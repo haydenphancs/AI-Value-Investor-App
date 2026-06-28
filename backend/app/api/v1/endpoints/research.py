@@ -559,8 +559,8 @@ async def delete_report(
 # ── List Personas ────────────────────────────────────────────────────────────
 
 # Hardcoded fallback that mirrors the iOS AnalysisPersona.allCases keys
-# (warren_buffett / cathie_wood / peter_lynch / bill_ackman). Returned when
-# the agent_personas Supabase query fails so the iOS app keeps working
+# (warren_buffett / cathie_wood / peter_lynch / bill_ackman / michael_burry).
+# Returned when the agent_personas Supabase query fails so the iOS app keeps working
 # instead of falling back to its own offline defaults. Field names are
 # snake_case to match the iOS BackendPersona CodingKeys.
 _FALLBACK_PERSONAS: List[dict] = [
@@ -617,6 +617,21 @@ _FALLBACK_PERSONAS: List[dict] = [
         "accent_color": "F97316",
         "is_active": True,
     },
+    {
+        "id": "fallback-michael_burry",
+        "key": "michael_burry",
+        "name": "Michael Burry",
+        "tagline": "Contrarian Deep Value",
+        "description": (
+            "A contrarian skeptic who hunts deeply undervalued, out-of-favor "
+            "companies with a large margin of safety, scrutinizes the balance "
+            "sheet for hidden risk, and is wary of hype, crowded trades, and "
+            "expensive darlings."
+        ),
+        "icon_name": "magnifyingglass",
+        "accent_color": "DC2626",
+        "is_active": True,
+    },
 ]
 
 
@@ -646,7 +661,7 @@ async def get_personas(
             return result.data
 
         # Table reachable but empty — log + serve fallback so iOS still
-        # gets the four core personas. Common when production DB hasn't
+        # gets the five core personas. Common when production DB hasn't
         # been seeded yet.
         logger.warning(
             "agent_personas query returned no active rows — serving "

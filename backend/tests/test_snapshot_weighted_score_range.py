@@ -48,6 +48,22 @@ def test_each_scorer_defaults_missing_data_to_neutral_3():
     assert _zscore_rating(None) == 3
 
 
+def test_growth_score_absolute_floor_protects_hypergrowth():
+    # A metric growing strongly in ABSOLUTE terms must never read as "weak" just
+    # because a thin / contaminated latest-period sector benchmark is even higher
+    # — the NVDA EPS +67% vs an uncredible 79% peer-avg case from the persona-
+    # scoring validation (scored 1/5 pre-floor, kneecapping the growth card).
+    assert _growth_score(66.67, 79.36) == 4      # was 1
+    assert _growth_score(60.0, 65.0) == 4        # was 2
+    assert _growth_score(25.0, 90.0) == 3        # 20-40% absolute floors at 3
+    # The floor never LOWERS a true relative outperformer.
+    assert _growth_score(34.0, 4.86) == 5
+    # Modest / weak / negative growth is untouched (no spurious inflation).
+    assert _growth_score(14.93, 13.43) == 3
+    assert _growth_score(2.0, 8.0) == 2
+    assert _growth_score(-10.0, 5.0) == 1
+
+
 def test_growth_weighted_in_unit_range():
     assert _growth_weighted([_growth_score(None, None)] * 4) == 3.0          # all-missing → neutral
     assert _growth_weighted([_growth_score(999.0, 0.0)] * 4) == 5.0          # all-best

@@ -103,6 +103,27 @@ def test_build_context_full_sample():
     assert ctx["bull_case"] and ctx["bear_case"]
 
 
+def test_quality_label_matches_ios_band_and_persona_lens():
+    # The PDF hero headline must use the SAME band cutoffs (80/65/48/33) and the
+    # persona-aware "<adjective> <lens> Profile" wording as the in-app gauge — NOT the
+    # old 80/60/40 "Quality Business" phrasing the iOS reframe dropped for compliance.
+    # _sample(): quality_score=72 (Strong band), agent=buffett (Value lens).
+    ctx = build_context(_sample(), fair_value_estimate=196.0)
+    assert ctx["quality_label"] == "Strong Value Profile"
+
+    # Burry → Contrarian lens; a low score → Weak/Poor band.
+    burry = _sample()
+    burry["agent"] = "burry"
+    burry["quality_score"] = 42
+    assert build_context(burry, 196.0)["quality_label"] == "Weak Contrarian Profile"
+
+    # Band boundaries track iOS (80 Excellent / 65 Strong / 48 Fair / 33 Weak).
+    wood = _sample()
+    wood["agent"] = "wood"
+    wood["quality_score"] = 80
+    assert build_context(wood, 196.0)["quality_label"] == "Excellent Growth Profile"
+
+
 def test_fair_value_prefers_wall_street_target():
     """Fair value = Wall Street consensus target (the hero card is labeled
     'Per Wall Street consensus'); the passed estimate is only a fallback."""

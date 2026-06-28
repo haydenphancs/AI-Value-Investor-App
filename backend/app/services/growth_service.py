@@ -15,10 +15,57 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.integrations.fmp import get_fmp_client
 from app.utils.period_labels import quarterly_period_label
 from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
-from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
+from app.services.sector_benchmark_lookup import (
+    MATURE_SAMPLE_FLOOR,
+    _period_sort_key,
+    get_sector_benchmark_lookup,
+)
 from app.services.sector_benchmark_service import _normalize_sector
 
 logger = logging.getLogger(__name__)
+
+
+def _hold_back_thin_benchmarks(
+    rich: Dict[str, Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, float]]:
+    """Flatten rich benchmark cells to ``{metric: {period: value}}``, replacing any
+    THIN period's value (sample_size < MATURE_SAMPLE_FLOOR) with the latest mature
+    value AT OR BEFORE that period.
+
+    The just-completed fiscal period is only partially reported — e.g. the
+    Semiconductors FY2026 EPS-growth median is +79% from n=9 early reporters
+    (mostly hypergrowth names) vs a credible +4.9% from n=77 in FY2025. Without the
+    hold-back a genuine 65%-grower is scored "below sector" against a contaminated
+    benchmark (see the persona-scoring validation). Mirrors the mature-sample-floor
+    hold-back the current-snapshot pickers already apply (sector_benchmark_lookup).
+
+    CRITICAL: hold back to the latest mature value that is NOT chronologically LATER
+    than the thin period — never the global-latest. An OLDER thin period (e.g. an
+    early year frozen at n<20 while later years grew past 20) must NOT be painted
+    with a FUTURE year's median (a lookahead that corrupts that year's chart point).
+    If no mature period exists at-or-before a thin period, keep its own value.
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    for metric, cells in rich.items():
+        # Mature cells (n >= floor, non-null value) as (sort_key, value), oldest→newest.
+        mature_sorted = sorted(
+            (
+                (_period_sort_key(lab), c["value"])
+                for lab, c in cells.items()
+                if (c.get("n") or 0) >= MATURE_SAMPLE_FLOOR and c.get("value") is not None
+            ),
+            key=lambda t: t[0],
+        )
+        flat: Dict[str, float] = {}
+        for period, cell in cells.items():
+            if (cell.get("n") or 0) >= MATURE_SAMPLE_FLOOR:
+                flat[period] = cell["value"]
+                continue
+            pk = _period_sort_key(period)
+            prior = [v for (sk, v) in mature_sorted if sk <= pk]
+            flat[period] = prior[-1] if prior else cell["value"]
+        out[metric] = flat
+    return out
 
 # ── In-memory cache ───────────────────────────────────────────────
 _cache: Dict[str, Tuple[float, Any]] = {}
@@ -307,14 +354,16 @@ class GrowthService:
         benchmarks_qoq_quarterly: Dict[str, Dict[str, float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
-            benchmarks_annual = lookup.get_benchmark_values(
-                industry, sector, all_yoy_metrics, "annual"
+            # Hold thin just-completed periods back to the last mature (n>=20) value
+            # so a contaminated latest-FY median can't make a real grower read weak.
+            benchmarks_annual = _hold_back_thin_benchmarks(
+                lookup.get_benchmarks(industry, sector, all_yoy_metrics, "annual")
             )
-            benchmarks_quarterly = lookup.get_benchmark_values(
-                industry, sector, all_yoy_metrics, "quarterly"
+            benchmarks_quarterly = _hold_back_thin_benchmarks(
+                lookup.get_benchmarks(industry, sector, all_yoy_metrics, "quarterly")
             )
-            benchmarks_qoq_quarterly = lookup.get_benchmark_values(
-                industry, sector, all_qoq_metrics, "quarterly"
+            benchmarks_qoq_quarterly = _hold_back_thin_benchmarks(
+                lookup.get_benchmarks(industry, sector, all_qoq_metrics, "quarterly")
             )
 
         # Phase 5: assemble response with sector averages matched by period label

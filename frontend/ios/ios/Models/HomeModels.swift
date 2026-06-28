@@ -267,6 +267,7 @@ enum InvestorPersona: String, CaseIterable, Codable {
     case peterLynch = "Peter Lynch"
     case cathieWood = "Cathie Wood"
     case billAckman = "Bill Ackman"
+    case michaelBurry = "Michael Burry"
 
     var displayName: String {
         rawValue
@@ -278,6 +279,7 @@ enum InvestorPersona: String, CaseIterable, Codable {
         case .peterLynch: return "059669"
         case .cathieWood: return "DC2626"
         case .billAckman: return "DC2626"
+        case .michaelBurry: return "991B1B"
         }
     }
 }
@@ -332,7 +334,10 @@ struct ResearchReport: Identifiable, Codable {
         self.stockTicker = try c.decode(String.self, forKey: .stockTicker)
         self.stockName = try c.decode(String.self, forKey: .stockName)
         self.companyLogoName = try c.decode(String.self, forKey: .companyLogoName)
-        self.persona = try c.decode(InvestorPersona.self, forKey: .persona)
+        // Tolerant: an unknown/newly-added persona display name must NOT throw —
+        // a single un-decodable element aborts the WHOLE home-feed array decode and
+        // collapses the entire feed to mock data. Default rather than crash.
+        self.persona = (try? c.decode(InvestorPersona.self, forKey: .persona)) ?? .warrenBuffett
         self.headline = try c.decode(String.self, forKey: .headline)
         self.summary = try c.decode(String.self, forKey: .summary)
         self.rating = try c.decode(Double.self, forKey: .rating)

@@ -65,6 +65,7 @@ PERSONA_DISPLAY_NAMES: Dict[str, str] = {
     "peter_lynch": "Peter Lynch",
     "cathie_wood": "Cathie Wood",
     "bill_ackman": "Bill Ackman",
+    "michael_burry": "Michael Burry",
 }
 
 PERSONA_GRADIENT_COLORS: Dict[str, List[str]] = {
@@ -72,6 +73,7 @@ PERSONA_GRADIENT_COLORS: Dict[str, List[str]] = {
     "peter_lynch": ["059669", "064E3B"],
     "cathie_wood": ["DC2626", "7F1D1D"],
     "bill_ackman": ["D97706", "78350F"],
+    "michael_burry": ["991B1B", "450A0A"],
 }
 
 

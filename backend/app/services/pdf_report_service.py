@@ -82,6 +82,8 @@ _PERSONA_DISPLAY: dict[str, str] = {
     "lynch": "Lynch Agent",
     "bill_ackman": "Ackman Agent",
     "ackman": "Ackman Agent",
+    "michael_burry": "Burry Agent",
+    "burry": "Burry Agent",
 }
 
 
@@ -240,7 +242,10 @@ def build_context(
         (data.get("quality_rating") or {}).get("label")
         if isinstance(data.get("quality_rating"), dict)
         else None
-    ) or _default_quality_label(quality)
+    ) or _quality_profile_label(
+        quality,
+        _LENS_BY_AGENT.get(str(data.get("agent") or "").strip().lower(), ""),
+    )
 
     # ── Fair value / margin of safety ─────────────────────────────────────────
     price_action = data.get("price_action") or {}
@@ -602,14 +607,34 @@ def build_context(
     }
 
 
-def _default_quality_label(score: float) -> str:
-    if score >= 80:
-        return "High Quality Business"
-    if score >= 60:
-        return "Fair Quality Business"
-    if score >= 40:
-        return "Mixed Quality Business"
-    return "Low Quality Business"
+# agent tag / persona key → lens word, mirroring iOS QualityBand.profileLabel.
+_LENS_BY_AGENT = {
+    "buffett": "Value", "warren_buffett": "Value",
+    "ackman": "Value", "bill_ackman": "Value", "dalio": "Value",  # legacy dalio → ackman
+    "wood": "Growth", "cathie_wood": "Growth",
+    "lynch": "GARP", "peter_lynch": "GARP",
+    "burry": "Contrarian", "michael_burry": "Contrarian",
+}
+
+
+def _quality_profile_label(score: float, lens: str = "") -> str:
+    """Persona-aware headline label matching the iOS QualityBand gauge cutoffs
+    (80/65/48/33) and the "<adjective> <lens> Profile" wording, so the downloaded
+    PDF and the in-app gauge never disagree (and the PDF doesn't reintroduce the
+    "Quality Business" phrasing the iOS reframe dropped). Empty lens → legacy wording.
+    """
+    s = round(score)
+    if s >= 80:
+        adj = "Excellent"
+    elif s >= 65:
+        adj = "Strong"
+    elif s >= 48:
+        adj = "Fair"
+    elif s >= 33:
+        adj = "Weak"
+    else:
+        adj = "Poor"
+    return f"{adj} {lens} Profile" if lens else f"{adj} Quality Business"
 
 
 def render_html(context: dict) -> str:

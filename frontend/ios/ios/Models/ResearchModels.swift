@@ -70,6 +70,18 @@ struct AnalysisPersona: Identifiable, Hashable {
         name.split(separator: " ").last.map(String.init) ?? name
     }
 
+    /// Lens word for the persona-aware headline label ("Strong <lens> Profile").
+    /// Mirrors ReportAgentPersona.lensWord — keep the two in sync.
+    var lensWord: String {
+        switch key {
+        case "cathie_wood":   return "Growth"
+        case "peter_lynch":   return "GARP"
+        case "bill_ackman":   return "Value"
+        case "michael_burry": return "Contrarian"
+        default:              return "Value"   // warren_buffett + unknown
+        }
+    }
+
     var accentColor: Color { Color(hex: accentColorHex) }
 
     static func == (lhs: AnalysisPersona, rhs: AnalysisPersona) -> Bool {
@@ -123,8 +135,18 @@ struct AnalysisPersona: Identifiable, Hashable {
         description: "Takes concentrated positions in high-quality businesses, uses activist strategies to unlock value, and focuses on companies with durable competitive advantages."
     )
 
+    static let michaelBurry = AnalysisPersona(
+        key: "michael_burry",
+        name: "Michael Burry",
+        tagline: "Contrarian Deep Value",
+        iconName: "icon_persona_burry",
+        systemIconName: "magnifyingglass",
+        accentColorHex: "DC2626",
+        description: "A contrarian skeptic who hunts deeply undervalued, out-of-favor companies with a large margin of safety, scrutinizes the balance sheet for hidden risk, and is wary of hype, crowded trades, and expensive darlings."
+    )
+
     static let allCases: [AnalysisPersona] = [
-        .warrenBuffett, .cathieWood, .peterLynch, .billAckman
+        .warrenBuffett, .cathieWood, .peterLynch, .billAckman, .michaelBurry
     ]
 
     static let fallbacks: [AnalysisPersona] = allCases
@@ -634,16 +656,13 @@ extension AnalysisReport {
             return nil
         }()
 
-        // Rating label from overall_score
+        // Rating label from overall_score — route through QualityBand (the single
+        // source of truth) so the list row and the report gauge can never disagree.
+        // (Previously this used its own 81/61/41 cutoffs + different labels, so the
+        // same score showed one band on the list and another on the report.)
         let ratingLabel: String? = {
             guard let score = item.overallScore else { return nil }
-            switch score {
-            case 81...100: return "Excellent Quality Business"
-            case 61...80: return "Strong Quality Business"
-            case 41...60: return "Average Quality Business"
-            case 21...40: return "Below Average"
-            default: return "Avoid"
-            }
+            return QualityBand.forScore(Int(score.rounded())).profileLabel(lens: persona.lensWord)
         }()
 
         return AnalysisReport(

@@ -19,6 +19,7 @@ import pytest
 
 from app.services.agents.persona_scoring import (
     _HEALTH_SCALE,
+    _lin,
     PERSONA_WEIGHTS,
     STYLE_FIT_CAP,
     compute_quality_score,
@@ -554,6 +555,71 @@ def test_ackman_style_fit_rewards_fcf_quality():
     junk = style_fit_adjustment("bill_ackman",
                                 {"fcf": 2e8, "net_income": 1e9, "mkt_cap": 4e10, "roic": 5, "debt_equity": 3.5})
     assert quality > junk
+
+
+def test_burry_style_fit_inverts_on_price():
+    # Contrarian: cheap + safe is rewarded, an expensive darling is PENALIZED.
+    cheap = style_fit_adjustment("michael_burry",
+                                 {"pe_ratio": 7, "mos_pct": 45, "debt_equity": 0.2, "fcf": 5e9, "mkt_cap": 5e10})
+    expensive = style_fit_adjustment("michael_burry",
+                                     {"pe_ratio": 50, "mos_pct": -30, "debt_equity": 2.5, "fcf": 1e8, "mkt_cap": 5e11})
+    assert cheap > 0 > expensive
+    # Isolate the P/E sub: a rich multiple ALONE must push DOWN. Pins the contrarian
+    # inversion so a sign-flip on the P/E _lin args fails loudly (the bounded test alone
+    # would not catch it).
+    assert style_fit_adjustment("michael_burry", {"pe_ratio": 40}) < 0
+
+
+def test_burry_negative_or_zero_pe_not_counted_as_cheap():
+    # Loss-makers (pe <= 0) must NOT read as "maximally cheap" — the _pe_pos guard drops it.
+    mos_only = style_fit_adjustment("michael_burry", {"mos_pct": 30})
+    assert style_fit_adjustment("michael_burry", {"pe_ratio": -10, "mos_pct": 30}) == mos_only
+    assert style_fit_adjustment("michael_burry", {"pe_ratio": 0.0, "mos_pct": 30}) == mos_only
+    # A valid positive P/E DOES move it (proves the sub is wired, not always-None).
+    assert style_fit_adjustment("michael_burry", {"pe_ratio": 8, "mos_pct": 30}) > mos_only
+
+
+def test_burry_top_weight_is_valuation_health_second():
+    # The contrarian/skeptic leads with cheapness + balance-sheet safety and keeps the
+    # hype axes (analyst consensus, forward forecast) near-zero. If this drifts, Burry
+    # stops being a contrarian (e.g. rewarding the crowded analyst darlings he shorts).
+    w = PERSONA_WEIGHTS["michael_burry"]
+    ranked = sorted(w, key=w.get, reverse=True)
+    assert ranked[0] == "valuation"
+    assert ranked[1] == "financial_health"
+    assert w["forecast"] <= 0.03 and w["wall_street"] <= 0.03
+
+
+@pytest.mark.parametrize("persona_key", ["warren_buffett", "peter_lynch", "bill_ackman", "michael_burry"])
+def test_negative_equity_de_never_rewards(persona_key):
+    # NEGATIVE debt_equity = negative shareholder equity = DISTRESS. The "lower is
+    # better" _lin map would otherwise send de<0 to +1.0 (a maximal "fortress balance
+    # sheet") — the inverse of reality. de=-120 must score <= a genuine low-debt de=0.3,
+    # and must never be the max-favorable +cap.
+    neg = style_fit_adjustment(persona_key, {"debt_equity": -120})
+    fortress = style_fit_adjustment(persona_key, {"debt_equity": 0.3})
+    assert neg <= fortress
+    assert neg < STYLE_FIT_CAP
+
+
+def test_lin_non_finite_drops_out():
+    from math import inf, nan
+    # NaN/inf must drop out (None), never resolve to +1.0 via the order-dependent
+    # max(-1, min(1, NaN)) clamp.
+    assert _lin(nan, 10.0, 40.0) is None
+    assert _lin(inf, 10.0, 40.0) is None
+    assert _lin(-inf, 10.0, 40.0) is None
+    assert _lin(5.0, 10.0, 40.0) is not None   # finite still scores
+
+
+@pytest.mark.parametrize("persona_key", sorted(PERSONA_WEIGHTS.keys()))
+@pytest.mark.parametrize("signal", ["mos_pct", "debt_equity", "roe", "pe_ratio", "revenue_growth"])
+def test_style_fit_single_non_finite_signal_is_zero(persona_key, signal):
+    # A lone NaN/inf signal (corrupted FMP data) must contribute NOTHING (drop out),
+    # never become the most-favorable sub-score. Same hazard guarded+tested in
+    # test_cards_become_score.py for _card_weighted_to_score10.
+    assert style_fit_adjustment(persona_key, {signal: float("nan")}) == 0.0
+    assert style_fit_adjustment(persona_key, {signal: float("inf")}) == 0.0
 
 
 def _growth_archetype(with_signals: bool) -> dict:

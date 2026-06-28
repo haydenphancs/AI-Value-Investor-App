@@ -22,6 +22,7 @@ enum ReportAgentPersona: String, CaseIterable {
     case wood = "ANALYZED BY WOOD AGENT"
     case lynch = "ANALYZED BY LYNCH AGENT"
     case ackman = "ANALYZED BY ACKMAN AGENT"
+    case burry = "ANALYZED BY BURRY AGENT"
 
     var starRating: Double {
         switch self {
@@ -29,6 +30,19 @@ enum ReportAgentPersona: String, CaseIterable {
         case .wood: return 3.5
         case .lynch: return 4.5
         case .ackman: return 4.0
+        case .burry: return 4.5
+        }
+    }
+
+    /// Lens word for the persona-aware headline label ("Strong <lens> Profile").
+    /// Single point to change if a persona is swapped.
+    var lensWord: String {
+        switch self {
+        case .buffett: return "Value"
+        case .wood:    return "Growth"
+        case .lynch:   return "GARP"
+        case .ackman:  return "Value"
+        case .burry:   return "Contrarian"
         }
     }
 }
@@ -46,13 +60,23 @@ enum QualityBand {
     case excellent, strong, fair, weak, distressed
 
     /// Map an already-rounded 0–100 score to its band.
+    ///
+    /// Calibrated to the score's ACTUAL range. The headline score is a persona-
+    /// weighted average of 10 vitals, and no real company maxes every dimension at
+    /// once (cheap valuation AND high growth AND elite profitability AND insider
+    /// buying AND benign macro never co-occur), so it tops out around ~85 in
+    /// practice. Under the old 90/75/50/30 cutoffs the "excellent" tier fired for
+    /// 0% of companies (even NVDA/DECK peaked ~82–86) and most quality names read
+    /// "weak". These cutoffs map the real ~30–85 distribution onto the five bands so
+    /// the label is meaningful. SINGLE source of truth — the research-list row
+    /// label routes through here too (see ResearchModels).
     static func forScore(_ score: Int) -> QualityBand {
         switch score {
-        case 90...:   return .excellent
-        case 75...89: return .strong
-        case 50...74: return .fair
-        case 30...49: return .weak
-        default:      return .distressed   // < 30
+        case 80...:   return .excellent
+        case 65...79: return .strong
+        case 48...64: return .fair
+        case 33...47: return .weak
+        default:      return .distressed   // < 33
         }
     }
 
@@ -64,6 +88,27 @@ enum QualityBand {
         case .weak:       return "Weak Quality Business"
         case .distressed: return "Distressed Quality Business"
         }
+    }
+
+    /// Persona-aware label: describes the company's profile THROUGH the active
+    /// investor's lens — "Strong Growth Profile" for Wood, "Strong Value Profile"
+    /// for Buffett. The headline score is persona-WEIGHTED, so it legitimately
+    /// varies by persona; naming the lens makes that expected instead of a
+    /// contradictory "Quality Business" that flips by persona (a hyper-growth name
+    /// is a "Strong Growth Profile" for Wood, not a "Strong Quality Business").
+    /// Stays DESCRIPTIVE — a profile, never a buy/sell/fit recommendation. Empty
+    /// lens → the legacy "… Quality Business" wording.
+    func profileLabel(lens: String) -> String {
+        guard !lens.isEmpty else { return label }
+        let adjective: String
+        switch self {
+        case .excellent:  adjective = "Excellent"
+        case .strong:     adjective = "Strong"
+        case .fair:       adjective = "Fair"
+        case .weak:       adjective = "Weak"
+        case .distressed: adjective = "Poor"
+        }
+        return "\(adjective) \(lens) Profile"
     }
 
     var color: Color {
@@ -79,6 +124,7 @@ enum QualityBand {
 struct ReportQualityRating {
     let score: Double       // raw 0-100 (continuous; drives the gauge arc fill)
     let maxScore: Double    // 100
+    let lens: String        // persona lens word ("Growth"/"Value"/"GARP"); "" → legacy "… Quality Business"
 
     /// The integer actually shown in the gauge. Rounded ONCE here so the
     /// displayed number, the label, and the color all derive from this single
@@ -88,15 +134,17 @@ struct ReportQualityRating {
     /// Band of the *displayed* (rounded) score — not the raw Double.
     var band: QualityBand { QualityBand.forScore(displayScore) }
 
-    /// Auto-generated from `band`, so it always agrees with the shown number.
-    var label: String { band.label }
+    /// Auto-generated from `band` THROUGH the active persona's lens, so it always
+    /// agrees with the shown number AND names the lens it was scored under.
+    var label: String { band.profileLabel(lens: lens) }
 
     var formattedScore: String { "\(displayScore)" }
     var formattedMax: String { "/ \(Int(maxScore))" }
 
-    init(score: Double, maxScore: Double = 100) {
+    init(score: Double, maxScore: Double = 100, lens: String = "") {
         self.score = score
         self.maxScore = maxScore
+        self.lens = lens
     }
 }
 
@@ -1439,7 +1487,8 @@ extension TickerReportData {
         priceCloseDate: "2026-02-06",
         agent: .buffett,
         qualityRating: ReportQualityRating(
-            score: 82
+            score: 82,
+            lens: ReportAgentPersona.buffett.lensWord
         ),
         executiveSummaryText: "Oracle is a legacy enterprise-software leader re-platforming its business around cloud infrastructure (OCI). Profitability stays strong, but the balance sheet is stretched and free cash flow has turned negative. Overall, this report weighs a credible cloud-growth story against real balance-sheet and valuation risk.",
         executiveSummaryBullets: [

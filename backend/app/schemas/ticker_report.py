@@ -517,7 +517,7 @@ class TickerReportResponse(BaseModel):
     price_close_date: Optional[str] = None
 
     # Agent & Rating
-    agent: str  # "buffett" | "wood" | "lynch" | "ackman" (legacy reports: "dalio")
+    agent: str  # "buffett" | "wood" | "lynch" | "ackman" | "burry" (legacy reports: "dalio")
     quality_score: float
 
     # Executive Summary

@@ -108,6 +108,7 @@ _AGENT_MAP: Dict[str, str] = {
     "cathie_wood": "wood",
     "peter_lynch": "lynch",
     "bill_ackman": "ackman",
+    "michael_burry": "burry",
 }
 
 # FMP segmentation metadata keys to drop when extracting segment dicts.
@@ -2236,9 +2237,13 @@ def _safe_float(d: Any, key: str, default: float = 0.0) -> float:
     if v is None:
         return default
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         return default
+    # Reject non-finite. FMP's non-standard JSON can carry NaN/Infinity literals
+    # (Python's json tolerates them); an inf leaking through would NaN-poison the
+    # insider score (clamp → fake 10.0) and crash int(nan) in _format_shares_short.
+    return f if math.isfinite(f) else default
 
 
 def _est_revenue(est: Dict[str, Any]) -> float:
@@ -2272,9 +2277,7 @@ def _num_or_none(v: Any) -> Optional[float]:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    if f != f:  # NaN check
-        return None
-    return f
+    return f if math.isfinite(f) else None  # NaN OR ±inf → None
 
 
 def _pct_or_none(v: Any) -> Optional[float]:
@@ -4620,13 +4623,22 @@ def _build_insider_sections(
         "ownership_note": None,  # AI fills
     }
 
-    # Vital score: 1 (heavy selling) → 10 (heavy buying), centered at 5.
-    # No informative insider transactions in the window → UNMEASURED: emit
-    # score.value=None so compute_quality_score renormalizes it out instead of
-    # voting a neutral 5.0 that drags the headline toward 50.
+    # Vital score — ASYMMETRIC, centered at 5 (neutral). Insider BUYING is an
+    # informative bullish signal (insiders rarely buy except on conviction) → reward
+    # it fully (5 → 10). Insider SELLING is mostly NOISE at healthy companies —
+    # routine comp/diversification, not a distress signal — and is empirically weak
+    # at predicting returns, so penalize it only mildly and floor at 3 (NOT 1). The
+    # old symmetric `5 + ratio*5` scored every net-seller ~1, dragging 84% of real
+    # companies (incl. NVDA/MSFT/every successful name where execs sell vested comp)
+    # to the bottom and capping the headline score. No informative transactions in
+    # the window → UNMEASURED (None) so compute_quality_score renormalizes it out.
     if (buy_value + sell_value) > 0:
         ratio = (buy_value - sell_value) / (buy_value + sell_value)
-        score = max(1.0, min(10.0, 5.0 + ratio * 5.0))
+        raw = 5.0 + ratio * 5.0 if ratio >= 0 else 5.0 + ratio * 2.0
+        # Defensive: a non-finite raw must DROP OUT (None), never let the
+        # max/min clamp silently resolve a NaN to a fake bullish 10.0. _safe_float
+        # already strips non-finite upstream; this mirrors _card_weighted_to_score10.
+        score = max(3.0, min(10.0, round(raw, 1))) if math.isfinite(raw) else None
     else:
         score = None
 

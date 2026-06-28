@@ -72,32 +72,46 @@ def _growth_score(value: Optional[float], sector_median: Optional[float]) -> int
     """
     Score 1-5 based on how a company's growth compares to sector median.
     Both value and sector_median are in percentage points (e.g., 12.5 = 12.5%).
+
+    Blends a sector-RELATIVE read with an ABSOLUTE-growth floor: a metric growing
+    strongly in absolute terms is never scored "weak" merely because a thin /
+    contaminated latest-period sector benchmark is even higher. Without this, a
+    65%-grower whose semiconductor peers' FY benchmark reads an (uncredible) 79%
+    YoY scored a 1/5 ("below sector") — see the persona-scoring validation. The
+    relative read still drives the UPSIDE (true outperformers reach 5).
     """
     if value is None:
         return 3  # neutral if no data
 
+    # Absolute floor: strong absolute growth can't read as weak regardless of peers.
+    abs_floor = 4 if value >= 40 else 3 if value >= 20 else 1
+
     if sector_median is None:
-        # Absolute fallback when no sector benchmark
+        # Absolute-only when no sector benchmark.
         if value > 20:
-            return 5
-        if value > 10:
-            return 4
-        if value > 0:
-            return 3
-        if value > -10:
-            return 2
-        return 1
+            rel = 5
+        elif value > 10:
+            rel = 4
+        elif value > 0:
+            rel = 3
+        elif value > -10:
+            rel = 2
+        else:
+            rel = 1
+        return max(rel, abs_floor)
 
     diff = value - sector_median  # percentage points above/below sector
     if diff > 10:
-        return 5  # 10pp+ above sector
-    if diff > 3:
-        return 4  # 3-10pp above
-    if diff > -3:
-        return 3  # within 3pp of sector
-    if diff > -10:
-        return 2  # 3-10pp below
-    return 1      # 10pp+ below sector
+        rel = 5  # 10pp+ above sector
+    elif diff > 3:
+        rel = 4  # 3-10pp above
+    elif diff > -3:
+        rel = 3  # within 3pp of sector
+    elif diff > -10:
+        rel = 2  # 3-10pp below
+    else:
+        rel = 1  # 10pp+ below sector
+    return max(rel, abs_floor)
 
 
 # ── Service ───────────────────────────────────────────────────────

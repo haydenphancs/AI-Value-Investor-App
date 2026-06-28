@@ -741,6 +741,7 @@ extension TickerReportAPIResponse {
             case "wood": return .wood
             case "lynch": return .lynch
             case "ackman": return .ackman
+            case "burry": return .burry
             // Legacy: cached/history reports tagged the Ackman persona "dalio"
             // before the badge was renamed. Every such report was an Ackman
             // analysis (there was never a real Dalio persona), so map it to
@@ -750,8 +751,9 @@ extension TickerReportAPIResponse {
             }
         }()
 
-        // Quality Rating
-        let quality = ReportQualityRating(score: qualityScore)
+        // Quality Rating — labeled through the report's persona lens
+        // ("Strong Growth Profile" for Wood, "Strong Value Profile" for Buffett).
+        let quality = ReportQualityRating(score: qualityScore, lens: agentPersona.lensWord)
 
         // Executive Summary Bullets
         let esBullets = executiveSummaryBullets.map { b in

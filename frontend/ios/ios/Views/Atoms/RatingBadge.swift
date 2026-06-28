@@ -17,6 +17,13 @@ struct RatingBadge: View {
     }
 
     private var backgroundColor: Color {
+        // For the 0–100 report score, defer to QualityBand (the SINGLE source of
+        // truth for score→band color, cutoffs 80/65/48/33) so this carousel chip
+        // can never disagree with the report gauge. The ratio cutoffs below are
+        // only for the 5-star rating path (maxRating <= 5).
+        if maxRating >= 100 {
+            return QualityBand.forScore(Int(rating.rounded())).color
+        }
         let ratio = rating / maxRating
         if ratio >= 0.8 {
             return AppColors.bullish

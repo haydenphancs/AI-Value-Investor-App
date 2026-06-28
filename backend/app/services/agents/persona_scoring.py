@@ -23,6 +23,7 @@ This is an INTERNAL substrate — the user-facing Key Vitals UI was
 removed; `_scoring_inputs` is stripped from every client response.
 """
 
+import math
 from typing import Any, Dict, Optional
 
 
@@ -60,33 +61,56 @@ PERSONA_WEIGHTS: Dict[str, Dict[str, float]] = {
         "profitability":     0.04,
         "insider":           0.04,
     },
-    # GARP: growth (forecast/revenue) balanced against price (valuation), a solid
-    # balance sheet, and decent profitability — "buy what you know, at a sane price".
+    # GARP: growth (forecast/revenue) is the lead, DISCIPLINED by price (valuation
+    # carries his highest single weight) — "buy what you know, at a sane price". He
+    # deliberately UNDER-weights the pure-quality vitals (moat/health) so he isn't a
+    # watered-down Buffett; his lane is reasonably-priced growth, not premium quality.
     "peter_lynch": {
-        "forecast":          0.20,
-        "revenue":           0.16,
-        "valuation":         0.16,
-        "financial_health":  0.11,
+        "forecast":          0.24,
+        "revenue":           0.18,
+        "valuation":         0.18,
         "profitability":     0.09,
-        "capital_allocation": 0.07,
-        "moat":              0.06,
-        "insider":           0.05,
+        "financial_health":  0.08,
+        "capital_allocation": 0.05,
+        "moat":              0.04,
         "wall_street":       0.05,
+        "insider":           0.04,
         "macro":             0.05,
     },
-    # Concentrated activist value: balance-sheet quality (FCF proxy) + valuation +
-    # capital-allocation discipline + moat + return quality carry the thesis.
+    # Concentrated activist value: PRICE (valuation) + capital-allocation discipline
+    # lead, on a solid balance sheet with strong FCF/returns. Deliberately LIGHTER on
+    # moat than Buffett — that's the key separation: Ackman buys mispriced quality he
+    # can push on, not buy-and-hold-forever wide moats — plus a tilt to forward growth
+    # (CMG/UBER-style). His FCF-conversion/-yield style-fit sharpens this further.
     "bill_ackman": {
-        "financial_health":  0.20,
-        "valuation":         0.16,
-        "capital_allocation": 0.14,
-        "moat":              0.13,
+        "valuation":         0.19,
+        "capital_allocation": 0.18,
+        "financial_health":  0.15,
         "profitability":     0.12,
-        "forecast":          0.08,
+        "forecast":          0.10,
+        "moat":              0.08,
         "revenue":           0.07,
         "wall_street":       0.04,
-        "macro":             0.04,
-        "insider":           0.02,
+        "insider":           0.04,
+        "macro":             0.03,
+    },
+    # Contrarian deep-value SKEPTIC: cheapness (valuation) + balance-sheet safety
+    # (financial_health) dominate; growth/forecast and analyst consensus
+    # (wall_street) are near-zero because a crowded, expensive, analyst-loved name
+    # is a RED FLAG to Burry, not a plus. The style-fit below then PENALIZES rich
+    # multiples — so a beloved hyper-growth darling (NVDA/PLTR) scores LOW, matching
+    # the real Burry's bets AGAINST the AI hype. This is the app's "bear" lens.
+    "michael_burry": {
+        "valuation":         0.27,
+        "financial_health":  0.20,
+        "profitability":     0.11,
+        "capital_allocation": 0.10,
+        "insider":           0.09,
+        "moat":              0.07,
+        "macro":             0.06,
+        "revenue":           0.05,
+        "wall_street":       0.03,
+        "forecast":          0.02,
     },
 }
 
@@ -204,9 +228,16 @@ STYLE_FIT_CAP: float = 10.0   # max |adjustment| in score points
 def _lin(value: Optional[float], bad: float, good: float) -> Optional[float]:
     """Map `value` onto [-1, +1]: at `bad` → -1, at `good` → +1, linear between
     and clamped outside. `good` may be below `bad` for "lower is better" metrics
-    (e.g. debt-to-equity). None in → None out (signal absent)."""
-    if value is None or good == bad:
-        return None if value is None else 0.0
+    (e.g. debt-to-equity). None in → None out (signal absent).
+
+    NON-FINITE (NaN / ±inf) in → None out. The max/min clamp below is order-
+    dependent on NaN (`min(1.0, nan) == 1.0`), which would silently map a corrupted
+    signal to +1.0 — the MOST favorable sub-score. Drop it out instead (mirrors the
+    `math.isfinite` guard in `_card_weighted_to_score10`)."""
+    if value is None or not math.isfinite(value):
+        return None
+    if good == bad:
+        return 0.0
     frac = (value - bad) / (good - bad)
     return max(-1.0, min(1.0, frac * 2.0 - 1.0))
 
@@ -232,9 +263,17 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
 
     def num(key: str) -> Optional[float]:
         v = signals.get(key)
-        return float(v) if isinstance(v, (int, float)) else None
+        if not isinstance(v, (int, float)):
+            return None
+        f = float(v)
+        return f if math.isfinite(f) else None   # NaN/inf → absent
 
     roe = num("roe"); roic = num("roic"); de = num("debt_equity")
+    # NEGATIVE debt_equity = NEGATIVE shareholder equity = a DISTRESS signal, not
+    # "very low debt". A "lower is better" _lin(de, ...) would map de<0 to +1.0 (a
+    # maximal "fortress balance sheet"), the inverse of reality. Gate it out of the
+    # leverage subs so it never REWARDS; Burry (balance-sheet-led) penalizes it below.
+    de_safe = de if (de is not None and de >= 0) else None
     gm = num("gross_margin"); gm_prev = num("gross_margin_prev")
     pe = num("pe_ratio"); fcf = num("fcf"); ni = num("net_income"); mcap = num("mkt_cap")
     rev_g = num("revenue_growth"); rev_cagr = num("revenue_cagr"); eps_cagr = num("eps_cagr")
@@ -252,7 +291,7 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
         # ROE/margins vs industry, so don't double-count ROE here at full weight.
         _roe_sub = _lin(roe, 10.0, 20.0)            # ROE 10% → -1, 20% → +1
         subs.append(_roe_sub * 0.5 if _roe_sub is not None else None)
-        subs.append(_lin(de, 1.5, 0.5))             # D/E 1.5 → -1, 0.5 → +1
+        subs.append(_lin(de_safe, 1.5, 0.5))        # D/E 1.5 → -1, 0.5 → +1
         m = _lin(moat, 4.0, 8.0)                     # moat 0-10
         if m is not None and m > 0 and roe is not None and roe < 15:
             m *= 0.3                                 # a moat with weak returns isn't a Buffett moat
@@ -266,9 +305,17 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
         if gm is not None and gm_prev is not None:
             subs.append(_clamp(_lin(gm - gm_prev, -3.0, 3.0), -0.4, 0.4))        # margin trend
     elif persona_key == "peter_lynch":
-        subs.append(_lin(peg, 2.0, 0.5))            # PEG 2 → -1, 0.5 → +1
+        # PEG is Lynch's SIGNATURE — double-weighted (counted twice in the present-
+        # average) so a genuinely cheap grower gets a decisive nudge. This is what
+        # separates GARP from growth-at-any-price (Wood ignores price) and quality-
+        # at-a-premium (Buffett pays up): Lynch only rewards growth that's cheap
+        # RELATIVE to that growth. Widened to 2.2→0.4 so classic ~1 PEG reads clearly
+        # positive and a >2 PEG is penalized.
+        _peg_sub = _lin(peg, 2.2, 0.4)              # PEG 2.2 → -1, 0.4 → +1
+        subs.append(_peg_sub)
+        subs.append(_peg_sub)                        # 2× weight (None-safe via _avg_present)
         subs.append(_clamp(_lin(growth, 8.0, 22.0), -0.5, 0.5))   # earnings/revenue growth band
-        subs.append(_clamp(_lin(de, 1.5, 0.3), -0.3, 0.3))        # net-cash lean
+        subs.append(_clamp(_lin(de_safe, 1.5, 0.3), -0.3, 0.3))   # net-cash lean
     elif persona_key == "bill_ackman":
         subs.append(_lin(fcf_conv, 0.6, 0.9))       # FCF conversion 60% → -1, 90% → +1
         subs.append(_lin(fcf_yield, 0.02, 0.06))    # FCF yield 2% → -1, 6% → +1
@@ -279,7 +326,19 @@ def style_fit_adjustment(persona_key: str, signals: Optional[Dict[str, Any]]) ->
         # DELTA/trend, not a level, so it is deliberately left full-strength.)
         _quality_sub = _clamp(_lin(quality, 8.0, 15.0), -0.5, 0.5)
         subs.append(_quality_sub * 0.5 if _quality_sub is not None else None)
-        subs.append(_clamp(_lin(de, 2.5, 0.8), -0.5, 0.5))        # leverage
+        subs.append(_clamp(_lin(de_safe, 2.5, 0.8), -0.5, 0.5))   # leverage
+    elif persona_key == "michael_burry":
+        # Deep-value contrarian: demand a big margin of safety, cheapness on REAL
+        # earnings, and a fortress balance sheet — and PENALIZE rich multiples. The
+        # contrarian inversion lives in the P/E sub: an expensive name gets a NEGATIVE
+        # nudge (P/E 25 → -1), so a beloved, richly-valued darling is pushed DOWN.
+        subs.append(_lin(mos, 10.0, 40.0))          # margin of safety: 10% → -1, 40% → +1
+        _pe_pos = pe if (pe is not None and pe > 0) else None
+        subs.append(_lin(_pe_pos, 25.0, 8.0))       # cheap on real earnings (P/E 25 → -1, 8 → +1)
+        subs.append(_lin(de_safe, 1.5, 0.3))        # fortress balance sheet (low debt)
+        if de is not None and de < 0:
+            subs.append(-1.0)                        # NEGATIVE equity = distress → push DOWN
+        subs.append(_clamp(_lin(fcf_yield, 0.03, 0.09), -0.5, 0.5))  # real free-cash yield
     else:
         return 0.0
 

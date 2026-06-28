@@ -1,0 +1,156 @@
+//
+//  HomeDashboardModels.swift
+//  ios
+//
+//  UI models for the redesigned Home dashboard (Caydex Home).
+//
+//  These are PRESENTATION models for the new home screen — they hold
+//  display-ready strings (preformatted prices/percentages) so the views stay
+//  dumb. They are intentionally separate from the legacy `HomeModels.swift`
+//  feed DTOs so the redesign is self-contained and the old backend-connected
+//  Home keeps working untouched.
+//
+//  Reuse note: `MarketTickerType` (from HomeModels.swift) is reused so a tapped
+//  market-pulse item can route to the correct existing detail screen.
+//
+
+import SwiftUI
+
+// MARK: - Market Pulse
+
+/// One tile in the horizontally-scrolling "Markets Open" pulse strip
+/// (S&P 500, Nasdaq, Bitcoin, …).
+struct MarketPulseItem: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let symbol: String
+    let type: MarketTickerType
+    /// Pre-formatted price exactly as shown in the design (e.g. "6,952.40", "112,430").
+    let priceText: String
+    /// Pre-formatted change (e.g. "+0.62%", "-1.85%").
+    let changeText: String
+    let isPositive: Bool
+    /// Sparkline series, ascending = rising price.
+    let spark: [Double]
+}
+
+// MARK: - Daily Scanners
+
+enum ScannerKind: Hashable {
+    case movers   // Today's Top Movers — gainers / losers toggle
+    case volume   // Heavy Traffic — unusual trading volume
+    case shorts   // Skeptical Money — highest short interest
+}
+
+/// A single leaderboard entry inside a scanner card's expanded list.
+/// `primaryText` / `secondaryText` meaning depends on the scanner kind:
+///   • movers  → primary = "+14.2%" (colored),  secondary = "$58.30"
+///   • volume  → primary = "8.4×"  (white),     secondary = "+3.2%" (colored)
+///   • shorts  → primary = "41.2%" (amber),     secondary = "$5.80"
+struct ScannerEntry: Identifiable, Hashable {
+    let id = UUID()
+    let rank: Int
+    let symbol: String
+    let name: String
+    let primaryText: String
+    let secondaryText: String
+    let isPositive: Bool
+    /// Only the head (rank 1) entry carries a sparkline; rows render none.
+    var spark: [Double] = []
+}
+
+/// One card in the "Daily Scanners" swipeable carousel.
+struct DailyScanner: Identifiable {
+    let id = UUID()
+    let kind: ScannerKind
+    let title: String
+    let subtitle: String
+    let iconSystemName: String
+    let accent: Color
+    /// Pill shown top-right for volume/shorts ("Volume", "Shorts"). Movers shows
+    /// a Gainers/Losers toggle instead, so this is nil there.
+    let badgeText: String?
+    /// Label on the expand button ("See full leaderboard", …).
+    let expandCTA: String
+    /// Optional explainer note (shorts card only).
+    let infoNote: String?
+
+    // Movers uses two lists (toggle); volume/shorts use `entries`.
+    let gainers: [ScannerEntry]
+    let losers: [ScannerEntry]
+    let entries: [ScannerEntry]
+
+    init(
+        kind: ScannerKind,
+        title: String,
+        subtitle: String,
+        iconSystemName: String,
+        accent: Color,
+        badgeText: String? = nil,
+        expandCTA: String,
+        infoNote: String? = nil,
+        gainers: [ScannerEntry] = [],
+        losers: [ScannerEntry] = [],
+        entries: [ScannerEntry] = []
+    ) {
+        self.kind = kind
+        self.title = title
+        self.subtitle = subtitle
+        self.iconSystemName = iconSystemName
+        self.accent = accent
+        self.badgeText = badgeText
+        self.expandCTA = expandCTA
+        self.infoNote = infoNote
+        self.gainers = gainers
+        self.losers = losers
+        self.entries = entries
+    }
+}
+
+// MARK: - App-Exclusive Signals
+
+/// A leader inside an expanded signal row (e.g. "NVDA · 4 buys").
+struct SignalLeader: Identifiable, Hashable {
+    let id = UUID()
+    let symbol: String
+    let stat: String
+}
+
+/// One row in the glowing "App-Exclusive Signals" card.
+struct ExclusiveSignal: Identifiable {
+    let id = UUID()
+    let title: String
+    let subtitle: String
+    let iconSystemName: String
+    let accent: Color
+    let topSymbol: String
+    let topStat: String
+    let leaders: [SignalLeader]
+}
+
+// MARK: - Trending Themes
+
+/// One tile in the "2026 Trending Themes" grid.
+struct TrendingTheme: Identifiable {
+    let id = UUID()
+    let title: String
+    /// e.g. "28 stocks".
+    let count: String
+    /// e.g. "+3.4%".
+    let changeText: String
+    let iconSystemName: String
+    let accent: Color
+}
+
+// MARK: - Aggregate
+
+/// Everything the redesigned Home screen renders, supplied by `HomeRepositoryProtocol`.
+struct HomeDashboardData {
+    let marketStatusText: String   // "Markets Open"
+    let marketIsOpen: Bool
+    let marketMoodText: String      // "Mostly green today"
+    let pulse: [MarketPulseItem]
+    let scanners: [DailyScanner]
+    let signals: [ExclusiveSignal]
+    let themes: [TrendingTheme]
+}

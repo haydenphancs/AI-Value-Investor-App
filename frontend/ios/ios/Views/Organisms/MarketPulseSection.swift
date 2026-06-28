@@ -11,23 +11,17 @@ import SwiftUI
 struct MarketPulseSection: View {
     let statusText: String
     let isOpen: Bool
-    let moodText: String
     let items: [MarketPulseItem]
     var onTap: ((MarketPulseItem) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                HStack(spacing: 7) {
-                    BlinkingDot(color: isOpen ? AppColors.bullish : AppColors.textMuted)
-                    Text(statusText)
-                        .font(AppTypography.labelEmphasis)
-                        .foregroundColor(AppColors.textPrimary)
-                }
+            HStack(spacing: 7) {
+                BlinkingDot(color: isOpen ? AppColors.bullish : AppColors.textMuted)
+                Text(statusText)
+                    .font(AppTypography.labelEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
                 Spacer()
-                Text(moodText)
-                    .font(AppTypography.labelSmall)
-                    .foregroundColor(AppColors.textMuted)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, 10)
@@ -77,7 +71,6 @@ private struct BlinkingDot: View {
     MarketPulseSection(
         statusText: "Markets Open",
         isOpen: true,
-        moodText: "Mostly green today",
         items: MockHomeRepository.pulse
     )
     .padding(.vertical)

@@ -18,7 +18,10 @@ import logging
 
 from app.dependencies import get_optional_user_id
 from app.services.home_service import HomeService
+from app.services.home_dashboard_service import get_home_dashboard_service
 from app.schemas.home import HomeFeedResponse
+from app.schemas.home_dashboard import HomeDashboardResponse
+from app.api.error_response import error_response_from_exception
 
 logger = logging.getLogger(__name__)
 
@@ -37,3 +40,25 @@ async def get_home_feed(
     """
     service = HomeService()
     return await service.get_home_feed(user_id)
+
+
+@router.get("/dashboard", response_model=HomeDashboardResponse)
+async def get_home_dashboard():
+    """
+    Aggregated Caydex Home dashboard — single request for the redesigned
+    `HomeDashboardView` (distinct from the legacy `/home/feed`).
+
+    Today this returns the market-status header and the top "Market Pulse"
+    strip (major indices + Bitcoin + commodities), each with a live quote and
+    a daily-close sparkline. Public (no auth). Degrades gracefully — a failed
+    symbol is dropped rather than failing the whole strip; only an unexpected
+    failure surfaces a structured error.
+    """
+    try:
+        service = get_home_dashboard_service()
+        return await service.get_dashboard()
+    except Exception as e:
+        logger.error(
+            "Home dashboard failed: %s: %s", type(e).__name__, e, exc_info=True
+        )
+        return error_response_from_exception(e, step="home_dashboard")

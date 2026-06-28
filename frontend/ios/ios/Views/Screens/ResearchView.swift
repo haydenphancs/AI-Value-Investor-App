@@ -165,12 +165,6 @@ struct ResearchContentView: View {
                 )
                 .padding(.horizontal, AppSpacing.lg)
 
-                // Trending Analyses Section
-                TrendingAnalysesSection(
-                    analyses: viewModel.trendingAnalyses,
-                    onAnalysisTapped: handleTrendingAnalysisTapped
-                )
-
                 // Bottom padding for tab bar
                 Spacer()
                     .frame(height: AppSpacing.xxxl)

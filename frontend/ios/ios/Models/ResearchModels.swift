@@ -229,7 +229,7 @@ struct AnalysisFeature: Identifiable {
         ),
         AnalysisFeature(
             title: "Hidden Market Signals",
-            subtitle: "Congressional trades, short interest, and smart-money positioning",
+            subtitle: "Smart money flows with congressional trading activity and short positions",
             iconName: "icon_feature_signals",
             systemIconName: "antenna.radiowaves.left.and.right",
             iconColor: Color(hex: "14B8A6")

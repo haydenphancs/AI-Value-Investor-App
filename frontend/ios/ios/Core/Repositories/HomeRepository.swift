@@ -20,6 +20,87 @@ protocol HomeRepositoryProtocol {
     func fetchHomeDashboard() async throws -> HomeDashboardData
 }
 
+// MARK: - Live implementation (backend-backed)
+
+/// Talks to `GET /api/v1/home/dashboard` via `APIClient`, decodes the
+/// aggregated DTO, and maps it into the display-ready presentation models.
+///
+/// Mirrors `StockRepository`: an injected `APIClient`, with errors left to
+/// propagate (the ViewModel maps them via `AppError`). Number→string
+/// formatting and the green/red `isPositive` flag are computed HERE so the
+/// views stay dumb — exactly what the mock did, just from live data.
+///
+/// Only the Market Pulse strip is served today; the lower sections are returned
+/// empty (which `HomeDashboardView` renders as nothing) until the backend grows
+/// the same response top-to-bottom.
+final class HomeRepository: HomeRepositoryProtocol {
+
+    private let apiClient: APIClient
+
+    init(apiClient: APIClient = .shared) {
+        self.apiClient = apiClient
+    }
+
+    func fetchHomeDashboard() async throws -> HomeDashboardData {
+        let dto = try await apiClient.request(
+            endpoint: .getHomeDashboard,
+            responseType: HomeDashboardResponseDTO.self
+        )
+        return Self.map(dto)
+    }
+
+    // MARK: - DTO → presentation mapping
+
+    private static func map(_ dto: HomeDashboardResponseDTO) -> HomeDashboardData {
+        HomeDashboardData(
+            marketStatusText: dto.marketStatusText,
+            marketIsOpen: dto.marketIsOpen,
+            pulse: dto.pulse.map(mapPulse),
+            // Not served yet — empty arrays render nothing (sections hide).
+            scanners: [],
+            signals: [],
+            themes: []
+        )
+    }
+
+    private static func mapPulse(_ dto: MarketPulseItemDTO) -> MarketPulseItem {
+        let type = MarketTickerType(rawValue: dto.type) ?? .stock
+        return MarketPulseItem(
+            name: dto.name,
+            symbol: dto.symbol,
+            type: type,
+            priceText: formatPrice(dto.price, type: type),
+            changeText: formatPercent(dto.changePercent),
+            isPositive: dto.changePercent >= 0,
+            // Backend sends daily closes oldest-first (ascending in time), which
+            // already matches the renderer's "ascending = rising" contract — so,
+            // unlike the mock, there is NO SVG-coordinate flip here.
+            spark: dto.spark
+        )
+    }
+
+    // MARK: - Number → display-string formatting
+
+    /// Signed, 2-decimal percent: `0.62 → "+0.62%"`, `-1.85 → "-1.85%"`.
+    private static func formatPercent(_ pct: Double) -> String {
+        String(format: "%+.2f%%", pct)
+    }
+
+    /// Grouped price string matching the design: crypto at whole-dollar
+    /// magnitudes (BTC ≈ 112,430) shows no decimals; indices and commodities
+    /// show cents (6,952.40, 70.95).
+    private static func formatPrice(_ price: Double, type: MarketTickerType) -> String {
+        let decimals = (type == .crypto && abs(price) >= 100) ? 0 : 2
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = true
+        formatter.minimumFractionDigits = decimals
+        formatter.maximumFractionDigits = decimals
+        return formatter.string(from: NSNumber(value: price))
+            ?? String(format: "%.\(decimals)f", price)
+    }
+}
+
 // MARK: - Mock implementation (UI only)
 
 /// Hard-coded, realistic dummy data mirroring the approved Caydex Home design.
@@ -31,7 +112,6 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         HomeDashboardData(
             marketStatusText: "Markets Open",
             marketIsOpen: true,
-            marketMoodText: "Mostly green today",
             pulse: Self.pulse,
             scanners: [Self.movers, Self.heavyTraffic, Self.skepticalMoney],
             signals: Self.signals,
@@ -74,7 +154,7 @@ final class MockHomeRepository: HomeRepositoryProtocol {
     static let movers = DailyScanner(
         kind: .movers,
         title: "Today's Top Movers",
-        subtitle: "Gainers & losers",
+        subtitle: "",  // no subtitle on the Top Movers card (toggle stands in for it)
         iconSystemName: "chart.line.uptrend.xyaxis",
         accent: AppColors.bullish,
         expandCTA: "See full leaderboard",
@@ -204,5 +284,9 @@ final class MockHomeRepository: HomeRepositoryProtocol {
                       iconSystemName: "hexagon.fill", accent: Color(hex: "C084FC")),
         TrendingTheme(title: "Defense & Aerospace", count: "16 stocks", changeText: "+0.8%",
                       iconSystemName: "shield.fill", accent: Color(hex: "FBBF24")),
+        TrendingTheme(title: "The Future of Healthcare", count: "24 stocks", changeText: "+2.7%",
+                      iconSystemName: "cross.case.fill", accent: Color(hex: "2DD4BF")),
+        TrendingTheme(title: "Robotics", count: "19 stocks", changeText: "+4.2%",
+                      iconSystemName: "gearshape.2.fill", accent: Color(hex: "FB923C")),
     ]
 }

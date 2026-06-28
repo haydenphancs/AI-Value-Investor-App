@@ -26,6 +26,9 @@ struct MoversToggle: View {
         .padding(3)
         .background(Color(hex: "14171F"))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // Keep the toggle at its intrinsic width so a long card title can't
+        // squeeze the labels onto a second line ("Gaine\nrs").
+        .fixedSize()
     }
 
     private func segment(_ value: MoversMode, _ label: String, active: Color) -> some View {
@@ -35,6 +38,8 @@ struct MoversToggle: View {
         } label: {
             Text(label)
                 .font(AppTypography.labelSmallEmphasis)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .foregroundColor(isActive ? active : AppColors.textMuted)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)

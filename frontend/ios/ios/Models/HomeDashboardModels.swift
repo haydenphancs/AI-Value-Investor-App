@@ -148,9 +148,45 @@ struct TrendingTheme: Identifiable {
 struct HomeDashboardData {
     let marketStatusText: String   // "Markets Open"
     let marketIsOpen: Bool
-    let marketMoodText: String      // "Mostly green today"
     let pulse: [MarketPulseItem]
     let scanners: [DailyScanner]
     let signals: [ExclusiveSignal]
     let themes: [TrendingTheme]
+}
+
+// MARK: - Live wire models (DTOs)
+
+/// Decoded from `GET /api/v1/home/dashboard` by the live `HomeRepository`, then
+/// mapped into the presentation models above. These carry RAW numbers — the
+/// repository formats them into the display strings the views consume.
+///
+/// Explicit snake_case `CodingKeys` are required: the iOS `APIClient` decoder
+/// deliberately does NOT use `.convertFromSnakeCase`, so every DTO declares its
+/// own keys (mismatch = a decode crash).
+struct HomeDashboardResponseDTO: Decodable {
+    let marketStatusText: String
+    let marketIsOpen: Bool
+    let pulse: [MarketPulseItemDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case marketStatusText = "market_status_text"
+        case marketIsOpen = "market_is_open"
+        case pulse
+    }
+}
+
+/// One Market Pulse tile as served by the backend (raw values).
+struct MarketPulseItemDTO: Decodable {
+    let symbol: String
+    let name: String
+    let type: String          // "index" | "crypto" | "commodity" | "stock" | "etf"
+    let price: Double
+    let changePercent: Double
+    /// Daily closes, oldest-first (ascending in time). May be empty.
+    let spark: [Double]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol, name, type, price, spark
+        case changePercent = "change_percent"
+    }
 }

@@ -22,6 +22,9 @@ struct MoneyMoveArticleDetailView: View {
     @State private var aiInputText: String = ""
     /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// Owns the chat conversation for this article so it resumes while the screen is open.
+    @StateObject private var chatViewModel = ChatViewModel()
+    @State private var showAIChat = false
 
     let article: MoneyMoveArticle
 
@@ -138,6 +141,16 @@ struct MoneyMoveArticleDetailView: View {
                 // Tapping the chat bar collapses the player to the top status island (Wiser-only).
                 CaydexAIChatBar(
                     inputText: $aiInputText,
+                    onSend: {
+                        let text = aiInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty else { return }
+                        aiInputText = ""
+                        chatViewModel.startNewConversation(
+                            firstMessage: text,
+                            context: "The user is reading the article \"\(article.title)\" by \(article.author.name). Answer in that context."
+                        )
+                        showAIChat = true
+                    },
                     onFocusChange: { focused in
                         audioManager.setCompactMode(focused, reason: compactToken)
                     }
@@ -148,6 +161,7 @@ struct MoneyMoveArticleDetailView: View {
         // fullScreenCover above RootContainerView, whose own overlay would be hidden).
         .globalAudioOverlay(token: compactToken)
         .navigationBarHidden(true)
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .preferredColorScheme(.dark)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)

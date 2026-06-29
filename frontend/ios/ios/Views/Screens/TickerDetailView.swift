@@ -221,19 +221,7 @@ struct TickerDetailView: View {
         .navigationDestination(item: $selectedSearchResult) { selection in
             AssetDetailRouter(selection: selection)
         }
-        .sheet(isPresented: $showAIChat) {
-            NavigationStack {
-                ChatConversationView(viewModel: chatViewModel)
-                    .navigationTitle("Ask Cay AI")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button("Close") { showAIChat = false }
-                        }
-                    }
-            }
-            .preferredColorScheme(.dark)
-        }
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
                 chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol, context: viewModel.contextForCurrentTab)

@@ -16,14 +16,9 @@ class TickerReportViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var error: String?
 
-    // AI chat input (bound directly to CaydexAIChatBar in the View)
+    // AI chat input (bound directly to CaydexAIChatBar in the View). The bar's onSend now seeds
+    // the unified full-screen chat (AIChatScreen) with report context — see TickerReportView.
     @Published var aiInputText: String = ""
-
-    // Chat response state
-    @Published var chatResponse: String?
-    @Published var isChatLoading: Bool = false
-    @Published var chatUserQuestion: String?
-    @Published var showChatResponse: Bool = false
 
     // MARK: - Private Properties
     private let ticker: String
@@ -200,47 +195,6 @@ class TickerReportViewModel: ObservableObject {
         }
     }
 
-    func chatWithReport() {
-        guard !aiInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let message = aiInputText
-        aiInputText = ""
-
-        print("💬 [TickerReport] Chat with report: \"\(message)\" for \(ticker)")
-
-        chatUserQuestion = message
-        isChatLoading = true
-        chatResponse = nil
-        showChatResponse = true
-
-        Task { [weak self] in
-            guard let self = self else { return }
-
-            do {
-                let response: TickerReportChatResponse = try await APIClient.shared.request(
-                    endpoint: .chatWithTickerReport(
-                        ticker: self.ticker,
-                        message: message,
-                        persona: self.persona
-                    ),
-                    responseType: TickerReportChatResponse.self
-                )
-
-                print("✅ [TickerReport] Chat response received: \(response.reply.prefix(100))...")
-                self.chatResponse = response.reply
-                self.isChatLoading = false
-            } catch {
-                print("❌ [TickerReport] Chat failed: \(error)")
-                self.chatResponse = "Sorry, I couldn't process that right now. Please try again."
-                self.isChatLoading = false
-            }
-        }
-    }
-
-    func dismissChatResponse() {
-        showChatResponse = false
-        chatResponse = nil
-        chatUserQuestion = nil
-    }
 
     // MARK: - Error Helpers
 

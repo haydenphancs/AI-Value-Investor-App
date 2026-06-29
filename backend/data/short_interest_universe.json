@@ -1,0 +1,10 @@
+{
+  "_comment": "Curated universe for the Home dashboard 'Skeptical Money' (highest short interest) scanner. No data provider offers a market-wide short-interest ranking, so we scan this hand-maintained list of historically heavily-shorted, liquid US names and rank by % of float (top 10 shown). Review ~quarterly: drop delisted/low-short names, add newly crowded shorts. Tickers that return no short-interest data are silently skipped, so a slightly stale entry is harmless.",
+  "updated": "2026-06-28",
+  "tickers": [
+    "BYND", "CVNA", "UPST", "WOLF", "BIGC", "FUBO", "AI", "LCID", "RIVN", "CHWY",
+    "W", "KSS", "GME", "AMC", "MARA", "RIOT", "PLUG", "FCEL", "HOOD", "SOFI",
+    "DKNG", "PTON", "ROKU", "SNAP", "AFRM", "COIN", "MSTR", "RUM", "GPRO", "SAVA",
+    "NVAX", "TLRY", "CGC", "IONQ", "SMR", "ASTS", "RKLB", "OPEN", "WBA", "LYFT"
+  ]
+}

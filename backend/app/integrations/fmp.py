@@ -604,6 +604,39 @@ class FMPClient:
             logger.warning(f"S&P 500 constituents fetch failed: {e}")
             return []
 
+    # ── Market movers (market-wide, single cheap calls) ──────────────
+    # All three return a flat list ranked by FMP; fields:
+    #   symbol, name, price, change, changesPercentage, exchange
+    # (most-actives is ranked by volume but does NOT expose the volume value).
+    # Non-critical → return [] on failure so the caller degrades gracefully.
+
+    async def get_biggest_gainers(self) -> List[Dict[str, Any]]:
+        """Market's biggest % gainers today (ranked desc by % change)."""
+        try:
+            data = await self._make_request("biggest-gainers")
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Biggest gainers fetch failed: {e}")
+            return []
+
+    async def get_biggest_losers(self) -> List[Dict[str, Any]]:
+        """Market's biggest % losers today (ranked desc by magnitude of decline)."""
+        try:
+            data = await self._make_request("biggest-losers")
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Biggest losers fetch failed: {e}")
+            return []
+
+    async def get_most_actives(self) -> List[Dict[str, Any]]:
+        """Most actively traded stocks today (ranked by raw volume)."""
+        try:
+            data = await self._make_request("most-actives")
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Most actives fetch failed: {e}")
+            return []
+
     async def get_index_constituents(self, symbol: str) -> List[Dict[str, Any]]:
         """Get constituent list for a given index symbol."""
         endpoint_map = {

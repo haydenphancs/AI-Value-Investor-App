@@ -56,8 +56,9 @@ final class HomeRepository: HomeRepositoryProtocol {
             marketStatusText: dto.marketStatusText,
             marketIsOpen: dto.marketIsOpen,
             pulse: dto.pulse.map(mapPulse),
-            // Not served yet — empty arrays render nothing (sections hide).
-            scanners: [],
+            scanners: mapScanners(dto.scanners),
+            // Sections below the scanners aren't served yet — empty arrays
+            // render nothing (sections hide).
             signals: [],
             themes: []
         )
@@ -99,6 +100,104 @@ final class HomeRepository: HomeRepositoryProtocol {
         formatter.maximumFractionDigits = decimals
         return formatter.string(from: NSNumber(value: price))
             ?? String(format: "%.\(decimals)f", price)
+    }
+
+    // MARK: - Daily Scanners mapping
+
+    /// Build the three scanner cards. The presentation chrome (title / icon /
+    /// accent / badge / CTA / infoNote) is FIXED per kind, so it's hardcoded here
+    /// (matching the mock); the backend supplies only the ranked rows.
+    private static func mapScanners(_ dto: ScannerGroupsDTO?) -> [DailyScanner] {
+        guard let dto else { return [] }
+        var out: [DailyScanner] = []
+
+        if let m = dto.movers, !(m.gainers.isEmpty && m.losers.isEmpty) {
+            out.append(DailyScanner(
+                kind: .movers,
+                title: "Today's Top Movers",
+                subtitle: "",
+                iconSystemName: "chart.line.uptrend.xyaxis",
+                accent: AppColors.bullish,
+                expandCTA: "See full leaderboard",
+                gainers: m.gainers.map(mapMoverRow),
+                losers: m.losers.map(mapMoverRow)
+            ))
+        }
+
+        if let v = dto.volume, !v.entries.isEmpty {
+            out.append(DailyScanner(
+                kind: .volume,
+                title: "Heavy Traffic",
+                subtitle: "Unusual trading volume",
+                iconSystemName: "chart.bar.fill",
+                accent: AppColors.accentCyan,
+                badgeText: "Volume",
+                expandCTA: "See all unusual volume",
+                entries: v.entries.map(mapVolumeRow)
+            ))
+        }
+
+        if let s = dto.shorts, !s.entries.isEmpty {
+            out.append(DailyScanner(
+                kind: .shorts,
+                title: "Skeptical Money",
+                subtitle: "Highest short interest",
+                iconSystemName: "eye.fill",
+                accent: AppColors.neutral,
+                badgeText: "Shorts",
+                expandCTA: "See all high short interest",
+                infoNote: "High short interest reflects skepticism — and can fuel a short squeeze if the stock rallies.",
+                entries: s.entries.map(mapShortRow)
+            ))
+        }
+
+        return out
+    }
+
+    // MOVERS: primary = signed % (colored), secondary = price.
+    private static func mapMoverRow(_ r: ScannerRowDTO) -> ScannerEntry {
+        ScannerEntry(
+            rank: r.rank, symbol: r.symbol, name: r.name,
+            primaryText: formatSignedPercent(r.changePercent),
+            secondaryText: formatDollar(r.price),
+            isPositive: r.changePercent >= 0,
+            spark: r.spark
+        )
+    }
+
+    // VOLUME: primary = RVOL "8.4×" (white), secondary = signed % (colored).
+    private static func mapVolumeRow(_ r: ScannerRowDTO) -> ScannerEntry {
+        ScannerEntry(
+            rank: r.rank, symbol: r.symbol, name: r.name,
+            primaryText: String(format: "%.1f×", r.volumeMultiple ?? 0),
+            secondaryText: formatSignedPercent(r.changePercent),
+            isPositive: r.changePercent >= 0,
+            spark: r.spark
+        )
+    }
+
+    // SHORTS: primary = % of float (amber), secondary = price; isPositive always false.
+    private static func mapShortRow(_ r: ScannerRowDTO) -> ScannerEntry {
+        ScannerEntry(
+            rank: r.rank, symbol: r.symbol, name: r.name,
+            primaryText: String(format: "%.1f%%", r.shortPercentOfFloat ?? 0),
+            secondaryText: formatDollar(r.price),
+            isPositive: false,
+            spark: r.spark
+        )
+    }
+
+    private static func formatSignedPercent(_ p: Double) -> String {
+        String(format: "%+.1f%%", p)
+    }
+
+    private static func formatDollar(_ p: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = true
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        return "$" + (formatter.string(from: NSNumber(value: p)) ?? String(format: "%.2f", p))
     }
 }
 

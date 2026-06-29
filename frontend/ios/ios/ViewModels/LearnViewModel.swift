@@ -203,10 +203,6 @@ class LearnViewModel: ObservableObject {
         print("Open book: \(book.title)")
     }
 
-    func chatWithBook(_ book: EducationBook) {
-        print("Chat with book: \(book.title)")
-    }
-
     func openDiscussion(_ discussion: CommunityDiscussion) {
         print("Open discussion by: \(discussion.authorName)")
     }

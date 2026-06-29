@@ -31,6 +31,9 @@ struct BookCoreDetailView: View {
 
     /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// Owns the chat conversation for this core so it resumes while the screen is open.
+    @StateObject private var chatViewModel = ChatViewModel()
+    @State private var showAIChat = false
 
     let book: LibraryBook
     let allCores: [BookCoreChapter]
@@ -242,6 +245,7 @@ struct BookCoreDetailView: View {
             jumpReadingToCore(coreNumber)
         })
         .navigationBarHidden(true)
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .onAppear {
             // If audio is already playing, show the player
             if audioManager.hasActiveEpisode && audioManager.isPlaying {
@@ -436,9 +440,14 @@ struct BookCoreDetailView: View {
     }
     
     private func handleAISend() {
-        guard !inputText.isEmpty else { return }
-        print("Ask AI about chapter: \(inputText)")
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
         inputText = ""
+        chatViewModel.startNewConversation(
+            firstMessage: text,
+            context: "The user is reading \"\(book.title)\" by \(book.author), core \(currentContent.chapterNumber). Answer in that context."
+        )
+        showAIChat = true
     }
 }
 

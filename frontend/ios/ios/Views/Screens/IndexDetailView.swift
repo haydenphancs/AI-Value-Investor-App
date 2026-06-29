@@ -217,19 +217,7 @@ struct IndexDetailView: View {
                 }
             )
         }
-        .sheet(isPresented: $showAIChat) {
-            NavigationStack {
-                ChatConversationView(viewModel: chatViewModel)
-                    .navigationTitle("Ask Cay AI")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button("Close") { showAIChat = false }
-                        }
-                    }
-            }
-            .preferredColorScheme(.dark)
-        }
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
                 print("🤖 IndexDetailView: Opening AI chat for \(indexSymbol) with query: \(query)")

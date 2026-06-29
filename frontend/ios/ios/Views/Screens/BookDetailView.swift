@@ -28,6 +28,9 @@ struct BookDetailView: View {
     @State private var playerTargetCore: BookCoreChapter?
     /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// Owns the chat conversation for this book so it resumes while the screen is open.
+    @StateObject private var chatViewModel = ChatViewModel()
+    @State private var showAIChat = false
 
     let book: LibraryBook
 
@@ -123,6 +126,16 @@ struct BookDetailView: View {
                 // Tapping the chat bar collapses the player to the top status island (Wiser-only).
                 CaydexAIChatBar(
                     inputText: $aiInputText,
+                    onSend: {
+                        let text = aiInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty else { return }
+                        aiInputText = ""
+                        chatViewModel.startNewConversation(
+                            firstMessage: text,
+                            context: "The user is reading the book \"\(book.title)\" by \(book.author). Answer in that context."
+                        )
+                        showAIChat = true
+                    },
                     onFocusChange: { focused in
                         audioManager.setCompactMode(focused, reason: compactToken)
                     }
@@ -138,6 +151,7 @@ struct BookDetailView: View {
             playerTargetCore = book.coreChapters.first(where: { $0.number == coreNumber })
         })
         .navigationBarHidden(true)
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .sheet(isPresented: $showShareSheet) {
             if let url = URL(string: "https://app.example.com/book/\(book.id)") {
                 ShareSheet(items: [book.title, "by \(book.author)", url])

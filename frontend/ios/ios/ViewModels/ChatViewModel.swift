@@ -104,13 +104,21 @@ class ChatViewModel: ObservableObject {
 
     /// Send a message in the current conversation.
     func sendMessage(_ text: String) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        // One message in flight at a time. `isAITyping` is true both while the AI is replying AND
+        // during the createSession round-trip of a freshly seeded conversation (when currentSessionId
+        // is still nil). Guarding here prevents (a) a second send firing a parallel AI request and
+        // (b) re-entering startNewConversation mid-seed, which would double-create a session and wipe
+        // the seeded first message. The UI also greys the send button while busy; this is the
+        // load-bearing guard.
+        guard !isAITyping else { return }
+
         guard let sessionId = currentSessionId else {
             // No session yet — start a new conversation
             startNewConversation(firstMessage: text)
             return
         }
-
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         errorMessage = nil
 
         // Add user message immediately
@@ -132,6 +140,9 @@ class ChatViewModel: ObservableObject {
         currentSessionId = sessionId
         messages = []
         isLoadingSession = true
+        // Switching conversations cancels any prior "thinking" indicator; a still-in-flight send
+        // for the previous session is dropped by the sessionId guard in sendMessageToSession.
+        isAITyping = false
         errorMessage = nil
 
         Task {
@@ -233,6 +244,12 @@ class ChatViewModel: ObservableObject {
             )
 
             let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
+            // If the user navigated to another conversation (or reset) while this was in flight,
+            // drop the result so it doesn't append into / clear the typing state of the wrong session.
+            guard sessionId == currentSessionId else {
+                print("⚠️ [ChatVM] Discarding stale response for \(sessionId); active is \(currentSessionId ?? "nil")")
+                return
+            }
             let richMessage = response.toRichChatMessage()
             messages.append(richMessage)
             isAITyping = false
@@ -243,6 +260,8 @@ class ChatViewModel: ObservableObject {
         } catch {
             let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
             print("❌ [ChatVM] Send failed after \(elapsed)s: \(error)")
+            // Only surface the error on the conversation that is still active.
+            guard sessionId == currentSessionId else { return }
             isAITyping = false
             errorMessage = "Failed to get AI response. Please try again."
         }

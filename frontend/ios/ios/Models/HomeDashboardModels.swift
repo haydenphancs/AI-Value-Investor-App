@@ -186,11 +186,14 @@ struct HomeDashboardResponseDTO: Decodable {
     let marketStatusText: String
     let marketIsOpen: Bool
     let pulse: [MarketPulseItemDTO]
+    /// Optional so an older backend that omits it can't crash decode.
+    let scanners: ScannerGroupsDTO?
 
     enum CodingKeys: String, CodingKey {
         case marketStatusText = "market_status_text"
         case marketIsOpen = "market_is_open"
         case pulse
+        case scanners
     }
 }
 
@@ -211,4 +214,44 @@ struct MarketPulseItemDTO: Decodable {
         case changePercent = "change_percent"
         case previousClose = "previous_close"
     }
+}
+
+// MARK: - Daily Scanner DTOs
+
+/// One ranked leaderboard row (raw numbers; the repository formats them per kind).
+struct ScannerRowDTO: Decodable {
+    let rank: Int
+    let symbol: String
+    let name: String
+    let price: Double
+    let changePercent: Double
+    let volumeMultiple: Double?         // Heavy Traffic (RVOL)
+    let shortPercentOfFloat: Double?    // Skeptical Money
+    let spark: [Double]                 // rank-1 only, else []
+
+    enum CodingKeys: String, CodingKey {
+        case rank, symbol, name, price, spark
+        case changePercent = "change_percent"
+        case volumeMultiple = "volume_multiple"
+        case shortPercentOfFloat = "short_percent_of_float"
+    }
+}
+
+/// One scanner card's data. Movers uses gainers+losers; volume/shorts use entries.
+struct ScannerGroupDTO: Decodable {
+    let kind: String
+    let gainers: [ScannerRowDTO]
+    let losers: [ScannerRowDTO]
+    let entries: [ScannerRowDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case kind, gainers, losers, entries
+    }
+}
+
+/// The three scanner cards. A null group → that card is omitted.
+struct ScannerGroupsDTO: Decodable {
+    let movers: ScannerGroupDTO?
+    let volume: ScannerGroupDTO?
+    let shorts: ScannerGroupDTO?
 }

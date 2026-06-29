@@ -23,14 +23,17 @@ import pytest
 from app.schemas.home_dashboard import (
     HomeDashboardResponse,
     MarketPulseItemResponse,
+    ScannerGroupsResponse,
 )
 from app.services.home_dashboard_service import (
     HomeDashboardService,
     _PULSE_SYMBOLS,
+    _SCANNER_CACHE_KEY,
     _downsample,
     _intraday_sparkline,
     _market_status,
 )
+import time as _time
 
 
 # ── 1. Schema parity ──────────────────────────────────────────────────
@@ -38,7 +41,7 @@ from app.services.home_dashboard_service import (
 # The exact snake_case keys the iOS `MarketPulseItemDTO.CodingKeys` expects.
 _ITEM_KEYS = {"symbol", "name", "type", "price", "change_percent", "previous_close", "spark"}
 # The exact snake_case keys the iOS `HomeDashboardResponseDTO.CodingKeys` expects.
-_RESPONSE_KEYS = {"market_status_text", "market_is_open", "pulse"}
+_RESPONSE_KEYS = {"market_status_text", "market_is_open", "pulse", "scanners"}
 
 
 def test_market_pulse_item_keys_match_ios_dto():
@@ -220,6 +223,15 @@ class _FakeFMP:
 def _fresh_service() -> tuple[HomeDashboardService, _FakeFMP]:
     HomeDashboardService._cache.clear()
     HomeDashboardService._inflight.clear()
+    HomeDashboardService._scanner_inflight.clear()
+    HomeDashboardService._float_cache.clear()
+    # Prime an empty scanner cache so get_dashboard's scanner path is satisfied
+    # from cache — these are PULSE tests; the scanner path (and its real FMP/FINRA
+    # network calls) is exercised in test_home_dashboard_scanners.py.
+    HomeDashboardService._scanner_cache.clear()
+    HomeDashboardService._scanner_cache[_SCANNER_CACHE_KEY] = (
+        _time.time(), ScannerGroupsResponse()
+    )
     svc = HomeDashboardService()
     fake = _FakeFMP()
     svc.fmp = fake  # type: ignore[assignment]
@@ -248,10 +260,12 @@ async def test_build_returns_all_symbols_mapped_and_validated():
 @pytest.mark.asyncio
 async def test_concurrent_loads_dedup_to_single_fanout():
     svc, fake = _fresh_service()
-    # Two simultaneous Home opens after a cold cache → ONE FMP fan-out.
+    # Two simultaneous Home opens after a cold cache → ONE pulse FMP fan-out.
+    # The dedup signal is the call count (the responses are fresh objects and
+    # Pydantic copies the pulse list on construction, so identity can't be used).
     a, b = await asyncio.gather(svc.get_dashboard(), svc.get_dashboard())
-    assert a is b  # same cached object returned to both awaiters
-    assert fake.quote_calls == len(_PULSE_SYMBOLS)   # not doubled
+    assert fake.quote_calls == len(_PULSE_SYMBOLS)   # not doubled → deduped
+    assert [p.symbol for p in a.pulse] == [p.symbol for p in b.pulse]
 
 
 @pytest.mark.asyncio

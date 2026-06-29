@@ -174,6 +174,26 @@ struct ScannerCard: View {
                         .foregroundColor(AppColors.textMuted)
                 }
             }
+        } else {
+            // No rows on this side (e.g. the Losers tab on a day with no quality
+            // losers). Show a calm empty state instead of a blank hero.
+            Text(emptyStateText)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textMuted)
+                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        }
+    }
+
+    private var emptyStateText: String {
+        switch scanner.kind {
+        case .movers:
+            return moversMode == .gainers
+                ? "No notable gainers right now."
+                : "No notable losers right now."
+        case .volume:
+            return "No unusual volume right now."
+        case .shorts:
+            return "No short-interest data right now."
         }
     }
 

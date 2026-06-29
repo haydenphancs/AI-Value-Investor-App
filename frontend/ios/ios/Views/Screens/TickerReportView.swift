@@ -16,6 +16,9 @@ struct TickerReportView: View {
     @State private var showDeleteConfirm: Bool = false
     /// Stable token keying this screen's compact-mode request + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
+    /// Owns the chat conversation for this report so it resumes while the screen is open.
+    @StateObject private var chatViewModel = ChatViewModel()
+    @State private var showAIChat = false
 
     init(ticker: String) {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(ticker: ticker))
@@ -54,9 +57,7 @@ struct TickerReportView: View {
         // Audio collapses to the top status island while this report screen is open, keeping the
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)
-        .sheet(isPresented: $viewModel.showChatResponse) {
-            chatResponseSheet
-        }
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .sheet(item: $viewModel.pdfSheet) { mode in
             ReportPDFView(
                 reportId: viewModel.pdfReportId ?? "",
@@ -134,7 +135,7 @@ struct TickerReportView: View {
                 CaydexAIChatBar(
                     inputText: $viewModel.aiInputText,
                     placeholder: "Chat with the report...",
-                    onSend: viewModel.chatWithReport
+                    onSend: handleReportChatSend
                 )
             }
         }
@@ -332,70 +333,24 @@ struct TickerReportView: View {
         }
     }
 
-    // MARK: - Chat Response Sheet
+    // MARK: - Report Chat
 
-    private var chatResponseSheet: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: AppSpacing.lg) {
-                    // User question
-                    if let question = viewModel.chatUserQuestion {
-                        HStack {
-                            Spacer()
-                            Text(question)
-                                .font(AppTypography.bodySmall)
-                                .foregroundColor(.white)
-                                .padding(.horizontal, AppSpacing.lg)
-                                .padding(.vertical, AppSpacing.md)
-                                .background(AppColors.primaryBlue)
-                                .cornerRadius(AppCornerRadius.large)
-                        }
-                        .padding(.horizontal, AppSpacing.lg)
-                    }
+    /// Seed the unified full-screen chat with this report's context, then present it.
+    private func handleReportChatSend() {
+        let text = viewModel.aiInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        viewModel.aiInputText = ""
 
-                    // AI response or loading
-                    HStack(alignment: .top, spacing: AppSpacing.md) {
-                        Image(systemName: "sparkles")
-                            .font(AppTypography.iconSmall)
-                            .foregroundColor(AppColors.primaryBlue)
-                            .padding(.top, 2)
+        let report = viewModel.reportData
+        let summary = String((report?.executiveSummaryText ?? "").prefix(800))
+        let context = "The user is viewing an in-depth research report on \(report?.symbol ?? "this company"). Report summary: \(summary). Answer questions grounded in this report."
 
-                        if viewModel.isChatLoading {
-                            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                                ProgressView()
-                                    .tint(AppColors.primaryBlue)
-                                Text("Thinking...")
-                                    .font(AppTypography.caption)
-                                    .foregroundColor(AppColors.textMuted)
-                            }
-                        } else if let response = viewModel.chatResponse {
-                            Text(response)
-                                .font(AppTypography.bodySmall)
-                                .foregroundColor(AppColors.textPrimary)
-                                .lineSpacing(4)
-                                .textSelection(.enabled)
-                        }
-
-                        Spacer()
-                    }
-                    .padding(.horizontal, AppSpacing.lg)
-                }
-                .padding(.top, AppSpacing.lg)
-            }
-            .background(AppColors.background)
-            .navigationTitle("AI Insight")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        viewModel.dismissChatResponse()
-                    }
-                    .foregroundColor(AppColors.primaryBlue)
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        chatViewModel.startNewConversation(
+            firstMessage: text,
+            stockId: report?.symbol,
+            context: context
+        )
+        showAIChat = true
     }
 
     // MARK: - Disclaimer

@@ -181,19 +181,7 @@ struct ETFDetailView: View {
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }
-        .sheet(isPresented: $showAIChat) {
-            NavigationStack {
-                ChatConversationView(viewModel: chatViewModel)
-                    .navigationTitle("Ask Cay AI")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button("Close") { showAIChat = false }
-                        }
-                    }
-            }
-            .preferredColorScheme(.dark)
-        }
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .navigationDestination(item: $selectedSearchResult) { selection in
             AssetDetailRouter(selection: selection)
         }

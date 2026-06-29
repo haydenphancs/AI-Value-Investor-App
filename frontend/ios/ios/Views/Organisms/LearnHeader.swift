@@ -12,6 +12,9 @@ struct LearnHeader: View {
     @Binding var selectedTab: LearnTab
     var onSearchTapped: (() -> Void)?
     var onProfileTapped: (() -> Void)?
+    /// Called when the "Chat" tab is tapped — the Wiser screen presents the full-screen
+    /// AIChatScreen cover instead of switching inline content.
+    var onChatTapped: (() -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -23,7 +26,7 @@ struct LearnHeader: View {
             )
 
             // Tab control
-            LearnTabControl(selectedTab: $selectedTab)
+            LearnTabControl(selectedTab: $selectedTab, onChatTapped: onChatTapped)
                 .padding(.horizontal, AppSpacing.lg)
         }
         .padding(.bottom, AppSpacing.sm)

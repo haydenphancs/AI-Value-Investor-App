@@ -9,13 +9,20 @@ import SwiftUI
 
 struct LearnTabControl: View {
     @Binding var selectedTab: LearnTab
+    /// When set, tapping the "Chat" tab calls this instead of switching `selectedTab` — the Wiser
+    /// screen uses it to present the full-screen AIChatScreen cover. "Learn" still switches inline.
+    var onChatTapped: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 0) {
             ForEach(LearnTab.allCases, id: \.rawValue) { tab in
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        selectedTab = tab
+                    if tab == .chat {
+                        onChatTapped?()
+                    } else {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedTab = tab
+                        }
                     }
                 } label: {
                     Text(tab.rawValue)

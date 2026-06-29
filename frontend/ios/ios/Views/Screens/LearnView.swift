@@ -9,15 +9,18 @@ import SwiftUI
 
 // MARK: - LearnContentView (Used in TabView)
 struct LearnContentView: View {
-    /// Whether the Wiser tab is the active bottom tab. Drives releasing the Chat sub-tab's audio
-    /// compact/island when this tab is backgrounded (tabs are opacity-mounted — no onDisappear fires).
-    var isWiserSelected: Bool = true
-
     @Environment(\.appState) private var appState
     @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = LearnViewModel()
     @ObservedObject private var bookmarks = BookmarkStore.shared
-    @State private var chatCompactToken = UUID().uuidString
+    /// Owns the Wiser chat conversation for the app session so the Chat tab RESUMES the last
+    /// conversation each time it's reopened (the Chat tab now opens AIChatScreen as a cover).
+    @StateObject private var chatViewModel = ChatViewModel()
+    @State private var showAIChat = false
+    /// Separate, ephemeral VM for the "Ask the Author Agent" book chat so seeding it never clobbers
+    /// the resumable Wiser Chat-tab thread above.
+    @StateObject private var bookChatViewModel = ChatViewModel()
+    @State private var showBookChat = false
     @State private var showingInvestorJourney = false
     @State private var shouldScrollToNextLesson = false
     @State private var showingMoneyMovesDetail = false
@@ -33,12 +36,6 @@ struct LearnContentView: View {
     /// flipping this to `true` once there's a real user base. See the gated block in learnTabContent.
     private let showCommunityDiscussions = false
 
-    /// The audio player collapses to the top island only while the AI Chat sub-tab is the foreground
-    /// content (Wiser tab selected AND Chat sub-tab) — keeps the bottom clear for the chat input.
-    private var isChatTabActive: Bool {
-        isWiserSelected && viewModel.selectedTab == .chat
-    }
-
     var body: some View {
         NavigationStack {
         ZStack {
@@ -52,19 +49,13 @@ struct LearnContentView: View {
                 LearnHeader(
                     selectedTab: $viewModel.selectedTab,
                     onSearchTapped: handleSearchTapped,
-                    onProfileTapped: handleProfileTapped
+                    onProfileTapped: handleProfileTapped,
+                    onChatTapped: { showAIChat = true }
                 )
 
-                // Tab content - no swipe gesture between tabs
-                Group {
-                    switch viewModel.selectedTab {
-                    case .learn:
-                        learnTabContent
-                    case .chat:
-                        chatTabContent
-                    }
-                }
-                .animation(.easeInOut(duration: 0.2), value: viewModel.selectedTab)
+                // Tab content — the "Chat" tab opens the full-screen AIChatScreen cover (see
+                // onChatTapped above); only the Learn content renders inline here.
+                learnTabContent
             }
 
             // Loading overlay
@@ -112,18 +103,13 @@ struct LearnContentView: View {
             await MoneyMovesProgressStore.shared.hydrate()
             await bookmarks.hydrate()
         }
-        // Reactively own the Chat-tab audio compact so it engages/releases as the Chat sub-tab and
-        // the Wiser bottom tab gain/lose foreground — robust against opacity-mounted tabs not firing
-        // onDisappear. (ChatTabView itself no longer toggles compact.)
-        .onAppear {
-            audioManager.setCompactMode(isChatTabActive, reason: chatCompactToken)
-        }
-        .onChange(of: isChatTabActive) { _, active in
-            audioManager.setCompactMode(active, reason: chatCompactToken)
-        }
-        .onDisappear {
-            audioManager.setCompactMode(false, reason: chatCompactToken)
-        }
+        // The Wiser "Chat" tab opens the unified full-screen chat (AIChatScreen) as a cover, which
+        // owns its own audio compact via .globalAudioOverlay — so the Wiser screen no longer manages
+        // chat-tab audio here.
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
+        // "Ask the Author Agent" book chat uses its own VM so it never overwrites the resumable
+        // Chat-tab thread.
+        .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)
         }
     }
 
@@ -194,17 +180,6 @@ struct LearnContentView: View {
         }
     }
 
-    // MARK: - Chat Tab Content
-    private var chatTabContent: some View {
-        ChatTabView {
-            handleHistoryTap()
-        }
-    }
-
-    private func handleHistoryTap() {
-        print("Chat history tapped")
-    }
-
     // MARK: - Action Handlers
     private func handleSearchTapped() {
         showSearch = true
@@ -251,7 +226,13 @@ struct LearnContentView: View {
     }
 
     private func handleChatWithBook(_ book: EducationBook) {
-        viewModel.chatWithBook(book)
+        // "Ask the Author Agent" → open the unified full-screen chat seeded with the book, in its
+        // OWN VM so it doesn't clobber the resumable Wiser Chat-tab conversation.
+        bookChatViewModel.startNewConversation(
+            firstMessage: "Tell me about \"\(book.title)\" by \(book.author).",
+            context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas."
+        )
+        showBookChat = true
     }
 
     private func handleSeeAllDiscussions() {

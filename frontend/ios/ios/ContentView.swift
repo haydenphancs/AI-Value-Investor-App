@@ -516,10 +516,10 @@ struct WiserViewWithBinding: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Pass whether Wiser is the active tab so the Chat sub-tab releases the audio
-                // compact/island when this tab is backgrounded (tabs are opacity-mounted, so
-                // onDisappear never fires on a tab switch).
-                LearnContentView(isWiserSelected: selectedTab == .wiser)
+                // The Wiser "Chat" tab now opens AIChatScreen as a full-screen cover that owns its
+                // own audio compact/island via .globalAudioOverlay, so the Wiser screen no longer
+                // needs an active-tab signal here.
+                LearnContentView()
 
                 CustomTabBar(selectedTab: $selectedTab)
             }

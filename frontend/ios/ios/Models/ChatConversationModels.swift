@@ -361,6 +361,31 @@ struct PageIndicatorData {
     let totalPages: Int
 }
 
+// MARK: - Tolerant ISO-8601 parsing
+
+/// Parse a backend ISO-8601 timestamp, tolerating BOTH fractional-second and whole-second forms.
+/// `ISO8601DateFormatter` with `.withFractionalSeconds` returns `nil` for a timestamp that has no
+/// fractional part (e.g. a Postgres `now()` / Python `isoformat()` landing on an exact second), so
+/// we fall back to the no-fractional formatter. Without this, such rows silently parse to `Date()`
+/// (now) — corrupting message timestamps and bucketing history into the wrong day. Formatters are
+/// cached (creating an `ISO8601DateFormatter` per parse is expensive).
+enum BackendISO8601 {
+    private static let withFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let withoutFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    static func date(from string: String) -> Date? {
+        withFractional.date(from: string) ?? withoutFractional.date(from: string)
+    }
+}
+
 // MARK: - Backend Response DTOs (Codable)
 
 /// Matches backend ``ChatSessionResponse``.
@@ -398,12 +423,10 @@ struct ChatSessionDTO: Codable, Identifiable, Sendable {
         }
     }
 
-    /// Parse createdAt into Date.
+    /// Parse createdAt into Date (tolerant of whole-second timestamps — see BackendISO8601).
     var date: Date {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.date(from: lastMessageAt ?? createdAt)
-            ?? formatter.date(from: createdAt)
+        BackendISO8601.date(from: lastMessageAt ?? createdAt)
+            ?? BackendISO8601.date(from: createdAt)
             ?? Date()
     }
 
@@ -459,9 +482,7 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
             richContent.append(.text(content))
         }
 
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let timestamp = formatter.date(from: createdAt) ?? Date()
+        let timestamp = BackendISO8601.date(from: createdAt) ?? Date()
 
         return RichChatMessage(role: msgRole, content: richContent, timestamp: timestamp)
     }

@@ -17,11 +17,14 @@ struct CaydexAIChatBar: View {
     /// Reports text-field focus changes. Wiser reading screens pass this to collapse the audio player
     /// to the top status island while the user types. Default nil ⇒ no behavior change elsewhere.
     var onFocusChange: ((Bool) -> Void)?
+    /// When true (e.g. AIChatScreen while the AI is replying), the send button is disabled so the
+    /// user can't fire a second concurrent request. Default false ⇒ no change for other call sites.
+    var isBusy: Bool = false
 
     @FocusState private var isFocused: Bool
 
     private var canSend: Bool {
-        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isBusy && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {

@@ -154,12 +154,12 @@ final class HomeRepository: HomeRepositoryProtocol {
         return out
     }
 
-    // MOVERS: primary = signed % (colored), secondary = price.
+    // MOVERS: primary = signed % (colored), secondary = price · market cap.
     private static func mapMoverRow(_ r: ScannerRowDTO) -> ScannerEntry {
         ScannerEntry(
             rank: r.rank, symbol: r.symbol, name: r.name,
             primaryText: formatSignedPercent(r.changePercent),
-            secondaryText: formatDollar(r.price),
+            secondaryText: formatDollar(r.price) + capSuffix(r.marketCap),
             isPositive: r.changePercent >= 0,
             spark: r.spark
         )
@@ -176,12 +176,12 @@ final class HomeRepository: HomeRepositoryProtocol {
         )
     }
 
-    // SHORTS: primary = % of float (amber), secondary = price; isPositive always false.
+    // SHORTS: primary = % of float (amber), secondary = price · market cap; isPositive always false.
     private static func mapShortRow(_ r: ScannerRowDTO) -> ScannerEntry {
         ScannerEntry(
             rank: r.rank, symbol: r.symbol, name: r.name,
             primaryText: String(format: "%.1f%%", r.shortPercentOfFloat ?? 0),
-            secondaryText: formatDollar(r.price),
+            secondaryText: formatDollar(r.price) + capSuffix(r.marketCap),
             isPositive: false,
             spark: r.spark
         )
@@ -198,6 +198,21 @@ final class HomeRepository: HomeRepositoryProtocol {
         formatter.minimumFractionDigits = 2
         formatter.maximumFractionDigits = 2
         return "$" + (formatter.string(from: NSNumber(value: p)) ?? String(format: "%.2f", p))
+    }
+
+    /// " · 45.2B Cap" appended to a price, or "" when market cap is absent.
+    private static func capSuffix(_ cap: Double?) -> String {
+        let text = formatMarketCap(cap)
+        return text.isEmpty ? "" : " · " + text
+    }
+
+    /// Market cap abbreviated as M / B / T with one decimal, e.g. "500.5M Cap",
+    /// "45.2B Cap", "3.1T Cap". Empty when missing/non-finite.
+    private static func formatMarketCap(_ cap: Double?) -> String {
+        guard let cap, cap.isFinite, cap > 0 else { return "" }
+        if cap >= 1_000_000_000_000 { return String(format: "%.1fT Cap", cap / 1_000_000_000_000) }
+        if cap >= 1_000_000_000 { return String(format: "%.1fB Cap", cap / 1_000_000_000) }
+        return String(format: "%.1fM Cap", cap / 1_000_000)
     }
 }
 

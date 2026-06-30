@@ -33,7 +33,7 @@ from app.services.home_dashboard_service import (
     _finite_float,
     _intraday_sparkline,
     _is_quality_company,
-    _movers_rows,
+    _movers_from_universe,
     _parse_pct,
     _rvol,
     _short_pct,
@@ -52,7 +52,7 @@ def _profile(symbol, *, mc=1e9, avg=2e6, etf=False, fund=False, **extra):
 # ── 1. Schema parity ──────────────────────────────────────────────────
 
 _ROW_KEYS = {
-    "rank", "symbol", "name", "price", "change_percent",
+    "rank", "symbol", "name", "price", "change_percent", "market_cap",
     "volume_multiple", "short_percent_of_float", "spark",
 }
 _GROUP_KEYS = {"kind", "gainers", "losers", "entries"}
@@ -144,36 +144,43 @@ def test_is_quality_company_filters_etf_microcap_and_thin():
     assert _is_quality_company({}) is False
 
 
-def test_movers_rows_filters_pump_penny_otc_etf_and_reranks():
-    raw = [
-        {"symbol": "SMCI", "name": "Super Micro", "price": 58.3, "changesPercentage": 14.2, "exchange": "NASDAQ"},
-        {"symbol": "SDOT", "name": "Sadot", "price": 21.45, "changesPercentage": 247.0, "exchange": "NASDAQ"},  # micro-cap pump
-        {"symbol": "PENNY", "name": "Penny", "price": 1.20, "changesPercentage": 300.0, "exchange": "NASDAQ"},  # <$5
-        {"symbol": "OTCX", "name": "OtcCo", "price": 50.0, "changesPercentage": 99.0, "exchange": "OTC"},       # bad exch
-        {"symbol": "TQQQ", "name": "UltraPro QQQ", "price": 71.0, "changesPercentage": 30.0, "exchange": "NASDAQ"},  # ETF
-        {"symbol": "FUBO", "name": "fuboTV", "price": 9.91, "changesPercentage": 22.5, "exchange": "NYSE"},
-    ]
+def test_movers_from_universe_ranks_by_change_and_splits_sign():
     pm = {
-        "SMCI": _profile("SMCI", mc=30e9, avg=5e6),
-        "SDOT": _profile("SDOT", mc=21e6, avg=2e6),      # < $300M → dropped
-        "TQQQ": _profile("TQQQ", mc=39e9, avg=80e6, etf=True),
-        "FUBO": _profile("FUBO", mc=3e9, avg=10e6),
+        "SMCI": _profile("SMCI", mc=30e9, avg=5e6, price=58.3),
+        "FUBO": _profile("FUBO", mc=3e9, avg=10e6, price=9.9),
+        "ON":   _profile("ON", mc=35e9, avg=4e6, price=90.0),
+        "BE":   _profile("BE", mc=71e9, avg=3e6, price=252.0),
+        "FLAT": _profile("FLAT", mc=2e9, avg=2e6, price=10.0),     # 0% → excluded both sides
+        "SDOT": _profile("SDOT", mc=21e6, avg=2e6, price=21.0),    # micro-cap → excluded
+        "TQQQ": _profile("TQQQ", mc=39e9, avg=80e6, etf=True, price=71.0),  # ETF → excluded
     }
-    rows = _movers_rows(raw, pm)
-    assert [r.symbol for r in rows] == ["SMCI", "FUBO"]   # pump/penny/OTC/ETF all dropped
-    assert [r.rank for r in rows] == [1, 2]               # contiguous after filter
-    assert rows[1].change_percent == 22.5
+    cm = {"SMCI": 14.2, "FUBO": 22.5, "ON": -23.7, "BE": -18.5,
+          "FLAT": 0.0, "SDOT": 247.0, "TQQQ": -2.0}
+    gainers = _movers_from_universe(pm, cm, positive=True)
+    losers = _movers_from_universe(pm, cm, positive=False)
+    # Gainers desc, losers asc; pump/ETF/flat excluded.
+    assert [r.symbol for r in gainers] == ["FUBO", "SMCI"]
+    assert [r.rank for r in gainers] == [1, 2]
+    assert [r.symbol for r in losers] == ["ON", "BE"]
+    assert [r.rank for r in losers] == [1, 2]
+    assert all(r.change_percent > 0 for r in gainers)
+    assert all(r.change_percent < 0 for r in losers)
 
 
-def test_movers_rows_caps_to_requested_rows():
-    raw = [
-        {"symbol": f"S{i}", "name": f"n{i}", "price": 10.0, "changesPercentage": 100 - i, "exchange": "NYSE"}
-        for i in range(20)
-    ]
-    pm = {f"S{i}": _profile(f"S{i}") for i in range(20)}
-    rows = _movers_rows(raw, pm, rows=10)
+def test_movers_from_universe_caps_to_requested_rows():
+    pm = {f"S{i}": _profile(f"S{i}", price=10.0) for i in range(20)}
+    cm = {f"S{i}": float(50 - i) for i in range(20)}   # all positive, descending
+    rows = _movers_from_universe(pm, cm, positive=True, rows=10)
     assert len(rows) == 10
     assert rows[0].symbol == "S0" and rows[-1].rank == 10
+
+
+def test_movers_from_universe_skips_non_finite_change():
+    pm = {"NANC": _profile("NANC", price=10.0), "GOOD": _profile("GOOD", price=10.0)}
+    cm = {"NANC": float("nan"), "GOOD": -4.0}
+    rows = _movers_from_universe(pm, cm, positive=False)
+    assert [r.symbol for r in rows] == ["GOOD"]
+    assert all(math.isfinite(r.change_percent) for r in rows)
 
 
 def test_volume_rows_ranks_by_rvol_desc_drops_below_threshold_etf_and_microcap():
@@ -284,12 +291,15 @@ async def test_build_scanner_groups_movers_volume_shorts(monkeypatch):
     s = _fresh_service(monkeypatch)
     groups = await s.get_scanners()
 
-    # Movers: penny PNNY dropped; SMCI gainer + WBD loser.
+    # Movers: ranked from the quality universe by % change. Penny PNNY ($0.5)
+    # dropped. Gainers desc = SMCI (+14.2), then GME (+3.2, a most-active that
+    # backfills with a real name). Losers asc = WBD (−9.4).
     assert groups.movers is not None
-    assert [r.symbol for r in groups.movers.gainers] == ["SMCI"]
+    assert [r.symbol for r in groups.movers.gainers] == ["SMCI", "GME"]
     assert [r.symbol for r in groups.movers.losers] == ["WBD"]
     # rank-1 gainer carries a sparkline; deeper rows don't.
     assert groups.movers.gainers[0].spark == [100.0, 101.0]
+    assert groups.movers.gainers[1].spark == []
 
     # Volume: names clearing the 2.0x RVOL floor, ranked desc
     # (GME 8.4x, SMCI 6.0x, WBD 2.0x). Mega-cap ~1x exclusion is covered by the
@@ -416,31 +426,17 @@ def test_intraday_sparkline_drops_infinite_close():
     assert all(math.isfinite(c) for c in out)
 
 
-def test_movers_rows_drop_nan_change_and_price():
-    raw = [
-        {"symbol": "NANC", "name": "NanChange", "price": 10.0, "changesPercentage": "NaN", "exchange": "NASDAQ"},
-        {"symbol": "NANP", "name": "NanPrice", "price": float("nan"), "changesPercentage": 5.0, "exchange": "NASDAQ"},
-        {"symbol": "GOOD", "name": "Good Co", "price": 10.0, "changesPercentage": 8.0, "exchange": "NASDAQ"},
-    ]
-    pm = {s: _profile(s) for s in ("NANC", "NANP", "GOOD")}
-    rows = _movers_rows(raw, pm)
+def test_movers_from_universe_drops_nan_price():
+    # change_map only ever holds finite values (it's built via _parse_pct), but
+    # a NaN price on a profile must still drop the row, not emit NaN.
+    pm = {
+        "NANP": _profile("NANP", price=float("nan")),
+        "GOOD": _profile("GOOD", price=10.0),
+    }
+    cm = {"NANP": 5.0, "GOOD": 8.0}
+    rows = _movers_from_universe(pm, cm, positive=True)
     assert [r.symbol for r in rows] == ["GOOD"]
-    assert all(math.isfinite(r.change_percent) and math.isfinite(r.price) for r in rows)
-
-
-def test_movers_rows_dedups_duplicated_upstream_symbol():
-    raw = [
-        {"symbol": "DUP", "name": "Dup", "price": 10.0, "changesPercentage": 9.0, "exchange": "NASDAQ"},
-        {"symbol": "DUP", "name": "Dup", "price": 10.0, "changesPercentage": 9.0, "exchange": "NASDAQ"},
-    ]
-    rows = _movers_rows(raw, {"DUP": _profile("DUP")})
-    assert [r.symbol for r in rows] == ["DUP"]
-
-
-def test_movers_rows_exchange_match_is_case_insensitive():
-    raw = [{"symbol": "X", "name": "X", "price": 10.0, "changesPercentage": 9.0, "exchange": "nasdaq"}]
-    rows = _movers_rows(raw, {"X": _profile("X")})
-    assert [r.symbol for r in rows] == ["X"]
+    assert all(math.isfinite(r.price) and math.isfinite(r.change_percent) for r in rows)
 
 
 def test_volume_rows_drops_nan_volume_not_ranked_first():
@@ -455,14 +451,12 @@ def test_volume_rows_drops_nan_volume_not_ranked_first():
 
 
 def test_response_with_nan_row_input_serializes_clean():
-    # Feed a NaN-change row through the builder; it must be dropped so the
-    # assembled dashboard serializes to STANDARD JSON (json.dumps allow_nan=False
-    # raises on any non-finite — i.e. the wire never carries NaN/Infinity).
-    raw = [
-        {"symbol": "BAD", "name": "Bad", "price": 10.0, "changesPercentage": float("inf"), "exchange": "NASDAQ"},
-        {"symbol": "GOOD", "name": "Good", "price": 10.0, "changesPercentage": 8.0, "exchange": "NASDAQ"},
-    ]
-    rows = _movers_rows(raw, {"BAD": _profile("BAD"), "GOOD": _profile("GOOD")})
+    # A non-finite change must be dropped so the assembled dashboard serializes to
+    # STANDARD JSON (json.dumps allow_nan=False raises on any non-finite — i.e. the
+    # wire never carries NaN/Infinity).
+    pm = {"BAD": _profile("BAD", price=10.0), "GOOD": _profile("GOOD", price=10.0)}
+    cm = {"BAD": float("inf"), "GOOD": 8.0}
+    rows = _movers_from_universe(pm, cm, positive=True)
     assert [r.symbol for r in rows] == ["GOOD"]
     resp = HomeDashboardResponse(
         market_status_text="Markets Open", market_is_open=True, pulse=[],
@@ -606,3 +600,42 @@ async def test_volume_universe_not_starved_of_most_actives(monkeypatch):
     # ahead of it — round-robin guarantees it under the cap of 6.
     assert volume is not None
     assert "MEGA" in {r.symbol for r in volume.entries}
+
+
+@pytest.mark.asyncio
+async def test_movers_profile_fetch_chunks_past_the_50_cap(monkeypatch):
+    """`get_company_profiles_batch` hard-caps at 50 symbols/call. The service must
+    CHUNK so a >50 universe is fully profiled — otherwise the tail (where
+    most-actives' down names land after the round-robin) is silently dropped and
+    Top Losers is starved of real names. Regression for that exact bug."""
+    s = _fresh_service(monkeypatch)
+    monkeypatch.setattr(svc, "_UNIVERSE_CAP", 90)
+
+    # 60 down most-actives; A59 is the most-negative and lands PAST position 50.
+    actives = [
+        {"symbol": f"A{i}", "name": f"A{i}", "price": 10.0,
+         "changesPercentage": -float(i + 1), "exchange": "NYSE"}
+        for i in range(60)
+    ]
+
+    async def _actives():
+        return actives
+
+    async def _empty():
+        return []
+
+    # Mirror the REAL 50-per-call cap so the test fails without chunking.
+    async def _capped_profiles(symbols):
+        return [_profile(sym, price=10.0, mc=1e9, avg=2e6) for sym in symbols[:50]]
+
+    s.fmp.get_biggest_gainers = _empty       # type: ignore[assignment]
+    s.fmp.get_biggest_losers = _empty        # type: ignore[assignment]
+    s.fmp.get_most_actives = _actives        # type: ignore[assignment]
+    s.fmp.get_company_profiles_batch = _capped_profiles  # type: ignore[assignment]
+
+    movers, _volume = await s._build_movers_and_volume()
+    assert movers is not None
+    syms = {r.symbol for r in movers.losers}
+    # A59/A58/… land past index 50; they'd be dropped without chunking.
+    assert "A59" in syms and "A55" in syms
+    assert len(movers.losers) == 10  # the 10 most-negative, fully profiled

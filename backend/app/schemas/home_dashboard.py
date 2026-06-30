@@ -53,6 +53,7 @@ class ScannerRowResponse(BaseModel):
     name: str
     price: float
     change_percent: float                           # signed; movers=primary, volume=secondary
+    market_cap: Optional[float] = None              # raw; iOS shows "$x · 45.2B Cap" next to price
     volume_multiple: Optional[float] = None         # RVOL (volume/avg), Heavy Traffic only
     short_percent_of_float: Optional[float] = None  # Skeptical Money only
     spark: List[float] = []                         # latest-session intraday; rank-1 only, else []

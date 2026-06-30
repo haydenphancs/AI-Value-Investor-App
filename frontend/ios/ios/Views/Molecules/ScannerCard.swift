@@ -45,6 +45,10 @@ struct ScannerCard: View {
             expandButton
                 .padding(.top, 13)
 
+            // Expands IN PLACE to reveal the full leaderboard. This is safe now
+            // that the carousel (DailyScannersSection) no longer uses
+            // `.scrollPosition(id:)` — that modifier's layout-time state write was
+            // what deadlocked SwiftUI when a card resized inside the carousel.
             if expanded {
                 leaderboard
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -219,7 +223,7 @@ struct ScannerCard: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Leaderboard
+    // MARK: - Leaderboard (expanded, in place)
 
     private var leaderboard: some View {
         VStack(spacing: 0) {

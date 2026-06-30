@@ -72,13 +72,17 @@ _SCANNER_BUILD_TIMEOUT_SECONDS = 8          # never let a cold shorts scan block
 _MOVERS_MIN_PRICE = 5.0
 _MOVERS_MIN_AVG_VOLUME = 1_000_000
 _MOVERS_EXCHANGES = {"NASDAQ", "NYSE", "AMEX"}
-# Market-cap floor: FMP's biggest-gainers/losers are topped by micro-cap pumps
-# (e.g. SDOT +247% at a $21M cap). $300M (the micro→small-cap line) drops those
-# while keeping real small/mid/large caps. Note: large-caps rarely move enough
-# to top the % list, so the movers cards are honestly thin on quiet days.
-_SCANNER_MIN_MARKET_CAP = 300_000_000
+# Quality bar (market-cap floor) for movers + Heavy Traffic. FMP's
+# biggest-gainers/losers are topped by micro-cap pumps (e.g. SDOT +247% at a
+# $21M cap); $250M drops those while keeping real small/mid/large caps. Movers
+# are ranked from the WHOLE in-play universe by % change (not the raw top-50
+# lists), so most-actives backfill the list with real names and it isn't thin.
+_SCANNER_MIN_MARKET_CAP = 250_000_000
 _RVOL_MIN = 2.0
-_UNIVERSE_CAP = 60                          # bound the shared profile fan-out
+# Bound the shared profile fan-out. Sized to fit the WHOLE in-play universe
+# (≈ filtered gainers + losers + most-actives, ~65–90), so most-actives — the
+# source of "real down names" that backfill Top Losers — aren't truncated.
+_UNIVERSE_CAP = 90
 # Short % of float above this is treated as bad data and dropped — a stale FMP
 # float vs a post-reverse-split FINRA shares_short can yield absurd ratios
 # (e.g. WOLF computing 435%). Genuine values essentially never exceed 100%.
@@ -302,46 +306,46 @@ def _is_quality_company(profile: Any) -> bool:
     return True
 
 
-def _movers_rows(
-    raw: List[Dict[str, Any]],
+def _movers_from_universe(
     profile_map: Dict[str, Dict[str, Any]],
+    change_map: Dict[str, float],
+    *,
+    positive: bool,
     rows: int = _SCANNER_ROWS,
 ) -> List[ScannerRowResponse]:
-    """Filter a biggest-gainers/losers list to LIQUID, REAL companies and take the
-    top N, preserving FMP's % ranking. Quality (price ≥ $5 + major exchange from
-    the list; marketCap ≥ $300M + avg vol ≥ 1M + not an ETF/fund from the profile)
-    drops micro-cap pumps and leveraged ETFs. Ranks re-numbered 1..N."""
+    """Rank the in-play quality universe by TODAY'S % change to build Top Movers.
+
+    ``positive=True`` → top gainers (change > 0, ranked desc); ``positive=False``
+    → top losers (change < 0, ranked asc). Ranking the whole universe (which
+    includes most-actives) — rather than filtering FMP's raw top-50 % lists —
+    means both directions reliably fill with ~``rows`` REAL companies: the
+    dramatic quality movers lead, and notable moves among the most-traded names
+    backfill. (FMP's biggest-losers top-50 is mostly sub-$5 penny names, so a
+    raw-list filter yields only a handful of real companies.)"""
+    scored: List[Tuple[float, str, float, Dict[str, Any]]] = []
+    for symbol, p in profile_map.items():
+        if not _is_quality_company(p):
+            continue
+        change = change_map.get(symbol)
+        if change is None or not math.isfinite(change) or change == 0:
+            continue
+        if (change > 0) != positive:
+            continue
+        price = _finite_float(p.get("price"))
+        if price is None or price <= 0:
+            continue
+        scored.append((change, symbol, price, p))
+    scored.sort(key=lambda t: t[0], reverse=positive)
     out: List[ScannerRowResponse] = []
-    seen: set = set()
-    for r in raw or []:
-        if not isinstance(r, dict):
-            continue
-        symbol = (r.get("symbol") or "").upper()
-        if not symbol or symbol in seen:  # guard against a duplicated upstream row
-            continue
-        price = _finite_float(r.get("price"))
-        if price is None or price < _MOVERS_MIN_PRICE:
-            continue
-        if (r.get("exchange") or "").upper() not in _MOVERS_EXCHANGES:
-            continue
-        profile = profile_map.get(symbol)
-        if not _is_quality_company(profile):
-            continue
-        change = _parse_pct(r.get("changesPercentage"))
-        if change is None:
-            change = _parse_pct(r.get("changePercentage"))
-        if change is None:
-            continue
-        seen.add(symbol)
+    for i, (change, symbol, price, p) in enumerate(scored[:rows]):
         out.append(ScannerRowResponse(
-            rank=len(out) + 1,
+            rank=i + 1,
             symbol=symbol,
-            name=r.get("name") or profile.get("companyName") or symbol,
+            name=p.get("companyName") or symbol,
             price=round(price, 2),
             change_percent=round(change, 2),
+            market_cap=_finite_float(p.get("marketCap")),
         ))
-        if len(out) >= rows:
-            break
     return out
 
 
@@ -377,6 +381,7 @@ def _volume_rows(
             name=p.get("companyName") or symbol,
             price=round(price, 2),
             change_percent=round(change or 0.0, 2),
+            market_cap=_finite_float(p.get("marketCap")),
             volume_multiple=round(rvol, 1),
         ))
     return out
@@ -401,6 +406,7 @@ def _short_rows(
             name=it.get("name") or it.get("symbol") or "",
             price=round(_finite_float(it.get("price")) or 0.0, 2),
             change_percent=round(_finite_float(it.get("change_percent")) or 0.0, 2),
+            market_cap=_finite_float(it.get("market_cap")),
             short_percent_of_float=round(float(it["short_percent_of_float"]), 2),
         ))
     return out
@@ -649,17 +655,40 @@ class HomeDashboardService:
             if len(universe) >= _UNIVERSE_CAP:
                 break
 
-        profiles = (
-            await self.fmp.get_company_profiles_batch(universe) if universe else []
+        # get_company_profiles_batch hard-caps at 50 symbols/call, so chunk the
+        # universe (otherwise the tail — where most-actives land after the
+        # round-robin — is silently dropped, starving Top Losers of real names).
+        profile_chunks = await asyncio.gather(
+            *[
+                self.fmp.get_company_profiles_batch(universe[i:i + 50])
+                for i in range(0, len(universe), 50)
+            ]
         )
         profile_map = {
             (p.get("symbol") or "").upper(): p
-            for p in profiles
+            for chunk in profile_chunks
+            for p in chunk
             if isinstance(p, dict) and p.get("symbol")
         }
 
-        gainers = _movers_rows(gainers_raw, profile_map)
-        losers = _movers_rows(losers_raw, profile_map)
+        # Today's % change per symbol, from the three raw lists (each row carries
+        # `changesPercentage`). Used to rank the quality universe into movers.
+        change_map: Dict[str, float] = {}
+        for raw in (gainers_raw, losers_raw, actives_raw):
+            for r in raw or []:
+                if not isinstance(r, dict):
+                    continue
+                s = (r.get("symbol") or "").upper()
+                if not s or s in change_map:
+                    continue
+                chg = _parse_pct(r.get("changesPercentage"))
+                if chg is None:
+                    chg = _parse_pct(r.get("changePercentage"))
+                if chg is not None:
+                    change_map[s] = chg
+
+        gainers = _movers_from_universe(profile_map, change_map, positive=True)
+        losers = _movers_from_universe(profile_map, change_map, positive=False)
         volume_entries = _volume_rows(profile_map)
 
         await self._attach_rank1_sparks([gainers, losers, volume_entries])
@@ -735,6 +764,7 @@ class HomeDashboardService:
                 "name": q.get("name") or it["symbol"],
                 "price": price_f,
                 "change_percent": change or 0.0,
+                "market_cap": _finite_float(q.get("marketCap")),
                 "short_percent_of_float": it["short_percent_of_float"],
             })
 

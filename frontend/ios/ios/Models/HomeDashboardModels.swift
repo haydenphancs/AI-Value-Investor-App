@@ -225,6 +225,7 @@ struct ScannerRowDTO: Decodable {
     let name: String
     let price: Double
     let changePercent: Double
+    let marketCap: Double?              // shown next to price as "· 45.2B Cap"
     let volumeMultiple: Double?         // Heavy Traffic (RVOL)
     let shortPercentOfFloat: Double?    // Skeptical Money
     let spark: [Double]                 // rank-1 only, else []
@@ -232,6 +233,7 @@ struct ScannerRowDTO: Decodable {
     enum CodingKeys: String, CodingKey {
         case rank, symbol, name, price, spark
         case changePercent = "change_percent"
+        case marketCap = "market_cap"
         case volumeMultiple = "volume_multiple"
         case shortPercentOfFloat = "short_percent_of_float"
     }

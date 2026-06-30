@@ -27,6 +27,8 @@ struct AIChatScreen: View {
     @State private var inputText: String = ""
     @State private var suggestions: [SuggestionChip] = SuggestionChip.sampleData
     @State private var showingHistory: Bool = false
+    /// Search query for the history panel's bottom search bar.
+    @State private var historySearchText: String = ""
     /// Horizontal drag for closing the history panel (matches the old ChatTabView panel).
     @State private var historyDragOffset: CGFloat = 0
     /// Vertical drag for swipe-down-to-dismiss (applied to the whole screen).
@@ -239,7 +241,7 @@ struct AIChatScreen: View {
         VStack(spacing: 0) {
             // Header with close button
             HStack {
-                Text("History")
+                Text("Caydex")
                     .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
@@ -257,9 +259,9 @@ struct AIChatScreen: View {
             .padding(.horizontal, AppSpacing.lg)
             .padding(.vertical, AppSpacing.md)
 
-            // History list — connected to real data
+            // History list — connected to real data (filtered by the search bar below).
             ChatHistoryView(
-                historyGroups: viewModel.historyGroups,
+                historyGroups: filteredHistoryGroups,
                 isLoading: viewModel.isLoadingHistory,
                 onItemTap: { item in
                     if let sessionId = item.sessionId {
@@ -280,9 +282,73 @@ struct AIChatScreen: View {
                     }
                 }
             )
+
+            // Bottom bar: search the history (left) + start a new chat (right, white box).
+            historyBottomBar
         }
         .frame(width: width)
         .background(AppColors.background)
+    }
+
+    /// Search history (left, fills the row) + a white-boxed "new chat" button (right).
+    private var historyBottomBar: some View {
+        HStack(spacing: AppSpacing.xxl) {
+            // Search field
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "magnifyingglass")
+                    .font(AppTypography.iconSmall)
+                    .foregroundColor(AppColors.textMuted)
+
+                TextField("Search history", text: $historySearchText)
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textPrimary)
+                    .submitLabel(.search)
+
+                if !historySearchText.isEmpty {
+                    Button {
+                        historySearchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(AppTypography.iconSmall)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.sm)
+            .background(AppColors.cardBackground)
+            .cornerRadius(AppCornerRadius.large)
+            .frame(maxWidth: .infinity)
+
+            // New chat — bigger icon in a smaller white box.
+            Button {
+                handleNewChat()
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(AppTypography.iconLarge).fontWeight(.semibold)
+                    .foregroundColor(.black)
+                    .frame(width: 36, height: 36)
+                    .background(Color.white)
+                    .cornerRadius(AppCornerRadius.medium)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.md)
+    }
+
+    /// Search-filtered copy of the history groups (matches title or preview, case-insensitive).
+    /// Empty query returns the full list unchanged; empty groups are dropped.
+    private var filteredHistoryGroups: [ChatHistoryGroup] {
+        let query = historySearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return viewModel.historyGroups }
+        return viewModel.historyGroups.compactMap { group in
+            let items = group.items.filter {
+                $0.title.lowercased().contains(query) || $0.preview.lowercased().contains(query)
+            }
+            return items.isEmpty ? nil : ChatHistoryGroup(section: group.section, items: items)
+        }
     }
 
     // MARK: - Action Handlers
@@ -293,6 +359,18 @@ struct AIChatScreen: View {
         }
         if showingHistory {
             viewModel.loadHistory()
+        }
+    }
+
+    /// Start a fresh conversation: clear the current thread + inputs and close the history panel,
+    /// returning to the empty state (suggestion chips). The backend session for the prior thread is
+    /// preserved server-side and still reachable from the history list.
+    private func handleNewChat() {
+        viewModel.resetConversation()
+        historySearchText = ""
+        inputText = ""
+        withAnimation(.easeInOut(duration: 0.15)) {
+            showingHistory = false
         }
     }
 

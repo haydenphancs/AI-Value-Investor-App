@@ -49,6 +49,7 @@ from app.services._whale_common import (  # noqa: E402
     parse_congress_amount_bounds,
     sum_amount_bounds,
     format_amount_range,
+    snapshot_db_row,
 )
 from app.services.agents.persona_config import _IDENTITY_RULE  # noqa: E402
 
@@ -1300,22 +1301,35 @@ class WhaleHydrator:
         except Exception:
             pass  # Table may not exist yet
 
-        # 1. Upsert snapshot
+        # 1. Upsert snapshot.
+        # `trade_groups` is NOT a column — it lives only in-memory (synced to the
+        # whale_trade_groups table in step 5). Sending it would make PostgREST
+        # reject the whole row (PGRST204) and silently kill the snapshot cache.
+        snapshot_ok = False
         try:
             sb.table("whale_filing_snapshots").upsert(
-                snapshot, on_conflict="whale_id,filing_period"
+                snapshot_db_row(snapshot), on_conflict="whale_id,filing_period"
             ).execute()
+            snapshot_ok = True
         except Exception as e:
-            logger.error("  Failed to upsert snapshot: %s", e)
+            logger.exception(
+                "  Failed to upsert snapshot whale_id=%s period=%s: %s: %s",
+                whale_id, snapshot.get("filing_period"),
+                type(e).__name__, e,
+            )
 
-        # 2. Update whales record
+        # 2. Update whales record. Only advertise the cache as warm
+        # (last_hydrated_at) if the snapshot actually persisted — otherwise the
+        # serve path would see last_hydrated_at, find no snapshot, and re-run the
+        # full FMP fan-out on every view.
         try:
             whale_update: Dict[str, Any] = {
                 "portfolio_value": snapshot["total_value"],
                 "behavior_summary": snapshot["behavior_summary"],
                 "sentiment_summary": snapshot["sentiment_text"],
-                "last_hydrated_at": datetime.now().isoformat(),
             }
+            if snapshot_ok:
+                whale_update["last_hydrated_at"] = datetime.now().isoformat()
             if ytd_return is not None:
                 whale_update["ytd_return"] = ytd_return
             if return_source:
@@ -1450,9 +1464,13 @@ class WhaleHydrator:
         biggest = max(trades, key=lambda t: abs(t.get("amount", 0)), default=None)
         ticker = biggest.get("ticker") if biggest else None
 
-        # Build alert text
+        # Build alert text. Congress groups carry a summed STOCK Act range
+        # (net_amount_range); NEVER show them a fabricated precise midpoint $.
         action_word = "bought" if net_action == "BOUGHT" else "sold"
-        if net_amount >= 1_000_000_000:
+        net_amount_range = tg.get("net_amount_range")  # congress-only; None for 13F
+        if net_amount_range:
+            amount_str = net_amount_range
+        elif net_amount >= 1_000_000_000:
             amount_str = f"${net_amount / 1_000_000_000:.1f}B"
         elif net_amount >= 1_000_000:
             amount_str = f"${net_amount / 1_000_000:.0f}M"

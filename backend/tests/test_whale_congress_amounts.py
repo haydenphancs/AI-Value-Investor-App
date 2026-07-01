@@ -24,11 +24,13 @@ from app.services._whale_common import (
     sum_amount_bounds,
     format_amount_range,
     format_amount_short,
+    snapshot_db_row,
     calc_13f_trade_dollars,
 )
 from app.services.whale_service import WhaleService
 from app.services.tracking_service import _format_amount_or_range
 from app.schemas.whale import WhaleTradeGroupResponse, WhaleTradeResponse
+from app.schemas.tracking import WhaleTradeItemResponse
 
 
 def _svc() -> WhaleService:
@@ -166,24 +168,94 @@ def test_assemble_group_congress_derives_range_from_db_trades():
     assert resp.transaction_date == "2026-06-01"
 
 
-# ── Tracking alert roll-up: range vs single ─────────────────────────
+# ── Tracking alert roll-up: range vs single (explicit is_congress) ──
 
 def test_tracking_all_institutional_single_figure():
+    # 13F-only bucket (is_congress=False) → exact figure, no range.
     bounds = [(500_000, 500_000), (200_000, 200_000)]
-    assert _format_amount_or_range(bounds, 700_000) == "$700K"
+    assert _format_amount_or_range(bounds, 700_000, False) == "$700K"
 
 
 def test_tracking_congress_shows_range():
     bounds = [(250_001, 500_000), (1_001, 15_000)]
-    label = _format_amount_or_range(bounds, 386_501)
+    label = _format_amount_or_range(bounds, 386_501, True)
     assert label == "$251K – $515K"
 
 
 def test_tracking_mixed_congress_and_13f_shows_range():
     # institutional exact ($455K) + congress range → honest combined range
     bounds = [(455_000, 455_000), (250_001, 500_000)]
-    label = _format_amount_or_range(bounds, 830_000)
+    label = _format_amount_or_range(bounds, 830_000, True)
     assert "–" in label  # must not collapse a mixed bucket to false precision
+
+
+# BUG6 regression: congress-ness is EXPLICIT, not inferred from bound spread.
+def test_tracking_congress_all_malformed_never_precise_dollar():
+    # Every row's amount_range unparseable ("N/A" -> (0,0)) but is_congress=True
+    # → must NOT render "$0" as if precise; render the "—" estimate sentinel.
+    assert _format_amount_or_range([(0.0, 0.0)], 0.0, True) == "—"
+
+
+def test_tracking_congress_single_value_marked_estimate():
+    # A single-value congress bucket collapses to low==high; with is_congress it
+    # must be flagged an estimate ("~$250K"), never a bare precise "$250K".
+    assert _format_amount_or_range([(250_000, 250_000)], 250_000, True) == "~$250K"
+
+
+def test_tracking_congress_open_ended_bucket():
+    # "Over $50M" → high None propagates → "$50.0M+", never a fake ceiling.
+    assert _format_amount_or_range([(50_000_000, None)], 75_000_000, True) == "$50.0M+"
+
+
+def test_tracking_collapsed_bounds_but_13f_stays_exact():
+    # Same collapsed bounds, but is_congress=False (real 13F point) → exact.
+    assert _format_amount_or_range([(250_000, 250_000)], 250_000, False) == "$250K"
+
+
+# ── BUG1: snapshot rows must never carry the phantom trade_groups column ──
+
+def test_snapshot_db_row_strips_trade_groups():
+    snap = {
+        "whale_id": "w1", "filing_period": "2026-06", "trade_group": {"date": "x"},
+        "trade_groups": [{"date": "x"}, {"date": "y"}], "raw_hash": "h",
+    }
+    row = snapshot_db_row(snap)
+    assert "trade_groups" not in row          # the phantom column is gone
+    assert row["trade_group"] == {"date": "x"}  # the real column survives
+    assert row["raw_hash"] == "h"
+    # Original dict is untouched (still needed in-memory for the DB sync).
+    assert "trade_groups" in snap
+
+
+def test_snapshot_db_row_noop_when_absent():
+    snap = {"whale_id": "w1", "trade_group": None}
+    assert snapshot_db_row(snap) == snap
+
+
+# ── BUG5: trade-group endpoints route through the assembler (range/dates) ──
+
+def test_assemble_congress_group_from_db_rows_net_direction_only():
+    # Filing net SOLD: range must reflect the SOLD bounds, not the buys.
+    trades = [
+        WhaleTradeResponse(
+            id="1", ticker="ORCL", company_name="Oracle", action="SOLD",
+            trade_type="Decreased", amount=375_000.0,
+            amount_range="$250,001 - $500,000",
+            date="2026-06-01", disclosure_date="2026-06-30",
+        ),
+        WhaleTradeResponse(
+            id="2", ticker="AAPL", company_name="Apple", action="BOUGHT",
+            trade_type="Increased", amount=8_000.0,
+            amount_range="$1,001 - $15,000",
+            date="2026-06-02", disclosure_date="2026-06-30",
+        ),
+    ]
+    tg = {"date": "2026-06-30", "trade_count": 2,
+          "net_action": "SOLD", "net_amount": 367_000.0}
+    resp = _svc()._assemble_group_response("g", tg, trades)
+    # Only the SOLD trade contributes → "$250K – $500K", not incl. the buy.
+    assert resp.net_amount_range == "$250K – $500K"
+    assert resp.disclosure_date == "2026-06-30"
 
 
 # ── Schema parity: new fields are optional + present ────────────────
@@ -220,3 +292,27 @@ def test_trade_response_disclosure_date_optional():
     })
     assert t.disclosure_date is None
     assert "disclosure_date" in t.model_dump()
+
+
+# BUG3: tracking item exposes per-item bounds + is_congress so iOS can
+# re-aggregate an honest RANGE after trimming to the active portfolio.
+def test_whale_trade_item_bounds_backward_compat():
+    old = {"ticker": "ORCL", "company_name": "Oracle", "whale_count": 1,
+           "amount": "$455K", "raw_amount": 455_000.0}
+    it = WhaleTradeItemResponse.model_validate(old)
+    assert it.raw_amount_low is None and it.raw_amount_high is None
+    assert it.is_congress is False
+    dumped = it.model_dump()
+    for k in ("raw_amount_low", "raw_amount_high", "is_congress"):
+        assert k in dumped
+
+
+def test_whale_trade_item_congress_bounds():
+    it = WhaleTradeItemResponse.model_validate({
+        "ticker": "ORCL", "company_name": "Oracle", "whale_count": 2,
+        "amount": "$251K – $515K", "raw_amount": 386_501.0,
+        "raw_amount_low": 251_002.0, "raw_amount_high": 515_000.0,
+        "is_congress": True,
+    })
+    assert it.is_congress is True
+    assert it.raw_amount_high == 515_000.0

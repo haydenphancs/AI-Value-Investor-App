@@ -445,6 +445,7 @@ class TrackingService:
                     "company_name": row.get("company_name") or ticker,
                     "total_amount": 0.0,
                     "bounds": [],
+                    "has_congress": False,
                     "whale_ids": set(),
                     "lead_whale_id": None,
                     "lead_whale_name": None,
@@ -458,6 +459,11 @@ class TrackingService:
             bucket["total_amount"] += amt
             amount_range = row.get("amount_range")
             if amount_range:
+                # Congress row: honest STOCK Act range (explicit flag — do NOT
+                # infer congress-ness from bound spread, since a malformed or
+                # single-value bucket collapses to low==high and would leak a
+                # precise dollar).
+                bucket["has_congress"] = True
                 bucket["bounds"].append(
                     parse_congress_amount_bounds(amount_range)
                 )
@@ -483,14 +489,19 @@ class TrackingService:
             "bought": [],
             "sold": [],
         }
+        action_has_congress: Dict[str, bool] = {"bought": False, "sold": False}
         for (ticker, action), bucket in buckets.items():
             whale_count = len(bucket["whale_ids"])
             if whale_count == 0:
                 continue
             action_word = "bought" if action == "BOUGHT" else "sold"
+            is_congress = bucket["has_congress"]
             amount_label = _format_amount_or_range(
-                bucket["bounds"], bucket["total_amount"]
+                bucket["bounds"], bucket["total_amount"], is_congress
             )
+            # Per-item summed bounds so iOS can re-aggregate an honest RANGE after
+            # trimming to the active portfolio (13F: low == high == exact).
+            item_low, item_high = sum_amount_bounds(bucket["bounds"])
             action_groups[action_word].append(
                 WhaleTradeItemResponse(
                     ticker=ticker,
@@ -498,6 +509,9 @@ class TrackingService:
                     whale_count=whale_count,
                     amount=amount_label,
                     raw_amount=bucket["total_amount"],
+                    raw_amount_low=item_low,
+                    raw_amount_high=item_high,
+                    is_congress=is_congress,
                     lead_whale_id=bucket["lead_whale_id"],
                     lead_whale_name=bucket["lead_whale_name"],
                     lead_whale_avatar_name=bucket["lead_whale_avatar"],
@@ -505,6 +519,8 @@ class TrackingService:
             )
             action_totals[action_word] += bucket["total_amount"]
             action_bounds[action_word].extend(bucket["bounds"])
+            if is_congress:
+                action_has_congress[action_word] = True
 
         alerts: List[AlertResponse] = []
         for action_word in ("bought", "sold"):
@@ -514,7 +530,9 @@ class TrackingService:
             # Largest position first (by midpoint magnitude, not the label)
             items.sort(key=lambda it: it.raw_amount, reverse=True)
             total_label = _format_amount_or_range(
-                action_bounds[action_word], action_totals[action_word]
+                action_bounds[action_word],
+                action_totals[action_word],
+                action_has_congress[action_word],
             )
             title = "Whales Bought" if action_word == "bought" else "Whales Sold"
             description = (
@@ -780,22 +798,30 @@ def _format_amount(value: float) -> str:
 
 
 def _format_amount_or_range(
-    bounds: List[Tuple[float, Optional[float]]], midpoint_sum: float
+    bounds: List[Tuple[float, Optional[float]]],
+    midpoint_sum: float,
+    is_congress: bool = False,
 ) -> str:
     """Format a rolled-up whale amount honestly.
 
     ``bounds`` is a list of ``(low, high)`` per underlying trade. Institutional
     (13F) trades are exact points (``low == high``); congressional trades are
-    STOCK Act ranges. If ANY bound is a true range (or open-ended), show the
-    summed range (e.g. ``"$455K – $705K"``); otherwise collapse to the single
-    exact figure (13F-only bucket).
+    STOCK Act ranges.
+
+    - ``is_congress`` True → ALWAYS render as a range/estimate, never a precise
+      dollar (a malformed/single-value congress bucket collapses to
+      ``low == high`` but must still not fake precision).
+    - Otherwise → collapse to the single exact figure (13F-only bucket).
     """
     if not bounds:
         return _format_amount(midpoint_sum)
-    has_range = any(h is None or abs((h if h is not None else lo) - lo) > 1.0
-                    for lo, h in bounds)
-    if has_range:
+    if is_congress:
         low, high = sum_amount_bounds(bounds)
+        # Malformed / single-value congress bounds collapse to low == high;
+        # format_amount_range would then emit a bare precise dollar. Never show
+        # false precision for a congressperson — mark it an estimate (or "—").
+        if high is not None and abs(high - low) < 1.0:
+            return f"~{_format_amount(low)}" if low >= 1.0 else "—"
         return format_amount_range(low, high)
     return _format_amount(midpoint_sum)
 

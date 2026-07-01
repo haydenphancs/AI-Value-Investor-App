@@ -6,7 +6,8 @@
 //  `GET /api/v1/home/signals/{kind}/{ticker}` and maps it to a display model.
 //
 
-import SwiftUI
+import Foundation
+import Combine
 
 @MainActor
 final class SignalTickerDetailViewModel: ObservableObject {

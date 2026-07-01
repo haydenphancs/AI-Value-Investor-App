@@ -104,13 +104,15 @@ _DETAIL_ROWS = 25                         # cap the holder list (screen scrolls)
 
 
 def _norm_name(name: Any) -> str:
-    """Order-insensitive name key for matching a congress member to the registry.
+    """Normalized name key for matching a congress member to the registry.
 
-    Collapses "Pelosi, Nancy" and "Nancy Pelosi" to the same key by lowercasing,
-    dropping punctuation, and sorting the tokens. Best-effort — a miss just leaves
-    the row non-tappable (still shows the trade), never an error."""
-    tokens = re.sub(r"[^a-z\s]", " ", str(name or "").lower()).split()
-    return " ".join(sorted(tokens))
+    Lowercase, strip punctuation, collapse whitespace — but ORDER-PRESERVING (NOT
+    token-sorted). Sorting tokens made "Robert J. Smith" and "J. Robert Smith"
+    collide, which could deep-link a tap to the WRONG politician's profile. FMP
+    rows and the registry both use "First Last" order, so an order-sensitive key
+    matches them without that collision. A miss just leaves the row non-tappable
+    (still shows the trade), never an error."""
+    return " ".join(re.sub(r"[^a-z0-9\s]", " ", str(name or "").lower()).split())
 
 
 def _congress_role(district: str, chamber: str) -> str:
@@ -726,6 +728,9 @@ class SignalsService:
         # header. A profile failure degrades to symbol-only, never fatal.
         company_name, price, market_cap = "", None, None
         try:
+            # Query FMP profile with the canonical DASH form (`sym`). Verified live:
+            # /stable/profile resolves "BRK-B"/"BF-B" but returns nothing for the dot
+            # form "BRK.B" — so the canonical symbol is correct as-is here.
             prof = await self.fmp.get_company_profile(sym)
             if isinstance(prof, dict):
                 company_name = prof.get("companyName") or ""
@@ -793,7 +798,10 @@ class SignalsService:
             )
             trades = (
                 sb.table("whale_trades")
-                .select("whale_id, ticker, action, trade_type, amount, date, disclosure_date")
+                # NOTE: disclosure_date is congress-only (migration 076) — always NULL
+                # for 13F, so it's not selected here (avoids that coupling); the 13F
+                # `date` IS the filing date, which iOS renders as "Filed …".
+                .select("whale_id, ticker, action, trade_type, amount, date")
                 .in_("ticker", variants)
                 .eq("action", "BOUGHT")
                 .limit(5000)
@@ -801,16 +809,19 @@ class SignalsService:
                 .data
                 or []
             )
-            # Best BOUGHT trade per whale (largest $ est) → the "how much" + date.
+            # MOST-RECENT BOUGHT trade per whale (latest filing date; tie-break larger $)
+            # → the "how much" + "when". Using the latest (not the largest-$) keeps
+            # amount + date COHERENT (same trade) and shows the freshest activity.
             tmap: Dict[Any, Dict[str, Any]] = {}
             for t in trades:
                 wid = t.get("whale_id")
                 if wid not in wmap:
                     continue
+                tdate_str = str(t.get("date") or "")[:10]
                 amt = _finite_float(t.get("amount")) or 0.0
                 cur = tmap.get(wid)
-                if cur is None or amt > (cur.get("_amt") or 0.0):
-                    tmap[wid] = {**t, "_amt": amt}
+                if cur is None or (tdate_str, amt) > (cur["_date"], cur["_amt"]):
+                    tmap[wid] = {**t, "_date": tdate_str, "_amt": amt}
 
             # Dedup by CIK so a fund registered under BOTH a person and a firm name
             # (Ray Dalio ↔ Bridgewater) appears ONCE — matching the card's distinct-
@@ -828,13 +839,13 @@ class SignalsService:
                 amount_est = _finite_float(tr.get("amount")) if tr else None
                 is_new = ((tr.get("trade_type") or "") == "New") if tr else None
                 tdate = (str(tr.get("date"))[:10] or None) if (tr and tr.get("date")) else None
-                ddate = (str(tr.get("disclosure_date"))[:10] or None) if (tr and tr.get("disclosure_date")) else None
                 candidate = SignalHolderResponse(
                     whale_id=str(wid),
                     name=info["name"],
                     subtitle="13F fund",
                     transaction_date=tdate,
-                    disclosure_date=ddate,
+                    # disclosure_date stays None for 13F (congress-only; iOS falls back
+                    # to transaction_date for the "Filed …" label).
                     allocation_percent=_finite_float(h.get("allocation")),
                     allocation_change=round(cp, 2),
                     is_new_position=is_new,
@@ -850,16 +861,23 @@ class SignalsService:
             as_of = max(hydrated) if hydrated else None
             return rows[:_DETAIL_ROWS], as_of
         except Exception as exc:  # noqa: BLE001
+            # RE-RAISE (don't swallow to []): a Supabase failure must propagate so
+            # get_ticker_detail returns an UNCACHED empty response and the next tap
+            # retries — swallowing to [] here would pin an empty screen for the 10-min
+            # cache TTL even after Supabase recovers. A genuine "no funds adding"
+            # returns [] normally above (and is legitimately cached).
             logger.warning(
                 "Whale detail for %s failed: %s: %s", sym, type(exc).__name__, exc
             )
-            return [], None
+            raise
 
     async def _detail_congress_rows(
         self, sym: str
     ) -> Tuple[List[SignalHolderResponse], Optional[str]]:
-        """All members who bought this ticker — SAME FMP feed + 30d disclosure window
-        as the card. Tappable only for the ~8 politicians in our registry."""
+        """Members who bought this ticker — SAME FMP feed + 30d disclosure window as
+        the card. ONE row per DISTINCT MEMBER (so the count matches the card's
+        "N members buying"), showing their most recent filing. Tappable only for
+        the ~8 politicians in our registry."""
         senate, house = await asyncio.gather(
             self.fmp.get_senate_latest(1000),
             self.fmp.get_house_latest(1000),
@@ -867,9 +885,9 @@ class SignalsService:
         reg = await asyncio.to_thread(self._congress_registry_map)
         now = datetime.now(timezone.utc)
 
-        rows: List[SignalHolderResponse] = []
-        dates: List[str] = []
-        seen: Set[Tuple[str, str, str]] = set()
+        # Keep the most-recent-disclosure row PER MEMBER (chamber+identity) — mirrors
+        # the card's distinct-member count, so the drill-down never shows a member twice.
+        best: Dict[Tuple[str, str], Tuple[str, SignalHolderResponse]] = {}
         for chamber, trades in (("senate", senate), ("house", house)):
             if not isinstance(trades, list):
                 continue
@@ -888,20 +906,23 @@ class SignalsService:
                 dobj = _parse_iso_date(dstr)
                 if dobj is not None and not (-2 <= (now - dobj).days <= _CONGRESS_WINDOW_DAYS):
                     continue
+                member = _congress_member_key(row, chamber)
+                if not member:
+                    continue
+                mkey = (chamber, member)
+                prev = best.get(mkey)
+                if prev is not None and dstr <= prev[0]:
+                    continue  # keep the member's most recent filing (first-seen on ties)
                 first = (row.get("firstName") or row.get("first_name") or "").strip()
                 last = (row.get("lastName") or row.get("last_name") or "").strip()
                 name = (f"{first} {last}".strip()) or (row.get("office") or "").strip()
                 if not name:
                     continue
                 tdate = str(row.get("transactionDate") or "")[:10]
-                dedup = (name, tdate, dstr)
-                if dedup in seen:
-                    continue
-                seen.add(dedup)
                 low, high = parse_congress_amount_bounds(row.get("amount") or "")
                 amount_range = format_amount_range(low, high) if (low or high) else None
-                rows.append(SignalHolderResponse(
-                    whale_id=reg.get(_norm_name(name)),
+                best[mkey] = (dstr, SignalHolderResponse(
+                    whale_id=reg.get((chamber, _norm_name(name))),
                     name=name,
                     subtitle=_congress_role((row.get("district") or "").strip(), chamber),
                     transaction_date=tdate or None,
@@ -910,35 +931,49 @@ class SignalsService:
                     owner=((row.get("owner") or "").strip() or None),
                     action="BOUGHT",
                 ))
-                if dstr:
-                    dates.append(dstr)
 
-        rows.sort(key=lambda r: (r.disclosure_date or ""), reverse=True)
-        as_of = max(dates) if dates else None
-        return rows[:_DETAIL_ROWS], as_of
+        entries = [row for _, row in best.values()]
+        entries.sort(key=lambda r: (r.disclosure_date or ""), reverse=True)
+        as_of = max((r.disclosure_date for r in entries if r.disclosure_date), default=None)
+        return entries[:_DETAIL_ROWS], as_of
 
-    def _congress_registry_map(self) -> Dict[str, str]:
-        """Normalized member-name → whale_id for our tracked politicians (~8)."""
+    def _congress_registry_map(self) -> Dict[Tuple[str, str], str]:
+        """(chamber, normalized-name) → whale_id for our tracked politicians (~8).
+
+        Chamber-scoped + order-sensitive keys prevent deep-linking a tap to the WRONG
+        member (a Senate and a House "John Smith", or First/Last permutations). A
+        genuine collision (two registry rows → one key) is logged and the FIRST kept,
+        so a bad registry entry is visible rather than silently shadowing another."""
         try:
             sb = get_supabase()
             rows = (
                 sb.table("whales")
-                .select("id, name, fmp_name")
+                .select("id, name, fmp_name, data_source")
                 .in_("data_source", ["congressional_house", "congressional_senate"])
                 .limit(500)
                 .execute()
                 .data
                 or []
             )
-            m: Dict[str, str] = {}
+            m: Dict[Tuple[str, str], str] = {}
             for r in rows:
                 wid = r.get("id")
                 if wid is None:
                     continue
+                chamber = "house" if "house" in (r.get("data_source") or "") else "senate"
                 for nm in (r.get("fmp_name"), r.get("name")):
                     k = _norm_name(nm)
-                    if k:
-                        m[k] = str(wid)
+                    if not k:
+                        continue
+                    key = (chamber, k)
+                    prev = m.get(key)
+                    if prev is not None and prev != str(wid):
+                        logger.warning(
+                            "Congress registry name collision on %s: keeping whale_id=%s, "
+                            "ignoring %s (name=%r)", key, prev, wid, r.get("name"),
+                        )
+                        continue
+                    m[key] = str(wid)
             return m
         except Exception as exc:  # noqa: BLE001
             logger.warning(

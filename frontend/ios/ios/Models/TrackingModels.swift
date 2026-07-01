@@ -181,6 +181,14 @@ enum AppAlert: Identifiable {
         let whaleCount: Int
         let amount: String
         let rawAmount: Double?
+        // Summed STOCK Act bounds (congress). 13F: low == high == exact.
+        // Open-ended top bucket: high == nil. Lets the client re-aggregate an
+        // honest RANGE after trimming to the active portfolio.
+        var rawAmountLow: Double? = nil
+        var rawAmountHigh: Double? = nil
+        // True → congressional STOCK Act range/estimate (never an exact dollar),
+        // even when its bounds happen to collapse (malformed/single-value data).
+        var isCongress: Bool = false
         let leadWhaleId: String?
         let leadWhaleName: String?
         let leadWhaleAvatarName: String?
@@ -654,6 +662,9 @@ struct WhaleTradeItemDTO: Codable {
     let whaleCount: Int
     let amount: String
     let rawAmount: Double?
+    let rawAmountLow: Double?
+    let rawAmountHigh: Double?
+    let isCongress: Bool?
     let leadWhaleId: String?
     let leadWhaleName: String?
     let leadWhaleAvatarName: String?
@@ -664,6 +675,9 @@ struct WhaleTradeItemDTO: Codable {
         case whaleCount = "whale_count"
         case amount
         case rawAmount = "raw_amount"
+        case rawAmountLow = "raw_amount_low"
+        case rawAmountHigh = "raw_amount_high"
+        case isCongress = "is_congress"
         case leadWhaleId = "lead_whale_id"
         case leadWhaleName = "lead_whale_name"
         case leadWhaleAvatarName = "lead_whale_avatar_name"
@@ -676,6 +690,9 @@ struct WhaleTradeItemDTO: Codable {
             whaleCount: whaleCount,
             amount: amount,
             rawAmount: rawAmount,
+            rawAmountLow: rawAmountLow,
+            rawAmountHigh: rawAmountHigh,
+            isCongress: isCongress ?? false,
             leadWhaleId: leadWhaleId,
             leadWhaleName: leadWhaleName,
             leadWhaleAvatarName: leadWhaleAvatarName

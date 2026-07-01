@@ -51,12 +51,19 @@ if [ -z "$PG_DUMP" ]; then
   exit 1
 fi
 
-# Resolve password
+# Resolve password — extract ONLY the SUPABASE_DB_PASSWORD line. Do NOT `source`
+# the whole .env: it's a python-dotenv file and other values (spaces, commas,
+# brackets, e.g. "7,16") aren't valid shell, so `source` errors out
+# ("line NN: ...: command not found") and, under `set -e`, aborts the dump.
 if [ -z "${SUPABASE_DB_PASSWORD:-}" ] && [ -f "$PROJECT_ROOT/backend/.env" ]; then
-  # shellcheck disable=SC1090,SC1091
-  set +u
-  source "$PROJECT_ROOT/backend/.env"
-  set -u
+  SUPABASE_DB_PASSWORD="$(
+    grep -E '^[[:space:]]*SUPABASE_DB_PASSWORD[[:space:]]*=' "$PROJECT_ROOT/backend/.env" \
+      | head -1 \
+      | sed -E 's/^[[:space:]]*SUPABASE_DB_PASSWORD[[:space:]]*=[[:space:]]*//'
+  )"
+  # Strip one layer of surrounding quotes if present.
+  SUPABASE_DB_PASSWORD="${SUPABASE_DB_PASSWORD%\"}"; SUPABASE_DB_PASSWORD="${SUPABASE_DB_PASSWORD#\"}"
+  SUPABASE_DB_PASSWORD="${SUPABASE_DB_PASSWORD%\'}"; SUPABASE_DB_PASSWORD="${SUPABASE_DB_PASSWORD#\'}"
 fi
 
 if [ -z "${SUPABASE_DB_PASSWORD:-}" ]; then

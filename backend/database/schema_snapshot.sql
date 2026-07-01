@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 84YhokA63C0VRSipck6mdhZxOVZSeNwshATTWbeCtBchy4wGJG3PXhTRwL1P0Pi
+\restrict nRBbQvGZJy4alljx6HpiTBLhjCC4SWwzgNSprhX16CqJz9V4KHWQRrySPUN8DSB
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -448,7 +448,13 @@ CREATE TYPE realtime.equality_op AS ENUM (
     'lte',
     'gt',
     'gte',
-    'in'
+    'in',
+    'like',
+    'ilike',
+    'is',
+    'match',
+    'imatch',
+    'isdistinct'
 );
 
 
@@ -1306,119 +1312,114 @@ CREATE FUNCTION realtime.apply_rls(wal jsonb, max_record_bytes integer DEFAULT (
     LANGUAGE plpgsql
     AS $$
 declare
--- Regclass of the table e.g. public.notes
-entity_ regclass = (quote_ident(wal ->> 'schema') || '.' || quote_ident(wal ->> 'table'))::regclass;
+    -- Regclass of the table e.g. public.notes
+    entity_ regclass = (quote_ident(wal ->> 'schema') || '.' || quote_ident(wal ->> 'table'))::regclass;
 
--- I, U, D, T: insert, update ...
-action realtime.action = (
-    case wal ->> 'action'
-        when 'I' then 'INSERT'
-        when 'U' then 'UPDATE'
-        when 'D' then 'DELETE'
-        else 'ERROR'
-    end
-);
+    -- I, U, D, T: insert, update ...
+    action realtime.action = (
+        case wal ->> 'action'
+            when 'I' then 'INSERT'
+            when 'U' then 'UPDATE'
+            when 'D' then 'DELETE'
+            else 'ERROR'
+        end
+    );
 
--- Is row level security enabled for the table
-is_rls_enabled bool = relrowsecurity from pg_class where oid = entity_;
+    -- Is row level security enabled for the table
+    is_rls_enabled bool = relrowsecurity from pg_class where oid = entity_;
 
-subscriptions realtime.subscription[] = array_agg(subs)
-    from
-        realtime.subscription subs
-    where
-        subs.entity = entity_
-        -- Filter by action early - only get subscriptions interested in this action
-        -- action_filter column can be: '*' (all), 'INSERT', 'UPDATE', or 'DELETE'
-        and (subs.action_filter = '*' or subs.action_filter = action::text);
+    subscriptions realtime.subscription[] = array_agg(subs)
+        from
+            realtime.subscription subs
+        where
+            subs.entity = entity_
+            -- Filter by action early - only get subscriptions interested in this action
+            -- action_filter column can be: '*' (all), 'INSERT', 'UPDATE', or 'DELETE'
+            and (subs.action_filter = '*' or subs.action_filter = action::text);
 
--- Subscription vars
-roles regrole[] = array_agg(distinct us.claims_role::text)
-    from
-        unnest(subscriptions) us;
+    -- Subscription vars
+    working_role regrole;
+    working_selected_columns text[];
+    claimed_role regrole;
+    claims jsonb;
 
-working_role regrole;
-claimed_role regrole;
-claims jsonb;
+    subscription_id uuid;
+    subscription_has_access bool;
+    visible_to_subscription_ids uuid[] = '{}';
 
-subscription_id uuid;
-subscription_has_access bool;
-visible_to_subscription_ids uuid[] = '{}';
+    -- structured info for wal's columns
+    columns realtime.wal_column[];
+    -- previous identity values for update/delete
+    old_columns realtime.wal_column[];
 
--- structured info for wal's columns
-columns realtime.wal_column[];
--- previous identity values for update/delete
-old_columns realtime.wal_column[];
+    error_record_exceeds_max_size boolean = octet_length(wal::text) > max_record_bytes;
 
-error_record_exceeds_max_size boolean = octet_length(wal::text) > max_record_bytes;
+    -- Primary jsonb output for record
+    output jsonb;
 
--- Primary jsonb output for record
-output jsonb;
+    -- Loop record for iterating unique roles (outer loop)
+    role_record record;
+    -- Loop record for iterating unique selected_columns within a role (inner loop)
+    cols_record record;
+    -- Subscription ids visible at the role level (before fanning out by selected_columns)
+    visible_role_sub_ids uuid[] = '{}';
 
 begin
-perform set_config('role', null, true);
+    perform set_config('role', null, true);
 
-columns =
-    array_agg(
-        (
-            x->>'name',
-            x->>'type',
-            x->>'typeoid',
-            realtime.cast(
-                (x->'value') #>> '{}',
-                coalesce(
-                    (x->>'typeoid')::regtype, -- null when wal2json version <= 2.4
-                    (x->>'type')::regtype
-                )
-            ),
-            (pks ->> 'name') is not null,
-            true
-        )::realtime.wal_column
-    )
-    from
-        jsonb_array_elements(wal -> 'columns') x
-        left join jsonb_array_elements(wal -> 'pk') pks
-            on (x ->> 'name') = (pks ->> 'name');
-
-old_columns =
-    array_agg(
-        (
-            x->>'name',
-            x->>'type',
-            x->>'typeoid',
-            realtime.cast(
-                (x->'value') #>> '{}',
-                coalesce(
-                    (x->>'typeoid')::regtype, -- null when wal2json version <= 2.4
-                    (x->>'type')::regtype
-                )
-            ),
-            (pks ->> 'name') is not null,
-            true
-        )::realtime.wal_column
-    )
-    from
-        jsonb_array_elements(wal -> 'identity') x
-        left join jsonb_array_elements(wal -> 'pk') pks
-            on (x ->> 'name') = (pks ->> 'name');
-
-for working_role in select * from unnest(roles) loop
-
-    -- Update `is_selectable` for columns and old_columns
     columns =
         array_agg(
             (
-                c.name,
-                c.type_name,
-                c.type_oid,
-                c.value,
-                c.is_pkey,
-                pg_catalog.has_column_privilege(working_role, entity_, c.name, 'SELECT')
+                x->>'name',
+                x->>'type',
+                x->>'typeoid',
+                realtime.cast(
+                    (x->'value') #>> '{}',
+                    coalesce(
+                        (x->>'typeoid')::regtype, -- null when wal2json version <= 2.4
+                        (x->>'type')::regtype
+                    )
+                ),
+                (pks ->> 'name') is not null,
+                true
             )::realtime.wal_column
         )
         from
-            unnest(columns) c;
+            jsonb_array_elements(wal -> 'columns') x
+            left join jsonb_array_elements(wal -> 'pk') pks
+                on (x ->> 'name') = (pks ->> 'name');
 
     old_columns =
+        array_agg(
+            (
+                x->>'name',
+                x->>'type',
+                x->>'typeoid',
+                realtime.cast(
+                    (x->'value') #>> '{}',
+                    coalesce(
+                        (x->>'typeoid')::regtype, -- null when wal2json version <= 2.4
+                        (x->>'type')::regtype
+                    )
+                ),
+                (pks ->> 'name') is not null,
+                true
+            )::realtime.wal_column
+        )
+        from
+            jsonb_array_elements(wal -> 'identity') x
+            left join jsonb_array_elements(wal -> 'pk') pks
+                on (x ->> 'name') = (pks ->> 'name');
+
+    for role_record in
+        select claims_role
+        from (select distinct claims_role from unnest(subscriptions)) t
+        order by claims_role::text
+    loop
+        working_role := role_record.claims_role;
+
+        -- Update `is_selectable` for columns and old_columns (once per role)
+        columns =
             array_agg(
                 (
                     c.name,
@@ -1430,178 +1431,238 @@ for working_role in select * from unnest(roles) loop
                 )::realtime.wal_column
             )
             from
-                unnest(old_columns) c;
+                unnest(columns) c;
 
-    if action <> 'DELETE' and count(1) = 0 from unnest(columns) c where c.is_pkey then
-        return next (
-            jsonb_build_object(
-                'schema', wal ->> 'schema',
-                'table', wal ->> 'table',
-                'type', action
-            ),
-            is_rls_enabled,
-            -- subscriptions is already filtered by entity
-            (select array_agg(s.subscription_id) from unnest(subscriptions) as s where claims_role = working_role),
-            array['Error 400: Bad Request, no primary key']
-        )::realtime.wal_rls;
-
-    -- The claims role does not have SELECT permission to the primary key of entity
-    elsif action <> 'DELETE' and sum(c.is_selectable::int) <> count(1) from unnest(columns) c where c.is_pkey then
-        return next (
-            jsonb_build_object(
-                'schema', wal ->> 'schema',
-                'table', wal ->> 'table',
-                'type', action
-            ),
-            is_rls_enabled,
-            (select array_agg(s.subscription_id) from unnest(subscriptions) as s where claims_role = working_role),
-            array['Error 401: Unauthorized']
-        )::realtime.wal_rls;
-
-    else
-        output = jsonb_build_object(
-            'schema', wal ->> 'schema',
-            'table', wal ->> 'table',
-            'type', action,
-            'commit_timestamp', to_char(
-                ((wal ->> 'timestamp')::timestamptz at time zone 'utc'),
-                'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
-            ),
-            'columns', (
-                select
-                    jsonb_agg(
-                        jsonb_build_object(
-                            'name', pa.attname,
-                            'type', pt.typname
-                        )
-                        order by pa.attnum asc
-                    )
-                from
-                    pg_attribute pa
-                    join pg_type pt
-                        on pa.atttypid = pt.oid
-                where
-                    attrelid = entity_
-                    and attnum > 0
-                    and pg_catalog.has_column_privilege(working_role, entity_, pa.attname, 'SELECT')
-            )
-        )
-        -- Add "record" key for insert and update
-        || case
-            when action in ('INSERT', 'UPDATE') then
-                jsonb_build_object(
-                    'record',
+        old_columns =
+                array_agg(
                     (
+                        c.name,
+                        c.type_name,
+                        c.type_oid,
+                        c.value,
+                        c.is_pkey,
+                        pg_catalog.has_column_privilege(working_role, entity_, c.name, 'SELECT')
+                    )::realtime.wal_column
+                )
+                from
+                    unnest(old_columns) c;
+
+        if action <> 'DELETE' and count(1) = 0 from unnest(columns) c where c.is_pkey then
+            -- Fan out 400 error per distinct selected_columns for this role
+            for cols_record in
+                select selected_columns
+                from (select distinct selected_columns from unnest(subscriptions) s where s.claims_role = working_role) t
+                order by coalesce(array_to_string(selected_columns, ','), '')
+            loop
+                working_selected_columns := cols_record.selected_columns;
+                return next (
+                    jsonb_build_object(
+                        'schema', wal ->> 'schema',
+                        'table', wal ->> 'table',
+                        'type', action
+                    ),
+                    is_rls_enabled,
+                    (select array_agg(s.subscription_id) from unnest(subscriptions) as s where s.claims_role = working_role and (s.selected_columns is not distinct from working_selected_columns)),
+                    array['Error 400: Bad Request, no primary key']
+                )::realtime.wal_rls;
+            end loop;
+
+        -- The claims role does not have SELECT permission to the primary key of entity
+        elsif action <> 'DELETE' and sum(c.is_selectable::int) <> count(1) from unnest(columns) c where c.is_pkey then
+            -- Fan out 401 error per distinct selected_columns for this role
+            for cols_record in
+                select selected_columns
+                from (select distinct selected_columns from unnest(subscriptions) s where s.claims_role = working_role) t
+                order by coalesce(array_to_string(selected_columns, ','), '')
+            loop
+                working_selected_columns := cols_record.selected_columns;
+                return next (
+                    jsonb_build_object(
+                        'schema', wal ->> 'schema',
+                        'table', wal ->> 'table',
+                        'type', action
+                    ),
+                    is_rls_enabled,
+                    (select array_agg(s.subscription_id) from unnest(subscriptions) as s where s.claims_role = working_role and (s.selected_columns is not distinct from working_selected_columns)),
+                    array['Error 401: Unauthorized']
+                )::realtime.wal_rls;
+            end loop;
+
+        else
+            -- Create the prepared statement (once per role)
+            if is_rls_enabled and action <> 'DELETE' then
+                if (select 1 from pg_prepared_statements where name = 'walrus_rls_stmt' limit 1) > 0 then
+                    deallocate walrus_rls_stmt;
+                end if;
+                execute realtime.build_prepared_statement_sql('walrus_rls_stmt', entity_, columns);
+            end if;
+
+            -- Collect all visible subscription IDs for this role (filter check + RLS check)
+            visible_role_sub_ids = '{}';
+
+            for subscription_id, claims in (
+                    select
+                        subs.subscription_id,
+                        subs.claims
+                    from
+                        unnest(subscriptions) subs
+                    where
+                        subs.entity = entity_
+                        and subs.claims_role = working_role
+                        and (
+                            realtime.is_visible_through_filters(columns, subs.filters)
+                            or (
+                              action = 'DELETE'
+                              and realtime.is_visible_through_filters(old_columns, subs.filters)
+                            )
+                        )
+            ) loop
+
+                if not is_rls_enabled or action = 'DELETE' then
+                    visible_role_sub_ids = visible_role_sub_ids || subscription_id;
+                else
+                    -- Check if RLS allows the role to see the record
+                    perform
+                        -- Trim leading and trailing quotes from working_role because set_config
+                        -- doesn't recognize the role as valid if they are included
+                        set_config('role', trim(both '"' from working_role::text), true),
+                        set_config('request.jwt.claims', claims::text, true);
+
+                    execute 'execute walrus_rls_stmt' into subscription_has_access;
+
+                    if subscription_has_access then
+                        visible_role_sub_ids = visible_role_sub_ids || subscription_id;
+                    end if;
+                end if;
+            end loop;
+
+            perform set_config('role', null, true);
+
+            -- Inner loop: per distinct selected_columns for this role
+            for cols_record in
+                select selected_columns
+                from (select distinct selected_columns from unnest(subscriptions) s where s.claims_role = working_role) t
+                order by coalesce(array_to_string(selected_columns, ','), '')
+            loop
+                working_selected_columns := cols_record.selected_columns;
+
+                output = jsonb_build_object(
+                    'schema', wal ->> 'schema',
+                    'table', wal ->> 'table',
+                    'type', action,
+                    'commit_timestamp', to_char(
+                        ((wal ->> 'timestamp')::timestamptz at time zone 'utc'),
+                        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+                    ),
+                    'columns', (
                         select
-                            jsonb_object_agg(
-                                -- if unchanged toast, get column name and value from old record
-                                coalesce((c).name, (oc).name),
-                                case
-                                    when (c).name is null then (oc).value
-                                    else (c).value
-                                end
+                            jsonb_agg(
+                                jsonb_build_object(
+                                    'name', pa.attname,
+                                    'type', pt.typname
+                                )
+                                order by pa.attnum asc
                             )
                         from
-                            unnest(columns) c
-                            full outer join unnest(old_columns) oc
-                                on (c).name = (oc).name
+                            pg_attribute pa
+                            join pg_type pt
+                                on pa.atttypid = pt.oid
+                            left join (
+                                select unnest(conkey) as pkey_attnum
+                                from pg_constraint
+                                where conrelid = entity_ and contype = 'p'
+                            ) pk on pk.pkey_attnum = pa.attnum
                         where
-                            coalesce((c).is_selectable, (oc).is_selectable)
-                            and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                            attrelid = entity_
+                            and attnum > 0
+                            and pg_catalog.has_column_privilege(working_role, entity_, pa.attname, 'SELECT')
+                            and (working_selected_columns is null or pa.attname = any(working_selected_columns) or pk.pkey_attnum is not null)
                     )
                 )
-            else '{}'::jsonb
-        end
-        -- Add "old_record" key for update and delete
-        || case
-            when action = 'UPDATE' then
-                jsonb_build_object(
-                        'old_record',
-                        (
-                            select jsonb_object_agg((c).name, (c).value)
-                            from unnest(old_columns) c
-                            where
-                                (c).is_selectable
-                                and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                -- Add "record" key for insert and update
+                || case
+                    when action in ('INSERT', 'UPDATE') then
+                        jsonb_build_object(
+                            'record',
+                            (
+                                select
+                                    jsonb_object_agg(
+                                        -- if unchanged toast, get column name and value from old record
+                                        coalesce((c).name, (oc).name),
+                                        case
+                                            when (c).name is null then (oc).value
+                                            else (c).value
+                                        end
+                                    )
+                                from
+                                    unnest(columns) c
+                                    full outer join unnest(old_columns) oc
+                                        on (c).name = (oc).name
+                                where
+                                    coalesce((c).is_selectable, (oc).is_selectable)
+                                    and (working_selected_columns is null or coalesce((c).name, (oc).name) = any(working_selected_columns) or coalesce((c).is_pkey, (oc).is_pkey))
+                                    and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                            )
                         )
-                    )
-            when action = 'DELETE' then
-                jsonb_build_object(
-                    'old_record',
+                    else '{}'::jsonb
+                end
+                -- Add "old_record" key for update and delete
+                || case
+                    when action = 'UPDATE' then
+                        jsonb_build_object(
+                                'old_record',
+                                (
+                                    select jsonb_object_agg((c).name, (c).value)
+                                    from unnest(old_columns) c
+                                    where
+                                        (c).is_selectable
+                                        and (working_selected_columns is null or (c).name = any(working_selected_columns) or (c).is_pkey)
+                                        and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                                )
+                            )
+                    when action = 'DELETE' then
+                        jsonb_build_object(
+                            'old_record',
+                            (
+                                select jsonb_object_agg((c).name, (c).value)
+                                from unnest(old_columns) c
+                                where
+                                    (c).is_selectable
+                                    and (working_selected_columns is null or (c).name = any(working_selected_columns) or (c).is_pkey)
+                                    and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                                    and ( not is_rls_enabled or (c).is_pkey ) -- if RLS enabled, we can't secure deletes so filter to pkey
+                            )
+                        )
+                    else '{}'::jsonb
+                end;
+
+                -- Filter visible_role_sub_ids to those matching the current selected_columns group
+                visible_to_subscription_ids = coalesce(
                     (
-                        select jsonb_object_agg((c).name, (c).value)
-                        from unnest(old_columns) c
-                        where
-                            (c).is_selectable
-                            and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
-                            and ( not is_rls_enabled or (c).is_pkey ) -- if RLS enabled, we can't secure deletes so filter to pkey
-                    )
-                )
-            else '{}'::jsonb
-        end;
+                        select array_agg(s.subscription_id)
+                        from unnest(subscriptions) s
+                        where s.claims_role = working_role
+                          and (s.selected_columns is not distinct from working_selected_columns)
+                          and s.subscription_id = any(visible_role_sub_ids)
+                    ),
+                    '{}'::uuid[]
+                );
 
-        -- Create the prepared statement
-        if is_rls_enabled and action <> 'DELETE' then
-            if (select 1 from pg_prepared_statements where name = 'walrus_rls_stmt' limit 1) > 0 then
-                deallocate walrus_rls_stmt;
-            end if;
-            execute realtime.build_prepared_statement_sql('walrus_rls_stmt', entity_, columns);
+                return next (
+                    output,
+                    is_rls_enabled,
+                    visible_to_subscription_ids,
+                    case
+                        when error_record_exceeds_max_size then array['Error 413: Payload Too Large']
+                        else '{}'
+                    end
+                )::realtime.wal_rls;
+            end loop;
+
         end if;
+    end loop;
 
-        visible_to_subscription_ids = '{}';
-
-        for subscription_id, claims in (
-                select
-                    subs.subscription_id,
-                    subs.claims
-                from
-                    unnest(subscriptions) subs
-                where
-                    subs.entity = entity_
-                    and subs.claims_role = working_role
-                    and (
-                        realtime.is_visible_through_filters(columns, subs.filters)
-                        or (
-                          action = 'DELETE'
-                          and realtime.is_visible_through_filters(old_columns, subs.filters)
-                        )
-                    )
-        ) loop
-
-            if not is_rls_enabled or action = 'DELETE' then
-                visible_to_subscription_ids = visible_to_subscription_ids || subscription_id;
-            else
-                -- Check if RLS allows the role to see the record
-                perform
-                    -- Trim leading and trailing quotes from working_role because set_config
-                    -- doesn't recognize the role as valid if they are included
-                    set_config('role', trim(both '"' from working_role::text), true),
-                    set_config('request.jwt.claims', claims::text, true);
-
-                execute 'execute walrus_rls_stmt' into subscription_has_access;
-
-                if subscription_has_access then
-                    visible_to_subscription_ids = visible_to_subscription_ids || subscription_id;
-                end if;
-            end if;
-        end loop;
-
-        perform set_config('role', null, true);
-
-        return next (
-            output,
-            is_rls_enabled,
-            visible_to_subscription_ids,
-            case
-                when error_record_exceeds_max_size then array['Error 413: Payload Too Large']
-                else '{}'
-            end
-        )::realtime.wal_rls;
-
-    end if;
-end loop;
-
-perform set_config('role', null, true);
+    perform set_config('role', null, true);
 end;
 $$;
 
@@ -1694,36 +1755,36 @@ $$;
 CREATE FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text) RETURNS boolean
     LANGUAGE plpgsql IMMUTABLE
     AS $$
-      /*
-      Casts *val_1* and *val_2* as type *type_* and check the *op* condition for truthiness
-      */
-      declare
-          op_symbol text = (
-              case
-                  when op = 'eq' then '='
-                  when op = 'neq' then '!='
-                  when op = 'lt' then '<'
-                  when op = 'lte' then '<='
-                  when op = 'gt' then '>'
-                  when op = 'gte' then '>='
-                  when op = 'in' then '= any'
-                  else 'UNKNOWN OP'
-              end
-          );
-          res boolean;
-      begin
-          execute format(
-              'select %L::'|| type_::text || ' ' || op_symbol
-              || ' ( %L::'
-              || (
-                  case
-                      when op = 'in' then type_::text || '[]'
-                      else type_::text end
-              )
-              || ')', val_1, val_2) into res;
-          return res;
-      end;
-      $$;
+/*
+Casts *val_1* and *val_2* as type *type_* and check the *op* condition for truthiness
+*/
+declare
+    op_symbol text = (
+        case
+            when op = 'eq' then '='
+            when op = 'neq' then '!='
+            when op = 'lt' then '<'
+            when op = 'lte' then '<='
+            when op = 'gt' then '>'
+            when op = 'gte' then '>='
+            when op = 'in' then '= any'
+            else 'UNKNOWN OP'
+        end
+    );
+    res boolean;
+begin
+    execute format(
+        'select %L::'|| type_::text || ' ' || op_symbol
+        || ' ( %L::'
+        || (
+            case
+                when op = 'in' then type_::text || '[]'
+                else type_::text end
+        )
+        || ')', val_1, val_2) into res;
+    return res;
+end;
+$$;
 
 
 --
@@ -1733,33 +1794,33 @@ CREATE FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtyp
 CREATE FUNCTION realtime.is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]) RETURNS boolean
     LANGUAGE sql IMMUTABLE
     AS $_$
-    /*
-    Should the record be visible (true) or filtered out (false) after *filters* are applied
-    */
-        select
-            -- Default to allowed when no filters present
-            $2 is null -- no filters. this should not happen because subscriptions has a default
-            or array_length($2, 1) is null -- array length of an empty array is null
-            or bool_and(
-                coalesce(
-                    realtime.check_equality_op(
-                        op:=f.op,
-                        type_:=coalesce(
-                            col.type_oid::regtype, -- null when wal2json version <= 2.4
-                            col.type_name::regtype
-                        ),
-                        -- cast jsonb to text
-                        val_1:=col.value #>> '{}',
-                        val_2:=f.value
+/*
+Should the record be visible (true) or filtered out (false) after *filters* are applied
+*/
+    select
+        -- Default to allowed when no filters present
+        $2 is null -- no filters. this should not happen because subscriptions has a default
+        or array_length($2, 1) is null -- array length of an empty array is null
+        or bool_and(
+            coalesce(
+                realtime.check_equality_op(
+                    op:=f.op,
+                    type_:=coalesce(
+                        col.type_oid::regtype, -- null when wal2json version <= 2.4
+                        col.type_name::regtype
                     ),
-                    false -- if null, filter does not match
-                )
+                    -- cast jsonb to text
+                    val_1:=col.value #>> '{}',
+                    val_2:=f.value
+                ),
+                false -- if null, filter does not match
             )
-        from
-            unnest(filters) f
-            join unnest(columns) col
-                on f.column_name = col.name;
-    $_$;
+        )
+    from
+        unnest(filters) f
+        join unnest(columns) col
+            on f.column_name = col.name;
+$_$;
 
 
 --
@@ -1782,7 +1843,7 @@ CREATE FUNCTION realtime.list_changes(publication name, slot_name name, max_chan
         string_agg(
           realtime.quote_wal2json(format('%I.%I', schemaname, tablename)::regclass),
           ','
-        ) filter (WHERE ppt.tablename IS NOT NULL AND ppt.tablename NOT LIKE '% %'),
+        ) filter (WHERE ppt.tablename IS NOT NULL),
         ''
       ) AS w2j_add_tables
     FROM pg_publication pp
@@ -1806,13 +1867,11 @@ CREATE FUNCTION realtime.list_changes(publication name, slot_name name, max_chan
            'add-tables', pub.w2j_add_tables
          ) x
   ),
-  -- Count raw slot entries before apply_rls/subscription filter
   slot_count AS (
     SELECT count(*)::bigint AS cnt
     FROM w2j
     WHERE w2j.w2j_add_tables <> ''
   ),
-  -- Apply RLS and filter as before
   rls_filtered AS (
     SELECT xyz.wal, xyz.is_rls_enabled, xyz.subscription_ids, xyz.errors
     FROM w2j,
@@ -1823,14 +1882,11 @@ CREATE FUNCTION realtime.list_changes(publication name, slot_name name, max_chan
     WHERE w2j.w2j_add_tables <> ''
       AND xyz.subscription_ids[1] IS NOT NULL
   )
-  -- Real rows with slot count attached
   SELECT rf.wal, rf.is_rls_enabled, rf.subscription_ids, rf.errors, sc.cnt
   FROM rls_filtered rf, slot_count sc
 
   UNION ALL
 
-  -- Sentinel row: always returned when no real rows exist so Elixir can
-  -- always read slot_changes_count. Identified by wal IS NULL.
   SELECT null, null, null, null, sc.cnt
   FROM slot_count sc
   WHERE NOT EXISTS (SELECT 1 FROM rls_filtered)
@@ -1844,35 +1900,14 @@ $$;
 CREATE FUNCTION realtime.quote_wal2json(entity regclass) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT
     AS $$
-      select
-        (
-          select string_agg('' || ch,'')
-          from unnest(string_to_array(nsp.nspname::text, null)) with ordinality x(ch, idx)
-          where
-            not (x.idx = 1 and x.ch = '"')
-            and not (
-              x.idx = array_length(string_to_array(nsp.nspname::text, null), 1)
-              and x.ch = '"'
-            )
-        )
-        || '.'
-        || (
-          select string_agg('' || ch,'')
-          from unnest(string_to_array(pc.relname::text, null)) with ordinality x(ch, idx)
-          where
-            not (x.idx = 1 and x.ch = '"')
-            and not (
-              x.idx = array_length(string_to_array(nsp.nspname::text, null), 1)
-              and x.ch = '"'
-            )
-          )
-      from
-        pg_class pc
-        join pg_namespace nsp
-          on pc.relnamespace = nsp.oid
-      where
-        pc.oid = entity
-    $$;
+  SELECT
+    realtime.wal2json_escape_identifier(nsp.nspname::text)
+    || '.'
+    || realtime.wal2json_escape_identifier(pc.relname::text)
+  FROM pg_class pc
+  JOIN pg_namespace nsp ON pc.relnamespace = nsp.oid
+  WHERE pc.oid = entity
+$$;
 
 
 --
@@ -1887,7 +1922,6 @@ DECLARE
   final_payload jsonb;
 BEGIN
   BEGIN
-    -- Generate a new UUID for the id
     generated_id := gen_random_uuid();
 
     -- Check if payload has an 'id' key, if not, add the generated UUID
@@ -1900,13 +1934,36 @@ BEGIN
     -- Set the topic configuration
     EXECUTE format('SET LOCAL realtime.topic TO %L', topic);
 
-    -- Attempt to insert the message
     INSERT INTO realtime.messages (id, payload, event, topic, private, extension)
     VALUES (generated_id, final_payload, event, topic, private, 'broadcast');
   EXCEPTION
     WHEN OTHERS THEN
-      -- Capture and notify the error
-      RAISE WARNING 'ErrorSendingBroadcastMessage: %', SQLERRM;
+      RAISE WARNING 'WarnSendingBroadcastMessage: %', SQLERRM;
+  END;
+END;
+$$;
+
+
+--
+-- Name: send_binary(bytea, text, text, boolean); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.send_binary(payload bytea, event text, topic text, private boolean DEFAULT true) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  generated_id uuid;
+BEGIN
+  BEGIN
+    generated_id := gen_random_uuid();
+
+    EXECUTE format('SET LOCAL realtime.topic TO %L', topic);
+
+    INSERT INTO realtime.messages (id, binary_payload, event, topic, private, extension)
+    VALUES (generated_id, payload, event, topic, private, 'broadcast');
+  EXCEPTION
+    WHEN OTHERS THEN
+      RAISE WARNING 'WarnSendingBroadcastMessage: %', SQLERRM;
   END;
 END;
 $$;
@@ -1919,71 +1976,74 @@ $$;
 CREATE FUNCTION realtime.subscription_check_filters() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-    /*
-    Validates that the user defined filters for a subscription:
-    - refer to valid columns that the claimed role may access
-    - values are coercable to the correct column type
-    */
-    declare
-        col_names text[] = coalesce(
-                array_agg(c.column_name order by c.ordinal_position),
-                '{}'::text[]
-            )
-            from
-                information_schema.columns c
-            where
-                format('%I.%I', c.table_schema, c.table_name)::regclass = new.entity
-                and pg_catalog.has_column_privilege(
-                    (new.claims ->> 'role'),
-                    format('%I.%I', c.table_schema, c.table_name)::regclass,
-                    c.column_name,
-                    'SELECT'
-                );
-        filter realtime.user_defined_filter;
-        col_type regtype;
-
-        in_val jsonb;
-    begin
-        for filter in select * from unnest(new.filters) loop
-            -- Filtered column is valid
-            if not filter.column_name = any(col_names) then
-                raise exception 'invalid column for filter %', filter.column_name;
-            end if;
-
-            -- Type is sanitized and safe for string interpolation
-            col_type = (
-                select atttypid::regtype
-                from pg_catalog.pg_attribute
-                where attrelid = new.entity
-                      and attname = filter.column_name
+declare
+    col_names text[] = coalesce(
+            array_agg(a.attname order by a.attnum),
+            '{}'::text[]
+        )
+        from
+            pg_catalog.pg_attribute a
+        where
+            a.attrelid = new.entity
+            and a.attnum > 0
+            and not a.attisdropped
+            and pg_catalog.has_column_privilege(
+                (new.claims ->> 'role'),
+                a.attrelid,
+                a.attnum,
+                'SELECT'
             );
-            if col_type is null then
-                raise exception 'failed to lookup type for column %', filter.column_name;
-            end if;
+    filter realtime.user_defined_filter;
+    col_type regtype;
+    in_val jsonb;
+    selected_col text;
+begin
+    for filter in select * from unnest(new.filters) loop
+        if not filter.column_name = any(col_names) then
+            raise exception 'invalid column for filter %', filter.column_name;
+        end if;
 
-            -- Set maximum number of entries for in filter
-            if filter.op = 'in'::realtime.equality_op then
-                in_val = realtime.cast(filter.value, (col_type::text || '[]')::regtype);
-                if coalesce(jsonb_array_length(in_val), 0) > 100 then
-                    raise exception 'too many values for `in` filter. Maximum 100';
-                end if;
-            else
-                -- raises an exception if value is not coercable to type
-                perform realtime.cast(filter.value, col_type);
-            end if;
+        col_type = (
+            select atttypid::regtype
+            from pg_catalog.pg_attribute
+            where attrelid = new.entity
+                  and attname = filter.column_name
+        );
+        if col_type is null then
+            raise exception 'failed to lookup type for column %', filter.column_name;
+        end if;
 
+        if filter.op = 'in'::realtime.equality_op then
+            in_val = realtime.cast(filter.value, (col_type::text || '[]')::regtype);
+            if coalesce(jsonb_array_length(in_val), 0) > 100 then
+                raise exception 'too many values for `in` filter. Maximum 100';
+            end if;
+        else
+            perform realtime.cast(filter.value, col_type);
+        end if;
+    end loop;
+
+    if new.selected_columns is not null then
+        for selected_col in select * from unnest(new.selected_columns) loop
+            if not selected_col = any(col_names) then
+                raise exception 'invalid column for select %', selected_col;
+            end if;
         end loop;
+    end if;
 
-        -- Apply consistent order to filters so the unique constraint on
-        -- (subscription_id, entity, filters) can't be tricked by a different filter order
-        new.filters = coalesce(
-            array_agg(f order by f.column_name, f.op, f.value),
-            '{}'
-        ) from unnest(new.filters) f;
+    new.filters = coalesce(
+        array_agg(f order by f.column_name, f.op, f.value),
+        '{}'
+    ) from unnest(new.filters) f;
 
-        return new;
-    end;
-    $$;
+    new.selected_columns = (
+        select array_agg(c order by c)
+        from unnest(new.selected_columns) c
+    );
+
+    return new;
+end;
+$$;
 
 
 --
@@ -2003,6 +2063,18 @@ CREATE FUNCTION realtime.topic() RETURNS text
     LANGUAGE sql STABLE
     AS $$
 select nullif(current_setting('realtime.topic', true), '')::text;
+$$;
+
+
+--
+-- Name: wal2json_escape_identifier(text); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.wal2json_escape_identifier(name text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $$
+  -- Prefix `\`, `,`, `.`, and any whitespace with `\`
+  SELECT regexp_replace(name, '([\\,.[:space:]])', '\\\1', 'g')
 $$;
 
 
@@ -2967,6 +3039,7 @@ CREATE TABLE auth.custom_oauth_providers (
     jwks_uri text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    custom_claims_allowlist text[] DEFAULT '{}'::text[] NOT NULL,
     CONSTRAINT custom_oauth_providers_authorization_url_https CHECK (((authorization_url IS NULL) OR (authorization_url ~~ 'https://%'::text))),
     CONSTRAINT custom_oauth_providers_authorization_url_length CHECK (((authorization_url IS NULL) OR (char_length(authorization_url) <= 2048))),
     CONSTRAINT custom_oauth_providers_client_id_length CHECK (((char_length(client_id) >= 1) AND (char_length(client_id) <= 512))),
@@ -3843,6 +3916,60 @@ CREATE TABLE public.company_profile_cache (
 
 
 --
+-- Name: competitor_intel_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.competitor_intel_audit (
+    id bigint NOT NULL,
+    run_id uuid NOT NULL,
+    ticker text NOT NULL,
+    status text NOT NULL,
+    raw_response jsonb,
+    suggested_tickers text[],
+    validated_tickers text[],
+    rejected jsonb,
+    source_labels text[],
+    tokens_used integer,
+    model_version text,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT competitor_intel_audit_status_check CHECK ((status = ANY (ARRAY['applied'::text, 'applied_with_rejections'::text, 'rejected_no_validated'::text, 'gemini_error'::text, 'skipped_kill_switch'::text])))
+);
+
+
+--
+-- Name: competitor_intel_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.competitor_intel_audit_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: competitor_intel_audit_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.competitor_intel_audit_id_seq OWNED BY public.competitor_intel_audit.id;
+
+
+--
+-- Name: competitor_intel_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.competitor_intel_cache (
+    ticker text NOT NULL,
+    competitor_tickers text[] NOT NULL,
+    source_labels text[] DEFAULT '{}'::text[] NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    model_version text
+);
+
+
+--
 -- Name: crypto_coin_id_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3945,6 +4072,57 @@ CREATE TABLE public.etf_snapshot_cache (
 
 
 --
+-- Name: geopolitical_macro_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.geopolitical_macro_audit (
+    id bigint NOT NULL,
+    run_id uuid NOT NULL,
+    status text NOT NULL,
+    factor_count integer,
+    factors jsonb,
+    raw_response jsonb,
+    search_queries text[],
+    tokens_used integer,
+    model_version text,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT geopolitical_macro_audit_status_check CHECK ((status = ANY (ARRAY['applied'::text, 'no_factors'::text, 'kept_last_good'::text, 'gemini_error'::text, 'skipped_kill_switch'::text])))
+);
+
+
+--
+-- Name: geopolitical_macro_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.geopolitical_macro_audit_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: geopolitical_macro_audit_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.geopolitical_macro_audit_id_seq OWNED BY public.geopolitical_macro_audit.id;
+
+
+--
+-- Name: geopolitical_macro_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.geopolitical_macro_cache (
+    scope text DEFAULT 'global'::text NOT NULL,
+    factors jsonb DEFAULT '[]'::jsonb NOT NULL,
+    model_version text,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL
+);
+
+
+--
 -- Name: health_check_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4015,6 +4193,194 @@ CREATE TABLE public.index_macro_forecast_cache (
     story_template text NOT NULL,
     indicators_json jsonb NOT NULL,
     cached_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: industry_dossier; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.industry_dossier (
+    id bigint NOT NULL,
+    industry text NOT NULL,
+    sector text NOT NULL,
+    current_tam_b numeric(14,2),
+    future_tam_b numeric(14,2),
+    current_year text,
+    future_year text,
+    cagr_5y_pct numeric(8,4),
+    lifecycle_phase text DEFAULT 'mature'::text NOT NULL,
+    hhi numeric(10,2),
+    top1_share_pct numeric(6,2),
+    top2_share_pct numeric(6,2),
+    concentration_label text,
+    constituent_count integer,
+    source_grain text NOT NULL,
+    source_label text NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone DEFAULT (now() + '8 days'::interval) NOT NULL,
+    tam_scope text DEFAULT 'us'::text NOT NULL,
+    CONSTRAINT industry_dossier_concentration_label_check CHECK ((concentration_label = ANY (ARRAY['monopoly'::text, 'duopoly'::text, 'oligopoly'::text, 'fragmented'::text]))),
+    CONSTRAINT industry_dossier_lifecycle_phase_check CHECK ((lifecycle_phase = ANY (ARRAY['emerging'::text, 'secular_growth'::text, 'mature'::text, 'declining'::text]))),
+    CONSTRAINT industry_dossier_source_grain_check CHECK ((source_grain = ANY (ARRAY['industry'::text, 'sector'::text, 'all_industry'::text]))),
+    CONSTRAINT industry_dossier_tam_scope_check CHECK ((tam_scope = ANY (ARRAY['us'::text, 'global'::text])))
+);
+
+
+--
+-- Name: industry_dossier_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.industry_dossier_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: industry_dossier_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.industry_dossier_id_seq OWNED BY public.industry_dossier.id;
+
+
+--
+-- Name: industry_moat_benchmarks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.industry_moat_benchmarks (
+    id bigint NOT NULL,
+    industry text NOT NULL,
+    pillar_name text NOT NULL,
+    peer_average_score numeric(3,1) NOT NULL,
+    sample_size integer NOT NULL,
+    score_p25 numeric(3,1),
+    score_p75 numeric(3,1),
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    model_version text
+);
+
+
+--
+-- Name: industry_moat_benchmarks_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.industry_moat_benchmarks_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: industry_moat_benchmarks_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.industry_moat_benchmarks_id_seq OWNED BY public.industry_moat_benchmarks.id;
+
+
+--
+-- Name: industry_override_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.industry_override_audit (
+    id bigint NOT NULL,
+    run_id uuid NOT NULL,
+    industry text NOT NULL,
+    sector text NOT NULL,
+    status text NOT NULL,
+    raw_response jsonb,
+    phase_a_tam_b numeric(14,2),
+    applied_tam_b numeric(14,2),
+    applied_cagr_pct numeric(8,4),
+    applied_source_label text,
+    rejection_reason text,
+    tokens_used integer,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    model_version text,
+    CONSTRAINT industry_override_audit_status_check CHECK ((status = ANY (ARRAY['applied'::text, 'applied_with_warning'::text, 'rejected_validation'::text, 'rejected_sanity'::text, 'rejected_low_confidence'::text, 'rejected_below_phase_a'::text, 'gemini_error'::text, 'skipped_kill_switch'::text])))
+);
+
+
+--
+-- Name: COLUMN industry_override_audit.model_version; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.industry_override_audit.model_version IS 'Gemini model identifier captured from the API response (e.g. gemini-1.5-pro). Null for rows written before migration 052 and for skipped_kill_switch rows.';
+
+
+--
+-- Name: industry_override_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.industry_override_audit_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: industry_override_audit_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.industry_override_audit_id_seq OWNED BY public.industry_override_audit.id;
+
+
+--
+-- Name: ip_intel_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ip_intel_audit (
+    id bigint NOT NULL,
+    run_id uuid NOT NULL,
+    ticker text NOT NULL,
+    status text NOT NULL,
+    payload jsonb,
+    uspto_total integer,
+    uspto_recent_5y integer,
+    fda_active integer,
+    assignee_name text,
+    sponsor_name text,
+    error_detail text,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ip_intel_audit_status_check CHECK ((status = ANY (ARRAY['applied'::text, 'applied_partial'::text, 'rejected_no_data'::text, 'uspto_error'::text, 'fda_error'::text, 'skipped'::text])))
+);
+
+
+--
+-- Name: ip_intel_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.ip_intel_audit_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: ip_intel_audit_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.ip_intel_audit_id_seq OWNED BY public.ip_intel_audit.id;
+
+
+--
+-- Name: ip_intel_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ip_intel_cache (
+    ticker text NOT NULL,
+    payload jsonb NOT NULL,
+    source_labels text[] DEFAULT '{}'::text[] NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL
 );
 
 
@@ -4097,6 +4463,60 @@ COMMENT ON COLUMN public.market_insights.sentiment IS 'Overall market sentiment:
 
 
 --
+-- Name: moat_intel_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.moat_intel_audit (
+    id bigint NOT NULL,
+    run_id uuid NOT NULL,
+    ticker text NOT NULL,
+    status text NOT NULL,
+    raw_response jsonb,
+    pillars_requested text[],
+    pillars_resolved text[],
+    rejected jsonb,
+    source_labels text[],
+    tokens_used integer,
+    model_version text,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT moat_intel_audit_status_check CHECK ((status = ANY (ARRAY['applied'::text, 'applied_with_rejections'::text, 'rejected_no_validated'::text, 'gemini_error'::text, 'skipped_kill_switch'::text])))
+);
+
+
+--
+-- Name: moat_intel_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.moat_intel_audit_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: moat_intel_audit_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.moat_intel_audit_id_seq OWNED BY public.moat_intel_audit.id;
+
+
+--
+-- Name: moat_intel_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.moat_intel_cache (
+    ticker text NOT NULL,
+    pillar_scores jsonb NOT NULL,
+    source_labels text[] DEFAULT '{}'::text[] NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    model_version text
+);
+
+
+--
 -- Name: money_move_articles; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4113,7 +4533,16 @@ CREATE TABLE public.money_move_articles (
     sections jsonb,
     statistics jsonb,
     related_articles jsonb,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    slug text,
+    content jsonb,
+    view_count text,
+    is_featured boolean DEFAULT false NOT NULL,
+    has_audio_version boolean DEFAULT false NOT NULL,
+    audio_url text,
+    audio_duration_seconds integer,
+    sort_order integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -4129,6 +4558,20 @@ COMMENT ON TABLE public.money_move_articles IS 'Investment case studies: bluepri
 --
 
 COMMENT ON COLUMN public.money_move_articles.sections IS 'JSONB array: [{type, title?, content?, items?[], imageURL?}]';
+
+
+--
+-- Name: COLUMN money_move_articles.content; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.money_move_articles.content IS 'JSONB passthrough of the full iOS MoneyMoveArticleDTO (camelCase keys). Source of truth for the served article.';
+
+
+--
+-- Name: COLUMN money_move_articles.audio_url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.money_move_articles.audio_url IS 'Public money-moves-media URL of the narration .m4a (Achird TTS). NULL until voice is generated.';
 
 
 --
@@ -4239,6 +4682,63 @@ CREATE TABLE public.portfolios (
 
 
 --
+-- Name: price_catalyst_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.price_catalyst_audit (
+    id bigint NOT NULL,
+    run_id uuid NOT NULL,
+    ticker text NOT NULL,
+    status text NOT NULL,
+    change_pct double precision,
+    window_label text,
+    tag text,
+    reason text,
+    sources jsonb,
+    raw_response jsonb,
+    search_queries text[],
+    tokens_used integer,
+    model_version text,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT price_catalyst_audit_status_check CHECK ((status = ANY (ARRAY['applied'::text, 'no_catalyst'::text, 'gemini_error'::text, 'skipped_kill_switch'::text])))
+);
+
+
+--
+-- Name: price_catalyst_audit_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.price_catalyst_audit_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: price_catalyst_audit_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.price_catalyst_audit_id_seq OWNED BY public.price_catalyst_audit.id;
+
+
+--
+-- Name: price_catalyst_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.price_catalyst_cache (
+    ticker text NOT NULL,
+    tag text,
+    reason text,
+    sources jsonb DEFAULT '[]'::jsonb NOT NULL,
+    model_version text,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL
+);
+
+
+--
 -- Name: profit_power_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4289,6 +4789,10 @@ CREATE TABLE public.research_reports (
     industry text,
     is_refunded boolean DEFAULT false NOT NULL,
     credits_charged integer DEFAULT 5 NOT NULL,
+    pdf_path text,
+    pdf_status text DEFAULT 'pending'::text,
+    pdf_generated_at timestamp with time zone,
+    processing_started_at timestamp with time zone,
     CONSTRAINT research_reports_fair_value_nonneg CHECK (((fair_value_estimate IS NULL) OR (fair_value_estimate >= (0)::numeric))),
     CONSTRAINT research_reports_overall_score_check CHECK (((overall_score >= (0)::numeric) AND (overall_score <= (100)::numeric))),
     CONSTRAINT research_reports_progress_check CHECK (((progress >= 0) AND (progress <= 100))),
@@ -4396,7 +4900,8 @@ CREATE TABLE public.sector_benchmarks (
     median_value numeric(20,6) NOT NULL,
     sample_size integer DEFAULT 0 NOT NULL,
     computed_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT sector_benchmarks_period_type_check CHECK ((period_type = ANY (ARRAY['annual'::text, 'quarterly'::text]))),
+    industry text DEFAULT ''::text NOT NULL,
+    CONSTRAINT sector_benchmarks_period_type_check CHECK ((period_type = ANY (ARRAY['annual'::text, 'quarterly'::text, 'ttm'::text]))),
     CONSTRAINT sector_benchmarks_sample_size_nonneg CHECK ((sample_size >= 0))
 );
 
@@ -4441,6 +4946,38 @@ CREATE TABLE public.signal_of_confidence_cache (
 
 
 --
+-- Name: signals_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.signals_cache (
+    id bigint NOT NULL,
+    cache_key text NOT NULL,
+    data jsonb NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL
+);
+
+
+--
+-- Name: signals_cache_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.signals_cache_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: signals_cache_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.signals_cache_id_seq OWNED BY public.signals_cache.id;
+
+
+--
 -- Name: snapshot_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4482,6 +5019,17 @@ CREATE TABLE public.stock_fundamentals_cache (
 
 
 --
+-- Name: ticker_data_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ticker_data_cache (
+    ticker text NOT NULL,
+    collected_data jsonb NOT NULL,
+    cached_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: ticker_news_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4518,6 +5066,38 @@ CREATE TABLE public.ticker_report_cache (
     ticker_report_data jsonb NOT NULL,
     cached_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: user_book_progress; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_book_progress (
+    id bigint NOT NULL,
+    user_id uuid NOT NULL,
+    curriculum_order integer NOT NULL,
+    core_number integer NOT NULL,
+    completed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: user_book_progress_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.user_book_progress_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: user_book_progress_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.user_book_progress_id_seq OWNED BY public.user_book_progress.id;
 
 
 --
@@ -4569,6 +5149,38 @@ COMMENT ON TABLE public.user_credits IS 'Per-user credit balance for AI research
 --
 
 COMMENT ON COLUMN public.user_credits.remaining IS 'Auto-computed: total - used. Never set directly.';
+
+
+--
+-- Name: user_learn_progress; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_learn_progress (
+    id bigint NOT NULL,
+    user_id uuid NOT NULL,
+    content_type text NOT NULL,
+    item_key text NOT NULL,
+    completed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: user_learn_progress_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.user_learn_progress_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: user_learn_progress_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.user_learn_progress_id_seq OWNED BY public.user_learn_progress.id;
 
 
 --
@@ -4677,6 +5289,9 @@ CREATE TABLE public.watchlist_items (
     sector text,
     asset_type text DEFAULT 'Stock'::text,
     country text DEFAULT 'US'::text,
+    industry text,
+    market_cap numeric(24,2),
+    beta numeric(10,4),
     CONSTRAINT watchlist_items_market_value_nonneg CHECK (((market_value IS NULL) OR (market_value >= (0)::numeric))),
     CONSTRAINT watchlist_items_shares_nonneg CHECK (((shares IS NULL) OR (shares >= (0)::numeric)))
 );
@@ -4891,6 +5506,8 @@ CREATE TABLE public.whale_trades (
     new_allocation numeric(7,4),
     date text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    amount_range text,
+    disclosure_date text,
     CONSTRAINT whale_trades_amount_nonneg CHECK ((amount >= (0)::numeric))
 );
 
@@ -4980,7 +5597,8 @@ CREATE TABLE realtime.messages (
     private boolean DEFAULT false,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     inserted_at timestamp without time zone DEFAULT now() NOT NULL,
-    id uuid DEFAULT gen_random_uuid() NOT NULL
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    binary_payload bytea
 )
 PARTITION BY RANGE (inserted_at);
 
@@ -5008,6 +5626,7 @@ CREATE TABLE realtime.subscription (
     claims_role regrole GENERATED ALWAYS AS (realtime.to_regrole((claims ->> 'role'::text))) STORED NOT NULL,
     created_at timestamp without time zone DEFAULT timezone('utc'::text, now()) NOT NULL,
     action_filter text DEFAULT '*'::text,
+    selected_columns text[],
     CONSTRAINT subscription_action_filter_check CHECK ((action_filter = ANY (ARRAY['*'::text, 'INSERT'::text, 'UPDATE'::text, 'DELETE'::text])))
 );
 
@@ -5187,6 +5806,83 @@ CREATE TABLE supabase_migrations.schema_migrations (
 --
 
 ALTER TABLE ONLY auth.refresh_tokens ALTER COLUMN id SET DEFAULT nextval('auth.refresh_tokens_id_seq'::regclass);
+
+
+--
+-- Name: competitor_intel_audit id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.competitor_intel_audit ALTER COLUMN id SET DEFAULT nextval('public.competitor_intel_audit_id_seq'::regclass);
+
+
+--
+-- Name: geopolitical_macro_audit id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.geopolitical_macro_audit ALTER COLUMN id SET DEFAULT nextval('public.geopolitical_macro_audit_id_seq'::regclass);
+
+
+--
+-- Name: industry_dossier id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.industry_dossier ALTER COLUMN id SET DEFAULT nextval('public.industry_dossier_id_seq'::regclass);
+
+
+--
+-- Name: industry_moat_benchmarks id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.industry_moat_benchmarks ALTER COLUMN id SET DEFAULT nextval('public.industry_moat_benchmarks_id_seq'::regclass);
+
+
+--
+-- Name: industry_override_audit id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.industry_override_audit ALTER COLUMN id SET DEFAULT nextval('public.industry_override_audit_id_seq'::regclass);
+
+
+--
+-- Name: ip_intel_audit id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ip_intel_audit ALTER COLUMN id SET DEFAULT nextval('public.ip_intel_audit_id_seq'::regclass);
+
+
+--
+-- Name: moat_intel_audit id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.moat_intel_audit ALTER COLUMN id SET DEFAULT nextval('public.moat_intel_audit_id_seq'::regclass);
+
+
+--
+-- Name: price_catalyst_audit id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.price_catalyst_audit ALTER COLUMN id SET DEFAULT nextval('public.price_catalyst_audit_id_seq'::regclass);
+
+
+--
+-- Name: signals_cache id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.signals_cache ALTER COLUMN id SET DEFAULT nextval('public.signals_cache_id_seq'::regclass);
+
+
+--
+-- Name: user_book_progress id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_book_progress ALTER COLUMN id SET DEFAULT nextval('public.user_book_progress_id_seq'::regclass);
+
+
+--
+-- Name: user_learn_progress id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_learn_progress ALTER COLUMN id SET DEFAULT nextval('public.user_learn_progress_id_seq'::regclass);
 
 
 --
@@ -5574,6 +6270,22 @@ ALTER TABLE ONLY public.company_profile_cache
 
 
 --
+-- Name: competitor_intel_audit competitor_intel_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.competitor_intel_audit
+    ADD CONSTRAINT competitor_intel_audit_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: competitor_intel_cache competitor_intel_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.competitor_intel_cache
+    ADD CONSTRAINT competitor_intel_cache_pkey PRIMARY KEY (ticker);
+
+
+--
 -- Name: crypto_coin_id_cache crypto_coin_id_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5654,6 +6366,22 @@ ALTER TABLE ONLY public.etf_snapshot_cache
 
 
 --
+-- Name: geopolitical_macro_audit geopolitical_macro_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.geopolitical_macro_audit
+    ADD CONSTRAINT geopolitical_macro_audit_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: geopolitical_macro_cache geopolitical_macro_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.geopolitical_macro_cache
+    ADD CONSTRAINT geopolitical_macro_cache_pkey PRIMARY KEY (scope);
+
+
+--
 -- Name: health_check_cache health_check_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5718,6 +6446,62 @@ ALTER TABLE ONLY public.index_macro_forecast_cache
 
 
 --
+-- Name: industry_dossier industry_dossier_industry_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.industry_dossier
+    ADD CONSTRAINT industry_dossier_industry_key UNIQUE (industry);
+
+
+--
+-- Name: industry_dossier industry_dossier_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.industry_dossier
+    ADD CONSTRAINT industry_dossier_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: industry_moat_benchmarks industry_moat_benchmarks_industry_pillar_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.industry_moat_benchmarks
+    ADD CONSTRAINT industry_moat_benchmarks_industry_pillar_name_key UNIQUE (industry, pillar_name);
+
+
+--
+-- Name: industry_moat_benchmarks industry_moat_benchmarks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.industry_moat_benchmarks
+    ADD CONSTRAINT industry_moat_benchmarks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: industry_override_audit industry_override_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.industry_override_audit
+    ADD CONSTRAINT industry_override_audit_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ip_intel_audit ip_intel_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ip_intel_audit
+    ADD CONSTRAINT ip_intel_audit_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ip_intel_cache ip_intel_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ip_intel_cache
+    ADD CONSTRAINT ip_intel_cache_pkey PRIMARY KEY (ticker);
+
+
+--
 -- Name: lessons lessons_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5739,6 +6523,22 @@ ALTER TABLE ONLY public.market_deep_dive_cache
 
 ALTER TABLE ONLY public.market_insights
     ADD CONSTRAINT market_insights_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: moat_intel_audit moat_intel_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.moat_intel_audit
+    ADD CONSTRAINT moat_intel_audit_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: moat_intel_cache moat_intel_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.moat_intel_cache
+    ADD CONSTRAINT moat_intel_cache_pkey PRIMARY KEY (ticker);
 
 
 --
@@ -5811,6 +6611,22 @@ ALTER TABLE ONLY public.portfolios
 
 ALTER TABLE ONLY public.portfolios
     ADD CONSTRAINT portfolios_user_id_name_key UNIQUE (user_id, name);
+
+
+--
+-- Name: price_catalyst_audit price_catalyst_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.price_catalyst_audit
+    ADD CONSTRAINT price_catalyst_audit_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: price_catalyst_cache price_catalyst_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.price_catalyst_cache
+    ADD CONSTRAINT price_catalyst_cache_pkey PRIMARY KEY (ticker);
 
 
 --
@@ -5902,6 +6718,22 @@ ALTER TABLE ONLY public.signal_of_confidence_cache
 
 
 --
+-- Name: signals_cache signals_cache_cache_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.signals_cache
+    ADD CONSTRAINT signals_cache_cache_key_key UNIQUE (cache_key);
+
+
+--
+-- Name: signals_cache signals_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.signals_cache
+    ADD CONSTRAINT signals_cache_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: snapshot_cache snapshot_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5950,6 +6782,14 @@ ALTER TABLE ONLY public.stock_fundamentals_cache
 
 
 --
+-- Name: ticker_data_cache ticker_data_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ticker_data_cache
+    ADD CONSTRAINT ticker_data_cache_pkey PRIMARY KEY (ticker);
+
+
+--
 -- Name: ticker_news_cache ticker_news_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5974,11 +6814,27 @@ ALTER TABLE ONLY public.ticker_report_cache
 
 
 --
--- Name: sector_benchmarks uq_sector_metric_period; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: sector_benchmarks uq_sector_industry_metric_period; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.sector_benchmarks
-    ADD CONSTRAINT uq_sector_metric_period UNIQUE (sector, metric_name, period_type, period_label);
+    ADD CONSTRAINT uq_sector_industry_metric_period UNIQUE (sector, industry, metric_name, period_type, period_label);
+
+
+--
+-- Name: user_book_progress user_book_progress_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_book_progress
+    ADD CONSTRAINT user_book_progress_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_book_progress user_book_progress_user_id_curriculum_order_core_number_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_book_progress
+    ADD CONSTRAINT user_book_progress_user_id_curriculum_order_core_number_key UNIQUE (user_id, curriculum_order, core_number);
 
 
 --
@@ -6011,6 +6867,22 @@ ALTER TABLE ONLY public.user_credits
 
 ALTER TABLE ONLY public.user_credits
     ADD CONSTRAINT user_credits_user_id_key UNIQUE (user_id);
+
+
+--
+-- Name: user_learn_progress user_learn_progress_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_learn_progress
+    ADD CONSTRAINT user_learn_progress_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_learn_progress user_learn_progress_user_id_content_type_item_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_learn_progress
+    ADD CONSTRAINT user_learn_progress_user_id_content_type_item_key_key UNIQUE (user_id, content_type, item_key);
 
 
 --
@@ -6171,6 +7043,14 @@ ALTER TABLE ONLY public.whale_trades
 
 ALTER TABLE ONLY public.whales
     ADD CONSTRAINT whales_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: messages messages_payload_exclusive; Type: CHECK CONSTRAINT; Schema: realtime; Owner: -
+--
+
+ALTER TABLE realtime.messages
+    ADD CONSTRAINT messages_payload_exclusive CHECK (((payload IS NULL) OR (binary_payload IS NULL))) NOT VALID;
 
 
 --
@@ -6782,6 +7662,34 @@ CREATE INDEX idx_chat_sessions_user ON public.chat_sessions USING btree (user_id
 
 
 --
+-- Name: idx_competitor_intel_audit_computed_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_competitor_intel_audit_computed_at ON public.competitor_intel_audit USING btree (computed_at DESC);
+
+
+--
+-- Name: idx_competitor_intel_audit_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_competitor_intel_audit_run_id ON public.competitor_intel_audit USING btree (run_id);
+
+
+--
+-- Name: idx_competitor_intel_audit_ticker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_competitor_intel_audit_ticker ON public.competitor_intel_audit USING btree (ticker, computed_at DESC);
+
+
+--
+-- Name: idx_competitor_intel_cache_expires; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_competitor_intel_cache_expires ON public.competitor_intel_cache USING btree (expires_at);
+
+
+--
 -- Name: idx_crypto_fundamentals_cache_symbol; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -6852,6 +7760,27 @@ CREATE INDEX idx_filing_snapshots_whale ON public.whale_filing_snapshots USING b
 
 
 --
+-- Name: idx_geopolitical_macro_audit_computed; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_geopolitical_macro_audit_computed ON public.geopolitical_macro_audit USING btree (computed_at DESC);
+
+
+--
+-- Name: idx_geopolitical_macro_audit_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_geopolitical_macro_audit_run_id ON public.geopolitical_macro_audit USING btree (run_id);
+
+
+--
+-- Name: idx_geopolitical_macro_cache_expires; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_geopolitical_macro_cache_expires ON public.geopolitical_macro_cache USING btree (expires_at);
+
+
+--
 -- Name: idx_health_check_cache_ticker; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -6877,6 +7806,83 @@ CREATE INDEX idx_holders_cache_ticker ON public.holders_cache USING btree (ticke
 --
 
 CREATE INDEX idx_index_detail_cache_symbol ON public.index_detail_cache USING btree (symbol);
+
+
+--
+-- Name: idx_industry_dossier_computed_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_industry_dossier_computed_at ON public.industry_dossier USING btree (computed_at DESC);
+
+
+--
+-- Name: idx_industry_dossier_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_industry_dossier_lookup ON public.industry_dossier USING btree (industry, expires_at);
+
+
+--
+-- Name: idx_industry_dossier_sector; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_industry_dossier_sector ON public.industry_dossier USING btree (sector);
+
+
+--
+-- Name: idx_industry_moat_benchmarks_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_industry_moat_benchmarks_lookup ON public.industry_moat_benchmarks USING btree (industry);
+
+
+--
+-- Name: idx_industry_override_audit_computed_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_industry_override_audit_computed_at ON public.industry_override_audit USING btree (computed_at DESC);
+
+
+--
+-- Name: idx_industry_override_audit_industry; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_industry_override_audit_industry ON public.industry_override_audit USING btree (industry, computed_at DESC);
+
+
+--
+-- Name: idx_industry_override_audit_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_industry_override_audit_run_id ON public.industry_override_audit USING btree (run_id);
+
+
+--
+-- Name: idx_ip_intel_audit_computed_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ip_intel_audit_computed_at ON public.ip_intel_audit USING btree (computed_at DESC);
+
+
+--
+-- Name: idx_ip_intel_audit_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ip_intel_audit_run_id ON public.ip_intel_audit USING btree (run_id);
+
+
+--
+-- Name: idx_ip_intel_audit_ticker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ip_intel_audit_ticker ON public.ip_intel_audit USING btree (ticker, computed_at DESC);
+
+
+--
+-- Name: idx_ip_intel_cache_expires; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ip_intel_cache_expires ON public.ip_intel_cache USING btree (expires_at);
 
 
 --
@@ -6912,6 +7918,48 @@ CREATE INDEX idx_lessons_level ON public.lessons USING btree (level, sort_order)
 --
 
 CREATE INDEX idx_market_insights_created ON public.market_insights USING btree (created_at DESC);
+
+
+--
+-- Name: idx_moat_intel_audit_computed_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_moat_intel_audit_computed_at ON public.moat_intel_audit USING btree (computed_at DESC);
+
+
+--
+-- Name: idx_moat_intel_audit_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_moat_intel_audit_run_id ON public.moat_intel_audit USING btree (run_id);
+
+
+--
+-- Name: idx_moat_intel_audit_ticker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_moat_intel_audit_ticker ON public.moat_intel_audit USING btree (ticker, computed_at DESC);
+
+
+--
+-- Name: idx_moat_intel_cache_expires; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_moat_intel_cache_expires ON public.moat_intel_cache USING btree (expires_at);
+
+
+--
+-- Name: idx_money_move_articles_slug; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_money_move_articles_slug ON public.money_move_articles USING btree (slug);
+
+
+--
+-- Name: idx_money_move_articles_sort; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_money_move_articles_sort ON public.money_move_articles USING btree (sort_order);
 
 
 --
@@ -6989,6 +8037,27 @@ CREATE INDEX idx_portfolio_items_portfolio ON public.portfolio_items USING btree
 --
 
 CREATE INDEX idx_portfolios_user_sort ON public.portfolios USING btree (user_id, sort_order);
+
+
+--
+-- Name: idx_price_catalyst_audit_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_price_catalyst_audit_run_id ON public.price_catalyst_audit USING btree (run_id);
+
+
+--
+-- Name: idx_price_catalyst_audit_ticker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_price_catalyst_audit_ticker ON public.price_catalyst_audit USING btree (ticker, computed_at DESC);
+
+
+--
+-- Name: idx_price_catalyst_cache_expires; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_price_catalyst_cache_expires ON public.price_catalyst_cache USING btree (expires_at);
 
 
 --
@@ -7076,6 +8145,13 @@ CREATE INDEX idx_sector_benchmarks_computed_at ON public.sector_benchmarks USING
 
 
 --
+-- Name: idx_sector_benchmarks_industry_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sector_benchmarks_industry_lookup ON public.sector_benchmarks USING btree (industry, metric_name, period_type);
+
+
+--
 -- Name: idx_sector_benchmarks_lookup; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7094,6 +8170,13 @@ CREATE INDEX idx_short_interest_cache_ticker ON public.short_interest_cache USIN
 --
 
 CREATE INDEX idx_signal_of_confidence_cache_ticker ON public.signal_of_confidence_cache USING btree (ticker);
+
+
+--
+-- Name: idx_signals_cache_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_signals_cache_lookup ON public.signals_cache USING btree (cache_key, expires_at);
 
 
 --
@@ -7139,6 +8222,13 @@ CREATE INDEX idx_study_schedules_user ON public.user_study_schedules USING btree
 
 
 --
+-- Name: idx_ticker_data_cache_cached_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ticker_data_cache_cached_at ON public.ticker_data_cache USING btree (cached_at DESC);
+
+
+--
 -- Name: idx_ticker_news_cache_expires; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7160,10 +8250,24 @@ CREATE INDEX idx_ticker_report_cache_cached_at ON public.ticker_report_cache USI
 
 
 --
+-- Name: idx_user_book_progress_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_book_progress_user ON public.user_book_progress USING btree (user_id);
+
+
+--
 -- Name: idx_user_credits_user; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_user_credits_user ON public.user_credits USING btree (user_id);
+
+
+--
+-- Name: idx_user_learn_progress_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_learn_progress_lookup ON public.user_learn_progress USING btree (user_id, content_type);
 
 
 --
@@ -7178,6 +8282,13 @@ CREATE INDEX idx_users_email ON public.users USING btree (email);
 --
 
 CREATE INDEX idx_users_tier ON public.users USING btree (tier);
+
+
+--
+-- Name: idx_watchlist_items_needs_enrich; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_watchlist_items_needs_enrich ON public.watchlist_items USING btree (user_id) WHERE (sector IS NULL);
 
 
 --
@@ -7314,6 +8425,13 @@ CREATE INDEX idx_whales_name ON public.whales USING btree (name);
 
 
 --
+-- Name: uq_whale_trade_groups_whale_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_whale_trade_groups_whale_date ON public.whale_trade_groups USING btree (whale_id, date);
+
+
+--
 -- Name: ix_realtime_subscription_entity; Type: INDEX; Schema: realtime; Owner: -
 --
 
@@ -7328,10 +8446,10 @@ CREATE INDEX messages_inserted_at_topic_index ON ONLY realtime.messages USING bt
 
 
 --
--- Name: subscription_subscription_id_entity_filters_action_filter_key; Type: INDEX; Schema: realtime; Owner: -
+-- Name: subscription_subscription_id_entity_filters_action_filter_selec; Type: INDEX; Schema: realtime; Owner: -
 --
 
-CREATE UNIQUE INDEX subscription_subscription_id_entity_filters_action_filter_key ON realtime.subscription USING btree (subscription_id, entity, filters, action_filter);
+CREATE UNIQUE INDEX subscription_subscription_id_entity_filters_action_filter_selec ON realtime.subscription USING btree (subscription_id, entity, filters, action_filter, COALESCE(selected_columns, '{}'::text[]));
 
 
 --
@@ -7990,6 +9108,13 @@ CREATE POLICY "Allow service_role full access" ON public.sector_benchmarks TO se
 
 
 --
+-- Name: ticker_data_cache Service role full access; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY "Service role full access" ON public.ticker_data_cache USING (true) WITH CHECK (true);
+
+
+--
 -- Name: portfolio_holdings Service role full access on holdings; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -8282,6 +9407,46 @@ CREATE POLICY company_profile_cache_service_write ON public.company_profile_cach
 
 
 --
+-- Name: competitor_intel_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.competitor_intel_audit ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: competitor_intel_audit competitor_intel_audit_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY competitor_intel_audit_public_read ON public.competitor_intel_audit FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: competitor_intel_audit competitor_intel_audit_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY competitor_intel_audit_service_write ON public.competitor_intel_audit TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: competitor_intel_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.competitor_intel_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: competitor_intel_cache competitor_intel_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY competitor_intel_cache_public_read ON public.competitor_intel_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: competitor_intel_cache competitor_intel_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY competitor_intel_cache_service_write ON public.competitor_intel_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: user_credits credits_select_own; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -8417,6 +9582,39 @@ CREATE POLICY filing_chunks_service_all ON public.company_filing_chunks USING ((
 
 
 --
+-- Name: geopolitical_macro_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.geopolitical_macro_audit ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: geopolitical_macro_audit geopolitical_macro_audit_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY geopolitical_macro_audit_service_all ON public.geopolitical_macro_audit TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: geopolitical_macro_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.geopolitical_macro_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: geopolitical_macro_cache geopolitical_macro_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY geopolitical_macro_cache_public_read ON public.geopolitical_macro_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: geopolitical_macro_cache geopolitical_macro_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY geopolitical_macro_cache_service_write ON public.geopolitical_macro_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: index_detail_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -8454,6 +9652,106 @@ CREATE POLICY index_macro_forecast_cache_public_read ON public.index_macro_forec
 --
 
 CREATE POLICY index_macro_forecast_cache_service_write ON public.index_macro_forecast_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: industry_dossier; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.industry_dossier ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: industry_dossier industry_dossier_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY industry_dossier_public_read ON public.industry_dossier FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: industry_dossier industry_dossier_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY industry_dossier_service_write ON public.industry_dossier TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: industry_moat_benchmarks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.industry_moat_benchmarks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: industry_moat_benchmarks industry_moat_benchmarks_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY industry_moat_benchmarks_public_read ON public.industry_moat_benchmarks FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: industry_moat_benchmarks industry_moat_benchmarks_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY industry_moat_benchmarks_service_write ON public.industry_moat_benchmarks TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: industry_override_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.industry_override_audit ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: industry_override_audit industry_override_audit_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY industry_override_audit_public_read ON public.industry_override_audit FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: industry_override_audit industry_override_audit_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY industry_override_audit_service_write ON public.industry_override_audit TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: ip_intel_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.ip_intel_audit ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ip_intel_audit ip_intel_audit_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ip_intel_audit_public_read ON public.ip_intel_audit FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: ip_intel_audit ip_intel_audit_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ip_intel_audit_service_write ON public.ip_intel_audit TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: ip_intel_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.ip_intel_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ip_intel_cache ip_intel_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ip_intel_cache_public_read ON public.ip_intel_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: ip_intel_cache ip_intel_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ip_intel_cache_service_write ON public.ip_intel_cache TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -8522,6 +9820,46 @@ CREATE POLICY market_deep_dive_cache_public_read ON public.market_deep_dive_cach
 --
 
 CREATE POLICY market_deep_dive_cache_service_write ON public.market_deep_dive_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: moat_intel_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.moat_intel_audit ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: moat_intel_audit moat_intel_audit_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY moat_intel_audit_public_read ON public.moat_intel_audit FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: moat_intel_audit moat_intel_audit_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY moat_intel_audit_service_write ON public.moat_intel_audit TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: moat_intel_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.moat_intel_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: moat_intel_cache moat_intel_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY moat_intel_cache_public_read ON public.moat_intel_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: moat_intel_cache moat_intel_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY moat_intel_cache_service_write ON public.moat_intel_cache TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -8613,6 +9951,39 @@ CREATE POLICY portfolios_owner ON public.portfolios USING ((user_id = auth.uid()
 
 
 --
+-- Name: price_catalyst_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.price_catalyst_audit ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: price_catalyst_audit price_catalyst_audit_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY price_catalyst_audit_service_all ON public.price_catalyst_audit TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: price_catalyst_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.price_catalyst_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: price_catalyst_cache price_catalyst_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY price_catalyst_cache_public_read ON public.price_catalyst_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: price_catalyst_cache price_catalyst_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY price_catalyst_cache_service_write ON public.price_catalyst_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: research_reports reports_delete_own; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -8690,6 +10061,26 @@ CREATE POLICY short_interest_cache_public_read ON public.short_interest_cache FO
 --
 
 CREATE POLICY short_interest_cache_service_write ON public.short_interest_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: signals_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.signals_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: signals_cache signals_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY signals_cache_public_read ON public.signals_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: signals_cache signals_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY signals_cache_service_write ON public.signals_cache TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -8775,6 +10166,12 @@ CREATE POLICY study_schedules_update_own ON public.user_study_schedules FOR UPDA
 
 
 --
+-- Name: ticker_data_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.ticker_data_cache ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: ticker_news_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -8808,6 +10205,47 @@ CREATE POLICY ticker_report_cache_service_write ON public.ticker_report_cache TO
 
 
 --
+-- Name: user_book_progress; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_book_progress ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_book_progress user_book_progress_delete_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_book_progress_delete_own ON public.user_book_progress FOR DELETE TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: user_book_progress user_book_progress_insert_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_book_progress_insert_own ON public.user_book_progress FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
+
+
+--
+-- Name: user_book_progress user_book_progress_select_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_book_progress_select_own ON public.user_book_progress FOR SELECT TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: user_book_progress user_book_progress_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_book_progress_service_all ON public.user_book_progress TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: user_book_progress user_book_progress_update_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_book_progress_update_own ON public.user_book_progress FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
+
+
+--
 -- Name: user_bookmarks; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -8818,6 +10256,47 @@ ALTER TABLE public.user_bookmarks ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.user_credits ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_learn_progress; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_learn_progress ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_learn_progress user_learn_progress_delete_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_learn_progress_delete_own ON public.user_learn_progress FOR DELETE TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: user_learn_progress user_learn_progress_insert_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_learn_progress_insert_own ON public.user_learn_progress FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
+
+
+--
+-- Name: user_learn_progress user_learn_progress_select_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_learn_progress_select_own ON public.user_learn_progress FOR SELECT TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: user_learn_progress user_learn_progress_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_learn_progress_service_all ON public.user_learn_progress TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: user_learn_progress user_learn_progress_update_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_learn_progress_update_own ON public.user_learn_progress FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
+
 
 --
 -- Name: user_lesson_progress; Type: ROW SECURITY; Schema: public; Owner: -
@@ -9100,6 +10579,20 @@ CREATE POLICY whales_service_all ON public.whales USING ((auth.role() = 'service
 ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: objects book_media_public_read; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY book_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'book-media'::text));
+
+
+--
+-- Name: objects book_media_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY book_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'book-media'::text)) WITH CHECK ((bucket_id = 'book-media'::text));
+
+
+--
 -- Name: buckets; Type: ROW SECURITY; Schema: storage; Owner: -
 --
 
@@ -9118,16 +10611,51 @@ ALTER TABLE storage.buckets_analytics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage.buckets_vectors ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: objects journey_media_public_read; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY journey_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'journey-media'::text));
+
+
+--
+-- Name: objects journey_media_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY journey_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'journey-media'::text)) WITH CHECK ((bucket_id = 'journey-media'::text));
+
+
+--
 -- Name: migrations; Type: ROW SECURITY; Schema: storage; Owner: -
 --
 
 ALTER TABLE storage.migrations ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: objects money_moves_media_public_read; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY money_moves_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'money-moves-media'::text));
+
+
+--
+-- Name: objects money_moves_media_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY money_moves_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'money-moves-media'::text)) WITH CHECK ((bucket_id = 'money-moves-media'::text));
+
+
+--
 -- Name: objects; Type: ROW SECURITY; Schema: storage; Owner: -
 --
 
 ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: objects research_pdfs_service_all; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY research_pdfs_service_all ON storage.objects TO service_role USING ((bucket_id = 'research-pdfs'::text)) WITH CHECK ((bucket_id = 'research-pdfs'::text));
+
 
 --
 -- Name: s3_multipart_uploads; Type: ROW SECURITY; Schema: storage; Owner: -
@@ -9210,5 +10738,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 84YhokA63C0VRSipck6mdhZxOVZSeNwshATTWbeCtBchy4wGJG3PXhTRwL1P0Pi
+\unrestrict nRBbQvGZJy4alljx6HpiTBLhjCC4SWwzgNSprhX16CqJz9V4KHWQRrySPUN8DSB
 

@@ -16,7 +16,9 @@ struct ScannerCard: View {
     var onEntryTap: ((ScannerEntry) -> Void)? = nil
 
     @State private var moversMode: MoversMode = .gainers
-    @State private var expanded = false
+    /// Lifted to the parent (via `DailyScannersSection` → the Home screen) so a
+    /// tap OUTSIDE the card can collapse it, and only one card expands at a time.
+    @Binding var isExpanded: Bool
     @State private var showInfo = false
 
     private var list: [ScannerEntry] {
@@ -49,7 +51,7 @@ struct ScannerCard: View {
             // that the carousel (DailyScannersSection) no longer uses
             // `.scrollPosition(id:)` — that modifier's layout-time state write was
             // what deadlocked SwiftUI when a card resized inside the carousel.
-            if expanded {
+            if isExpanded {
                 leaderboard
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
@@ -57,7 +59,13 @@ struct ScannerCard: View {
         .padding(15)
         .background(AppColors.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .animation(.easeInOut(duration: 0.25), value: expanded)
+        // Swallow taps that land ON the card so ONLY a tap OUTSIDE it (caught at
+        // the Home screen) collapses it. Inner controls (toggle, expand button,
+        // ticker rows) are child buttons and still win the tap; a drag still
+        // scrolls the carousel since this is tap-only.
+        .contentShape(Rectangle())
+        .onTapGesture { }
+        .animation(.easeInOut(duration: 0.25), value: isExpanded)
     }
 
     // MARK: - Header
@@ -205,14 +213,14 @@ struct ScannerCard: View {
 
     private var expandButton: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.25)) { expanded.toggle() }
+            withAnimation(.easeInOut(duration: 0.25)) { isExpanded.toggle() }
         } label: {
             HStack(spacing: 6) {
                 Text(scanner.expandCTA)
                     .font(AppTypography.labelSmallEmphasis)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 12, weight: .semibold))
-                    .rotationEffect(.degrees(expanded ? 180 : 0))
+                    .rotationEffect(.degrees(isExpanded ? 180 : 0))
             }
             .foregroundColor(AppColors.primaryBlue)
             .frame(maxWidth: .infinity)
@@ -238,13 +246,32 @@ struct ScannerCard: View {
 }
 
 #Preview {
-    ScrollView {
-        VStack(spacing: 14) {
-            ScannerCard(scanner: MockHomeRepository.movers)
-            ScannerCard(scanner: MockHomeRepository.heavyTraffic)
-            ScannerCard(scanner: MockHomeRepository.skepticalMoney)
+    ScannerCardPreviewHost()
+}
+
+/// Gives each card a real expand binding (one open at a time) for the preview.
+private struct ScannerCardPreviewHost: View {
+    @State private var expandedID: DailyScanner.ID?
+    private let cards = [
+        MockHomeRepository.movers,
+        MockHomeRepository.heavyTraffic,
+        MockHomeRepository.skepticalMoney,
+    ]
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                ForEach(cards) { card in
+                    ScannerCard(
+                        scanner: card,
+                        isExpanded: Binding(
+                            get: { expandedID == card.id },
+                            set: { expandedID = $0 ? card.id : nil }
+                        )
+                    )
+                }
+            }
+            .padding()
         }
-        .padding()
+        .background(AppColors.background)
     }
-    .background(AppColors.background)
 }

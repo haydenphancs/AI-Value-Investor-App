@@ -22,6 +22,9 @@ struct HomeDashboardView: View {
     @State private var showSearch = false
     @State private var showProfile = false
     @State private var selectedTicker: MarketTicker?
+    /// Which Daily Scanner card is expanded (nil = none). Owned here so a tap
+    /// ANYWHERE outside the card (in the scroll content) collapses it.
+    @State private var expandedScannerID: DailyScanner.ID?
 
     /// `repository == nil` → the live `HomeRepository` (the app default).
     /// Pass `MockHomeRepository()` for offline previews / tests.
@@ -111,7 +114,8 @@ struct HomeDashboardView: View {
                     if !data.scanners.isEmpty {
                         DailyScannersSection(
                             scanners: data.scanners,
-                            onEntryTap: openStock
+                            onEntryTap: openStock,
+                            expandedCardID: $expandedScannerID
                         )
                     }
 
@@ -132,6 +136,17 @@ struct HomeDashboardView: View {
 
                 Spacer()
                     .frame(height: 100)
+            }
+            // Tap ANYWHERE outside an expanded Daily Scanner card collapses it: a
+            // non-consuming tap in the scroll content bubbles up here, while taps
+            // on a card body (swallowed in ScannerCard) and on its buttons/tickers
+            // (child buttons) do NOT. It's a TapGesture, so scrolling never
+            // triggers it; guarded so it's a no-op when nothing is expanded.
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if expandedScannerID != nil {
+                    withAnimation(.easeInOut(duration: 0.25)) { expandedScannerID = nil }
+                }
             }
         }
         .refreshable {

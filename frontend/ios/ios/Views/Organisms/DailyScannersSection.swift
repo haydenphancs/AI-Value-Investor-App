@@ -21,6 +21,9 @@ import SwiftUI
 struct DailyScannersSection: View {
     let scanners: [DailyScanner]
     var onEntryTap: ((ScannerEntry) -> Void)? = nil
+    /// Which card is expanded (nil = none). Lifted to the Home screen so a tap
+    /// ANYWHERE outside the card collapses it; also enforces one-open-at-a-time.
+    @Binding var expandedCardID: DailyScanner.ID?
 
     @State private var activeIndex: Int = 0
     @State private var viewportWidth: CGFloat = 0
@@ -28,13 +31,6 @@ struct DailyScannersSection: View {
     private let cardSpacing: CGFloat = 14
     private let widthFactor: CGFloat = 0.86
     private static let coordSpace = "dailyScannersCarousel"
-
-    // Width of one card and the per-page step, used only to map scroll offset →
-    // active page (purely cosmetic dot highlighting; never feeds layout).
-    private var step: CGFloat {
-        let cardWidth = max((viewportWidth - AppSpacing.lg * 2) * widthFactor, 1)
-        return cardWidth + cardSpacing
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -51,22 +47,37 @@ struct DailyScannersSection: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(alignment: .top, spacing: cardSpacing) {
-                            ForEach(scanners) { scanner in
-                                ScannerCard(scanner: scanner, onEntryTap: onEntryTap)
+                            ForEach(Array(scanners.enumerated()), id: \.element.id) { index, scanner in
+                                ScannerCard(
+                                    scanner: scanner,
+                                    onEntryTap: onEntryTap,
+                                    isExpanded: Binding(
+                                        get: { expandedCardID == scanner.id },
+                                        set: { expandedCardID = $0 ? scanner.id : nil }
+                                    )
+                                )
                                     // ~86% of the container width so the next card peeks.
                                     .containerRelativeFrame(.horizontal) { length, _ in length * widthFactor }
+                                    // Each card reports its center-X in the carousel's
+                                    // coordinate space; the card nearest the viewport
+                                    // center is the active page (drives the dots). This
+                                    // recomputes every scroll frame — no scroll-offset
+                                    // math and no default-value race to freeze it.
+                                    .background(
+                                        GeometryReader { g in
+                                            Color.clear.preference(
+                                                key: ScannerActiveCardKey.self,
+                                                value: [ActiveCardCandidate(
+                                                    index: index,
+                                                    midX: g.frame(in: .named(Self.coordSpace)).midX
+                                                )]
+                                            )
+                                        }
+                                    )
                                     .id(scanner.id)
                             }
                         }
                         .scrollTargetLayout()
-                        .background(
-                            GeometryReader { g in
-                                Color.clear.preference(
-                                    key: ScannerCarouselOffsetKey.self,
-                                    value: g.frame(in: .named(Self.coordSpace)).minX
-                                )
-                            }
-                        )
                     }
                     .scrollTargetBehavior(.viewAligned)
                     .contentMargins(.horizontal, AppSpacing.lg, for: .scrollContent)
@@ -78,12 +89,16 @@ struct DailyScannersSection: View {
                                 .onChange(of: g.size.width) { _, w in viewportWidth = w }
                         }
                     )
-                    .onPreferenceChange(ScannerCarouselOffsetKey.self) { minX in
-                        guard step > 1, !scanners.isEmpty else { return }
-                        // Content rests at x = leading inset on page 0; each page
-                        // shifts it left by `step`.
-                        let idx = Int(((AppSpacing.lg - minX) / step).rounded())
-                        activeIndex = min(max(idx, 0), scanners.count - 1)
+                    .onPreferenceChange(ScannerActiveCardKey.self) { candidates in
+                        guard viewportWidth > 0, !candidates.isEmpty else { return }
+                        // The card whose center is nearest the viewport center is
+                        // the active page.
+                        let center = viewportWidth / 2
+                        if let best = candidates.min(by: {
+                            abs($0.midX - center) < abs($1.midX - center)
+                        }) {
+                            activeIndex = min(max(best.index, 0), max(scanners.count - 1, 0))
+                        }
                     }
 
                     CarouselPageDots(count: scanners.count, activeIndex: activeIndex) { index in
@@ -102,22 +117,39 @@ struct DailyScannersSection: View {
     }
 }
 
-/// Read-only carousel scroll offset (the content's leading edge in the scroll
-/// view's coordinate space). Used to highlight the active page dot WITHOUT a
-/// `.scrollPosition` binding (which would deadlock layout on card expand).
-private struct ScannerCarouselOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+/// One card's index + its center-X in the carousel's coordinate space. The
+/// section picks the candidate nearest the viewport center as the active page —
+/// a READ-ONLY derivation (no `.scrollPosition` binding, which would deadlock
+/// layout when a card expands in place).
+private struct ActiveCardCandidate: Equatable {
+    let index: Int
+    let midX: CGFloat
+}
+
+private struct ScannerActiveCardKey: PreferenceKey {
+    static var defaultValue: [ActiveCardCandidate] = []
+    static func reduce(value: inout [ActiveCardCandidate], nextValue: () -> [ActiveCardCandidate]) {
+        value.append(contentsOf: nextValue())
+    }
 }
 
 #Preview {
-    DailyScannersSection(
-        scanners: [
-            MockHomeRepository.movers,
-            MockHomeRepository.heavyTraffic,
-            MockHomeRepository.skepticalMoney
-        ]
-    )
-    .padding(.vertical)
-    .background(AppColors.background)
+    DailyScannersSectionPreviewHost()
+}
+
+/// Stateful host so the carousel preview can actually expand/collapse a card.
+private struct DailyScannersSectionPreviewHost: View {
+    @State private var expandedID: DailyScanner.ID?
+    var body: some View {
+        DailyScannersSection(
+            scanners: [
+                MockHomeRepository.movers,
+                MockHomeRepository.heavyTraffic,
+                MockHomeRepository.skepticalMoney
+            ],
+            expandedCardID: $expandedID
+        )
+        .padding(.vertical)
+        .background(AppColors.background)
+    }
 }

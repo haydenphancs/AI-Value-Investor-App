@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict nRBbQvGZJy4alljx6HpiTBLhjCC4SWwzgNSprhX16CqJz9V4KHWQRrySPUN8DSB
+\restrict 3Py1YesKnc7NOq9mbWAsYIblWchxSMADSfSnqSeDVbw50oj3sTeI0Y7NmYsNgig
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -9528,6 +9528,19 @@ CREATE POLICY crypto_snapshots_service_write ON public.crypto_snapshots TO servi
 
 
 --
+-- Name: daily_briefings; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.daily_briefings ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: daily_briefings daily_briefings_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY daily_briefings_service_all ON public.daily_briefings TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: etf_detail_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -9612,6 +9625,45 @@ CREATE POLICY geopolitical_macro_cache_public_read ON public.geopolitical_macro_
 --
 
 CREATE POLICY geopolitical_macro_cache_service_write ON public.geopolitical_macro_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: health_check_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.health_check_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: health_check_cache health_check_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY health_check_cache_service_all ON public.health_check_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: hedge_fund_quarters; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.hedge_fund_quarters ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: hedge_fund_quarters hedge_fund_quarters_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY hedge_fund_quarters_service_all ON public.hedge_fund_quarters TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: holders_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.holders_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: holders_cache holders_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY holders_cache_service_all ON public.holders_cache TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -9823,6 +9875,19 @@ CREATE POLICY market_deep_dive_cache_service_write ON public.market_deep_dive_ca
 
 
 --
+-- Name: market_insights; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.market_insights ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: market_insights market_insights_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY market_insights_service_all ON public.market_insights TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: moat_intel_audit; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -9984,6 +10049,19 @@ CREATE POLICY price_catalyst_cache_service_write ON public.price_catalyst_cache 
 
 
 --
+-- Name: profit_power_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.profit_power_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: profit_power_cache profit_power_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY profit_power_cache_service_all ON public.profit_power_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: research_reports reports_delete_own; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -10025,6 +10103,19 @@ CREATE POLICY reports_update_own ON public.research_reports FOR UPDATE USING ((a
 ALTER TABLE public.research_reports ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: revenue_breakdown_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.revenue_breakdown_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: revenue_breakdown_cache revenue_breakdown_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY revenue_breakdown_cache_service_all ON public.revenue_breakdown_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: sector_aggregates; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -10061,6 +10152,19 @@ CREATE POLICY short_interest_cache_public_read ON public.short_interest_cache FO
 --
 
 CREATE POLICY short_interest_cache_service_write ON public.short_interest_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: signal_of_confidence_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.signal_of_confidence_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: signal_of_confidence_cache signal_of_confidence_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY signal_of_confidence_cache_service_all ON public.signal_of_confidence_cache TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -10115,6 +10219,19 @@ CREATE POLICY snapshots_select_all ON public.asset_snapshots FOR SELECT USING (t
 --
 
 CREATE POLICY snapshots_service_all ON public.asset_snapshots USING ((auth.role() = 'service_role'::text));
+
+
+--
+-- Name: social_mentions_history; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.social_mentions_history ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: social_mentions_history social_mentions_history_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY social_mentions_history_service_all ON public.social_mentions_history TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -10738,5 +10855,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict nRBbQvGZJy4alljx6HpiTBLhjCC4SWwzgNSprhX16CqJz9V4KHWQRrySPUN8DSB
+\unrestrict 3Py1YesKnc7NOq9mbWAsYIblWchxSMADSfSnqSeDVbw50oj3sTeI0Y7NmYsNgig
 

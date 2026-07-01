@@ -46,6 +46,10 @@ class ChatViewModel: ObservableObject {
     /// Error message (nil if no error)
     @Published var errorMessage: String?
 
+    /// Transient error for history-row actions (pin / rename / delete). Kept separate from
+    /// `errorMessage` so a failed row action never disturbs the main chat surface.
+    @Published var historyActionError: String?
+
     /// Whether we're in an active conversation (vs. empty state)
     var isInConversation: Bool {
         currentSessionId != nil && !messages.isEmpty
@@ -206,6 +210,7 @@ class ChatViewModel: ObservableObject {
                 // Remove from local state
                 historySessions.removeAll { $0.id == sessionId }
                 historyGroups = groupSessionsByDate(historySessions)
+                historyActionError = nil
 
                 // If we deleted the current session, clear the conversation
                 if currentSessionId == sessionId {
@@ -216,6 +221,55 @@ class ChatViewModel: ObservableObject {
 
             } catch {
                 print("❌ [ChatVM] Failed to delete session: \(error)")
+                historyActionError = "Couldn't delete chat — please try again."
+            }
+        }
+    }
+
+    /// Pin / unpin a session (persists `is_saved`). Replaces the local row with the server's
+    /// authoritative updated session so the history list reflects the change immediately.
+    func setPinned(_ sessionId: String, pinned: Bool) {
+        Task {
+            do {
+                print("📡 [ChatVM] \(pinned ? "Pinning" : "Unpinning") session \(sessionId)...")
+                let updated = try await APIClient.shared.request(
+                    endpoint: .updateChatSession(sessionId: sessionId, title: nil, isSaved: pinned),
+                    responseType: ChatSessionDTO.self
+                )
+                if let idx = historySessions.firstIndex(where: { $0.id == sessionId }) {
+                    historySessions[idx] = updated
+                    historyGroups = groupSessionsByDate(historySessions)
+                }
+                historyActionError = nil
+                print("✅ [ChatVM] \(pinned ? "Pinned" : "Unpinned") session \(sessionId)")
+            } catch {
+                print("❌ [ChatVM] Failed to set pin on \(sessionId): \(error)")
+                historyActionError = "Couldn't update chat — please try again."
+            }
+        }
+    }
+
+    /// Rename a session's title (persists `title`). No-op on empty input. Updates the local row
+    /// from the server's authoritative response.
+    func renameSession(_ sessionId: String, title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task {
+            do {
+                print("📡 [ChatVM] Renaming session \(sessionId)...")
+                let updated = try await APIClient.shared.request(
+                    endpoint: .updateChatSession(sessionId: sessionId, title: trimmed, isSaved: nil),
+                    responseType: ChatSessionDTO.self
+                )
+                if let idx = historySessions.firstIndex(where: { $0.id == sessionId }) {
+                    historySessions[idx] = updated
+                    historyGroups = groupSessionsByDate(historySessions)
+                }
+                historyActionError = nil
+                print("✅ [ChatVM] Renamed session \(sessionId)")
+            } catch {
+                print("❌ [ChatVM] Failed to rename \(sessionId): \(error)")
+                historyActionError = "Couldn't rename chat — please try again."
             }
         }
     }

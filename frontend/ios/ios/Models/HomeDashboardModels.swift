@@ -245,9 +245,14 @@ struct ScannerGroupDTO: Decodable {
     let gainers: [ScannerRowDTO]
     let losers: [ScannerRowDTO]
     let entries: [ScannerRowDTO]
+    /// Card-level "as of" settlement date (ISO `yyyy-MM-dd`) — SHORTS only; nil
+    /// for movers/volume (and for shorts when no shown row carries a date). The
+    /// repository renders it as the "As of Jun 15" subtitle. Optional → decode-safe.
+    let asOfDate: String?
 
     enum CodingKeys: String, CodingKey {
         case kind, gainers, losers, entries
+        case asOfDate = "as_of_date"
     }
 }
 

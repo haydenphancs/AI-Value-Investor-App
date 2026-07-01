@@ -30,12 +30,14 @@ from app.services import home_dashboard_service as svc
 from app.services.home_dashboard_service import (
     HomeDashboardService,
     _SCANNER_CACHE_KEY,
+    _canonical_symbol,
     _finite_float,
     _intraday_sparkline,
     _is_quality_company,
     _movers_from_universe,
     _parse_pct,
     _rvol,
+    _short_data_is_fresh,
     _short_pct,
     _short_rows,
     _volume_rows,
@@ -55,7 +57,7 @@ _ROW_KEYS = {
     "rank", "symbol", "name", "price", "change_percent", "market_cap",
     "volume_multiple", "short_percent_of_float", "spark",
 }
-_GROUP_KEYS = {"kind", "gainers", "losers", "entries"}
+_GROUP_KEYS = {"kind", "gainers", "losers", "entries", "as_of_date"}
 _GROUPS_KEYS = {"movers", "volume", "shorts"}
 
 
@@ -144,6 +146,22 @@ def test_is_quality_company_filters_etf_microcap_and_thin():
     assert _is_quality_company({}) is False
 
 
+def test_quality_gate_logs_when_dropping_on_missing_profile_field(caplog):
+    # A name with a MISSING marketCap is still dropped (quality bar unchanged),
+    # but the drop is now diagnosable from logs rather than silent. An ordinary
+    # present-but-too-small cap stays silent (it's a routine micro-cap filter).
+    import logging
+    missing = {"symbol": "FRESH", "companyName": "Fresh IPO", "marketCap": None,
+               "averageVolume": 5e6, "isEtf": False, "isFund": False}
+    micro = _profile("MICRO", mc=50e6, avg=2e6)  # present but below the floor
+    with caplog.at_level(logging.DEBUG, logger="app.services.home_dashboard_service"):
+        assert _is_quality_company(missing) is False
+        assert _is_quality_company(micro) is False
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("FRESH" in m and "marketCap" in m for m in msgs)
+    assert not any("MICRO" in m for m in msgs)  # routine filter must stay silent
+
+
 def test_movers_from_universe_ranks_by_change_and_splits_sign():
     pm = {
         "SMCI": _profile("SMCI", mc=30e9, avg=5e6, price=58.3),
@@ -183,6 +201,78 @@ def test_movers_from_universe_skips_non_finite_change():
     assert all(math.isfinite(r.change_percent) for r in rows)
 
 
+def test_movers_drops_near_zero_change_that_would_render_as_0pct():
+    # A finite, non-zero change whose magnitude is < 0.05 rounds to "0.0%" under
+    # the iOS "%+.1f%%" format. Such a name must NOT appear as a top mover (or,
+    # worse, rank #1 on a flat day) on either side.
+    pm = {
+        "TINYUP":   _profile("TINYUP", price=10.0),   # +0.04 → would show "+0.0%"
+        "TINYDOWN": _profile("TINYDOWN", price=10.0),  # -0.03 → would show "-0.0%"
+        "REALUP":   _profile("REALUP", price=10.0),    # +3.0
+        "REALDOWN": _profile("REALDOWN", price=10.0),  # -2.0
+    }
+    cm = {"TINYUP": 0.04, "TINYDOWN": -0.03, "REALUP": 3.0, "REALDOWN": -2.0}
+    gainers = _movers_from_universe(pm, cm, positive=True)
+    losers = _movers_from_universe(pm, cm, positive=False)
+    assert [r.symbol for r in gainers] == ["REALUP"]
+    assert [r.symbol for r in losers] == ["REALDOWN"]
+    # Boundary: exactly at the floor is kept (0.05 renders as "+0.1%").
+    cm_edge = {"EDGE": 0.05}
+    pm_edge = {"EDGE": _profile("EDGE", price=10.0)}
+    assert [r.symbol for r in _movers_from_universe(pm_edge, cm_edge, positive=True)] == ["EDGE"]
+
+
+def test_movers_never_emit_signed_negative_zero():
+    # Even if a value squeaks toward zero, the emitted change_percent must never be
+    # a signed -0.0 (which decodes as isPositive=true on iOS and paints a loser
+    # green). The abs floor drops the near-zero range; this pins the contract.
+    pm = {"A": _profile("A", price=10.0), "B": _profile("B", price=10.0)}
+    cm = {"A": -2.0, "B": -5.0}
+    for r in _movers_from_universe(pm, cm, positive=False):
+        # math.copysign distinguishes -0.0 from 0.0; assert no negative zero.
+        assert not (r.change_percent == 0.0 and math.copysign(1.0, r.change_percent) < 0)
+
+
+def test_canonical_symbol_folds_class_share_delimiter():
+    assert _canonical_symbol("BRK-B") == _canonical_symbol("BRK.B") == "BRK-B"
+    assert _canonical_symbol("aapl") == "AAPL"
+    assert _canonical_symbol(None) == ""
+    assert _canonical_symbol("") == ""
+
+
+def test_movers_joins_class_share_when_profile_symbol_uses_dot():
+    # The raw mover list returns "BRK-B" (dash) but /stable/profile echoes "BRK.B"
+    # (dot). profile_map is keyed by the profile symbol; change_map by the list
+    # symbol. The canonical join must still rank the name rather than drop it.
+    pm = {"BRK.B": _profile("BRK.B", mc=900e9, avg=4e6, price=470.0)}
+    cm = {"BRK-B": -3.1}  # keyed as the raw list delivered it
+    rows = _movers_from_universe(pm, cm, positive=False)
+    assert [r.symbol for r in rows] == ["BRK.B"]
+    assert rows[0].change_percent == -3.1
+
+
+def test_movers_tie_break_is_deterministic_by_market_cap_then_symbol():
+    # Two quality names share an identical change. The bigger market cap must rank
+    # ahead (and the result must not depend on dict/insertion order); symbol
+    # breaks an exact market-cap tie.
+    pm = {
+        "SMALL": _profile("SMALL", mc=1e9, avg=2e6, price=10.0),
+        "BIG":   _profile("BIG", mc=50e9, avg=2e6, price=10.0),
+        "TIEA":  _profile("TIEA", mc=5e9, avg=2e6, price=10.0),
+        "TIEB":  _profile("TIEB", mc=5e9, avg=2e6, price=10.0),
+    }
+    cm = {"SMALL": 5.0, "BIG": 5.0, "TIEA": 9.0, "TIEB": 9.0}
+    gainers = _movers_from_universe(pm, cm, positive=True)
+    # TIEA/TIEB lead at +9 (equal cap → symbol asc), then BIG before SMALL at +5.
+    assert [r.symbol for r in gainers] == ["TIEA", "TIEB", "BIG", "SMALL"]
+    # Losers branch keeps the same cap-desc / symbol-asc tie-break.
+    cm_neg = {"SMALL": -5.0, "BIG": -5.0}
+    losers = _movers_from_universe(
+        {"SMALL": pm["SMALL"], "BIG": pm["BIG"]}, cm_neg, positive=False
+    )
+    assert [r.symbol for r in losers] == ["BIG", "SMALL"]
+
+
 def test_volume_rows_ranks_by_rvol_desc_drops_below_threshold_etf_and_microcap():
     pm = {
         "GME":  _profile("GME", mc=10e9, avg=10e6, price=24.0, volume=84e6, changePercentage=3.2),    # 8.4x
@@ -196,6 +286,26 @@ def test_volume_rows_ranks_by_rvol_desc_drops_below_threshold_etf_and_microcap()
     assert rows[0].volume_multiple == 8.4
     assert rows[1].volume_multiple == 3.0
     assert [r.rank for r in rows] == [1, 2]
+
+
+def test_short_data_is_fresh_guards_stale_settlement():
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 6, 30, tzinfo=timezone.utc)
+    # Recent FINRA print → fresh.
+    assert _short_data_is_fresh({"settlement_date": "2026-06-15"}, now=now) is True
+    # 11-month-old print (a name that stopped being reported) → stale.
+    assert _short_data_is_fresh({"settlement_date": "2025-07-31"}, now=now) is False
+    # ~4-month-old print → stale.
+    assert _short_data_is_fresh({"settlement_date": "2026-02-27"}, now=now) is False
+    # No settlement date (Yahoo precomputed % is date-consistent) → keep.
+    assert _short_data_is_fresh({"shares_short": 1}, now=now) is True
+    # Unparseable date → don't over-filter.
+    assert _short_data_is_fresh({"settlement_date": "n/a"}, now=now) is True
+    # Boundary: exactly at the threshold is kept; one day past is dropped.
+    edge = (now - timedelta(days=svc._SHORT_MAX_SETTLEMENT_AGE_DAYS)).strftime("%Y-%m-%d")
+    over = (now - timedelta(days=svc._SHORT_MAX_SETTLEMENT_AGE_DAYS + 1)).strftime("%Y-%m-%d")
+    assert _short_data_is_fresh({"settlement_date": edge}, now=now) is True
+    assert _short_data_is_fresh({"settlement_date": over}, now=now) is False
 
 
 def test_short_rows_ranks_by_pct_of_float_desc():
@@ -246,11 +356,19 @@ class _FakeFMP:
 
     async def get_batch_quotes(self, symbols):
         await asyncio.sleep(0)
-        table = {
-            "BYND": {"symbol": "BYND", "name": "Beyond Meat", "price": 5.8, "changesPercentage": -1.2},
-            "CVNA": {"symbol": "CVNA", "name": "Carvana", "price": 244.1, "changesPercentage": 0.5},
+        # Known names + a default marketCap so every quoted symbol clears the
+        # $250M shorts floor unless a test overrides get_batch_quotes.
+        known = {
+            "BYND": {"name": "Beyond Meat", "price": 5.8, "changesPercentage": -1.2},
+            "CVNA": {"name": "Carvana", "price": 244.1, "changesPercentage": 0.5},
         }
-        return [table[s] for s in symbols if s in table]
+        out = []
+        for s in symbols:
+            q = {"symbol": s, "name": s, "price": 10.0, "changesPercentage": 0.0,
+                 "marketCap": 1e9}
+            q.update(known.get(s, {}))
+            out.append(q)
+        return out
 
     async def get_shares_float(self, ticker):
         await asyncio.sleep(0)
@@ -312,6 +430,7 @@ async def test_build_scanner_groups_movers_volume_shorts(monkeypatch):
     assert groups.shorts is not None
     assert [r.symbol for r in groups.shorts.entries] == ["CVNA", "BYND"]
     assert groups.shorts.entries[0].short_percent_of_float == 22.5
+    assert groups.shorts.as_of_date is None  # fake_si carries no settlement_date
 
 
 @pytest.mark.asyncio
@@ -560,6 +679,70 @@ async def test_shorts_computes_from_float_when_precomputed_zero(monkeypatch):
     assert group is not None
     assert group.entries[0].symbol == "AAA"
     assert group.entries[0].short_percent_of_float == 20.0  # 8M / 40M * 100
+
+
+@pytest.mark.asyncio
+async def test_shorts_applies_250m_floor_and_settlement_freshness(monkeypatch):
+    """Skeptical Money applies the same $250M floor as movers/volume, and drops a
+    name whose latest short print is stale (its % would otherwise be computed
+    against a CURRENT float → misleading)."""
+    from datetime import datetime, timezone, timedelta
+    HomeDashboardService._scanner_cache.clear()
+    HomeDashboardService._scanner_inflight.clear()
+    HomeDashboardService._float_cache.clear()
+    s = HomeDashboardService()
+
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(days=10)).strftime("%Y-%m-%d")
+    fresh_older = (now - timedelta(days=25)).strftime("%Y-%m-%d")  # still < 60d
+    stale = (now - timedelta(days=200)).strftime("%Y-%m-%d")
+
+    class _FMP(_FakeFMP):
+        async def get_batch_quotes(self, symbols):
+            await asyncio.sleep(0)
+            table = {
+                "BIGSHORT": {"symbol": "BIGSHORT", "name": "Big Short Co", "price": 30.0,
+                             "changesPercentage": -2.0, "marketCap": 5e9},
+                "OKAY":     {"symbol": "OKAY", "name": "Okay Co", "price": 12.0,
+                             "changesPercentage": 0.5, "marketCap": 800e6},
+                "MICRO":    {"symbol": "MICRO", "name": "Micro Co", "price": 2.0,
+                             "changesPercentage": 1.0, "marketCap": 60e6},   # sub-floor
+                "STALEHI":  {"symbol": "STALEHI", "name": "Stale Hi", "price": 40.0,
+                             "changesPercentage": 0.0, "marketCap": 9e9},     # big cap, stale data
+            }
+            return [table[x] for x in symbols if x in table]
+
+        async def get_shares_float(self, ticker):
+            await asyncio.sleep(0)
+            return {"floatShares": 10_000_000}
+
+    s.fmp = _FMP()  # type: ignore[assignment]
+
+    async def fake_si(ticker):
+        await asyncio.sleep(0)
+        data = {
+            "MICRO":    (8_000_000, fresh),   # 80% — but sub-$250M → dropped by floor
+            "STALEHI":  (9_000_000, stale),   # 90% — but stale settlement → dropped
+            "BIGSHORT": (4_000_000, fresh),         # 40% — kept (newer settlement)
+            "OKAY":     (2_000_000, fresh_older),   # 20% — kept (older settlement)
+        }
+        if ticker in data:
+            ss, sd = data[ticker]
+            return {"shares_short": ss, "settlement_date": sd}
+        return {}
+
+    monkeypatch.setattr(svc, "get_short_interest", fake_si)
+    monkeypatch.setattr(svc, "_load_short_universe",
+                        lambda: ["MICRO", "STALEHI", "BIGSHORT", "OKAY"])
+
+    group = await s._build_shorts()
+    assert group is not None
+    # MICRO dropped (sub-floor) despite 80%; STALEHI dropped (stale) despite 90%.
+    assert [r.symbol for r in group.entries] == ["BIGSHORT", "OKAY"]
+    assert all(r.market_cap >= 250_000_000 for r in group.entries)
+    # Card-level "as of" = the LATEST settlement among shown rows: BIGSHORT=`fresh`
+    # (newer) vs OKAY=`fresh_older` → max() picks `fresh`.
+    assert group.as_of_date == fresh
 
 
 def test_load_short_universe_dedups_and_normalizes(tmp_path, monkeypatch):

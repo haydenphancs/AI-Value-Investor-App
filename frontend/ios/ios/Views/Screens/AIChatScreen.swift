@@ -35,6 +35,11 @@ struct AIChatScreen: View {
     @State private var dismissOffset: CGFloat = 0
     /// Stable token keying this screen's audio compact reason.
     @State private var chatToken = UUID().uuidString
+    /// The history row whose Pin/Rename/Delete popup is open (nil = closed).
+    @State private var menuItem: ChatHistoryItem?
+    /// The history row being renamed (drives the rename alert) + its editable text.
+    @State private var renamingItem: ChatHistoryItem?
+    @State private var renameText: String = ""
 
     var body: some View {
         GeometryReader { geometry in
@@ -83,7 +88,7 @@ struct AIChatScreen: View {
             // doesn't show a leftover banner. Conversation/session/messages are intentionally
             // preserved (resume) — only the transient error resets.
             viewModel.errorMessage = nil
-            // Load the history list so the right-hand history icon is ready. Does NOT touch the
+            // Load the history list so the top-left history icon is ready. Does NOT touch the
             // active conversation — reopening resumes whatever the caller's ViewModel holds.
             viewModel.loadHistory()
         }
@@ -93,18 +98,18 @@ struct AIChatScreen: View {
 
     private var topBar: some View {
         HStack {
-            // Close (left)
+            // History (left)
+            HistoryButton { handleHistoryTap() }
+
+            Spacer()
+
+            // Close (right)
             Button { dismiss() } label: {
                 Image(systemName: "xmark")
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textSecondary)
             }
             .buttonStyle(.plain)
-
-            Spacer()
-
-            // History (right)
-            HistoryButton { handleHistoryTap() }
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.md)
@@ -271,10 +276,8 @@ struct AIChatScreen: View {
                         showingHistory = false
                     }
                 },
-                onItemDelete: { item in
-                    if let sessionId = item.sessionId {
-                        viewModel.deleteSession(sessionId)
-                    }
+                onItemMoreOptions: { item in
+                    menuItem = item
                 },
                 onDismiss: {
                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -283,16 +286,157 @@ struct AIChatScreen: View {
                 }
             )
 
+            // Transient error from a failed pin / rename / delete (dismissable).
+            if let actionError = viewModel.historyActionError {
+                historyActionBanner(actionError)
+            }
+
             // Bottom bar: search the history (left) + start a new chat (right, white box).
             historyBottomBar
         }
         .frame(width: width)
         .background(AppColors.background)
+        // Floating Liquid-Glass options popup, anchored under the tapped row's 3-dot.
+        .overlayPreferenceValue(ChatRowMenuAnchorKey.self) { anchors in
+            chatRowMenuOverlay(anchors)
+        }
+        .alert("Rename chat", isPresented: renameAlertPresented) {
+            TextField("Name", text: $renameText)
+            Button("Cancel", role: .cancel) { renamingItem = nil }
+            Button("Save") {
+                if let item = renamingItem, let sid = item.sessionId {
+                    viewModel.renameSession(sid, title: renameText)
+                }
+                renamingItem = nil
+            }
+            .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Enter a new name for this conversation.")
+        }
+    }
+
+    // MARK: - History Row Options Menu (Liquid Glass)
+
+    private let menuWidth: CGFloat = 200
+
+    private var renameAlertPresented: Binding<Bool> {
+        Binding(get: { renamingItem != nil }, set: { if !$0 { renamingItem = nil } })
+    }
+
+    @ViewBuilder
+    private func chatRowMenuOverlay(_ anchors: [String: Anchor<CGRect>]) -> some View {
+        // The open menu's anchor, looked up by STABLE sessionId. Gating BOTH the render and the
+        // hit-testing on this exact value means an orphaned `menuItem` (e.g. a loadHistory landing
+        // mid-open) can never leave the full-panel overlay swallowing touches with nothing drawn.
+        let activeAnchor: Anchor<CGRect>? = menuItem.flatMap { $0.sessionId }.flatMap { anchors[$0] }
+        GeometryReader { proxy in
+            if let item = menuItem, let anchor = activeAnchor {
+                let rect = proxy[anchor]
+                ZStack(alignment: .topLeading) {
+                    // Near-invisible full-panel scrim: tap anywhere to dismiss.
+                    Color.black.opacity(0.001)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                        .onTapGesture { menuItem = nil }
+
+                    chatRowMenuPanel(for: item)
+                        .frame(width: menuWidth, alignment: .leading)
+                        .padding(.vertical, AppSpacing.xs)
+                        // Same iOS Liquid Glass material as the portfolio header popup.
+                        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                        .offset(
+                            x: menuXOffset(rect: rect, in: proxy.size.width),
+                            y: menuYOffset(rect: rect, in: proxy.size.height)
+                        )
+                }
+            }
+        }
+        // Only intercept touches while the popup is actually drawn (see comment above).
+        .allowsHitTesting(activeAnchor != nil)
+    }
+
+    /// Trailing-align the popup to the 3-dot, clamped so it never spills past a panel edge.
+    private func menuXOffset(rect: CGRect, in totalWidth: CGFloat) -> CGFloat {
+        let edgeInset: CGFloat = 8
+        let desired = rect.maxX - menuWidth
+        let maxX = totalWidth - menuWidth - edgeInset
+        return min(max(edgeInset, desired), max(edgeInset, maxX))
+    }
+
+    /// Estimated popup height (3 rows + divider + vertical padding).
+    private let menuEstimatedHeight: CGFloat = 124
+
+    /// Place the popup below the 3-dot, but flip it ABOVE the row when below would overflow the
+    /// bottom (reserving room for the search / new-chat bar) so it never covers the bottom bar.
+    private func menuYOffset(rect: CGRect, in totalHeight: CGFloat) -> CGFloat {
+        let below = rect.maxY + AppSpacing.xs
+        let bottomReserve: CGFloat = 96
+        if below + menuEstimatedHeight > totalHeight - bottomReserve {
+            return max(AppSpacing.xs, rect.minY - menuEstimatedHeight - AppSpacing.xs)
+        }
+        return below
+    }
+
+    private func chatRowMenuPanel(for item: ChatHistoryItem) -> some View {
+        VStack(spacing: 0) {
+            ChatMenuRow(
+                title: item.isSaved ? "Unpin" : "Pin",
+                systemImage: item.isSaved ? "pin.slash" : "pin"
+            ) { handlePin(item) }
+
+            ChatMenuRow(title: "Rename", systemImage: "pencil") { handleRename(item) }
+
+            ChatMenuDivider()
+
+            ChatMenuRow(title: "Delete", systemImage: "trash", isDestructive: true) { handleDelete(item) }
+        }
+    }
+
+    private func handlePin(_ item: ChatHistoryItem) {
+        menuItem = nil
+        if let sid = item.sessionId {
+            viewModel.setPinned(sid, pinned: !item.isSaved)
+        }
+    }
+
+    private func handleRename(_ item: ChatHistoryItem) {
+        menuItem = nil
+        renameText = item.title
+        renamingItem = item
+    }
+
+    private func handleDelete(_ item: ChatHistoryItem) {
+        menuItem = nil
+        if let sid = item.sessionId {
+            viewModel.deleteSession(sid)
+        }
+    }
+
+    private func historyActionBanner(_ message: String) -> some View {
+        HStack(spacing: AppSpacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(AppColors.bearish)
+            Text(message)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+            Spacer()
+            Button {
+                viewModel.historyActionError = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.sm)
+        .background(AppColors.bearish.opacity(0.1))
     }
 
     /// Search history (left, fills the row) + a white-boxed "new chat" button (right).
     private var historyBottomBar: some View {
-        HStack(spacing: AppSpacing.xxl) {
+        HStack(spacing: AppSpacing.xxxl) {
             // Search field
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: "magnifyingglass")
@@ -328,6 +472,9 @@ struct AIChatScreen: View {
                 Image(systemName: "square.and.pencil")
                     .font(AppTypography.iconLarge).fontWeight(.semibold)
                     .foregroundColor(.black)
+                    // `square.and.pencil`'s pencil tip extends the glyph box upward, so plain
+                    // frame-centering renders it visually low. Nudge the icon up (box unchanged).
+                    .offset(y: -2)
                     .frame(width: 36, height: 36)
                     .background(Color.white)
                     .cornerRadius(AppCornerRadius.medium)
@@ -358,6 +505,7 @@ struct AIChatScreen: View {
             showingHistory.toggle()
         }
         if showingHistory {
+            viewModel.historyActionError = nil
             viewModel.loadHistory()
         }
     }
@@ -389,17 +537,95 @@ struct AIChatScreen: View {
     }
 }
 
+// MARK: - Liquid Glass menu row / divider (mirrors the portfolio header popup style)
+
+private struct ChatMenuRow: View {
+    let title: String
+    var systemImage: String? = nil
+    var isDestructive: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: AppSpacing.sm) {
+                // Reserved leading slot keeps every label aligned.
+                ZStack {
+                    if let systemImage {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(isDestructive ? AppColors.bearish : AppColors.textSecondary)
+                    }
+                }
+                .frame(width: 18)
+
+                Text(title)
+                    .font(.system(size: 14))
+                    .foregroundColor(isDestructive ? AppColors.bearish : AppColors.textPrimary)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ChatMenuDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.08))
+            .frame(height: 0.5)
+            .padding(.vertical, AppSpacing.xxs)
+    }
+}
+
 // MARK: - Presentation modifier
+
+/// Identifiable token so the chat presents via `.fullScreenCover(item:)` rather than `(isPresented:)`.
+/// This matters because the host screens (asset details, the report, the book/article readers) are
+/// THEMSELVES presented as `.fullScreenCover`s, and SwiftUI's `.fullScreenCover(isPresented:)` silently
+/// fails to present when nested inside another cover — while the `item:` variant presents reliably
+/// (the book's "Read"/chapter covers are item-based and work). Hosts keep their simple `Bool` binding;
+/// `AIChatCoverModifier` bridges it to a stable token internally.
+private struct ChatCoverToken: Identifiable, Equatable {
+    let id = UUID()
+}
+
+private struct AIChatCoverModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    let viewModel: ChatViewModel
+    @State private var token: ChatCoverToken?
+
+    func body(content: Content) -> some View {
+        content
+            .fullScreenCover(item: $token) { _ in
+                AIChatScreen(viewModel: viewModel)
+                    .preferredColorScheme(.dark)
+            }
+            .onChange(of: isPresented) { _, present in
+                // Create a stable token on present (don't replace an existing one — that would
+                // re-present/flicker); clear it on dismiss.
+                if present {
+                    if token == nil { token = ChatCoverToken() }
+                } else {
+                    token = nil
+                }
+            }
+            .onChange(of: token) { _, newToken in
+                // Cover dismissed itself (swipe / ✕ → item set to nil) → sync the host's Bool back.
+                if newToken == nil && isPresented { isPresented = false }
+            }
+    }
+}
 
 extension View {
     /// Present the unified full-screen AI chat. The caller owns the `ChatViewModel` (as a
     /// `@StateObject`) so the conversation resumes when reopened. Audio is re-injected across
     /// the cover boundary by `AIChatScreen`'s `.globalAudioOverlay`.
     func aiChatCover(isPresented: Binding<Bool>, viewModel: ChatViewModel) -> some View {
-        fullScreenCover(isPresented: isPresented) {
-            AIChatScreen(viewModel: viewModel)
-                .preferredColorScheme(.dark)
-        }
+        modifier(AIChatCoverModifier(isPresented: isPresented, viewModel: viewModel))
     }
 }
 

@@ -62,7 +62,12 @@ _SIGNALS_BUILD_TIMEOUT_SECONDS = 8       # never let a cold build block the dash
 _SIGNAL_ROWS = 5                         # drill-down leaders per card
 
 # Congress
-_CONGRESS_WINDOW_DAYS = 14               # window on DISCLOSURE date
+# Window on DISCLOSURE date. 30 days (not 14): congressional filings lag 30-45 days
+# and cluster, so a 2-week window almost never accumulates ≥2 members on one ticker
+# (verified against live data — a 14d window left every ticker at 1 member and hid
+# the card). 30d reliably surfaces the mega-caps (AAPL/GOOGL/MSFT ≈ 3 members) while
+# staying "this month" fresh. Keep the iOS subtitle in sync with this span.
+_CONGRESS_WINDOW_DAYS = 30
 _CONGRESS_MIN_MEMBERS = 2                # a "most-bought" headline needs > 1 member
 
 # Whale

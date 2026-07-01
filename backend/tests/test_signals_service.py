@@ -29,7 +29,7 @@ from app.services.signals_service import (
     _aggregate_earnings,
 )
 
-# Fixed "now" so disclosure windowing is deterministic. 14-day window → on/after 2026-06-16.
+# Fixed "now" so disclosure windowing is deterministic. 30-day window → on/after 2026-05-31.
 NOW = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
 
 
@@ -346,18 +346,18 @@ def test_congress_includes_future_disclosure_within_2day_buffer():
     assert g is not None and [r.symbol for r in g.entries] == ["INCL"]
 
 
-def test_congress_past_window_boundary_14_in_15_out():
-    # 14 days back (2026-06-16) included; 15 days back (2026-06-15) excluded.
+def test_congress_past_window_boundary_30_in_31_out():
+    # 30 days back (2026-05-31) included; 31 days back (2026-05-30) excluded.
     senate = [
-        {"symbol": "IN", "type": "Purchase", "disclosureDate": "2026-06-16", "lastName": "A"},
-        {"symbol": "IN", "type": "Purchase", "disclosureDate": "2026-06-16", "lastName": "B"},
-        {"symbol": "OUT", "type": "Purchase", "disclosureDate": "2026-06-15", "lastName": "C"},
-        {"symbol": "OUT", "type": "Purchase", "disclosureDate": "2026-06-15", "lastName": "D"},
+        {"symbol": "IN", "type": "Purchase", "disclosureDate": "2026-05-31", "lastName": "A"},
+        {"symbol": "IN", "type": "Purchase", "disclosureDate": "2026-05-31", "lastName": "B"},
+        {"symbol": "OUT", "type": "Purchase", "disclosureDate": "2026-05-30", "lastName": "C"},
+        {"symbol": "OUT", "type": "Purchase", "disclosureDate": "2026-05-30", "lastName": "D"},
     ]
     g = _aggregate_congress(senate, [], now=NOW)
     assert g is not None
     assert [r.symbol for r in g.entries] == ["IN"]
-    assert g.as_of_date == "2026-06-16"
+    assert g.as_of_date == "2026-05-31"
 
 
 def test_congress_two_members_different_tickers_returns_none():

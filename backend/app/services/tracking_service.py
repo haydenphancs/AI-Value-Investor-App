@@ -28,6 +28,11 @@ from app.schemas.tracking import (
 )
 from app.services._insider_common import classify_for_alerts
 from app.services._analyst_common import classify_for_alerts as classify_analyst_for_alerts
+from app.services._whale_common import (
+    parse_congress_amount_bounds,
+    sum_amount_bounds,
+    format_amount_range,
+)
 from app.services._earnings_common import (
     parse_fmp_timing,
     timing_sentence,
@@ -410,7 +415,7 @@ class TrackingService:
         try:
             result = (
                 sb.table("whale_trades")
-                .select("ticker, company_name, action, amount, date, created_at, whale_id, whales(name, avatar_url)")
+                .select("ticker, company_name, action, amount, amount_range, date, created_at, whale_id, whales(name, avatar_url)")
                 .in_("ticker", ticker_list)
                 .gte("created_at", cutoff_iso)
                 .order("created_at", desc=True)
@@ -423,6 +428,10 @@ class TrackingService:
             return []
 
         # First pass: bucket by (ticker, action) — each bucket becomes one item.
+        # Each row contributes (low, high) dollar bounds: for congress trades the
+        # STOCK Act range; for institutional trades an exact point (low == high).
+        # Summing the bounds yields an honest range for congress and collapses to
+        # a single figure when everything is exact (13F only).
         buckets: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for row in rows:
             ticker = (row.get("ticker") or "").upper()
@@ -435,6 +444,7 @@ class TrackingService:
                 {
                     "company_name": row.get("company_name") or ticker,
                     "total_amount": 0.0,
+                    "bounds": [],
                     "whale_ids": set(),
                     "lead_whale_id": None,
                     "lead_whale_name": None,
@@ -442,9 +452,17 @@ class TrackingService:
                 },
             )
             try:
-                bucket["total_amount"] += float(row.get("amount") or 0)
+                amt = float(row.get("amount") or 0)
             except (TypeError, ValueError):
-                pass
+                amt = 0.0
+            bucket["total_amount"] += amt
+            amount_range = row.get("amount_range")
+            if amount_range:
+                bucket["bounds"].append(
+                    parse_congress_amount_bounds(amount_range)
+                )
+            else:
+                bucket["bounds"].append((amt, amt))
             whale_id = row.get("whale_id")
             if whale_id:
                 bucket["whale_ids"].add(whale_id)
@@ -461,12 +479,18 @@ class TrackingService:
             "sold": [],
         }
         action_totals: Dict[str, float] = {"bought": 0.0, "sold": 0.0}
+        action_bounds: Dict[str, List[Tuple[float, Optional[float]]]] = {
+            "bought": [],
+            "sold": [],
+        }
         for (ticker, action), bucket in buckets.items():
             whale_count = len(bucket["whale_ids"])
             if whale_count == 0:
                 continue
             action_word = "bought" if action == "BOUGHT" else "sold"
-            amount_label = _format_amount(bucket["total_amount"])
+            amount_label = _format_amount_or_range(
+                bucket["bounds"], bucket["total_amount"]
+            )
             action_groups[action_word].append(
                 WhaleTradeItemResponse(
                     ticker=ticker,
@@ -480,17 +504,18 @@ class TrackingService:
                 )
             )
             action_totals[action_word] += bucket["total_amount"]
+            action_bounds[action_word].extend(bucket["bounds"])
 
         alerts: List[AlertResponse] = []
         for action_word in ("bought", "sold"):
             items = action_groups[action_word]
             if not items:
                 continue
-            # Largest position first
-            items.sort(
-                key=lambda it: _amount_sort_key(it.amount), reverse=True
+            # Largest position first (by midpoint magnitude, not the label)
+            items.sort(key=lambda it: it.raw_amount, reverse=True)
+            total_label = _format_amount_or_range(
+                action_bounds[action_word], action_totals[action_word]
             )
-            total_label = _format_amount(action_totals[action_word])
             title = "Whales Bought" if action_word == "bought" else "Whales Sold"
             description = (
                 f"{_join_tickers([it.ticker for it in items])} this week"
@@ -752,6 +777,27 @@ def _format_amount(value: float) -> str:
     if amt >= 1_000:
         return f"${amt / 1_000:.0f}K"
     return f"${amt:.0f}"
+
+
+def _format_amount_or_range(
+    bounds: List[Tuple[float, Optional[float]]], midpoint_sum: float
+) -> str:
+    """Format a rolled-up whale amount honestly.
+
+    ``bounds`` is a list of ``(low, high)`` per underlying trade. Institutional
+    (13F) trades are exact points (``low == high``); congressional trades are
+    STOCK Act ranges. If ANY bound is a true range (or open-ended), show the
+    summed range (e.g. ``"$455K – $705K"``); otherwise collapse to the single
+    exact figure (13F-only bucket).
+    """
+    if not bounds:
+        return _format_amount(midpoint_sum)
+    has_range = any(h is None or abs((h if h is not None else lo) - lo) > 1.0
+                    for lo, h in bounds)
+    if has_range:
+        low, high = sum_amount_bounds(bounds)
+        return format_amount_range(low, high)
+    return _format_amount(midpoint_sum)
 
 
 def _amount_sort_key(label: str) -> float:

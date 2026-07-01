@@ -204,6 +204,9 @@ struct WhaleTradeGroupDTO: Codable {
     let tradeCount: Int
     let netAction: String
     let netAmount: Double
+    let netAmountRange: String?
+    let disclosureDate: String?
+    let transactionDate: String?
     let summary: String?
     let insights: [String]
     let trades: [WhaleTradeDTO]
@@ -213,6 +216,9 @@ struct WhaleTradeGroupDTO: Codable {
         case tradeCount = "trade_count"
         case netAction = "net_action"
         case netAmount = "net_amount"
+        case netAmountRange = "net_amount_range"
+        case disclosureDate = "disclosure_date"
+        case transactionDate = "transaction_date"
     }
 
     func toWhaleTradeGroup() -> WhaleTradeGroup {
@@ -222,6 +228,9 @@ struct WhaleTradeGroupDTO: Codable {
             tradeCount: tradeCount,
             netAction: WhaleTradeAction(rawValue: netAction) ?? .bought,
             netAmount: netAmount,
+            netAmountRange: netAmountRange,
+            disclosureDate: disclosureDate.flatMap { DateParser.parseDateOptional($0) },
+            transactionDate: transactionDate.flatMap { DateParser.parseDateOptional($0) },
             summary: summary,
             insights: insights,
             trades: trades.map { $0.toWhaleTrade() }
@@ -242,6 +251,7 @@ struct WhaleTradeDTO: Codable {
     let previousAllocation: Double
     let newAllocation: Double
     let date: String
+    let disclosureDate: String?
     let assetType: String?
 
     enum CodingKeys: String, CodingKey {
@@ -251,6 +261,7 @@ struct WhaleTradeDTO: Codable {
         case amountRange = "amount_range"
         case previousAllocation = "previous_allocation"
         case newAllocation = "new_allocation"
+        case disclosureDate = "disclosure_date"
         case assetType = "asset_type"
     }
 
@@ -266,6 +277,7 @@ struct WhaleTradeDTO: Codable {
             previousAllocation: previousAllocation,
             newAllocation: newAllocation,
             date: DateParser.parseDate(date),
+            disclosureDate: disclosureDate.flatMap { DateParser.parseDateOptional($0) },
             assetType: assetType ?? "stock"
         )
     }
@@ -320,14 +332,21 @@ enum DateParser {
 
     private static let isoFormatter = ISO8601DateFormatter()
 
-    static func parseDate(_ dateString: String) -> Date {
-        if let date = dateFormatter.date(from: dateString) {
-            return date
-        }
-        if let date = isoFormatter.date(from: dateString) {
-            return date
-        }
+    /// Optional parse — returns nil (never a fabricated "now") on empty/bad input.
+    static func parseDateOptional(_ dateString: String) -> Date? {
+        if dateString.isEmpty { return nil }
+        if let date = dateFormatter.date(from: dateString) { return date }
+        if let date = isoFormatter.date(from: dateString) { return date }
+        #if DEBUG
         print("[DateParser] ⚠️ Failed to parse date: \(dateString)")
-        return Date()
+        #endif
+        return nil
+    }
+
+    /// Non-optional parse. On failure returns `.distantPast` (a sentinel the
+    /// formatters treat as "date unavailable") — NOT `Date()`, which would
+    /// masquerade an unparseable date as a fabricated "Today".
+    static func parseDate(_ dateString: String) -> Date {
+        parseDateOptional(dateString) ?? .distantPast
     }
 }

@@ -44,6 +44,13 @@ from app.integrations.gemini import GeminiClient  # noqa: E402
 from app.services.whale_service import (  # noqa: E402
     SIC_TO_SECTOR, SECTOR_COLORS, DEFAULT_SECTOR_COLOR, _map_sic_to_sector,
 )
+from app.services._whale_common import (  # noqa: E402
+    parse_congress_amount_dollars,
+    parse_congress_amount_bounds,
+    sum_amount_bounds,
+    format_amount_range,
+)
+from app.services.agents.persona_config import _IDENTITY_RULE  # noqa: E402
 
 logger = logging.getLogger("hydrate_whales")
 
@@ -57,20 +64,9 @@ FMP_BATCH_SIZE = 30
 # are imported from app.services.whale_service (single source of truth).
 
 
-# Congressional amount range → midpoint
-AMOUNT_RANGES: Dict[str, float] = {
-    "$1,001 - $15,000": 8_000,
-    "$15,001 - $50,000": 32_500,
-    "$50,001 - $100,000": 75_000,
-    "$100,001 - $250,000": 175_000,
-    "$250,001 - $500,000": 375_000,
-    "$500,001 - $1,000,000": 750_000,
-    "$1,000,001 - $5,000,000": 3_000_000,
-    "$5,000,001 - $25,000,000": 15_000_000,
-    "$25,000,001 - $50,000,000": 37_500_000,
-    "$50,000,001 - $100,000,000": 75_000_000,
-    "Over $50,000,000": 75_000_000,
-}
+# Congressional amount parsing (midpoint for internal math, bounds for the
+# honest display range) lives in app.services._whale_common — single source of
+# truth shared with whale_service, so both agree on the same numbers.
 
 CONGRESSIONAL_TYPE_MAP: Dict[str, str] = {
     "purchase": "BOUGHT",
@@ -195,7 +191,13 @@ class WhaleHydrator:
 
         holdings = raw["holdings"]
         sectors = raw["sectors"]
-        trade_group = raw["trade_group"]
+        # 13F returns a single "trade_group"; congress returns "trade_groups".
+        single_group = raw.get("trade_group")
+        trade_groups = raw.get("trade_groups") or (
+            [single_group] if single_group else []
+        )
+        primary_group = trade_groups[0] if trade_groups else None
+        is_congress = raw.get("is_congress", False)
         total_value = raw["total_value"]
         raw_hash = raw["raw_hash"]
         perf_data = raw.get("perf_data", {})
@@ -236,7 +238,7 @@ class WhaleHydrator:
 
         # Step 6: AI summaries (parallel)
         behavior, sentiment = await self._generate_ai_summaries(
-            name, holdings, trade_group, sectors
+            name, holdings, primary_group, sectors, is_congress=is_congress
         )
 
         # Step 7: Compute ytd_return + risk profile
@@ -244,7 +246,7 @@ class WhaleHydrator:
             whale_id, total_value, perf_data_list, whale=whale
         )
         risk_profile = self._compute_risk_profile(
-            holdings, sectors, trade_group, perf_data
+            holdings, sectors, primary_group, perf_data
         )
 
         # Step 8: Persist
@@ -255,7 +257,8 @@ class WhaleHydrator:
             "total_value": total_value,
             "holdings_data": holdings,
             "sector_data": sectors,
-            "trade_group": trade_group,
+            "trade_group": primary_group,   # backward-compat (most recent)
+            "trade_groups": trade_groups,   # full per-filing timeline
             "behavior_summary": behavior,
             "sentiment_text": sentiment,
             "raw_hash": raw_hash,
@@ -379,7 +382,7 @@ class WhaleHydrator:
         if not raw_trades:
             return None
 
-        holdings, trade_group = self._aggregate_congressional(
+        holdings, trade_groups = self._aggregate_congressional(
             raw_trades, now.strftime("%Y-%m-%d")
         )
         total_value = sum(h.get("value", 0) for h in holdings)
@@ -406,7 +409,8 @@ class WhaleHydrator:
             "holdings": holdings,
             "prev_holdings": prev_holdings,
             "sectors": [],  # Filled later in step 5
-            "trade_group": trade_group,
+            "trade_groups": trade_groups,
+            "is_congress": True,
             "total_value": total_value,
             "raw_hash": raw_hash,
             "perf_data": {},
@@ -464,8 +468,16 @@ class WhaleHydrator:
 
     def _aggregate_congressional(
         self, raw_trades: List[Dict], as_of_date: str
-    ) -> Tuple[List[Dict], Optional[Dict]]:
-        """Aggregate congressional trades into holdings + trade group."""
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """Aggregate congressional trades into holdings + per-filing groups.
+
+        Groups by ``disclosureDate`` (STOCK Act filing), NOT by ``now`` — so
+        each group is dated by when it became public and is stable/de-dupable
+        across hydration runs (the old ``date=as_of_date`` stamp created a new
+        "today" group on every daily/6-hourly run → the fake Today/Yesterday
+        timeline). Each trade preserves its STOCK Act range string + parsed
+        bounds so the UI shows honest ranges instead of midpoints.
+        """
         trades = []
         holdings_accum: Dict[str, Dict] = {}
 
@@ -477,11 +489,19 @@ class WhaleHydrator:
             raw_type = (t.get("type") or "").lower().strip()
             action = CONGRESSIONAL_TYPE_MAP.get(raw_type, "BOUGHT")
             amount_str = t.get("amount") or "$1,001 - $15,000"
-            amount = AMOUNT_RANGES.get(amount_str, 8_000)
+            amount = parse_congress_amount_dollars(amount_str) or 8_000
+            amount_low, amount_high = parse_congress_amount_bounds(amount_str)
             tx_date = (
                 t.get("transactionDate")
                 or t.get("transaction_date")
                 or as_of_date
+            )
+            disclosure_date = (
+                t.get("disclosureDate")
+                or t.get("disclosure_date")
+                or t.get("dateRecieved")
+                or t.get("dateReceived")
+                or tx_date
             )
             name = (
                 t.get("assetDescription")
@@ -497,9 +517,13 @@ class WhaleHydrator:
                 "action": action,
                 "trade_type": trade_type,
                 "amount": amount,
+                "amount_range": amount_str,
+                "amount_low": amount_low,
+                "amount_high": amount_high,
                 "previous_allocation": 0,
                 "new_allocation": 0,
                 "date": tx_date,
+                "disclosure_date": disclosure_date,
             })
 
             if symbol not in holdings_accum:
@@ -523,41 +547,73 @@ class WhaleHydrator:
             h["allocation"] = round(h["value"] / total * 100, 2)
         holdings.sort(key=lambda x: x["value"], reverse=True)
 
-        # Trade group from recent 90 days
-        cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
-        recent = [t for t in trades if t.get("date", "") >= cutoff]
-        if not recent:
-            recent = trades[:20]
+        # Group trades by disclosure filing → one group per disclosure date
+        by_disclosure: Dict[str, List[Dict]] = {}
+        for t in trades:
+            key = t.get("disclosure_date") or t.get("date") or as_of_date
+            by_disclosure.setdefault(key, []).append(t)
 
-        trade_group = None
-        if recent:
+        trade_groups: List[Dict] = []
+        for disclosure_date, filing_trades in by_disclosure.items():
             total_bought = sum(
-                t["amount"] for t in recent if t["action"] == "BOUGHT"
+                t["amount"] for t in filing_trades if t["action"] == "BOUGHT"
             )
             total_sold = sum(
-                t["amount"] for t in recent if t["action"] == "SOLD"
+                t["amount"] for t in filing_trades if t["action"] == "SOLD"
             )
             net_dollar = total_bought - total_sold
             net_action = "BOUGHT" if net_dollar >= 0 else "SOLD"
 
-            buys = [t for t in recent if t["action"] == "BOUGHT"]
-            sells = [t for t in recent if t["action"] == "SOLD"]
+            buys = [t for t in filing_trades if t["action"] == "BOUGHT"]
+            sells = [t for t in filing_trades if t["action"] == "SOLD"]
             summary = _generate_trade_summary(buys, sells, net_action)
-            insights = _generate_trade_insights(
-                recent, total_bought, total_sold
+
+            direction_bounds = [
+                (t.get("amount_low", 0.0), t.get("amount_high", 0.0))
+                for t in filing_trades
+                if t["action"] == net_action
+            ]
+            net_amount_range = (
+                format_amount_range(*sum_amount_bounds(direction_bounds))
+                if direction_bounds
+                else None
             )
 
-            trade_group = {
-                "date": as_of_date,
-                "trade_count": len(recent),
+            # Congress insights use the disclosed RANGE — never a precise dollar.
+            insights = []
+            if net_amount_range:
+                verb = "buying" if net_action == "BOUGHT" else "selling"
+                insights.append(
+                    f"Net {verb} of {net_amount_range} (disclosed range)"
+                )
+            new_tickers = [
+                t["ticker"] for t in filing_trades if t["trade_type"] == "New"
+            ][:3]
+            if new_tickers:
+                insights.append(f"New positions: {', '.join(new_tickers)}")
+            insights = insights[:4]
+
+            transaction_date = max(
+                (t.get("date", "") for t in filing_trades), default=""
+            )
+
+            trade_groups.append({
+                "date": disclosure_date,
+                "disclosure_date": disclosure_date,
+                "transaction_date": transaction_date,
+                "trade_count": len(filing_trades),
                 "net_action": net_action,
                 "net_amount": abs(net_dollar),
+                "net_amount_range": net_amount_range,
                 "summary": summary,
                 "insights": insights,
-                "trades": recent[:50],
-            }
+                "trades": sorted(
+                    filing_trades, key=lambda t: t["amount"], reverse=True
+                )[:50],
+            })
 
-        return holdings[:30], trade_group
+        trade_groups.sort(key=lambda g: g["date"], reverse=True)
+        return holdings[:30], trade_groups[:12]
 
     # ── Quarter Diffing (13F) ────────────────────────────────────────
 
@@ -875,13 +931,14 @@ class WhaleHydrator:
         holdings: List[Dict],
         trade_group: Optional[Dict],
         sectors: List[Dict],
+        is_congress: bool = False,
     ) -> Tuple[Dict, str]:
         """Generate behavior + sentiment via Gemini in parallel."""
         behavior_task = self._ai_behavior(
-            whale_name, holdings, trade_group, sectors
+            whale_name, holdings, trade_group, sectors, is_congress
         )
         sentiment_task = self._ai_sentiment(
-            whale_name, holdings, trade_group, sectors
+            whale_name, holdings, trade_group, sectors, is_congress
         )
 
         results = await asyncio.gather(
@@ -903,7 +960,9 @@ class WhaleHydrator:
                 "  Gemini sentiment failed for %s, using fallback: %s",
                 whale_name, sentiment,
             )
-            sentiment = _fallback_sentiment(holdings, trade_group, sectors)
+            sentiment = _fallback_sentiment(
+                holdings, trade_group, sectors, is_congress
+            )
 
         return behavior, sentiment
 
@@ -913,6 +972,7 @@ class WhaleHydrator:
         holdings: List[Dict],
         trade_group: Optional[Dict],
         sectors: List[Dict],
+        is_congress: bool = False,
     ) -> Dict[str, str]:
         """Gemini JSON generation for behavior summary."""
         top_holdings_str = ", ".join(
@@ -934,12 +994,22 @@ class WhaleHydrator:
                 1 for t in trade_group.get("trades", [])
                 if t["action"] == "SOLD"
             )
-            trade_info = (
-                f"{trade_group['trade_count']} trades: "
-                f"{buys} buys, {sells} sells. "
-                f"Net: {trade_group['net_action']} "
-                f"${trade_group.get('net_amount', 0):,.0f}"
-            )
+            if is_congress:
+                # Congress: direction + range only, NEVER a precise dollar sum.
+                rng = trade_group.get("net_amount_range")
+                amount_txt = f" ({rng})" if rng else ""
+                trade_info = (
+                    f"{trade_group['trade_count']} disclosed trades: "
+                    f"{buys} buys, {sells} sells. "
+                    f"Net direction: {trade_group['net_action']}{amount_txt}"
+                )
+            else:
+                trade_info = (
+                    f"{trade_group['trade_count']} trades: "
+                    f"{buys} buys, {sells} sells. "
+                    f"Net: {trade_group['net_action']} "
+                    f"${trade_group.get('net_amount', 0):,.0f}"
+                )
 
         prompt = (
             f"Analyze the recent investment behavior of {whale_name}.\n\n"
@@ -958,7 +1028,7 @@ class WhaleHydrator:
             f"Be specific to {whale_name}'s actual data."
         )
 
-        system = (
+        system = _IDENTITY_RULE + (
             "You are a financial analyst summarizing institutional investor "
             "behavior. Return only valid JSON matching the schema. Be concise."
         )
@@ -983,6 +1053,7 @@ class WhaleHydrator:
         holdings: List[Dict],
         trade_group: Optional[Dict],
         sectors: List[Dict],
+        is_congress: bool = False,
     ) -> str:
         """Gemini text generation for sentiment paragraph."""
         top_holdings_str = ", ".join(
@@ -1003,35 +1074,66 @@ class WhaleHydrator:
             top_sells = [
                 t["ticker"] for t in trades if t["action"] == "SOLD"
             ][:3]
-            trade_info = (
-                f"Recent filing: {trade_group['trade_count']} trades, "
-                f"net {trade_group['net_action'].lower()} "
-                f"${trade_group.get('net_amount', 0):,.0f}. "
-            )
+            if is_congress:
+                # Congress: NO precise dollar amount — only direction + range.
+                rng = trade_group.get("net_amount_range")
+                amount_txt = f" ({rng})" if rng else ""
+                trade_info = (
+                    f"Latest disclosure: {trade_group['trade_count']} trades, "
+                    f"net {trade_group['net_action'].lower()}{amount_txt}. "
+                )
+            else:
+                trade_info = (
+                    f"Recent filing: {trade_group['trade_count']} trades, "
+                    f"net {trade_group['net_action'].lower()} "
+                    f"${trade_group.get('net_amount', 0):,.0f}. "
+                )
             if top_buys:
                 trade_info += f"Top buys: {', '.join(top_buys)}. "
             if top_sells:
                 trade_info += f"Top sells: {', '.join(top_sells)}. "
 
-        prompt = (
-            f"Write a 2-3 sentence investment sentiment summary for "
-            f"{whale_name}.\n\n"
-            f"Portfolio Data:\n"
-            f"- Top Holdings: {top_holdings_str}\n"
-            f"- Sector Exposure: {top_sectors_str}\n"
-            f"- {trade_info}\n\n"
-            "Requirements:\n"
-            "- Describe overall investment posture\n"
-            "- Mention specific sectors or holdings being emphasized\n"
-            "- Note any notable strategy shifts\n"
-            "- Third person, present tense, under 60 words\n"
-            "- Be specific to the actual data"
-        )
+        if is_congress:
+            prompt = (
+                f"Write a 2-3 sentence summary of the recent disclosed trading "
+                f"activity of {whale_name}.\n\n"
+                f"Disclosed Data:\n"
+                f"- Recently Traded: {top_holdings_str}\n"
+                f"- Sector Exposure: {top_sectors_str}\n"
+                f"- {trade_info}\n\n"
+                "Requirements:\n"
+                "- These are congressional STOCK Act disclosures reported ONLY "
+                "as dollar RANGES, on a 30-45 day lag. NEVER state a precise "
+                "dollar figure — say 'a range of' or use the provided range.\n"
+                "- Describe only the disclosed direction (net buying/selling) "
+                "and the tickers/sectors listed above.\n"
+                "- Do NOT infer motive, strategy, sentiment, or investment "
+                "thesis (no 'profit-taking', 'cautious stance', 'conviction', "
+                "etc.). Stick strictly to what was disclosed.\n"
+                "- Third person, present tense, under 55 words.\n"
+                "- Only reference the tickers and sectors provided above."
+            )
+        else:
+            prompt = (
+                f"Write a 2-3 sentence investment sentiment summary for "
+                f"{whale_name}.\n\n"
+                f"Portfolio Data:\n"
+                f"- Top Holdings: {top_holdings_str}\n"
+                f"- Sector Exposure: {top_sectors_str}\n"
+                f"- {trade_info}\n\n"
+                "Requirements:\n"
+                "- Describe overall investment posture\n"
+                "- Mention specific sectors or holdings being emphasized\n"
+                "- Note any notable strategy shifts\n"
+                "- Third person, present tense, under 60 words\n"
+                "- Be specific to the actual data"
+            )
 
-        system = (
-            "You are a financial analyst writing concise investor sentiment "
-            "summaries. Write naturally without markdown. Return only the "
-            "summary paragraph."
+        system = _IDENTITY_RULE + (
+            "You are a financial analyst writing concise investor summaries. "
+            "Write naturally without markdown. Only state facts present in the "
+            "provided data — never fabricate figures. Return only the summary "
+            "paragraph."
         )
 
         async with GEMINI_SEMAPHORE:
@@ -1259,9 +1361,14 @@ class WhaleHydrator:
         except Exception as e:
             logger.error("  Failed to sync sectors: %s", e)
 
-        # 5. Insert trade group + trades (skip if date already exists)
-        tg = snapshot.get("trade_group")
-        if tg:
+        # 5. Insert trade groups + trades (one per filing; skip existing dates)
+        groups = snapshot.get("trade_groups")
+        if not groups:
+            single = snapshot.get("trade_group")
+            groups = [single] if single else []
+        for tg in groups:
+            if not tg or not tg.get("date"):
+                continue
             try:
                 existing = (
                     sb.table("whale_trade_groups")
@@ -1270,38 +1377,44 @@ class WhaleHydrator:
                     .eq("date", tg["date"])
                     .execute()
                 )
-                if not existing.data:
-                    tg_result = sb.table("whale_trade_groups").insert({
-                        "whale_id": whale_id,
-                        "date": tg["date"],
-                        "trade_count": tg["trade_count"],
-                        "net_action": tg["net_action"],
-                        "net_amount": tg["net_amount"],
-                        "summary": tg.get("summary"),
-                        "insights": tg.get("insights", []),
-                    }).execute()
+                if existing.data:
+                    continue
+                tg_result = sb.table("whale_trade_groups").insert({
+                    "whale_id": whale_id,
+                    "date": tg["date"],
+                    "trade_count": tg["trade_count"],
+                    "net_action": tg["net_action"],
+                    "net_amount": tg["net_amount"],
+                    "summary": tg.get("summary"),
+                    "insights": tg.get("insights", []),
+                }).execute()
 
-                    if tg_result.data:
-                        tg_id = tg_result.data[0]["id"]
-                        for trade in tg.get("trades", [])[:50]:
-                            sb.table("whale_trades").insert({
-                                "whale_id": whale_id,
-                                "trade_group_id": tg_id,
-                                "ticker": trade["ticker"],
-                                "company_name": trade.get(
-                                    "company_name", trade["ticker"]
-                                ),
-                                "action": trade["action"],
-                                "trade_type": trade["trade_type"],
-                                "amount": trade["amount"],
-                                "previous_allocation": trade.get(
-                                    "previous_allocation"
-                                ),
-                                "new_allocation": trade.get(
-                                    "new_allocation"
-                                ),
-                                "date": trade.get("date", ""),
-                            }).execute()
+                if not tg_result.data:
+                    continue
+                tg_id = tg_result.data[0]["id"]
+                for trade in tg.get("trades", [])[:50]:
+                    sb.table("whale_trades").insert({
+                        "whale_id": whale_id,
+                        "trade_group_id": tg_id,
+                        "ticker": trade["ticker"],
+                        "company_name": trade.get(
+                            "company_name", trade["ticker"]
+                        ),
+                        "action": trade["action"],
+                        "trade_type": trade["trade_type"],
+                        "amount": trade["amount"],
+                        # Congress STOCK Act range + disclosure date (None for
+                        # 13F). Requires migration #076 columns.
+                        "amount_range": trade.get("amount_range"),
+                        "disclosure_date": trade.get("disclosure_date"),
+                        "previous_allocation": trade.get(
+                            "previous_allocation"
+                        ),
+                        "new_allocation": trade.get(
+                            "new_allocation"
+                        ),
+                        "date": trade.get("date", ""),
+                    }).execute()
             except Exception as e:
                 logger.error("  Failed to sync trade group: %s", e)
 
@@ -1487,14 +1600,30 @@ def _fallback_sentiment(
     holdings: List[Dict],
     trade_group: Optional[Dict],
     sectors: List[Dict],
+    is_congress: bool = False,
 ) -> str:
-    """Rule-based fallback when Gemini fails."""
+    """Rule-based fallback when Gemini fails.
+
+    For congress, dollar figures are STOCK Act ranges disclosed on a lag, so
+    never state a precise net amount — describe direction + range instead.
+    """
     top_tickers = ", ".join(h["ticker"] for h in holdings[:5])
     top_sector = sectors[0]["name"] if sectors else "various sectors"
 
     if trade_group:
         activity = trade_group.get("summary", "active rebalancing")
         net_action = trade_group.get("net_action", "BOUGHT")
+
+        if is_congress:
+            direction = "net buying" if net_action == "BOUGHT" else "net selling"
+            rng = trade_group.get("net_amount_range")
+            amount_text = f" ({rng})" if rng else ""
+            return (
+                f"Recent disclosures show {direction}{amount_text} across "
+                f"positions in {top_tickers}. Amounts are STOCK Act ranges "
+                f"disclosed on a 30-45 day lag. Activity summary: {activity}."
+            )
+
         net_amount = trade_group.get("net_amount", 0)
         action_text = (
             f"net buying of {_format_amount(net_amount, net_action)}"

@@ -138,6 +138,9 @@ struct SignalLeader: Identifiable, Hashable {
 /// One row in the glowing "App-Exclusive Signals" card.
 struct ExclusiveSignal: Identifiable {
     let id = UUID()
+    /// "congress" | "whale" | "earnings" — routes the leader tap (whale/congress
+    /// open the per-ticker detail; earnings opens TickerDetailView directly).
+    let kind: String
     let title: String
     let subtitle: String
     let iconSystemName: String

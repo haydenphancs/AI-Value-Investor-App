@@ -35,6 +35,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import re
+
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.services.earnings_service import _compute_surprise
@@ -42,10 +44,18 @@ from app.services.earnings_service import _compute_surprise
 # (BRK.B ↔ BRK-B) and reject NaN/Inf exactly like the scanners do. NOTE: the
 # dashboard service must import THIS module function-locally to avoid a cycle.
 from app.services.home_dashboard_service import _canonical_symbol, _finite_float
+from app.services._whale_common import (
+    parse_congress_amount_bounds,
+    format_amount_range,
+)
 from app.schemas.home_dashboard import (
     SignalsGroupResponse,
     SignalGroupResponse,
     SignalRowResponse,
+)
+from app.schemas.signals_detail import (
+    SignalTickerDetailResponse,
+    SignalHolderResponse,
 )
 from pydantic import ValidationError
 
@@ -55,7 +65,11 @@ logger = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────
 _SIGNALS_MEM_TTL_SECONDS = 2700          # 45 min in-memory freshness ceiling
 _SIGNALS_SUPABASE_TTL_HOURS = 24         # Tier-2 survives restart; sources daily/quarterly
-_SIGNALS_CACHE_KEY = "signals"
+_SIGNALS_CACHE_KEY = "signals_v2"        # bump to invalidate stale rows written by the
+                                         # pre-30d-window / pre-10-rows code — the old
+                                         # "signals" row (congress=null, 5 whale) lingers
+                                         # for its 24h TTL but is now ignored, so a redeploy
+                                         # serves fresh data immediately (self-healing).
 _SIGNALS_TABLE = "signals_cache"
 _SIGNALS_BUILD_TIMEOUT_SECONDS = 8       # never let a cold build block the dashboard
 
@@ -82,6 +96,45 @@ _EARNINGS_QUOTE_CANDIDATES = 25          # rank this many, then apply the market
 _EARNINGS_MIN_MARKET_CAP = 250_000_000   # $250M quality floor (parity with the scanner cards)
 
 _BAD_SYMBOLS = {"", "--", "N/A", "NA", "NONE"}
+
+# Per-ticker drill-down (tap a signal ticker → who bought it). On-demand, so a
+# short in-memory tier + inflight dedup is enough (no Supabase tier).
+_DETAIL_TTL_SECONDS = 600                 # 10 min
+_DETAIL_ROWS = 25                         # cap the holder list (screen scrolls)
+
+
+def _norm_name(name: Any) -> str:
+    """Order-insensitive name key for matching a congress member to the registry.
+
+    Collapses "Pelosi, Nancy" and "Nancy Pelosi" to the same key by lowercasing,
+    dropping punctuation, and sorting the tokens. Best-effort — a miss just leaves
+    the row non-tappable (still shows the trade), never an error."""
+    tokens = re.sub(r"[^a-z\s]", " ", str(name or "").lower()).split()
+    return " ".join(sorted(tokens))
+
+
+def _congress_role(district: str, chamber: str) -> str:
+    """Format a member's role for display (mirrors holders_service._format_district):
+    "Senator (KY)" / "Representative (TX-11)"."""
+    if not district:
+        return "Senator" if chamber == "senate" else "Representative"
+    if chamber == "senate":
+        return f"Senator ({district})"
+    m = re.match(r"([A-Za-z]{2})(\d+)", district)
+    if m:
+        return f"Representative ({m.group(1).upper()}-{m.group(2)})"
+    return f"Representative ({district})"
+
+
+def _whale_row_rank(r: SignalHolderResponse) -> Tuple[float, float, str]:
+    """Sort key for whale drill-down rows (smaller = stronger): $ est desc (nulls
+    last), then allocation desc, then name asc. Also used to pick the best row per
+    CIK when a fund is registered under both a person and a firm name."""
+    return (
+        -(r.amount_est if r.amount_est is not None else -1.0),
+        -(r.allocation_percent or 0.0),
+        r.name,
+    )
 
 
 # ── Pure helpers (unit-tested without network / Supabase) ──────────────
@@ -332,6 +385,9 @@ class SignalsService:
     # Class-level so the cache/dedup are shared across requests (mirrors scanners).
     _cache: Dict[str, Tuple[float, SignalsGroupResponse]] = {}
     _inflight: Dict[str, asyncio.Future] = {}
+    # Per-(kind, ticker) drill-down cache + dedup.
+    _detail_cache: Dict[str, Tuple[float, SignalTickerDetailResponse]] = {}
+    _detail_inflight: Dict[str, asyncio.Future] = {}
 
     def __init__(self) -> None:
         self.fmp: FMPClient = get_fmp_client()
@@ -619,6 +675,276 @@ class SignalsService:
             logger.warning(
                 "Signals Tier-2 write failed: %s: %s", type(exc).__name__, exc
             )
+
+    # ── Per-ticker drill-down (tap a signal ticker → who bought it) ────
+
+    async def get_ticker_detail(
+        self, kind: str, ticker: str
+    ) -> SignalTickerDetailResponse:
+        """WHO bought/added `ticker` behind the whale/congress signal, WHEN, HOW
+        MUCH. Cache-aside (10 min) + in-flight dedup. Never raises: any failure
+        degrades to an empty holder list (iOS shows an honest empty state)."""
+        kind = (kind or "").strip().lower()
+        sym = _canonical_symbol(ticker)
+        key = f"{kind}:{sym}"
+
+        cached = self._detail_cache.get(key)
+        if cached is not None and (time.time() - cached[0]) < _DETAIL_TTL_SECONDS:
+            return cached[1]
+
+        inflight = self._detail_inflight.get(key)
+        if inflight is not None:
+            return await inflight
+
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._detail_inflight[key] = fut
+        try:
+            try:
+                result = await self._build_ticker_detail(kind, sym)
+                self._detail_cache[key] = (time.time(), result)
+            except Exception as exc:  # noqa: BLE001 — drill-down must never 500 the screen
+                logger.warning(
+                    "Signal detail %s/%s failed: %s: %s",
+                    kind, sym, type(exc).__name__, exc,
+                )
+                result = SignalTickerDetailResponse(symbol=sym, kind=kind)
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            self._detail_inflight.pop(key, None)
+
+    async def _build_ticker_detail(
+        self, kind: str, sym: str
+    ) -> SignalTickerDetailResponse:
+        # Header (best-effort): company + price + market cap for the tappable ticker
+        # header. A profile failure degrades to symbol-only, never fatal.
+        company_name, price, market_cap = "", None, None
+        try:
+            prof = await self.fmp.get_company_profile(sym)
+            if isinstance(prof, dict):
+                company_name = prof.get("companyName") or ""
+                price = _finite_float(prof.get("price"))
+                market_cap = _finite_float(prof.get("marketCap") or prof.get("mktCap"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Signal detail profile %s failed: %s: %s", sym, type(exc).__name__, exc
+            )
+
+        if kind == "whale":
+            holders, as_of = await asyncio.to_thread(self._detail_whale_rows, sym)
+        elif kind == "congress":
+            holders, as_of = await self._detail_congress_rows(sym)
+        else:
+            holders, as_of = [], None
+
+        return SignalTickerDetailResponse(
+            symbol=sym, kind=kind, company_name=company_name,
+            price=price, market_cap=market_cap, as_of_date=as_of, holders=holders,
+        )
+
+    def _detail_whale_rows(
+        self, sym: str
+    ) -> Tuple[List[SignalHolderResponse], Optional[str]]:
+        """Our registry 13F funds adding this ticker — SAME source as the card, so
+        the list matches the "N funds adding" count and every fund is tappable."""
+        try:
+            sb = get_supabase()
+            whales = (
+                sb.table("whales")
+                .select("id, name, cik, last_hydrated_at")
+                .eq("data_source", "13f")
+                .limit(2000)
+                .execute()
+                .data
+                or []
+            )
+            wmap: Dict[Any, Dict[str, str]] = {}   # whale_id -> {name, cik(dedup key)}
+            hydrated: List[str] = []
+            for w in whales:
+                wid = w.get("id")
+                if wid is None:
+                    continue
+                cik = (w.get("cik") or "").strip()
+                # Dedup key = CIK — a person and their fund share one 13F filing/CIK
+                # (Ray Dalio ↔ Bridgewater). Null CIK → per-whale sentinel so it
+                # stays distinct. Same rule the card counts by.
+                wmap[wid] = {"name": w.get("name") or "", "cik": cik or f"nocik:{wid}"}
+                hd = w.get("last_hydrated_at")
+                if hd:
+                    hydrated.append(str(hd)[:10])
+
+            # Class-share tickers store either delimiter; match both forms.
+            variants = list({sym, sym.replace("-", ".")})
+            holdings = (
+                sb.table("whale_holdings")
+                .select("whale_id, ticker, allocation, change_percent")
+                .in_("ticker", variants)
+                .gt("change_percent", 0)
+                .limit(5000)
+                .execute()
+                .data
+                or []
+            )
+            trades = (
+                sb.table("whale_trades")
+                .select("whale_id, ticker, action, trade_type, amount, date, disclosure_date")
+                .in_("ticker", variants)
+                .eq("action", "BOUGHT")
+                .limit(5000)
+                .execute()
+                .data
+                or []
+            )
+            # Best BOUGHT trade per whale (largest $ est) → the "how much" + date.
+            tmap: Dict[Any, Dict[str, Any]] = {}
+            for t in trades:
+                wid = t.get("whale_id")
+                if wid not in wmap:
+                    continue
+                amt = _finite_float(t.get("amount")) or 0.0
+                cur = tmap.get(wid)
+                if cur is None or amt > (cur.get("_amt") or 0.0):
+                    tmap[wid] = {**t, "_amt": amt}
+
+            # Dedup by CIK so a fund registered under BOTH a person and a firm name
+            # (Ray Dalio ↔ Bridgewater) appears ONCE — matching the card's distinct-
+            # fund count. Keep the strongest row per CIK.
+            best_by_cik: Dict[str, SignalHolderResponse] = {}
+            for h in holdings:
+                info = wmap.get(h.get("whale_id"))
+                if info is None:
+                    continue  # not a 13F registry whale
+                cp = _finite_float(h.get("change_percent"))
+                if cp is None or cp <= 0:
+                    continue
+                wid = h.get("whale_id")
+                tr = tmap.get(wid)
+                amount_est = _finite_float(tr.get("amount")) if tr else None
+                is_new = ((tr.get("trade_type") or "") == "New") if tr else None
+                tdate = (str(tr.get("date"))[:10] or None) if (tr and tr.get("date")) else None
+                ddate = (str(tr.get("disclosure_date"))[:10] or None) if (tr and tr.get("disclosure_date")) else None
+                candidate = SignalHolderResponse(
+                    whale_id=str(wid),
+                    name=info["name"],
+                    subtitle="13F fund",
+                    transaction_date=tdate,
+                    disclosure_date=ddate,
+                    allocation_percent=_finite_float(h.get("allocation")),
+                    allocation_change=round(cp, 2),
+                    is_new_position=is_new,
+                    amount_est=amount_est,
+                    action="BOUGHT",
+                )
+                key = info["cik"]
+                existing = best_by_cik.get(key)
+                if existing is None or _whale_row_rank(candidate) < _whale_row_rank(existing):
+                    best_by_cik[key] = candidate
+
+            rows = sorted(best_by_cik.values(), key=_whale_row_rank)
+            as_of = max(hydrated) if hydrated else None
+            return rows[:_DETAIL_ROWS], as_of
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Whale detail for %s failed: %s: %s", sym, type(exc).__name__, exc
+            )
+            return [], None
+
+    async def _detail_congress_rows(
+        self, sym: str
+    ) -> Tuple[List[SignalHolderResponse], Optional[str]]:
+        """All members who bought this ticker — SAME FMP feed + 30d disclosure window
+        as the card. Tappable only for the ~8 politicians in our registry."""
+        senate, house = await asyncio.gather(
+            self.fmp.get_senate_latest(1000),
+            self.fmp.get_house_latest(1000),
+        )
+        reg = await asyncio.to_thread(self._congress_registry_map)
+        now = datetime.now(timezone.utc)
+
+        rows: List[SignalHolderResponse] = []
+        dates: List[str] = []
+        seen: Set[Tuple[str, str, str]] = set()
+        for chamber, trades in (("senate", senate), ("house", house)):
+            if not isinstance(trades, list):
+                continue
+            for row in trades:
+                if not isinstance(row, dict):
+                    continue
+                if _canonical_symbol(row.get("symbol")) != sym:
+                    continue
+                ttype = (row.get("type") or "").lower()
+                if not ("purchase" in ttype or "buy" in ttype or "exchange" in ttype):
+                    continue
+                dstr = str(
+                    row.get("disclosureDate") or row.get("dateReceived")
+                    or row.get("date") or row.get("transactionDate") or ""
+                )[:10]
+                dobj = _parse_iso_date(dstr)
+                if dobj is not None and not (-2 <= (now - dobj).days <= _CONGRESS_WINDOW_DAYS):
+                    continue
+                first = (row.get("firstName") or row.get("first_name") or "").strip()
+                last = (row.get("lastName") or row.get("last_name") or "").strip()
+                name = (f"{first} {last}".strip()) or (row.get("office") or "").strip()
+                if not name:
+                    continue
+                tdate = str(row.get("transactionDate") or "")[:10]
+                dedup = (name, tdate, dstr)
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                low, high = parse_congress_amount_bounds(row.get("amount") or "")
+                amount_range = format_amount_range(low, high) if (low or high) else None
+                rows.append(SignalHolderResponse(
+                    whale_id=reg.get(_norm_name(name)),
+                    name=name,
+                    subtitle=_congress_role((row.get("district") or "").strip(), chamber),
+                    transaction_date=tdate or None,
+                    disclosure_date=dstr or None,
+                    amount_range=amount_range,
+                    owner=((row.get("owner") or "").strip() or None),
+                    action="BOUGHT",
+                ))
+                if dstr:
+                    dates.append(dstr)
+
+        rows.sort(key=lambda r: (r.disclosure_date or ""), reverse=True)
+        as_of = max(dates) if dates else None
+        return rows[:_DETAIL_ROWS], as_of
+
+    def _congress_registry_map(self) -> Dict[str, str]:
+        """Normalized member-name → whale_id for our tracked politicians (~8)."""
+        try:
+            sb = get_supabase()
+            rows = (
+                sb.table("whales")
+                .select("id, name, fmp_name")
+                .in_("data_source", ["congressional_house", "congressional_senate"])
+                .limit(500)
+                .execute()
+                .data
+                or []
+            )
+            m: Dict[str, str] = {}
+            for r in rows:
+                wid = r.get("id")
+                if wid is None:
+                    continue
+                for nm in (r.get("fmp_name"), r.get("name")):
+                    k = _norm_name(nm)
+                    if k:
+                        m[k] = str(wid)
+            return m
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Congress registry map failed: %s: %s", type(exc).__name__, exc
+            )
+            return {}
 
 
 # ── Singleton ─────────────────────────────────────────────────────────

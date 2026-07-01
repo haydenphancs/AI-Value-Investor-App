@@ -262,6 +262,7 @@ final class HomeRepository: HomeRepositoryProtocol {
 
         if let c = dto.congress, let top = c.entries.first {
             out.append(ExclusiveSignal(
+                kind: "congress",
                 title: "Congressional Buys",
                 // "this month" matches the backend's 30-day disclosure window
                 // (filings lag 30-45d, so a "this week" claim would be inaccurate).
@@ -278,6 +279,7 @@ final class HomeRepository: HomeRepositoryProtocol {
 
         if let w = dto.whale, let top = w.entries.first {
             out.append(ExclusiveSignal(
+                kind: "whale",
                 title: "Whale Accumulation",
                 subtitle: "Institutions quietly loading up",
                 iconSystemName: "square.3.layers.3d.down.right",
@@ -295,6 +297,7 @@ final class HomeRepository: HomeRepositoryProtocol {
 
         if let e = dto.earnings, let top = e.entries.first {
             out.append(ExclusiveSignal(
+                kind: "earnings",
                 title: "Earnings Shockers",
                 subtitle: "Just beat or missed the Street big",
                 iconSystemName: "bolt.fill",
@@ -448,6 +451,7 @@ final class MockHomeRepository: HomeRepositoryProtocol {
 
     static let signals: [ExclusiveSignal] = [
         ExclusiveSignal(
+            kind: "congress",
             title: "Congressional Buys",
             subtitle: "Most-bought on Capitol Hill this month",
             iconSystemName: "building.columns.fill",
@@ -461,6 +465,7 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             ]
         ),
         ExclusiveSignal(
+            kind: "whale",
             title: "Whale Accumulation",
             subtitle: "Institutions quietly loading up",
             iconSystemName: "square.3.layers.3d.down.right",
@@ -474,6 +479,7 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             ]
         ),
         ExclusiveSignal(
+            kind: "earnings",
             title: "Earnings Shockers",
             subtitle: "Just beat or missed the Street big",
             iconSystemName: "bolt.fill",

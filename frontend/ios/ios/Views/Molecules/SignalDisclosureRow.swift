@@ -11,7 +11,9 @@ import SwiftUI
 
 struct SignalDisclosureRow: View {
     let signal: ExclusiveSignal
-    var onLeaderTap: ((SignalLeader) -> Void)? = nil
+    // (kind, leader) — kind routes the tap (whale/congress → per-ticker detail,
+    // earnings → TickerDetailView).
+    var onLeaderTap: ((String, SignalLeader) -> Void)? = nil
 
     @State private var expanded = false
 
@@ -100,7 +102,7 @@ struct SignalDisclosureRow: View {
     // so both render identically. Tapping routes to the ticker via `onLeaderTap`.
     @ViewBuilder
     private func leaderRow(_ leader: SignalLeader) -> some View {
-        Button { onLeaderTap?(leader) } label: {
+        Button { onLeaderTap?(signal.kind, leader) } label: {
             HStack {
                 Text(leader.symbol)
                     .font(AppTypography.labelEmphasis)

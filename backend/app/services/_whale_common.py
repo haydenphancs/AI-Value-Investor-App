@@ -13,6 +13,25 @@ and trade-dollar formula, giving different answers for the same trade.
 from typing import Optional, Tuple
 
 
+# ── Snapshot persistence guard ──────────────────────────────────────
+
+# Keys that live on the in-memory snapshot dict but are NOT columns on the
+# whale_filing_snapshots table. `trade_groups` (the full per-filing timeline) is
+# synced to the whale_trade_groups TABLE instead; sending it as a column makes
+# PostgREST reject the entire upsert (PGRST204) and silently kills the snapshot
+# cache tier for congress AND 13F whales.
+_SNAPSHOT_NON_COLUMNS = ("trade_groups",)
+
+
+def snapshot_db_row(snapshot: dict) -> dict:
+    """Return a copy of ``snapshot`` safe to upsert into whale_filing_snapshots.
+
+    Strips in-memory-only keys (see ``_SNAPSHOT_NON_COLUMNS``). Keeps the full
+    dict callers pass around for downstream syncing / rendering intact.
+    """
+    return {k: v for k, v in snapshot.items() if k not in _SNAPSHOT_NON_COLUMNS}
+
+
 # ── Congressional (range-based) ─────────────────────────────────────
 
 

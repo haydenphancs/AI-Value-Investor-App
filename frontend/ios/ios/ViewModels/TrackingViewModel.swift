@@ -216,10 +216,8 @@ class TrackingViewModel: ObservableObject {
                 guard !trimmed.isEmpty else { return nil }
                 return .whaleTrade(AppAlert.WhaleTradeAlertData(
                     action: data.action,
-                    totalAmount: Self.recomputedTotal(
-                        trimmed.compactMap(\.rawAmount),
-                        fallback: data.totalAmount,
-                        expectedCount: trimmed.count
+                    totalAmount: Self.recomputedWhaleTotal(
+                        trimmed, fallback: data.totalAmount
                     ),
                     timeWindowLabel: data.timeWindowLabel,
                     items: trimmed
@@ -256,6 +254,40 @@ class TrackingViewModel: ObservableObject {
     ) -> String {
         guard amounts.count == expectedCount else { return fallback }
         return formatDollars(amounts.reduce(0, +))
+    }
+
+    /// Re-aggregate a trimmed whale-trade rollup honestly. Congress items carry
+    /// STOCK Act bounds (`rawAmountLow`/`High`); if any trimmed item is a range
+    /// (or open-ended) the total is a summed RANGE — never a fabricated precise
+    /// dollar. A 13F-only trimmed set (all exact points) collapses to one figure.
+    /// Falls back to the server label if any item lacks bounds (older backend).
+    private static func recomputedWhaleTotal(
+        _ items: [AppAlert.WhaleTradeItem], fallback: String
+    ) -> String {
+        guard items.allSatisfy({ $0.rawAmountLow != nil }) else { return fallback }
+        let low = items.reduce(0.0) { $0 + ($1.rawAmountLow ?? 0) }
+        // If ANY trimmed item is congressional, the total is a STOCK Act
+        // range/estimate — never a bare precise dollar (mirrors backend
+        // _format_amount_or_range). 13F-only sets collapse to one exact figure.
+        if items.contains(where: { $0.isCongress }) {
+            let hasOpenEnded = items.contains { $0.rawAmountHigh == nil }
+            let high: Double? = hasOpenEnded
+                ? nil
+                : items.reduce(0.0) { $0 + ($1.rawAmountHigh ?? 0) }
+            if let high, abs(high - low) < 1 {
+                // Bounds collapsed (malformed/single-value) — mark as estimate.
+                return low >= 1 ? "~\(formatDollars(low))" : "—"
+            }
+            return formatAmountRange(low: low, high: high)
+        }
+        return formatDollars(low)  // all exact points (13F)
+    }
+
+    /// Mirrors backend `format_amount_range` in _whale_common.py.
+    private static func formatAmountRange(low: Double, high: Double?) -> String {
+        guard let high else { return "\(formatDollars(low))+" }
+        if abs(high - low) < 1 { return formatDollars(low) }
+        return "\(formatDollars(low)) – \(formatDollars(high))"
     }
 
     /// Mirrors backend `_format_amount` in tracking_service.py so re-aggregated

@@ -48,8 +48,14 @@ class WhaleTradeItemResponse(BaseModel):
     ticker: str
     company_name: str
     whale_count: int
-    amount: str  # e.g. "$2.4B"
-    raw_amount: float  # numeric dollars — lets iOS re-aggregate after trimming to active portfolio
+    amount: str  # e.g. "$2.4B" (13F) or "$50K – $250K" (congress range)
+    raw_amount: float  # midpoint dollars — sort key + legacy re-aggregation
+    # Summed STOCK Act bounds so iOS re-aggregates an honest RANGE after trimming
+    # to the active portfolio. 13F: low == high == exact; congress open-ended
+    # top bucket: high is None. Optional for backward-compat with old clients.
+    raw_amount_low: Optional[float] = None
+    raw_amount_high: Optional[float] = None
+    is_congress: bool = False  # True → amount is a STOCK Act range/estimate, not exact
     lead_whale_id: Optional[str] = None
     lead_whale_name: Optional[str] = None
     lead_whale_avatar_name: Optional[str] = None

@@ -29,6 +29,7 @@ from app.services._whale_common import (
     parse_congress_amount_bounds,
     sum_amount_bounds,
     format_amount_range,
+    snapshot_db_row,
     calc_13f_trade_dollars,
 )
 from app.schemas.whale import (
@@ -790,17 +791,10 @@ class WhaleService:
                 .execute()
             )
             groups.append(
-                WhaleTradeGroupResponse(
-                    id=str(tg["id"]),
-                    date=tg.get("date", ""),
-                    trade_count=tg.get("trade_count", 0),
-                    net_action=tg.get("net_action", "BOUGHT"),
-                    net_amount=float(tg.get("net_amount", 0)),
-                    summary=tg.get("summary"),
-                    insights=tg.get("insights") or [],
-                    trades=self._build_trade_responses_from_db(
-                        db_trades.data or []
-                    ),
+                self._assemble_group_response(
+                    str(tg["id"]),
+                    tg,
+                    self._build_trade_responses_from_db(db_trades.data or []),
                 )
             )
         return groups
@@ -829,17 +823,10 @@ class WhaleService:
             .execute()
         )
 
-        return WhaleTradeGroupResponse(
-            id=str(tg["id"]),
-            date=tg.get("date", ""),
-            trade_count=tg.get("trade_count", 0),
-            net_action=tg.get("net_action", "BOUGHT"),
-            net_amount=float(tg.get("net_amount", 0)),
-            summary=tg.get("summary"),
-            insights=tg.get("insights") or [],
-            trades=self._build_trade_responses_from_db(
-                db_trades.data or []
-            ),
+        return self._assemble_group_response(
+            str(tg["id"]),
+            tg,
+            self._build_trade_responses_from_db(db_trades.data or []),
         )
 
     async def toggle_follow(
@@ -1187,18 +1174,26 @@ class WhaleService:
             "holdings_data": holdings_data,
             "sector_data": sector_data,
             "trade_group": primary_group,   # backward-compat (most recent)
-            "trade_groups": trade_groups,   # full per-filing timeline
+            "trade_groups": trade_groups,   # full per-filing timeline (in-memory only)
             "behavior_summary": behavior,
             "sentiment_text": sentiment,
             "raw_hash": raw_hash,
         }
 
         try:
+            # `trade_groups` is NOT a column on whale_filing_snapshots — it lives
+            # only in-memory (used by _build_whale_profile for the immediate live
+            # render and synced to the whale_trade_groups table below). Sending it
+            # in the upsert would make PostgREST reject the whole row (PGRST204),
+            # silently killing the snapshot cache tier. Strip it for the DB write.
             sb.table("whale_filing_snapshots").upsert(
-                snapshot, on_conflict="whale_id,filing_period"
+                snapshot_db_row(snapshot), on_conflict="whale_id,filing_period"
             ).execute()
         except Exception as e:
-            logger.error("Failed to persist congressional snapshot: %s", e)
+            logger.exception(
+                "Failed to persist congressional snapshot whale_id=%s period=%s: %s: %s",
+                whale_id, period, type(e).__name__, e,
+            )
 
         await self._sync_to_whale_tables(
             whale_id, holdings_data, sector_data, trade_groups,
@@ -2308,7 +2303,12 @@ class WhaleService:
                     "allocation": s["allocation"],
                 }).execute()
 
-            # Insert trade groups + trades (one row per filing, deduped by date)
+            # Insert trade groups + trades (one row per filing, deduped by date).
+            # The SELECT-then-INSERT is best-effort; the UNIQUE(whale_id, date)
+            # index (migration 077) is the authoritative guard. A concurrent
+            # writer that wins the race raises a unique violation here — we treat
+            # that as "already inserted" and skip its children (they belong to
+            # the other writer's group row), so no duplicate rows are created.
             for trade_group in trade_groups or []:
                 if not trade_group or not trade_group.get("date"):
                     continue
@@ -2321,15 +2321,24 @@ class WhaleService:
                 )
                 if existing_tg.data:
                     continue
-                tg_result = sb.table("whale_trade_groups").insert({
-                    "whale_id": whale_id,
-                    "date": trade_group["date"],
-                    "trade_count": trade_group["trade_count"],
-                    "net_action": trade_group["net_action"],
-                    "net_amount": trade_group["net_amount"],
-                    "summary": trade_group.get("summary"),
-                    "insights": trade_group.get("insights", []),
-                }).execute()
+                try:
+                    tg_result = sb.table("whale_trade_groups").insert({
+                        "whale_id": whale_id,
+                        "date": trade_group["date"],
+                        "trade_count": trade_group["trade_count"],
+                        "net_action": trade_group["net_action"],
+                        "net_amount": trade_group["net_amount"],
+                        "summary": trade_group.get("summary"),
+                        "insights": trade_group.get("insights", []),
+                    }).execute()
+                except Exception as tg_err:
+                    logger.warning(
+                        "whale_trade_group insert skipped (likely concurrent "
+                        "duplicate) whale_id=%s date=%s: %s: %s",
+                        whale_id, trade_group["date"],
+                        type(tg_err).__name__, tg_err,
+                    )
+                    continue
 
                 if not tg_result.data:
                     continue

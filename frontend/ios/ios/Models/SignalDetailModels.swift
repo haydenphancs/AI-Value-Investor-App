@@ -57,6 +57,25 @@ struct SignalHolderDTO: Decodable {
         case amountEst = "amount_est"
         case amountRange = "amount_range"
     }
+
+    // Decode-safe: the backend always sends `subtitle`/`action` (Pydantic defaults),
+    // but if a future change or proxy omits one, `decodeIfPresent` defaults it rather
+    // than throwing keyNotFound and nuking the WHOLE holder-list decode.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        whaleId = try c.decodeIfPresent(String.self, forKey: .whaleId)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        subtitle = try c.decodeIfPresent(String.self, forKey: .subtitle) ?? ""
+        transactionDate = try c.decodeIfPresent(String.self, forKey: .transactionDate)
+        disclosureDate = try c.decodeIfPresent(String.self, forKey: .disclosureDate)
+        allocationPercent = try c.decodeIfPresent(Double.self, forKey: .allocationPercent)
+        allocationChange = try c.decodeIfPresent(Double.self, forKey: .allocationChange)
+        isNewPosition = try c.decodeIfPresent(Bool.self, forKey: .isNewPosition)
+        amountEst = try c.decodeIfPresent(Double.self, forKey: .amountEst)
+        amountRange = try c.decodeIfPresent(String.self, forKey: .amountRange)
+        owner = try c.decodeIfPresent(String.self, forKey: .owner)
+        action = try c.decodeIfPresent(String.self, forKey: .action) ?? "BOUGHT"
+    }
 }
 
 // MARK: - Display model (pre-formatted; the row renders these directly)

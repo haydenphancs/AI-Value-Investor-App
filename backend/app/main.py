@@ -215,13 +215,18 @@ async def _run_scanner_pre_warmer():
         _market_status,
         get_home_dashboard_service,
     )
+    from app.services.signals_service import get_signals_service
 
     while True:
         try:
             _, is_open = _market_status()
             if is_open:  # regular US session only (9:30–4 ET, DST-aware)
                 await get_home_dashboard_service().get_scanners()
-                logger.info("Scanner pre-warm: refreshed (regular session open)")
+                # App-Exclusive Signals ride along (congress/whale/earnings). Cheap:
+                # whale is Supabase-only, congress is 2 FMP calls, earnings is 1 —
+                # and get_signals() serves its own cache first (a no-op when warm).
+                await get_signals_service().get_signals()
+                logger.info("Scanner + signals pre-warm: refreshed (regular session open)")
         except Exception as e:
             logger.error(f"Scanner pre-warmer failed: {e}", exc_info=True)
 

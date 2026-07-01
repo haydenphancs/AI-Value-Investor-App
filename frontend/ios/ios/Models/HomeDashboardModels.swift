@@ -188,12 +188,15 @@ struct HomeDashboardResponseDTO: Decodable {
     let pulse: [MarketPulseItemDTO]
     /// Optional so an older backend that omits it can't crash decode.
     let scanners: ScannerGroupsDTO?
+    /// Optional for the same reason — a backend that predates signals decodes nil.
+    let signals: SignalGroupsDTO?
 
     enum CodingKeys: String, CodingKey {
         case marketStatusText = "market_status_text"
         case marketIsOpen = "market_is_open"
         case pulse
         case scanners
+        case signals
     }
 }
 
@@ -261,4 +264,39 @@ struct ScannerGroupsDTO: Decodable {
     let movers: ScannerGroupDTO?
     let volume: ScannerGroupDTO?
     let shorts: ScannerGroupDTO?
+}
+
+// MARK: - App-Exclusive Signal DTOs
+
+/// One ranked leader row in a signal card (raw numbers; the repository formats
+/// them per kind). `value` is polymorphic by the enclosing group's `kind`:
+/// congress → distinct-member count · whale → distinct-fund count · earnings →
+/// SIGNED EPS surprise % (beat +, miss −). All keys are already snake_case-safe
+/// (single words), so no `CodingKeys` map is needed.
+struct SignalRowDTO: Decodable {
+    let rank: Int
+    let symbol: String
+    let name: String
+    let value: Double
+}
+
+/// One signal card's data. The headline (top ticker + its stat) is `entries[0]`
+/// — the repository derives it, mirroring the scanner cards.
+struct SignalGroupDTO: Decodable {
+    let kind: String                // "congress" | "whale" | "earnings"
+    let entries: [SignalRowDTO]
+    /// Card-level "as of" context (ISO `yyyy-MM-dd`) or nil. Optional → decode-safe.
+    let asOfDate: String?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, entries
+        case asOfDate = "as_of_date"
+    }
+}
+
+/// The three App-Exclusive Signal cards. A null group → that card is omitted.
+struct SignalGroupsDTO: Decodable {
+    let congress: SignalGroupDTO?
+    let whale: SignalGroupDTO?
+    let earnings: SignalGroupDTO?
 }

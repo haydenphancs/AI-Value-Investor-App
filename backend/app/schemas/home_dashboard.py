@@ -81,6 +81,52 @@ class ScannerGroupsResponse(BaseModel):
     shorts: Optional[ScannerGroupResponse] = None
 
 
+# ── App-Exclusive Signals ──────────────────────────────────────────────
+# Three "signals you won't find on free trackers" cards: Congressional Buys
+# (most-bought on Capitol Hill), Whale Accumulation (13F funds adding), and
+# Earnings Shockers (biggest beats/misses). Same contract as the scanners: the
+# backend sends only the ranked DATA rows + raw numbers; the iOS repository
+# supplies the fixed per-card chrome (title/icon/accent/subtitle) and formats
+# the display strings.
+
+
+class SignalRowResponse(BaseModel):
+    """One ranked leader row in a signal card (raw numbers; iOS formats).
+
+    ``value`` is polymorphic by the enclosing group's ``kind`` (a single wire
+    field keeps the contract simple — the card already dispatches on kind):
+      • congress → distinct-member count (how many members bought this ticker)
+      • whale    → distinct-fund count (how many 13F funds are adding; deduped by CIK)
+      • earnings → SIGNED EPS surprise % (beat is +, miss is −)
+    """
+
+    rank: int                       # 1-based, assigned by the service
+    symbol: str
+    name: str = ""                  # company/display name; "" when the source lacks it
+    value: float                    # meaning depends on kind (see class docstring)
+
+
+class SignalGroupResponse(BaseModel):
+    """One signal card: ranked drill-down entries. The headline (top ticker +
+    its stat) is ``entries[0]`` — iOS derives it, mirroring ScannerGroupResponse."""
+
+    kind: str                                   # "congress" | "whale" | "earnings"
+    entries: List[SignalRowResponse] = []
+    # Card-level "as of" context (honest cadence — these sources are NOT live):
+    #   • congress → latest DISCLOSURE date in the window (filings lag 30–45d)
+    #   • whale    → whales.last_hydrated_at (quarterly 13F basis)
+    #   • earnings → latest report date in the window
+    as_of_date: Optional[str] = None
+
+
+class SignalsGroupResponse(BaseModel):
+    """The three App-Exclusive Signal cards. A null group → iOS omits that card."""
+
+    congress: Optional[SignalGroupResponse] = None
+    whale: Optional[SignalGroupResponse] = None
+    earnings: Optional[SignalGroupResponse] = None
+
+
 class HomeDashboardResponse(BaseModel):
     """Top-level aggregated payload for the Caydex Home dashboard.
 
@@ -95,3 +141,6 @@ class HomeDashboardResponse(BaseModel):
     # Additive + defaulted so old clients ignore it and a failed scanner build
     # still returns a valid response with all-null groups.
     scanners: ScannerGroupsResponse = ScannerGroupsResponse()
+    # Additive + defaulted (same rationale): a failed signals build degrades to
+    # all-null groups; old clients ignore the field.
+    signals: SignalsGroupResponse = SignalsGroupResponse()

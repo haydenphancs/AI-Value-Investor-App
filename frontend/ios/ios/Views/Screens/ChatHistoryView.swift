@@ -15,6 +15,9 @@ struct ChatHistoryView: View {
     /// Fired when a row's 3-dot is tapped — the history panel opens the Pin/Rename/Delete popup.
     var onItemMoreOptions: ((ChatHistoryItem) -> Void)?
     var onDismiss: (() -> Void)?
+    /// When non-empty, the list is showing SEARCH results — drives a search-specific empty state
+    /// ("no matches" vs "no conversations yet").
+    var searchQuery: String = ""
 
     /// Convenience init with defaults for backward compatibility (previews)
     init(
@@ -22,13 +25,19 @@ struct ChatHistoryView: View {
         isLoading: Bool = false,
         onItemTap: ((ChatHistoryItem) -> Void)? = nil,
         onItemMoreOptions: ((ChatHistoryItem) -> Void)? = nil,
-        onDismiss: (() -> Void)? = nil
+        onDismiss: (() -> Void)? = nil,
+        searchQuery: String = ""
     ) {
         self.historyGroups = historyGroups ?? ChatHistoryItem.sampleGroups
         self.isLoading = isLoading
         self.onItemTap = onItemTap
         self.onItemMoreOptions = onItemMoreOptions
         self.onDismiss = onDismiss
+        self.searchQuery = searchQuery
+    }
+
+    private var isSearching: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -56,18 +65,22 @@ struct ChatHistoryView: View {
     private var emptyState: some View {
         VStack(spacing: AppSpacing.md) {
             Spacer()
-            Image(systemName: "bubble.left.and.bubble.right")
+            Image(systemName: isSearching ? "magnifyingglass" : "bubble.left.and.bubble.right")
                 .font(.system(size: 40))
                 .foregroundColor(AppColors.textMuted)
-            Text("No conversations yet")
+            Text(isSearching ? "No matches" : "No conversations yet")
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textMuted)
-            Text("Start a chat to see your history here")
+            Text(isSearching
+                 ? "No conversations match \u{201C}\(searchQuery)\u{201D}"
+                 : "Start a chat to see your history here")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
             Spacer()
         }
         .frame(maxWidth: .infinity)
+        .padding(.horizontal, AppSpacing.lg)
     }
 
     // MARK: - Action Handlers

@@ -16,6 +16,7 @@ No network — fake FMP + monkeypatched short interest.
 import asyncio
 import json
 import math
+import time
 
 import pytest
 from fastapi.encoders import jsonable_encoder
@@ -25,8 +26,12 @@ from app.schemas.home_dashboard import (
     ScannerGroupResponse,
     ScannerGroupsResponse,
     ScannerRowResponse,
+    SignalGroupResponse,
+    SignalRowResponse,
+    SignalsGroupResponse,
 )
 from app.services import home_dashboard_service as svc
+from app.services.signals_service import SignalsService, _SIGNALS_CACHE_KEY
 from app.services.home_dashboard_service import (
     HomeDashboardService,
     _SCANNER_CACHE_KEY,
@@ -98,6 +103,55 @@ def test_dashboard_validates_full_scanner_payload():
     assert resp.scanners.movers.gainers[0].symbol == "SMCI"
     assert resp.scanners.volume.entries[0].volume_multiple == 8.4
     assert resp.scanners.shorts is None
+
+
+# ── 1b. Signal (App-Exclusive) schema parity ──────────────────────────
+
+# The exact snake_case keys the iOS SignalRowDTO / SignalGroupDTO / SignalGroupsDTO
+# decode (Models/HomeDashboardModels.swift). A drift here = an iOS decode crash.
+_SIGNAL_ROW_KEYS = {"rank", "symbol", "name", "value"}
+_SIGNAL_GROUP_KEYS = {"kind", "entries", "as_of_date"}
+_SIGNAL_GROUPS_KEYS = {"congress", "whale", "earnings"}
+
+
+def test_signal_row_keys_match_ios_dto():
+    row = SignalRowResponse(rank=1, symbol="NVDA", name="NVIDIA", value=7.0)
+    assert set(row.model_dump().keys()) == _SIGNAL_ROW_KEYS
+
+
+def test_signal_group_and_groups_keys_match_ios_dto():
+    g = SignalGroupResponse(kind="congress")
+    assert set(g.model_dump().keys()) == _SIGNAL_GROUP_KEYS
+    gs = SignalsGroupResponse()
+    assert set(gs.model_dump().keys()) == _SIGNAL_GROUPS_KEYS
+
+
+def test_dashboard_default_signals_all_null():
+    resp = HomeDashboardResponse(market_status_text="Markets Open", market_is_open=True, pulse=[])
+    assert resp.model_dump()["signals"] == {"congress": None, "whale": None, "earnings": None}
+
+
+def test_dashboard_validates_full_signals_payload():
+    # One entry per kind, an empty name, a null as_of_date, and a signed-negative
+    # earnings surprise — all must validate and round-trip to the exact wire keys.
+    resp = HomeDashboardResponse.model_validate({
+        "market_status_text": "Markets Closed",
+        "market_is_open": False,
+        "pulse": [],
+        "signals": {
+            "congress": {"kind": "congress", "as_of_date": "2026-06-20",
+                         "entries": [{"rank": 1, "symbol": "NVDA", "name": "", "value": 7.0}]},
+            "whale": {"kind": "whale", "as_of_date": None,
+                      "entries": [{"rank": 1, "symbol": "MSFT", "name": "Microsoft", "value": 5.0}]},
+            "earnings": {"kind": "earnings", "as_of_date": "2026-06-27",
+                         "entries": [{"rank": 1, "symbol": "AVGO", "name": "", "value": -22.5}]},
+        },
+    })
+    assert resp.signals.congress.entries[0].value == 7.0
+    assert resp.signals.whale.entries[0].symbol == "MSFT"
+    assert resp.signals.earnings.entries[0].value == -22.5   # signed miss preserved
+    assert set(resp.signals.congress.entries[0].model_dump().keys()) == _SIGNAL_ROW_KEYS
+    assert set(resp.signals.congress.model_dump().keys()) == _SIGNAL_GROUP_KEYS
 
 
 # ── 2. Pure transforms ────────────────────────────────────────────────
@@ -387,6 +441,12 @@ def _fresh_service(monkeypatch, *, short_pct=33.0, short_delay=0.0):
     HomeDashboardService._scanner_cache.clear()
     HomeDashboardService._scanner_inflight.clear()
     HomeDashboardService._float_cache.clear()
+    # Prime an empty signals cache — get_dashboard() now fans out a 3rd branch
+    # (App-Exclusive Signals). These are SCANNER tests; the signals aggregation is
+    # exercised in test_signals_service.py. Priming keeps it network-free here.
+    SignalsService._cache.clear()
+    SignalsService._inflight.clear()
+    SignalsService._cache[_SIGNALS_CACHE_KEY] = (time.time(), SignalsGroupResponse())
     s = HomeDashboardService()
     s.fmp = _FakeFMP()  # type: ignore[assignment]
 

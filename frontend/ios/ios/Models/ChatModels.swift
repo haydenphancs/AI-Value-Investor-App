@@ -186,6 +186,7 @@ struct ChatHistoryItem: Identifiable {
 
 // MARK: - Chat History Section
 enum ChatHistorySection: String, CaseIterable {
+    case pinned = "PINNED"
     case today = "TODAY"
     case yesterday = "YESTERDAY"
     case older = "OLDER"
@@ -193,7 +194,9 @@ enum ChatHistorySection: String, CaseIterable {
 
 // MARK: - Chat History Grouped
 struct ChatHistoryGroup: Identifiable {
-    let id = UUID()
+    /// Stable identity = the section (each section appears at most once per list). A fresh UUID would
+    /// re-mint identities on every search keystroke, tearing down the list + resetting scroll.
+    var id: ChatHistorySection { section }
     let section: ChatHistorySection
     let items: [ChatHistoryItem]
 }

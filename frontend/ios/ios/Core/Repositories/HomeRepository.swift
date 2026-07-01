@@ -57,9 +57,8 @@ final class HomeRepository: HomeRepositoryProtocol {
             marketIsOpen: dto.marketIsOpen,
             pulse: dto.pulse.map(mapPulse),
             scanners: mapScanners(dto.scanners),
-            // Sections below the scanners aren't served yet — empty arrays
-            // render nothing (sections hide).
-            signals: [],
+            signals: mapSignals(dto.signals),
+            // Trending Themes isn't served yet — an empty array renders nothing.
             themes: []
         )
     }
@@ -245,6 +244,73 @@ final class HomeRepository: HomeRepositoryProtocol {
             return "Highest short interest"
         }
         return "As of \(shortsAsOfDisplay.string(from: date))"
+    }
+
+    // MARK: - App-Exclusive Signals mapping
+
+    /// Build the three signal cards. Like the scanners, the presentation chrome
+    /// (title / subtitle / icon / accent) is FIXED per kind — matching the mock —
+    /// so it's hardcoded here; the backend supplies only the ranked rows + raw
+    /// numbers, which we format into the display strings per kind.
+    ///
+    /// `SignalRowDTO.value` is polymorphic by kind: congress = # distinct members,
+    /// whale = # distinct funds, earnings = SIGNED surprise %. The card headline
+    /// is derived from `entries[0]`; an empty/absent group renders no card.
+    private static func mapSignals(_ dto: SignalGroupsDTO?) -> [ExclusiveSignal] {
+        guard let dto else { return [] }
+        var out: [ExclusiveSignal] = []
+
+        if let c = dto.congress, let top = c.entries.first {
+            out.append(ExclusiveSignal(
+                title: "Congressional Buys",
+                subtitle: "Most-bought on Capitol Hill this week",
+                iconSystemName: "building.columns.fill",
+                accent: AppColors.primaryBlue,
+                topSymbol: top.symbol,
+                topStat: "\(Int(top.value)) members buying",
+                leaders: c.entries.map {
+                    SignalLeader(symbol: $0.symbol, stat: "\(Int($0.value)) buys")
+                }
+            ))
+        }
+
+        if let w = dto.whale, let top = w.entries.first {
+            out.append(ExclusiveSignal(
+                title: "Whale Accumulation",
+                subtitle: "Institutions quietly loading up",
+                iconSystemName: "square.3.layers.3d.down.right",
+                accent: AppColors.alertOrange,
+                topSymbol: top.symbol,
+                // Honest fund COUNT (not a $ figure): 13F trade dollars are
+                // implied-price estimates, so a precise "+$2.1B" would overstate
+                // precision. See the plan's whale-source decision.
+                topStat: "\(Int(top.value)) funds adding",
+                leaders: w.entries.map {
+                    SignalLeader(symbol: $0.symbol, stat: "\(Int($0.value)) funds")
+                }
+            ))
+        }
+
+        if let e = dto.earnings, let top = e.entries.first {
+            out.append(ExclusiveSignal(
+                title: "Earnings Shockers",
+                subtitle: "Just beat or missed the Street big",
+                iconSystemName: "bolt.fill",
+                accent: AppColors.accentYellow,
+                topSymbol: top.symbol,
+                topStat: "\(formatSurprise(top.value)) surprise",
+                leaders: e.entries.map {
+                    SignalLeader(symbol: $0.symbol, stat: "\(formatSurprise($0.value)) EPS")
+                }
+            ))
+        }
+
+        return out
+    }
+
+    /// Signed integer-percent surprise: `22.0 → "+22%"`, `-25.4 → "-25%"`.
+    private static func formatSurprise(_ p: Double) -> String {
+        String(format: "%+.0f%%", p)
     }
 }
 

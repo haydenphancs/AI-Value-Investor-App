@@ -541,9 +541,16 @@ class HomeDashboardService:
         a 5-minute dashboard cache — the scanners appear on the very next request
         as soon as their own background build warms _scanner_cache.
         """
-        pulse, scanners = await asyncio.gather(
+        # Signals (App-Exclusive) ride in the SAME response as a 3rd branch, each
+        # behind its own cache + guard. The import is function-local to avoid a
+        # module cycle — signals_service imports `_canonical_symbol`/`_finite_float`
+        # from THIS module (same pattern the pre-warmer uses in main.py).
+        from app.services.signals_service import get_signals_service
+
+        pulse, scanners, signals = await asyncio.gather(
             self._get_pulse_cached(),
             self._get_scanners_guarded(),
+            get_signals_service().get_signals_guarded(),
         )
         status_text, is_open = _market_status()
         return HomeDashboardResponse(
@@ -551,6 +558,7 @@ class HomeDashboardService:
             market_is_open=is_open,
             pulse=pulse,
             scanners=scanners,
+            signals=signals,
         )
 
     # ── Market Pulse (cache-aside) ────────────────────────────────────

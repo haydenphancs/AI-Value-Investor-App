@@ -283,7 +283,8 @@ struct AIChatScreen: View {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         showingHistory = false
                     }
-                }
+                },
+                searchQuery: historySearchText
             )
 
             // Transient error from a failed pin / rename / delete (dismissable).
@@ -325,34 +326,38 @@ struct AIChatScreen: View {
 
     @ViewBuilder
     private func chatRowMenuOverlay(_ anchors: [String: Anchor<CGRect>]) -> some View {
-        // The open menu's anchor, looked up by STABLE sessionId. Gating BOTH the render and the
-        // hit-testing on this exact value means an orphaned `menuItem` (e.g. a loadHistory landing
-        // mid-open) can never leave the full-panel overlay swallowing touches with nothing drawn.
+        // The open menu's anchor, looked up by STABLE sessionId.
         let activeAnchor: Anchor<CGRect>? = menuItem.flatMap { $0.sessionId }.flatMap { anchors[$0] }
         GeometryReader { proxy in
-            if let item = menuItem, let anchor = activeAnchor {
-                let rect = proxy[anchor]
+            if menuItem != nil {
                 ZStack(alignment: .topLeading) {
-                    // Near-invisible full-panel scrim: tap anywhere to dismiss.
+                    // Dismiss scrim is drawn whenever a menu is logically open — even if its row
+                    // scrolled out of the LazyVStack or got filtered out by search (anchor gone) — so
+                    // the user can always tap to dismiss instead of being stuck with an invisible menu.
                     Color.black.opacity(0.001)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .contentShape(Rectangle())
                         .onTapGesture { menuItem = nil }
 
-                    chatRowMenuPanel(for: item)
-                        .frame(width: menuWidth, alignment: .leading)
-                        .padding(.vertical, AppSpacing.xs)
-                        // Same iOS Liquid Glass material as the portfolio header popup.
-                        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
-                        .offset(
-                            x: menuXOffset(rect: rect, in: proxy.size.width),
-                            y: menuYOffset(rect: rect, in: proxy.size.height)
-                        )
+                    // The popup itself only renders while its row is on-screen (anchor resolvable).
+                    if let item = menuItem, let anchor = activeAnchor {
+                        let rect = proxy[anchor]
+                        chatRowMenuPanel(for: item)
+                            .frame(width: menuWidth, alignment: .leading)
+                            .padding(.vertical, AppSpacing.xs)
+                            // Same iOS Liquid Glass material as the portfolio header popup.
+                            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                            .offset(
+                                x: menuXOffset(rect: rect, in: proxy.size.width),
+                                y: menuYOffset(rect: rect, in: proxy.size.height)
+                            )
+                    }
                 }
             }
         }
-        // Only intercept touches while the popup is actually drawn (see comment above).
-        .allowsHitTesting(activeAnchor != nil)
+        // Intercept touches only while a menu is open — gated on menuItem (NOT the anchor) so the
+        // dismiss scrim stays tappable after the popup's anchor is lost; closed => list interactive.
+        .allowsHitTesting(menuItem != nil)
     }
 
     /// Trailing-align the popup to the 3-dot, clamped so it never spills past a panel edge.
@@ -505,6 +510,8 @@ struct AIChatScreen: View {
             showingHistory.toggle()
         }
         if showingHistory {
+            // Fresh, unfiltered open every time — a stale search filter must not hide conversations.
+            historySearchText = ""
             viewModel.historyActionError = nil
             viewModel.loadHistory()
         }

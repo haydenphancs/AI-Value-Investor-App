@@ -69,6 +69,12 @@ class ChatViewModel: ObservableObject {
         stockId: String? = nil,
         context: String? = nil
     ) {
+        // One seed in flight at a time: block a second synchronous seed (rapid double-tap on the
+        // Deep Research / AI Analyst / report-chat buttons, which have no text-field empty-guard)
+        // from creating a duplicate backend session and overwriting `messages`. isAITyping is reset
+        // by resetConversation()/loadConversation(), so a genuine new chat from a settled state passes.
+        guard !isAITyping else { return }
+
         errorMessage = nil
         currentStockId = stockId
         currentSessionType = stockId != nil ? "STOCK" : "NORMAL"
@@ -91,6 +97,12 @@ class ChatViewModel: ObservableObject {
                     endpoint: .createChatSession(stockId: stockId),
                     responseType: ChatSessionDTO.self
                 )
+                // If the user navigated to another conversation (loadConversation) while createSession
+                // was in flight, abandon this seed so it doesn't clobber the now-active session.
+                guard currentSessionId == nil else {
+                    print("⚠️ [ChatVM] Abandoning stale seed; active session is \(currentSessionId ?? "nil")")
+                    return
+                }
                 currentSessionId = session.id
                 print("✅ [ChatVM] Session created: \(session.id)")
 
@@ -100,6 +112,9 @@ class ChatViewModel: ObservableObject {
 
             } catch {
                 print("❌ [ChatVM] Failed to start conversation: \(error)")
+                // Only surface the error if this seed is still the active context (the user did not
+                // navigate to another conversation during the createSession round-trip).
+                guard currentSessionId == nil else { return }
                 isAITyping = false
                 errorMessage = "Failed to start conversation. Please try again."
             }
@@ -221,7 +236,14 @@ class ChatViewModel: ObservableObject {
 
             } catch {
                 print("❌ [ChatVM] Failed to delete session: \(error)")
-                historyActionError = "Couldn't delete chat — please try again."
+                // A 404 means it's already gone server-side — that IS the desired end state, so
+                // reconcile locally (no error banner) rather than nagging the user to retry.
+                if case APIError.notFound = error {
+                    removeSessionLocally(sessionId)
+                    historyActionError = nil
+                } else {
+                    historyActionError = "Couldn't delete chat — please try again."
+                }
             }
         }
     }
@@ -244,7 +266,7 @@ class ChatViewModel: ObservableObject {
                 print("✅ [ChatVM] \(pinned ? "Pinned" : "Unpinned") session \(sessionId)")
             } catch {
                 print("❌ [ChatVM] Failed to set pin on \(sessionId): \(error)")
-                historyActionError = "Couldn't update chat — please try again."
+                reconcileHistoryActionError(error, sessionId: sessionId, message: "Couldn't update chat — please try again.")
             }
         }
     }
@@ -269,7 +291,7 @@ class ChatViewModel: ObservableObject {
                 print("✅ [ChatVM] Renamed session \(sessionId)")
             } catch {
                 print("❌ [ChatVM] Failed to rename \(sessionId): \(error)")
-                historyActionError = "Couldn't rename chat — please try again."
+                reconcileHistoryActionError(error, sessionId: sessionId, message: "Couldn't rename chat — please try again.")
             }
         }
     }
@@ -282,6 +304,26 @@ class ChatViewModel: ObservableObject {
         messages = []
         isAITyping = false
         errorMessage = nil
+    }
+
+    /// Drop a session from the local history list + regroup, resetting the conversation if it was active.
+    private func removeSessionLocally(_ sessionId: String) {
+        historySessions.removeAll { $0.id == sessionId }
+        historyGroups = groupSessionsByDate(historySessions)
+        if currentSessionId == sessionId {
+            resetConversation()
+        }
+    }
+
+    /// On a pin/rename failure: if the session is gone server-side (404), drop the ghost row and stay
+    /// silent (its state can't be updated); otherwise surface a transient, retryable banner.
+    private func reconcileHistoryActionError(_ error: Error, sessionId: String, message: String) {
+        if case APIError.notFound = error {
+            removeSessionLocally(sessionId)
+            historyActionError = nil
+        } else {
+            historyActionError = message
+        }
     }
 
     // MARK: - Private Helpers
@@ -324,13 +366,17 @@ class ChatViewModel: ObservableObject {
     /// Group sessions into TODAY / YESTERDAY / OLDER for the history panel.
     private func groupSessionsByDate(_ sessions: [ChatSessionDTO]) -> [ChatHistoryGroup] {
         let calendar = Calendar.current
+        var pinnedItems: [ChatHistoryItem] = []
         var todayItems: [ChatHistoryItem] = []
         var yesterdayItems: [ChatHistoryItem] = []
         var olderItems: [ChatHistoryItem] = []
 
         for session in sessions {
             let item = session.toChatHistoryItem()
-            if calendar.isDateInToday(item.timestamp) {
+            if item.isSaved {
+                // Pinned chats float out of their date bucket into a top "PINNED" section.
+                pinnedItems.append(item)
+            } else if calendar.isDateInToday(item.timestamp) {
                 todayItems.append(item)
             } else if calendar.isDateInYesterday(item.timestamp) {
                 yesterdayItems.append(item)
@@ -340,6 +386,9 @@ class ChatViewModel: ObservableObject {
         }
 
         var groups: [ChatHistoryGroup] = []
+        if !pinnedItems.isEmpty {
+            groups.append(ChatHistoryGroup(section: .pinned, items: pinnedItems))
+        }
         if !todayItems.isEmpty {
             groups.append(ChatHistoryGroup(section: .today, items: todayItems))
         }

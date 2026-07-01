@@ -181,14 +181,24 @@ async def send_chat_message(
         preview = ai_result["content"][:100]
         current_count = session.data.get("message_count", 0)
 
-        # Auto-title: use first user message as title if still "New Chat"
+        # Auto-title from the user's first question so history search-by-name matches the topic.
+        # This upgrades the auto-generated defaults ONLY — "New Chat"/None (general chats) AND the
+        # "Chat about <TICKER>" default given to asset/report chats — and only on the first exchange
+        # (message_count == 0), so a later message or a user rename is never clobbered. Guard against
+        # an empty/whitespace first message so we never blank a useful title.
         update_payload: dict = {
             "message_count": current_count + 2,
             "preview_message": preview,
             "last_message_at": now_iso,
         }
-        if session.data.get("title") in ("New Chat", None):
-            update_payload["title"] = request.message[:80]
+        existing_title = session.data.get("title")
+        is_generic_title = (
+            existing_title in ("New Chat", None)
+            or (isinstance(existing_title, str) and existing_title.startswith("Chat about "))
+        )
+        first_question = request.message.strip()
+        if current_count == 0 and is_generic_title and first_question:
+            update_payload["title"] = first_question[:80]
 
         supabase.table("chat_sessions").update(update_payload).eq(
             "id", session_id

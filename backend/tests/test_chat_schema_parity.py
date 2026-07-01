@@ -26,6 +26,8 @@ iOS contract pinned here (Models/ChatConversationModels.swift):
 
 from __future__ import annotations
 
+import pytest
+
 from app.schemas.chat import (
     ChatHistoryResponse,
     ChatMessageResponse,
@@ -36,6 +38,7 @@ from app.schemas.chat import (
     MarketOverviewSector,
     MarketOverviewWidget,
     StockChartWidget,
+    UpdateChatSessionRequest,
 )
 from app.api.v1.endpoints.chat import _row_to_message, _row_to_session
 
@@ -257,3 +260,78 @@ def test_history_with_mixed_messages_all_decodable():
     dumped = resp.model_dump()
     for msg in dumped["messages"]:
         _assert_required_non_null(msg, _MESSAGE_REQUIRED, "history message")
+
+
+# ── History search: the session title is the NAME the iOS search matches ───────
+#
+# The iOS history search (AIChatScreen.filteredHistoryGroups) filters on
+# ChatHistoryItem.title, which is ChatSessionDTO.title (falling back to "Chat").
+# So `GET /chat/sessions` MUST carry the session's real title through verbatim, or
+# the user can't search by name. These pin that the title survives serialization
+# for ordinary, outlier, and unicode names.
+
+@pytest.mark.parametrize("title", [
+    "Drawing the Battle Lines",          # a real book-core name the user would search
+    "AAPL — should I buy?",              # punctuation / em dash
+    "  leading and trailing spaces  ",   # not trimmed server-side; iOS lowercases+contains
+    "Δívïdéñd stratégy 📈",              # unicode + emoji
+    "x" * 200,                            # very long
+])
+def test_session_title_is_preserved_verbatim_for_search(title):
+    row = {"id": "s", "title": title, "preview_message": "some preview",
+           "created_at": "2026-06-28T00:00:00.000000+00:00"}
+    dumped = _row_to_session(row).model_dump()
+    assert dumped["title"] == title, "title must pass through so iOS can search by name"
+    assert dumped["preview_message"] == "some preview"
+
+
+def test_session_null_title_becomes_ios_chat_fallback():
+    """A session with no title serializes title=None; iOS shows/searches 'Chat' (title ?? 'Chat')."""
+    row = {"id": "s", "created_at": "2026-06-28T00:00:00.000000+00:00"}  # no title key
+    assert _row_to_session(row).model_dump()["title"] is None
+
+
+# ── Pin / Rename update path (partial update must not clobber the other field) ──
+
+def test_pin_request_omits_title_so_title_is_not_wiped():
+    """
+    Pinning sends only is_saved (iOS omits nil title via encodeIfPresent). The request model must
+    read title as None so `update_chat_session` skips it (`if request.title is not None`) and the
+    existing title is preserved. A wiped title would blank the searchable name.
+    """
+    req = UpdateChatSessionRequest(**{"is_saved": True})  # body carries NO 'title' key
+    assert req.title is None, "omitted title must be None so the endpoint skips it"
+    assert req.is_saved is True
+    # Endpoint logic (mirrors chat.py): only provided fields get written.
+    update_data = {}
+    if req.title is not None:
+        update_data["title"] = req.title
+    if req.is_saved is not None:
+        update_data["is_saved"] = req.is_saved
+    assert update_data == {"is_saved": True}, "pin must not touch title"
+
+
+def test_rename_request_omits_is_saved_so_pin_state_is_kept():
+    req = UpdateChatSessionRequest(**{"title": "Renamed chat"})  # body carries NO 'is_saved' key
+    assert req.is_saved is None
+    assert req.title == "Renamed chat"
+    update_data = {}
+    if req.title is not None:
+        update_data["title"] = req.title
+    if req.is_saved is not None:
+        update_data["is_saved"] = req.is_saved
+    assert update_data == {"title": "Renamed chat"}, "rename must not touch is_saved"
+
+
+def test_update_response_row_decodes_like_a_list_row():
+    """
+    `update_chat_session` returns _row_to_session(result.data[0]) — the SAME shape as list/create,
+    so the iOS ChatSessionDTO decode of the update response has identical required-field guarantees.
+    Worst case: the updated row omits the optionals; required fields must still be present + non-null.
+    """
+    updated_row = {"id": "s", "is_saved": True, "message_count": 6,
+                   "created_at": "2026-06-28T00:00:00.000000+00:00"}
+    dumped = _row_to_session(updated_row).model_dump()
+    _assert_keys_subset(_SESSION_ALL_KEYS, dumped, "update response")
+    _assert_required_non_null(dumped, _SESSION_REQUIRED, "update response")
+    assert dumped["is_saved"] is True and dumped["message_count"] == 6

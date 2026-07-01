@@ -24,6 +24,7 @@ from app.schemas.home_dashboard import (
     HomeDashboardResponse,
     MarketPulseItemResponse,
     ScannerGroupsResponse,
+    SignalsGroupResponse,
 )
 from app.services.home_dashboard_service import (
     HomeDashboardService,
@@ -33,6 +34,7 @@ from app.services.home_dashboard_service import (
     _intraday_sparkline,
     _market_status,
 )
+from app.services.signals_service import SignalsService, _SIGNALS_CACHE_KEY
 import time as _time
 
 
@@ -41,7 +43,7 @@ import time as _time
 # The exact snake_case keys the iOS `MarketPulseItemDTO.CodingKeys` expects.
 _ITEM_KEYS = {"symbol", "name", "type", "price", "change_percent", "previous_close", "spark"}
 # The exact snake_case keys the iOS `HomeDashboardResponseDTO.CodingKeys` expects.
-_RESPONSE_KEYS = {"market_status_text", "market_is_open", "pulse", "scanners"}
+_RESPONSE_KEYS = {"market_status_text", "market_is_open", "pulse", "scanners", "signals"}
 
 
 def test_market_pulse_item_keys_match_ios_dto():
@@ -65,6 +67,9 @@ def test_dashboard_response_keys_match_ios_dto():
     dumped = resp.model_dump()
     assert set(dumped.keys()) == _RESPONSE_KEYS
     assert dumped["pulse"] == []  # empty strip is valid → iOS hides the section
+    # Additive + defaulted: a response built without signals ships all-null groups
+    # (iOS omits the whole section) rather than a decode-breaking absent key.
+    assert dumped["signals"] == {"congress": None, "whale": None, "earnings": None}
 
 
 def test_dashboard_response_validates_worst_case_inputs():
@@ -232,6 +237,12 @@ def _fresh_service() -> tuple[HomeDashboardService, _FakeFMP]:
     HomeDashboardService._scanner_cache[_SCANNER_CACHE_KEY] = (
         _time.time(), ScannerGroupsResponse()
     )
+    # Prime an empty signals cache too — get_dashboard() now fans out a 3rd branch
+    # (App-Exclusive Signals). These are PULSE tests; the signals aggregation (and
+    # its real FMP/Supabase calls) is exercised in test_signals_service.py.
+    SignalsService._cache.clear()
+    SignalsService._inflight.clear()
+    SignalsService._cache[_SIGNALS_CACHE_KEY] = (_time.time(), SignalsGroupResponse())
     svc = HomeDashboardService()
     fake = _FakeFMP()
     svc.fmp = fake  # type: ignore[assignment]

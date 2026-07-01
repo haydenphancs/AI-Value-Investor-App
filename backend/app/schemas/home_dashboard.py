@@ -66,6 +66,11 @@ class ScannerGroupResponse(BaseModel):
     gainers: List[ScannerRowResponse] = []          # movers only
     losers: List[ScannerRowResponse] = []           # movers only
     entries: List[ScannerRowResponse] = []          # volume / shorts
+    # Card-level "as of" date (ISO YYYY-MM-DD) — SHORTS only. Short interest is a
+    # bi-monthly FINRA settlement figure, not a live daily number; iOS renders this
+    # as the "As of Jun 15" subtitle so the cadence is honest. Null for
+    # movers/volume (and for shorts when no shown row carries a settlement date).
+    as_of_date: Optional[str] = None
 
 
 class ScannerGroupsResponse(BaseModel):

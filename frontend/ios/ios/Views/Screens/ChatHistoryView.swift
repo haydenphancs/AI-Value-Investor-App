@@ -12,7 +12,8 @@ struct ChatHistoryView: View {
     var historyGroups: [ChatHistoryGroup]
     var isLoading: Bool = false
     var onItemTap: ((ChatHistoryItem) -> Void)?
-    var onItemDelete: ((ChatHistoryItem) -> Void)?
+    /// Fired when a row's 3-dot is tapped — the history panel opens the Pin/Rename/Delete popup.
+    var onItemMoreOptions: ((ChatHistoryItem) -> Void)?
     var onDismiss: (() -> Void)?
 
     /// Convenience init with defaults for backward compatibility (previews)
@@ -20,13 +21,13 @@ struct ChatHistoryView: View {
         historyGroups: [ChatHistoryGroup]? = nil,
         isLoading: Bool = false,
         onItemTap: ((ChatHistoryItem) -> Void)? = nil,
-        onItemDelete: ((ChatHistoryItem) -> Void)? = nil,
+        onItemMoreOptions: ((ChatHistoryItem) -> Void)? = nil,
         onDismiss: (() -> Void)? = nil
     ) {
         self.historyGroups = historyGroups ?? ChatHistoryItem.sampleGroups
         self.isLoading = isLoading
         self.onItemTap = onItemTap
-        self.onItemDelete = onItemDelete
+        self.onItemMoreOptions = onItemMoreOptions
         self.onDismiss = onDismiss
     }
 
@@ -77,8 +78,7 @@ struct ChatHistoryView: View {
     }
 
     private func handleItemMoreOptions(_ item: ChatHistoryItem) {
-        print("🗑️ [History] Delete: \(item.title)")
-        onItemDelete?(item)
+        onItemMoreOptions?(item)
     }
 
     private func handleSectionTap(_ section: ChatHistorySection) {

@@ -186,6 +186,15 @@ class Settings(BaseSettings):
     REPORT_PREWARM_TOP_N: int = 20
     REPORT_PREWARM_INTERVAL_SECONDS: int = 3600
 
+    # Home Daily Scanners pre-warm: keeps Movers + Volume (and, free of charge,
+    # Skeptical Money — built in the same get_scanners() pass) hot during the
+    # regular session. Interval is BELOW the 20-min scanner cache TTL so the cache
+    # is refreshed before it expires (no cold gap mid-session). ~135 FMP calls per
+    # build, builds ≥15 min apart, gated to market hours → ~18% of a Premium
+    # minute's budget. Raise the interval to 1800 on FMP Starter (300/min).
+    SCANNER_PREWARM_ENABLED: bool = True
+    SCANNER_PREWARM_INTERVAL_SECONDS: int = 900
+
     # On-view report pre-warm: when a user opens a ticker's detail view, iOS
     # fires POST /stocks/{ticker}/prewarm-report, which warms the persona-neutral
     # ticker_data_cache so a later Generate Analysis skips the ~20-call FMP

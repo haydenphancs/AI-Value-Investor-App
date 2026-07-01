@@ -141,7 +141,7 @@ final class HomeRepository: HomeRepositoryProtocol {
             out.append(DailyScanner(
                 kind: .shorts,
                 title: "Skeptical Money",
-                subtitle: "Highest short interest",
+                subtitle: Self.shortsSubtitle(s.asOfDate),
                 iconSystemName: "eye.fill",
                 accent: AppColors.neutral,
                 badgeText: "Shorts",
@@ -213,6 +213,38 @@ final class HomeRepository: HomeRepositoryProtocol {
         if cap >= 1_000_000_000_000 { return String(format: "%.1fT Cap", cap / 1_000_000_000_000) }
         if cap >= 1_000_000_000 { return String(format: "%.1fB Cap", cap / 1_000_000_000) }
         return String(format: "%.1fM Cap", cap / 1_000_000)
+    }
+
+    // MARK: - Skeptical Money "as of" subtitle
+
+    /// Short interest is a bi-monthly FINRA settlement figure, not a live daily
+    /// number — so the shorts card subtitles its as-of date ("As of Jun 15")
+    /// instead of implying it's current. Falls back to the generic label when the
+    /// backend sent no date (Yahoo-sourced rows, or all rows missing a settlement).
+    /// Parses/renders in a fixed zone so the calendar date never shifts with the
+    /// device timezone.
+    private static let shortsAsOfParser: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static let shortsAsOfDisplay: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "MMM d"
+        return f
+    }()
+
+    private static func shortsSubtitle(_ asOfDate: String?) -> String {
+        guard let asOfDate,
+              let date = shortsAsOfParser.date(from: asOfDate) else {
+            return "Highest short interest"
+        }
+        return "As of \(shortsAsOfDisplay.string(from: date))"
     }
 }
 

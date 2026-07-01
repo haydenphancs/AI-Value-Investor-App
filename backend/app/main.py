@@ -66,6 +66,11 @@ async def lifespan(app: FastAPI):
         # makes some Gemini-grounded calls for cold tickers).
         asyncio.create_task(_run_report_pre_warmer())
 
+        # Start background scanner pre-warmer: keeps the Home Daily Scanners
+        # (Movers/Volume + Skeptical Money) hot during the regular session so the
+        # first Home load after each 20-min cache expiry isn't a cold build.
+        asyncio.create_task(_run_scanner_pre_warmer())
+
         # NOTE: the old weekly sector-only benchmark job was RETIRED here.
         # Sector + industry medians are now computed together by the
         # industry-benchmark recompute chained into the quarterly batch
@@ -181,6 +186,46 @@ async def _run_report_pre_warmer():
             logger.error(f"Report pre-warmer failed: {e}", exc_info=True)
 
         await asyncio.sleep(settings.REPORT_PREWARM_INTERVAL_SECONDS)
+
+
+async def _run_scanner_pre_warmer():
+    """Background task: keep the Home Daily Scanners hot during the regular session.
+
+    Movers + Volume are intraday metrics behind a 20-min cache; Skeptical Money is
+    built in the SAME ``get_scanners()`` pass. Without warming, the first Home load
+    after each cache expiry pays a cold build. This refreshes the shared scanner
+    cache every ``SCANNER_PREWARM_INTERVAL_SECONDS`` (set BELOW the 20-min TTL so it
+    never goes cold mid-session) ONLY while the regular US session is open, and
+    idles otherwise (0 FMP calls overnight/weekends).
+
+    ``get_scanners()`` serves its cache first (a no-op when a user already built it
+    recently, via the in-flight dedup) and degrades internally on an FMP 429, so
+    this loop needs no extra rate logic — the inter-build gap IS the backoff. Short
+    interest is 3-day cached over a bi-monthly source, so warming it here adds ~0
+    FINRA calls.
+    """
+    if not settings.SCANNER_PREWARM_ENABLED:
+        return
+
+    # Stagger after the news (30s) and report (45s) pre-warmers so the startup
+    # bursts don't pile onto the shared 20-connection FMP pool at once.
+    await asyncio.sleep(120)
+
+    from app.services.home_dashboard_service import (
+        _market_status,
+        get_home_dashboard_service,
+    )
+
+    while True:
+        try:
+            _, is_open = _market_status()
+            if is_open:  # regular US session only (9:30–4 ET, DST-aware)
+                await get_home_dashboard_service().get_scanners()
+                logger.info("Scanner pre-warm: refreshed (regular session open)")
+        except Exception as e:
+            logger.error(f"Scanner pre-warmer failed: {e}", exc_info=True)
+
+        await asyncio.sleep(settings.SCANNER_PREWARM_INTERVAL_SECONDS)
 
 
 async def _run_research_reconciliation_job():

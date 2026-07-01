@@ -79,6 +79,13 @@ _MOVERS_EXCHANGES = {"NASDAQ", "NYSE", "AMEX"}
 # lists), so most-actives backfill the list with real names and it isn't thin.
 _SCANNER_MIN_MARKET_CAP = 250_000_000
 _RVOL_MIN = 2.0
+# A mover whose % change would render as "0.0%" is not a mover. The iOS row
+# formats change with ONE decimal ("%+.1f%%"), so any |change| < 0.05 displays
+# as "+0.0%"/"-0.0%". Dropping that range keeps a near-flat name off the board
+# (and out of the #1 slot on a quiet session, when the dramatic movers are all
+# sub-$5/ETFs and get filtered) and removes the signed-zero path where
+# round(-0.003, 2) == -0.0 decodes as positive on iOS and paints a loser green.
+_MOVERS_MIN_ABS_CHANGE_PCT = 0.05
 # Bound the shared profile fan-out. Sized to fit the WHOLE in-play universe
 # (≈ filtered gainers + losers + most-actives, ~65–90), so most-actives — the
 # source of "real down names" that backfill Top Losers — aren't truncated.
@@ -87,6 +94,17 @@ _UNIVERSE_CAP = 90
 # float vs a post-reverse-split FINRA shares_short can yield absurd ratios
 # (e.g. WOLF computing 435%). Genuine values essentially never exceed 100%.
 _SHORT_PCT_SANITY_MAX = 100.0
+# The card computes % of float as FINRA shares_short / CURRENT FMP float. A stale
+# settlement date against a current float yields a misleading ratio, so a FINRA/
+# Nasdaq print whose settlement is older than this is dropped. FINRA publishes
+# ~twice monthly, so a latest print older than ~2 cycles means the name stopped
+# being reported (delisted/halted) or the feed is stale. Yahoo's precomputed % of
+# float carries no settlement date and is internally date-consistent → exempt.
+_SHORT_MAX_SETTLEMENT_AGE_DAYS = 60
+# Only quote the top-N most-shorted candidates (rather than the whole universe)
+# before applying the market-cap floor — covers the 10 floor-passers in realistic
+# cases while bounding the per-build quote burst (rate hygiene under the pre-warm).
+_SHORT_QUOTE_CANDIDATES = 25
 _FLOAT_TTL_SECONDS = 86_400                 # 24h in-mem float cache (float moves slowly)
 
 _SHORT_UNIVERSE_PATH = (
@@ -286,6 +304,32 @@ def _short_pct(shares_short: Any, float_shares: Any, precomputed_pct: Any) -> Op
     return None
 
 
+def _short_data_is_fresh(
+    si: Dict[str, Any], *, now: Optional[datetime] = None
+) -> bool:
+    """True if a short-interest payload is fresh enough to compute % of float.
+
+    The card divides a FINRA/Nasdaq ``shares_short`` (as of a settlement date) by
+    the CURRENT FMP float, so a stale settlement against a current float produces
+    a misleading ratio. When a ``settlement_date`` is present, require it within
+    ``_SHORT_MAX_SETTLEMENT_AGE_DAYS``. When absent (Yahoo's precomputed % of
+    float is internally date-consistent) or unparseable, don't reject — the
+    freshness guard is for the compute-from-float path, not a blanket filter.
+    """
+    sd = si.get("settlement_date") if isinstance(si, dict) else None
+    if not sd:
+        return True
+    try:
+        settled = datetime.strptime(str(sd)[:10], "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+    except (ValueError, TypeError):
+        return True
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return (now - settled).days <= _SHORT_MAX_SETTLEMENT_AGE_DAYS
+
+
 def _is_quality_company(profile: Any) -> bool:
     """A liquid, real operating company (not an ETF/fund, not a micro-cap pump).
     Uses the FMP company profile, which carries marketCap, averageVolume, and the
@@ -297,13 +341,43 @@ def _is_quality_company(profile: Any) -> bool:
         return False
     market_cap = _finite_float(profile.get("marketCap"))
     avg_volume = _finite_float(profile.get("averageVolume"))
-    # None (missing/NaN/inf) fails the gate — a NaN marketCap must NOT slip
-    # through (NaN < threshold is False).
-    if market_cap is None or market_cap < _SCANNER_MIN_MARKET_CAP:
+    # A MISSING/non-finite marketCap or averageVolume fails the gate (a NaN must
+    # NOT slip through — NaN < threshold is False). This is also the one silent
+    # data-loss case worth surfacing: the name already cleared the raw-list /
+    # price / exchange gates upstream, so a sparse FMP profile (e.g. a freshly
+    # listed name with no cap yet) is dropped here with no other trace. Log it at
+    # debug so the loss is diagnosable; a present-but-too-small value is an
+    # ordinary micro-cap filter and stays silent.
+    if market_cap is None:
+        logger.debug(
+            "Quality gate dropped %s: marketCap missing/non-finite (%r)",
+            profile.get("symbol"), profile.get("marketCap"),
+        )
         return False
-    if avg_volume is None or avg_volume < _MOVERS_MIN_AVG_VOLUME:
+    if market_cap < _SCANNER_MIN_MARKET_CAP:
+        return False
+    if avg_volume is None:
+        logger.debug(
+            "Quality gate dropped %s: averageVolume missing/non-finite (%r)",
+            profile.get("symbol"), profile.get("averageVolume"),
+        )
+        return False
+    if avg_volume < _MOVERS_MIN_AVG_VOLUME:
         return False
     return True
+
+
+def _canonical_symbol(symbol: Any) -> str:
+    """Canonical join key for a ticker across FMP endpoints.
+
+    FMP's mover lists and its profile endpoint disagree on the class-share
+    delimiter — the biggest-losers / most-actives lists return e.g. ``"BRK-B"``
+    while ``/stable/profile`` echoes ``"BRK.B"``. A raw uppercase compare then
+    fails to join the two, silently dropping real class-share movers from the
+    leaderboard. Folding ``"."`` → ``"-"`` makes both forms match. Returns
+    ``""`` for missing/empty input.
+    """
+    return str(symbol or "").upper().replace(".", "-")
 
 
 def _movers_from_universe(
@@ -322,28 +396,47 @@ def _movers_from_universe(
     dramatic quality movers lead, and notable moves among the most-traded names
     backfill. (FMP's biggest-losers top-50 is mostly sub-$5 penny names, so a
     raw-list filter yields only a handful of real companies.)"""
-    scored: List[Tuple[float, str, float, Dict[str, Any]]] = []
+    scored: List[Tuple[float, float, str, float, Dict[str, Any]]] = []
     for symbol, p in profile_map.items():
         if not _is_quality_company(p):
             continue
-        change = change_map.get(symbol)
-        if change is None or not math.isfinite(change) or change == 0:
+        # Canonical lookup so a class-share whose profile symbol uses a different
+        # delimiter than the raw mover list (e.g. profile "BRK.B" vs list
+        # "BRK-B") still joins its change and isn't silently dropped.
+        change = change_map.get(_canonical_symbol(symbol))
+        if change is None or not math.isfinite(change):
+            continue
+        # Drop anything that would render as 0.0% (see _MOVERS_MIN_ABS_CHANGE_PCT)
+        # — this also excludes the signed-zero range that would paint a "loser"
+        # green on iOS (round(-0.003, 2) == -0.0, and -0.0 >= 0 is True in Swift).
+        if abs(change) < _MOVERS_MIN_ABS_CHANGE_PCT:
             continue
         if (change > 0) != positive:
             continue
         price = _finite_float(p.get("price"))
         if price is None or price <= 0:
             continue
-        scored.append((change, symbol, price, p))
-    scored.sort(key=lambda t: t[0], reverse=positive)
+        market_cap = _finite_float(p.get("marketCap"))
+        scored.append((change, market_cap or 0.0, symbol, price, p))
+    # Rank by % change (gainers desc, losers asc), breaking ties by larger market
+    # cap then symbol so the order is deterministic and defensible rather than
+    # dependent on universe insertion order (which otherwise decides the #1
+    # sparkline and the row-N cutoff). Both branches sort ascending on a
+    # sign-adjusted key.
+    if positive:
+        scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    else:
+        scored.sort(key=lambda t: (t[0], -t[1], t[2]))
     out: List[ScannerRowResponse] = []
-    for i, (change, symbol, price, p) in enumerate(scored[:rows]):
+    for i, (change, _market_cap, symbol, price, p) in enumerate(scored[:rows]):
         out.append(ScannerRowResponse(
             rank=i + 1,
             symbol=symbol,
             name=p.get("companyName") or symbol,
             price=round(price, 2),
-            change_percent=round(change, 2),
+            # `+ 0.0` collapses a possible signed -0.0 to 0.0 (defensive; the abs
+            # floor above already excludes the near-zero range).
+            change_percent=round(change, 2) + 0.0,
             market_cap=_finite_float(p.get("marketCap")),
         ))
     return out
@@ -678,7 +771,9 @@ class HomeDashboardService:
             for r in raw or []:
                 if not isinstance(r, dict):
                     continue
-                s = (r.get("symbol") or "").upper()
+                # Canonical key so the join survives the class-share delimiter
+                # mismatch between these lists and the profile endpoint.
+                s = _canonical_symbol(r.get("symbol"))
                 if not s or s in change_map:
                     continue
                 chg = _parse_pct(r.get("changesPercentage"))
@@ -722,6 +817,12 @@ class HomeDashboardService:
                     return None
             if not si:
                 return None
+            if not _short_data_is_fresh(si):
+                logger.debug(
+                    "Skeptical Money: %s short data stale (settlement %s) — skipped",
+                    ticker, si.get("settlement_date"),
+                )
+                return None
             shares_short = si.get("shares_short")
             precomputed = si.get("short_percent_of_float")
             # Fetch float to COMPUTE % when there's no usable precomputed value —
@@ -734,18 +835,31 @@ class HomeDashboardService:
             pct = _short_pct(shares_short, float_shares, precomputed)
             if pct is None:
                 return None
-            return {"symbol": ticker.upper(), "short_percent_of_float": pct}
+            return {
+                "symbol": ticker.upper(),
+                "short_percent_of_float": pct,
+                # Carried through so the card can show "As of {settlement}" — the
+                # FINRA print is bi-monthly, not a live daily figure. None for the
+                # Yahoo precomputed path (no settlement date).
+                "settlement_date": si.get("settlement_date"),
+            }
 
         results = await asyncio.gather(*[_one(t) for t in universe])
         items = [r for r in results if r is not None]
         if not items:
             return None
 
+        # Rank by % of float, then quote the TOP candidates in one fan-out so the
+        # $250M market-cap floor — the same quality bar the movers/volume cards
+        # apply — can filter BEFORE the top-N cut. The most-shorted names skew
+        # small, so filtering only the top 10 would leave gaps; we over-fetch a
+        # bounded set (_SHORT_QUOTE_CANDIDATES) to keep the per-build quote burst
+        # in check while reliably yielding 10 floor-passers.
         items.sort(key=lambda it: it["short_percent_of_float"], reverse=True)
-        top = items[:_SCANNER_ROWS]
-        top_symbols = [it["symbol"] for it in top]
+        candidates = items[:_SHORT_QUOTE_CANDIDATES]
+        candidate_symbols = [it["symbol"] for it in candidates]
 
-        quotes = await self.fmp.get_batch_quotes(top_symbols)
+        quotes = await self.fmp.get_batch_quotes(candidate_symbols)
         qmap = {
             (q.get("symbol") or "").upper(): q
             for q in quotes
@@ -753,8 +867,15 @@ class HomeDashboardService:
         }
 
         enriched: List[Dict[str, Any]] = []
-        for it in top:
+        # candidates is sorted desc by short% → the first N clearing the floor are
+        # the top N, so we can stop once we have a full board.
+        for it in candidates:
             q = qmap.get(it["symbol"], {})
+            market_cap = _finite_float(q.get("marketCap"))
+            # $250M quality floor (parity with movers/volume). A missing/non-finite
+            # market cap can't prove it clears the floor → drop.
+            if market_cap is None or market_cap < _SCANNER_MIN_MARKET_CAP:
+                continue
             price_f = _finite_float(q.get("price")) or 0.0
             change = _parse_pct(q.get("changesPercentage"))
             if change is None:
@@ -764,15 +885,24 @@ class HomeDashboardService:
                 "name": q.get("name") or it["symbol"],
                 "price": price_f,
                 "change_percent": change or 0.0,
-                "market_cap": _finite_float(q.get("marketCap")),
+                "market_cap": market_cap,
                 "short_percent_of_float": it["short_percent_of_float"],
+                "settlement_date": it.get("settlement_date"),
             })
+            if len(enriched) >= _SCANNER_ROWS:
+                break
 
         rows = _short_rows(enriched)
         if not rows:
             return None
+        # Card-level "as of" = the latest settlement among the shown rows (ISO
+        # strings sort chronologically); None when none carry a date (all-Yahoo).
+        as_of = max(
+            (e["settlement_date"] for e in enriched if e.get("settlement_date")),
+            default=None,
+        )
         await self._attach_rank1_sparks([rows])
-        return ScannerGroupResponse(kind="shorts", entries=rows)
+        return ScannerGroupResponse(kind="shorts", entries=rows, as_of_date=as_of)
 
     async def _attach_rank1_sparks(
         self, lists: List[List[ScannerRowResponse]]

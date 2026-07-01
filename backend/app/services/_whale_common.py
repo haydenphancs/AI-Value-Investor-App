@@ -55,6 +55,92 @@ def parse_congress_amount_dollars(amount_str: str) -> float:
         return 0.0
 
 
+def parse_congress_amount_bounds(
+    amount_str: str,
+) -> Tuple[float, Optional[float]]:
+    """Parse FMP's congressional amount range → ``(low, high)`` DOLLAR bounds.
+
+    Politicians disclose trades ONLY as ranges (by law) — never an exact
+    figure. Returns the honest bounds so the UI can show a range instead of
+    the fabricated-precision midpoint that :func:`parse_congress_amount_dollars`
+    produces (that midpoint is still used internally for sorting / net math).
+
+      - Range:   ``"$1,001 - $15,000"``   → ``(1001.0, 15000.0)``
+      - Over-X:  ``"Over $50,000,000"``    → ``(50_000_000.0, None)`` (open high)
+      - Single:  ``"100000"``              → ``(100_000.0, 100_000.0)``
+      - Empty / unparseable                 → ``(0.0, 0.0)``
+    """
+    if not amount_str:
+        return (0.0, 0.0)
+
+    clean = amount_str.replace("$", "").replace(",", "").strip()
+
+    if " - " in clean:
+        parts = clean.split(" - ")
+        try:
+            low = float(parts[0].strip())
+            high = float(parts[1].strip())
+            return (low, high)
+        except (ValueError, IndexError):
+            pass
+
+    if clean.lower().startswith("over "):
+        try:
+            base = float(clean[5:].strip())
+            return (base, None)  # open-ended top bucket
+        except ValueError:
+            pass
+
+    try:
+        v = float(clean)
+        return (v, v)
+    except ValueError:
+        return (0.0, 0.0)
+
+
+def sum_amount_bounds(
+    bounds: list,
+) -> Tuple[float, Optional[float]]:
+    """Sum a list of ``(low, high)`` bounds into a single summed range.
+
+    If ANY high is ``None`` (open-ended "Over $X" bucket), the summed high is
+    ``None`` too — the total is open-ended.
+    """
+    total_low = 0.0
+    total_high: Optional[float] = 0.0
+    for low, high in bounds:
+        total_low += low
+        if total_high is not None:
+            total_high = None if high is None else total_high + high
+    return (total_low, total_high)
+
+
+def format_amount_short(value: float) -> str:
+    """Compact dollar label with no sign: ``$8K`` / ``$1.5M`` / ``$2.34B``."""
+    amt = abs(value)
+    if amt >= 1_000_000_000:
+        return f"${amt / 1_000_000_000:.2f}B"
+    if amt >= 1_000_000:
+        return f"${amt / 1_000_000:.1f}M"
+    if amt >= 1_000:
+        return f"${amt / 1_000:.0f}K"
+    return f"${amt:.0f}"
+
+
+def format_amount_range(low: float, high: Optional[float]) -> str:
+    """Format a summed congressional dollar RANGE for display.
+
+      - Open-ended high (``None``)  → ``"$50M+"``
+      - Collapsed (``low == high``) → ``"$8K"``
+      - Otherwise                   → ``"$50K – $250K"``
+    """
+    if high is None:
+        return f"{format_amount_short(low)}+"
+    if abs(high - low) < 1.0:
+        return format_amount_short(low)
+    return f"{format_amount_short(low)} – {format_amount_short(high)}"
+
+
 # ── 13F Institutional (shares × implied price) ─────────────────────
 
 

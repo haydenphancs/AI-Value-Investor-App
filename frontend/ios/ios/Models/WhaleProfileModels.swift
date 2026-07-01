@@ -185,19 +185,66 @@ struct WhaleTradeGroup: Identifiable, Codable {
     let tradeCount: Int
     let netAction: WhaleTradeAction
     let netAmount: Double
+    /// Congress only: summed STOCK Act range label (e.g. "$50K – $250K"). When
+    /// present, the honest range is shown instead of the midpoint `netAmount`.
+    let netAmountRange: String?
+    /// Congress only: when the filing became public (STOCK Act disclosure).
+    let disclosureDate: Date?
+    /// Congress only: when the trades actually happened.
+    let transactionDate: Date?
     let summary: String?
     let insights: [String]
     let trades: [WhaleTrade]
 
+    /// Congressional disclosures report ranges on a 30–45 day lag; we detect
+    /// them by the presence of a range/disclosure date and render differently.
+    var isCongressional: Bool {
+        netAmountRange != nil || disclosureDate != nil
+    }
+
+    /// A date is real only if it parsed; `.distantPast` is the "unavailable"
+    /// sentinel (see DateParser) — never treat it as a fabricated "Today".
+    private static func isReal(_ d: Date?) -> Bool {
+        guard let d else { return false }
+        return d.timeIntervalSince1970 > 946_684_800  // 2000-01-01
+    }
+
+    private static let shortDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f
+    }()
+
     /// Formatted date for the detail header (e.g. "Feb 05, 2026")
     var formattedDateFull: String {
+        guard WhaleTradeGroup.isReal(date) else { return "Date unavailable" }
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM dd, yyyy"
         return formatter.string(from: date)
     }
 
-    /// Formatted date — shows relative for recent, or "MMM dd, yyyy" otherwise
+    /// Primary label for the trade-group card.
+    ///
+    /// Congress: absolute "Traded … · Disclosed …" (no relative labels — a
+    /// disclosure can't honestly be "Today" given the STOCK Act lag).
+    /// 13F: relative for recent filings, else the full date.
     var formattedDate: String {
+        if isCongressional {
+            let tx = WhaleTradeGroup.isReal(transactionDate)
+                ? WhaleTradeGroup.shortDateFormatter.string(from: transactionDate!)
+                : nil
+            let disc = WhaleTradeGroup.isReal(disclosureDate)
+                ? WhaleTradeGroup.shortDateFormatter.string(from: disclosureDate!)
+                : nil
+            switch (tx, disc) {
+            case let (tx?, disc?): return "Traded \(tx) · Disclosed \(disc)"
+            case let (tx?, nil):   return "Traded \(tx)"
+            case let (nil, disc?): return "Disclosed \(disc)"
+            default:               return "Recently disclosed"
+            }
+        }
+
+        guard WhaleTradeGroup.isReal(date) else { return "Date unavailable" }
         let calendar = Calendar.current
         let now = Date()
         let daysAgo = calendar.dateComponents([.day], from: date, to: now).day ?? 0
@@ -217,7 +264,12 @@ struct WhaleTradeGroup: Identifiable, Codable {
         "\(tradeCount) \(tradeCount == 1 ? "trade" : "trades")"
     }
 
+    /// Amount label. Congress → honest summed range (no sign, no false
+    /// precision). 13F → signed precise figure.
     var formattedNetAmount: String {
+        if let range = netAmountRange {
+            return "\(range) \(netAction.rawValue)"
+        }
         let prefix = netAction == .bought ? "+" : "- "
         return "\(prefix)\(formatAmount(netAmount)) \(netAction.rawValue)"
     }
@@ -240,6 +292,9 @@ struct WhaleTradeGroup: Identifiable, Codable {
         tradeCount: Int,
         netAction: WhaleTradeAction,
         netAmount: Double,
+        netAmountRange: String? = nil,
+        disclosureDate: Date? = nil,
+        transactionDate: Date? = nil,
         summary: String? = nil,
         insights: [String] = [],
         trades: [WhaleTrade] = []
@@ -249,6 +304,9 @@ struct WhaleTradeGroup: Identifiable, Codable {
         self.tradeCount = tradeCount
         self.netAction = netAction
         self.netAmount = netAmount
+        self.netAmountRange = netAmountRange
+        self.disclosureDate = disclosureDate
+        self.transactionDate = transactionDate
         self.summary = summary
         self.insights = insights
         self.trades = trades
@@ -323,6 +381,7 @@ struct WhaleTrade: Identifiable, Codable {
     let previousAllocation: Double
     let newAllocation: Double
     let date: Date
+    let disclosureDate: Date?
     let assetType: String
 
     var formattedAmount: String {
@@ -366,6 +425,7 @@ struct WhaleTrade: Identifiable, Codable {
         previousAllocation: Double = 0,
         newAllocation: Double = 0,
         date: Date = Date(),
+        disclosureDate: Date? = nil,
         assetType: String = "stock"
     ) {
         self.id = id
@@ -378,6 +438,7 @@ struct WhaleTrade: Identifiable, Codable {
         self.previousAllocation = previousAllocation
         self.newAllocation = newAllocation
         self.date = date
+        self.disclosureDate = disclosureDate
         self.assetType = assetType
     }
 }

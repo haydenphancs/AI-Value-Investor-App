@@ -6,8 +6,11 @@ The walk must produce consistent previous/new allocations that reflect
 what portfolio state looked like at each trade time. Bucket midpoints are
 used for dollar estimates — allocations are directional, not exact.
 
-Test dates are kept within the last 90 days (the ``recent`` filter window)
-of today (2026-04-20) so trades aren't dropped from the returned group.
+_aggregate_congressional_trades returns a LIST of trade groups, one per
+disclosure filing (grouped by ``disclosureDate``, falling back to the
+transaction date when absent). The chronological allocation walk is GLOBAL
+across all trades regardless of grouping, so per-trade allocations are the
+same — we just flatten the groups to assert on individual trades.
 """
 
 from unittest.mock import MagicMock
@@ -28,6 +31,14 @@ def _make_trade(symbol: str, ttype: str, amount: str, date: str) -> dict:
     }
 
 
+def _all_trades(groups: list) -> list:
+    """Flatten every trade across all returned per-disclosure groups."""
+    out = []
+    for g in groups:
+        out.extend(g["trades"])
+    return out
+
+
 @pytest.fixture
 def service():
     # _aggregate_congressional_trades does not touch any async deps,
@@ -39,15 +50,17 @@ def service():
 
 def test_single_buy_is_full_portfolio(service):
     raw = [_make_trade("AAPL", "purchase", "$1,001 - $15,000", "2026-03-10")]
-    _, trade_group, _ = service._aggregate_congressional_trades(
+    _, groups, _ = service._aggregate_congressional_trades(
         raw, "2026-04-20"
     )
-    trades = trade_group["trades"]
+    trades = _all_trades(groups)
     assert len(trades) == 1
     assert trades[0]["previous_allocation"] == 0.0
     assert trades[0]["new_allocation"] == 100.0
     assert trades[0]["trade_type"] == "New"
     assert trades[0]["amount_range"] == "$1,001 - $15,000"
+    # Group is dated by disclosure (falls back to tx date) — never "now".
+    assert groups[0]["date"] != "2026-04-20"
 
 
 def test_second_buy_same_ticker_chains_allocations(service):
@@ -56,10 +69,10 @@ def test_second_buy_same_ticker_chains_allocations(service):
         _make_trade("AAPL", "purchase", "$1,001 - $15,000", "2026-02-10"),
         _make_trade("AAPL", "purchase", "$1,001 - $15,000", "2026-03-10"),
     ]
-    _, trade_group, _ = service._aggregate_congressional_trades(
+    _, groups, _ = service._aggregate_congressional_trades(
         raw, "2026-04-20"
     )
-    trades = sorted(trade_group["trades"], key=lambda t: t["date"])
+    trades = sorted(_all_trades(groups), key=lambda t: t["date"])
     assert trades[0]["previous_allocation"] == 0.0
     assert trades[0]["new_allocation"] == 100.0
     assert trades[1]["previous_allocation"] == 100.0
@@ -73,10 +86,10 @@ def test_two_different_tickers_shrink_each_other(service):
         _make_trade("AAPL", "purchase", "$1,001 - $15,000", "2026-02-10"),
         _make_trade("MSFT", "purchase", "$1,001 - $15,000", "2026-03-10"),
     ]
-    _, trade_group, _ = service._aggregate_congressional_trades(
+    _, groups, _ = service._aggregate_congressional_trades(
         raw, "2026-04-20"
     )
-    by_ticker = {t["ticker"]: t for t in trade_group["trades"]}
+    by_ticker = {t["ticker"]: t for t in _all_trades(groups)}
     # MSFT trade sees AAPL holding 100%, adds itself → 50/50 split
     assert by_ticker["MSFT"]["previous_allocation"] == 0.0
     assert by_ticker["MSFT"]["new_allocation"] == 50.0
@@ -91,11 +104,11 @@ def test_full_sale_zeros_allocation(service):
         _make_trade("MSFT", "purchase", "$15,001 - $50,000", "2026-02-15"),
         _make_trade("AAPL", "sale_full", "$15,001 - $50,000", "2026-03-10"),
     ]
-    _, trade_group, _ = service._aggregate_congressional_trades(
+    _, groups, _ = service._aggregate_congressional_trades(
         raw, "2026-04-20"
     )
     sale = next(
-        t for t in trade_group["trades"]
+        t for t in _all_trades(groups)
         if t["ticker"] == "AAPL" and t["action"] == "SOLD"
     )
     assert sale["trade_type"] == "Closed"
@@ -110,10 +123,10 @@ def test_oversell_clamps_no_negative_allocation(service):
         _make_trade("AAPL", "purchase", "$1,001 - $15,000", "2026-02-10"),
         _make_trade("AAPL", "sale_full", "$1,000,001 - $5,000,000", "2026-03-10"),
     ]
-    _, trade_group, _ = service._aggregate_congressional_trades(
+    _, groups, _ = service._aggregate_congressional_trades(
         raw, "2026-04-20"
     )
-    sale = next(t for t in trade_group["trades"] if t["action"] == "SOLD")
+    sale = next(t for t in _all_trades(groups) if t["action"] == "SOLD")
     assert sale["new_allocation"] == 0.0
     assert sale["previous_allocation"] >= 0.0  # never negative
 
@@ -125,10 +138,10 @@ def test_unsorted_input_produces_date_ordered_walk(service):
         _make_trade("MSFT", "purchase", "$1,001 - $15,000", "2026-03-10"),
         _make_trade("AAPL", "purchase", "$1,001 - $15,000", "2026-02-10"),
     ]
-    _, trade_group, _ = service._aggregate_congressional_trades(
+    _, groups, _ = service._aggregate_congressional_trades(
         raw, "2026-04-20"
     )
-    by_ticker = {t["ticker"]: t for t in trade_group["trades"]}
+    by_ticker = {t["ticker"]: t for t in _all_trades(groups)}
     # AAPL was first in time → 100% at that moment
     assert by_ticker["AAPL"]["new_allocation"] == 100.0
     # MSFT second → 50% split

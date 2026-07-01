@@ -19,9 +19,17 @@ import logging
 from app.dependencies import get_optional_user_id
 from app.services.home_service import HomeService
 from app.services.home_dashboard_service import get_home_dashboard_service
+from app.services.signals_service import get_signals_service
 from app.schemas.home import HomeFeedResponse
 from app.schemas.home_dashboard import HomeDashboardResponse
-from app.api.error_response import error_response_from_exception
+from app.schemas.signals_detail import SignalTickerDetailResponse
+from app.api.error_response import (
+    error_response_from_exception,
+    make_error_response,
+    ErrorCode,
+)
+
+_VALID_SIGNAL_KINDS = {"whale", "congress"}
 
 logger = logging.getLogger(__name__)
 
@@ -62,3 +70,32 @@ async def get_home_dashboard():
             "Home dashboard failed: %s: %s", type(e).__name__, e, exc_info=True
         )
         return error_response_from_exception(e, step="home_dashboard")
+
+
+@router.get("/signals/{kind}/{ticker}", response_model=SignalTickerDetailResponse)
+async def get_signal_ticker_detail(kind: str, ticker: str):
+    """Per-ticker drill-down for a Home signal card — WHO bought/added `ticker`,
+    WHEN, HOW MUCH. ``kind`` ∈ {whale, congress}. Public (no auth). The service
+    degrades to an empty holder list rather than failing; only an unexpected
+    error surfaces a structured response.
+    """
+    if kind not in _VALID_SIGNAL_KINDS:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Unsupported signal kind: {kind!r}",
+            details={"kind": kind, "valid": sorted(_VALID_SIGNAL_KINDS)},
+        )
+    if not ticker or len(ticker) > 12:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Invalid ticker symbol: {ticker!r}",
+            details={"ticker": ticker},
+        )
+    try:
+        return await get_signals_service().get_ticker_detail(kind, ticker)
+    except Exception as e:
+        logger.error(
+            "Signal detail failed (%s/%s): %s: %s",
+            kind, ticker, type(e).__name__, e, exc_info=True,
+        )
+        return error_response_from_exception(e, ticker=ticker, step="signal_detail")

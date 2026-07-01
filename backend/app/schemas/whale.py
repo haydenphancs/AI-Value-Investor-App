@@ -72,7 +72,8 @@ class WhaleTradeResponse(BaseModel):
     amount_range: Optional[str] = None  # STOCK Act bucket, e.g. "$1,001 - $15,000"
     previous_allocation: float = 0.0
     new_allocation: float = 0.0
-    date: str
+    date: str  # transaction date
+    disclosure_date: Optional[str] = None  # congress: when it became public
     asset_type: str = "stock"
 
 
@@ -80,10 +81,13 @@ class WhaleTradeGroupResponse(BaseModel):
     """Batch of trades. Maps to Swift WhaleTradeGroup."""
 
     id: str
-    date: str
+    date: str  # sort/dedup key — disclosure date for congress, filing date for 13F
     trade_count: int
     net_action: str  # "BOUGHT" or "SOLD"
-    net_amount: float
+    net_amount: float  # midpoint sum — internal/13F precise; NOT shown for congress
+    net_amount_range: Optional[str] = None  # congress: summed STOCK Act range label
+    disclosure_date: Optional[str] = None  # congress only
+    transaction_date: Optional[str] = None  # congress only (when trades happened)
     summary: Optional[str] = None
     insights: List[str] = Field(default_factory=list)
     trades: List[WhaleTradeResponse] = Field(default_factory=list)

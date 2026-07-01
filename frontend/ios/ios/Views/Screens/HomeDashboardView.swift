@@ -25,6 +25,8 @@ struct HomeDashboardView: View {
     /// Which Daily Scanner card is expanded (nil = none). Owned here so a tap
     /// ANYWHERE outside the card (in the scroll content) collapses it.
     @State private var expandedScannerID: DailyScanner.ID?
+    /// A tapped whale/congress signal ticker → the per-ticker drill-down screen.
+    @State private var signalDetailTarget: SignalDetailTarget?
 
     /// `repository == nil` → the live `HomeRepository` (the app default).
     /// Pass `MockHomeRepository()` for offline previews / tests.
@@ -82,6 +84,12 @@ struct HomeDashboardView: View {
                     }
                 }
                 .navigationBarHidden(true)
+            }
+            .preferredColorScheme(.dark)
+        }
+        .fullScreenCover(item: $signalDetailTarget) { target in
+            NavigationStack {
+                SignalTickerDetailView(kind: target.kind, ticker: target.symbol)
             }
             .preferredColorScheme(.dark)
         }
@@ -188,8 +196,14 @@ struct HomeDashboardView: View {
         presentStock(symbol: entry.symbol, name: entry.name)
     }
 
-    private func openLeader(_ leader: SignalLeader) {
-        presentStock(symbol: leader.symbol, name: leader.symbol)
+    private func openLeader(_ kind: String, _ leader: SignalLeader) {
+        // Whale & Congress → the per-ticker drill-down (who bought/added it).
+        // Earnings has no "who bought" list → open the ticker detail directly.
+        if kind == "whale" || kind == "congress" {
+            signalDetailTarget = SignalDetailTarget(kind: kind, symbol: leader.symbol)
+        } else {
+            presentStock(symbol: leader.symbol, name: leader.symbol)
+        }
     }
 
     private func presentStock(symbol: String, name: String) {
@@ -202,6 +216,13 @@ struct HomeDashboardView: View {
             sparklineData: []
         )
     }
+}
+
+/// A tapped whale/congress signal ticker, presented as the per-ticker drill-down.
+private struct SignalDetailTarget: Identifiable {
+    let id = UUID()
+    let kind: String        // "whale" | "congress"
+    let symbol: String
 }
 
 #Preview {

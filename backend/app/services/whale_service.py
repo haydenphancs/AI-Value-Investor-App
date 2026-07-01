@@ -26,6 +26,9 @@ from app.integrations.fmp import get_fmp_client, FMPClient
 from app.database import get_supabase
 from app.services._whale_common import (
     parse_congress_amount_dollars,
+    parse_congress_amount_bounds,
+    sum_amount_bounds,
+    format_amount_range,
     calc_13f_trade_dollars,
 )
 from app.schemas.whale import (
@@ -583,41 +586,40 @@ class WhaleService:
                     )
                 )
 
-        # Trade groups from snapshot + DB
+        # Trade groups — snapshot (per-filing list) + historical DB rows.
         trade_groups: List[WhaleTradeGroupResponse] = []
         all_trades: List[WhaleTradeResponse] = []
 
-        if snapshot and snapshot.get("trade_group"):
-            tg = snapshot["trade_group"]
-            trades_for_group = self._build_trade_responses(
-                tg.get("trades", [])
-            )
+        snap_groups = (snapshot or {}).get("trade_groups")
+        if not snap_groups:
+            # Backward-compat: older snapshots stored a single group.
+            single = (snapshot or {}).get("trade_group")
+            snap_groups = [single] if single else []
+
+        for tg in snap_groups:
+            if not tg:
+                continue
+            trades_for_group = self._build_trade_responses(tg.get("trades", []))
             trade_groups.append(
-                WhaleTradeGroupResponse(
-                    id=str(uuid.uuid4()),
-                    date=tg.get("date", ""),
-                    trade_count=tg.get("trade_count", 0),
-                    net_action=tg.get("net_action", "BOUGHT"),
-                    net_amount=float(tg.get("net_amount", 0)),
-                    summary=tg.get("summary"),
-                    insights=tg.get("insights", []),
-                    trades=trades_for_group,
+                self._assemble_group_response(
+                    str(uuid.uuid4()), tg, trades_for_group
                 )
             )
             all_trades.extend(trades_for_group)
 
-        # Historical trade groups from DB
+        # Historical trade groups from DB (dedup by date)
         try:
             db_groups = (
                 sb.table("whale_trade_groups")
                 .select("*")
                 .eq("whale_id", whale_id)
-                .order("created_at", desc=True)
-                .limit(10)
+                .order("date", desc=True)
+                .limit(12)
                 .execute()
             )
+            existing_dates = {g.date for g in trade_groups}
             for tg in db_groups.data or []:
-                if any(g.date == tg.get("date", "") for g in trade_groups):
+                if tg.get("date", "") in existing_dates:
                     continue
                 db_trades = (
                     sb.table("whale_trades")
@@ -630,15 +632,8 @@ class WhaleService:
                     db_trades.data or []
                 )
                 trade_groups.append(
-                    WhaleTradeGroupResponse(
-                        id=str(tg["id"]),
-                        date=tg.get("date", ""),
-                        trade_count=tg.get("trade_count", 0),
-                        net_action=tg.get("net_action", "BOUGHT"),
-                        net_amount=float(tg.get("net_amount", 0)),
-                        summary=tg.get("summary"),
-                        insights=tg.get("insights") or [],
-                        trades=trades_for_group,
+                    self._assemble_group_response(
+                        str(tg["id"]), tg, trades_for_group
                     )
                 )
                 all_trades.extend(trades_for_group)
@@ -647,6 +642,9 @@ class WhaleService:
                 "[whale_profile] DB trade groups failed for %s: %s",
                 whale_id, e,
             )
+
+        # Combined timeline, most-recent filing first
+        trade_groups.sort(key=lambda g: g.date or "", reverse=True)
 
         # Behavior summary
         behavior_raw = (
@@ -1118,7 +1116,8 @@ class WhaleService:
 
         # Sync to denormalized tables
         await self._sync_to_whale_tables(
-            whale_id, holdings_data, sector_data, trade_group,
+            whale_id, holdings_data, sector_data,
+            [trade_group] if trade_group else [],
             behavior, sentiment, total_value, perf_data_list,
             whale=whale,
         )
@@ -1157,10 +1156,11 @@ class WhaleService:
         if not raw_trades:
             return await self._read_from_supabase(whale_id)
 
-        # Aggregate trades
-        holdings_data, trade_group, sector_data = (
+        # Aggregate trades → LIST of per-disclosure-filing groups
+        holdings_data, trade_groups, sector_data = (
             self._aggregate_congressional_trades(raw_trades, now.isoformat()[:10])
         )
+        primary_group = trade_groups[0] if trade_groups else None
         total_value = sum(h.get("value", 0) for h in holdings_data)
 
         # Single enrichment pass: logos + names + sectors
@@ -1170,9 +1170,9 @@ class WhaleService:
         if not sector_data and enriched_sectors:
             sector_data = enriched_sectors
 
-        behavior = self._generate_behavior_summary(trade_group, sector_data)
+        behavior = self._generate_behavior_summary(primary_group, sector_data)
         sentiment = self._generate_sentiment_summary(
-            holdings_data, trade_group, sector_data
+            holdings_data, primary_group, sector_data, is_congress=True
         )
 
         raw_hash = hashlib.sha256(
@@ -1186,7 +1186,8 @@ class WhaleService:
             "total_value": total_value,
             "holdings_data": holdings_data,
             "sector_data": sector_data,
-            "trade_group": trade_group,
+            "trade_group": primary_group,   # backward-compat (most recent)
+            "trade_groups": trade_groups,   # full per-filing timeline
             "behavior_summary": behavior,
             "sentiment_text": sentiment,
             "raw_hash": raw_hash,
@@ -1200,7 +1201,7 @@ class WhaleService:
             logger.error("Failed to persist congressional snapshot: %s", e)
 
         await self._sync_to_whale_tables(
-            whale_id, holdings_data, sector_data, trade_group,
+            whale_id, holdings_data, sector_data, trade_groups,
             behavior, sentiment, total_value, {},
         )
 
@@ -1376,8 +1377,8 @@ class WhaleService:
         self,
         raw_trades: List[Dict],
         as_of_date: str,
-    ) -> Tuple[List[Dict], Optional[Dict], List[Dict]]:
-        """Aggregate congressional trades into holdings + trade group + sectors.
+    ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+        """Aggregate congressional trades into holdings + trade groups + sectors.
 
         Uses a chronological walk (oldest → newest) to reconstruct
         `previous_allocation` and `new_allocation` at each trade. This is a
@@ -1389,8 +1390,16 @@ class WhaleService:
         - Sales exceeding known holdings clamp to zero (no negative allocations).
 
         The raw STOCK Act bucket string (e.g. ``"$1,001 - $15,000"``) is
-        preserved on each trade as ``amount_range`` so the UI can display the
-        honest range instead of the midpoint.
+        preserved on each trade as ``amount_range`` (with parsed ``amount_low`` /
+        ``amount_high`` bounds) so the UI can display the honest range instead
+        of the fabricated-precision midpoint.
+
+        Trades are grouped **by disclosure filing** (`disclosureDate`), not by
+        an ``as_of``/``now`` stamp — congressional trades are disclosed on a
+        30–45 day STOCK Act lag, so each returned group is dated by when it
+        became public. Returns a LIST of groups (most-recent filing first) so
+        the "Recent Trades" timeline reflects real, stable, de-dupable dates
+        rather than one aggregate re-stamped "today" on every hydration run.
         """
         full_sale_types = {"sale_full", "sale (full)"}
 
@@ -1405,12 +1414,20 @@ class WhaleService:
             action = CONGRESSIONAL_TYPE_MAP.get(raw_type, "BOUGHT")
             amount_range = t.get("amount") or "$1,001 - $15,000"
             amount = parse_congress_amount_dollars(amount_range)
+            amount_low, amount_high = parse_congress_amount_bounds(amount_range)
             if amount == 0.0:
-                amount = 8_000  # safety fallback
+                amount = 8_000  # safety fallback (sort key only)
             tx_date = (
                 t.get("transactionDate")
                 or t.get("transaction_date")
                 or as_of_date
+            )
+            disclosure_date = (
+                t.get("disclosureDate")
+                or t.get("disclosure_date")
+                or t.get("dateRecieved")
+                or t.get("dateReceived")
+                or tx_date
             )
             name = t.get("assetDescription") or t.get("asset_description") or symbol
 
@@ -1421,7 +1438,10 @@ class WhaleService:
                 "raw_type": raw_type,
                 "amount": amount,
                 "amount_range": amount_range,
+                "amount_low": amount_low,
+                "amount_high": amount_high,
                 "date": tx_date,
+                "disclosure_date": disclosure_date,
             })
 
         # Sort oldest → newest; stable preserves FMP order for same-day trades
@@ -1480,9 +1500,12 @@ class WhaleService:
                 "trade_type": trade_type,
                 "amount": amount,
                 "amount_range": t["amount_range"],
+                "amount_low": t["amount_low"],
+                "amount_high": t["amount_high"],
                 "previous_allocation": previous_allocation,
                 "new_allocation": new_allocation,
                 "date": t["date"],
+                "disclosure_date": t["disclosure_date"],
             })
 
         # ── Build holdings from final running portfolio ─────────────────
@@ -1524,49 +1547,103 @@ class WhaleService:
             h["allocation"] = round(h["value"] / total_value * 100, 2)
         holdings.sort(key=lambda x: x["value"], reverse=True)
 
-        # Build trade group from recent trades (last 90 days relative to as_of_date)
-        try:
-            as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d")
-        except (TypeError, ValueError):
-            as_of_dt = datetime.now()
-        cutoff = (as_of_dt - timedelta(days=90)).strftime("%Y-%m-%d")
-        recent = [t for t in trades if (t.get("date", "") >= cutoff)]
-        if not recent:
-            recent = trades[:20]
+        # ── Group trades by disclosure filing → one group per disclosure ─
+        by_disclosure: Dict[str, List[Dict]] = {}
+        for t in trades:
+            key = t.get("disclosure_date") or t.get("date") or as_of_date
+            by_disclosure.setdefault(key, []).append(t)
 
-        total_bought = sum(t["amount"] for t in recent if t["action"] == "BOUGHT")
-        total_sold = sum(t["amount"] for t in recent if t["action"] == "SOLD")
-        net_dollar = total_bought - total_sold
-        net_action = "BOUGHT" if net_dollar >= 0 else "SOLD"
+        trade_groups: List[Dict] = []
+        for disclosure_date, filing_trades in by_disclosure.items():
+            group = self._build_congress_trade_group(filing_trades, disclosure_date)
+            if group:
+                trade_groups.append(group)
 
-        new_count = sum(1 for t in recent if t["trade_type"] == "New")
-        closed_count = sum(1 for t in recent if t["trade_type"] == "Closed")
-        summary = self._generate_trade_group_summary(
-            recent, new_count, closed_count, net_action
-        )
-        insights = self._generate_trade_group_insights(
-            recent, new_count, closed_count, total_bought, total_sold
-        )
-
-        # Use the most recent trade date (not today) to avoid duplicate groups
-        trade_group_date = max(
-            (t.get("date", as_of_date) for t in recent), default=as_of_date
-        )
-
-        trade_group = {
-            "date": trade_group_date,
-            "trade_count": len(recent),
-            "net_action": net_action,
-            "net_amount": abs(net_dollar),
-            "summary": summary,
-            "insights": insights,
-            "trades": sorted(recent, key=lambda t: t["amount"], reverse=True)[:50],
-        } if recent else None
+        # Most-recent disclosure first; keep a bounded, honest window
+        trade_groups.sort(key=lambda g: g["date"], reverse=True)
+        trade_groups = trade_groups[:12]
 
         # Sectors (basic — from holdings tickers)
         sectors: List[Dict] = []
 
-        return holdings[:30], trade_group, sectors
+        return holdings[:30], trade_groups, sectors
+
+    def _build_congress_trade_group(
+        self, filing_trades: List[Dict], disclosure_date: str
+    ) -> Optional[Dict]:
+        """Build ONE congressional trade group for a single disclosure filing.
+
+        ``date`` is the disclosure date (stable dedup + sort key across
+        hydration runs); ``transaction_date`` is when the trades actually
+        happened. ``net_amount_range`` is the summed STOCK Act range of the
+        trades in the net direction — the honest figure to display instead of
+        the midpoint ``net_amount`` (kept for internal sort / behaviour only).
+        """
+        if not filing_trades:
+            return None
+
+        total_bought = sum(
+            t["amount"] for t in filing_trades if t["action"] == "BOUGHT"
+        )
+        total_sold = sum(
+            t["amount"] for t in filing_trades if t["action"] == "SOLD"
+        )
+        net_dollar = total_bought - total_sold
+        net_action = "BOUGHT" if net_dollar >= 0 else "SOLD"
+
+        new_count = sum(1 for t in filing_trades if t["trade_type"] == "New")
+        closed_count = sum(1 for t in filing_trades if t["trade_type"] == "Closed")
+        summary = self._generate_trade_group_summary(
+            filing_trades, new_count, closed_count, net_action
+        )
+
+        # Summed honest range for the trades in the net direction
+        direction_bounds = [
+            (t.get("amount_low", 0.0), t.get("amount_high", 0.0))
+            for t in filing_trades
+            if t["action"] == net_action
+        ]
+        net_amount_range = (
+            format_amount_range(*sum_amount_bounds(direction_bounds))
+            if direction_bounds
+            else None
+        )
+
+        # Congress insights use the disclosed RANGE — never a precise dollar.
+        insights: List[str] = []
+        if net_amount_range:
+            verb = "buying" if net_action == "BOUGHT" else "selling"
+            insights.append(f"Net {verb} of {net_amount_range} (disclosed range)")
+        new_tickers = [
+            t["ticker"] for t in filing_trades if t["trade_type"] == "New"
+        ][:3]
+        if new_tickers:
+            insights.append(f"New positions: {', '.join(new_tickers)}")
+        closed_tickers = [
+            t["ticker"] for t in filing_trades if t["trade_type"] == "Closed"
+        ][:3]
+        if closed_tickers:
+            insights.append(f"Exited: {', '.join(closed_tickers)}")
+        insights = insights[:4]
+
+        transaction_date = max(
+            (t.get("date", "") for t in filing_trades), default=""
+        )
+
+        return {
+            "date": disclosure_date,
+            "disclosure_date": disclosure_date,
+            "transaction_date": transaction_date,
+            "trade_count": len(filing_trades),
+            "net_action": net_action,
+            "net_amount": abs(net_dollar),
+            "net_amount_range": net_amount_range,
+            "summary": summary,
+            "insights": insights,
+            "trades": sorted(
+                filing_trades, key=lambda t: t["amount"], reverse=True
+            )[:50],
+        }
 
     # ── Build Helpers ────────────────────────────────────────────────
 
@@ -1810,6 +1887,7 @@ class WhaleService:
                 previous_allocation=float(t.get("previous_allocation", 0)),
                 new_allocation=float(t.get("new_allocation", 0)),
                 date=t.get("date", ""),
+                disclosure_date=t.get("disclosure_date"),
             )
             for t in trades
         ]
@@ -1830,9 +1908,64 @@ class WhaleService:
                 previous_allocation=float(t.get("previous_allocation") or 0),
                 new_allocation=float(t.get("new_allocation") or 0),
                 date=t.get("date", ""),
+                disclosure_date=t.get("disclosure_date"),
             )
             for t in db_trades
         ]
+
+    def _assemble_group_response(
+        self,
+        group_id: str,
+        tg: Dict[str, Any],
+        trades: List[WhaleTradeResponse],
+    ) -> WhaleTradeGroupResponse:
+        """Build a WhaleTradeGroupResponse from a snapshot group dict OR a DB row.
+
+        Congressional groups get the honest summed STOCK Act range
+        (``net_amount_range``) plus split transaction/disclosure dates. These
+        are read from the group dict when present (snapshot path) or derived
+        from the trades when absent (DB path, whose row has no such columns).
+        13F groups leave them ``None`` and keep the precise ``net_amount``.
+        """
+        net_action = tg.get("net_action", "BOUGHT")
+        disclosure_date = tg.get("disclosure_date")
+        transaction_date = tg.get("transaction_date")
+        net_amount_range = tg.get("net_amount_range")
+
+        # Congress trades carry a STOCK Act bucket string; 13F trades do not.
+        if any(t.amount_range for t in trades):
+            if not disclosure_date:
+                disclosure_date = max(
+                    (t.disclosure_date or "" for t in trades), default=""
+                ) or None
+            if not transaction_date:
+                transaction_date = max(
+                    (t.date or "" for t in trades), default=""
+                ) or None
+            if not net_amount_range:
+                bounds = [
+                    parse_congress_amount_bounds(t.amount_range)
+                    for t in trades
+                    if t.action == net_action and t.amount_range
+                ]
+                if bounds:
+                    net_amount_range = format_amount_range(
+                        *sum_amount_bounds(bounds)
+                    )
+
+        return WhaleTradeGroupResponse(
+            id=group_id,
+            date=tg.get("date", ""),
+            trade_count=tg.get("trade_count", 0),
+            net_action=net_action,
+            net_amount=float(tg.get("net_amount", 0)),
+            net_amount_range=net_amount_range,
+            disclosure_date=disclosure_date,
+            transaction_date=transaction_date,
+            summary=tg.get("summary"),
+            insights=tg.get("insights") or [],
+            trades=trades,
+        )
 
     # ── Summary Generation (Rule-Based) ──────────────────────────────
 
@@ -1969,14 +2102,31 @@ class WhaleService:
         holdings: List[Dict],
         trade_group: Optional[Dict],
         sector_data: List[Dict],
+        is_congress: bool = False,
     ) -> str:
-        """Generate a rule-based sentiment summary paragraph."""
+        """Generate a rule-based sentiment summary paragraph.
+
+        For congressional whales, dollar figures are disclosed only as ranges
+        (STOCK Act) on a 30–45 day lag, so we never state a precise net dollar
+        amount — we describe direction + the summed range instead.
+        """
         top_tickers = ", ".join(h["ticker"] for h in holdings[:5])
         top_sector = sector_data[0]["name"] if sector_data else "various sectors"
 
         if trade_group:
             activity = trade_group.get("summary", "active rebalancing")
             net_action = trade_group.get("net_action", "BOUGHT")
+
+            if is_congress:
+                direction = "net buying" if net_action == "BOUGHT" else "net selling"
+                rng = trade_group.get("net_amount_range")
+                amount_text = f" ({rng})" if rng else ""
+                return (
+                    f"Recent disclosures show {direction}{amount_text} across "
+                    f"positions in {top_tickers}. Amounts are STOCK Act ranges "
+                    f"disclosed on a 30–45 day lag. Activity summary: {activity}."
+                )
+
             net_amount = trade_group.get("net_amount", 0)
             action_text = (
                 f"net buying of {_format_amount(net_amount, net_action)}"
@@ -2090,14 +2240,20 @@ class WhaleService:
         whale_id: str,
         holdings: List[Dict],
         sectors: List[Dict],
-        trade_group: Optional[Dict],
+        trade_groups: List[Dict],
         behavior: Dict,
         sentiment: str,
         total_value: float,
         perf_data: Any,
         whale: Optional[Dict] = None,
     ) -> None:
-        """Write aggregated data into the existing whale_* tables."""
+        """Write aggregated data into the existing whale_* tables.
+
+        ``trade_groups`` is a list — one entry per 13F quarter or per
+        congressional disclosure filing. Each is upserted keyed by
+        ``(whale_id, date)`` so re-running hydration on unchanged upstream data
+        does NOT accumulate duplicate rows (the old daily-``now``-stamp bug).
+        """
         sb = get_supabase()
 
         try:
@@ -2152,8 +2308,10 @@ class WhaleService:
                     "allocation": s["allocation"],
                 }).execute()
 
-            # Insert trade group + trades
-            if trade_group:
+            # Insert trade groups + trades (one row per filing, deduped by date)
+            for trade_group in trade_groups or []:
+                if not trade_group or not trade_group.get("date"):
+                    continue
                 existing_tg = (
                     sb.table("whale_trade_groups")
                     .select("id")
@@ -2161,36 +2319,43 @@ class WhaleService:
                     .eq("date", trade_group["date"])
                     .execute()
                 )
-                if not existing_tg.data:
-                    tg_result = sb.table("whale_trade_groups").insert({
-                        "whale_id": whale_id,
-                        "date": trade_group["date"],
-                        "trade_count": trade_group["trade_count"],
-                        "net_action": trade_group["net_action"],
-                        "net_amount": trade_group["net_amount"],
-                        "summary": trade_group.get("summary"),
-                        "insights": trade_group.get("insights", []),
-                    }).execute()
+                if existing_tg.data:
+                    continue
+                tg_result = sb.table("whale_trade_groups").insert({
+                    "whale_id": whale_id,
+                    "date": trade_group["date"],
+                    "trade_count": trade_group["trade_count"],
+                    "net_action": trade_group["net_action"],
+                    "net_amount": trade_group["net_amount"],
+                    "summary": trade_group.get("summary"),
+                    "insights": trade_group.get("insights", []),
+                }).execute()
 
-                    if tg_result.data:
-                        tg_id = tg_result.data[0]["id"]
-                        for trade in trade_group.get("trades", [])[:50]:
-                            sb.table("whale_trades").insert({
-                                "whale_id": whale_id,
-                                "trade_group_id": tg_id,
-                                "ticker": trade["ticker"],
-                                "company_name": trade.get(
-                                    "company_name", trade["ticker"]
-                                ),
-                                "action": trade["action"],
-                                "trade_type": trade["trade_type"],
-                                "amount": trade["amount"],
-                                "previous_allocation": trade.get(
-                                    "previous_allocation"
-                                ),
-                                "new_allocation": trade.get("new_allocation"),
-                                "date": trade.get("date", ""),
-                            }).execute()
+                if not tg_result.data:
+                    continue
+                tg_id = tg_result.data[0]["id"]
+                for trade in trade_group.get("trades", [])[:50]:
+                    sb.table("whale_trades").insert({
+                        "whale_id": whale_id,
+                        "trade_group_id": tg_id,
+                        "ticker": trade["ticker"],
+                        "company_name": trade.get(
+                            "company_name", trade["ticker"]
+                        ),
+                        "action": trade["action"],
+                        "trade_type": trade["trade_type"],
+                        "amount": trade["amount"],
+                        # STOCK Act range + disclosure date preserved for
+                        # congress trades (None for 13F). Requires migration
+                        # #076 columns; harmless once applied.
+                        "amount_range": trade.get("amount_range"),
+                        "disclosure_date": trade.get("disclosure_date"),
+                        "previous_allocation": trade.get(
+                            "previous_allocation"
+                        ),
+                        "new_allocation": trade.get("new_allocation"),
+                        "date": trade.get("date", ""),
+                    }).execute()
 
         except Exception as e:
             logger.error(

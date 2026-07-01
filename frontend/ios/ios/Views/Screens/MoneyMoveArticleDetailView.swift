@@ -149,6 +149,11 @@ struct MoneyMoveArticleDetailView: View {
                             firstMessage: text,
                             context: "The user is reading the article \"\(article.title)\" by \(article.author.name). Answer in that context."
                         )
+                        // Release the focus-driven compact reason deterministically (the covered
+                        // TextField's focus-off event is unreliable). AIChatScreen's own forceCompact
+                        // keeps audio in the DI while the chat is open; on close this screen's mini
+                        // player returns instead of staying stuck hidden.
+                        audioManager.setCompactMode(false, reason: compactToken)
                         showAIChat = true
                     },
                     onFocusChange: { focused in

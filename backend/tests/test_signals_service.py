@@ -328,3 +328,170 @@ async def test_get_signals_dedups_concurrent_cold_builds(monkeypatch):
     assert calls["n"] == 1  # in-flight dedup → ONE build for two concurrent opens
     assert a.congress.entries[0].symbol == "NVDA"
     assert b.congress.entries[0].symbol == "NVDA"
+
+
+# ── 5. Outlier / boundary hardening (deep-review additions) ─────────────
+
+
+def test_congress_includes_future_disclosure_within_2day_buffer():
+    # disclosureDate can lead `now` by a day (TZ/clock skew) — the window allows up
+    # to 2 days ahead, excludes 3+. With NOW=2026-06-30: 07-02 in, 07-03 out.
+    senate = [
+        {"symbol": "INCL", "type": "Purchase", "disclosureDate": "2026-07-02", "lastName": "A"},
+        {"symbol": "INCL", "type": "Purchase", "disclosureDate": "2026-07-02", "lastName": "B"},
+        {"symbol": "EXCL", "type": "Purchase", "disclosureDate": "2026-07-03", "lastName": "C"},
+        {"symbol": "EXCL", "type": "Purchase", "disclosureDate": "2026-07-03", "lastName": "D"},
+    ]
+    g = _aggregate_congress(senate, [], now=NOW)
+    assert g is not None and [r.symbol for r in g.entries] == ["INCL"]
+
+
+def test_congress_past_window_boundary_14_in_15_out():
+    # 14 days back (2026-06-16) included; 15 days back (2026-06-15) excluded.
+    senate = [
+        {"symbol": "IN", "type": "Purchase", "disclosureDate": "2026-06-16", "lastName": "A"},
+        {"symbol": "IN", "type": "Purchase", "disclosureDate": "2026-06-16", "lastName": "B"},
+        {"symbol": "OUT", "type": "Purchase", "disclosureDate": "2026-06-15", "lastName": "C"},
+        {"symbol": "OUT", "type": "Purchase", "disclosureDate": "2026-06-15", "lastName": "D"},
+    ]
+    g = _aggregate_congress(senate, [], now=NOW)
+    assert g is not None
+    assert [r.symbol for r in g.entries] == ["IN"]
+    assert g.as_of_date == "2026-06-16"
+
+
+def test_congress_two_members_different_tickers_returns_none():
+    # 2 distinct members, but 1 per ticker → no ticker reaches the 2-member floor.
+    senate = [
+        {"symbol": "AAPL", "type": "Purchase", "disclosureDate": "2026-06-25", "lastName": "M1"},
+        {"symbol": "MSFT", "type": "Purchase", "disclosureDate": "2026-06-24", "lastName": "M2"},
+    ]
+    assert _aggregate_congress(senate, [], now=NOW) is None
+
+
+def test_congress_skips_rows_with_no_member_identity():
+    # A row with every identity field blank can't be attributed → dropped (not a
+    # phantom member). Here that leaves NVDA with only 1 real member → below floor.
+    senate = [
+        {"symbol": "NVDA", "type": "Purchase", "disclosureDate": "2026-06-25",
+         "lastName": "", "firstName": "", "office": "", "district": ""},
+        {"symbol": "NVDA", "type": "Purchase", "disclosureDate": "2026-06-24", "lastName": "A"},
+    ]
+    assert _aggregate_congress(senate, [], now=NOW) is None
+
+
+def test_congress_as_of_is_global_max_not_top_ticker_date():
+    # Top-ranked ticker (by member count) is NOT the one with the latest disclosure.
+    senate = [
+        {"symbol": "NVDA", "type": "Purchase", "disclosureDate": "2026-06-25", "lastName": "A"},
+        {"symbol": "NVDA", "type": "Purchase", "disclosureDate": "2026-06-24", "lastName": "B"},
+        {"symbol": "NVDA", "type": "Purchase", "disclosureDate": "2026-06-23", "lastName": "C"},
+        {"symbol": "ZZZ", "type": "Purchase", "disclosureDate": "2026-06-28", "lastName": "D"},
+        {"symbol": "ZZZ", "type": "Purchase", "disclosureDate": "2026-06-28", "lastName": "E"},
+    ]
+    g = _aggregate_congress(senate, [], now=NOW)
+    assert g is not None
+    assert g.entries[0].symbol == "NVDA"       # ranked by member count
+    assert g.as_of_date == "2026-06-28"        # global max across ALL tickers, not NVDA's
+
+
+def test_earnings_drops_foreign_listings():
+    cal = [
+        {"symbol": "AAPL", "epsActual": 1.2, "epsEstimated": 1.0, "date": "2026-06-27"},     # +20% US
+        {"symbol": "ZOO.L", "epsActual": 2.0, "epsEstimated": 1.0, "date": "2026-06-27"},    # London → dropped
+        {"symbol": "005930.KS", "epsActual": 3.0, "epsEstimated": 1.0, "date": "2026-06-27"},# Korea → dropped
+    ]
+    g = _aggregate_earnings(cal)
+    assert g is not None and [r.symbol for r in g.entries] == ["AAPL"]
+
+
+def test_earnings_as_of_uses_latest_report_not_largest_surprise():
+    # Same symbol reports 3× in the window: keep the biggest surprise, but as_of must
+    # be the LATEST qualifying report date (not the kept-surprise date).
+    cal = [
+        {"symbol": "D", "epsActual": 1.15, "epsEstimated": 1.0, "date": "2026-06-20"},  # +15%
+        {"symbol": "D", "epsActual": 0.60, "epsEstimated": 1.0, "date": "2026-06-27"},  # -40% (kept)
+        {"symbol": "D", "epsActual": 1.30, "epsEstimated": 1.0, "date": "2026-06-28"},  # +30% (later)
+    ]
+    g = _aggregate_earnings(cal)
+    assert g is not None and len(g.entries) == 1
+    assert g.entries[0].value == -40.0     # largest magnitude kept
+    assert g.as_of_date == "2026-06-28"    # freshest report, not the -40% date
+
+
+def test_earnings_all_missing_dates_yields_none_as_of():
+    cal = [
+        {"symbol": "A", "epsActual": 1.5, "epsEstimated": 1.0},   # +50%, no date
+        {"symbol": "B", "epsActual": 2.0, "epsEstimated": 1.0},   # +100%, no date
+    ]
+    g = _aggregate_earnings(cal)
+    assert g is not None and len(g.entries) == 2
+    assert g.entries[0].symbol == "B"      # +100% ranks first
+    assert g.as_of_date is None
+
+
+def test_aggregators_skip_malformed_non_dict_rows():
+    senate = [
+        "not-a-dict", None, 42,
+        {"symbol": "NVDA", "type": "Purchase", "disclosureDate": "2026-06-25", "lastName": "A"},
+        {"symbol": "NVDA", "type": "Purchase", "disclosureDate": "2026-06-24", "lastName": "B"},
+    ]
+    cg = _aggregate_congress(senate, [], now=NOW)
+    assert cg is not None and cg.entries[0].value == 2.0
+
+    wh = _aggregate_whale(
+        ["x", None, {"whale_id": "w1", "ticker": "NVDA", "change_percent": 1.0},
+         {"whale_id": "w2", "ticker": "NVDA", "change_percent": 1.0}],
+        {"w1": "C1", "w2": "C2"},
+    )
+    assert wh is not None and wh.entries[0].value == 2.0
+
+    ea = _aggregate_earnings(
+        ["x", None,
+         {"symbol": "AAPL", "epsActual": 1.5, "epsEstimated": 1.0, "date": "2026-06-27"},
+         {"symbol": "MSFT", "epsActual": 1.3, "epsEstimated": 1.0, "date": "2026-06-27"}]
+    )
+    assert ea is not None and {r.symbol for r in ea.entries} == {"AAPL", "MSFT"}
+
+
+class _FakeEarningsFMP:
+    """Minimal FMP stub for _build_earnings: canned calendar + batch quotes."""
+
+    def __init__(self, calendar, quotes):
+        self._calendar = calendar
+        self._quotes = quotes  # {symbol: {"symbol":..., "marketCap":...}}
+
+    async def get_earnings_calendar(self, from_date, to_date):
+        return self._calendar
+
+    async def get_batch_quotes(self, symbols):
+        return [self._quotes[s] for s in symbols if s in self._quotes]
+
+
+@pytest.mark.asyncio
+async def test_build_earnings_applies_market_cap_floor_and_drops_foreign():
+    cal = [
+        {"symbol": "BIG", "epsActual": 1.5, "epsEstimated": 1.0, "date": "2026-06-27"},   # +50%, large cap
+        {"symbol": "TINY", "epsActual": 2.0, "epsEstimated": 1.0, "date": "2026-06-26"},  # +100%, micro cap
+        {"symbol": "ZOO.L", "epsActual": 3.0, "epsEstimated": 1.0, "date": "2026-06-27"}, # foreign → dropped pre-quote
+    ]
+    quotes = {
+        "BIG": {"symbol": "BIG", "marketCap": 5_000_000_000},
+        "TINY": {"symbol": "TINY", "marketCap": 50_000_000},   # below $250M floor
+    }
+    s = ssvc.SignalsService()
+    s.fmp = _FakeEarningsFMP(cal, quotes)  # type: ignore[assignment]
+    g = await s._build_earnings()
+    assert g is not None
+    # ZOO.L never reaches the quote step (foreign); TINY dropped by the floor.
+    assert [r.symbol for r in g.entries] == ["BIG"]
+    assert g.entries[0].value == 50.0
+
+
+@pytest.mark.asyncio
+async def test_build_earnings_none_when_no_candidate_clears_floor():
+    cal = [{"symbol": "TINY", "epsActual": 2.0, "epsEstimated": 1.0, "date": "2026-06-27"}]  # +100%
+    quotes = {"TINY": {"symbol": "TINY", "marketCap": 10_000_000}}
+    s = ssvc.SignalsService()
+    s.fmp = _FakeEarningsFMP(cal, quotes)  # type: ignore[assignment]
+    assert await s._build_earnings() is None

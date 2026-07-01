@@ -276,7 +276,10 @@ struct ScannerGroupsDTO: Decodable {
 struct SignalRowDTO: Decodable {
     let rank: Int
     let symbol: String
-    let name: String
+    /// Optional for decode-safety: the backend always sends it (defaults to "")
+    /// but it's unused by `mapSignals`, so a missing key must NOT crash the whole
+    /// dashboard decode. `?` makes `keyNotFound` a no-op instead of a fatal error.
+    let name: String?
     let value: Double
 }
 

@@ -47,6 +47,7 @@ from app.schemas.home_dashboard import (
     SignalGroupResponse,
     SignalRowResponse,
 )
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,8 @@ _WHALE_MIN_FUNDS = 2                     # a "funds loading up" headline needs >
 _EARNINGS_WINDOW_DAYS = 10
 _EARNINGS_MIN_ABS_SURPRISE = 10.0        # |surprise%| ≥ 10 to count as a "shocker"
 _EARNINGS_MAX_ABS_SURPRISE = 1000.0      # cap penny-EPS blowups (est 0.01 → thousands %)
+_EARNINGS_QUOTE_CANDIDATES = 25          # rank this many, then apply the market-cap floor
+_EARNINGS_MIN_MARKET_CAP = 250_000_000   # $250M quality floor (parity with the scanner cards)
 
 _BAD_SYMBOLS = {"", "--", "N/A", "NA", "NONE"}
 
@@ -242,22 +245,33 @@ def _aggregate_earnings(
     max_abs: float = _EARNINGS_MAX_ABS_SURPRISE,
     top_n: int = _SIGNAL_ROWS,
 ) -> Optional[SignalGroupResponse]:
-    """Rank recent reporters by |EPS surprise %| (beats AND misses), value SIGNED.
+    """Rank recent US reporters by |EPS surprise %| (beats AND misses), value SIGNED.
 
     Reuses ``earnings_service._compute_surprise`` (returns ``None`` for a zero
-    estimate → skipped). Rows missing actual/estimate are skipped; a symbol
-    reported twice keeps the larger-magnitude surprise; ``|surprise|`` outside
-    [min_abs, max_abs] is dropped (upper cap kills penny-EPS artifacts). Returns
-    ``None`` when nothing clears the threshold.
+    estimate → skipped). Foreign listings (dotted symbols) are dropped; rows
+    missing actual/estimate are skipped; a symbol reported twice keeps the
+    larger-magnitude surprise; ``|surprise|`` outside [min_abs, max_abs] is dropped
+    (upper cap kills penny-EPS artifacts). Returns ``None`` when nothing clears the
+    threshold. NOTE: no market-cap filter here (calendar rows carry none) — the
+    caller ``_build_earnings`` over-ranks candidates then applies the $250M floor.
     """
     if not isinstance(calendar, list):
         return None
 
     best: Dict[str, Dict[str, Any]] = {}
+    latest_dates: Dict[str, str] = {}
     for row in calendar:
         if not isinstance(row, dict):
             continue
-        sym = _canonical_symbol(row.get("symbol"))
+        raw_symbol = str(row.get("symbol") or "")
+        # Drop non-US listings: FMP's earnings-calendar spans global exchanges and
+        # tags foreign tickers with a "." suffix (ZOO.L, 005930.KS). US commons are
+        # dot-free. This also drops US class shares (BRK.B) — acceptable, they're
+        # never "shockers". Done on the RAW symbol, BEFORE _canonical_symbol folds
+        # "." → "-" (which would otherwise disguise a foreign ticker as US).
+        if "." in raw_symbol:
+            continue
+        sym = _canonical_symbol(raw_symbol)
         if sym in _BAD_SYMBOLS:
             continue
         actual = _finite_float(row.get("epsActual"))
@@ -275,9 +289,14 @@ def _aggregate_earnings(
         if not (min_abs <= abs(surprise) <= max_abs):
             continue
         date_str = str(row.get("date") or "")[:10]
+        # Track the latest QUALIFYING report date per symbol independently of which
+        # surprise we keep, so as_of reflects the freshest report — not merely the
+        # date of the largest-magnitude one (a symbol can report twice in a window).
+        if date_str and date_str > latest_dates.get(sym, ""):
+            latest_dates[sym] = date_str
         cur = best.get(sym)
         if cur is None or abs(surprise) > abs(cur["surprise"]):
-            best[sym] = {"surprise": surprise, "date": date_str}
+            best[sym] = {"surprise": surprise}
 
     if not best:
         return None
@@ -292,7 +311,9 @@ def _aggregate_earnings(
         )
         for i, (sym, e) in enumerate(ranked[:top_n])
     ]
-    as_of = max((e["date"] for _, e in ranked if e["date"]), default="") or None
+    as_of = max(
+        (latest_dates.get(sym, "") for sym, _ in ranked[:top_n]), default=""
+    ) or None
     return SignalGroupResponse(kind="earnings", entries=entries, as_of_date=as_of)
 
 
@@ -332,22 +353,33 @@ class SignalsService:
         fut: asyncio.Future = loop.create_future()
         self._inflight[_SIGNALS_CACHE_KEY] = fut
         try:
+            # Tier 2: a fresh Supabase row (survives restarts) BEFORE a rebuild. A
+            # read failure is a cache MISS (→ proceed to rebuild), NOT a reason to
+            # blank the card — keep the two tiers' failures independent.
             try:
-                # Tier 2: a fresh Supabase row (survives restarts) before a rebuild.
                 result = await asyncio.to_thread(self._read_supabase_cache)
-                if result is not None:
-                    logger.debug("Signals served from Supabase cache")
-                    self._cache[_SIGNALS_CACHE_KEY] = (time.time(), result)
-                else:
+            except Exception as exc:  # noqa: BLE001 — read failure → miss, then rebuild
+                logger.warning(
+                    "Signals Tier-2 read failed: %s: %s", type(exc).__name__, exc
+                )
+                result = None
+
+            if result is not None:
+                logger.debug("Signals served from Supabase cache")
+                self._cache[_SIGNALS_CACHE_KEY] = (time.time(), result)
+            else:
+                try:
                     result = await self._build()
                     # Cache/persist ONLY a build that produced ≥1 group — never pin a
                     # transient triple-failure (all-None) for 45 min / 24 h.
                     if result.congress or result.whale or result.earnings:
                         self._cache[_SIGNALS_CACHE_KEY] = (time.time(), result)
                         await asyncio.to_thread(self._write_supabase_cache, result)
-            except Exception as exc:  # noqa: BLE001 — signals must never fail the dashboard
-                logger.warning("Signals build failed: %s: %s", type(exc).__name__, exc)
-                result = SignalsGroupResponse()  # empty; not cached → retries
+                except Exception as exc:  # noqa: BLE001 — build failed → empty (not cached)
+                    logger.warning(
+                        "Signals build failed: %s: %s", type(exc).__name__, exc
+                    )
+                    result = SignalsGroupResponse()  # empty; not cached → retries
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -425,43 +457,59 @@ class SignalsService:
         return await asyncio.to_thread(self._query_and_aggregate_whale)
 
     def _query_and_aggregate_whale(self) -> Optional[SignalGroupResponse]:
-        sb = get_supabase()
-        whales = (
-            sb.table("whales")
-            .select("id, cik, last_hydrated_at")
-            .eq("data_source", "13f")
-            .execute()
-            .data
-            or []
-        )
-        if not whales:
-            logger.info("Whale Accumulation: no 13F whales in registry — omitting card")
+        # Wrapped so a Supabase failure degrades THIS branch with a whale-specific
+        # marker (rather than surfacing only as a generic "signal whale failed" from
+        # _build's gather) — honoring the "each branch degrades independently" rule.
+        try:
+            sb = get_supabase()
+            whales = (
+                sb.table("whales")
+                .select("id, cik, last_hydrated_at")
+                .eq("data_source", "13f")
+                .limit(2000)
+                .execute()
+                .data
+                or []
+            )
+            if not whales:
+                logger.info(
+                    "Whale Accumulation: no 13F whales in registry — omitting card"
+                )
+                return None
+
+            cik_map: Dict[Any, str] = {}
+            hydrated: List[str] = []
+            for w in whales:
+                wid = w.get("id")
+                if wid is None:
+                    continue
+                cik = (w.get("cik") or "").strip()
+                # Null/blank CIK → per-whale sentinel so it stays its OWN distinct
+                # fund rather than collapsing all null-CIK whales into one.
+                cik_map[wid] = cik if cik else f"nocik:{wid}"
+                hd = w.get("last_hydrated_at")
+                if hd:
+                    hydrated.append(str(hd)[:10])
+
+            holdings = (
+                sb.table("whale_holdings")
+                .select("whale_id, ticker, company_name, change_percent")
+                .gt("change_percent", 0)
+                # Explicit high limit: PostgREST caps at 1000 rows by default, which
+                # (25 whales × up-to-30 holdings) is close today and WILL truncate as
+                # the registry grows — silently dropping funds from the count.
+                .limit(10000)
+                .execute()
+                .data
+                or []
+            )
+            as_of = max(hydrated) if hydrated else None
+            return _aggregate_whale(holdings, cik_map, as_of=as_of)
+        except Exception as exc:  # noqa: BLE001 — degrade this card, never the dashboard
+            logger.warning(
+                "Whale Accumulation query failed: %s: %s", type(exc).__name__, exc
+            )
             return None
-
-        cik_map: Dict[Any, str] = {}
-        hydrated: List[str] = []
-        for w in whales:
-            wid = w.get("id")
-            if wid is None:
-                continue
-            cik = (w.get("cik") or "").strip()
-            # Null/blank CIK → per-whale sentinel so it stays its OWN distinct fund
-            # rather than collapsing all null-CIK whales into one.
-            cik_map[wid] = cik if cik else f"nocik:{wid}"
-            hd = w.get("last_hydrated_at")
-            if hd:
-                hydrated.append(str(hd)[:10])
-
-        holdings = (
-            sb.table("whale_holdings")
-            .select("whale_id, ticker, company_name, change_percent")
-            .gt("change_percent", 0)
-            .execute()
-            .data
-            or []
-        )
-        as_of = max(hydrated) if hydrated else None
-        return _aggregate_whale(holdings, cik_map, as_of=as_of)
 
     async def _build_earnings(self) -> Optional[SignalGroupResponse]:
         now = datetime.now(timezone.utc)
@@ -470,7 +518,47 @@ class SignalsService:
         # get_earnings_calendar RAISES on FMP failure (unlike the congress methods)
         # → propagates to _build's return_exceptions → earnings None + a warning.
         calendar = await self.fmp.get_earnings_calendar(from_date, to_date)
-        return _aggregate_earnings(calendar or [])
+        # Rank a bounded candidate set, THEN enforce the same $250M quality floor the
+        # movers/volume/shorts cards use. Earnings-calendar rows carry no market cap,
+        # so quote the top candidates and drop micro-caps (mirrors _build_shorts) —
+        # otherwise a $30M name with a huge beat outranks the real large-cap shockers.
+        candidates = _aggregate_earnings(
+            calendar or [], top_n=_EARNINGS_QUOTE_CANDIDATES
+        )
+        if candidates is None or not candidates.entries:
+            return None
+
+        symbols = [e.symbol for e in candidates.entries]
+        quotes = await self.fmp.get_batch_quotes(symbols)
+        qmap = {
+            _canonical_symbol(q.get("symbol")): q
+            for q in quotes
+            if isinstance(q, dict) and q.get("symbol")
+        }
+
+        kept: List[SignalRowResponse] = []
+        for e in candidates.entries:  # already ranked by |surprise| desc
+            market_cap = _finite_float(qmap.get(e.symbol, {}).get("marketCap"))
+            if market_cap is None or market_cap < _EARNINGS_MIN_MARKET_CAP:
+                continue
+            kept.append(e)
+            if len(kept) >= _SIGNAL_ROWS:
+                break
+
+        if not kept:
+            logger.info(
+                "Earnings Shockers: no candidate cleared the $%dM market-cap floor "
+                "— omitting card", _EARNINGS_MIN_MARKET_CAP // 1_000_000,
+            )
+            return None
+
+        entries = [
+            SignalRowResponse(rank=i + 1, symbol=e.symbol, name=e.name, value=e.value)
+            for i, e in enumerate(kept)
+        ]
+        return SignalGroupResponse(
+            kind="earnings", entries=entries, as_of_date=candidates.as_of_date
+        )
 
     # ── Supabase Tier-2 (best-effort) ─────────────────────────────────
 
@@ -491,6 +579,15 @@ class SignalsService:
             if not rows:
                 return None
             return SignalsGroupResponse.model_validate(rows[0]["data"])
+        except ValidationError as exc:
+            # A row that no longer matches the schema is likely real corruption / a
+            # schema drift — surface at ERROR (not the transient-failure WARNING) so
+            # it's visible in alerting; return None to rebuild from source.
+            logger.error(
+                "Signals Tier-2 row failed schema validation (possible corruption): %s",
+                exc,
+            )
+            return None
         except Exception as exc:
             logger.warning(
                 "Signals Tier-2 read failed: %s: %s", type(exc).__name__, exc

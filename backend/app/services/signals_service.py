@@ -59,7 +59,8 @@ _SIGNALS_CACHE_KEY = "signals"
 _SIGNALS_TABLE = "signals_cache"
 _SIGNALS_BUILD_TIMEOUT_SECONDS = 8       # never let a cold build block the dashboard
 
-_SIGNAL_ROWS = 5                         # drill-down leaders per card
+_SIGNAL_ROWS = 10                        # drill-down leaders per card (iOS scrolls the
+                                         # expanded list in a bounded box past ~6 rows)
 
 # Congress
 # Window on DISCLOSURE date. 30 days (not 14): congressional filings lag 30-45 days

@@ -53,7 +53,18 @@ struct ExclusiveSignalsSection: View {
                 .stroke(accent.opacity(glow ? 0.5 : 0.28), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: accent.opacity(glow ? 0.32 : 0.12), radius: glow ? 22 : 14, x: 0, y: 0)
+        // Pulse only the shadow COLOR opacity (cheap) — NOT the blur radius. A
+        // blurred shadow whose radius animates on a .repeatForever loop forces the
+        // render server to re-rasterize the blur off-screen every frame; when a row
+        // EXPANDS the card resizes, compounding that into a main-thread stall (the
+        // tap-to-expand freeze). A fixed radius is rasterized once — matching the
+        // opacity-only glow MarketPulseSection uses (which never froze).
+        .shadow(color: accent.opacity(glow ? 0.32 : 0.12), radius: 18, x: 0, y: 0)
+        // Swallow stray taps on the card body (padding / title / row gaps) so they
+        // don't bubble to the Home scroll's scanner-collapse .onTapGesture — mirrors
+        // ScannerCard. Inner SignalDisclosureRow Buttons still win their own hit area.
+        .contentShape(Rectangle())
+        .onTapGesture { }
         .padding(.horizontal, AppSpacing.lg)
         // Gate the perpetual glow on tab visibility — tabs are opacity-mounted, so
         // without this the animation would keep re-rendering shadow/stroke on the

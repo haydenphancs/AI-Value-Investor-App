@@ -256,10 +256,19 @@ final class AudioManager: ObservableObject {
         center.previousTrackCommand.isEnabled = false
     }
 
+    /// True while the current episode is in the failed (.error) state.
+    private var isPlaybackErrored: Bool {
+        if case .error = playbackState { return true }
+        return false
+    }
+
     /// Publish the current episode + playback state to the system so it renders in the Dynamic
     /// Island / Lock Screen / Control Center. Call on every state change (load/play/pause/seek/speed).
     private func updateNowPlayingInfo() {
-        guard let episode = currentEpisode else {
+        // Clear on failure too (not only when there's no episode): handlePlaybackFailure leaves
+        // currentEpisode set, and the deferred $playbackState sink would otherwise republish the dead
+        // episode, leaving a stale/frozen entry in the Dynamic Island / Lock Screen.
+        guard let episode = currentEpisode, !isPlaybackErrored else {
             clearNowPlayingInfo()
             return
         }

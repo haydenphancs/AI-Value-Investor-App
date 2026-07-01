@@ -447,6 +447,9 @@ struct BookCoreDetailView: View {
             firstMessage: text,
             context: "The user is reading \"\(book.title)\" by \(book.author), core \(currentContent.chapterNumber). Answer in that context."
         )
+        // Release the focus-driven compact reason deterministically (the covered TextField's
+        // focus-off event is unreliable) so the mini player returns when the chat closes.
+        audioManager.setCompactMode(false, reason: compactToken)
         showAIChat = true
     }
 }

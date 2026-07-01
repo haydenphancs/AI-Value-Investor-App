@@ -263,7 +263,9 @@ final class HomeRepository: HomeRepositoryProtocol {
         if let c = dto.congress, let top = c.entries.first {
             out.append(ExclusiveSignal(
                 title: "Congressional Buys",
-                subtitle: "Most-bought on Capitol Hill this week",
+                // "this month" matches the backend's 30-day disclosure window
+                // (filings lag 30-45d, so a "this week" claim would be inaccurate).
+                subtitle: "Most-bought on Capitol Hill this month",
                 iconSystemName: "building.columns.fill",
                 accent: AppColors.primaryBlue,
                 topSymbol: top.symbol,
@@ -447,7 +449,7 @@ final class MockHomeRepository: HomeRepositoryProtocol {
     static let signals: [ExclusiveSignal] = [
         ExclusiveSignal(
             title: "Congressional Buys",
-            subtitle: "Most-bought on Capitol Hill this week",
+            subtitle: "Most-bought on Capitol Hill this month",
             iconSystemName: "building.columns.fill",
             accent: AppColors.primaryBlue,
             topSymbol: "NVDA",

@@ -96,8 +96,8 @@ struct SignalTickerDetailView: View {
     // MARK: - Header (tappable ticker → TickerDetailView)
 
     private func header(_ detail: SignalTickerDetail) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            HStack(alignment: .firstTextBaseline) {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 Button {
                     selectedTicker = MarketTicker(
                         name: detail.companyName.isEmpty ? detail.symbol : detail.companyName,
@@ -119,32 +119,32 @@ struct SignalTickerDetailView: View {
                 }
                 .buttonStyle(.plain)
 
-                Spacer()
-
-                if !detail.priceText.isEmpty {
-                    Text(detail.priceText)
-                        .font(AppTypography.dataTitle)
-                        .foregroundColor(AppColors.textPrimary)
-                }
-            }
-
-            HStack(spacing: AppSpacing.xs) {
                 if !detail.companyName.isEmpty {
                     Text(detail.companyName)
                         .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)
                         .lineLimit(1)
                 }
+
+                Text(detail.subtitleLine)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
+
+            Spacer(minLength: AppSpacing.md)
+
+            VStack(alignment: .trailing, spacing: 4) {
+                if !detail.priceText.isEmpty {
+                    Text(detail.priceText)
+                        .font(AppTypography.dataTitle)
+                        .foregroundColor(AppColors.textPrimary)
+                }
                 if !detail.marketCapText.isEmpty {
-                    Text("· " + detail.marketCapText)
+                    Text(detail.marketCapText)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                 }
             }
-
-            Text(detail.subtitleLine)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.lg)

@@ -25,6 +25,9 @@ struct HomeDashboardView: View {
     /// Which Daily Scanner card is expanded (nil = none). Owned here so a tap
     /// ANYWHERE outside the card (in the scroll content) collapses it.
     @State private var expandedScannerID: DailyScanner.ID?
+    /// Which App-Exclusive Signals row is expanded (nil = none). Same
+    /// tap-outside-collapses ownership as `expandedScannerID`.
+    @State private var expandedSignalID: ExclusiveSignal.ID?
     /// A tapped whale/congress signal ticker → the per-ticker drill-down screen.
     @State private var signalDetailTarget: SignalDetailTarget?
 
@@ -123,6 +126,9 @@ struct HomeDashboardView: View {
                         DailyScannersSection(
                             scanners: data.scanners,
                             onEntryTap: openStock,
+                            // A tap swallowed by a scanner card's body is still
+                            // OUTSIDE the signals section → collapse its row.
+                            onBodyTap: collapseExpandedSignal,
                             expandedCardID: $expandedScannerID
                         )
                     }
@@ -130,7 +136,11 @@ struct HomeDashboardView: View {
                     if !data.signals.isEmpty {
                         ExclusiveSignalsSection(
                             signals: data.signals,
-                            onLeaderTap: openLeader
+                            onLeaderTap: openLeader,
+                            // A tap swallowed by the signals panel/row body is
+                            // still OUTSIDE the carousel → collapse its card.
+                            onBodyTap: collapseExpandedScanner,
+                            expandedSignalID: $expandedSignalID
                         )
                     }
 
@@ -145,15 +155,21 @@ struct HomeDashboardView: View {
                 Spacer()
                     .frame(height: 100)
             }
-            // Tap ANYWHERE outside an expanded Daily Scanner card collapses it: a
-            // non-consuming tap in the scroll content bubbles up here, while taps
-            // on a card body (swallowed in ScannerCard) and on its buttons/tickers
-            // (child buttons) do NOT. It's a TapGesture, so scrolling never
+            // Tap outside an expanded Daily Scanner card or an expanded
+            // App-Exclusive Signals row collapses it: a non-consuming tap in the
+            // scroll content bubbles up here. Taps swallowed by a card/row body
+            // (ScannerCard / SignalDisclosureRow / ExclusiveSignalsSection) don't
+            // reach this gesture — those sections forward them via onBodyTap so
+            // the OTHER section still collapses. Taps on buttons/tickers collapse
+            // nothing (child buttons win). It's a TapGesture, so scrolling never
             // triggers it; guarded so it's a no-op when nothing is expanded.
             .contentShape(Rectangle())
             .onTapGesture {
-                if expandedScannerID != nil {
-                    withAnimation(.easeInOut(duration: 0.25)) { expandedScannerID = nil }
+                if expandedScannerID != nil || expandedSignalID != nil {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        expandedScannerID = nil
+                        expandedSignalID = nil
+                    }
                 }
             }
         }
@@ -177,6 +193,21 @@ struct HomeDashboardView: View {
         .cornerRadius(AppCornerRadius.medium)
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.xs)
+    }
+
+    // MARK: - Cross-section collapse (taps swallowed by one section's body are
+    // still "outside" the other section's expandable — see onBodyTap wiring).
+
+    private func collapseExpandedScanner() {
+        if expandedScannerID != nil {
+            withAnimation(.easeInOut(duration: 0.25)) { expandedScannerID = nil }
+        }
+    }
+
+    private func collapseExpandedSignal() {
+        if expandedSignalID != nil {
+            withAnimation(.easeInOut(duration: 0.25)) { expandedSignalID = nil }
+        }
     }
 
     // MARK: - Navigation

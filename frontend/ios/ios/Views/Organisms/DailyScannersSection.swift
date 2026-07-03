@@ -21,6 +21,9 @@ import SwiftUI
 struct DailyScannersSection: View {
     let scanners: [DailyScanner]
     var onEntryTap: ((ScannerEntry) -> Void)? = nil
+    /// Forwarded from each card's body-tap swallow (see `ScannerCard.onBodyTap`) —
+    /// the Home screen collapses the expanded App-Exclusive Signals row with it.
+    var onBodyTap: (() -> Void)? = nil
     /// Which card is expanded (nil = none). Lifted to the Home screen so a tap
     /// ANYWHERE outside the card collapses it; also enforces one-open-at-a-time.
     @Binding var expandedCardID: DailyScanner.ID?
@@ -51,6 +54,7 @@ struct DailyScannersSection: View {
                                 ScannerCard(
                                     scanner: scanner,
                                     onEntryTap: onEntryTap,
+                                    onBodyTap: onBodyTap,
                                     isExpanded: Binding(
                                         get: { expandedCardID == scanner.id },
                                         set: { expandedCardID = $0 ? scanner.id : nil }

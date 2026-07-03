@@ -14,6 +14,11 @@ import SwiftUI
 struct ScannerCard: View {
     let scanner: DailyScanner
     var onEntryTap: ((ScannerEntry) -> Void)? = nil
+    /// Fired when a tap lands on the card BODY (not a child control). The card
+    /// swallows the tap so it can't bubble to the Home collapse gesture and close
+    /// THIS card — but that tap is still "outside" every OTHER expandable, so the
+    /// Home screen uses this to collapse the expanded App-Exclusive Signals row.
+    var onBodyTap: (() -> Void)? = nil
 
     @State private var moversMode: MoversMode = .gainers
     /// Lifted to the parent (via `DailyScannersSection` → the Home screen) so a
@@ -59,12 +64,14 @@ struct ScannerCard: View {
         .padding(15)
         .background(AppColors.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        // Swallow taps that land ON the card so ONLY a tap OUTSIDE it (caught at
-        // the Home screen) collapses it. Inner controls (toggle, expand button,
-        // ticker rows) are child buttons and still win the tap; a drag still
-        // scrolls the carousel since this is tap-only.
+        // Swallow taps that land ON the card so a tap OUTSIDE it (caught at the
+        // Home screen or a sibling section) collapses it, while a tap on the card
+        // itself never does. Inner controls (toggle, expand button, ticker rows)
+        // are child buttons and still win the tap; a drag still scrolls the
+        // carousel since this is tap-only. The swallowed tap is forwarded via
+        // onBodyTap so the Home screen can collapse OTHER expanded sections.
         .contentShape(Rectangle())
-        .onTapGesture { }
+        .onTapGesture { onBodyTap?() }
         .animation(.easeInOut(duration: 0.25), value: isExpanded)
     }
 

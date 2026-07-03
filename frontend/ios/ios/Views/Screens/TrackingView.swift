@@ -588,11 +588,18 @@ struct WhaleTradeCard: View {
                 // Info
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     HStack {
-                        // Name and trade count
+                        // Name (with firm for person-fronted whales) and trade count
                         VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                             Text(activity.entityName)
                                 .font(AppTypography.bodyEmphasis)
                                 .foregroundColor(AppColors.textPrimary)
+
+                            if let firm = activity.entityFirmName, !firm.isEmpty {
+                                Text(firm)
+                                    .font(AppTypography.caption)
+                                    .foregroundColor(AppColors.textSecondary)
+                                    .lineLimit(1)
+                            }
 
                             Text(activity.formattedTradeCount)
                                 .font(AppTypography.caption)
@@ -823,15 +830,23 @@ struct WhaleCard: View {
                     category: whale.category
                 )
 
-                // Info
+                // Info — a person-fronted whale always shows their firm with
+                // the name ("Ray Dalio / Bridgewater Associates").
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     Text(whale.name)
                         .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
+                    if let firm = whale.firmName, !firm.isEmpty {
+                        Text(firm)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textSecondary)
+                            .lineLimit(1)
+                    }
+
                     Text(whale.formattedFollowers)
                         .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
+                        .foregroundColor(AppColors.textMuted)
                 }
 
                 Spacer()

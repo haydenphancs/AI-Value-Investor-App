@@ -34,6 +34,10 @@ class TrendingWhaleResponse(BaseModel):
     title: str = ""
     description: str = ""
     recent_trade_count: int = 0
+    # Firm a person-fronted whale runs ("Bridgewater Associates" for Ray Dalio).
+    # None for firm-branded institutions and politicians. Always displayed with
+    # the name (one merged profile per 13F filer since migration 080).
+    firm_name: Optional[str] = None
 
 
 # ── Whale profile sub-models ────────────────────────────────────────
@@ -109,6 +113,9 @@ class WhaleProfileResponse(BaseModel):
     name: str
     title: str
     description: str
+    # Optional with default None: whale_profile_cache replays cached JSON built
+    # before this field existed — must tolerate its absence.
+    firm_name: Optional[str] = None
     avatar_url: Optional[str] = None
     risk_profile: str = ""
     portfolio_value: float = 0.0
@@ -139,6 +146,7 @@ class WhaleTradeGroupActivityResponse(BaseModel):
     whale_id: str = ""
     entity_name: str
     entity_avatar_name: str = ""
+    entity_firm_name: Optional[str] = None  # firm shown with a person-fronted name
     category: Optional[str] = None  # "investors" | "institutions" | "politicians" | "crypto"
     action: str  # "BOUGHT" or "SOLD"
     trade_count: int

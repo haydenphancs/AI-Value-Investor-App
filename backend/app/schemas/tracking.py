@@ -59,6 +59,8 @@ class WhaleTradeItemResponse(BaseModel):
     lead_whale_id: Optional[str] = None
     lead_whale_name: Optional[str] = None
     lead_whale_avatar_name: Optional[str] = None
+    # Firm the lead whale runs (person-fronted profiles show both names).
+    lead_whale_firm: Optional[str] = None
 
 
 class AnalystRatingItemResponse(BaseModel):

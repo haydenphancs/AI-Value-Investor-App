@@ -351,6 +351,7 @@ class WhaleService:
                 title=w.get("title", ""),
                 description=w.get("description", ""),
                 recent_trade_count=trade_counts.get(str(w["id"]), 0),
+                firm_name=w.get("firm_name"),
             )
             for w in whales
         ]
@@ -680,6 +681,7 @@ class WhaleService:
             name=whale["name"],
             title=whale.get("title", ""),
             description=whale.get("description", ""),
+            firm_name=whale.get("firm_name"),
             avatar_url=whale.get("avatar_url"),
             risk_profile=risk_label,
             portfolio_value=portfolio_value,
@@ -735,7 +737,7 @@ class WhaleService:
         # Fetch whale names
         whales = (
             sb.table("whales")
-            .select("id, name, avatar_url, category")
+            .select("id, name, avatar_url, category, firm_name")
             .in_("id", whale_ids)
             .execute()
         )
@@ -752,6 +754,7 @@ class WhaleService:
                     whale_id=str(tg["whale_id"]),
                     entity_name=whale.get("name", "Unknown"),
                     entity_avatar_name=whale.get("avatar_url", ""),
+                    entity_firm_name=whale.get("firm_name"),
                     category=whale.get("category"),
                     action=tg.get("net_action", "BOUGHT"),
                     trade_count=tg.get("trade_count", 0),

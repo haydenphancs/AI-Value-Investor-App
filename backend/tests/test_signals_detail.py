@@ -131,6 +131,33 @@ def test_whale_rows_dedup_shared_cik_person_and_fund(monkeypatch):
     assert "Ray Dalio" not in names
 
 
+def test_whale_rows_subtitle_carries_firm_name(monkeypatch):
+    # Post-merge (migration 080): person-fronted whales carry firm_name, and the
+    # drill-down row's subtitle shows the FIRM so the name never appears alone.
+    # Whales without a firm (true institutions) keep the "13F fund" fallback.
+    tables = {
+        "whales": [
+            {"id": "wp", "name": "Ray Dalio", "cik": "CIK1",
+             "firm_name": "Bridgewater Associates",
+             "last_hydrated_at": "2026-03-31T00:00:00Z"},
+            {"id": "w2", "name": "Renaissance Technologies", "cik": "CIK2",
+             "firm_name": None,
+             "last_hydrated_at": "2026-03-31T00:00:00Z"},
+        ],
+        "whale_holdings": [
+            {"whale_id": "wp", "ticker": "TSM", "allocation": 1.6, "change_percent": 1.6},
+            {"whale_id": "w2", "ticker": "TSM", "allocation": 0.9, "change_percent": 0.2},
+        ],
+        "whale_trades": [],
+    }
+    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
+    rows, _ = _svc()._detail_whale_rows("TSM")
+
+    by_name = {r.name: r for r in rows}
+    assert by_name["Ray Dalio"].subtitle == "Bridgewater Associates"
+    assert by_name["Renaissance Technologies"].subtitle == "13F fund"
+
+
 def test_whale_rows_empty_when_nothing_adding(monkeypatch):
     tables = {
         "whales": [{"id": "w1", "name": "Citadel", "last_hydrated_at": "2026-03-31T00:00:00Z"}],

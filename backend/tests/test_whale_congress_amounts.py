@@ -316,3 +316,23 @@ def test_whale_trade_item_congress_bounds():
     })
     assert it.is_congress is True
     assert it.raw_amount_high == 515_000.0
+
+
+def test_whale_trade_item_lead_whale_firm_round_trip():
+    # Post-merge (migration 080): fully-populated item carries the lead whale's
+    # firm; old payloads without the key must keep validating (optional field).
+    it = WhaleTradeItemResponse.model_validate({
+        "ticker": "ORCL", "company_name": "Oracle", "whale_count": 1,
+        "amount": "$2.4B", "raw_amount": 2_400_000_000.0,
+        "lead_whale_id": "w1", "lead_whale_name": "Ray Dalio",
+        "lead_whale_avatar_name": "avatar_dalio",
+        "lead_whale_firm": "Bridgewater Associates",
+    })
+    assert it.lead_whale_firm == "Bridgewater Associates"
+    assert "lead_whale_firm" in it.model_dump()
+
+    old = WhaleTradeItemResponse.model_validate({
+        "ticker": "ORCL", "company_name": "Oracle", "whale_count": 1,
+        "amount": "$455K", "raw_amount": 455_000.0,
+    })
+    assert old.lead_whale_firm is None

@@ -192,6 +192,8 @@ enum AppAlert: Identifiable {
         let leadWhaleId: String?
         let leadWhaleName: String?
         let leadWhaleAvatarName: String?
+        // Firm the lead whale runs — shown with the person's name.
+        var leadWhaleFirm: String? = nil
     }
 
     struct AnalystRatingAlertData: Identifiable {
@@ -668,6 +670,7 @@ struct WhaleTradeItemDTO: Codable {
     let leadWhaleId: String?
     let leadWhaleName: String?
     let leadWhaleAvatarName: String?
+    let leadWhaleFirm: String?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -681,6 +684,7 @@ struct WhaleTradeItemDTO: Codable {
         case leadWhaleId = "lead_whale_id"
         case leadWhaleName = "lead_whale_name"
         case leadWhaleAvatarName = "lead_whale_avatar_name"
+        case leadWhaleFirm = "lead_whale_firm"
     }
 
     func toItem() -> AppAlert.WhaleTradeItem {
@@ -695,7 +699,8 @@ struct WhaleTradeItemDTO: Codable {
             isCongress: isCongress ?? false,
             leadWhaleId: leadWhaleId,
             leadWhaleName: leadWhaleName,
-            leadWhaleAvatarName: leadWhaleAvatarName
+            leadWhaleAvatarName: leadWhaleAvatarName,
+            leadWhaleFirm: leadWhaleFirm
         )
     }
 }
@@ -836,8 +841,11 @@ struct TrendingWhale: Identifiable {
     let title: String
     let description: String
     let recentTradeCount: Int
+    /// Firm a person-fronted whale runs ("Bridgewater Associates" for Ray
+    /// Dalio) — always displayed with the name. nil for institutions/politicians.
+    let firmName: String?
 
-    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0) {
+    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0, firmName: String? = nil) {
         self.id = id
         self.name = name
         self.category = category
@@ -847,6 +855,7 @@ struct TrendingWhale: Identifiable {
         self.title = title
         self.description = description
         self.recentTradeCount = recentTradeCount
+        self.firmName = firmName
     }
 
     var formattedFollowers: String {
@@ -870,6 +879,8 @@ struct WhaleTradeGroupActivity: Identifiable {
     let whaleId: String     // owner of the trade group
     let entityName: String
     let entityAvatarName: String
+    /// Firm shown with a person-fronted entity name (nil for institutions/politicians).
+    let entityFirmName: String?
     let category: WhaleCategory?
     let action: WhaleAction
     let tradeCount: Int
@@ -877,11 +888,12 @@ struct WhaleTradeGroupActivity: Identifiable {
     let summary: String?
     let date: Date
 
-    init(id: String = UUID().uuidString, whaleId: String = "", entityName: String, entityAvatarName: String, category: WhaleCategory? = nil, action: WhaleAction, tradeCount: Int, totalAmount: String, summary: String?, date: Date) {
+    init(id: String = UUID().uuidString, whaleId: String = "", entityName: String, entityAvatarName: String, entityFirmName: String? = nil, category: WhaleCategory? = nil, action: WhaleAction, tradeCount: Int, totalAmount: String, summary: String?, date: Date) {
         self.id = id
         self.whaleId = whaleId
         self.entityName = entityName
         self.entityAvatarName = entityAvatarName
+        self.entityFirmName = entityFirmName
         self.category = category
         self.action = action
         self.tradeCount = tradeCount
@@ -1174,11 +1186,12 @@ extension TrendingWhale {
         ),
         TrendingWhale(
             name: "Bill Ackman",
-            category: .institutions,
+            category: .investors,
             avatarName: "avatar_ackman",
             followersCount: 76000,
             isFollowing: true,
-            recentTradeCount: 4
+            recentTradeCount: 4,
+            firmName: "Pershing Square Capital"
         ),
         TrendingWhale(
             name: "Michael Burry",
@@ -1186,7 +1199,8 @@ extension TrendingWhale {
             avatarName: "avatar_burry",
             followersCount: 98000,
             isFollowing: true,
-            recentTradeCount: 1
+            recentTradeCount: 1,
+            firmName: "Scion Asset Management"
         )
     ]
 
@@ -1194,11 +1208,12 @@ extension TrendingWhale {
     static let topPopularWhalesData: [TrendingWhale] = [
         TrendingWhale(
             name: "Ray Dalio",
-            category: .institutions,
+            category: .investors,
             avatarName: "avatar_dalio",
             followersCount: 112000,
             isFollowing: false,
-            title: "Bridgewater Associates"
+            title: "Bridgewater Associates Founder",
+            firmName: "Bridgewater Associates"
         ),
         TrendingWhale(
             name: "George Soros",
@@ -1206,15 +1221,17 @@ extension TrendingWhale {
             avatarName: "avatar_soros",
             followersCount: 95000,
             isFollowing: false,
-            title: "Soros Fund Management"
+            title: "Soros Fund Management Founder",
+            firmName: "Soros Fund Management"
         ),
         TrendingWhale(
             name: "Cathie Wood",
-            category: .institutions,
+            category: .investors,
             avatarName: "avatar_wood",
             followersCount: 89000,
             isFollowing: false,
-            title: "ARK Invest CEO"
+            title: "ARK Invest CEO",
+            firmName: "ARK Invest"
         ),
         TrendingWhale(
             name: "Tommy Tuberville",
@@ -1235,25 +1252,28 @@ extension TrendingWhale {
             followersCount: 125000,
             isFollowing: false,
             title: "Berkshire Hathaway CEO",
-            description: "The Oracle of Omaha. Value investing legend with 50+ years of market-beating returns."
+            description: "The Oracle of Omaha. Value investing legend with 50+ years of market-beating returns.",
+            firmName: "Berkshire Hathaway"
         ),
         TrendingWhale(
             name: "Cathie Wood",
-            category: .institutions,
+            category: .investors,
             avatarName: "avatar_wood",
             followersCount: 89000,
             isFollowing: false,
             title: "ARK Invest CEO",
-            description: "Disruptive innovation champion. Leading the charge in AI, genomics, and blockchain investing."
+            description: "Disruptive innovation champion. Leading the charge in AI, genomics, and blockchain investing.",
+            firmName: "ARK Invest"
         ),
         TrendingWhale(
             name: "Ray Dalio",
-            category: .institutions,
+            category: .investors,
             avatarName: "avatar_dalio",
             followersCount: 112000,
             isFollowing: false,
             title: "Bridgewater Associates Founder",
-            description: "Macro investing pioneer. Built the world's largest hedge fund with radical transparency."
+            description: "Macro investing pioneer. Built the world's largest hedge fund with radical transparency.",
+            firmName: "Bridgewater Associates"
         ),
         TrendingWhale(
             name: "Michael Burry",
@@ -1262,38 +1282,41 @@ extension TrendingWhale {
             followersCount: 98000,
             isFollowing: false,
             title: "Scion Asset Management",
-            description: "The Big Short. Legendary contrarian known for calling the 2008 housing crisis."
+            description: "The Big Short. Legendary contrarian known for calling the 2008 housing crisis.",
+            firmName: "Scion Asset Management"
         )
     ]
 
     // MARK: - All Whales by Category (for AllWhalesView)
 
-    // 10 Investors
+    // 10 Investors — person-fronted, firm always alongside (post-merge shape:
+    // one whale per 13F filer; the person is the profile, firmName the firm).
     static let allInvestorsData: [TrendingWhale] = [
-        TrendingWhale(name: "Warren Buffett", category: .investors, avatarName: "avatar_buffett", followersCount: 125000, isFollowing: false, title: "Berkshire Hathaway CEO"),
-        TrendingWhale(name: "Michael Burry", category: .investors, avatarName: "avatar_burry", followersCount: 98000, isFollowing: false, title: "Scion Asset Management"),
-        TrendingWhale(name: "George Soros", category: .investors, avatarName: "avatar_soros", followersCount: 95000, isFollowing: false, title: "Soros Fund Management"),
-        TrendingWhale(name: "Carl Icahn", category: .investors, avatarName: "avatar_icahn", followersCount: 87000, isFollowing: false, title: "Icahn Enterprises"),
-        TrendingWhale(name: "Stanley Druckenmiller", category: .investors, avatarName: "avatar_druckenmiller", followersCount: 83000, isFollowing: false, title: "Duquesne Family Office"),
-        TrendingWhale(name: "Peter Lynch", category: .investors, avatarName: "avatar_lynch", followersCount: 72000, isFollowing: false, title: "Fidelity Investments"),
-        TrendingWhale(name: "Howard Marks", category: .investors, avatarName: "avatar_marks", followersCount: 68000, isFollowing: false, title: "Oaktree Capital Co-Chairman"),
-        TrendingWhale(name: "Seth Klarman", category: .investors, avatarName: "avatar_klarman", followersCount: 54000, isFollowing: false, title: "Baupost Group"),
-        TrendingWhale(name: "Joel Greenblatt", category: .investors, avatarName: "avatar_greenblatt", followersCount: 41000, isFollowing: false, title: "Gotham Capital"),
-        TrendingWhale(name: "Mohnish Pabrai", category: .investors, avatarName: "avatar_pabrai", followersCount: 38000, isFollowing: false, title: "Pabrai Investment Funds")
+        TrendingWhale(name: "Warren Buffett", category: .investors, avatarName: "avatar_buffett", followersCount: 125000, isFollowing: false, title: "Berkshire Hathaway CEO", firmName: "Berkshire Hathaway"),
+        TrendingWhale(name: "Michael Burry", category: .investors, avatarName: "avatar_burry", followersCount: 98000, isFollowing: false, title: "Scion Asset Management", firmName: "Scion Asset Management"),
+        TrendingWhale(name: "George Soros", category: .investors, avatarName: "avatar_soros", followersCount: 95000, isFollowing: false, title: "Soros Fund Management Founder", firmName: "Soros Fund Management"),
+        TrendingWhale(name: "Ray Dalio", category: .investors, avatarName: "avatar_dalio", followersCount: 112000, isFollowing: false, title: "Bridgewater Associates Founder", firmName: "Bridgewater Associates"),
+        TrendingWhale(name: "Cathie Wood", category: .investors, avatarName: "avatar_wood", followersCount: 89000, isFollowing: false, title: "ARK Invest CEO", firmName: "ARK Invest"),
+        TrendingWhale(name: "Bill Ackman", category: .investors, avatarName: "avatar_ackman", followersCount: 76000, isFollowing: false, title: "Pershing Square Capital", firmName: "Pershing Square Capital"),
+        TrendingWhale(name: "Carl Icahn", category: .investors, avatarName: "avatar_icahn", followersCount: 87000, isFollowing: false, title: "Icahn Enterprises", firmName: "Icahn Enterprises"),
+        TrendingWhale(name: "Stanley Druckenmiller", category: .investors, avatarName: "avatar_druckenmiller", followersCount: 83000, isFollowing: false, title: "Duquesne Family Office", firmName: "Duquesne Family Office"),
+        TrendingWhale(name: "Howard Marks", category: .investors, avatarName: "avatar_marks", followersCount: 68000, isFollowing: false, title: "Oaktree Capital Co-Chairman", firmName: "Oaktree Capital"),
+        TrendingWhale(name: "Seth Klarman", category: .investors, avatarName: "avatar_klarman", followersCount: 54000, isFollowing: false, title: "Baupost Group", firmName: "Baupost Group")
     ]
 
-    // 10 Institutions
+    // 10 Institutions — firm-branded filers only (no person duplicates; the
+    // person-led funds above live under Investors since the migration-080 merge).
     static let allInstitutionsData: [TrendingWhale] = [
-        TrendingWhale(name: "Ray Dalio", category: .institutions, avatarName: "avatar_dalio", followersCount: 112000, isFollowing: false, title: "Bridgewater Associates"),
-        TrendingWhale(name: "Ken Griffin", category: .institutions, avatarName: "avatar_griffin", followersCount: 92000, isFollowing: false, title: "Citadel CEO"),
-        TrendingWhale(name: "Cathie Wood", category: .institutions, avatarName: "avatar_wood", followersCount: 89000, isFollowing: false, title: "ARK Invest CEO"),
-        TrendingWhale(name: "Bill Ackman", category: .institutions, avatarName: "avatar_ackman", followersCount: 76000, isFollowing: false, title: "Pershing Square Capital"),
-        TrendingWhale(name: "Jim Simons", category: .institutions, avatarName: "avatar_simons", followersCount: 78000, isFollowing: false, title: "Renaissance Technologies"),
-        TrendingWhale(name: "Steve Cohen", category: .institutions, avatarName: "avatar_cohen", followersCount: 67000, isFollowing: false, title: "Point72 Chairman"),
-        TrendingWhale(name: "David Tepper", category: .institutions, avatarName: "avatar_tepper", followersCount: 58000, isFollowing: false, title: "Appaloosa Management"),
-        TrendingWhale(name: "Chase Coleman", category: .institutions, avatarName: "avatar_coleman", followersCount: 51000, isFollowing: false, title: "Tiger Global Management"),
-        TrendingWhale(name: "Dan Loeb", category: .institutions, avatarName: "avatar_loeb", followersCount: 45000, isFollowing: false, title: "Third Point CEO"),
-        TrendingWhale(name: "Philippe Laffont", category: .institutions, avatarName: "avatar_laffont", followersCount: 39000, isFollowing: false, title: "Coatue Management")
+        TrendingWhale(name: "Renaissance Technologies", category: .institutions, avatarName: "avatar_simons", followersCount: 78000, isFollowing: false, title: "Quantitative Hedge Fund"),
+        TrendingWhale(name: "Citadel Advisors", category: .institutions, avatarName: "avatar_griffin", followersCount: 92000, isFollowing: false, title: "Multi-Strategy Hedge Fund"),
+        TrendingWhale(name: "Point72 Asset Management", category: .institutions, avatarName: "avatar_cohen", followersCount: 67000, isFollowing: false, title: "Multi-Strategy Hedge Fund"),
+        TrendingWhale(name: "Tiger Global Management", category: .institutions, avatarName: "avatar_coleman", followersCount: 51000, isFollowing: false, title: "Technology-Focused Hedge Fund"),
+        TrendingWhale(name: "Two Sigma Investments", category: .institutions, avatarName: "avatar_twosigma", followersCount: 44000, isFollowing: false, title: "Quantitative Hedge Fund"),
+        TrendingWhale(name: "Millennium Management", category: .institutions, avatarName: "avatar_millennium", followersCount: 42000, isFollowing: false, title: "Multi-Strategy Hedge Fund"),
+        TrendingWhale(name: "D.E. Shaw", category: .institutions, avatarName: "avatar_deshaw", followersCount: 41000, isFollowing: false, title: "Quantitative Hedge Fund"),
+        TrendingWhale(name: "AQR Capital Management", category: .institutions, avatarName: "avatar_aqr", followersCount: 36000, isFollowing: false, title: "Quantitative Investment Manager"),
+        TrendingWhale(name: "Norges Bank", category: .institutions, avatarName: "avatar_norges", followersCount: 33000, isFollowing: false, title: "Norwegian Sovereign Wealth Fund"),
+        TrendingWhale(name: "Baillie Gifford", category: .institutions, avatarName: "avatar_baillie", followersCount: 29000, isFollowing: false, title: "Long-Horizon Growth Manager")
     ]
 
     // 10 Politicians

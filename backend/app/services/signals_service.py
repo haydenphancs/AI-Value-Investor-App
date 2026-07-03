@@ -762,24 +762,28 @@ class SignalsService:
             sb = get_supabase()
             whales = (
                 sb.table("whales")
-                .select("id, name, cik, last_hydrated_at")
+                .select("id, name, cik, firm_name, last_hydrated_at")
                 .eq("data_source", "13f")
                 .limit(2000)
                 .execute()
                 .data
                 or []
             )
-            wmap: Dict[Any, Dict[str, str]] = {}   # whale_id -> {name, cik(dedup key)}
+            wmap: Dict[Any, Dict[str, str]] = {}   # whale_id -> {name, firm, cik(dedup key)}
             hydrated: List[str] = []
             for w in whales:
                 wid = w.get("id")
                 if wid is None:
                     continue
                 cik = (w.get("cik") or "").strip()
-                # Dedup key = CIK — a person and their fund share one 13F filing/CIK
-                # (Ray Dalio ↔ Bridgewater). Null CIK → per-whale sentinel so it
-                # stays distinct. Same rule the card counts by.
-                wmap[wid] = {"name": w.get("name") or "", "cik": cik or f"nocik:{wid}"}
+                # Dedup key = CIK — kept as a safety net even after migration 080
+                # merged person↔fund rows (null CIK still needs the per-whale
+                # sentinel to stay distinct). Same rule the card counts by.
+                wmap[wid] = {
+                    "name": w.get("name") or "",
+                    "firm": w.get("firm_name") or "",
+                    "cik": cik or f"nocik:{wid}",
+                }
                 hd = w.get("last_hydrated_at")
                 if hd:
                     hydrated.append(str(hd)[:10])
@@ -842,7 +846,10 @@ class SignalsService:
                 candidate = SignalHolderResponse(
                     whale_id=str(wid),
                     name=info["name"],
-                    subtitle="13F fund",
+                    # Person-fronted whales carry their firm here ("Bridgewater
+                    # Associates" under "Ray Dalio") so the name never appears
+                    # without the firm; generic label only when no firm exists.
+                    subtitle=info["firm"] or "13F fund",
                     transaction_date=tdate,
                     # disclosure_date stays None for 13F (congress-only; iOS falls back
                     # to transaction_date for the "Filed …" label).

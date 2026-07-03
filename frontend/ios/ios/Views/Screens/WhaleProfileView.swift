@@ -126,11 +126,21 @@ struct WhaleProfileHeader: View {
                 size: 80
             )
 
-            // Name and Title
+            // Name and Title. Person-fronted whales show their firm directly
+            // under the name (GuruFocus-style "Warren Buffett / Berkshire
+            // Hathaway") — but only when the title doesn't already contain it
+            // ("Berkshire Hathaway CEO" would make a separate firm line redundant).
             VStack(spacing: AppSpacing.xs) {
                 Text(profile.name)
                     .font(AppTypography.title)
                     .foregroundColor(AppColors.textPrimary)
+
+                if let firm = profile.firmName, !firm.isEmpty,
+                   !profile.title.localizedCaseInsensitiveContains(firm) {
+                    Text(firm)
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textPrimary.opacity(0.85))
+                }
 
                 Text(profile.title)
                     .font(AppTypography.bodySmall)

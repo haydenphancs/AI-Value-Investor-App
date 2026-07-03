@@ -14,6 +14,10 @@ struct WhaleProfile: Identifiable, Codable {
     let name: String
     let title: String
     let description: String
+    /// Firm a person-fronted whale runs ("Bridgewater Associates" for Ray
+    /// Dalio). `var` with default so the memberwise init keeps old call sites
+    /// (mocks) compiling; nil for institutions/politicians and old backends.
+    var firmName: String? = nil
     let avatarURL: String?
     let riskProfile: WhaleRiskProfile
     let portfolioValue: Double

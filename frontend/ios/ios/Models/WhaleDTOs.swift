@@ -20,6 +20,9 @@ struct TrendingWhaleDTO: Codable, Identifiable {
     let title: String
     let description: String
     let recentTradeCount: Int
+    /// Firm a person-fronted whale runs ("Bridgewater Associates" for Ray
+    /// Dalio). Optional — nil for institutions/politicians and old backends.
+    let firmName: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name, category, title, description
@@ -27,6 +30,7 @@ struct TrendingWhaleDTO: Codable, Identifiable {
         case followersCount = "followers_count"
         case isFollowing = "is_following"
         case recentTradeCount = "recent_trade_count"
+        case firmName = "firm_name"
     }
 
     func toTrendingWhale() -> TrendingWhale {
@@ -39,7 +43,8 @@ struct TrendingWhaleDTO: Codable, Identifiable {
             isFollowing: isFollowing,
             title: title,
             description: description,
-            recentTradeCount: recentTradeCount
+            recentTradeCount: recentTradeCount,
+            firmName: firmName
         )
     }
 }
@@ -51,6 +56,7 @@ struct WhaleTradeGroupActivityDTO: Codable, Identifiable {
     let whaleId: String
     let entityName: String
     let entityAvatarName: String
+    let entityFirmName: String?
     let category: String?
     let action: String
     let tradeCount: Int
@@ -63,6 +69,7 @@ struct WhaleTradeGroupActivityDTO: Codable, Identifiable {
         case whaleId = "whale_id"
         case entityName = "entity_name"
         case entityAvatarName = "entity_avatar_name"
+        case entityFirmName = "entity_firm_name"
         case tradeCount = "trade_count"
         case totalAmount = "total_amount"
     }
@@ -73,6 +80,7 @@ struct WhaleTradeGroupActivityDTO: Codable, Identifiable {
             whaleId: whaleId,
             entityName: entityName,
             entityAvatarName: entityAvatarName,
+            entityFirmName: entityFirmName,
             category: category.map { WhaleCategory.fromBackend($0) },
             action: WhaleAction(rawValue: action) ?? .bought,
             tradeCount: tradeCount,
@@ -90,6 +98,7 @@ struct WhaleProfileDTO: Codable {
     let name: String
     let title: String
     let description: String
+    let firmName: String?
     let avatarUrl: String?
     let riskProfile: String
     let portfolioValue: Double
@@ -107,6 +116,7 @@ struct WhaleProfileDTO: Codable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, title, description
+        case firmName = "firm_name"
         case avatarUrl = "avatar_url"
         case riskProfile = "risk_profile"
         case portfolioValue = "portfolio_value"
@@ -129,6 +139,7 @@ struct WhaleProfileDTO: Codable {
             name: name,
             title: title,
             description: description,
+            firmName: firmName,
             avatarURL: avatarUrl,
             riskProfile: WhaleRiskProfile.fromBackend(riskProfile),
             portfolioValue: portfolioValue,

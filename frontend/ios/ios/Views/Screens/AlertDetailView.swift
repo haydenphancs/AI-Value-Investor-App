@@ -139,7 +139,7 @@ struct AlertDetailView: View {
                     detailRow(label: "Company", value: item.companyName)
                     detailRow(label: "Whales", value: "\(item.whaleCount)")
                     if let lead = item.leadWhaleName {
-                        leadWhaleRow(name: lead, whaleId: item.leadWhaleId)
+                        leadWhaleRow(name: lead, firm: item.leadWhaleFirm, whaleId: item.leadWhaleId)
                     }
                     detailRow(label: "Amount", value: item.amount)
                 }
@@ -148,7 +148,7 @@ struct AlertDetailView: View {
     }
 
     @ViewBuilder
-    private func leadWhaleRow(name: String, whaleId: String?) -> some View {
+    private func leadWhaleRow(name: String, firm: String?, whaleId: String?) -> some View {
         if let whaleId {
             Button {
                 navigateToWhaleId = whaleId
@@ -158,15 +158,25 @@ struct AlertDetailView: View {
                         .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textMuted)
                     Spacer()
-                    Text(name)
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.primaryBlue)
+                    // Person-fronted whales always show name + firm together.
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(name)
+                            .font(AppTypography.bodySmallEmphasis)
+                            .foregroundColor(AppColors.primaryBlue)
+                        if let firm, !firm.isEmpty {
+                            Text(firm)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
+                    }
                     Image(systemName: "chevron.right")
                         .font(AppTypography.iconSmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }
             .buttonStyle(.plain)
+        } else if let firm, !firm.isEmpty {
+            detailRow(label: "Lead Whale", value: "\(name) · \(firm)")
         } else {
             detailRow(label: "Lead Whale", value: name)
         }

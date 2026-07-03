@@ -2,6 +2,7 @@
   {
     "name": "Warren Buffett",
     "title": "Berkshire Hathaway CEO",
+    "firm_name": "Berkshire Hathaway",
     "description": "The Oracle of Omaha and chairman of Berkshire Hathaway. Known for his long-term buy-and-hold value investing philosophy, he built one of the largest conglomerates in the world by acquiring undervalued companies with strong competitive moats. His annual shareholder letters are considered essential reading for investors worldwide.",
     "category": "investors",
     "cik": "0001067983",
@@ -12,6 +13,7 @@
   {
     "name": "Bill Ackman",
     "title": "Pershing Square Capital",
+    "firm_name": "Pershing Square Capital",
     "description": "Billionaire activist investor and founder of Pershing Square Capital Management. Known for taking concentrated positions in large-cap companies and pushing for operational changes to unlock shareholder value. Made headlines with his $2.6B profit on a COVID market hedge and high-profile battles with companies like Herbalife and Valeant.",
     "category": "investors",
     "cik": "0001336528",
@@ -22,6 +24,7 @@
   {
     "name": "Michael Burry",
     "title": "Scion Asset Management",
+    "firm_name": "Scion Asset Management",
     "description": "The investor who predicted and profited from the 2008 subprime mortgage crisis, famously portrayed in The Big Short. Runs Scion Asset Management with a deep-value, contrarian approach. Known for making large concentrated bets against market consensus and frequently rotating his entire portfolio between quarters.",
     "category": "investors",
     "cik": "0001649339",
@@ -31,6 +34,7 @@
   {
     "name": "Ray Dalio",
     "title": "Bridgewater Associates Founder",
+    "firm_name": "Bridgewater Associates",
     "description": "Founder of Bridgewater Associates, the world's largest hedge fund managing approximately $100B in total assets. Pioneer of the 'All Weather' and 'Pure Alpha' strategies that combine systematic macro investing with risk parity allocation.",
     "category": "investors",
     "cik": "0001350694",
@@ -40,6 +44,7 @@
   {
     "name": "Cathie Wood",
     "title": "ARK Invest CEO",
+    "firm_name": "ARK Invest",
     "description": "Founder and CEO of ARK Invest, known for her high-conviction bets on disruptive innovation including AI, genomics, robotics, and blockchain. Her flagship ARK Innovation ETF (ARKK) became one of the most popular actively managed ETFs. Takes bold positions in early-stage technology companies and publishes her trades daily for full transparency.",
     "category": "investors",
     "cik": "0001697748",
@@ -50,6 +55,7 @@
   {
     "name": "David Tepper",
     "title": "Appaloosa Management Founder",
+    "firm_name": "Appaloosa Management",
     "description": "Founder of Appaloosa Management, one of the most successful hedge fund managers in history. Specializes in distressed debt and equity investing with a contrarian macro approach. Known for making massive bets during market crises — his fund returned 132% in 2009 by buying beaten-down bank stocks.",
     "category": "investors",
     "cik": "0001656456",
@@ -59,6 +65,7 @@
   {
     "name": "George Soros",
     "title": "Soros Fund Management Founder",
+    "firm_name": "Soros Fund Management",
     "description": "Legendary macro investor and founder of Soros Fund Management. Most famous for 'breaking the Bank of England' in 1992 by shorting the British pound, netting over $1 billion in a single day. His reflexivity theory of markets influenced a generation of traders.",
     "category": "investors",
     "cik": "0001029160",
@@ -68,6 +75,7 @@
   {
     "name": "Carl Icahn",
     "title": "Icahn Enterprises",
+    "firm_name": "Icahn Enterprises",
     "description": "One of Wall Street's most feared activist investors for over four decades. Built his fortune through hostile takeovers and corporate restructuring, pushing companies to unlock shareholder value through management changes, spin-offs, and buybacks.",
     "category": "investors",
     "cik": "0000921669",
@@ -78,6 +86,7 @@
   {
     "name": "Stanley Druckenmiller",
     "title": "Duquesne Family Office",
+    "firm_name": "Duquesne Family Office",
     "description": "Former lead portfolio manager for George Soros's Quantum Fund, where he co-executed the famous British pound trade. Later ran Duquesne Capital Management with one of the best long-term track records in hedge fund history — averaging 30% annual returns over 30 years with no losing year.",
     "category": "investors",
     "cik": "0001536411",
@@ -87,6 +96,7 @@
   {
     "name": "Seth Klarman",
     "title": "Baupost Group Founder",
+    "firm_name": "Baupost Group",
     "description": "Founder of The Baupost Group and author of 'Margin of Safety,' one of the most sought-after investing books ever written. A disciple of Benjamin Graham's value investing philosophy, he focuses on finding deeply undervalued securities with a significant margin of safety.",
     "category": "investors",
     "cik": "0001061768",
@@ -96,9 +106,231 @@
   {
     "name": "Dan Loeb",
     "title": "Third Point LLC",
+    "firm_name": "Third Point",
     "description": "Founder of Third Point LLC, an activist hedge fund that combines deep fundamental research with shareholder activism. Known for writing forceful public letters to company boards demanding strategic changes.",
     "category": "investors",
     "cik": "0001040273",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "David Einhorn",
+    "title": "Greenlight Capital Founder",
+    "firm_name": "Greenlight Capital",
+    "description": "Founder of Greenlight Capital (now filing as DME Capital Management), famous for publicly shorting Lehman Brothers months before its 2008 collapse. A disciplined value investor and accomplished poker player, he combines long positions in misunderstood businesses with high-conviction shorts against what he sees as accounting fictions.",
+    "category": "investors",
+    "cik": "0001489933",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Howard Marks",
+    "title": "Oaktree Capital Co-Founder",
+    "firm_name": "Oaktree Capital",
+    "description": "Co-founder of Oaktree Capital Management, the world's largest distressed-debt investor. His investment memos are read across Wall Street — Warren Buffett says when one arrives, it's the first thing he opens. Known for market-cycle wisdom and buying quality assets when others are forced to sell.",
+    "category": "investors",
+    "cik": "0000949509",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Nelson Peltz",
+    "title": "Trian Partners Founder",
+    "firm_name": "Trian Partners",
+    "description": "Founding partner of Trian Fund Management and one of the most prominent activist investors of his generation. Takes large stakes in iconic consumer and industrial companies — P&G, Heinz, Disney — and pushes for board seats and operational overhauls, a style he calls 'constructivism'.",
+    "category": "investors",
+    "cik": "0001345471",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Paul Singer",
+    "title": "Elliott Management Founder",
+    "firm_name": "Elliott Management",
+    "description": "Founder of Elliott Investment Management, widely considered the most feared activist investor in the world. Famous for a 15-year legal battle with Argentina over defaulted bonds that ended with a $2.4B settlement, and for activist campaigns that have reshaped companies from AT&T to Salesforce.",
+    "category": "investors",
+    "cik": "0001791786",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Chris Hohn",
+    "title": "TCI Fund Management Founder",
+    "firm_name": "TCI Fund Management",
+    "description": "Founder of The Children's Investment Fund (TCI), one of the most profitable hedge funds in history by dollar gains. Runs a highly concentrated portfolio of dominant infrastructure-like businesses and pairs aggressive shareholder activism with large-scale philanthropy.",
+    "category": "investors",
+    "cik": "0001647251",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Terry Smith",
+    "title": "Fundsmith Founder",
+    "firm_name": "Fundsmith",
+    "description": "Founder of Fundsmith and often called 'the English Buffett'. His strategy is famously simple: buy good companies, don't overpay, do nothing. Runs a concentrated portfolio of high-return consumer and healthcare compounders held for years, and his blunt annual letters have a cult following.",
+    "category": "investors",
+    "cik": "0001569205",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Li Lu",
+    "title": "Himalaya Capital Founder",
+    "firm_name": "Himalaya Capital",
+    "description": "Founder of Himalaya Capital and the only outside manager Charlie Munger ever trusted with his family's money. Introduced Berkshire to BYD, one of its most successful investments ever. Runs an ultra-concentrated value portfolio and is often called 'the Chinese Warren Buffett'.",
+    "category": "investors",
+    "cik": "0001709323",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Mohnish Pabrai",
+    "title": "Pabrai Investment Funds Founder",
+    "firm_name": "Pabrai Investment Funds",
+    "description": "Founder of Pabrai Investment Funds (filing as Dalal Street) and author of 'The Dhandho Investor'. An unapologetic 'cloner' of great investors' ideas, he famously paid $650K with Guy Spier for a charity lunch with Warren Buffett. Runs a highly concentrated low-fee value portfolio.",
+    "category": "investors",
+    "cik": "0001549575",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Bill Gates",
+    "title": "Gates Foundation Trust",
+    "firm_name": "Gates Foundation Trust",
+    "description": "The Microsoft co-founder's philanthropic endowment, managed by his long-time investment chief Michael Larson. One of the most-watched 13F portfolios in the world — a concentrated collection of long-term holdings including Microsoft, Berkshire Hathaway, and Waste Management.",
+    "category": "investors",
+    "cik": "0001166559",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Chuck Akre",
+    "title": "Akre Capital Founder",
+    "firm_name": "Akre Capital Management",
+    "description": "Founder of Akre Capital Management and creator of the 'three-legged stool' framework: great business, great management, great reinvestment. His fund holds compounding machines like Mastercard, Moody's, and O'Reilly for a decade or more with famously low turnover.",
+    "category": "investors",
+    "cik": "0001112520",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Thomas Gayner",
+    "title": "Markel Group CEO",
+    "firm_name": "Markel Group",
+    "description": "CEO of Markel Group, the insurance company so closely modeled on Berkshire Hathaway it's nicknamed 'baby Berkshire'. Has run Markel's equity portfolio for over 30 years with a buy-and-hold quality approach, compounding the insurer's float into a multi-billion dollar stock portfolio.",
+    "category": "investors",
+    "cik": "0001096343",
+    "data_source": "13f",
+    "fmp_name": null,
+    "associated_ticker": "MKL"
+  },
+  {
+    "name": "Philippe Laffont",
+    "title": "Coatue Management Founder",
+    "firm_name": "Coatue Management",
+    "description": "Founder of Coatue Management and one of the most successful 'Tiger cubs' trained under Julian Robertson. Runs a technology-focused crossover fund investing in both public and private companies, with early conviction bets across AI, consumer internet, and semiconductors.",
+    "category": "investors",
+    "cik": "0001135730",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Stephen Mandel",
+    "title": "Lone Pine Capital Founder",
+    "firm_name": "Lone Pine Capital",
+    "description": "Founder of Lone Pine Capital and one of the most respected growth investors of the past three decades. A 'Tiger cub' under Julian Robertson, he built Lone Pine into a powerhouse with deep fundamental research on high-growth franchises across tech, consumer, and healthcare.",
+    "category": "investors",
+    "cik": "0001061165",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Andreas Halvorsen",
+    "title": "Viking Global Founder",
+    "firm_name": "Viking Global",
+    "description": "Norwegian former navy SEAL turned 'Tiger cub' who co-founded Viking Global Investors, one of the largest long/short equity funds in the world. Known for a deep fundamental research process and disciplined portfolio management across public and private markets.",
+    "category": "investors",
+    "cik": "0001103804",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Brad Gerstner",
+    "title": "Altimeter Capital Founder",
+    "firm_name": "Altimeter Capital",
+    "description": "Founder of Altimeter Capital and one of the most vocal technology investors of the AI era. Made concentrated bets on Snowflake and Uber, wrote the famous 'Time to Get Fit' open letter to Meta, and champions the 'Invest America' program to give every American child an investing account.",
+    "category": "investors",
+    "cik": "0001541617",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Dan Sundheim",
+    "title": "D1 Capital Founder",
+    "firm_name": "D1 Capital Partners",
+    "description": "Founder of D1 Capital Partners and former chief investment officer of Viking Global. Runs a concentrated crossover portfolio spanning public equities and late-stage private companies, and is regarded as one of the sharpest fundamental analysts of his generation.",
+    "category": "investors",
+    "cik": "0001747057",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Duan Yongping",
+    "title": "H&H International Investment",
+    "firm_name": "H&H International Investment",
+    "description": "The Chinese electronics billionaire behind BBK, OPPO, and vivo, who retired young and turned to Buffett-style investing. His concentrated portfolio — anchored by an enormous Apple position — has a cult following among value investors, who track his filings as closely as Berkshire's.",
+    "category": "investors",
+    "cik": "0001759760",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "John Paulson",
+    "title": "Paulson & Co Founder",
+    "firm_name": "Paulson & Co",
+    "description": "Architect of 'the greatest trade ever' — his 2007 bet against subprime mortgages via credit default swaps made roughly $15 billion as the housing market collapsed. Later became one of the largest private investors in gold. Now runs Paulson & Co as a family office.",
+    "category": "investors",
+    "cik": "0001035674",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Leon Cooperman",
+    "title": "Omega Family Office Chairman",
+    "firm_name": "Omega Family Office",
+    "description": "Former CEO of Goldman Sachs Asset Management who founded Omega Advisors and ran it for 27 years before converting to a family office. A classic value investor who files 13Fs under his own name, known for outspoken market commentary and pledging his fortune to charity.",
+    "category": "investors",
+    "cik": "0000898382",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Ken Fisher",
+    "title": "Fisher Investments Founder",
+    "firm_name": "Fisher Investments",
+    "description": "Founder of Fisher Investments, one of the largest independent wealth managers in the world with well over $200B under management. Wrote the Forbes 'Portfolio Strategy' column for 32 years — the longest run in the magazine's history. His firm's 13F reflects a broad, actively tilted portfolio across thousands of client accounts.",
+    "category": "investors",
+    "cik": "0000850529",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Jeremy Grantham",
+    "title": "GMO Co-Founder",
+    "firm_name": "GMO",
+    "description": "Co-founder of asset manager GMO and the market's most famous bubble historian — he identified and sidestepped the Japan bubble, the dot-com bubble, and the 2008 housing bubble. Focuses on long-term asset-class value and has become a leading voice on climate investing.",
+    "category": "investors",
+    "cik": "0001352662",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Larry Robbins",
+    "title": "Glenview Capital Founder",
+    "firm_name": "Glenview Capital",
+    "description": "Founder of Glenview Capital Management, best known for deep fundamental bets on healthcare and managed-care companies. His 'growth at a reasonable price' hedge fund famously returned over 80% in 2013 on hospital stocks after the Affordable Care Act ruling.",
+    "category": "investors",
+    "cik": "0001138995",
     "data_source": "13f",
     "fmp_name": null
   },
@@ -139,62 +371,6 @@
     "fmp_name": null
   },
   {
-    "name": "Bridgewater Associates",
-    "title": "World's Largest Hedge Fund",
-    "description": "The world's largest hedge fund, managing approximately $100B in total assets. Founded by Ray Dalio, Bridgewater pioneered the 'All Weather' and 'Pure Alpha' strategies combining systematic macro investing with risk parity allocation. The 13F portfolio represents their US public equity holdings.",
-    "category": "institutions",
-    "cik": "0001350694",
-    "data_source": "13f",
-    "fmp_name": null
-  },
-  {
-    "name": "Pershing Square Capital",
-    "title": "Activist Hedge Fund",
-    "description": "Founded by Bill Ackman, Pershing Square Capital Management is known for taking large concentrated positions in undervalued companies and using activist strategies to drive change. Manages approximately $18B in assets with a focused portfolio of typically 8-12 positions.",
-    "category": "institutions",
-    "cik": "0001336528",
-    "data_source": "13f",
-    "fmp_name": null,
-    "associated_ticker": "PSH.L"
-  },
-  {
-    "name": "ARK Invest",
-    "title": "Disruptive Innovation ETFs",
-    "description": "ARK Investment Management, founded by Cathie Wood, focuses exclusively on disruptive innovation across AI, genomics, robotics, energy storage, and blockchain. Manages several actively traded ETFs including the flagship ARK Innovation ETF (ARKK). Known for daily trade transparency and high-conviction growth investing.",
-    "category": "institutions",
-    "cik": "0001697748",
-    "data_source": "13f",
-    "fmp_name": null,
-    "associated_ticker": "ARKK"
-  },
-  {
-    "name": "Baupost Group",
-    "title": "Value-Oriented Hedge Fund",
-    "description": "Founded by Seth Klarman, The Baupost Group is one of the largest and most respected value-oriented hedge funds, managing approximately $25B in assets. Known for holding large cash positions when bargains are scarce and investing across distressed debt, equities, and real estate when opportunities arise.",
-    "category": "institutions",
-    "cik": "0001061768",
-    "data_source": "13f",
-    "fmp_name": null
-  },
-  {
-    "name": "Soros Fund Management",
-    "title": "Macro-Focused Family Office",
-    "description": "Founded by George Soros, one of the most successful investors in history. Manages the Soros family fortune through a flexible macro approach spanning equities, currencies, fixed income, and commodities. Now operates as a family office after returning outside investor capital in 2011.",
-    "category": "institutions",
-    "cik": "0001029160",
-    "data_source": "13f",
-    "fmp_name": null
-  },
-  {
-    "name": "Appaloosa Management",
-    "title": "Distressed Debt Hedge Fund",
-    "description": "Founded by David Tepper, Appaloosa Management is known for making bold contrarian bets during market dislocations. Specializes in distressed debt and equity investing with a macro overlay. The fund returned 132% in 2009 by buying beaten-down bank stocks during the financial crisis.",
-    "category": "institutions",
-    "cik": "0001656456",
-    "data_source": "13f",
-    "fmp_name": null
-  },
-  {
     "name": "D.E. Shaw",
     "title": "Quantitative Hedge Fund",
     "description": "Founded by David Shaw, D.E. Shaw is one of the largest and most sophisticated quantitative hedge funds in the world, managing over $60B in assets. Combines computational techniques with human judgment across systematic, discretionary, and hybrid strategies spanning equities, fixed income, and alternative investments.",
@@ -227,6 +403,42 @@
     "description": "Founded by Cliff Asness, AQR Capital Management is a global quantitative investment firm managing over $100B in assets. Pioneered factor-based investing strategies including value, momentum, and low-volatility approaches. Known for rigorous academic research and systematic portfolio construction.",
     "category": "institutions",
     "cik": "0001167557",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Harris Associates",
+    "title": "Oakmark Funds Manager",
+    "description": "The Chicago value shop behind the Oakmark Funds, long associated with star manager Bill Nygren. Buys businesses trading at significant discounts to intrinsic value and holds through volatility — a classic fundamental value discipline applied at mutual-fund scale.",
+    "category": "institutions",
+    "cik": "0000813917",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Norges Bank",
+    "title": "Norwegian Sovereign Wealth Fund",
+    "description": "Norway's central bank, filing on behalf of the Government Pension Fund Global — the largest sovereign wealth fund on Earth at roughly $1.8 trillion, built from North Sea oil revenue. It owns about 1.5% of every listed company in the world, making its US filings a window into the biggest single pool of equity capital anywhere.",
+    "category": "institutions",
+    "cik": "0001374170",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Public Investment Fund",
+    "title": "Saudi Arabia Sovereign Wealth Fund",
+    "description": "Saudi Arabia's sovereign wealth fund and the financial engine of the kingdom's Vision 2030 transformation. Known for bold concentrated bets — an early $3.5B stake in Uber, majority ownership of Lucid Motors, and headline-grabbing investments across gaming, sports, and technology.",
+    "category": "institutions",
+    "cik": "0001767640",
+    "data_source": "13f",
+    "fmp_name": null
+  },
+  {
+    "name": "Baillie Gifford",
+    "title": "Long-Horizon Growth Manager",
+    "description": "The century-old Scottish investment partnership that became famous for finding transformational growth companies years early — it was one of the largest outside investors in Tesla, Amazon, and NVIDIA long before the crowd. Invests with a 5-10 year horizon and asks one question: can this company grow to many times its current size?",
+    "category": "institutions",
+    "cik": "0001088875",
     "data_source": "13f",
     "fmp_name": null
   },

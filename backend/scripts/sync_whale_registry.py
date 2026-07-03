@@ -60,6 +60,10 @@ def main():
             "description": whale.get("description", ""),
             "category": whale.get("category", "investors"),
             "data_source": whale.get("data_source", "manual"),
+            # Unconditional (unlike cik/fmp_name below) so a corrected or
+            # removed firm_name propagates on re-sync. Requires migration 080
+            # (adds whales.firm_name) to be applied first.
+            "firm_name": whale.get("firm_name"),
         }
         if whale.get("cik"):
             row["cik"] = whale["cik"]

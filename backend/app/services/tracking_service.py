@@ -415,7 +415,7 @@ class TrackingService:
         try:
             result = (
                 sb.table("whale_trades")
-                .select("ticker, company_name, action, amount, amount_range, date, created_at, whale_id, whales(name, avatar_url)")
+                .select("ticker, company_name, action, amount, amount_range, date, created_at, whale_id, whales(name, avatar_url, firm_name)")
                 .in_("ticker", ticker_list)
                 .gte("created_at", cutoff_iso)
                 .order("created_at", desc=True)
@@ -450,6 +450,7 @@ class TrackingService:
                     "lead_whale_id": None,
                     "lead_whale_name": None,
                     "lead_whale_avatar": None,
+                    "lead_whale_firm": None,
                 },
             )
             try:
@@ -478,6 +479,7 @@ class TrackingService:
                     bucket["lead_whale_id"] = whale_id
                     bucket["lead_whale_name"] = whale.get("name")
                     bucket["lead_whale_avatar"] = whale.get("avatar_url")
+                    bucket["lead_whale_firm"] = whale.get("firm_name")
 
         # Second pass: group items by action → one rolled-up alert per action.
         action_groups: Dict[str, List[WhaleTradeItemResponse]] = {
@@ -515,6 +517,7 @@ class TrackingService:
                     lead_whale_id=bucket["lead_whale_id"],
                     lead_whale_name=bucket["lead_whale_name"],
                     lead_whale_avatar_name=bucket["lead_whale_avatar"],
+                    lead_whale_firm=bucket["lead_whale_firm"],
                 )
             )
             action_totals[action_word] += bucket["total_amount"]

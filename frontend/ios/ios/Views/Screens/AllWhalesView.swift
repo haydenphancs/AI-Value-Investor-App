@@ -250,6 +250,9 @@ struct AllWhalesView: View {
             viewModel.allPopularWhales.filter { whale in
                 whale.name.lowercased().contains(query) ||
                 whale.title.lowercased().contains(query) ||
+                // Searching a firm ("Bridgewater") finds its person-fronted
+                // whale (Ray Dalio) — one merged profile per 13F filer.
+                (whale.firmName?.lowercased().contains(query) ?? false) ||
                 whale.category.rawValue.lowercased().contains(query)
             }
         )
@@ -275,7 +278,12 @@ struct AllWhalesView: View {
         let trackedNames = Set(viewModel.trackedWhales.map(\.name))
         return whales.map { whale in
             if trackedNames.contains(whale.name) && !whale.isFollowing {
+                // Rebuilds the struct field-by-field — every field must be
+                // threaded through or it silently disappears from followed rows
+                // (id was previously dropped here, breaking profile navigation
+                // for these rows; firmName would have vanished the same way).
                 return TrendingWhale(
+                    id: whale.id,
                     name: whale.name,
                     category: whale.category,
                     avatarName: whale.avatarName,
@@ -283,7 +291,8 @@ struct AllWhalesView: View {
                     isFollowing: true,
                     title: whale.title,
                     description: whale.description,
-                    recentTradeCount: whale.recentTradeCount
+                    recentTradeCount: whale.recentTradeCount,
+                    firmName: whale.firmName
                 )
             }
             return whale

@@ -453,13 +453,6 @@ extension MoneyMove {
             learnerCount: "2.1k"
         ),
         MoneyMove(
-            title: "The Fall of Enron",
-            subtitle: "Red flags every investor should know.",
-            category: .valueTraps,
-            estimatedMinutes: 15,
-            learnerCount: "1.5k"
-        ),
-        MoneyMove(
             title: "Netflix vs. Disney+",
             subtitle: "The streaming wars breakdown.",
             category: .battles,
@@ -480,13 +473,6 @@ extension MoneyMove {
             estimatedMinutes: 13,
             learnerCount: "1.9k"
         ),
-        MoneyMove(
-            title: "WeWork's Unraveling",
-            subtitle: "When valuations don't match reality.",
-            category: .valueTraps,
-            estimatedMinutes: 11,
-            learnerCount: "1.3k"
-        ),
         // Placeholder cards (not yet authored). They render generated boilerplate via
         // createArticleFromMove until real content is authored + served. Authored
         // topics from MoneyMovesContentStore take precedence over any same-titled card.
@@ -505,20 +491,6 @@ extension MoneyMove {
             learnerCount: "1.2k"
         ),
         MoneyMove(
-            title: "The FTX Collapse",
-            subtitle: "Crypto's biggest fraud unraveled.",
-            category: .valueTraps,
-            estimatedMinutes: 18,
-            learnerCount: "3.2k"
-        ),
-        MoneyMove(
-            title: "Theranos: Blood & Lies",
-            subtitle: "The $9 billion medical fraud.",
-            category: .valueTraps,
-            estimatedMinutes: 16,
-            learnerCount: "2.8k"
-        ),
-        MoneyMove(
             title: "Visa vs. Mastercard",
             subtitle: "The payment network duopoly.",
             category: .battles,
@@ -531,7 +503,83 @@ extension MoneyMove {
             category: .battles,
             estimatedMinutes: 15,
             learnerCount: "2.5k"
-        )
+        ),
+        
+        // New Blueprints from brainstorm
+        MoneyMove(
+            title: "NVIDIA's AI Dominance",
+            subtitle: "How a gaming chip company became the engine of the AI revolution.",
+            category: .blueprints,
+            estimatedMinutes: 12,
+            learnerCount: "3.5k"
+        ),
+        MoneyMove(
+            title: "The Rise of LVMH",
+            subtitle: "The art of acquiring and cultivating timeless brands.",
+            category: .blueprints,
+            estimatedMinutes: 10,
+            learnerCount: "1.4k"
+        ),
+        MoneyMove(
+            title: "Microsoft's Cloud Metamorphosis",
+            subtitle: "How Satya Nadella saved a giant from irrelevance.",
+            category: .blueprints,
+            estimatedMinutes: 11,
+            learnerCount: "2.9k"
+        ),
+        MoneyMove(
+            title: "TSMC: The Foundry That Runs the World",
+            subtitle: "The story of the most important company you've never heard of.",
+            category: .blueprints,
+            estimatedMinutes: 13,
+            learnerCount: "1.1k"
+        ),
+
+        // New Battles from brainstorm
+        MoneyMove(
+            title: "AMD vs. Intel: The CPU Wars",
+            subtitle: "A multi-decade battle for the heart of the computer.",
+            category: .battles,
+            estimatedMinutes: 14,
+            learnerCount: "2.7k"
+        ),
+        MoneyMove(
+            title: "The Home Depot vs. Lowe's",
+            subtitle: "A fight for the loyalty of contractors and DIY enthusiasts.",
+            category: .battles,
+            estimatedMinutes: 10,
+            learnerCount: "1.5k"
+        ),
+        MoneyMove(
+            title: "Boeing vs. Airbus: The Aerospace Duopoly",
+            subtitle: "A global battle for the skies, defined by engineering and politics.",
+            category: .battles,
+            estimatedMinutes: 16,
+            learnerCount: "2.0k"
+        ),
+        MoneyMove(
+            title: "The Rise of TikTok vs. Instagram Reels",
+            subtitle: "The war for short-form video and the future of attention.",
+            category: .battles,
+            estimatedMinutes: 12,
+            learnerCount: "3.1k"
+        ),
+
+        // Value Traps
+        MoneyMove(
+            title: "Meta's Metaverse Pivot",
+            subtitle: "Betting the kingdom on a virtual dream.",
+            category: .valueTraps,
+            estimatedMinutes: 14,
+            learnerCount: "2.8k"
+        ),
+        MoneyMove(
+            title: "The Fall of Sears",
+            subtitle: "How a retail titan was hollowed out from the inside.",
+            category: .valueTraps,
+            estimatedMinutes: 15,
+            learnerCount: "1.6k"
+        ),
     ]
 }
 

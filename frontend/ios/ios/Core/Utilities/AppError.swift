@@ -200,6 +200,11 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "SYSTEM_BUSY" || code == "TOO_MANY_CONCURRENT_REPORTS" {
                 return .apiError(code: code, message: message)
             }
+            // A theme card tapped after it was deleted → a typed .notFound rather
+            // than a generic .apiError (per the "don't fall through" rule).
+            if code == "THEME_NOT_FOUND" {
+                return .notFound(resource: "theme")
+            }
             return .apiError(code: code, message: message)
         case .decodingError:
             return .unknown(message: "Failed to process server response")

@@ -22,12 +22,12 @@ from app.services.ticker_report_cache import (
 )
 from app.services.agents.ticker_report_data_collector import _latest_completed_close
 
-# 2026-06-29 is a Monday. All dates are AFTER CACHE_SCHEMA_FLOOR (2026-06-25 01:00
-# UTC) so freshness isn't gated by the schema floor — shifted forward a week when the
-# floor was bumped for the profit_power freeze (same dance as the growth_chart bump).
-_MON_PRE_CLOSE = datetime(2026, 6, 29, 19, 30, tzinfo=timezone.utc)   # ~3:30pm ET Mon
-_MON_POST_CLOSE = datetime(2026, 6, 30, 0, 30, tzinfo=timezone.utc)   # ~8:30pm ET Mon
-_MON_AFTERNOON = datetime(2026, 6, 29, 18, 0, tzinfo=timezone.utc)    # ~2pm ET Mon
+# 2026-07-06 is a Monday. All dates are AFTER CACHE_SCHEMA_FLOOR (2026-07-04 01:00
+# UTC) so freshness isn't gated by the schema floor — shifted forward when the floor
+# was bumped for the Future Forecast window (same dance as the prior bumps).
+_MON_PRE_CLOSE = datetime(2026, 7, 6, 19, 30, tzinfo=timezone.utc)    # ~3:30pm ET Mon
+_MON_POST_CLOSE = datetime(2026, 7, 7, 0, 30, tzinfo=timezone.utc)    # ~8:30pm ET Mon
+_MON_AFTERNOON = datetime(2026, 7, 6, 18, 0, tzinfo=timezone.utc)     # ~2pm ET Mon
 
 
 def test_cycle_start_is_at_or_before_now_and_a_weekday():
@@ -56,10 +56,10 @@ def test_weekend_holds_fridays_close():
     # Saturday: the boundary is Friday's close (no Sat/Sun boundary), so a
     # Friday-evening report stays fresh through the weekend. Dates must sit
     # AFTER CACHE_SCHEMA_FLOOR (else the floor, not the cycle, marks it stale).
-    sat = datetime(2026, 6, 27, 18, 0, tzinfo=timezone.utc)  # ~2pm ET Sat
+    sat = datetime(2026, 7, 11, 18, 0, tzinfo=timezone.utc)  # ~2pm ET Sat
     cycle = current_close_cycle_start(sat)
     assert cycle.weekday() == 4  # Friday
-    fri_eve = datetime(2026, 6, 26, 23, 0, tzinfo=timezone.utc)  # ~7pm ET Fri
+    fri_eve = datetime(2026, 7, 10, 23, 0, tzinfo=timezone.utc)  # ~7pm ET Fri
     assert is_cache_fresh(fri_eve, now=sat)
 
 
@@ -79,7 +79,7 @@ def test_schema_floor_not_in_future():
 def test_row_written_now_is_fresh():
     # The load-bearing invariant the future-dated-floor bug violated: a row written at
     # a post-floor instant, within the current close cycle, must be considered fresh.
-    now = datetime(2026, 6, 25, 14, 0, tzinfo=timezone.utc)  # Thursday, after the floor
+    now = datetime(2026, 7, 9, 14, 0, tzinfo=timezone.utc)  # Thursday, after the floor
     assert now >= CACHE_SCHEMA_FLOOR
     assert is_cache_fresh(now, now) is True
 

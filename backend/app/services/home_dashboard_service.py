@@ -40,6 +40,10 @@ from app.schemas.home_dashboard import (
     ThemesGroupResponse,
     TrendingThemeResponse,
 )
+from app.schemas.themes_detail import (
+    ThemeConstituentResponse,
+    ThemeDetailResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +125,9 @@ _THEMES_CACHE_KEY = "themes"
 _THEMES_BUILD_TIMEOUT_SECONDS = 8           # never let a cold themes build block the dashboard
 _THEMES_TABLE = "trending_themes"
 _THEMES_MAX_ROWS = 50                        # sane ceiling on active theme cards
+# Per-theme drill-down (GET /home/themes/{slug}) — its own 10-min cache, keyed by
+# slug. Separate from the dashboard themes cache (different shape + lazy on tap).
+_THEME_DETAIL_CACHE_TTL_SECONDS = 600
 
 _SHORT_UNIVERSE_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "short_interest_universe.json"
@@ -564,6 +571,9 @@ class HomeDashboardService:
     # re-reading + re-quoting on every dashboard request).
     _themes_cache: Dict[str, Tuple[float, ThemesGroupResponse]] = {}
     _themes_inflight: Dict[str, asyncio.Future] = {}
+    # Per-theme drill-down cache, keyed by slug (lazy, on tap).
+    _theme_detail_cache: Dict[str, Tuple[float, ThemeDetailResponse]] = {}
+    _theme_detail_inflight: Dict[str, asyncio.Future] = {}
 
     def __init__(self) -> None:
         self.fmp: FMPClient = get_fmp_client()
@@ -1122,6 +1132,134 @@ class HomeDashboardService:
                 )
             )
         return ThemesGroupResponse(themes=themes)
+
+    # ── Emerging Frontiers theme DETAIL (per-slug drill-down) ─────────
+
+    async def get_theme_detail(self, slug: str) -> Optional[ThemeDetailResponse]:
+        """Per-theme drill-down: the theme's hero (title/subtitle/image) + its live
+        constituent companies. Cache-aside (10 min) + in-flight dedup, keyed by
+        slug.
+
+        Returns ``None`` when no ACTIVE theme matches the slug (→ the endpoint
+        404s). A transient FMP quote failure degrades to the header with an EMPTY
+        constituent list (still cached — the header is valid). A Supabase read
+        failure PROPAGATES so the endpoint returns a 502, not a misleading 404."""
+        key = (slug or "").strip().lower()
+        if not key:
+            return None
+
+        cached = self._theme_detail_cache.get(key)
+        if cached is not None and (time.time() - cached[0]) < _THEME_DETAIL_CACHE_TTL_SECONDS:
+            logger.debug("Theme detail %s served from in-memory cache", key)
+            return cached[1]
+
+        inflight = self._theme_detail_inflight.get(key)
+        if inflight is not None:
+            logger.debug("Theme detail %s joining in-flight build", key)
+            return await inflight
+
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._theme_detail_inflight[key] = fut
+        try:
+            result = await self._build_theme_detail(key)
+            # Cache a FOUND theme (even with empty constituents on a transient quote
+            # failure). None (slug not found) is NOT cached, so a just-created theme
+            # surfaces on the next request.
+            if result is not None:
+                self._theme_detail_cache[key] = (time.time(), result)
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except BaseException as exc:  # settle awaiters (incl. CancelledError), then re-raise
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            self._theme_detail_inflight.pop(key, None)
+
+    async def _build_theme_detail(self, slug: str) -> Optional[ThemeDetailResponse]:
+        """Read the theme row by slug, resolve its tickers to live constituents."""
+        row = await asyncio.to_thread(self._read_theme_row, slug)
+        if row is None:
+            return None
+        raw = row.get("tickers") or []
+        tickers = [str(t).strip().upper() for t in raw if str(t or "").strip()]
+        constituents = await self._build_constituents(tickers)
+        return ThemeDetailResponse(
+            slug=str(row.get("slug") or slug),
+            title=str(row.get("title") or "").strip(),
+            subtitle=str(row.get("subtitle") or "").strip(),
+            image_url=(row.get("image_url") or None),
+            accent_hex=(str(row.get("accent_hex") or "").strip()) or "22D3EE",
+            constituents=constituents,
+        )
+
+    async def _build_constituents(
+        self, tickers: List[str]
+    ) -> List[ThemeConstituentResponse]:
+        """Resolve a theme's tickers to live company rows (price, daily %, market
+        cap, name) via ONE deduped batch-quote fan-out, ordered largest-cap first.
+        Degrades to ``[]`` on an FMP failure (the hero still renders)."""
+        if not tickers:
+            return []
+        union = sorted({_canonical_symbol(t) for t in tickers if _canonical_symbol(t)})
+        if not union:
+            return []
+        try:
+            quotes = await self.fmp.get_batch_quotes(union)
+        except Exception as exc:  # noqa: BLE001 — degrade the list, never the screen
+            logger.warning(
+                "Theme constituents quote fetch failed: %s: %s", type(exc).__name__, exc
+            )
+            return []
+
+        rows: List[ThemeConstituentResponse] = []
+        for q in quotes:
+            if not isinstance(q, dict):
+                continue
+            sym = _canonical_symbol(q.get("symbol"))
+            if not sym:
+                continue
+            price = _finite_float(q.get("price"))
+            change = _parse_pct(q.get("changesPercentage"))
+            if change is None:
+                change = _parse_pct(q.get("changePercentage"))
+            market_cap = _finite_float(q.get("marketCap"))
+            rows.append(
+                ThemeConstituentResponse(
+                    ticker=sym,
+                    company_name=str(q.get("name") or "").strip(),
+                    price=(round(price, 2) if price is not None else None),
+                    change_percent=(round(change, 2) + 0.0 if change is not None else None),
+                    market_cap=market_cap,
+                )
+            )
+        # Largest market cap first (user choice). A missing cap sinks to the bottom;
+        # deterministic tie-break by ticker so the order is stable across builds.
+        rows.sort(key=lambda c: (-(c.market_cap or 0.0), c.ticker))
+        return rows
+
+    def _read_theme_row(self, slug: str) -> Optional[Dict[str, Any]]:
+        """Read ONE active theme row by slug (SYNC — call via ``asyncio.to_thread``).
+
+        ``select("*")`` (not an explicit column list) so this tolerates a DB that
+        predates migration 082 — `subtitle` simply comes back absent → "". Returns
+        ``None`` when no active row matches; RAISES on a Supabase error (so the
+        endpoint surfaces a 502, not a misleading 404)."""
+        from app.database import get_supabase
+
+        sb = get_supabase()
+        res = (
+            sb.table(_THEMES_TABLE)
+            .select("*")
+            .eq("slug", slug)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        data = res.data or []
+        return data[0] if data else None
 
     async def _cached_float(self, ticker: str) -> Optional[float]:
         """Float-shares count for a ticker, 24h in-memory cached (float moves

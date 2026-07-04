@@ -141,13 +141,20 @@ TABLE_NAME = "ticker_report_cache"
 #     collections lack the new CollectedTickerData fields (TTM benchmark cells +
 #     peer-group level/name), so the floor invalidates them → a fresh collect bakes
 #     the TTM values and correct peer-group labels.
+# 2026-07-04: bumped for the Future Forecast window standardization. annual_timeline
+#     now shows the last 5 reported years + up to 5 forward estimates (was up to 10
+#     actuals + ALL forwards), and the frozen price overlay is fetched with an
+#     explicit ~6y `from` so it spans every actual bar (was capped by FMP's default).
+#     Both are baked into the report/collection payloads, so older cached rows carry
+#     the old window + short price line — invalidate them so a fresh collect+assemble
+#     bakes the new shape.
 #     The literal MUST be <= the actual deploy/restart wall-clock: a FUTURE-dated floor
 #     makes is_cache_fresh reject even rows written *now*, so the report cache goes cold
 #     (every view re-collects → FMP/Gemini cost spike) until wall-clock passes it. Set
 #     to a recent PAST instant (01:00 UTC) so the cache stays warm on restart while
 #     still invalidating every pre-rollout cached report. (Guarded by
 #     test_cache_freshness.test_schema_floor_not_in_future.)
-CACHE_SCHEMA_FLOOR = datetime(2026, 6, 25, 1, 0, 0, tzinfo=timezone.utc)
+CACHE_SCHEMA_FLOOR = datetime(2026, 7, 4, 1, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Close-aligned cache freshness ───────────────────────────────────

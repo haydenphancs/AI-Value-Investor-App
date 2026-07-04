@@ -24,6 +24,10 @@ from app.schemas.home_dashboard import (
     ThemesGroupResponse,
     TrendingThemeResponse,
 )
+from app.schemas.themes_detail import (
+    ThemeConstituentResponse,
+    ThemeDetailResponse,
+)
 from app.services.home_dashboard_service import (
     HomeDashboardService,
     _canonical_symbol,
@@ -255,3 +259,142 @@ async def test_build_themes_non_finite_quote_is_dropped():
     t = (await svc._build_themes()).themes[0]
     assert t.ticker_count == 2
     assert t.change_percent == 4.0              # NaN excluded; averages the clean one
+
+
+# ── 4. Theme DETAIL (drill-down) — schema parity ──────────────────────
+
+_DETAIL_KEYS = {"slug", "title", "subtitle", "image_url", "accent_hex", "constituents"}
+_CONSTITUENT_KEYS = {"ticker", "company_name", "price", "change_percent", "market_cap"}
+
+
+def test_theme_detail_keys_match_ios_dto():
+    d = ThemeDetailResponse(slug="silicon-rush", title="The Silicon Rush",
+                            subtitle="…", image_url=None, accent_hex="22D3EE")
+    assert set(d.model_dump().keys()) == _DETAIL_KEYS
+    assert d.model_dump()["constituents"] == []   # default empty → iOS empty state
+
+
+def test_theme_constituent_keys_match_ios_dto():
+    c = ThemeConstituentResponse(ticker="NVDA", company_name="NVIDIA",
+                                 price=120.0, change_percent=2.1, market_cap=3.0e12)
+    assert set(c.model_dump().keys()) == _CONSTITUENT_KEYS
+
+
+# ── 5. `_build_constituents` end-to-end (stub FMP) ────────────────────
+
+
+def _detail_service(quotes_by_symbol, row="__unset__"):
+    """A fresh service with a stubbed FMP; optionally a stubbed `_read_theme_row`."""
+    HomeDashboardService._theme_detail_cache.clear()
+    HomeDashboardService._theme_detail_inflight.clear()
+    svc = HomeDashboardService()
+    svc.fmp = _FakeThemesFMP(quotes_by_symbol)  # type: ignore[assignment]
+    if row != "__unset__":
+        svc._read_theme_row = lambda slug: row  # type: ignore[assignment]
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_build_constituents_empty_tickers():
+    svc = _detail_service(quotes_by_symbol={})
+    assert await svc._build_constituents([]) == []
+    assert svc.fmp.batch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_build_constituents_sorts_by_market_cap_desc():
+    quotes = {
+        "AMD":  {"symbol": "AMD",  "name": "AMD",    "price": 100.0, "changesPercentage": 1.0, "marketCap": 500_000_000.0},
+        "NVDA": {"symbol": "NVDA", "name": "NVIDIA", "price": 120.0, "changesPercentage": 2.0, "marketCap": 3_000_000_000_000.0},
+        "TSM":  {"symbol": "TSM",  "name": "TSMC",   "price": 180.0, "changesPercentage": 3.0, "marketCap": 45_000_000_000.0},
+    }
+    svc = _detail_service(quotes)
+    rows = await svc._build_constituents(["AMD", "NVDA", "TSM"])
+    assert [c.ticker for c in rows] == ["NVDA", "TSM", "AMD"]   # 3T, 45B, 500M
+    assert rows[0].company_name == "NVIDIA"
+    assert rows[0].price == 120.0
+    assert rows[0].change_percent == 2.0
+    assert rows[0].market_cap == 3_000_000_000_000.0
+
+
+@pytest.mark.asyncio
+async def test_build_constituents_missing_cap_sinks_to_bottom():
+    quotes = {
+        "A": {"symbol": "A", "name": "A", "price": 1.0, "changesPercentage": 0.0},                   # no marketCap
+        "B": {"symbol": "B", "name": "B", "price": 2.0, "changesPercentage": 0.0, "marketCap": 9e9},
+    }
+    svc = _detail_service(quotes)
+    rows = await svc._build_constituents(["A", "B"])
+    assert [c.ticker for c in rows] == ["B", "A"]   # capped B first, uncapped A last
+    assert rows[1].market_cap is None
+
+
+@pytest.mark.asyncio
+async def test_build_constituents_missing_quote_dropped_and_name_change_fallback():
+    quotes = {
+        "NVDA": {"symbol": "NVDA", "price": 120.0, "marketCap": 3e12},   # no name, no change
+        # AMD intentionally absent → dropped
+    }
+    svc = _detail_service(quotes)
+    rows = await svc._build_constituents(["NVDA", "AMD"])
+    assert [c.ticker for c in rows] == ["NVDA"]      # unresolved AMD dropped
+    assert rows[0].company_name == ""                # iOS falls back to the ticker
+    assert rows[0].change_percent is None            # iOS hides the % line
+
+
+@pytest.mark.asyncio
+async def test_build_constituents_non_finite_price_and_change_become_none():
+    quotes = {"X": {"symbol": "X", "name": "X", "price": float("inf"),
+                    "changesPercentage": float("nan"), "marketCap": 1e9}}
+    svc = _detail_service(quotes)
+    rows = await svc._build_constituents(["X"])
+    assert rows[0].price is None                     # inf rejected
+    assert rows[0].change_percent is None            # NaN rejected
+    assert rows[0].market_cap == 1e9
+
+
+@pytest.mark.asyncio
+async def test_build_theme_detail_maps_header_and_constituents():
+    row = {
+        "slug": "silicon-rush", "title": "The Silicon Rush",
+        "subtitle": "The chips powering the AI era",
+        "image_url": "https://x/hero.jpg", "accent_hex": "22D3EE",
+        "tickers": ["NVDA", "AMD"],
+    }
+    quotes = {
+        "NVDA": {"symbol": "NVDA", "name": "NVIDIA", "price": 120.0, "changesPercentage": 2.0, "marketCap": 3e12},
+        "AMD":  {"symbol": "AMD",  "name": "AMD",    "price": 100.0, "changesPercentage": 1.0, "marketCap": 2e11},
+    }
+    svc = _detail_service(quotes, row=row)
+    detail = await svc._build_theme_detail("silicon-rush")
+    assert detail is not None
+    assert detail.slug == "silicon-rush"
+    assert detail.title == "The Silicon Rush"
+    assert detail.subtitle == "The chips powering the AI era"
+    assert detail.image_url == "https://x/hero.jpg"
+    assert detail.accent_hex == "22D3EE"
+    assert [c.ticker for c in detail.constituents] == ["NVDA", "AMD"]   # cap desc
+
+
+@pytest.mark.asyncio
+async def test_build_theme_detail_missing_row_is_none():
+    svc = _detail_service(quotes_by_symbol={}, row=None)   # _read_theme_row → None
+    assert await svc._build_theme_detail("ghost") is None
+
+
+@pytest.mark.asyncio
+async def test_build_theme_detail_missing_subtitle_defaults_empty():
+    row = {"slug": "s", "title": "T", "tickers": []}       # no subtitle/image/accent
+    svc = _detail_service(quotes_by_symbol={}, row=row)
+    detail = await svc._build_theme_detail("s")
+    assert detail.subtitle == ""
+    assert detail.image_url is None
+    assert detail.accent_hex == "22D3EE"                   # service default
+    assert detail.constituents == []
+
+
+@pytest.mark.asyncio
+async def test_get_theme_detail_blank_slug_is_none():
+    svc = _detail_service(quotes_by_symbol={})
+    assert await svc.get_theme_detail("") is None
+    assert await svc.get_theme_detail("   ") is None

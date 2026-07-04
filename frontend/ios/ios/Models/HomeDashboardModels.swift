@@ -155,6 +155,8 @@ struct ExclusiveSignal: Identifiable {
 /// One tile in the "Emerging Frontiers" grid — a server-driven megatrend card.
 struct TrendingTheme: Identifiable {
     let id = UUID()
+    /// Stable server id (e.g. "silicon-rush") — opens the theme detail on tap.
+    let slug: String
     /// The "Next-Wave" name shown on the card, e.g. "The Silicon Rush".
     let title: String
     /// e.g. "8 stocks".

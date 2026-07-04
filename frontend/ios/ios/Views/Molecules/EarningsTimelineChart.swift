@@ -61,6 +61,10 @@ struct EarningsTimelineChart: View {
         let epsYoYColor: Color
         let revenueAnalystCount: Int?
         let epsAnalystCount: Int?
+        /// False when the backend sent "N/A" for this year's EPS (genuinely
+        /// absent, not a real 0). The EPS marker/segment is skipped for these so
+        /// the line doesn't dip to a false zero; the bar + "N/A" label still show.
+        var hasEPS: Bool { epsLabel != "N/A" }
     }
     private var points: [YP] {
         timeline.compactMap { p in
@@ -263,20 +267,26 @@ struct EarningsTimelineChart: View {
                         }
 
                         // EPS line + dots (scaled into the revenue domain, shared
-                        // zero — so negative EPS dips below the baseline too)
+                        // zero — so negative EPS dips below the baseline too). Years
+                        // with no EPS ("N/A") are skipped so the line breaks over the
+                        // gap instead of dropping to a false zero.
                         Path { p in
+                            var penDown = false
                             for (i, pt) in points.enumerated() {
+                                guard pt.hasEPS else { penDown = false; continue }
                                 let pos = CGPoint(x: centerX(i), y: epsY(pt.eps))
-                                if i == 0 { p.move(to: pos) } else { p.addLine(to: pos) }
+                                if penDown { p.addLine(to: pos) } else { p.move(to: pos); penDown = true }
                             }
                         }
                         .stroke(AppColors.accentYellow,
                                 style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                         ForEach(Array(points.enumerated()), id: \.offset) { i, pt in
-                            Circle()
-                                .fill(AppColors.accentYellow)
-                                .frame(width: 6, height: 6)
-                                .position(x: centerX(i), y: epsY(pt.eps))
+                            if pt.hasEPS {
+                                Circle()
+                                    .fill(AppColors.accentYellow)
+                                    .frame(width: 6, height: 6)
+                                    .position(x: centerX(i), y: epsY(pt.eps))
+                            }
                         }
 
                         // Smooth DAILY price line (normalized into its own band).
@@ -412,7 +422,7 @@ struct EarningsTimelineChart: View {
 
     /// One side of the popup — a colored dot + series label, then the YoY %, the
     /// value, and the analyst count stacked beneath. YoY hidden when there's no
-    /// anchor; analyst count hidden on actuals (and older reports).
+    /// anchor; analyst count shows "n/a" on actuals / years FMP didn't cover.
     private func popupColumn(color: Color, label: String,
                              yoy: String?, yoyColor: Color,
                              value: String, analysts: Int?) -> some View {
@@ -433,6 +443,13 @@ struct EarningsTimelineChart: View {
                 .foregroundColor(AppColors.textPrimary)
             if let analysts {
                 Text("\(analysts) Analyst\(analysts == 1 ? "" : "s")")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            } else {
+                // Actuals (reported, no analyst coverage) and any forecast year
+                // FMP didn't cover show "n/a" rather than a blank — so every year
+                // surfaces its analyst count.
+                Text("n/a")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }

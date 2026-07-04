@@ -61,6 +61,8 @@ from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricRespo
 from app.services.agents.ticker_report_data_collector import (
     CollectedTickerData,
     TickerReportDataCollector,
+    _build_annual_timeline,
+    _build_timeline_prices,
     _build_capital_allocation_block,
     _build_fundamental_metrics_from_snapshots,
     _build_fundamentals_history,
@@ -446,6 +448,48 @@ def test_revenue_forecast_carries_insight_field():
     insight_jobs[0].apply("Revenue compounds ~15% on cloud demand; EPS faster on leverage.")
     assert rf["insight"].startswith("Revenue compounds")
     RevenueForecastResponse.model_validate(rf)
+
+
+def test_annual_timeline_na_row_validates_and_keeps_ios_keys():
+    """A forecast year FMP only partly covered emits an "N/A" eps_label + None
+    analyst/YoY on the annual_timeline row (never a $0 or a dropped field). That
+    worst-case row must still validate against RevenueForecastResponse AND expose
+    every key the iOS RevenueProjection decoder reads — a missing key or a wrong
+    type ships as a Future Forecast decode crash."""
+    income = [{"date": "2024-12-31", "revenue": 10_000_000_000, "epsDiluted": 2.0}]
+    estimates = [
+        {"date": "2025-12-31", "revenueAvg": 11_000_000_000, "epsAvg": 2.2,
+         "numAnalystsRevenue": 7, "numAnalystsEps": 6},
+        {"date": "2026-12-31", "revenueAvg": 12_000_000_000},  # no EPS / no analyst counts
+    ]
+    timeline = _build_annual_timeline(income, estimates)
+
+    # Every row carries the full key set the iOS RevenueProjection decodes.
+    ios_keys = {
+        "period", "revenue", "revenue_label", "revenue_yoy_pct",
+        "eps", "eps_label", "eps_yoy_pct",
+        "revenue_analyst_count", "eps_analyst_count", "is_forecast",
+    }
+    for row in timeline:
+        assert ios_keys <= set(row.keys()), f"missing keys on {row.get('period')}"
+
+    rf = {
+        "cagr": 0.0,
+        "eps_growth": 0.0,
+        "management_guidance": "maintained",
+        "projections": [],
+        "annual_timeline": timeline,
+        "timeline_prices": _build_timeline_prices(
+            {"historical": [{"date": "2024-06-28", "close": 190.0}]}, timeline
+        ),
+    }
+    model = RevenueForecastResponse.model_validate(rf)  # must not raise
+
+    na = next(r for r in model.annual_timeline if r.period == "2026")
+    assert na.eps_label == "N/A"
+    assert na.eps == 0.0
+    assert na.eps_yoy_pct is None
+    assert na.eps_analyst_count is None and na.revenue_analyst_count is None
 
 
 def test_critical_factors_capped_at_five():

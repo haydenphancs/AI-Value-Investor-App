@@ -42,6 +42,9 @@ class ErrorCode(str, Enum):
     TICKER_NOT_FOUND = "TICKER_NOT_FOUND"
     INVALID_PERSONA = "INVALID_PERSONA"
     INVALID_INPUT = "INVALID_INPUT"
+    # An Emerging Frontiers theme slug that isn't an active `trending_themes` row
+    # (e.g. a card deleted between a dashboard load and the tap).
+    THEME_NOT_FOUND = "THEME_NOT_FOUND"
 
     # ── Upstream services ────────────────────────────────────────────
     FMP_RATE_LIMITED = "FMP_RATE_LIMITED"
@@ -74,6 +77,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ),
     ErrorCode.INVALID_INPUT: (
         "The request was missing or malformed."
+    ),
+    ErrorCode.THEME_NOT_FOUND: (
+        "That theme is no longer available."
     ),
     ErrorCode.FMP_RATE_LIMITED: (
         "Market data is rate-limited right now. Please try again in a minute."
@@ -134,6 +140,7 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.TICKER_NOT_FOUND: 404,
     ErrorCode.INVALID_PERSONA: 400,
     ErrorCode.INVALID_INPUT: 400,
+    ErrorCode.THEME_NOT_FOUND: 404,
     ErrorCode.FMP_RATE_LIMITED: 502,
     ErrorCode.FMP_UNAVAILABLE: 502,
     ErrorCode.GEMINI_QUOTA_EXCEEDED: 502,

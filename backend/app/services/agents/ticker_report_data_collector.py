@@ -603,6 +603,18 @@ class TickerReportDataCollector:
             datetime.now(timezone.utc) - timedelta(days=365)
         ).strftime("%Y-%m-%d")
 
+        # Frozen Future Forecast price overlay must reach the leftmost of the last
+        # ~5 reported years (see _build_annual_timeline). FMP caps the historical
+        # window when `from` is omitted, which left the price line starting years
+        # after the leftmost bar. Pin an explicit ~6y floor (5 shown actual years +
+        # 1y margin for the earliest year's January weeks) so the overlay spans
+        # every actual bar; _build_timeline_prices trims to the timeline's year_min
+        # and downsamples to weekly, so the extra depth is filtered/thinned, never
+        # shown raw. Newly-IPO'd names auto-start at first trade. Recent-window
+        # consumers (recent_prices[:200], _monthly_closes) read the newest end and
+        # are unaffected — a further-back `from` only appends older rows at the tail.
+        hist_from = date(datetime.now(timezone.utc).year - 6, 1, 1).isoformat()
+
         # Each entry: (attribute_name, awaitable, default_on_failure)
         tasks: List[Tuple[str, Any, Any]] = [
             ("profile", self.fmp.get_company_profile(ticker), {}),
@@ -636,7 +648,7 @@ class TickerReportDataCollector:
             # the left and forward estimates on the right, which lets the
             # window helper pick "current = first FY with date >= today".
             ("estimates", self.fmp.get_analyst_estimates(ticker, "annual", 10), []),
-            ("historical", self.fmp.get_historical_prices(ticker), {}),
+            ("historical", self.fmp.get_historical_prices(ticker, from_date=hist_from), {}),
             ("news", self.fmp.get_stock_news(ticker, 20), []),
             ("insider_trades", self.fmp.get_insider_trading(ticker, since_date=insider_since), []),
             ("insider_roster", self.fmp.get_insider_roster(ticker), []),
@@ -4295,13 +4307,23 @@ def _build_annual_timeline(
     estimates: Optional[List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
     """One continuous yearly revenue+EPS series for the Earnings Timeline view:
-    historical ACTUALS (annual income, is_forecast=False) followed GAPLESSLY by
-    ALL forward analyst estimates after the last reported year (is_forecast=True).
+    the last 5 reported ACTUAL years (is_forecast=False) followed GAPLESSLY by up
+    to 5 forward analyst-estimate years (is_forecast=True).
+
+    This is the industry-standard forecast window — a short, deliberate past (not a
+    company's whole history: Apple/Coca-Cola back to the 1990s is noise on a forecast
+    chart) plus the forward consensus. Matches stockanalysis.com / Simply Wall St.
+    Young names show only what exists (floor = first reported year / IPO); nothing is
+    padded. Missing revenue/EPS/analyst-count values are PRESERVED as absent and
+    surfaced as "N/A" downstream — never a misleading $0 or a hidden blank.
 
     Self-contained: its own divisor + YoY, independent of the curated forecast
     window in `_build_revenue_forecast_partial`. Reuses inputs the collector
     already fetched (no new FMP calls). Returns [] when there is no data.
     """
+    _ACTUALS_SHOWN = 5   # last N reported years (standard forecast-chart past window)
+    _FORECASTS_SHOWN = 5  # up to N forward estimate years (whatever FMP has, capped)
+
     def _year(rec: Dict[str, Any]) -> Optional[int]:
         ds = rec.get("date") or ""
         try:
@@ -4309,50 +4331,79 @@ def _build_annual_timeline(
         except ValueError:
             return None
 
-    # (year, revenue, eps, is_forecast, revenue_analyst_count, eps_analyst_count)
-    rows: List[Tuple[int, float, float, bool, Optional[int], Optional[int]]] = []
+    def _est_num(est: Dict[str, Any], primary: str, legacy: str) -> Optional[float]:
+        # `/stable` uses revenueAvg/epsAvg; the deprecated `/api/v3` used the
+        # estimated* names. None-preserving (a genuinely absent field → "N/A"),
+        # unlike _est_revenue/_est_eps which collapse missing to 0.0.
+        v = _num_or_none(est.get(primary))
+        return v if v is not None else _num_or_none(est.get(legacy))
+
+    # (year, revenue|None, eps|None, is_forecast, revenue_analyst_count,
+    # eps_analyst_count) — revenue/eps are None when the upstream value is genuinely
+    # absent (→ "N/A"), distinct from a real 0.0.
+    Row = Tuple[int, Optional[float], Optional[float], bool, Optional[int], Optional[int]]
+    actuals: List[Row] = []
     for rec in sorted((income or []), key=lambda r: r.get("date", "")):
         y = _year(rec)
         if y is not None:
             # Reported actuals have no analyst coverage.
-            rows.append(
-                (y, _safe_float(rec, "revenue"), _safe_float(rec, "epsDiluted"), False, None, None)
+            actuals.append(
+                (y, _num_or_none(rec.get("revenue")), _num_or_none(rec.get("epsDiluted")),
+                 False, None, None)
             )
-    last_actual = max((y for y, *_ in rows), default=None)
+    last_actual = max((y for y, *_ in actuals), default=None)
+
+    forecasts: List[Row] = []
     for est in sorted((estimates or []), key=lambda r: r.get("date", "")):
         y = _year(est)
         if y is None:
             continue
         if last_actual is not None and y <= last_actual:
             continue  # actuals win for already-reported years
-        rows.append((
-            y, _est_revenue(est), _est_eps(est), True,
+        forecasts.append((
+            y,
+            _est_num(est, "revenueAvg", "estimatedRevenueAvg"),
+            _est_num(est, "epsAvg", "estimatedEpsAvg"),
+            True,
             _int_or_none(est.get("numAnalystsRevenue")),
             _int_or_none(est.get("numAnalystsEps")),
         ))
-    if not rows:
-        return []
 
-    max_rev = max((r for _, r, *_ in rows), default=0.0)
+    # Window: last 5 actuals DISPLAYED, plus one older actual (when present) kept
+    # ONLY as the leftmost bar's off-screen YoY anchor (so it still gets a % chip),
+    # then up to 5 forecasts. Mirrors the off-screen-anchor idea in
+    # _select_visible_forecast_window.
+    anchor: List[Row] = (
+        actuals[-(_ACTUALS_SHOWN + 1):-_ACTUALS_SHOWN]
+        if len(actuals) > _ACTUALS_SHOWN else []
+    )
+    display_rows = actuals[-_ACTUALS_SHOWN:] + forecasts[:_FORECASTS_SHOWN]
+    if not display_rows:
+        return []
+    rows_for_yoy = anchor + display_rows
+    anchor_offset = len(anchor)  # index in rows_for_yoy where the DISPLAYED rows start
+
+    max_rev = max((r for _, r, *_ in display_rows if r is not None), default=0.0)
     divisor = 1e12 if max_rev >= 1e12 else 1e9 if max_rev >= 1e9 else 1e6
 
-    def _yoy(curr: float, prior: Optional[float]) -> Optional[float]:
-        if prior is None or prior <= 0:
+    def _yoy(curr: Optional[float], prior: Optional[float]) -> Optional[float]:
+        if curr is None or prior is None or prior <= 0:
             return None
         return round((curr - prior) / prior * 100, 1)
 
     series: List[Dict[str, Any]] = []
-    for i, (year, rev, eps, is_fc, rev_n, eps_n) in enumerate(rows):
-        prior_rev = rows[i - 1][1] if i > 0 else None
-        prior_eps = rows[i - 1][2] if i > 0 else None
+    for k in range(anchor_offset, len(rows_for_yoy)):
+        year, rev, eps, is_fc, rev_n, eps_n = rows_for_yoy[k]
+        prior_rev = rows_for_yoy[k - 1][1] if k > 0 else None
+        prior_eps = rows_for_yoy[k - 1][2] if k > 0 else None
         series.append({
             "period": str(year),
             "revenue": round(rev / divisor, 2) if rev else 0.0,
-            "revenue_label": _format_revenue(rev),
-            "revenue_yoy_pct": _yoy(rev, prior_rev) if rev else None,
+            "revenue_label": _format_revenue(rev) if rev is not None else "N/A",
+            "revenue_yoy_pct": _yoy(rev, prior_rev),
             "eps": round(eps, 2) if eps else 0.0,
-            "eps_label": f"${eps:.2f}" if eps else "$0",
-            "eps_yoy_pct": _yoy(eps, prior_eps) if eps else None,
+            "eps_label": f"${eps:.2f}" if eps is not None else "N/A",
+            "eps_yoy_pct": _yoy(eps, prior_eps),
             "revenue_analyst_count": rev_n,
             "eps_analyst_count": eps_n,
             "is_forecast": is_fc,

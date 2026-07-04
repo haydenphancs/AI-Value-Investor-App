@@ -95,6 +95,9 @@ struct CommodityDetailView: View {
                                 previousClose: commodityData.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
+                        } else {
+                            DetailHeaderChartSkeleton()
+                                .padding(.top, AppSpacing.sm)
                         }
 
                         // Section with pinned tab bar header
@@ -146,10 +149,8 @@ struct CommodityDetailView: View {
                 onSend: viewModel.handleAISend
             )
 
-            // Loading overlay
-            if viewModel.isLoading {
-                LoadingOverlay()
-            }
+            // No blocking LoadingOverlay — it covered the header + ate the back tap.
+            // The price+chart area shows a shimmer skeleton until data loads.
         }
         .preferredColorScheme(.dark)
         .navigationBarHidden(true)

@@ -105,6 +105,13 @@ class RevenueProjectionResponse(BaseModel):
     eps: float
     eps_label: str
     eps_yoy_pct: Optional[float] = None
+    # Free cash flow overlay (Earnings Timeline). ACTUALS-ONLY — FMP has no FCF
+    # forecast, so these are None on forecast rows (and on older cached reports
+    # that predate the field). `fcf` is in the same divisor units as `revenue`;
+    # `fcf_label` is a SIGNED compact string ("-$394M") so negatives read correctly.
+    fcf: Optional[float] = None
+    fcf_label: Optional[str] = None
+    fcf_yoy_pct: Optional[float] = None
     # Analyst coverage behind a FORECAST year (FMP numAnalysts*). None on
     # historical actual rows and older cached reports. Shown per-column in the
     # Earnings Timeline tap-to-inspect popup.

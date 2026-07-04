@@ -313,3 +313,34 @@ async def test_symbol_failure_drops_only_that_tile():
     symbols = {p.symbol for p in resp.pulse}
     assert "BTCUSD" not in symbols                       # the one failure dropped
     assert len(resp.pulse) == len(_PULSE_SYMBOLS) - 1    # everyone else survives
+
+
+@pytest.mark.asyncio
+async def test_pulse_non_finite_price_drops_tile_and_never_serializes_nan():
+    """Regression (adversarial review): a NaN/Inf quote price must drop the tile
+    (via _finite_float), never reaching the REQUIRED MarketPulseItemResponse.price
+    as a non-standard JSON `NaN`/`Infinity` token — which would 500 the WHOLE
+    dashboard for the cache window and defeat the per-tile degradation."""
+    import json
+    import math as _m
+
+    svc, _fake = _fresh_service()
+
+    async def nan_quote(ticker: str):
+        if ticker == "^GSPC":
+            return {"price": float("nan"), "changesPercentage": 0.5, "previousClose": 100.0}
+        # A non-finite CHANGE (not price) must degrade to 0.0, not drop the tile.
+        return {"price": 42.0, "changesPercentage": float("inf"), "previousClose": 41.0}
+
+    svc.fmp.get_stock_price_quote = nan_quote  # type: ignore[assignment]
+    resp = await svc.get_dashboard()
+
+    symbols = {p.symbol for p in resp.pulse}
+    assert "^GSPC" not in symbols                    # NaN-price tile dropped
+    assert len(resp.pulse) == len(_PULSE_SYMBOLS) - 1
+    for p in resp.pulse:
+        assert _m.isfinite(p.price) and p.price > 0
+        assert _m.isfinite(p.change_percent)         # Inf change → 0.0
+        assert p.previous_close is None or _m.isfinite(p.previous_close)
+    # The whole response serializes with NO non-standard tokens.
+    json.dumps(resp.model_dump(), allow_nan=False)

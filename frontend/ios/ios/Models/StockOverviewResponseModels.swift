@@ -63,6 +63,100 @@ struct StockOverviewPricePointDTO: Decodable {
     let volume: Double?
 }
 
+// MARK: - Fast-core response (GET /stocks/{ticker}/overview/core)
+
+/// The fast subset the stock detail screen paints first (price + chart + name),
+/// before the full `/overview` supersedes it. Field names mirror
+/// `StockOverviewResponseDTO`, reusing `StockOverviewPricePointDTO` + `MarketStatusDTO`.
+struct StockOverviewCoreResponseDTO: Decodable {
+    let symbol: String
+    let companyName: String
+    let currentPrice: Double
+    let priceChange: Double
+    let priceChangePercent: Double
+    let marketStatus: MarketStatusDTO
+    let chartData: [StockOverviewPricePointDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case companyName = "company_name"
+        case currentPrice = "current_price"
+        case priceChange = "price_change"
+        case priceChangePercent = "price_change_percent"
+        case marketStatus = "market_status"
+        case chartData = "chart_data"
+    }
+
+    /// Map to the lightweight price+chart side model the ViewModel paints until
+    /// the full `tickerData` lands.
+    func toCoreData() -> TickerCoreData {
+        TickerCoreData(
+            symbol: symbol,
+            companyName: companyName,
+            currentPrice: currentPrice,
+            priceChange: priceChange,
+            priceChangePercent: priceChangePercent,
+            marketStatus: marketStatus.resolvedMarketStatus,
+            chartPricePoints: chartData.map {
+                StockPricePoint(date: $0.date ?? "", close: $0.close,
+                                open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
+            }
+        )
+    }
+}
+
+extension MarketStatusDTO {
+    /// Shared status→`MarketStatus` mapping (identical to the switch in
+    /// `StockOverviewResponseDTO.toDisplayModel`), so the fast-core header renders
+    /// exactly like the full one.
+    var resolvedMarketStatus: MarketStatus {
+        switch status {
+        case "open":
+            return .open
+        case "pre_market":
+            return .preMarket
+        case "after_hours":
+            return .afterHours
+        default:
+            let resolvedDate: Date = {
+                if let dateStr = date {
+                    let fmt = ISO8601DateFormatter()
+                    fmt.formatOptions = [.withInternetDateTime]
+                    return fmt.date(from: dateStr) ?? Date()
+                }
+                return Date()
+            }()
+            return .closed(date: resolvedDate, time: time ?? "4:00 PM", timezone: timezone ?? "EST")
+        }
+    }
+}
+
+/// Lightweight price+chart snapshot for the instant first paint. Formatted
+/// computeds mirror `TickerDetailData` exactly so core → full is visually seamless.
+struct TickerCoreData {
+    let symbol: String
+    let companyName: String
+    let currentPrice: Double
+    let priceChange: Double
+    let priceChangePercent: Double
+    let marketStatus: MarketStatus
+    /// `var` so the ViewModel can keep the fast-core chart in sync with the selected
+    /// range pill while only coreData is shown (the pill is interactive before the
+    /// full overview lands). See TickerDetailViewModel.fetchChartData.
+    var chartPricePoints: [StockPricePoint]
+
+    var isPositive: Bool { priceChange >= 0 }
+    var formattedPrice: String { String(format: "$%.2f", currentPrice) }
+    var formattedChange: String {
+        let sign = priceChange >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", priceChange))"
+    }
+    var formattedChangePercent: String {
+        let sign = priceChangePercent >= 0 ? "+" : ""
+        return "(\(sign)\(String(format: "%.2f", priceChangePercent))%)"
+    }
+}
+
 // MARK: - Key Statistics Group DTO
 
 struct StockKeyStatisticsGroupDTO: Decodable {

@@ -186,26 +186,40 @@ def _infer_fiscal_label(est_date: str, fiscal_month_map: Dict[int, str]) -> str:
     return f"{period} '{yr}"
 
 
-def _match_earning_cal(
-    income_date: str, cal_lookup: Dict[str, dict], tolerance_days: int = 10
+def _match_announcement(
+    period_end: str, ec_sorted: List[dict], max_days: int = 80
 ) -> Optional[dict]:
-    """Find earning_calendar record matching an income statement fiscal date.
+    """Pair an income quarter (by fiscal PERIOD-END) with its earnings announcement:
+    the FIRST earnings-calendar record strictly AFTER the period end, within
+    ``max_days``.
 
-    The earnings-calendar uses the report date as 'date' key.
-    We match by fiscalDateEnding or by proximity to the income fiscal date.
+    An earnings announcement lands ~20-50 days after the quarter-end, and the NEXT
+    quarter's announcement is ~130 days out — so "first record after the period end,
+    within ~80 days" is unambiguous. Crucially it's robust to WHEN the 10-Q/10-K is
+    filed. Matching the filing/accepted date instead broke both ways:
+      * a tight window MISSED a fiscal-Q4 whose 10-K lags the release (Oracle FY26 Q4:
+        announced 2026-06-10, 10-K accepted 2026-06-22) → the quarter fell to the GAAP
+        income-statement EPS compared against a non-GAAP estimate = a bogus "miss";
+      * a loose window CROSS-MATCHED a very late 10-K into the NEXT quarter's
+        announcement (Disney files its 10-K ~Jan for a Sep FY-end → Q4 grabbed Q1's
+        numbers, and both showed the same figure).
+    ``ec_sorted`` must be ascending by ``date``.
     """
-    key = income_date[:10]
-    if key in cal_lookup:
-        return cal_lookup[key]
     try:
-        dt = datetime.strptime(key, "%Y-%m-%d")
+        pe = datetime.strptime(period_end[:10], "%Y-%m-%d")
     except Exception:
         return None
-    for delta in range(1, tolerance_days + 1):
-        for d in [(dt - timedelta(days=delta)), (dt + timedelta(days=delta))]:
-            k = d.strftime("%Y-%m-%d")
-            if k in cal_lookup:
-                return cal_lookup[k]
+    for rec in ec_sorted:
+        d = (rec.get("date") or "")[:10]
+        try:
+            dd = datetime.strptime(d, "%Y-%m-%d")
+        except Exception:
+            continue
+        if dd <= pe:
+            continue
+        # First announcement after the period end: it's this quarter's iff it lands
+        # inside the window (else this quarter simply has no announcement on file).
+        return rec if (dd - pe).days <= max_days else None
     return None
 
 
@@ -368,19 +382,34 @@ class EarningsService:
             )
 
         results = await asyncio.gather(
+            # Per-symbol /stable/earnings — ALL announcements (past + upcoming) with
+            # paired epsActual/epsEstimated in ONE call. This is the AUTHORITATIVE
+            # source: the windowed fetch below queries only [acceptedDate-10,
+            # acceptedDate+1], which MISSES a fiscal-Q4 announcement when the 10-K is
+            # filed >10 days after the earnings release (Oracle FY26 Q4: announced
+            # 06-10, 10-K accepted 06-22 → the record fell outside the window, so Q4
+            # dropped to GAAP income-statement EPS vs a non-GAAP estimate = a bogus
+            # -26% "miss"). The per-symbol call has no date-window blind spot and no
+            # 4000-record cap risk, so every reported quarter gets its apples-to-
+            # apples non-GAAP actual vs estimate.
+            self.fmp.get_earning_calendar_full(ticker),
             self._fetch_earnings_calendar_for_symbol(ticker, accepted_dates),
             *forward_tasks,
             return_exceptions=True,
         )
-        historical_ec = results[0] if isinstance(results[0], list) else []
+        full_ec = results[0] if isinstance(results[0], list) else []
+        historical_ec = results[1] if isinstance(results[1], list) else []
         forward_ec: List[dict] = []
-        for r in results[1:]:
+        for r in results[2:]:
             if isinstance(r, list):
                 forward_ec.extend(r)
 
-        ec_records = list(historical_ec)
+        # Per-symbol records win on date collisions (added first); the windowed +
+        # forward fetches only fill any date the per-symbol call didn't return
+        # (keeps next_earnings_date coverage intact).
+        ec_records = list(full_ec)
         seen_dates = {(r.get("date") or "")[:10] for r in ec_records}
-        for rec in forward_ec:
+        for rec in list(historical_ec) + forward_ec:
             d = (rec.get("date") or "")[:10]
             if d and d not in seen_dates:
                 seen_dates.add(d)
@@ -393,6 +422,9 @@ class EarningsService:
             d = (rec.get("date") or "")[:10]
             if d:
                 ec_by_date[d] = rec
+        # Announcements ascending by date → pair each income quarter to the FIRST
+        # announcement after its period-end (see _match_announcement).
+        ec_sorted = sorted(ec_by_date.values(), key=lambda r: (r.get("date") or "")[:10])
 
         # Build price lookup: date → close
         # FMP returns either a list or a dict with "historical" key
@@ -448,11 +480,12 @@ class EarningsService:
             label = quarterly_period_label(rec, use_fiscal_year=True)
             fiscal_key = fiscal_date[:10]
 
-            # Try to match with earnings-calendar (adjusted/non-GAAP data)
-            # The earnings-calendar record date is the report date, which is
-            # near the acceptedDate (within ~10 days before)
-            accepted = rec.get("acceptedDate", rec.get("filingDate", fiscal_date))[:10]
-            ec_match = _match_earning_cal(accepted, ec_by_date, tolerance_days=10)
+            # Pair this quarter with its earnings-calendar announcement (adjusted /
+            # non-GAAP actual + estimate) by fiscal PERIOD-END — the first
+            # announcement after it. Robust to when the 10-Q/10-K is filed; see
+            # _match_announcement for the Oracle (lagging Q4 10-K) and Disney (very
+            # late 10-K) failure modes that filing-date matching got wrong.
+            ec_match = _match_announcement(fiscal_key, ec_sorted)
 
             if ec_match:
                 # earnings-calendar has properly paired adjusted actual/estimate data
@@ -479,6 +512,32 @@ class EarningsService:
                         surprise_percent=None,
                         fiscal_date=fiscal_key,
                     ))
+                else:
+                    # Matched announcement lacks a usable EPS actual (a not-yet-reported
+                    # placeholder, or an FMP gap). DON'T silently drop the quarter's EPS
+                    # — fall back to the income-statement GAAP epsDiluted (+ analyst
+                    # estimate if present), the SAME degrade path as the no-match branch
+                    # (revenue already falls back to the income statement below). Without
+                    # this, a matched-but-null-actual record consumed the quarter and its
+                    # EPS bar vanished.
+                    gaap_eps = _safe_float(rec, "epsDiluted") or _safe_float(rec, "eps")
+                    if gaap_eps is not None:
+                        matched_est = self._find_matching_estimate(fiscal_key, est_by_date)
+                        est_eps = _safe_float(matched_est, "epsAvg") if matched_est else None
+                        if est_eps is not None:
+                            logger.warning(
+                                "earnings EPS DEGRADED to GAAP epsDiluted vs non-GAAP epsAvg "
+                                "for %s %s — matched announcement had null epsActual "
+                                "(actual=%s est=%s)",
+                                ticker, fiscal_key, gaap_eps, est_eps,
+                            )
+                        eps_quarters.append(EarningsQuarterSchema(
+                            quarter=label,
+                            actual_value=gaap_eps,
+                            estimate_value=est_eps if est_eps is not None else gaap_eps,
+                            surprise_percent=_compute_surprise(gaap_eps, est_eps) if est_eps is not None else None,
+                            fiscal_date=fiscal_key,
+                        ))
 
                 # Revenue: prefer earnings-calendar, fall back to income-statement
                 if ec_rev_actual is not None and ec_rev_estimate is not None:
@@ -512,6 +571,20 @@ class EarningsService:
                 if actual_eps is not None:
                     if matched_est and _safe_float(matched_est, "epsAvg") is not None:
                         est_eps = _safe_float(matched_est, "epsAvg")
+                        # DEGRADED path: no announcement in the per-symbol feed for
+                        # this quarter, so we compare the income statement's GAAP
+                        # epsDiluted against the NON-GAAP analyst epsAvg — the exact
+                        # apples-to-oranges comparison the announcement matching
+                        # avoids (it can look like a big beat/miss when GAAP and
+                        # non-GAAP diverge). Rare (feed gap / stub period), but log it
+                        # loudly so it's greppable in prod rather than a silent wrong
+                        # surprise. See _match_announcement.
+                        logger.warning(
+                            "earnings surprise DEGRADED to GAAP epsDiluted vs non-GAAP "
+                            "epsAvg for %s %s — no announcement in per-symbol feed "
+                            "(actual=%s est=%s)",
+                            ticker, fiscal_key, actual_eps, est_eps,
+                        )
                         eps_quarters.append(EarningsQuarterSchema(
                             quarter=label,
                             actual_value=actual_eps,

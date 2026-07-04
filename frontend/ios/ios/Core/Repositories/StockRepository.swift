@@ -27,6 +27,7 @@ protocol StockRepositoryProtocol {
     func searchStocks(query: String, limit: Int) async throws -> [StockSearchResult]
     func getStock(ticker: String) async throws -> StockDetail
     func getStockOverview(ticker: String, range: String, interval: String?, extendedHours: Bool) async throws -> StockOverviewResponseDTO
+    func getStockOverviewCore(ticker: String, range: String, interval: String?, extendedHours: Bool) async throws -> StockOverviewCoreResponseDTO
     func getStockQuote(ticker: String) async throws -> StockQuote
     func getStockNews(ticker: String, limit: Int) async throws -> TickerNewsFeedResponse
     func enrichStockNews(ticker: String, articleIds: [String]) async throws -> EnrichStockNewsResponse
@@ -151,6 +152,24 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got overview for \(ticker), range=\(range), interval=\(interval ?? "default"), extendedHours=\(extendedHours)")
+        return response
+    }
+
+    /// Fast subset (price + chart + name) for the instant first paint. Mirrors
+    /// `getStockOverview` but hits `/overview/core`; the full overview supersedes it.
+    func getStockOverviewCore(ticker: String, range: String = "3M", interval: String? = nil, extendedHours: Bool = false) async throws -> StockOverviewCoreResponseDTO {
+        let cacheKey = "overview_core_\(ticker)_\(range)_\(interval ?? "default")_\(extendedHours)"
+
+        if let cached: StockOverviewCoreResponseDTO = getCached(cacheKey, maxAge: CacheTTL.volatile) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getStockOverviewCore(ticker: ticker, range: range, interval: interval, extendedHours: extendedHours),
+            responseType: StockOverviewCoreResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
         return response
     }
 
@@ -2441,6 +2460,11 @@ final class MockStockRepository: StockRepositoryProtocol {
 
     func getStockOverview(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockOverviewResponseDTO {
         // Mock: just throw so ViewModel falls back to sample data
+        throw URLError(.badServerResponse)
+    }
+
+    func getStockOverviewCore(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false) async throws -> StockOverviewCoreResponseDTO {
+        // Mock: throw so the core-first path is a no-op (VM still loads the full/fallback).
         throw URLError(.badServerResponse)
     }
 

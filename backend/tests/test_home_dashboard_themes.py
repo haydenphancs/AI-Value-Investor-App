@@ -398,3 +398,94 @@ async def test_get_theme_detail_blank_slug_is_none():
     svc = _detail_service(quotes_by_symbol={})
     assert await svc.get_theme_detail("") is None
     assert await svc.get_theme_detail("   ") is None
+
+
+@pytest.mark.asyncio
+async def test_get_theme_detail_preserves_slug_casing_for_db_lookup():
+    """Regression (adversarial review): the dashboard emits the slug VERBATIM and
+    the `trending_themes.slug` UNIQUE constraint is case-sensitive, so
+    get_theme_detail must query the DB with the ORIGINAL casing. Lowercasing here
+    404'd a legitimately-uppercase slug (e.g. "AI-Boom") that renders fine on the
+    dashboard. Assert `_read_theme_row` receives the original-cased slug."""
+    HomeDashboardService._theme_detail_cache.clear()
+    HomeDashboardService._theme_detail_inflight.clear()
+    svc = HomeDashboardService()
+    svc.fmp = _FakeThemesFMP({})  # type: ignore[assignment]  # no tickers → no quotes
+
+    seen = {}
+
+    def _spy(slug):
+        seen["slug"] = slug
+        # Row exists ONLY under its exact (uppercase) casing — mimics a case-
+        # sensitive DB `.eq("slug", ...)`. A lowercased query would miss it.
+        if slug == "AI-Boom":
+            return {"slug": "AI-Boom", "title": "AI Boom", "tickers": []}
+        return None
+
+    svc._read_theme_row = _spy  # type: ignore[assignment]
+
+    detail = await svc.get_theme_detail("AI-Boom")
+    assert seen["slug"] == "AI-Boom"      # queried with original casing, NOT "ai-boom"
+    assert detail is not None             # would be None (404) under the old lowercasing bug
+    assert detail.slug == "AI-Boom"
+
+
+@pytest.mark.asyncio
+async def test_build_themes_dedupes_duplicate_tickers_in_row():
+    """Regression (adversarial review): a duplicate in a theme's editorial tickers[]
+    must NOT inflate ticker_count or double-weight the avg % change — and must match
+    the detail path (_build_constituents dedupes its union)."""
+    rows = [{"slug": "s", "title": "T", "tickers": ["NVDA", "NVDA", "AMD"], "sort_order": 0}]
+    quotes = {
+        "NVDA": {"symbol": "NVDA", "changesPercentage": 10.0},
+        "AMD": {"symbol": "AMD", "changesPercentage": 4.0},
+    }
+    svc = _service_with(rows, quotes)
+    t = (await svc._build_themes()).themes[0]
+    assert t.ticker_count == 2          # NVDA counted once, not twice
+    assert t.change_percent == 7.0      # avg(10, 4) — NOT (10+10+4)/3 = 8.0
+
+
+@pytest.mark.asyncio
+async def test_get_themes_caches_empty_successful_read():
+    """Regression (adversarial review): a SUCCESSFUL 'no active themes' read is
+    cached (mirrors get_scanners) — the dashboard must not re-hit Supabase every
+    request while the section is legitimately empty."""
+    HomeDashboardService._themes_cache.clear()
+    HomeDashboardService._themes_inflight.clear()
+    svc = HomeDashboardService()
+    svc.fmp = _FakeThemesFMP({})  # type: ignore[assignment]
+    calls = {"n": 0}
+
+    def _read():
+        calls["n"] += 1
+        return []                        # successful read, zero active rows
+
+    svc._read_theme_rows = _read  # type: ignore[assignment]
+
+    r1 = await svc.get_themes()
+    r2 = await svc.get_themes()
+    assert r1.themes == [] and r2.themes == []
+    assert calls["n"] == 1               # 2nd call served from cache — NOT re-read
+
+
+@pytest.mark.asyncio
+async def test_get_themes_does_not_cache_on_read_error():
+    """Regression (adversarial review): a Supabase read ERROR must NOT be pinned as
+    empty for 10 min — it degrades UNcached and retries next request."""
+    HomeDashboardService._themes_cache.clear()
+    HomeDashboardService._themes_inflight.clear()
+    svc = HomeDashboardService()
+    svc.fmp = _FakeThemesFMP({})  # type: ignore[assignment]
+    calls = {"n": 0}
+
+    def _read():
+        calls["n"] += 1
+        raise RuntimeError("supabase down")
+
+    svc._read_theme_rows = _read  # type: ignore[assignment]
+
+    r1 = await svc.get_themes()
+    r2 = await svc.get_themes()
+    assert r1.themes == [] and r2.themes == []   # degrades to empty both times
+    assert calls["n"] == 2                        # NOT cached → re-attempted

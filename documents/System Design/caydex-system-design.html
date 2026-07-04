@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Caydex · AI Value Investor — System Architecture Map</title>
+<!--
+  Caydex — System Architecture Map (standalone, offline, no external assets).
+  Pure HTML/CSS/JS block-and-arrow map with a click-to-inspect detail panel.
+  Source of truth: documents/System Design/SYSTEM_DESIGN_GUIDELINES.md + CLAUDE.md.
+  MAINTENANCE: when the system changes, edit the COMPONENTS array + CROSSCUTTING /
+  layer copy near the bottom of this file — the diagram re-renders from that data.
+-->
+<style>
+  :root{
+    --bg:#070b12; --bg2:#0b1220; --ink:#e8eef6; --muted:#93a1b5; --faint:#6b788c;
+    --panel:rgba(255,255,255,.035); --panel2:rgba(255,255,255,.055);
+    --border:rgba(255,255,255,.09); --border2:rgba(255,255,255,.16);
+    --client:#38bdf8; --backend:#34d399; --ai:#a78bfa; --data:#fbbf24;
+    --shadow:0 10px 40px rgba(0,0,0,.45);
+    --radius:16px;
+    --font: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Inter","Helvetica Neue",Arial,sans-serif;
+    --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:var(--font); color:var(--ink); background:var(--bg);
+    background-image:
+      radial-gradient(1100px 600px at 15% -8%, rgba(56,189,248,.10), transparent 60%),
+      radial-gradient(1000px 620px at 100% 6%, rgba(167,139,250,.10), transparent 55%),
+      radial-gradient(900px 700px at 50% 120%, rgba(251,191,36,.06), transparent 55%);
+    -webkit-font-smoothing:antialiased; line-height:1.45; min-height:100vh;
+  }
+  a{color:inherit}
+  ::selection{background:rgba(56,189,248,.35)}
+
+  /* ---------- top bar ---------- */
+  header.top{
+    position:sticky; top:0; z-index:30; backdrop-filter:blur(14px);
+    background:linear-gradient(180deg, rgba(7,11,18,.92), rgba(7,11,18,.62));
+    border-bottom:1px solid var(--border);
+    padding:16px clamp(16px,3vw,34px);
+    display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+  }
+  .brand{display:flex; align-items:center; gap:13px; min-width:0}
+  .logo{
+    width:42px;height:42px;border-radius:12px;flex:none;
+    display:grid;place-items:center;font-weight:800;font-size:18px;color:#04121a;
+    background:conic-gradient(from 210deg,#38bdf8,#a78bfa,#34d399,#fbbf24,#38bdf8);
+    box-shadow:0 6px 22px rgba(56,189,248,.35);
+  }
+  .brand h1{font-size:18px;margin:0;letter-spacing:.2px;font-weight:700}
+  .brand p{margin:2px 0 0;font-size:12.5px;color:var(--muted)}
+  .top .spacer{flex:1}
+  .legend{display:flex; gap:14px; align-items:center; flex-wrap:wrap}
+  .legend .k{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);
+    cursor:pointer;padding:5px 9px;border-radius:999px;border:1px solid transparent;transition:.15s}
+  .legend .k:hover{border-color:var(--border2);background:var(--panel)}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .flowhint{font-size:12px;color:var(--faint);white-space:nowrap}
+
+  /* ---------- layout ---------- */
+  .wrap{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:26px;
+    padding:26px clamp(16px,3vw,34px) 60px; align-items:start; max-width:1680px;margin:0 auto}
+  @media (max-width:1080px){ .wrap{grid-template-columns:1fr} .detail-col{position:static !important;order:-1} }
+
+  /* ---------- layer band ---------- */
+  .layer{
+    position:relative; border:1px solid var(--border); border-radius:var(--radius);
+    background:linear-gradient(180deg, var(--panel), rgba(255,255,255,.012));
+    padding:18px 18px 20px; margin-bottom:6px; box-shadow:var(--shadow);
+    border-left:3px solid var(--acc);
+  }
+  .layer::before{content:"";position:absolute;inset:0;border-radius:var(--radius);pointer-events:none;
+    background:radial-gradient(600px 120px at 0% 0%, color-mix(in srgb, var(--acc) 14%, transparent), transparent 70%)}
+  .layer-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:14px;position:relative}
+  .layer-badge{font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;
+    color:var(--acc); padding:4px 10px;border:1px solid color-mix(in srgb,var(--acc) 40%,transparent);
+    border-radius:999px;background:color-mix(in srgb,var(--acc) 10%,transparent)}
+  .layer-head h2{font-size:16.5px;margin:0;font-weight:700}
+  .layer-head .sub{font-size:12.5px;color:var(--muted)}
+  .layer-blurb{font-size:12.5px;color:var(--faint);flex-basis:100%;margin-top:-6px}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px;position:relative}
+  .card{
+    text-align:left;cursor:pointer;color:var(--ink);font-family:inherit;
+    background:var(--panel);border:1px solid var(--border);border-radius:13px;
+    padding:13px 13px 12px;transition:transform .14s, border-color .14s, box-shadow .14s, background .14s;
+    display:flex;flex-direction:column;gap:5px;min-height:92px;position:relative;overflow:hidden;
+  }
+  .card:hover,.card:focus-visible{transform:translateY(-3px);border-color:color-mix(in srgb,var(--acc) 55%,transparent);
+    background:var(--panel2);box-shadow:0 12px 26px rgba(0,0,0,.4), 0 0 0 1px color-mix(in srgb,var(--acc) 25%,transparent);outline:none}
+  .card.active{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,var(--panel2));
+    box-shadow:0 0 0 1px var(--acc), 0 14px 30px rgba(0,0,0,.45)}
+  .card .cn{display:flex;align-items:center;gap:9px}
+  .card .ic{font-size:17px;filter:saturate(1.1)}
+  .card .nm{font-weight:650;font-size:13.5px;letter-spacing:.1px}
+  .card .tg{font-size:11.5px;color:var(--muted);line-height:1.35}
+  .card::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--acc);opacity:.0;transition:.14s}
+  .card:hover::after,.card.active::after{opacity:.9}
+
+  /* connector between layers */
+  .flow{display:flex;flex-direction:column;align-items:center;gap:2px;margin:2px 0 8px;color:var(--faint)}
+  .flow .rail{width:2px;height:16px;background:linear-gradient(var(--faint),transparent);opacity:.5}
+  .flow .lbl{font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--faint);
+    border:1px solid var(--border);border-radius:999px;padding:2px 9px;background:var(--panel)}
+  .flow .chev{font-size:11px;line-height:1;opacity:.7;animation:bob 2.4s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0);opacity:.4}50%{transform:translateY(3px);opacity:.9}}
+
+  /* cross-cutting strip */
+  .xcut{margin-top:16px;border:1px dashed var(--border2);border-radius:14px;padding:14px 16px;background:var(--panel)}
+  .xcut h3{margin:0 0 10px;font-size:12px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:700}
+  .pills{display:flex;flex-wrap:wrap;gap:9px}
+  .pill{font-size:12px;color:var(--ink);background:var(--panel2);border:1px solid var(--border);
+    border-radius:999px;padding:6px 12px;cursor:default;display:flex;align-items:center;gap:7px}
+  .pill b{font-weight:650}
+  .pill.link{cursor:pointer;transition:.14s}
+  .pill.link:hover{border-color:var(--border2);background:rgba(255,255,255,.09)}
+
+  /* ---------- detail panel ---------- */
+  .detail-col{position:sticky;top:96px}
+  .detail{border:1px solid var(--border);border-radius:var(--radius);background:linear-gradient(180deg,var(--bg2),rgba(11,18,32,.6));
+    box-shadow:var(--shadow);overflow:hidden;min-height:420px}
+  .detail .bar{height:5px;background:var(--acc,#3a4658);transition:.2s}
+  .detail .body{padding:20px 20px 22px}
+  .detail .eyebrow{font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--acc,#8b97a7);font-weight:800}
+  .detail h2{margin:6px 0 3px;font-size:20px;font-weight:750;letter-spacing:.2px}
+  .detail .tag{font-size:13px;color:var(--muted);margin-bottom:16px}
+  .detail .sec{margin:16px 0 0}
+  .detail .sec h4{margin:0 0 8px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--faint);font-weight:700}
+  .detail ul{margin:0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+  .detail li{font-size:13.3px;color:#cdd7e4;position:relative;padding-left:18px;line-height:1.5}
+  .detail li::before{content:"";position:absolute;left:2px;top:8px;width:6px;height:6px;border-radius:50%;background:var(--acc,#4b5a6e)}
+  .detail code, .files code{font-family:var(--mono);font-size:12px;color:#bfe9ff;background:rgba(56,189,248,.10);
+    border:1px solid rgba(56,189,248,.16);border-radius:6px;padding:1px 6px;white-space:nowrap}
+  .files{display:flex;flex-direction:column;gap:6px}
+  .files code{color:#d8e2ee;background:var(--panel);border-color:var(--border);white-space:normal;word-break:break-word;padding:6px 9px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{font-size:12px;border:1px solid var(--border2);background:var(--panel);border-radius:999px;padding:5px 11px;
+    cursor:pointer;color:var(--ink);font-family:inherit;transition:.14s;display:flex;align-items:center;gap:6px}
+  .chip:hover{background:rgba(255,255,255,.09);transform:translateY(-1px)}
+  .chip .cdot{width:8px;height:8px;border-radius:50%}
+  .detail .empty{color:var(--muted);font-size:13.5px}
+  .detail .empty b{color:var(--ink)}
+  .kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--border2);border-bottom-width:2px;border-radius:6px;padding:1px 6px;color:var(--muted)}
+
+  footer.foot{padding:22px clamp(16px,3vw,34px) 40px;color:var(--faint);font-size:12px;max-width:1680px;margin:0 auto;
+    border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <div class="logo">C</div>
+    <div>
+      <h1>Caydex · AI Value Investor</h1>
+      <p>System Architecture Map — client → backend → intelligence → data</p>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <div class="legend" id="legend"></div>
+  <div class="flowhint">↓ requests &nbsp;·&nbsp; ↑ responses</div>
+</header>
+
+<div class="wrap">
+  <!-- LEFT: the layered map -->
+  <main id="map"></main>
+
+  <!-- RIGHT: inspector -->
+  <aside class="detail-col">
+    <div class="detail" id="detail">
+      <div class="bar" id="dbar" style="--acc:#3a4658"></div>
+      <div class="body" id="dbody"></div>
+    </div>
+  </aside>
+</div>
+
+<footer class="foot">
+  <span>Living document · re-renders from the <code style="font-family:var(--mono)">COMPONENTS</code> data in this file. Keep in sync with <b>SYSTEM_DESIGN_GUIDELINES.md</b>.</span>
+  <span>Offline · single file · no external assets</span>
+</footer>
+
+<script>
+/* ============================================================================
+   DATA MODEL — edit here when the architecture changes; the map re-renders.
+   ========================================================================== */
+
+const LAYERS = [
+  { id:"client",  name:"Client Layer",           sub:"iOS · SwiftUI (native)",
+    acc:"var(--client)", color:"#38bdf8",
+    blurb:"The native app. Views stay dumb; ViewModels fetch + derive; one @Observable AppState is the single source of truth; every network call goes through one actor." },
+  { id:"backend", name:"API / Backend Layer",     sub:"Python 3.11 · FastAPI · Railway",
+    acc:"var(--backend)", color:"#34d399",
+    blurb:"Async-first HTTP surface. Endpoints dispatch to a service layer that owns caching + dedup; thin integrations wrap upstreams; a Postgres-backed task queue runs the heavy AI work off the request path." },
+  { id:"ai",      name:"AI / Intelligence Layer", sub:"Multi-agent research · Gemini · Voice",
+    acc:"var(--ai)", color:"#a78bfa",
+    blurb:"Turns raw data into investor-voice research. A two-stage agent collects data via function-calling tools, then narrates per persona. Deterministic scoring, RAG, and voice generation live here." },
+  { id:"data",    name:"Data Layer",              sub:"Supabase · FMP · external feeds",
+    acc:"var(--data)", color:"#fbbf24",
+    blurb:"Supabase Postgres (RLS) is the system of record + cache tier + content store, with pgvector for RAG and Storage for audio. FMP is the primary market-data source, alongside macro/crypto/social feeds." },
+];
+
+const COMPONENTS = [
+  /* ---------------- CLIENT ---------------- */
+  { id:"swiftui", layer:"client", icon:"📱", name:"SwiftUI Views", tag:"Atomic Design: Atoms · Molecules · Organisms · Screens",
+    role:"The native iOS user interface — 480+ views in a strict four-level pyramid so components stay reusable and dumb.",
+    points:[
+      "Atoms = generic primitives (no domain data); Molecules compose atoms (one model); Organisms are labeled sections; Screens own one ViewModel.",
+      "Views never make network calls and never hold business logic — they render display-ready strings from the ViewModel.",
+      "Global state injected via @Environment(AppState.self); no singletons for state."
+    ],
+    files:["frontend/ios/ios/Views/{Atoms,Molecules,Organisms,Screens}/"],
+    connects:["viewmodels","appstate"] },
+
+  { id:"viewmodels", layer:"client", icon:"🧩", name:"ViewModels", tag:"ObservableObject + @Published · one per Screen",
+    role:"Owns data fetching, decoding, error mapping, and view-state derivation for a screen.",
+    points:[
+      "Uses ObservableObject + @Published (18+ VMs follow this); Screens consume via @StateObject / @ObservedObject.",
+      "Calls Repositories (or APIClient), maps errors through AppError.from(_:), exposes a ViewState<T> (.loading/.loaded/.error).",
+      "Formatting (prices, %, colors) happens here so the View stays presentational."
+    ],
+    files:["frontend/ios/ios/ViewModels/"],
+    connects:["repositories","apiclient","appstate","swiftui"] },
+
+  { id:"appstate", layer:"client", icon:"🧠", name:"AppState", tag:"@Observable · single source of truth",
+    role:"Centralized app state (iOS-17 Observation). Holds the shared cross-screen state so mutations stay consistent.",
+    points:[
+      "Sub-states: AuthState · UserState (profile/credits/tier) · WatchlistState · ResearchState.",
+      "Configured at launch with the injected APIClient + AuthService; restores auth from the keychain.",
+      "Note the intentional asymmetry: AppState is @Observable; ViewModels are ObservableObject."
+    ],
+    files:["frontend/ios/ios/Core/State/AppState.swift"],
+    connects:["apiclient","viewmodels"] },
+
+  { id:"repositories", layer:"client", icon:"🗂️", name:"Repositories", tag:"Feature data layer · format + cache",
+    role:"Per-feature data layer that talks to the APIClient, decodes DTOs, and maps them into presentation models.",
+    points:[
+      "Protocol + Live + Mock trio (e.g. HomeRepository/StockRepository) — the ViewModel depends on the protocol, previews use the mock.",
+      "In-memory TTL cache with background refresh for hot resources; all number→string formatting lives here.",
+      "Progressive first-paint: the ticker repo fires /overview/core + /overview in parallel."
+    ],
+    files:["frontend/ios/ios/Core/Repositories/"],
+    connects:["apiclient"] },
+
+  { id:"apiclient", layer:"client", icon:"🔌", name:"APIClient (actor)", tag:"single network entry · JWT · JSONDecoder",
+    role:"The ONE network entry point — a Swift actor exposing a generic request<T: Decodable>(endpoint:).",
+    points:[
+      "Explicit CodingKeys everywhere (decoder does NOT convertFromSnakeCase); unknown keys ignored; retries server errors.",
+      "Injects the Supabase JWT via setAuthToken(_:); low-level APIError → user-facing AppError.",
+      "A backend↔iOS shape drift = a decode crash — guarded by schema-parity tests."
+    ],
+    files:["frontend/ios/ios/Core/Services/APIClient.swift","…/APIEndpoint.swift"],
+    connects:["endpoints"] },
+
+  { id:"ioscache", layer:"client", icon:"💾", name:"On-device Cache", tag:"in-memory + disk · per-resource TTL",
+    role:"Client-side caching so the app is fast and resilient offline.",
+    points:[
+      "L1 in-memory (short TTL) + L2 disk (per-resource TTL); persistent user data separately.",
+      "Cache-first with background revalidation for volatile market data.",
+      "Bundled JSON fallback for Learn content when the network is unavailable."
+    ],
+    files:["frontend/ios/ios/Core/Utilities/ · Repositories/"],
+    connects:["repositories"] },
+
+  /* ---------------- BACKEND ---------------- */
+  { id:"fastapi", layer:"backend", icon:"⚙️", name:"FastAPI App", tag:"Python 3.11 · uvicorn · Railway (Procfile)",
+    role:"The async web app. All handlers are async def; the request path never blocks the event loop.",
+    points:[
+      "Deployed to Railway via Procfile; app assembled in app/main.py with a lifespan that boots background jobs.",
+      "Strict four-layer separation: endpoints → services → integrations → schemas (Pydantic v2).",
+      "No ORM — the raw Supabase Python SDK via get_supabase()."
+    ],
+    files:["backend/app/main.py","backend/Procfile"],
+    connects:["endpoints","jobs"] },
+
+  { id:"endpoints", layer:"backend", icon:"🛣️", name:"API Endpoints (v1)", tag:"/home · /stocks · /research · /learn · /whales · /portfolios",
+    role:"The HTTP surface — request parsing, dispatch to a service, response shaping, error wrapping.",
+    points:[
+      "Home: GET /home/dashboard (one aggregated call: Market Pulse · Scanners · Signals · Themes) + /home/themes/{slug}.",
+      "Stocks: /stocks/{ticker}/overview (full) + /overview/core (fast first-paint) + news/analysis/growth/holders/…",
+      "Research (async, credit-charged), Learn (server-driven content), Whales, Portfolios, Auth."
+    ],
+    files:["backend/app/api/v1/endpoints/","…/api.py (router registration)"],
+    connects:["services","errors","apiclient"] },
+
+  { id:"services", layer:"backend", icon:"🧠", name:"Service Layer", tag:"business logic · two-tier cache · _inflight dedup",
+    role:"Where the real work lives: aggregation, persona routing, and the mandated caching pattern.",
+    points:[
+      "Cache-aside two-tier: Tier-1 in-process dict (≈5–20 min TTL) + Tier-2 Supabase *_cache tables (24h / close-aligned).",
+      "_inflight asyncio.Future dedup collapses concurrent misses (thundering-herd guard); cache only on success.",
+      "Parallel upstream calls via asyncio.gather(..., return_exceptions=True); non-finite values filtered before serialize."
+    ],
+    files:["backend/app/services/  (reference: profit_power_service.py)"],
+    connects:["integrations","supabase","orchestrator","taskqueue"] },
+
+  { id:"integrations", layer:"backend", icon:"🔗", name:"Integrations", tag:"thin httpx clients · typed exceptions",
+    role:"HTTP in, parsed dict/list out. No caching, no business logic — just wrap an upstream and raise typed errors.",
+    points:[
+      "Persistent httpx.AsyncClient per integration (pooled, closed in lifespan).",
+      "FMP · Gemini · CoinGecko · FRED · FINRA short-interest · ApeWisdom · Alternative.me.",
+      "Each exports its own exception hierarchy (e.g. FMPRateLimitException) → mapped to the error contract."
+    ],
+    files:["backend/app/integrations/"],
+    connects:["fmp","upstreams","gemini"] },
+
+  { id:"taskqueue", layer:"backend", icon:"📋", name:"Task Queue + Polling", tag:"research_reports as queue · semaphore · 409 admission gate",
+    role:"Runs long AI research OFF the request path so the API stays responsive; iOS polls for completion.",
+    points:[
+      "The research_reports table is dual-purpose: task queue + content store; dedup by (user, ticker, persona, bucket).",
+      "Global agent-run semaphore pins the Gemini concurrency; up to 4 reports/user concurrently.",
+      "409 SYSTEM_BUSY admission gate (not 429, so iOS surfaces the user_message); two-threshold reconciliation."
+    ],
+    files:["backend/app/services/research_service.py · research_reconciliation_service.py","…/api/v1/endpoints/research.py"],
+    connects:["orchestrator","supabase","errors"] },
+
+  { id:"jobs", layer:"backend", icon:"⏱️", name:"Background Jobs", tag:"pre-warmers · sector benchmarks · whale hydration",
+    role:"Scheduled work registered in the app lifespan, cancelled cleanly on shutdown.",
+    points:[
+      "Cache pre-warmers (market-hours only): scanners · signals · themes · news for top tickers.",
+      "Sector/industry benchmark recompute (winsorized, scheduled); whale 13F hydration (daily + 6-hourly politicians).",
+      "Keeps the first user request warm so cold-cache latency is rare."
+    ],
+    files:["backend/app/main.py (lifespan) · services/*"],
+    connects:["services","supabase"] },
+
+  { id:"errors", layer:"backend", icon:"🚨", name:"Error Contract", tag:"ErrorCode → APIErrorResponse",
+    role:"One machine-readable error shape so the iOS client can show actionable, typed messages.",
+    points:[
+      "Every error = {error_code, message, user_message, action?, details?}; a new failure mode adds an ErrorCode enum value.",
+      "error_response_from_exception() classifies exceptions → ErrorCode + HTTP status; iOS AppError.mapAPIError mirrors each code.",
+      "Fail loudly & legibly: log type + operation + ids (ticker/user/report/persona); never swallow silently."
+    ],
+    files:["backend/app/api/error_response.py","frontend/…/Core/Utilities/AppError.swift"],
+    connects:["endpoints","apiclient"] },
+
+  /* ---------------- AI ---------------- */
+  { id:"orchestrator", layer:"ai", icon:"🤖", name:"Multi-Agent Research", tag:"Stage A collect → Stage B narrate",
+    role:"The app's own two-stage research orchestrator (a custom pipeline, not a framework like LangGraph).",
+    points:[
+      "Stage A = data collection: Gemini autonomously calls FMP function-calling tools (max ~4 rounds) → a structured dict.",
+      "Stage B = narrative: Gemini writes investor-voice prose per persona from Stage A's output (no tools).",
+      "Always returns a valid TickerReportResponse — partial/sentinel/failed statuses, never a bubbled exception."
+    ],
+    files:["backend/app/services/agents/research_agent.py","…/ticker_report_data_collector.py","…/fmp_tools.py"],
+    connects:["gemini","personas","scoring","fmp"] },
+
+  { id:"personas", layer:"ai", icon:"🎭", name:"Investor Personas", tag:"value/growth/quality/momentum/contrarian",
+    role:"Persona configs that define each agent's lens (system prompt, weights, style signals).",
+    points:[
+      "PERSONA_WEIGHTS (10 factors) + bounded style-fit adjustment differentiate Buffett/Wood/Ackman/… views.",
+      "Identity rule enforced on every prompt: the agent is “Cay AI by Caydex” — never reveal Gemini/Google/OpenAI/model.",
+      "Persona metadata seeded in the agent_personas table; matched by an iOS agent_tag for attribution."
+    ],
+    files:["backend/app/services/agents/persona_config.py · persona_scoring.py · narrative_prompts.py"],
+    connects:["orchestrator","scoring","supabase"] },
+
+  { id:"gemini", layer:"ai", icon:"✨", name:"Google Gemini", tag:"chat · research · function-calling",
+    role:"The LLM engine for chat, Stage-A tool use, and Stage-B narration.",
+    points:[
+      "Retry ×3 with exponential backoff; skip retries on 429 quota → sentinel response (never hang).",
+      "Scaling guards: 429 backoff + circuit breaker + Stage-B context caching; response cache in the calling service.",
+      "Identity-neutral at the integration layer — the persona layer prepends the identity rule."
+    ],
+    files:["backend/app/integrations/gemini.py"],
+    connects:["orchestrator","integrations"] },
+
+  { id:"scoring", layer:"ai", icon:"📊", name:"Persona Scoring", tag:"deterministic factor tilts → rating / fair value",
+    role:"Numeric, reproducible scoring that grounds the narrative (not vibes).",
+    points:[
+      "Scores a ticker through each persona's lens from the frozen card metrics (valuation/health/profitability/revenue vitals).",
+      "Feeds the rating/recommendation and a single objective DCF fair value (compliance: never a buy/sell call).",
+      "Card-verdict labels are deterministic from sector-relative 1–5 scores; only the ✨ Insight stays AI-written."
+    ],
+    files:["backend/app/services/agents/persona_scoring.py","…/card_verdict.py"],
+    connects:["orchestrator","personas"] },
+
+  { id:"voice", layer:"ai", icon:"🔊", name:"Voice / TTS", tag:"Achird TTS · RunPod Chatterbox · read-along",
+    role:"Generates narration audio for Learn content and book cores, with word/sentence-synced highlighting.",
+    points:[
+      "Money Moves + Journey narration via Achird TTS; book cores re-cloned on rented RunPod (Chatterbox).",
+      "Forced alignment (torchaudio MMS_FA, local/free) writes read-along timings into the served JSONB.",
+      "Audio lands in public Supabase Storage buckets; iOS prefers remote, falls back to on-device estimate."
+    ],
+    files:["backend/scripts/* (generate/align/seed) · services/*_content_service.py"],
+    connects:["storage","supabase"] },
+
+  { id:"rag", layer:"ai", icon:"📚", name:"RAG (pgvector)", tag:"book/article chunk embeddings · HNSW",
+    role:"Retrieval over embedded long-form content (books, articles, filings) for grounded answers.",
+    points:[
+      "Content chunked → VECTOR(1536) embeddings stored in Postgres; HNSW index (vector_cosine_ops) for recall.",
+      "Cosine-similarity retrieval augments the chat/research context.",
+      "New RAG corpora follow the *_chunks table template."
+    ],
+    files:["backend/database/migrations/*_chunks.sql · services/*"],
+    connects:["pgvector","supabase"] },
+
+  /* ---------------- DATA ---------------- */
+  { id:"supabase", layer:"data", icon:"🐘", name:"Supabase (Postgres)", tag:"RLS · user data · caches · content",
+    role:"System of record + cache tier + content store. Accessed via the raw Supabase SDK (no ORM).",
+    points:[
+      "Row-Level Security on every user + *_cache table (public-read / service-write, or owner-scoped).",
+      "Migrations are sequential, idempotent NNN_*.sql; the live schema is dumped to schema_snapshot.sql.",
+      "Auth (JWT) is Supabase-issued; a SECURITY DEFINER trigger bootstraps the profile row on signup."
+    ],
+    files:["backend/database/migrations/  ·  schema_snapshot.sql","backend/app/database.py (get_supabase)"],
+    connects:["pgvector","storage","tables"] },
+
+  { id:"pgvector", layer:"data", icon:"🧬", name:"pgvector", tag:"HNSW embedding index for RAG",
+    role:"The vector extension in Postgres powering semantic retrieval.",
+    points:[
+      "VECTOR(1536) columns; HNSW (not IVFFlat) for new tables — better recall at higher dimensions.",
+      "Backs the book/article knowledge base for chat + research grounding."
+    ],
+    files:["backend/database/migrations/*_chunks.sql"],
+    connects:["rag","supabase"] },
+
+  { id:"storage", layer:"data", icon:"🗄️", name:"Supabase Storage", tag:"public audio buckets",
+    role:"Object storage for narration audio + media, served on public CDNs.",
+    points:[
+      "Buckets: journey-media · money-moves-media · home-theme-media · book narration.",
+      "New content (a DB row + an audio object) appears in the shipped app with NO app update.",
+      "Public-read policies; service-role writes from the seed/generation scripts."
+    ],
+    files:["storage.buckets · migrations (bucket + policy blocks)"],
+    connects:["voice","supabase"] },
+
+  { id:"fmp", layer:"data", icon:"💹", name:"FMP /stable", tag:"primary financial data",
+    role:"Financial Modeling Prep — the main source for quotes, fundamentals, historical prices, and calendars.",
+    points:[
+      "Base URL is /stable ONLY (never /api/v3 — deprecated). One call returns all fields; extract multiple metrics per response.",
+      "Honor X-RateLimit-Remaining; raise FMPRateLimitException on 429; parallel fan-out via gather.",
+      "Fast-core reuses only the quick paths (quote + intraday chart); the slow IPO-to-present history stays in the full call."
+    ],
+    files:["backend/app/integrations/fmp.py"],
+    connects:["integrations","services"] },
+
+  { id:"upstreams", layer:"data", icon:"🌐", name:"Other Data Feeds", tag:"FRED · CoinGecko · FINRA · ApeWisdom · Alternative.me",
+    role:"Specialized external sources beyond FMP.",
+    points:[
+      "FRED = macro (CPI, fed funds, yield curves); CoinGecko = crypto supply/FDV (token-bucket limited).",
+      "FINRA = short interest; ApeWisdom = social mention counts; Alternative.me = crypto Fear & Greed.",
+      "Each is a thin integration with its own rate behavior + typed exceptions."
+    ],
+    files:["backend/app/integrations/{fred,coingecko,finra_short_interest,apewisdom,alternative_me}.py"],
+    connects:["integrations"] },
+
+  { id:"tables", layer:"data", icon:"🧾", name:"Key Tables", tag:"queue · caches · user · content",
+    role:"The core relations that back the product (read schema_snapshot.sql for the canonical structure).",
+    points:[
+      "research_reports (task queue + content) · user_credits · watchlist_items · portfolio_items/holdings.",
+      "Caches: profit_power_cache · signals_cache · ticker_data_cache · stock_fundamentals_cache · snapshot_cache.",
+      "Content/config: trending_themes · agent_personas · lessons · money_move_articles · sector_benchmarks · whales/whale_holdings/whale_trades."
+    ],
+    files:["backend/database/schema_snapshot.sql"],
+    connects:["supabase"] },
+];
+
+/* ============================================================================
+   CROSS-CUTTING CONCERNS (the strip under the map)
+   ========================================================================== */
+const CROSSCUTTING = [
+  { t:"Auth", d:"Supabase JWT; keychain-restored; owner-scoped RLS", link:"supabase" },
+  { t:"Caching", d:"Two-tier cache-aside + _inflight dedup", link:"services" },
+  { t:"Errors", d:"ErrorCode → APIErrorResponse, mirrored on iOS", link:"errors" },
+  { t:"Async-first", d:"async def + asyncio.gather; never block the loop" },
+  { t:"Schema parity", d:"backend Pydantic ⇄ iOS Codable (decode-crash guard)", link:"apiclient" },
+  { t:"Server-driven content", d:"DB row + Storage → live in the shipped app", link:"storage" },
+  { t:"Credits & compliance", d:"per-generation debit; objective DCF, no buy/sell", link:"taskqueue" },
+];
+
+/* ============================================================================
+   RENDER
+   ========================================================================== */
+const $ = (s,el=document)=>el.querySelector(s);
+const layerMeta = Object.fromEntries(LAYERS.map(l=>[l.id,l]));
+const compMap   = Object.fromEntries(COMPONENTS.map(c=>[c.id,c]));
+
+function el(tag, cls, html){ const e=document.createElement(tag); if(cls)e.className=cls; if(html!=null)e.innerHTML=html; return e; }
+
+/* legend */
+(function renderLegend(){
+  const wrap = $("#legend");
+  LAYERS.forEach(l=>{
+    const k = el("div","k");
+    k.innerHTML = `<span class="dot" style="background:${l.color}"></span>${l.name}`;
+    k.onclick = ()=>{ const first = COMPONENTS.find(c=>c.layer===l.id); if(first) select(first.id); document.getElementById("layer-"+l.id).scrollIntoView({behavior:"smooth",block:"center"}); };
+    wrap.appendChild(k);
+  });
+})();
+
+/* map */
+(function renderMap(){
+  const map = $("#map");
+  LAYERS.forEach((l,i)=>{
+    const band = el("section","layer");
+    band.id = "layer-"+l.id;
+    band.style.setProperty("--acc", l.color);
+    const head = el("div","layer-head");
+    head.innerHTML = `<span class="layer-badge">${l.name}</span>
+      <h2>${l.sub}</h2>
+      <span class="layer-blurb">${l.blurb}</span>`;
+    band.appendChild(head);
+    const cards = el("div","cards");
+    COMPONENTS.filter(c=>c.layer===l.id).forEach(c=>{
+      const card = el("button","card");
+      card.id = "card-"+c.id;
+      card.style.setProperty("--acc", l.color);
+      card.setAttribute("aria-label", c.name);
+      card.innerHTML = `<span class="cn"><span class="ic">${c.icon}</span><span class="nm">${c.name}</span></span>
+        <span class="tg">${c.tag}</span>`;
+      card.onclick = ()=>select(c.id);
+      cards.appendChild(card);
+    });
+    band.appendChild(cards);
+    map.appendChild(band);
+
+    if(i < LAYERS.length-1){
+      const nxt = LAYERS[i+1];
+      const flow = el("div","flow");
+      flow.innerHTML = `<div class="rail"></div>
+        <div class="chev">▼</div>
+        <div class="lbl">${l.name.replace(" Layer","")} &nbsp;⇄&nbsp; ${nxt.name.replace(" Layer","")}</div>
+        <div class="chev">▼</div>
+        <div class="rail"></div>`;
+      map.appendChild(flow);
+    }
+  });
+
+  // cross-cutting strip
+  const x = el("div","xcut");
+  x.innerHTML = `<h3>Cross-cutting concerns</h3>`;
+  const pills = el("div","pills");
+  CROSSCUTTING.forEach(p=>{
+    const pill = el("div", "pill"+(p.link?" link":""));
+    pill.innerHTML = `<b>${p.t}</b><span style="color:var(--muted)">${p.d}</span>`;
+    if(p.link){ pill.onclick = ()=>select(p.link); }
+    pills.appendChild(pill);
+  });
+  x.appendChild(pills);
+  map.appendChild(x);
+})();
+
+/* inspector */
+function select(id){
+  const c = compMap[id]; if(!c) return;
+  const l = layerMeta[c.layer];
+  document.querySelectorAll(".card.active").forEach(e=>e.classList.remove("active"));
+  const card = document.getElementById("card-"+id);
+  if(card){ card.classList.add("active"); }
+  $("#dbar").style.setProperty("--acc", l.color);
+  const body = $("#dbody");
+  body.style.setProperty("--acc", l.color);
+
+  const files = c.files.map(f=>`<code>${f}</code>`).join("");
+  const pts = c.points.map(p=>`<li>${p}</li>`).join("");
+  const chips = (c.connects||[]).map(cid=>{
+    const cc = compMap[cid]; if(!cc) return "";
+    const col = layerMeta[cc.layer].color;
+    return `<button class="chip" onclick="select('${cid}')"><span class="cdot" style="background:${col}"></span>${cc.name}</button>`;
+  }).join("");
+
+  body.innerHTML = `
+    <div class="eyebrow">${l.name} · ${l.sub}</div>
+    <h2>${c.icon} ${c.name}</h2>
+    <div class="tag">${c.tag}</div>
+    <p style="font-size:13.6px;color:#d7e0ec;margin:0 0 4px">${c.role}</p>
+    <div class="sec"><h4>Responsibilities</h4><ul>${pts}</ul></div>
+    <div class="sec"><h4>Key paths</h4><div class="files">${files}</div></div>
+    ${chips?`<div class="sec"><h4>Connects to</h4><div class="chips">${chips}</div></div>`:""}
+  `;
+  if(window.innerWidth <= 1080){ $("#detail").scrollIntoView({behavior:"smooth",block:"start"}); }
+}
+
+/* default inspector state */
+function showOverview(){
+  $("#dbar").style.setProperty("--acc","#5a6b82");
+  $("#dbody").style.setProperty("--acc","#8fa0b6");
+  $("#dbody").innerHTML = `
+    <div class="eyebrow" style="--acc:#8fa0b6">Overview</div>
+    <h2 style="--acc:#8fa0b6">🧭 How to read this map</h2>
+    <div class="tag">Four layers, top to bottom. Requests flow down; responses flow back up.</div>
+    <div class="sec"><h4>The four layers</h4>
+      <ul>
+        <li><b style="color:var(--client)">Client</b> — SwiftUI app: dumb Views · ViewModels · one @Observable AppState · one APIClient actor.</li>
+        <li><b style="color:var(--backend)">Backend</b> — FastAPI: endpoints → services (cache + dedup) → thin integrations, plus a Postgres task queue.</li>
+        <li><b style="color:var(--ai)">Intelligence</b> — a two-stage multi-agent researcher on Gemini, deterministic scoring, RAG, and voice.</li>
+        <li><b style="color:var(--data)">Data</b> — Supabase (Postgres + pgvector + Storage), FMP as the primary feed, plus macro/crypto/social sources.</li>
+      </ul>
+    </div>
+    <div class="sec"><h4>Try it</h4>
+      <ul>
+        <li>Click any <b>block</b> to inspect its role, responsibilities, key file paths, and what it connects to.</li>
+        <li>Use the <b>“Connects to”</b> chips to hop across the system.</li>
+        <li>Click a colour in the top <b>legend</b> to jump to a layer.</li>
+      </ul>
+    </div>`;
+}
+showOverview();
+
+/* keyboard: Esc resets to overview */
+document.addEventListener("keydown", e=>{ if(e.key==="Escape"){ document.querySelectorAll(".card.active").forEach(x=>x.classList.remove("active")); showOverview(); }});
+</script>
+</body>
+</html>

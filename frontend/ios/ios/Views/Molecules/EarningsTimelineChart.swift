@@ -28,6 +28,7 @@ struct EarningsTimelineChart: View {
     let timeline: [RevenueProjection]      // gapless actuals -> forecast
     let dailyPrices: [EarningsDailyPricePoint]
     let showPrice: Bool
+    let showFCF: Bool
 
     private let columnWidth: CGFloat = 68
     private let topPad: CGFloat = 30        // headroom for the 2-line revenue labels
@@ -61,10 +62,19 @@ struct EarningsTimelineChart: View {
         let epsYoYColor: Color
         let revenueAnalystCount: Int?
         let epsAnalystCount: Int?
+        // Free cash flow (actuals-only). `fcf` is in the same units as revenue;
+        // `fcfLabel` is "N/A" on forecast years / old reports.
+        let fcf: Double
+        let fcfLabel: String
+        let fcfYoYText: String?
+        let fcfYoYColor: Color
         /// False when the backend sent "N/A" for this year's EPS (genuinely
         /// absent, not a real 0). The EPS marker/segment is skipped for these so
         /// the line doesn't dip to a false zero; the bar + "N/A" label still show.
         var hasEPS: Bool { epsLabel != "N/A" }
+        /// Same for FCF — false on forecast years (actuals-only) and old reports,
+        /// so the purple line breaks/stops instead of dropping to a false zero.
+        var hasFCF: Bool { fcfLabel != "N/A" }
     }
     private var points: [YP] {
         timeline.compactMap { p in
@@ -75,7 +85,9 @@ struct EarningsTimelineChart: View {
                       epsLabel: p.epsLabel,
                       epsYoYText: p.epsYoYText, epsYoYColor: p.epsYoYColor,
                       revenueAnalystCount: p.revenueAnalystCount,
-                      epsAnalystCount: p.epsAnalystCount)
+                      epsAnalystCount: p.epsAnalystCount,
+                      fcf: p.fcf ?? 0, fcfLabel: p.fcfLabel ?? "N/A",
+                      fcfYoYText: p.fcfYoYText, fcfYoYColor: p.fcfYoYColor)
         }
     }
 
@@ -105,6 +117,23 @@ struct EarningsTimelineChart: View {
     /// Place the largest *normal* EPS dot at ~70% of the tallest bar.
     private var epsScaleFactor: Double { (maxAbsRevenue * 0.70) / robustMaxEPS }
 
+    // ── FCF scaling — mirrors EPS exactly (own robust factor + clamp), computed
+    // over ONLY the years that actually have FCF (actuals) so N/A years don't drag
+    // the median. FCF is a dollar quantity, so like EPS it's scaled to fit the
+    // revenue band; negatives dip below the shared zero baseline.
+    private var maxAbsFCF: Double { max(points.filter(\.hasFCF).map { abs($0.fcf) }.max() ?? 1, 1) }
+    private var medianAbsFCF: Double {
+        let vals = points.filter(\.hasFCF).map { abs($0.fcf) }.filter { $0 > 0 }.sorted()
+        guard !vals.isEmpty else { return 0 }
+        let n = vals.count
+        return n % 2 == 1 ? vals[n / 2] : (vals[n / 2 - 1] + vals[n / 2]) / 2
+    }
+    private var robustMaxFCF: Double {
+        let m = medianAbsFCF
+        return max(m > 0 ? min(maxAbsFCF, m * 8) : maxAbsFCF, 1)
+    }
+    private var fcfScaleFactor: Double { (maxAbsRevenue * 0.70) / robustMaxFCF }
+
     /// Shared value domain across revenue AND eps-scaled-into-revenue, always
     /// including zero so a baseline exists. 15% headroom on the populated
     /// side(s) leaves room for the value labels. All-positive data reduces to
@@ -119,6 +148,15 @@ struct EarningsTimelineChart: View {
         var vals = points.map(\.revenue)
         for p in points where abs(p.eps * factor) <= extent {
             vals.append(p.eps * factor)
+        }
+        // When the FCF overlay is on, fold its scaled (in-extent) values in too, so a
+        // negative FCF pushes axisMin below zero → the shared zero baseline draws and
+        // the purple line dips. Same gate as EPS: a clamped outlier is excluded.
+        if showFCF {
+            let fcfFactor = fcfScaleFactor
+            for p in points where p.hasFCF && abs(p.fcf * fcfFactor) <= extent {
+                vals.append(p.fcf * fcfFactor)
+            }
         }
         let rawMax = max(vals.max() ?? 0, 0)
         let rawMin = min(vals.min() ?? 0, 0)
@@ -169,6 +207,25 @@ struct EarningsTimelineChart: View {
         sidePad * 2 + CGFloat(points.count) * columnWidth
     }
 
+    /// Scroll the actual|forecast boundary to mid-screen on open, so the module
+    /// opens showing a few past years AND a few forecast years (not parked on the
+    /// oldest year). The chart is mounted inside a collapsible module
+    /// (`if isExpanded { … }` in ReportDeepDiveSection), so on the FIRST expand the
+    /// horizontal ScrollView usually isn't laid out yet when `.onAppear` fires and
+    /// a lone scrollTo no-ops. Fire once synchronously (enough on a re-expand, when
+    /// layout is already warm) then retry across a few runloop hops until the
+    /// content is measured — all land within ~0.35s, before the user can scroll.
+    /// Re-issuing scrollTo to the same anchor is a no-op once centered, so the
+    /// extra calls never cause a visible jump.
+    private func centerOnBoundary(_ proxy: ScrollViewProxy) {
+        proxy.scrollTo(boundaryAnchorID, anchor: .center)
+        for delay in [0.05, 0.15, 0.35] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                proxy.scrollTo(boundaryAnchorID, anchor: .center)
+            }
+        }
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
@@ -192,6 +249,13 @@ struct EarningsTimelineChart: View {
                     let epsFactor = epsScaleFactor
                     let epsY: (Double) -> CGFloat = { e in
                         min(max(yFor(e * epsFactor), topPad + 2), plotBottom - 2)
+                    }
+                    // FCF shares the same mapping as EPS (own factor + clamp), so a
+                    // negative FCF dips below the shared zero baseline and a lone
+                    // extreme year pins to the band edge instead of distorting.
+                    let fcfFactor = fcfScaleFactor
+                    let fcfY: (Double) -> CGFloat = { f in
+                        min(max(yFor(f * fcfFactor), topPad + 2), plotBottom - 2)
                     }
                     // Price min/max derived ONCE per render from the pre-parsed
                     // columns (a cheap float pass, no strings) and captured by
@@ -289,6 +353,31 @@ struct EarningsTimelineChart: View {
                             }
                         }
 
+                        // Free Cash Flow line + dots (purple, toggle off by default,
+                        // ACTUALS-ONLY). Mirrors EPS: scaled into the shared domain,
+                        // dips below zero for negative FCF, and breaks at N/A years so
+                        // it stops at the forecast boundary instead of a false zero.
+                        if showFCF {
+                            Path { p in
+                                var penDown = false
+                                for (i, pt) in points.enumerated() {
+                                    guard pt.hasFCF else { penDown = false; continue }
+                                    let pos = CGPoint(x: centerX(i), y: fcfY(pt.fcf))
+                                    if penDown { p.addLine(to: pos) } else { p.move(to: pos); penDown = true }
+                                }
+                            }
+                            .stroke(AppColors.profitFCFMargin,
+                                    style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                            ForEach(Array(points.enumerated()), id: \.offset) { i, pt in
+                                if pt.hasFCF {
+                                    Circle()
+                                        .fill(AppColors.profitFCFMargin)
+                                        .frame(width: 6, height: 6)
+                                        .position(x: centerX(i), y: fcfY(pt.fcf))
+                                }
+                            }
+                        }
+
                         // Smooth DAILY price line (normalized into its own band).
                         // Iterates the pre-parsed `priceColumns` with the captured
                         // `pBounds` — O(n) float math, no per-point re-parse.
@@ -304,16 +393,23 @@ struct EarningsTimelineChart: View {
                                     style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                         }
 
-                        // Invisible anchor at the actual|forecast boundary (or the
-                        // latest year when there's no forecast) so the sheet opens
-                        // with the "current year" mid-screen.
+                        // Invisible scroll anchor at the actual|forecast boundary (or
+                        // the latest year when there's no forecast) so the module opens
+                        // with the "current year" mid-screen. Laid out in REAL flow — a
+                        // leading spacer of exactly boundaryX + a 1pt marker — NOT
+                        // `.position`, whose inflated frame made scrollTo(.center)
+                        // target the CONTENT middle (wrong on an asymmetric window like
+                        // 5 actuals + 3 forecasts).
                         if !points.isEmpty {
                             let anchorX = firstForecastIndex.map { sidePad + CGFloat($0) * colW }
                                 ?? centerX(points.count - 1)
-                            Color.clear
-                                .frame(width: 1, height: 1)
-                                .position(x: anchorX, y: topPad)
-                                .id(boundaryAnchorID)
+                            HStack(spacing: 0) {
+                                Color.clear.frame(width: max(anchorX, 0), height: 1)
+                                Color.clear.frame(width: 1, height: 1).id(boundaryAnchorID)
+                                Spacer(minLength: 0)
+                            }
+                            .frame(width: geo.size.width, height: 1, alignment: .leading)
+                            .allowsHitTesting(false)
                         }
 
                         // Transparent tap-catcher on top: a discrete tap maps the
@@ -368,13 +464,7 @@ struct EarningsTimelineChart: View {
                 }
                 guard !didCenter else { return }
                 didCenter = true
-                // Center the boundary on open. The synchronous call positions
-                // before first paint when layout is ready; the async call is a
-                // safety net for when it isn't yet.
-                proxy.scrollTo(boundaryAnchorID, anchor: .center)
-                DispatchQueue.main.async {
-                    proxy.scrollTo(boundaryAnchorID, anchor: .center)
-                }
+                centerOnBoundary(proxy)
             }
             .onChange(of: dailyPrices.count) { _, _ in
                 // Price arrived (async) or changed — re-parse ONCE here, off the
@@ -386,7 +476,8 @@ struct EarningsTimelineChart: View {
 
     // MARK: - Inspect popup
 
-    private let popupHalfWidth: CGFloat = 84   // ~half the (2-column) popup, for edge clamping
+    // ~half the popup, for edge clamping — wider when the 3rd (FCF) column shows.
+    private var popupHalfWidth: CGFloat { showFCF ? 120 : 84 }
     private let popupCenterY: CGFloat = 64     // pushed down so the tighter toggle-chart gap doesn't crowd the button
 
     /// Detail card for the tapped column: a year header, then TWO columns
@@ -404,6 +495,12 @@ struct EarningsTimelineChart: View {
                 popupColumn(color: AppColors.accentYellow, label: "EPS",
                             yoy: pt.epsYoYText, yoyColor: pt.epsYoYColor,
                             value: pt.epsLabel, analysts: pt.epsAnalystCount)
+                // FCF column only when the overlay is on; no analyst row for FCF.
+                if showFCF {
+                    popupColumn(color: AppColors.profitFCFMargin, label: "FCF",
+                                yoy: pt.fcfYoYText, yoyColor: pt.fcfYoYColor,
+                                value: pt.fcfLabel, analysts: nil, showAnalysts: false)
+                }
             }
         }
         .padding(.horizontal, AppSpacing.sm)
@@ -425,7 +522,8 @@ struct EarningsTimelineChart: View {
     /// anchor; analyst count shows "n/a" on actuals / years FMP didn't cover.
     private func popupColumn(color: Color, label: String,
                              yoy: String?, yoyColor: Color,
-                             value: String, analysts: Int?) -> some View {
+                             value: String, analysts: Int?,
+                             showAnalysts: Bool = true) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Circle().fill(color).frame(width: 6, height: 6)
@@ -441,17 +539,20 @@ struct EarningsTimelineChart: View {
             Text(value)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textPrimary)
-            if let analysts {
-                Text("\(analysts) Analyst\(analysts == 1 ? "" : "s")")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            } else {
-                // Actuals (reported, no analyst coverage) and any forecast year
-                // FMP didn't cover show "n/a" rather than a blank — so every year
-                // surfaces its analyst count.
-                Text("n/a")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+            // FCF has no analyst concept (showAnalysts=false) → no analyst row.
+            if showAnalysts {
+                if let analysts {
+                    Text("\(analysts) Analyst\(analysts == 1 ? "" : "s")")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                } else {
+                    // Actuals (reported, no analyst coverage) and any forecast year
+                    // FMP didn't cover show "n/a" rather than a blank — so every year
+                    // surfaces its analyst count.
+                    Text("n/a")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
             }
         }
         .frame(minWidth: 58, alignment: .leading)

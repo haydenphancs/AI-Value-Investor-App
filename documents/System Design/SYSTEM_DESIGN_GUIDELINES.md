@@ -284,8 +284,12 @@ class StockService:
         3. Aggregate and transform
         4. Return result
 
-        Note: Backend uses Supabase DB-level caching (e.g. news_articles table
-        with TTL) rather than Redis. No dedicated in-memory cache layer.
+        Note: Backend uses the two-tier cache-aside pattern (CLAUDE.md
+        invariant #4), NOT Redis: Tier 1 = a per-service in-process Python
+        dict (typical 5-min TTL) fronted by an `_inflight` asyncio.Future to
+        dedup concurrent misses (thundering-herd guard); Tier 2 = Supabase
+        `*_cache` tables (24h / close-aligned via `expires_at`). Reference
+        implementation: services/profit_power_service.py.
         """
 
         # Parallel fetch
@@ -304,6 +308,44 @@ class StockService:
 
         return stock
 ```
+
+### 3.4 Live Home Dashboard — single-response aggregation (added 2026)
+
+The redesigned Home tab (`HomeDashboardView`) is fed by ONE aggregation endpoint,
+`GET /api/v1/home/dashboard` → `HomeDashboardResponse`, built top-to-bottom by
+`services/home_dashboard_service.py` (+ `services/signals_service.py`). Four
+sections in one call to minimize round-trips:
+
+1. **Market Pulse** — indices + BTC + commodities (live quote + 1D intraday sparkline).
+2. **Daily Scanners** — movers / heavy-volume / short-interest leaderboards.
+3. **App-Exclusive Signals** — congress buys / whale accumulation / earnings shockers.
+4. **Emerging Frontiers themes** — editorial megatrend cards from the `trending_themes`
+   Supabase table (server-editable → no app release), with a per-theme drill-down at
+   `GET /home/themes/{slug}` → `ThemeDetailResponse`.
+
+**Per-section degradation contract (load-bearing):** each section field defaults to
+an empty group (`scanners`/`signals`/`themes` default-empty; `pulse` may be `[]`), so
+a failed sub-build degrades ONLY its own section — the iOS views hide an empty section
+rather than erroring the whole screen. Every new Home DTO iOS decodes MUST keep this
+optional/defaulted shape (see the schema-parity tests). Each section has its own Tier-1
+cache + `_inflight` dedup + a shielded timeout guard so a slow/cold sub-build never
+blocks the dashboard.
+
+### 3.5 Progressive first-paint — the fast-core pattern (added 2026)
+
+The stock detail screen paints instantly instead of blocking on the ~2–5s aggregated
+`/overview`. On open, the client fires TWO calls in parallel:
+
+- `GET /stocks/{ticker}/overview/core` → `StockOverviewCoreResponse` — a FAST subset
+  (price + intraday chart + company name) reusing only the live quote + intraday chart
+  + cached profile; it deliberately never touches the slow historical/fundamentals
+  bundle. Returns ~0.5s.
+- `GET /stocks/{ticker}/overview` — the full aggregation, as before (untouched).
+
+The ViewModel renders the price+chart from `core` the moment it lands (a shimmer
+skeleton shows until then; the back button is never blocked), then the full response
+supersedes it with every Overview section. The core endpoint is additive — the shared
+`/overview` contract is unchanged, so blast radius is ~zero.
 
 ---
 
@@ -1074,18 +1116,19 @@ extension APIService {
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                     BACKEND                                          │    │
+│  │            BACKEND — two-tier cache-aside (CLAUDE.md invariant #4)   │    │
 │  │                                                                       │    │
-│  │  L1: Supabase DB Cache (PostgreSQL tables as cache)                  │    │
-│  │      ├── News articles: TTL 6 hours (news_articles table)           │    │
-│  │      ├── Background pre-warmer for popular tickers                  │    │
-│  │      └── Automatic cleanup of expired cache entries                  │    │
+│  │  Tier 1: In-process Python dict, PER SERVICE  ← primary hot cache    │    │
+│  │      ├── TTL: 5 min hot data (10 min themes/detail, 20 min scanners) │    │
+│  │      ├── `_inflight` asyncio.Future dedup (thundering-herd guard)    │    │
+│  │      └── Reference: services/profit_power_service.py                 │    │
 │  │                                                                       │    │
-│  │  L2: Supabase (PostgreSQL)                                           │    │
-│  │      └── Persistent data store                                        │    │
+│  │  Tier 2: Supabase `*_cache` tables (PostgreSQL, `expires_at`)        │    │
+│  │      ├── TTL: 24h / close-aligned; survives restarts                 │    │
+│  │      └── news_articles, profit_power_cache, signals_cache, …         │    │
 │  │                                                                       │    │
-│  │  Note: No Redis. Services call Supabase and external APIs directly. │    │
-│  │  Consider adding Redis if caching needs grow beyond DB-level cache.  │    │
+│  │  Pre-warmers in main.py lifespan warm popular tickers/scanners.     │    │
+│  │  No Redis — the in-process dict + Supabase tiers suffice today.     │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```

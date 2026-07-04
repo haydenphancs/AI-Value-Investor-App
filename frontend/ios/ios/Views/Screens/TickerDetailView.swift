@@ -76,7 +76,10 @@ struct TickerDetailView: View {
                 // Scrollable Content with pinned tab bar
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                        // Content above tab bar (scrolls away)
+                        // Content above tab bar (scrolls away). Prefer the full
+                        // tickerData; fall back to the fast `coreData` (price+chart)
+                        // the instant it lands; else an instant shimmer skeleton —
+                        // so the screen never shows a blank/blocking state.
                         if let tickerData = viewModel.tickerData {
                             // Full Ticker Price Header
                             TickerPriceHeader(
@@ -102,6 +105,33 @@ struct TickerDetailView: View {
                                 previousClose: viewModel.stockQuote?.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
+                        } else if let core = viewModel.coreData {
+                            // Fast core: real price + chart, before the full overview lands.
+                            TickerPriceHeader(
+                                companyName: core.companyName,
+                                symbol: core.symbol,
+                                price: core.formattedPrice,
+                                priceChange: core.formattedChange,
+                                priceChangePercent: core.formattedChangePercent,
+                                isPositive: core.isPositive,
+                                marketStatus: core.marketStatus
+                            )
+                            .padding(.top, AppSpacing.sm)
+
+                            TickerChartView(
+                                pricePoints: core.chartPricePoints,
+                                isPositive: core.isPositive,
+                                selectedRange: $viewModel.selectedChartRange,
+                                chartSettings: viewModel.chartSettings,
+                                assetContext: .stock,
+                                chartDataVersion: viewModel.chartDataVersion,
+                                chartEventDates: viewModel.chartEventDates,
+                                previousClose: viewModel.stockQuote?.previousClose
+                            )
+                            .padding(.top, AppSpacing.lg)
+                        } else {
+                            DetailHeaderChartSkeleton()
+                                .padding(.top, AppSpacing.sm)
                         }
 
                         // Section with pinned tab bar header
@@ -154,10 +184,10 @@ struct TickerDetailView: View {
                 onSend: viewModel.handleAISend
             )
 
-            // Loading overlay
-            if viewModel.isLoading {
-                LoadingOverlay()
-            }
+            // NOTE: no blocking LoadingOverlay — it covered the header and ate the
+            // back tap. The header/tabs/AI bar render instantly; the price+chart
+            // area shows a shimmer skeleton (see the content gate above) until the
+            // fast core, then the full overview, arrives.
         }
         .preferredColorScheme(.dark)
         .navigationBarHidden(true)

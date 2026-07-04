@@ -1007,13 +1007,15 @@ class HomeDashboardService:
         try:
             try:
                 result = await self._build_themes()
-                # Cache ONLY a non-empty build — never pin an empty result (a
-                # transient Supabase/FMP blip) for 10 min and blank the section.
-                if result.themes:
-                    self._themes_cache[_THEMES_CACHE_KEY] = (time.time(), result)
+                # Cache ANY successful build — including a genuine "no active themes"
+                # empty (mirrors get_scanners). _read_theme_rows now RAISES on a
+                # Supabase error, so an empty here means the read succeeded with zero
+                # active rows — safe to cache, and it stops re-reading Supabase every
+                # request. Only a BUILD EXCEPTION (below) skips caching so it retries.
+                self._themes_cache[_THEMES_CACHE_KEY] = (time.time(), result)
             except Exception as exc:  # noqa: BLE001 — themes must never fail the dashboard
                 logger.warning("Themes build failed: %s: %s", type(exc).__name__, exc)
-                result = ThemesGroupResponse()  # empty; not cached → retries
+                result = ThemesGroupResponse()  # empty; NOT cached → retries next request
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -1053,25 +1055,22 @@ class HomeDashboardService:
     def _read_theme_rows(self) -> List[Dict[str, Any]]:
         """Read active theme rows from Supabase (SYNC — call via ``asyncio.to_thread``).
 
-        Self-guarded: a Supabase failure returns ``[]`` so the section degrades
-        (hides) rather than erroring the dashboard. Function-local import mirrors
-        the signals service (avoids a module import cycle at load time)."""
-        try:
-            from app.database import get_supabase
+        Returns ``[]`` for a genuine "no active rows" (a CACHEABLE empty state), but
+        RAISES on a Supabase error so ``get_themes`` does NOT pin a transient blip as
+        empty for 10 min (it degrades UNcached and retries next request). Mirrors the
+        detail-path ``_read_theme_row``. Function-local import avoids a load-time cycle."""
+        from app.database import get_supabase
 
-            sb = get_supabase()
-            res = (
-                sb.table(_THEMES_TABLE)
-                .select("slug, title, image_url, accent_hex, tickers, sort_order")
-                .eq("is_active", True)
-                .order("sort_order")
-                .limit(_THEMES_MAX_ROWS)
-                .execute()
-            )
-            return res.data or []
-        except Exception as exc:  # noqa: BLE001 — degrade the section, never the dashboard
-            logger.warning("Themes table read failed: %s: %s", type(exc).__name__, exc)
-            return []
+        sb = get_supabase()
+        res = (
+            sb.table(_THEMES_TABLE)
+            .select("slug, title, image_url, accent_hex, tickers, sort_order")
+            .eq("is_active", True)
+            .order("sort_order")
+            .limit(_THEMES_MAX_ROWS)
+            .execute()
+        )
+        return res.data or []
 
     async def _build_themes(self) -> ThemesGroupResponse:
         """Assemble the Emerging Frontiers cards.
@@ -1086,12 +1085,21 @@ class HomeDashboardService:
         if not rows:
             return ThemesGroupResponse()
 
-        # Normalize each row's tickers once; build the deduped union for one fetch.
+        # Normalize + DEDUPE each row's tickers once; build the deduped union for one
+        # fetch. Per-row dedup matters: a duplicate in the editorial tickers[] array
+        # would otherwise inflate ticker_count AND double-weight the average % change,
+        # and disagree with the detail path (_build_constituents dedupes its union).
         row_tickers: List[List[str]] = []
         union = set()
         for row in rows:
             raw = row.get("tickers") or []
-            tickers = [str(t).strip().upper() for t in raw if str(t or "").strip()]
+            seen: set = set()
+            tickers: List[str] = []
+            for t in raw:
+                s = str(t).strip().upper()
+                if s and s not in seen:
+                    seen.add(s)
+                    tickers.append(s)
             row_tickers.append(tickers)
             union.update(_canonical_symbol(t) for t in tickers)
 
@@ -1143,8 +1151,15 @@ class HomeDashboardService:
         Returns ``None`` when no ACTIVE theme matches the slug (→ the endpoint
         404s). A transient FMP quote failure degrades to the header with an EMPTY
         constituent list (still cached — the header is valid). A Supabase read
-        failure PROPAGATES so the endpoint returns a 502, not a misleading 404."""
-        key = (slug or "").strip().lower()
+        failure PROPAGATES so the endpoint returns a 502, not a misleading 404.
+
+        The slug is matched CASE-SENSITIVELY (stripped only, NOT lowercased): the
+        dashboard emits the row's slug verbatim (see ``_build_themes``) and the
+        ``trending_themes.slug`` UNIQUE constraint is case-sensitive, so lowercasing
+        here would 404 a legitimately-uppercase slug (e.g. "AI-Boom") that renders
+        fine on the dashboard — and would also collide two distinct-cased rows in
+        the cache."""
+        key = (slug or "").strip()
         if not key:
             return None
 
@@ -1299,36 +1314,30 @@ class HomeDashboardService:
             logger.warning("No quote for pulse symbol %s — dropping tile", symbol)
             return None
 
-        price = quote.get("price")
-        if price is None:
-            logger.warning("Quote for %s missing price — dropping tile", symbol)
-            return None
-
         # FMP returns the % field as `changesPercentage`; some endpoints/versions
         # use the singular `changePercentage`. Accept either.
         change = quote.get("changesPercentage")
         if change is None:
             change = quote.get("changePercentage")
 
-        try:
-            price_f = float(price)
-        except (TypeError, ValueError):
-            logger.warning("Quote for %s has non-numeric price %r — dropping tile", symbol, price)
+        # Route EVERY numeric through _finite_float: a non-finite (NaN/Inf) upstream
+        # value passes a bare float() and, on the REQUIRED `price` field, serializes
+        # as a non-standard JSON `NaN`/`Infinity` token → a hard 500 that poisons the
+        # WHOLE dashboard for the cache window, defeating the per-tile drop. (Matches
+        # every other builder in this file.)
+        price_f = _finite_float(quote.get("price"))
+        if price_f is None or price_f <= 0:
+            logger.warning("Quote for %s has missing/bad price — dropping tile", symbol)
             return None
 
-        try:
-            change_f = float(change) if change is not None else 0.0
-        except (TypeError, ValueError):
+        change_f = _finite_float(change)
+        if change_f is None:
             change_f = 0.0
 
-        # Prior close → the dashed reference line on the iOS sparkline.
-        prev_close_raw = quote.get("previousClose")
-        try:
-            previous_close = (
-                round(float(prev_close_raw), 2) if prev_close_raw else None
-            )
-        except (TypeError, ValueError):
-            previous_close = None
+        # Prior close → the dashed reference line on the iOS sparkline (drop if
+        # missing/non-finite/non-positive so a bad value never anchors the line).
+        prev_close_f = _finite_float(quote.get("previousClose"))
+        previous_close = round(prev_close_f, 2) if (prev_close_f is not None and prev_close_f > 0) else None
 
         return MarketPulseItemResponse(
             symbol=symbol,

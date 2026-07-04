@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Caydex · Data-Flow & Feature Structure</title>
+<!--
+  Caydex — feature-level DATA-FLOW map (standalone, offline, no external assets).
+  For each feature: iOS screen → endpoint → service → external APIs (FMP/Gemini/…) → data → cache,
+  plus the exact technologies/APIs involved and improvement opportunities.
+  Source of truth: SYSTEM_DESIGN_GUIDELINES.md · caydex-report-system-design.html · the codebase.
+  MAINTENANCE: edit the FEATURES array near the bottom — the diagram + panels re-render from it.
+-->
+<style>
+  :root{
+    --bg:#ffffff; --ink:#111827; --muted:#5b6675; --faint:#8894a5;
+    --panel:#fbfcfe; --line:#e6e9ef; --border:rgba(17,24,39,.10); --border2:rgba(17,24,39,.18);
+    --shadow:0 10px 30px rgba(17,24,39,.07);
+    /* node/tech kind colors */
+    --client:#0284c7; --api:#4f46e5; --service:#475569; --cache:#0d9488;
+    --fmp:#d97706; --ai:#7c3aed; --ext:#e11d48; --store:#059669;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Inter","Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{font-family:var(--font);color:var(--ink);background:var(--bg);line-height:1.5;-webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(900px 480px at 12% -6%, rgba(2,132,199,.05), transparent 60%),
+      radial-gradient(820px 460px at 100% 4%, rgba(124,58,237,.05), transparent 55%);min-height:100vh}
+  ::selection{background:rgba(2,132,199,.22)}
+
+  header.top{position:sticky;top:0;z-index:30;backdrop-filter:blur(12px);
+    background:linear-gradient(180deg,rgba(255,255,255,.95),rgba(255,255,255,.75));
+    border-bottom:1px solid var(--line);padding:14px clamp(16px,3vw,30px);display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:12px}
+  .logo{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;font-weight:800;color:#04121a;
+    background:conic-gradient(from 210deg,#0284c7,#7c3aed,#059669,#d97706,#0284c7);box-shadow:0 6px 18px rgba(2,132,199,.28)}
+  .brand h1{margin:0;font-size:17px;font-weight:700;letter-spacing:.2px}
+  .brand p{margin:2px 0 0;font-size:12px;color:var(--muted)}
+  .top .sp{flex:1}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center}
+  .lk{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted)}
+  .lk .sw{width:11px;height:11px;border-radius:3px;border:1.5px solid var(--c);background:color-mix(in srgb,var(--c) 12%,#fff)}
+
+  .wrap{display:grid;grid-template-columns:236px minmax(0,1fr);gap:0;max-width:1560px;margin:0 auto;align-items:start}
+  @media (max-width:940px){ .wrap{grid-template-columns:1fr} nav.side{position:static;border-right:none;border-bottom:1px solid var(--line)} }
+
+  /* nav */
+  nav.side{position:sticky;top:69px;align-self:start;border-right:1px solid var(--line);padding:16px 12px 40px;
+    max-height:calc(100vh - 69px);overflow:auto}
+  .navgroup{font-size:10.5px;letter-spacing:1.1px;text-transform:uppercase;color:var(--faint);font-weight:700;margin:16px 8px 6px}
+  .navitem{display:flex;align-items:center;gap:9px;width:100%;text-align:left;font-family:inherit;font-size:13.4px;color:var(--ink);
+    background:transparent;border:1px solid transparent;border-radius:9px;padding:8px 9px;cursor:pointer;transition:.12s;margin:1px 0}
+  .navitem:hover{background:var(--panel);border-color:var(--border)}
+  .navitem.active{background:color-mix(in srgb,var(--api) 8%,#fff);border-color:color-mix(in srgb,var(--api) 40%,transparent);font-weight:600}
+  .navitem .ic{font-size:15px;flex:none}
+  .navitem .nl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* main */
+  main.doc{padding:26px clamp(16px,3vw,40px) 70px;min-width:0}
+  .fhead{margin-bottom:18px}
+  .fhead .kick{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--api);font-weight:800}
+  .fhead h2{margin:5px 0 6px;font-size:24px;font-weight:750;letter-spacing:.2px}
+  .fhead .what{font-size:14.5px;color:#374151;max-width:74ch}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+  .schip{font-size:11.5px;color:var(--muted);border:1px solid var(--border);background:var(--panel);border-radius:999px;padding:4px 10px}
+  .schip b{color:var(--ink);font-weight:600}
+
+  .cols{display:grid;grid-template-columns:minmax(0,560px) minmax(0,1fr);gap:30px;align-items:start;margin-top:8px}
+  @media (max-width:1080px){ .cols{grid-template-columns:1fr} }
+
+  /* flow diagram */
+  .flowwrap{border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,#fff,#fcfdff);padding:22px 18px;box-shadow:var(--shadow)}
+  .flow{display:flex;flex-direction:column;align-items:stretch;gap:0}
+  .step{display:flex;gap:10px;justify-content:center}
+  .node{flex:1 1 0;min-width:0;border:1.4px solid var(--c);border-radius:12px;padding:11px 13px;
+    background:color-mix(in srgb,var(--c) 6.5%,#fff);position:relative;transition:.14s}
+  .node:hover{box-shadow:0 6px 16px rgba(17,24,39,.10);transform:translateY(-1px)}
+  .node .tag{font-size:9.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--c)}
+  .node .t{font-weight:650;font-size:13.6px;margin-top:2px;letter-spacing:.1px;color:#111827}
+  .node .t code{font-family:var(--mono);font-size:12px;background:transparent;padding:0;color:#111827}
+  .node .s{font-size:11.6px;color:var(--muted);margin-top:3px;line-height:1.4}
+  .arrow{height:22px;display:flex;align-items:center;justify-content:center;color:#b4bcc8}
+  .arrow svg{width:16px;height:22px}
+  .arrow.split{color:#c2cad6}
+  .steplabel{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--faint);text-align:center;margin:4px 0 -2px}
+
+  /* side panels */
+  .side-panels{display:flex;flex-direction:column;gap:18px;position:sticky;top:88px}
+  @media (max-width:1080px){ .side-panels{position:static} }
+  .panel{border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:var(--shadow);overflow:hidden}
+  .panel h3{margin:0;padding:13px 16px;font-size:11.5px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);font-weight:700;
+    border-bottom:1px solid var(--line);background:var(--panel)}
+  .panel .pb{padding:12px 16px 15px}
+  .api{display:flex;gap:10px;padding:8px 0;border-bottom:1px dashed var(--line);align-items:flex-start}
+  .api:last-child{border-bottom:none}
+  .api .dot{width:9px;height:9px;border-radius:50%;background:var(--c);flex:none;margin-top:5px}
+  .api .n{font-size:13px;font-weight:600;color:#1f2937}
+  .api .n code{font-family:var(--mono);font-size:11.5px;color:#0369a1;background:rgba(2,132,199,.08);border-radius:5px;padding:1px 5px}
+  .api .d{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.45}
+  .cacheline{font-size:12.8px;color:#374151}
+  .cacheline b{color:#111827}
+  .improve{border-left:3px solid var(--fmp);background:#fffbeb;border-radius:0 8px 8px 0;padding:2px 14px 2px}
+  .improve ul{margin:10px 0;padding-left:18px}
+  .improve li{font-size:12.8px;color:#3f4756;margin:7px 0;line-height:1.5}
+  .improve li b{color:#92400e}
+  code.k{font-family:var(--mono);font-size:12px;background:#f3f4f6;border-radius:5px;padding:1px 5px;color:#111827}
+
+  footer.foot{max-width:1560px;margin:0 auto;padding:18px clamp(16px,3vw,40px) 40px;color:var(--faint);font-size:12px;border-top:1px solid var(--line)}
+  footer.foot code{font-family:var(--mono)}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <div class="logo">C</div>
+    <div><h1>Caydex · Data-Flow & Feature Structure</h1><p>How data moves per feature — and which tech / APIs power it</p></div>
+  </div>
+  <div class="sp"></div>
+  <div class="legend" id="legend"></div>
+</header>
+
+<div class="wrap">
+  <nav class="side" id="nav"></nav>
+  <main class="doc" id="doc"></main>
+</div>
+
+<footer class="foot">
+  Living document · re-renders from the <code>FEATURES</code> array in this file. FMP endpoints are on the <code>/stable</code> API; Gemini = Flash tier. Keep in sync with <b>SYSTEM_DESIGN_GUIDELINES.md</b>.
+</footer>
+
+<script>
+/* ============================================================================
+   KIND METADATA (colors + legend labels)
+   ========================================================================== */
+const KINDS = {
+  client:{c:"var(--client)",label:"Client / iOS"},
+  api:{c:"var(--api)",label:"API endpoint"},
+  service:{c:"var(--service)",label:"Backend service"},
+  cache:{c:"var(--cache)",label:"Cache tier"},
+  fmp:{c:"var(--fmp)",label:"FMP (market data)"},
+  ai:{c:"var(--ai)",label:"Gemini / AI"},
+  ext:{c:"var(--ext)",label:"Other external API"},
+  store:{c:"var(--store)",label:"Supabase / store"},
+};
+
+/* ============================================================================
+   FEATURES — the data model. Each feature renders a flow + tech panel + notes.
+   node = {k:kind, t:title(html), s:subtitle}. steps = array of rows; a row is
+   an array of nodes (1–3 nodes side-by-side = a parallel branch).
+   ========================================================================== */
+const FEATURES = [
+  /* ---------------------------------------------------------------- HOME */
+  { id:"home", group:"Home", icon:"🏠", name:"Home Dashboard",
+    screen:"HomeDashboardView", latency:"~0.3–0.8s (warm)",
+    what:"One aggregated call paints the whole Home tab. Four sections — Market Pulse, Daily Scanners, App-Exclusive Signals, Emerging Frontiers — build in parallel and degrade independently, so a slow sub-build never blocks the screen.",
+    steps:[
+      [{k:"client",t:"HomeDashboardView · HomeRepository",s:"one request on appear; views render preformatted strings"}],
+      [{k:"api",t:"GET <code>/api/v1/home/dashboard</code>",s:"public · single response envelope"}],
+      [{k:"service",t:"home_dashboard_service + signals_service",s:"4 sub-builds in parallel · each own cache + _inflight + 8s shield"}],
+      [{k:"fmp",t:"FMP /stable",s:"quotes · gainers/losers/actives · profile batch · earnings-cal · senate/house"},
+       {k:"ext",t:"FINRA short interest",s:"movers short% + shorts card"},
+       {k:"store",t:"Supabase (pre-hydrated)",s:"whales · whale_holdings · trending_themes"}],
+      [{k:"cache",t:"Two-tier cache-aside",s:"Pulse 5m · Scanners 20m · Themes 10m · signals_cache 24h"}],
+      [{k:"store",t:"HomeDashboardResponse → 4 section cards",s:"empty section ⇒ iOS hides it (per-section degradation)"}],
+    ],
+    apis:[
+      {k:"fmp",n:"<code>get_stock_price_quote</code> → /stable/quote",d:"6 Pulse symbols (^GSPC ^IXIC ^DJI BTCUSD GCUSD CLUSD) + scanner ranking"},
+      {k:"fmp",n:"<code>get_biggest_gainers/losers/most_actives</code>",d:"/stable/gainers · /losers · /actives → the in-play mover universe"},
+      {k:"fmp",n:"<code>get_company_profiles_batch</code> → /stable/profile",d:"quality gate: marketCap ≥ $250M, avgVol ≥ 1M, major exchange (chunked at 50)"},
+      {k:"fmp",n:"<code>get_earnings_calendar</code> · <code>get_senate/house_latest</code>",d:"Earnings Shockers + Congress Buys signal cards"},
+      {k:"fmp",n:"chart_helper 1D intraday",d:"5-min bars → 30-pt sparkline for each Pulse tile"},
+      {k:"ext",n:"FINRA / Nasdaq / Yahoo short interest",d:"shares_short ÷ float; 3-day cache (FINRA publishes ~2×/month)"},
+      {k:"store",n:"Supabase: whales · whale_holdings · trending_themes",d:"Signals + Themes read pre-hydrated rows — NO live 13F on the request path"},
+      {k:"store",n:"Supabase: signals_cache · short_interest_cache",d:"Tier-2 24h / 3d persistence across restarts"},
+    ],
+    cache:"Per-section Tier-1 dict (5/20/10 min) + Tier-2 <code>signals_cache</code> (24h) & <code>short_interest_cache</code> (3d); every build is <code>_inflight</code>-deduped and wrapped in an 8s <code>asyncio.shield</code> timeout so a cold sub-build ships on the next request instead of blocking.",
+    improve:[
+      "<b>Quote fan-out is duplicated</b> — Market Pulse fetches 6 quotes and the scanners fetch ~90 profiles+quotes independently (no shared quote cache). A shared per-symbol quote cache could dedup them.",
+      "<b>Scanners dominate FMP cost</b> (~90 profile calls/build). The 20-min cache + market-hours pre-warmer keep it off the request path — keep the pre-warmer enabled in prod.",
+      "Signals are Supabase-only on the request path (fast) — the FMP/13F work happens in the daily hydration job. Good separation to preserve.",
+    ] },
+
+  { id:"themes", group:"Home", icon:"🚀", name:"Emerging Frontiers (theme detail)",
+    screen:"ThemeDetailView", latency:"~0.3s",
+    what:"Tapping a theme card opens a server-driven detail screen: an editorial hero + the theme's constituent companies with live price/change. Editors change tickers/images in Supabase with no app release.",
+    steps:[
+      [{k:"client",t:"ThemeDetailView (tap a theme card)",s:"slug passed from the dashboard card"}],
+      [{k:"api",t:"GET <code>/home/themes/{slug}</code>",s:"public · 404 THEME_NOT_FOUND if inactive"}],
+      [{k:"service",t:"home_dashboard_service.get_theme_detail",s:"read the row → resolve its tickers to live quotes"}],
+      [{k:"store",t:"Supabase trending_themes",s:"slug/title/subtitle/image_url/tickers[] (editable)"},
+       {k:"fmp",t:"FMP get_batch_quotes",s:"ONE deduped fan-out · price/change/marketCap/name"}],
+      [{k:"service",t:"sort by market-cap desc · format",s:"count + avg % computed live from the tickers"}],
+      [{k:"store",t:"ThemeDetailResponse → hero + companies list",s:"row tap → TickerDetailView"}],
+    ],
+    apis:[
+      {k:"fmp",n:"<code>get_batch_quotes</code> → /stable/quote",d:"one call over the deduped ticker union → price, change, marketCap, name"},
+      {k:"store",n:"Supabase: <code>trending_themes</code>",d:"editorial content (migrations 081/082); a DB edit updates the card with no release"},
+      {k:"store",n:"Supabase Storage: <code>home-theme-media</code>",d:"hero images; swap the URL, no app update"},
+    ],
+    cache:"10-min Tier-1 dict + <code>_inflight</code> (slug-keyed, case-sensitive). No Tier-2 — the row read is cheap and the FMP change is the only computed part.",
+    improve:[
+      "The card's <code>ticker_count</code> + avg % are computed live from the DB tickers — <b>editing tickers instantly changes the card</b>, no rebuild. Great for iteration.",
+      "The detail sends the full constituent list; if a theme grows large, consider paginating or capping the quoted set.",
+    ] },
+
+  /* --------------------------------------------------------------- STOCK */
+  { id:"overview", group:"Stock Detail", icon:"📈", name:"Stock Overview (+ fast core)",
+    screen:"TickerDetailView", latency:"core ~0.5s · full ~2–5s cold",
+    what:"The Overview tab. The screen fires TWO calls in parallel: a fast 'core' (price + intraday chart + name) that paints instantly, and the full aggregation that supersedes it. On open it also warms a future report's data cache.",
+    steps:[
+      [{k:"client",t:"TickerDetailView · TickerDetailViewModel",s:"fires core + full in parallel; also POST /prewarm-report"}],
+      [{k:"api",t:"GET /overview/core",s:"fast subset"},
+       {k:"api",t:"GET /overview",s:"full aggregation"}],
+      [{k:"service",t:"stock_overview_service",s:"core = quote+chart+profile · full = fundamentals bundle + snapshots"}],
+      [{k:"fmp",t:"FMP fast path",s:"quote + intraday chart + profile (~0.5s)"},
+       {k:"fmp",t:"FMP full path",s:"14 parallel calls incl. IPO→today history (2–5s)"}],
+      [{k:"cache",t:"Two-tier",s:"volatile 120s · fundamentals 1h dict + stock_fundamentals_cache 24h · snapshot caches"}],
+      [{k:"store",t:"StockOverview(Core)Response",s:"price header · chart · key stats · performance · snapshots"}],
+    ],
+    apis:[
+      {k:"fmp",n:"<code>get_stock_price_quote</code> · <code>get_company_profile</code>",d:"/stable/quote · /stable/profile — the fast-core pair"},
+      {k:"fmp",n:"chart_helper (intraday / historical)",d:"1D/1W = fast intraday; 3M+/5Y/ALL = daily/aggregated (the slow path)"},
+      {k:"fmp",n:"<code>get_key_metrics(_ttm)</code> · <code>get_financial_ratios(_ttm)</code>",d:"/stable/key-metrics* · /stable/ratios* — key statistics"},
+      {k:"fmp",n:"<code>get_income/balance/cash_flow_statement</code>",d:"/stable/*-statement — fundamentals + health"},
+      {k:"fmp",n:"<code>get_historical_prices</code> (ticker + SPY)",d:"/stable/historical-price-eod/full from 1900 → performance/benchmark. THE 2–5s bottleneck.",},
+      {k:"fmp",n:"<code>get_analyst_estimates</code> · <code>get_shares_float</code> · <code>get_institutional_ownership_summary</code>",d:"estimates + float + ownership context"},
+      {k:"store",n:"Supabase: <code>stock_fundamentals_cache</code> · <code>snapshot_cache</code> · <code>ticker_data_cache</code>",d:"Tier-2 24h; the report collector reuses the same rows (partial warm)"},
+    ],
+    cache:"Volatile (quote+chart) 120s dict · fundamentals 1h dict + <code>stock_fundamentals_cache</code> 24h Supabase · 5 snapshot services (5-min dict + 24h Supabase) · <code>_inflight</code> per ticker. The fast-core has its own 120s cache and never touches the slow bundle.",
+    improve:[
+      "<b>The two IPO-to-present <code>get_historical_prices</code> calls (ticker + SPY) are the dominant latency</b> — needed for all-time CAGR + vs-SPY. SPY history is already cached 1h; consider a longer SPY cache and precomputing all-time CAGR nightly.",
+      "The <b>fast-core split</b> already hides this: price+chart paint in ~0.5s while the full call loads — extend the same core-first pattern to the sibling detail screens (index/crypto/etf) if they feel slow.",
+      "Opening the detail view <b>partial-warms a future report</b> (shared caches) — a real efficiency win worth keeping.",
+    ] },
+
+  { id:"tabs", group:"Stock Detail", icon:"🗂️", name:"Stock Detail — supplementary tabs",
+    screen:"TickerDetailView (News / Analysis / Financials / Holders)", latency:"streamed, non-blocking",
+    what:"After the overview paints, the ViewModel fires ~11 supplementary endpoints in parallel (Phase 2), each streamed with its own loading flag. Every tab is its own cached service — the app never blocks on them.",
+    steps:[
+      [{k:"client",t:"TickerDetailView tabs (Phase-2 fan-out)",s:"11 parallel fetches after the overview lands"}],
+      [{k:"api",t:"GET /stocks/{ticker}/{news · analyst-analysis · sentiment · technical-analysis · earnings · growth · profit-power · revenue-breakdown · health-check · signal-of-confidence · holders}",s:""}],
+      [{k:"service",t:"one cached service per tab",s:"news_service · analyst · sentiment · technical · earnings · growth · profit_power · …"}],
+      [{k:"fmp",t:"FMP",s:"statements · ratios · grades · estimates · segmentation · calendar · news"},
+       {k:"ext",t:"ApeWisdom · Alternative.me · FINRA",s:"social sentiment · Fear&Greed · short/Congress"}],
+      [{k:"cache",t:"Two-tier per tab",s:"news 1h · sentiment ~6h · fundamentals 24h · _inflight"}],
+      [{k:"store",t:"per-tab responses → tab content",s:"each renders as its data arrives"}],
+    ],
+    apis:[
+      {k:"fmp",n:"News → <code>get_stock_news</code>",d:"/stable/stock_news · <code>news_cache</code> 1h"},
+      {k:"fmp",n:"Analyst → <code>get_grades</code> · <code>get_price_target_consensus</code>",d:"/stable/grades · /stable/price-target-consensus"},
+      {k:"fmp",n:"Earnings → <code>get_earning_calendar_full</code> + <code>get_analyst_estimates</code>",d:"/stable/earnings — surprise vs the announced non-GAAP actual"},
+      {k:"fmp",n:"Growth / Profit Power / Health / Revenue",d:"income/ratios/balance/cash-flow + /stable/revenue-product-segmentation"},
+      {k:"ext",n:"Sentiment → ApeWisdom + Alternative.me + FMP social",d:"Reddit mentions + crypto Fear&Greed + /stable/social_sentiment"},
+      {k:"ext",n:"Holders → FMP institutional + Congress disclosures",d:"/stable/institutional-holdings + senate/house-disclosure"},
+    ],
+    cache:"Each tab = Tier-1 dict + Tier-2 <code>*_cache</code> (news 1h · sentiment ~6h · technical ~5h · fundamentals 24h) + <code>_inflight</code>. ~8–9 of these are the exact caches the report collector reuses.",
+    improve:[
+      "Tabs are already <b>lazy + streamed</b> (per-section loading flags) — no wasted work for tabs the user never opens beyond the first fan-out.",
+      "Sentiment adds three upstreams (ApeWisdom, Alternative.me, FMP social) — the slowest of the tab set; its ~6h cache is appropriate.",
+      "Consider making the Phase-2 fan-out <b>tab-triggered</b> (fetch a tab's data on first tab-select) rather than all 11 on open, to cut cold-open upstream load.",
+    ] },
+
+  /* ------------------------------------------------------------ RESEARCH */
+  { id:"research", group:"Research", icon:"🤖", name:"Research Report (multi-agent)",
+    screen:"TickerReportView", latency:"first ~1 min · 100 reports ~10–15 min",
+    what:"The credit-charged, AI-generated deep report. An admission gate sheds load, a global semaphore paces Gemini, and a two-stage agent collects data (FMP) then narrates per persona (Gemini). A conditional completion write delivers it, XOR a reconciliation job refunds it.",
+    steps:[
+      [{k:"client",t:"TickerReportView → POST /research/generate",s:"pick ticker + persona"}],
+      [{k:"api",t:"Admission gate (pre-charge)",s:"per-user ≤4 · global ≤150 → else 409 SYSTEM_BUSY"}],
+      [{k:"service",t:"charge 5 credits · pending row · fire-and-forget task",s:"user_credits − · research_reports = queue + store"}],
+      [{k:"cache",t:"shared ticker_data_cache lookup",s:"persona-neutral; same ticker ⇒ 1 collection via _INFLIGHT"}],
+      [{k:"service",t:"Global agent-run semaphore = 8 (the gate)",s:"8 run · the rest queue and drain in waves"}],
+      [{k:"fmp",t:"Stage A — collect",s:"~25–40 FMP calls · shared 20-conn pool · 750 rpm"},
+       {k:"ai",t:"Stage B — narrate",s:"~22 Gemini calls · 15 parallel · context-cached · 429 backoff + breaker"}],
+      [{k:"store",t:"conditional completion write → delivered",s:"XOR refund safety net (processing_started_at clock)"}],
+    ],
+    apis:[
+      {k:"fmp",n:"Stage A collector — ~20 FMP methods",d:"profile · quote · key-metrics(_ttm) · ratios(_ttm) · income/balance/cashflow · estimates · grades · price-target · institutional · earnings · news · segmentation"},
+      {k:"ai",n:"Gemini (Flash) — Stage A tools + Stage B narration",d:"function-calling via <code>fmp_tools</code> (~15 tools, max 4 rounds) · 15 parallel narratives · core-thesis synthesis"},
+      {k:"ext",n:"FRED · ApeWisdom · FINRA (macro grounding)",d:"inflation/rates/yield-curve + social + short interest → the report's critical-factors"},
+      {k:"store",n:"Supabase: <code>research_reports</code> · <code>ticker_data_cache</code> · <code>user_credits</code>",d:"queue+content · persona-neutral shared cache (~6h) · credit ledger"},
+    ],
+    cache:"Stage A writes the persona-neutral <code>ticker_data_cache</code> so a 2nd persona (or the detail view's pre-warm) skips the FMP fan-out. Same <code>(ticker,persona)</code> collapses to one run via <code>_INFLIGHT</code>; followers await a deep copy.",
+    improve:[
+      "<b>Reports are Gemini-bound</b> (8-slot semaphore + tier TPM), unlike the FMP-bound detail view. To raise throughput: bump <code>MAX_CONCURRENT_AGENT_RUNS</code> only if the Gemini tier headroom allows, else you just trade a queue for 429s.",
+      "100 <i>distinct</i> tickers = worst case (no dedup) → ~13 waves of 8. Same-ticker demand collapses to 1 run — a spike on one hot ticker is cheap.",
+      "Under overload nothing crashes: it sheds (409), paces Gemini (429 backoff + circuit breaker), and <b>refunds anything it can't deliver</b> (the credit invariant).",
+    ] },
+
+  /* ------------------------------------------------------------------ AI */
+  { id:"chat", group:"AI Chat", icon:"💬", name:"Ask Cay AI (chat)",
+    screen:"AIChatScreen", latency:"~1–3s / message",
+    what:"Conversational analysis. Gemini answers with function-calling tools (live stock/analyst/sentiment/market data) and RAG over embedded filings for grounded, cited answers — never revealing the underlying model (identity rule).",
+    steps:[
+      [{k:"client",t:"AIChatScreen · ChatViewModel",s:"caller-owned session; one full-screen cover app-wide"}],
+      [{k:"api",t:"POST /chat/sessions/{id}/messages",s:"send message → AI response + rich widget"}],
+      [{k:"service",t:"ChatService.generate_response",s:"embed query · retrieve · call Gemini with tools"}],
+      [{k:"ai",t:"Gemini (Flash) + embeddings",s:"function-calling + RAG synthesis"},
+       {k:"store",t:"pgvector filing chunks",s:"top 10–20 chunks → citations"}],
+      [{k:"fmp",t:"tool handlers → FMP",s:"quote · intraday · grades · sector"},
+       {k:"ext",t:"ApeWisdom",s:"social sentiment tool"}],
+      [{k:"store",t:"chat_sessions · chat_messages",s:"history + rich_content (widget) persisted"}],
+    ],
+    apis:[
+      {k:"ai",n:"Gemini (Flash) — function-calling",d:"tools: get_stock_chart · analyst · sentiment · market-overview → reuse the cached FMP services"},
+      {k:"ai",n:"Gemini embeddings — RAG",d:"embed the user query → pgvector cosine search over filing chunks"},
+      {k:"fmp",n:"FMP via tool handlers",d:"/stable/quote · historical-chart/5min · grades · sector-performance-snapshot"},
+      {k:"ext",n:"ApeWisdom (social)",d:"mention counts for the sentiment tool"},
+      {k:"store",n:"Supabase: <code>chat_sessions</code> · <code>chat_messages</code> + pgvector",d:"history + citations; embeddings for the knowledge base"},
+    ],
+    cache:"Conversation history in-memory per session; the stock-widget tool reuses the 5-min quote cache; deep 'market overview' cached in Supabase by (stock, context).",
+    improve:[
+      "Embedding + pgvector retrieval add ~1–2s per message vs a plain chat — the cost of grounded, cited answers.",
+      "Tools <b>reuse the same cached FMP services</b> the detail tabs use → no extra FMP load for a chat about a ticker you just viewed.",
+      "The identity rule (“Cay AI by Caydex”) is enforced in the persona/prompt layer — keep it there, never in the model integration.",
+    ] },
+
+  /* --------------------------------------------------------------- LEARN */
+  { id:"learn", group:"Learn", icon:"📚", name:"Learn (Money Moves · Journey · Books)",
+    screen:"LearnContentView", latency:"instant (content) · audio streamed",
+    what:"Server-driven educational content with narration + synced read-along. NO FMP or Gemini on the request path — pure Supabase content + Storage audio. A new DB row appears in the shipped app with no update; the offline bundle is the fallback.",
+    steps:[
+      [{k:"client",t:"Learn stores prefetch once/session",s:"prefer remote; bundled JSON fallback offline"}],
+      [{k:"api",t:"GET /learn/{money-moves · journey}",s:"public · full iOS-shaped content"}],
+      [{k:"service",t:"money_moves / journey content service",s:"read rows → overlay audio URL + read-along timings"}],
+      [{k:"store",t:"Supabase money_move_articles · lessons",s:"content JSONB (+ readAlong timings baked in)"},
+       {k:"store",t:"Supabase Storage (audio buckets)",s:"journey-media · money-moves-media"}],
+      [{k:"client",t:"progress + bookmarks",s:"POST /learn/progress · /learn/bookmarks → user_learn_progress"}],
+    ],
+    apis:[
+      {k:"store",n:"Supabase: <code>money_move_articles</code> · <code>lessons</code>",d:"content JSONB is the source of truth; iOS decodes it directly"},
+      {k:"store",n:"Supabase: <code>user_learn_progress</code>",d:"unified table: journey_lesson · money_move · book_core · book_bookmark (idempotent upsert)"},
+      {k:"store",n:"Supabase Storage: audio buckets",d:"narration .m4a served on a public CDN"},
+      {k:"ai",n:"TTS pipeline (build-time, OFF request path)",d:"Achird TTS + RunPod Chatterbox → forced alignment (local, free) → seed"},
+    ],
+    cache:"In-memory content (once/session) + bundled-JSON offline fallback. No Tier-2 — read-only, low-traffic. Read-along timings live in the served JSONB, so no per-play alignment.",
+    improve:[
+      "<b>Content ships without an app update</b> — a DB row + a Storage audio object surface in the live app after the 1-hr endpoint cache. Powerful for iteration; the trade-off is the transcript must match the audio (regenerate on edit).",
+      "TTS is entirely off the request path (pre-generated), so the feature is Supabase-latency only.",
+    ] },
+
+  /* --------------------------------------------------------- SMART MONEY */
+  { id:"whales", group:"Smart Money", icon:"🐋", name:"Whales (13F) + Congress",
+    screen:"Smart Money tab · WhaleProfileView", latency:"fast (Supabase-only on request)",
+    what:"Institutional 13F holdings + Congressional trades. The request path reads pre-hydrated Supabase (fast); a daily background job does the FMP/SEC-EDGAR fetch, computes deltas, and upserts — keeping the heavy work off the user's path.",
+    steps:[
+      [{k:"client",t:"Smart Money tab · WhaleProfileView",s:"list · activity · profile · trade groups"}],
+      [{k:"api",t:"GET /whales · /whales/{id}/profile · /trade-groups",s:"+ follow / unfollow"}],
+      [{k:"service",t:"WhaleService",s:"reads pre-hydrated rows — NO live 13F on the request path"}],
+      [{k:"store",t:"Supabase whales · whale_holdings · whale_trades",s:"1h dict + whale_profile_cache 24h"}],
+      [{k:"steplabel"}],
+      [{k:"service",t:"⏱ background: whale hydration job (daily post-close)",s:"the only path that hits FMP / EDGAR"}],
+      [{k:"fmp",t:"FMP 13F + Congress",s:"institutional-holdings · senate/house-disclosure"},
+       {k:"store",t:"whale_registry.json (CIK map)",s:"person↔fund merge · firm_name"}],
+    ],
+    apis:[
+      {k:"fmp",n:"<code>get_institutional_holdings</code> → /stable/institutional-holdings",d:"per-CIK 13F positions (quarterly, via SEC EDGAR)"},
+      {k:"fmp",n:"<code>get_senate/house_disclosure</code> + <code>_latest</code>",d:"Congressional trades (disclosed ~30–45 days after the trade)"},
+      {k:"store",n:"<code>backend/data/whale_registry.json</code>",d:"CIK → whale identity (Buffett, Ackman, …); firm_name shown everywhere"},
+      {k:"store",n:"Supabase: whales · whale_holdings · whale_trades · whale_followers",d:"pre-hydrated; follow-state is always fresh (per-user, uncached)"},
+    ],
+    cache:"Request path: 1h dict + <code>whale_profile_cache</code> 24h Supabase (+ force-refresh bypass). The FMP/EDGAR work is entirely in the <code>_run_whale_hydration_job()</code> (daily + 6-hourly politicians).",
+    improve:[
+      "<b>Request path is Supabase-only</b> → fast + FMP-quota-free. The hydration job absorbs all the upstream cost off-path. Preserve this shape.",
+      "The registry CIK ↔ whale_id must match precisely or holdings orphan — a data-integrity risk worth a validation check (there's a <code>/whale-registry-validate</code> command).",
+      "13F is quarterly + lagged; Congress is ~30–45 days lagged — the data is inherently stale, so aggressive caching is correct.",
+    ] },
+
+  /* ---------------------------------------------------------- PORTFOLIO */
+  { id:"portfolio", group:"Portfolio", icon:"📊", name:"Watchlist · Portfolio · Insights",
+    screen:"Assets / Tracking", latency:"fast",
+    what:"User-owned watchlists and portfolios, plus a server-side diversification score. Holdings are user-controlled (not volatile); FMP only enriches metadata (logo, sector, price) for the insights math.",
+    steps:[
+      [{k:"client",t:"Watchlist / Portfolio / Insights screens",s:"add · reorder · set holdings"}],
+      [{k:"api",t:"/watchlist · /portfolios · /tracking/portfolio-insights",s:"GET/POST/PUT/DELETE"}],
+      [{k:"service",t:"portfolio_insights_service",s:"normalized-HHI diversification (sector/industry/asset class)"}],
+      [{k:"store",t:"Supabase watchlist_items · portfolios · portfolio_items",s:"user-owned (RLS)"},
+       {k:"fmp",t:"FMP enrichment",s:"profile sector/industry + quote for market_value"}],
+      [{k:"store",t:"portfolio_insights (breakdown JSONB)",s:"diversification score + heatmap"}],
+    ],
+    apis:[
+      {k:"fmp",n:"<code>get_company_profile</code> → /stable/profile",d:"sector/industry/market-cap for the diversification calc + watchlist logo"},
+      {k:"fmp",n:"<code>get_stock_price_quote</code> → /stable/quote",d:"current price for market_value"},
+      {k:"store",n:"Supabase: watchlist_items · portfolios · portfolio_items · portfolio_insights",d:"owner-scoped RLS; a two-table holdings vs watchlist-metadata join"},
+    ],
+    cache:"Profile enrichment (logo/sector) cached 24h per ticker; holdings are stored in the DB (not volatile), so no market-data cache is needed for them.",
+    improve:[
+      "The <b>“Other 100%” bug</b> was a null sector — fixed by lazy FMP enrichment (migration 071). Keep the enrichment lazy so a new ticker backfills its sector on first insight.",
+      "Diversification is server-side (normalized HHI); the Swift-side calculator is now an offline-only fallback — keep the server as the source of truth.",
+    ] },
+
+  /* -------------------------------------------------------------- MACRO */
+  { id:"macro", group:"Macro", icon:"🌍", name:"Macro / Market Context",
+    screen:"(grounds Signal of Confidence + report critical-factors)", latency:"cheap (6h cache)",
+    what:"The macro engine grounds the AI's risk view — inflation, rates, the yield curve — from FRED. It isn't a standalone screen; it feeds the report's critical-factors and the Signal-of-Confidence card.",
+    steps:[
+      [{k:"service",t:"macro threat engine · geopolitical_macro_service",s:"composite/tier cutoffs · breadth guards"}],
+      [{k:"ext",t:"FRED get_observations",s:"CPI · Fed Funds · 10Y · unemployment (free, 120 rpm)"}],
+      [{k:"cache",t:"6h dict + Supabase caches",s:"~4 fetches/day per series"}],
+      [{k:"store",t:"macro factors → AI grounding",s:"report critical-factors + Signal of Confidence"}],
+    ],
+    apis:[
+      {k:"ext",n:"FRED → <code>get_observations</code>",d:"/data/observations/series/{id}?limit=13 — inflation, rates, yield curve, unemployment"},
+      {k:"ext",n:"Census (optional)",d:"economic grounding for geopolitical deep-dives (off the critical path)"},
+      {k:"store",n:"Supabase: macro / <code>industry_benchmarks</code> caches",d:"sector/industry medians for peer comparison"},
+    ],
+    cache:"6h Tier-1 per FRED series (≈4 fetches/day — well under FRED's free 120 rpm). Industry benchmarks recomputed weekly by a background job.",
+    improve:[
+      "FRED free tier is ample given the 6h cache — no cost pressure here.",
+      "Macro is a <b>grounding input</b>, not a screen — it improves the honesty of the AI's risk narrative (cap-AI + require-breadth guards prevent over-claiming).",
+    ] },
+
+  /* ---------------------------------------------------- GLOBAL INFRA */
+  { id:"infra", group:"Foundations", icon:"⚙️", name:"Global infrastructure",
+    screen:"every feature", latency:"—",
+    what:"The shared machinery every feature rides on: the two-tier cache-aside pattern with thundering-herd dedup, one pooled HTTP client to FMP, background pre-warmers that keep hot paths primed, and the Gemini quota guards.",
+    steps:[
+      [{k:"client",t:"any request"}],
+      [{k:"api",t:"endpoint → service"}],
+      [{k:"cache",t:"Tier 1 — in-process dict (5 min–24h)",s:"+ _inflight asyncio.Future dedup (thundering-herd guard)"}],
+      [{k:"cache",t:"Tier 2 — Supabase *_cache (24h / close-aligned)",s:"survives restarts (expires_at)"}],
+      [{k:"fmp",t:"upstream on miss",s:"shared httpx client · max_connections=20 · FMP Premium ~750 rpm"},
+       {k:"ai",t:"Gemini on miss",s:"Flash tier · 429 backoff + circuit breaker + context caching"}],
+      [{k:"store",t:"write both tiers · return",s:"cache only on success · never cache an exception"}],
+    ],
+    apis:[
+      {k:"cache",n:"Two-tier cache-aside (CLAUDE.md #4)",d:"reference: <code>profit_power_service.py</code> — Tier-1 dict + Tier-2 Supabase + <code>_inflight</code>"},
+      {k:"fmp",n:"Shared httpx.AsyncClient",d:"max_connections=20 · keepalive 10 · reused across every FMP call · FMP Premium ~750 rpm"},
+      {k:"service",n:"Background pre-warmers (main.py lifespan)",d:"scanners (20m) · signals · news (2h) · report data (post-close) · whale hydration (daily) · benchmarks (weekly) — market-hours gated"},
+      {k:"ai",n:"Gemini guards",d:"global agent semaphore (8) · 429 backoff · circuit breaker · Stage-B context caching · 90s timeout"},
+      {k:"store",n:"Reconciliation job",d:"two-threshold refund of stranded reports (<code>processing_started_at</code> clock) — the credit invariant"},
+    ],
+    cache:"Every expensive upstream call goes through the same shape: Tier-1 dict → Tier-2 Supabase → upstream, with <code>_inflight</code> collapsing concurrent misses. Cache is written <b>only on success</b>; a genuine empty is cacheable, a transient error is not.",
+    improve:[
+      "The system is defensively bounded: it <b>sheds load</b> (409), <b>paces</b> Gemini (429 backoff + breaker), and <b>refunds</b> undelivered work — so overload degrades instead of crashing.",
+      "Biggest lever for scale: the <b>Gemini concurrency ceiling</b> (report semaphore) and the <b>FMP 750-rpm pool</b> — different bottlenecks for reports (Gemini) vs detail views (FMP).",
+      "No Redis today — the in-process dict + Supabase tiers suffice. If you scale to multiple backend instances, the Tier-1 dict stops being shared across them (Redis or a shared cache becomes worth it).",
+    ] },
+];
+
+/* ============================================================================
+   RENDER
+   ========================================================================== */
+const $ = (s,el=document)=>el.querySelector(s);
+const featMap = Object.fromEntries(FEATURES.map(f=>[f.id,f]));
+
+/* legend */
+(function(){
+  const box = $("#legend");
+  Object.entries(KINDS).forEach(([k,v])=>{
+    const s=document.createElement("span"); s.className="lk"; s.style.setProperty("--c",v.c);
+    s.innerHTML=`<span class="sw"></span>${v.label}`; box.appendChild(s);
+  });
+})();
+
+/* nav */
+(function(){
+  const nav=$("#nav"); let lastGroup=null;
+  FEATURES.forEach(f=>{
+    if(f.group!==lastGroup){ const g=document.createElement("div"); g.className="navgroup"; g.textContent=f.group; nav.appendChild(g); lastGroup=f.group; }
+    const b=document.createElement("button"); b.className="navitem"; b.id="nav-"+f.id;
+    b.innerHTML=`<span class="ic">${f.icon}</span><span class="nl">${f.name}</span>`;
+    b.onclick=()=>select(f.id); nav.appendChild(b);
+  });
+})();
+
+function node(n){
+  if(n.k==="steplabel") return `<div class="steplabel">↑ request path · ↓ background job</div>`;
+  const c=KINDS[n.k]?KINDS[n.k].c:"var(--service)";
+  const tag=(KINDS[n.k]?KINDS[n.k].label:n.k).toUpperCase();
+  return `<div class="node" style="--c:${c}"><div class="tag">${tag}</div>
+    <div class="t">${n.t||""}</div>${n.s?`<div class="s">${n.s}</div>`:""}</div>`;
+}
+const CHEV=`<svg viewBox="0 0 16 22" fill="none"><path d="M8 2v14M3 12l5 6 5-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+function renderFlow(steps){
+  let h=`<div class="flow">`;
+  steps.forEach((row,i)=>{
+    if(row.length===1 && row[0].k==="steplabel"){ h+=node(row[0]); return; }
+    h+=`<div class="step">${row.map(node).join("")}</div>`;
+    if(i<steps.length-1){ const nextIsLabel = steps[i+1].length===1 && steps[i+1][0].k==="steplabel"; h+=`<div class="arrow${row.length>1?' split':''}">${nextIsLabel?"":CHEV}</div>`; }
+  });
+  h+=`</div>`; return h;
+}
+
+function select(id){
+  const f=featMap[id]; if(!f) return;
+  document.querySelectorAll(".navitem.active").forEach(e=>e.classList.remove("active"));
+  const nb=document.getElementById("nav-"+id); if(nb) nb.classList.add("active");
+
+  const apis=f.apis.map(a=>{
+    const c=KINDS[a.k]?KINDS[a.k].c:"var(--service)";
+    return `<div class="api" style="--c:${c}"><span class="dot"></span><div><div class="n">${a.n}</div>${a.d?`<div class="d">${a.d}</div>`:""}</div></div>`;
+  }).join("");
+  const improve=f.improve.map(x=>`<li>${x}</li>`).join("");
+
+  $("#doc").innerHTML=`
+    <div class="fhead">
+      <div class="kick" style="color:var(--api)">${f.group}</div>
+      <h2>${f.icon} ${f.name}</h2>
+      <div class="what">${f.what}</div>
+      <div class="chips">
+        <span class="schip"><b>Screen:</b> ${f.screen}</span>
+        ${f.latency&&f.latency!=="—"?`<span class="schip"><b>Latency:</b> ${f.latency}</span>`:""}
+      </div>
+    </div>
+    <div class="cols">
+      <div class="flowwrap">${renderFlow(f.steps)}</div>
+      <div class="side-panels">
+        <div class="panel"><h3>Technologies & APIs involved</h3><div class="pb">${apis}</div></div>
+        <div class="panel"><h3>Caching & performance</h3><div class="pb"><div class="cacheline">${f.cache}</div></div></div>
+        <div class="panel"><h3>Improvement opportunities</h3><div class="pb"><div class="improve"><ul>${improve}</ul></div></div></div>
+      </div>
+    </div>`;
+  if(window.innerWidth<=940){ $("#doc").scrollIntoView({behavior:"smooth",block:"start"}); }
+}
+
+select("home");
+</script>
+</body>
+</html>

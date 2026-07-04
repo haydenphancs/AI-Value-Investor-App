@@ -157,7 +157,7 @@ struct TrendingTheme: Identifiable {
     let id = UUID()
     /// Stable server id (e.g. "silicon-rush") — opens the theme detail on tap.
     let slug: String
-    /// The "Next-Wave" name shown on the card, e.g. "The Silicon Rush".
+    /// The "Next-Wave" name shown on the card, e.g. "The New Oil".
     let title: String
     /// e.g. "8 stocks".
     let count: String

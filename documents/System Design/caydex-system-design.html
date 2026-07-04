@@ -13,11 +13,11 @@
 -->
 <style>
   :root{
-    --bg:#070b12; --bg2:#0b1220; --ink:#e8eef6; --muted:#93a1b5; --faint:#6b788c;
-    --panel:rgba(255,255,255,.035); --panel2:rgba(255,255,255,.055);
-    --border:rgba(255,255,255,.09); --border2:rgba(255,255,255,.16);
-    --client:#38bdf8; --backend:#34d399; --ai:#a78bfa; --data:#fbbf24;
-    --shadow:0 10px 40px rgba(0,0,0,.45);
+    --bg:#ffffff; --bg2:#f7f9fc; --ink:#0f172a; --muted:#55637a; --faint:#8592a6;
+    --panel:rgba(15,23,42,.025); --panel2:rgba(15,23,42,.05);
+    --border:rgba(15,23,42,.10); --border2:rgba(15,23,42,.18);
+    --client:#0284c7; --backend:#059669; --ai:#7c3aed; --data:#d97706;
+    --shadow:0 10px 34px rgba(15,23,42,.08);
     --radius:16px;
     --font: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Inter","Helvetica Neue",Arial,sans-serif;
     --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
@@ -27,9 +27,9 @@
   body{
     font-family:var(--font); color:var(--ink); background:var(--bg);
     background-image:
-      radial-gradient(1100px 600px at 15% -8%, rgba(56,189,248,.10), transparent 60%),
-      radial-gradient(1000px 620px at 100% 6%, rgba(167,139,250,.10), transparent 55%),
-      radial-gradient(900px 700px at 50% 120%, rgba(251,191,36,.06), transparent 55%);
+      radial-gradient(1100px 600px at 15% -8%, rgba(2,132,199,.06), transparent 60%),
+      radial-gradient(1000px 620px at 100% 6%, rgba(124,58,237,.055), transparent 55%),
+      radial-gradient(900px 700px at 50% 120%, rgba(217,119,6,.05), transparent 55%);
     -webkit-font-smoothing:antialiased; line-height:1.45; min-height:100vh;
   }
   a{color:inherit}
@@ -38,7 +38,7 @@
   /* ---------- top bar ---------- */
   header.top{
     position:sticky; top:0; z-index:30; backdrop-filter:blur(14px);
-    background:linear-gradient(180deg, rgba(7,11,18,.92), rgba(7,11,18,.62));
+    background:linear-gradient(180deg, rgba(255,255,255,.94), rgba(255,255,255,.72));
     border-bottom:1px solid var(--border);
     padding:16px clamp(16px,3vw,34px);
     display:flex; align-items:center; gap:18px; flex-wrap:wrap;
@@ -90,9 +90,9 @@
     display:flex;flex-direction:column;gap:5px;min-height:92px;position:relative;overflow:hidden;
   }
   .card:hover,.card:focus-visible{transform:translateY(-3px);border-color:color-mix(in srgb,var(--acc) 55%,transparent);
-    background:var(--panel2);box-shadow:0 12px 26px rgba(0,0,0,.4), 0 0 0 1px color-mix(in srgb,var(--acc) 25%,transparent);outline:none}
-  .card.active{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,var(--panel2));
-    box-shadow:0 0 0 1px var(--acc), 0 14px 30px rgba(0,0,0,.45)}
+    background:var(--panel2);box-shadow:0 12px 24px rgba(15,23,42,.12), 0 0 0 1px color-mix(in srgb,var(--acc) 25%,transparent);outline:none}
+  .card.active{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,#fff);
+    box-shadow:0 0 0 1px var(--acc), 0 14px 28px rgba(15,23,42,.14)}
   .card .cn{display:flex;align-items:center;gap:9px}
   .card .ic{font-size:17px;filter:saturate(1.1)}
   .card .nm{font-weight:650;font-size:13.5px;letter-spacing:.1px}
@@ -116,7 +116,7 @@
     border-radius:999px;padding:6px 12px;cursor:default;display:flex;align-items:center;gap:7px}
   .pill b{font-weight:650}
   .pill.link{cursor:pointer;transition:.14s}
-  .pill.link:hover{border-color:var(--border2);background:rgba(255,255,255,.09)}
+  .pill.link:hover{border-color:var(--border2);background:rgba(15,23,42,.05)}
 
   /* ---------- detail panel ---------- */
   .detail-col{position:sticky;top:96px}
@@ -130,16 +130,16 @@
   .detail .sec{margin:16px 0 0}
   .detail .sec h4{margin:0 0 8px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--faint);font-weight:700}
   .detail ul{margin:0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:8px}
-  .detail li{font-size:13.3px;color:#cdd7e4;position:relative;padding-left:18px;line-height:1.5}
+  .detail li{font-size:13.3px;color:#334155;position:relative;padding-left:18px;line-height:1.5}
   .detail li::before{content:"";position:absolute;left:2px;top:8px;width:6px;height:6px;border-radius:50%;background:var(--acc,#4b5a6e)}
-  .detail code, .files code{font-family:var(--mono);font-size:12px;color:#bfe9ff;background:rgba(56,189,248,.10);
-    border:1px solid rgba(56,189,248,.16);border-radius:6px;padding:1px 6px;white-space:nowrap}
+  .detail code, .files code{font-family:var(--mono);font-size:12px;color:#0369a1;background:rgba(2,132,199,.09);
+    border:1px solid rgba(2,132,199,.20);border-radius:6px;padding:1px 6px;white-space:nowrap}
   .files{display:flex;flex-direction:column;gap:6px}
-  .files code{color:#d8e2ee;background:var(--panel);border-color:var(--border);white-space:normal;word-break:break-word;padding:6px 9px}
+  .files code{color:#334155;background:var(--panel);border-color:var(--border);white-space:normal;word-break:break-word;padding:6px 9px}
   .chips{display:flex;flex-wrap:wrap;gap:8px}
   .chip{font-size:12px;border:1px solid var(--border2);background:var(--panel);border-radius:999px;padding:5px 11px;
     cursor:pointer;color:var(--ink);font-family:inherit;transition:.14s;display:flex;align-items:center;gap:6px}
-  .chip:hover{background:rgba(255,255,255,.09);transform:translateY(-1px)}
+  .chip:hover{background:rgba(15,23,42,.05);transform:translateY(-1px)}
   .chip .cdot{width:8px;height:8px;border-radius:50%}
   .detail .empty{color:var(--muted);font-size:13.5px}
   .detail .empty b{color:var(--ink)}
@@ -189,16 +189,16 @@
 
 const LAYERS = [
   { id:"client",  name:"Client Layer",           sub:"iOS · SwiftUI (native)",
-    acc:"var(--client)", color:"#38bdf8",
+    acc:"var(--client)", color:"#0284c7",
     blurb:"The native app. Views stay dumb; ViewModels fetch + derive; one @Observable AppState is the single source of truth; every network call goes through one actor." },
   { id:"backend", name:"API / Backend Layer",     sub:"Python 3.11 · FastAPI · Railway",
-    acc:"var(--backend)", color:"#34d399",
+    acc:"var(--backend)", color:"#059669",
     blurb:"Async-first HTTP surface. Endpoints dispatch to a service layer that owns caching + dedup; thin integrations wrap upstreams; a Postgres-backed task queue runs the heavy AI work off the request path." },
   { id:"ai",      name:"AI / Intelligence Layer", sub:"Multi-agent research · Gemini · Voice",
-    acc:"var(--ai)", color:"#a78bfa",
+    acc:"var(--ai)", color:"#7c3aed",
     blurb:"Turns raw data into investor-voice research. A two-stage agent collects data via function-calling tools, then narrates per persona. Deterministic scoring, RAG, and voice generation live here." },
   { id:"data",    name:"Data Layer",              sub:"Supabase · FMP · external feeds",
-    acc:"var(--data)", color:"#fbbf24",
+    acc:"var(--data)", color:"#d97706",
     blurb:"Supabase Postgres (RLS) is the system of record + cache tier + content store, with pgvector for RAG and Storage for audio. FMP is the primary market-data source, alongside macro/crypto/social feeds." },
 ];
 
@@ -565,7 +565,7 @@ function select(id){
     <div class="eyebrow">${l.name} · ${l.sub}</div>
     <h2>${c.icon} ${c.name}</h2>
     <div class="tag">${c.tag}</div>
-    <p style="font-size:13.6px;color:#d7e0ec;margin:0 0 4px">${c.role}</p>
+    <p style="font-size:13.6px;color:#334155;margin:0 0 4px">${c.role}</p>
     <div class="sec"><h4>Responsibilities</h4><ul>${pts}</ul></div>
     <div class="sec"><h4>Key paths</h4><div class="files">${files}</div></div>
     ${chips?`<div class="sec"><h4>Connects to</h4><div class="chips">${chips}</div></div>`:""}

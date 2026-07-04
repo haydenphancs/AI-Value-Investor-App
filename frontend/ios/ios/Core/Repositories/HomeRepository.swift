@@ -521,17 +521,17 @@ final class MockHomeRepository: HomeRepositoryProtocol {
     // one entry is negative to preview the red badge.
 
     static let themes: [TrendingTheme] = [
-        TrendingTheme(slug: "silicon-rush", title: "The Silicon Rush", count: "8 stocks", changeText: "+3.4%",
+        TrendingTheme(slug: "silicon-rush", title: "Silicon Rush", count: "8 stocks", changeText: "+3.4%",
                       isPositive: true, imageUrl: nil, accent: Color(hex: "22D3EE")),
-        TrendingTheme(slug: "modern-battlefield", title: "The Modern Battlefield", count: "7 stocks", changeText: "+1.2%",
+        TrendingTheme(slug: "modern-battlefield", title: "Modern Battlefield", count: "7 stocks", changeText: "+1.2%",
                       isPositive: true, imageUrl: nil, accent: Color(hex: "FBBF24")),
         TrendingTheme(slug: "the-new-oil", title: "The New Oil", count: "5 stocks", changeText: "-1.2%",
                       isPositive: false, imageUrl: nil, accent: Color(hex: "FB923C")),
-        TrendingTheme(slug: "robot-workforce", title: "The Robot Workforce", count: "6 stocks", changeText: "+4.2%",
+        TrendingTheme(slug: "robot-workforce", title: "Robot Workforce", count: "6 stocks", changeText: "+4.2%",
                       isPositive: true, imageUrl: nil, accent: Color(hex: "C084FC")),
         TrendingTheme(slug: "hacking-health", title: "Hacking Human Health", count: "6 stocks", changeText: "+2.7%",
                       isPositive: true, imageUrl: nil, accent: Color(hex: "2DD4BF")),
-        TrendingTheme(slug: "cyber-wars", title: "The Cyber Wars", count: "6 stocks", changeText: "+5.1%",
+        TrendingTheme(slug: "cyber-wars", title: "Cyber Wars", count: "6 stocks", changeText: "+5.1%",
                       isPositive: true, imageUrl: nil, accent: Color(hex: "34D399")),
     ]
 }

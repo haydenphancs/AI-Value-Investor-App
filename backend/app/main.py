@@ -37,12 +37,22 @@ async def lifespan(app: FastAPI):
         logger.info("Supabase connection OK")
         # Clear whale profile cache on deploy so code changes take effect
         # immediately without needing manual force_refresh per whale.
+        # NOTE: whale_id is uuid — .neq("whale_id", "") used to throw 22P02
+        # here (PostgREST can't cast "" to uuid), so the wipe silently
+        # no-op'd on every deploy. IS NOT NULL matches every row and casts
+        # cleanly on a uuid column.
         try:
             sb = get_supabase()
-            sb.table("whale_profile_cache").delete().neq("whale_id", "").execute()
+            sb.table("whale_profile_cache").delete().not_.is_(
+                "whale_id", "null"
+            ).execute()
             logger.info("Cleared whale_profile_cache on startup")
         except Exception as e:
-            logger.warning("Failed to clear whale_profile_cache: %s", e)
+            logger.error(
+                "Startup whale_profile_cache wipe FAILED (stale cached "
+                "profiles will replay until TTL/hydration): %s: %s",
+                type(e).__name__, e,
+            )
     else:
         logger.warning("Supabase connection FAILED — check configuration")
 

@@ -781,7 +781,9 @@ class SignalsService:
                 # sentinel to stay distinct). Same rule the card counts by.
                 wmap[wid] = {
                     "name": w.get("name") or "",
-                    "firm": w.get("firm_name") or "",
+                    # strip: a whitespace-only firm (bad row edit) must fall
+                    # through to the "13F fund" subtitle, not render blank.
+                    "firm": (w.get("firm_name") or "").strip(),
                     "cik": cik or f"nocik:{wid}",
                 }
                 hd = w.get("last_hydrated_at")

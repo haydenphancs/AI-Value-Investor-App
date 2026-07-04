@@ -797,6 +797,9 @@ class TrackingViewModel: ObservableObject {
 
     func toggleFollowWhale(_ whale: TrendingWhale) {
         let newFollowing = !whale.isFollowing
+        // Field-by-field rebuild — every TrendingWhale field must be threaded
+        // through or it silently disappears from the row (firmName vanished
+        // here on follow tap before it was added).
         let updatedWhale = TrendingWhale(
             id: whale.id,
             name: whale.name,
@@ -806,7 +809,8 @@ class TrackingViewModel: ObservableObject {
             isFollowing: newFollowing,
             title: whale.title,
             description: whale.description,
-            recentTradeCount: whale.recentTradeCount
+            recentTradeCount: whale.recentTradeCount,
+            firmName: whale.firmName
         )
 
         // Update isFollowing in-place across all lists
@@ -855,7 +859,8 @@ class TrackingViewModel: ObservableObject {
                 isFollowing: following,
                 title: whale.title,
                 description: whale.description,
-                recentTradeCount: whale.recentTradeCount
+                recentTradeCount: whale.recentTradeCount,
+                firmName: whale.firmName
             )
         }
 
@@ -878,6 +883,9 @@ class TrackingViewModel: ObservableObject {
                 trackedWhales.append(makeUpdated(whale, following: true))
             } else {
                 let title = userInfo["whaleTitle"] as? String ?? ""
+                let firm = (userInfo["whaleFirmName"] as? String).flatMap {
+                    $0.isEmpty ? nil : $0
+                }
                 let newWhale = TrendingWhale(
                     id: whaleId,
                     name: whaleName,
@@ -885,7 +893,8 @@ class TrackingViewModel: ObservableObject {
                     avatarName: "",
                     followersCount: 0,
                     isFollowing: true,
-                    title: title
+                    title: title,
+                    firmName: firm
                 )
                 trackedWhales.append(newWhale)
             }

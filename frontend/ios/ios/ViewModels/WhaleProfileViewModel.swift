@@ -77,29 +77,14 @@ class WhaleProfileViewModel: ObservableObject {
     }
 
     private func updateFollowStatus() {
+        // Mutate isFollowing in place — a field-by-field WhaleProfile
+        // reconstruction here silently dropped every defaulted field it
+        // forgot (firmName vanished from the header on follow-state sync).
         guard var currentProfile = profile else { return }
         let isFollowing = whaleService.isFollowing(whaleId)
 
         if currentProfile.isFollowing != isFollowing {
-            currentProfile = WhaleProfile(
-                id: currentProfile.id,
-                name: currentProfile.name,
-                title: currentProfile.title,
-                description: currentProfile.description,
-                avatarURL: currentProfile.avatarURL,
-                riskProfile: currentProfile.riskProfile,
-                portfolioValue: currentProfile.portfolioValue,
-                ytdReturn: currentProfile.ytdReturn,
-                sectorExposure: currentProfile.sectorExposure,
-                currentHoldings: currentProfile.currentHoldings,
-                recentTradeGroups: currentProfile.recentTradeGroups,
-                recentTrades: currentProfile.recentTrades,
-                behaviorSummary: currentProfile.behaviorSummary,
-                sentimentSummary: currentProfile.sentimentSummary,
-                isFollowing: isFollowing,
-                dataSource: currentProfile.dataSource,
-                returnLabel: currentProfile.returnLabel
-            )
+            currentProfile.isFollowing = isFollowing
             profile = currentProfile
         }
     }
@@ -120,28 +105,11 @@ class WhaleProfileViewModel: ObservableObject {
                 )
                 var loadedProfile = dto.toWhaleProfile()
 
-                // Merge local follow state from WhaleService
+                // Merge local follow state from WhaleService — in-place
+                // mutation, NOT reconstruction (see updateFollowStatus).
                 let isFollowing = self.whaleService.isFollowing(self.whaleId)
                 if loadedProfile.isFollowing != isFollowing {
-                    loadedProfile = WhaleProfile(
-                        id: loadedProfile.id,
-                        name: loadedProfile.name,
-                        title: loadedProfile.title,
-                        description: loadedProfile.description,
-                        avatarURL: loadedProfile.avatarURL,
-                        riskProfile: loadedProfile.riskProfile,
-                        portfolioValue: loadedProfile.portfolioValue,
-                        ytdReturn: loadedProfile.ytdReturn,
-                        sectorExposure: loadedProfile.sectorExposure,
-                        currentHoldings: loadedProfile.currentHoldings,
-                        recentTradeGroups: loadedProfile.recentTradeGroups,
-                        recentTrades: loadedProfile.recentTrades,
-                        behaviorSummary: loadedProfile.behaviorSummary,
-                        sentimentSummary: loadedProfile.sentimentSummary,
-                        isFollowing: isFollowing,
-                        dataSource: loadedProfile.dataSource,
-                        returnLabel: loadedProfile.returnLabel
-                    )
+                    loadedProfile.isFollowing = isFollowing
                 }
 
                 self.profile = loadedProfile
@@ -174,42 +142,27 @@ class WhaleProfileViewModel: ObservableObject {
     // MARK: - Actions
 
     func toggleFollow() {
-        guard let currentProfile = profile else { return }
-        let newFollowState = !currentProfile.isFollowing
+        guard var updatedProfile = profile else { return }
+        let newFollowState = !updatedProfile.isFollowing
 
-        // Optimistic UI update
-        let updatedProfile = WhaleProfile(
-            id: currentProfile.id,
-            name: currentProfile.name,
-            title: currentProfile.title,
-            description: currentProfile.description,
-            avatarURL: currentProfile.avatarURL,
-            riskProfile: currentProfile.riskProfile,
-            portfolioValue: currentProfile.portfolioValue,
-            ytdReturn: currentProfile.ytdReturn,
-            sectorExposure: currentProfile.sectorExposure,
-            currentHoldings: currentProfile.currentHoldings,
-            recentTradeGroups: currentProfile.recentTradeGroups,
-            recentTrades: currentProfile.recentTrades,
-            behaviorSummary: currentProfile.behaviorSummary,
-            sentimentSummary: currentProfile.sentimentSummary,
-            isFollowing: newFollowState,
-            dataSource: currentProfile.dataSource,
-            returnLabel: currentProfile.returnLabel
-        )
+        // Optimistic UI update — in-place mutation, NOT reconstruction
+        // (see updateFollowStatus).
+        updatedProfile.isFollowing = newFollowState
         profile = updatedProfile
 
         // Sync to backend via WhaleService (handles optimistic + revert)
         whaleService.toggleFollow(whaleId)
 
-        // Notify TrackingViewModel so the followed whales row stays in sync
+        // Notify TrackingViewModel so the followed whales row stays in sync.
+        // Includes the firm so a fallback-built row keeps its firm line.
         NotificationCenter.default.post(
             name: .whaleFollowStateChanged,
             object: nil,
             userInfo: [
                 "whaleId": whaleId,
-                "whaleName": currentProfile.name,
-                "whaleTitle": currentProfile.title,
+                "whaleName": updatedProfile.name,
+                "whaleTitle": updatedProfile.title,
+                "whaleFirmName": updatedProfile.firmName ?? "",
                 "isFollowing": newFollowState
             ]
         )

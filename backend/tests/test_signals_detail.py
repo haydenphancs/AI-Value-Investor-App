@@ -158,6 +158,31 @@ def test_whale_rows_subtitle_carries_firm_name(monkeypatch):
     assert by_name["Renaissance Technologies"].subtitle == "13F fund"
 
 
+def test_whale_rows_firm_edge_cases_whitespace_and_unicode(monkeypatch):
+    # Whitespace-only firm (bad row edit) → generic fallback, never a blank
+    # subtitle; ampersand firm names (live registry data) pass through intact.
+    tables = {
+        "whales": [
+            {"id": "w1", "name": "Broken Row", "cik": "C1", "firm_name": "   ",
+             "last_hydrated_at": "2026-03-31T00:00:00Z"},
+            {"id": "w2", "name": "Duan Yongping", "cik": "C2",
+             "firm_name": "H&H International Investment",
+             "last_hydrated_at": "2026-03-31T00:00:00Z"},
+        ],
+        "whale_holdings": [
+            {"whale_id": "w1", "ticker": "TSM", "allocation": 1.0, "change_percent": 0.5},
+            {"whale_id": "w2", "ticker": "TSM", "allocation": 2.0, "change_percent": 1.1},
+        ],
+        "whale_trades": [],
+    }
+    monkeypatch.setattr(ssvc, "get_supabase", lambda: _FakeSupabase(tables))
+    rows, _ = _svc()._detail_whale_rows("TSM")
+
+    by_name = {r.name: r for r in rows}
+    assert by_name["Broken Row"].subtitle == "13F fund"
+    assert by_name["Duan Yongping"].subtitle == "H&H International Investment"
+
+
 def test_whale_rows_empty_when_nothing_adding(monkeypatch):
     tables = {
         "whales": [{"id": "w1", "name": "Citadel", "last_hydrated_at": "2026-03-31T00:00:00Z"}],

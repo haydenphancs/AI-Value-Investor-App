@@ -60,6 +60,24 @@ class CompanyProfileResponse(BaseModel):
     sector_performance: float = 0.0
 
 
+class StockOverviewCoreResponse(BaseModel):
+    """Fast subset for GET /stocks/{ticker}/overview/core — price + chart + name.
+
+    Served for the instant first paint of the stock detail Overview tab: the
+    client renders the price header + chart from this the moment it arrives, then
+    the full /overview call (fired in parallel) supersedes it with every section.
+    Field names/types mirror StockOverviewResponse exactly so iOS reuses its
+    chart-point decode. See stock_overview_service.get_overview_core.
+    """
+    symbol: str
+    company_name: str
+    current_price: float
+    price_change: float
+    price_change_percent: float
+    market_status: MarketStatusResponse
+    chart_data: List[Dict[str, Any]]
+
+
 class StockOverviewResponse(BaseModel):
     """Top-level response for GET /stocks/{ticker}/overview."""
     symbol: str

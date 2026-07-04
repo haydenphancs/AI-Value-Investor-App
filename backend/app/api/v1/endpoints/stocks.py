@@ -19,7 +19,7 @@ from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
 from app.schemas.stock import StockSearchResult
-from app.schemas.stock_overview import StockOverviewResponse
+from app.schemas.stock_overview import StockOverviewResponse, StockOverviewCoreResponse
 from app.schemas.analyst import AnalystAnalysisResponse
 from app.schemas.sentiment import SentimentAnalysisResponse
 from app.schemas.technical_analysis import (
@@ -403,6 +403,40 @@ async def get_stock_overview(
         raise HTTPException(
             status_code=502,
             detail=f"Stock overview service unavailable for {ticker}",
+        )
+
+
+@router.get("/{ticker}/overview/core", response_model=StockOverviewCoreResponse)
+async def get_stock_overview_core(
+    ticker: str,
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
+    extended_hours: bool = Query(False, alias="extended_hours"),
+):
+    """
+    Fast first-paint subset of the Overview tab — price + chart + company name.
+
+    Returns in ~0.5s (reuses only the live quote + intraday chart + profile name),
+    so the stock detail screen paints the price header + chart instantly. The
+    client fires the full `/overview` in parallel; when it lands it supersedes this
+    with every Overview section. Public (no auth). Distinct path depth from
+    `/overview`, so there is no route-order conflict.
+    """
+    ticker = ticker.upper()
+    try:
+        service = get_stock_overview_service()
+        return await service.get_overview_core(ticker, chart_range=chart_range, interval=interval, extended_hours=extended_hours)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Stock overview core failed for {ticker}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Stock overview core service unavailable for {ticker}",
         )
 
 

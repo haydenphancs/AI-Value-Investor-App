@@ -46,6 +46,7 @@ enum APIEndpoint: Sendable {
     case searchStocks(query: String, limit: Int)
     case getStock(ticker: String)
     case getStockOverview(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false)
+    case getStockOverviewCore(ticker: String, range: String, interval: String? = nil, extendedHours: Bool = false)
     case getStockQuote(ticker: String)
     case getStockFundamentals(ticker: String)
     case getStockNews(ticker: String, limit: Int)
@@ -208,6 +209,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/stocks/search"
         case .getStock(let ticker):
             return "/api/v1/stocks/\(ticker)"
+        case .getStockOverviewCore(let ticker, _, _, _):
+            return "/api/v1/stocks/\(ticker)/overview/core"
         case .getStockOverview(let ticker, _, _, _):
             return "/api/v1/stocks/\(ticker)/overview"
         case .prewarmReportCollection(let ticker):
@@ -467,7 +470,8 @@ enum APIEndpoint: Sendable {
         case .getCommodityNews(_, let limit):
             return ["limit": String(limit)]
 
-        case .getStockOverview(_, let range, let interval, let extendedHours):
+        case .getStockOverview(_, let range, let interval, let extendedHours),
+             .getStockOverviewCore(_, let range, let interval, let extendedHours):
             var params = ["range": range]
             if let interval = interval { params["interval"] = interval }
             if extendedHours { params["extended_hours"] = "true" }
@@ -613,7 +617,7 @@ enum APIEndpoint: Sendable {
         case .signIn, .signUp, .refreshToken:
             return false
         // Stock/crypto/commodity endpoints are public on the backend
-        case .searchStocks, .getStock, .getStockOverview, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
+        case .searchStocks, .getStock, .getStockOverview, .getStockOverviewCore, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
              .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .prewarmReportCollection, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getIndexNews, .enrichIndexNews, .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getCommodityDetail, .getCommodityNews, .enrichCommodityNews:
             return false
@@ -669,6 +673,8 @@ enum APIEndpoint: Sendable {
             return 45 // 45 seconds for technical indicator computation
         case .getStockOverview:
             return 60 // 1 minute for aggregated overview (many FMP calls)
+        case .getStockOverviewCore:
+            return 20 // fast subset (quote + chart + profile); surface a hang quickly
         case .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return 60 // 1 minute for aggregated detail
         case .getCryptoSentiment:

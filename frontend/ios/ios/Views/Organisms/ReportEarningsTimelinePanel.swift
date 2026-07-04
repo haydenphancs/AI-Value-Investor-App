@@ -26,21 +26,33 @@ struct ReportEarningsTimelinePanel: View {
     @Binding var selectedIndex: Int?
 
     @State private var showPrice = true
+    @State private var showFCF = false
+
+    /// Only offer the FCF toggle when the report actually carries FCF (actuals-only;
+    /// absent on older cached reports) — a dead toggle would just confuse.
+    private var hasAnyFCF: Bool {
+        timeline.contains { ($0.fcfLabel ?? "N/A") != "N/A" }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: AppSpacing.sm) {
                 Spacer()
+                if hasAnyFCF {
+                    EarningsPriceToggle(isEnabled: $showFCF, label: "FCF",
+                                        activeColor: AppColors.profitFCFMargin)
+                }
                 EarningsPriceToggle(isEnabled: $showPrice)
             }
 
-            // Tight gap below the Price toggle. The chart's top headroom + the
+            // Tight gap below the toggles. The chart's top headroom + the
             // inspect popup (pushed down via popupCenterY) keep the popup from
-            // crowding the button despite the smaller gap.
+            // crowding the buttons despite the smaller gap.
             EarningsTimelineChart(
                 timeline: timeline,
                 dailyPrices: dailyPrices,
                 showPrice: showPrice,
+                showFCF: showFCF && hasAnyFCF,
                 selectedIndex: $selectedIndex
             )
             .padding(.top, AppSpacing.xxs)
@@ -56,6 +68,9 @@ struct ReportEarningsTimelinePanel: View {
         HStack(spacing: AppSpacing.lg) {
             legendItem(color: AppColors.primaryBlue, shape: .bar, label: "Revenue")
             legendItem(color: AppColors.accentYellow, shape: .dot, label: "EPS")
+            if showFCF && hasAnyFCF {
+                legendItem(color: AppColors.profitFCFMargin, shape: .line, label: "FCF")
+            }
             if showPrice {
                 legendItem(color: AppColors.accentCyan, shape: .line, label: "Price")
             }

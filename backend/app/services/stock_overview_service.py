@@ -8,6 +8,7 @@ helper functions for return calculations and snapshot ratings.
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -28,6 +29,7 @@ from app.schemas.stock_overview import (
     SectorIndustryResponse,
     SnapshotItemResponse,
     SnapshotMetricResponse,
+    StockOverviewCoreResponse,
     StockOverviewResponse,
 )
 from app.services.sector_benchmark_service import _FMP_SECTOR_MAP
@@ -158,14 +160,21 @@ def _pct(value: Optional[float], decimals: int = 2) -> str:
 
 
 def _safe_float(d: Dict, key: str, default: float = 0.0) -> float:
-    """Safely extract a float from a dict."""
+    """Safely extract a FINITE float from a dict.
+
+    Non-finite (NaN/Inf) is rejected → the default. A NaN/Inf reaching a REQUIRED
+    response Double (current_price / price_change / …) would serialize as a
+    non-standard JSON ``NaN``/``Infinity`` token and crash the iOS JSONDecoder on
+    the whole response. Guarding here protects BOTH the full ``/overview`` and the
+    fast-core price extraction (both route price/change/etc. through this helper)."""
     v = d.get(key)
     if v is None:
         return default
     try:
-        return float(v)
+        f = float(v)
     except (ValueError, TypeError):
         return default
+    return f if math.isfinite(f) else default
 
 
 # ── Return computation helpers (same as etf_service) ─────────────
@@ -601,25 +610,110 @@ class StockOverviewService:
 
     # ── Volatile: live intraday data (120s response-level cache) ──
 
+    async def get_overview_core(
+        self,
+        ticker: str,
+        chart_range: str = "3M",
+        interval: Optional[str] = None,
+        extended_hours: bool = False,
+    ) -> StockOverviewCoreResponse:
+        """Fast subset for the instant first paint — price + chart + company name.
+
+        Reuses the FAST paths only: ``_get_volatile`` (live quote + intraday chart)
+        and ``get_company_profile`` (company name). Deliberately does NOT touch
+        ``_get_fundamentals`` / ``get_historical_prices`` / snapshot services / the
+        IPO fetch — those are the 2–5s bottleneck the full ``/overview`` bundles.
+
+        Chart: only INTRADAY ranges (1D/1W) carry a chart in core (``fast_only=True``);
+        daily/5Y/ALL yield ``chart_data=[]`` and the parallel full ``/overview`` call
+        supplies them — so core NEVER pays the slow historical fetch for ANY range
+        (including 5Y/ALL). The default open is 1D (intraday) → core carries a real
+        chart. Never raises on a partial upstream failure — degrades field-by-field."""
+        ticker = ticker.upper()
+        core_key = (
+            f"stock_overview_core:{ticker}:{chart_range}:{interval or 'default'}:{extended_hours}"
+        )
+        cached = _cache_get(core_key, ttl=_VOLATILE_TTL)
+        if cached is not None:
+            return cached
+
+        vol, profile = await asyncio.gather(
+            self._get_volatile(ticker, chart_range, interval, extended_hours, fast_only=True),
+            self.fmp.get_company_profile(ticker),
+            return_exceptions=True,
+        )
+        if isinstance(vol, Exception):
+            logger.warning("Overview core volatile fetch failed for %s: %s", ticker, vol)
+            vol = {}
+        if isinstance(profile, Exception):
+            logger.warning("Overview core profile fetch failed for %s: %s", ticker, profile)
+            profile = {}
+        profile = profile or {}
+        quote = (vol.get("quote") or {}) if isinstance(vol, dict) else {}
+
+        # Same price extraction as the full builder (_build_full_response).
+        price = _safe_float(quote, "price") or _safe_float(profile, "price")
+        change = _safe_float(quote, "change") or _safe_float(profile, "changes")
+        change_pct = (
+            _safe_float(quote, "changePercentage")
+            or _safe_float(quote, "changesPercentage")
+            or _safe_float(profile, "changePercentage")
+            or _safe_float(profile, "changesPercentage")
+        )
+        company_name = profile.get("companyName") or quote.get("name") or ticker
+        # NEVER slice from stock_historical here — that requires the slow bundle.
+        chart_data = (vol.get("chart_data") if isinstance(vol, dict) else None) or []
+
+        response = StockOverviewCoreResponse(
+            symbol=ticker,
+            company_name=company_name,
+            current_price=price,
+            price_change=change,
+            price_change_percent=change_pct,
+            market_status=_get_market_status(),
+            chart_data=chart_data,
+        )
+        _cache_set(core_key, response)
+        return response
+
     async def _get_volatile(
         self, ticker: str, chart_range: str, interval: str, extended_hours: bool,
+        fast_only: bool = False,
     ) -> Dict[str, Any]:
-        """Fetch live quote + chart data (no persistent caching)."""
+        """Fetch live quote + chart data (no persistent caching).
+
+        ``fast_only`` (the instant-first-paint core path) fetches the chart ONLY
+        for genuinely-fast INTRADAY ranges (1D/1W → 5min/1hour). For daily/weekly/
+        monthly ranges (3M/6M/1Y and — critically — 5Y and ALL) it returns
+        ``chart_data=None`` so the core NEVER pays the slow historical fetch
+        (5Y = a multi-year daily pull; ALL = up to 5 sequential paginated pulls via
+        ``_fetch_all_daily``). The full ``/overview`` supplies those charts."""
         quote_task = self.fmp.get_stock_price_quote(ticker)
 
-        from app.services.chart_helper import fetch_chart_data, resolve_interval
+        from app.services.chart_helper import (
+            fetch_chart_data,
+            resolve_interval,
+            INTRADAY_INTERVALS,
+        )
         resolved = resolve_interval(chart_range, interval)
 
         results = await asyncio.gather(quote_task, return_exceptions=True)
         quote = results[0] if not isinstance(results[0], Exception) else {}
 
         # Chart data
-        if resolved != "daily" or chart_range == "ALL":
+        if fast_only:
+            # Only the fast intraday chart. 5Y (weekly) / ALL (monthly) / daily all
+            # require the slow historical bundle → skip here (full /overview fills them).
+            want_chart = resolved in INTRADAY_INTERVALS
+        else:
+            want_chart = resolved != "daily" or chart_range == "ALL"
+
+        if want_chart:
             chart_data = await fetch_chart_data(
                 self.fmp, ticker, chart_range, interval, extended_hours=extended_hours,
             )
         else:
-            chart_data = None  # Will be sliced from fundamental stock_historical
+            chart_data = None  # Will be sliced from fundamental stock_historical (full path)
 
         return {"quote": quote, "chart_data": chart_data}
 

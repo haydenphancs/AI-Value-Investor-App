@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 3Py1YesKnc7NOq9mbWAsYIblWchxSMADSfSnqSeDVbw50oj3sTeI0Y7NmYsNgig
+\restrict DINMpac2sfPJdhHuPY8my9vNEKpwYoRYUQkJmCU630Kgtejf6OmZVkbImDF5MBc
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -5069,6 +5069,61 @@ CREATE TABLE public.ticker_report_cache (
 
 
 --
+-- Name: trending_themes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.trending_themes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    slug text NOT NULL,
+    category text NOT NULL,
+    title text NOT NULL,
+    image_url text,
+    accent_hex text DEFAULT '22D3EE'::text NOT NULL,
+    tickers text[] DEFAULT '{}'::text[] NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    sort_order integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    subtitle text
+);
+
+
+--
+-- Name: TABLE trending_themes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.trending_themes IS 'Server-driven Home "Emerging Frontiers" theme cards. Edit rows to change cards/tickers/images with no app release.';
+
+
+--
+-- Name: COLUMN trending_themes.category; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.category IS 'Editorial grouping (the "boring name", e.g. "AI & Semiconductors"). Not sent to the client.';
+
+
+--
+-- Name: COLUMN trending_themes.accent_hex; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.accent_hex IS 'Card accent colour as a 6-digit hex WITHOUT a leading #, e.g. "22D3EE". iOS decodes via Color(hex:).';
+
+
+--
+-- Name: COLUMN trending_themes.tickers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.tickers IS 'Curated constituents. Backend serves ticker_count = cardinality(tickers) and avg daily % change; not sent verbatim.';
+
+
+--
+-- Name: COLUMN trending_themes.subtitle; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.subtitle IS 'Editorial tagline shown under the title on the theme detail hero. Editable in Supabase; no app release.';
+
+
+--
 -- Name: user_book_progress; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5538,6 +5593,7 @@ CREATE TABLE public.whales (
     associated_ticker text,
     return_source text DEFAULT ''::text,
     return_label text DEFAULT ''::text,
+    firm_name text,
     CONSTRAINT whales_followers_count_nonneg CHECK ((followers_count >= 0)),
     CONSTRAINT whales_portfolio_value_nonneg CHECK (((portfolio_value IS NULL) OR (portfolio_value >= (0)::numeric)))
 );
@@ -5583,6 +5639,13 @@ COMMENT ON COLUMN public.whales.fmp_name IS 'Exact name for FMP congressional tr
 --
 
 COMMENT ON COLUMN public.whales.last_hydrated_at IS 'Timestamp of last successful hydration run';
+
+
+--
+-- Name: COLUMN whales.firm_name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.whales.firm_name IS 'Firm a person-fronted whale runs (e.g. "Bridgewater Associates" for Ray Dalio). NULL for institutions/politicians.';
 
 
 --
@@ -6811,6 +6874,22 @@ ALTER TABLE ONLY public.ticker_news_cache
 
 ALTER TABLE ONLY public.ticker_report_cache
     ADD CONSTRAINT ticker_report_cache_pkey PRIMARY KEY (ticker, persona);
+
+
+--
+-- Name: trending_themes trending_themes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trending_themes
+    ADD CONSTRAINT trending_themes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: trending_themes trending_themes_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trending_themes
+    ADD CONSTRAINT trending_themes_slug_key UNIQUE (slug);
 
 
 --
@@ -8250,6 +8329,20 @@ CREATE INDEX idx_ticker_report_cache_cached_at ON public.ticker_report_cache USI
 
 
 --
+-- Name: idx_trending_themes_active_sort; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_trending_themes_active_sort ON public.trending_themes USING btree (is_active, sort_order);
+
+
+--
+-- Name: idx_trending_themes_slug; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_trending_themes_slug ON public.trending_themes USING btree (slug);
+
+
+--
 -- Name: idx_user_book_progress_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8404,13 +8497,6 @@ CREATE INDEX idx_whales_category ON public.whales USING btree (category);
 
 
 --
--- Name: idx_whales_cik; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_whales_cik ON public.whales USING btree (cik) WHERE (cik IS NOT NULL);
-
-
---
 -- Name: idx_whales_last_hydrated_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8429,6 +8515,13 @@ CREATE INDEX idx_whales_name ON public.whales USING btree (name);
 --
 
 CREATE UNIQUE INDEX uq_whale_trade_groups_whale_date ON public.whale_trade_groups USING btree (whale_id, date);
+
+
+--
+-- Name: uq_whales_cik; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_whales_cik ON public.whales USING btree (cik) WHERE (cik IS NOT NULL);
 
 
 --
@@ -9105,13 +9198,6 @@ CREATE POLICY "Allow public read access" ON public.sector_benchmarks FOR SELECT 
 --
 
 CREATE POLICY "Allow service_role full access" ON public.sector_benchmarks TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: ticker_data_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.ticker_data_cache USING (true) WITH CHECK (true);
 
 
 --
@@ -10289,6 +10375,13 @@ CREATE POLICY study_schedules_update_own ON public.user_study_schedules FOR UPDA
 ALTER TABLE public.ticker_data_cache ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: ticker_data_cache ticker_data_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ticker_data_cache_service_all ON public.ticker_data_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: ticker_news_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -10319,6 +10412,26 @@ CREATE POLICY ticker_report_cache_public_read ON public.ticker_report_cache FOR 
 --
 
 CREATE POLICY ticker_report_cache_service_write ON public.ticker_report_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: trending_themes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.trending_themes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: trending_themes trending_themes_select_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY trending_themes_select_all ON public.trending_themes FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: trending_themes trending_themes_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY trending_themes_service_all ON public.trending_themes TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -10728,6 +10841,20 @@ ALTER TABLE storage.buckets_analytics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage.buckets_vectors ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: objects home_theme_media_public_read; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY home_theme_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'home-theme-media'::text));
+
+
+--
+-- Name: objects home_theme_media_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY home_theme_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'home-theme-media'::text)) WITH CHECK ((bucket_id = 'home-theme-media'::text));
+
+
+--
 -- Name: objects journey_media_public_read; Type: POLICY; Schema: storage; Owner: -
 --
 
@@ -10855,5 +10982,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 3Py1YesKnc7NOq9mbWAsYIblWchxSMADSfSnqSeDVbw50oj3sTeI0Y7NmYsNgig
+\unrestrict DINMpac2sfPJdhHuPY8my9vNEKpwYoRYUQkJmCU630Kgtejf6OmZVkbImDF5MBc
 

@@ -14,6 +14,10 @@ class TickerDetailViewModel: ObservableObject {
     // MARK: - Published Properties
 
     @Published var tickerData: TickerDetailData?
+    /// Fast price+chart snapshot from `/overview/core`, painted the instant it
+    /// arrives so the screen isn't blank while the full `tickerData` loads. Once
+    /// `tickerData` (full) lands it supersedes this (the view prefers `tickerData`).
+    @Published var coreData: TickerCoreData?
     @Published var newsArticles: [TickerNewsArticle] = []  // displayed (paginated)
     @Published var isNewsLoading: Bool = false
     @Published var hasMoreNews: Bool = false
@@ -181,16 +185,43 @@ class TickerDetailViewModel: ObservableObject {
                 try? await self.stockRepository.prewarmReportCollection(ticker: ticker)
             }
 
+            // Fast core (parallel with Phase 1): paint price + chart the instant it
+            // lands — reuses only the quote + intraday chart + profile, so it returns
+            // in ~0.5s instead of waiting for the full overview's slow historical
+            // aggregation. Guarded so a late core never overwrites the full model.
+            Task { [weak self] in
+                guard let self else { return }
+                let ext = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
+                guard let core = try? await self.stockRepository.getStockOverviewCore(
+                    ticker: ticker, range: self.selectedChartRange.rawValue,
+                    interval: self.chartSettings.selectedInterval.rawValue,
+                    extendedHours: ext
+                ) else { return }
+                if self.tickerData == nil {
+                    self.coreData = core.toCoreData()
+                    self.chartDataVersion += 1
+                }
+            }
+
             // Phase 1: Get price/chart data — show UI as soon as this arrives
             do {
                 let useExtendedHours = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
+                // Range the overview is fetched for, captured now (before the await).
+                let requestedRange = self.selectedChartRange
                 let response = try await self.stockRepository.getStockOverview(
-                    ticker: ticker, range: self.selectedChartRange.rawValue,
+                    ticker: ticker, range: requestedRange.rawValue,
                     interval: self.chartSettings.selectedInterval.rawValue,
                     extendedHours: useExtendedHours
                 )
                 self.tickerData = response.toDisplayModel()
                 self.chartDataVersion += 1
+                // If the user changed the range while the (slow) overview was loading
+                // — now possible because the fast-core chart is interactive — the
+                // overview's chart is for the OLD range. Re-fetch so the chart matches
+                // the currently-selected pill instead of silently reverting.
+                if self.selectedChartRange != requestedRange {
+                    await self.fetchChartData(ticker, range: self.selectedChartRange)
+                }
                 print("✅ TickerDetailVM: Overview loaded for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
             } catch {
                 print("⚠️ TickerDetailVM: Overview failed, falling back to separate calls: \(error)")
@@ -853,13 +884,22 @@ class TickerDetailViewModel: ObservableObject {
             let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString, interval: intervalString, extendedHours: useExtendedHours)
             let pricePoints = chartResponse.prices
             print("✅ TickerDetailVM: Got \(pricePoints.count) chart data points for \(ticker)")
-            if !pricePoints.isEmpty, var currentData = self.tickerData {
-                let previousCount = currentData.chartPricePoints.count
-                // Update chart prices in-place
-                currentData.chartPricePoints = pricePoints
-                self.tickerData = currentData
-                // Only reset viewport when new candles appeared (not just values updated)
-                if pricePoints.count != previousCount {
+            if !pricePoints.isEmpty {
+                if var currentData = self.tickerData {
+                    let previousCount = currentData.chartPricePoints.count
+                    // Update chart prices in-place
+                    currentData.chartPricePoints = pricePoints
+                    self.tickerData = currentData
+                    // Only reset viewport when new candles appeared (not just values updated)
+                    if pricePoints.count != previousCount {
+                        self.chartDataVersion += 1
+                    }
+                } else if var core = self.coreData {
+                    // Still on the fast-core placeholder (full overview not in yet):
+                    // keep its chart in sync with the selected range pill so a range
+                    // change during this window isn't silently dropped.
+                    core.chartPricePoints = pricePoints
+                    self.coreData = core
                     self.chartDataVersion += 1
                 }
             }

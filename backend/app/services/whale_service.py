@@ -340,18 +340,24 @@ class WhaleService:
         except Exception as e:
             logger.warning("Failed to fetch recent trade counts: %s", e)
 
+        # `x or ""` (NOT .get(k, "")) throughout: a NULL column arrives as an
+        # EXISTING key with value None, so .get's default never applies and an
+        # explicit None fails pydantic's `str` fields with a 500 (this exact
+        # trap broke /whales/activity for NULL avatar_url rows).
         response = [
             TrendingWhaleResponse(
                 id=str(w["id"]),
                 name=w["name"],
-                category=w.get("category", "investors"),
+                category=w.get("category") or "investors",
                 avatar_url=w.get("avatar_url"),
-                followers_count=w.get("followers_count", 0),
+                followers_count=w.get("followers_count") or 0,
                 is_following=str(w["id"]) in followed_ids,
-                title=w.get("title", ""),
-                description=w.get("description", ""),
+                title=w.get("title") or "",
+                description=w.get("description") or "",
                 recent_trade_count=trade_counts.get(str(w["id"]), 0),
-                firm_name=w.get("firm_name"),
+                # Blank/whitespace firm (bad row edit) → None so iOS
+                # `!firm.isEmpty` guards keep the firm line hidden, not blank.
+                firm_name=(w.get("firm_name") or "").strip() or None,
             )
             for w in whales
         ]
@@ -676,12 +682,14 @@ class WhaleService:
         )
         ytd_return = float(whale.get("ytd_return") or 0)
 
+        # `x or ""` not .get(k, ""): NULL columns arrive as existing keys with
+        # None — .get defaults never apply, and None fails the str fields.
         profile = WhaleProfileResponse(
             id=str(whale["id"]),
             name=whale["name"],
-            title=whale.get("title", ""),
-            description=whale.get("description", ""),
-            firm_name=whale.get("firm_name"),
+            title=whale.get("title") or "",
+            description=whale.get("description") or "",
+            firm_name=(whale.get("firm_name") or "").strip() or None,
             avatar_url=whale.get("avatar_url"),
             risk_profile=risk_label,
             portfolio_value=portfolio_value,
@@ -693,9 +701,9 @@ class WhaleService:
             behavior_summary=behavior,
             sentiment_summary=sentiment,
             is_following=is_following,
-            data_source=whale.get("data_source", ""),
-            return_source=whale.get("return_source", ""),
-            return_label=whale.get("return_label", ""),
+            data_source=whale.get("data_source") or "",
+            return_source=whale.get("return_source") or "",
+            return_label=whale.get("return_label") or "",
         )
 
         return profile
@@ -752,9 +760,14 @@ class WhaleService:
                 WhaleTradeGroupActivityResponse(
                     id=str(tg["id"]),
                     whale_id=str(tg["whale_id"]),
-                    entity_name=whale.get("name", "Unknown"),
-                    entity_avatar_name=whale.get("avatar_url", ""),
-                    entity_firm_name=whale.get("firm_name"),
+                    # `or`-form, NOT .get defaults: avatar_url is NULL for most
+                    # whales (sync/hydration never write it) — the key EXISTS
+                    # with None, .get's "" default is dead code, and None fails
+                    # the `str` field → one followed avatar-less whale 500'd
+                    # the ENTIRE activity feed.
+                    entity_name=whale.get("name") or "Unknown",
+                    entity_avatar_name=whale.get("avatar_url") or "",
+                    entity_firm_name=(whale.get("firm_name") or "").strip() or None,
                     category=whale.get("category"),
                     action=tg.get("net_action", "BOUGHT"),
                     trade_count=tg.get("trade_count", 0),

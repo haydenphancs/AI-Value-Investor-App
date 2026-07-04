@@ -410,6 +410,9 @@ class TrackingService:
 
         ticker_list = [t.upper() for t in watchlist_tickers]
         cutoff_iso = (datetime.now() - timedelta(days=7)).isoformat()
+        # Same 7-day window as a DATE string, to gate 13F rows on their own
+        # trade/filing date (see the backfill guard in the bucket loop).
+        cutoff_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
         sb = get_supabase()
         try:
@@ -438,6 +441,19 @@ class TrackingService:
             action = (row.get("action") or "").upper()
             if not ticker or action not in ("BOUGHT", "SOLD"):
                 continue
+            # BACKFILL GUARD (13F only): the query windows on created_at, but a
+            # newly added whale's FIRST hydration inserts months-old filings
+            # with created_at=now — without this, the "this week" alert would
+            # present May filings as this week's activity. A 13F row's `date`
+            # IS the filing date, so require it inside the same 7-day window.
+            # Congress rows (amount_range set) keep the created_at window:
+            # their `date` is the TRANSACTION date, which legitimately lags
+            # the disclosure that makes the trade newsworthy. Missing/blank
+            # date → keep (degrade to the old created_at-only behavior).
+            if not row.get("amount_range"):
+                trade_date = str(row.get("date") or "")[:10]
+                if trade_date and trade_date < cutoff_date:
+                    continue
             key = (ticker, action)
             bucket = buckets.setdefault(
                 key,
@@ -479,7 +495,9 @@ class TrackingService:
                     bucket["lead_whale_id"] = whale_id
                     bucket["lead_whale_name"] = whale.get("name")
                     bucket["lead_whale_avatar"] = whale.get("avatar_url")
-                    bucket["lead_whale_firm"] = whale.get("firm_name")
+                    bucket["lead_whale_firm"] = (
+                        (whale.get("firm_name") or "").strip() or None
+                    )
 
         # Second pass: group items by action → one rolled-up alert per action.
         action_groups: Dict[str, List[WhaleTradeItemResponse]] = {

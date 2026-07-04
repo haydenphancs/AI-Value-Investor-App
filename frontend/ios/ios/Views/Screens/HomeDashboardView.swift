@@ -30,6 +30,8 @@ struct HomeDashboardView: View {
     @State private var expandedSignalID: ExclusiveSignal.ID?
     /// A tapped whale/congress signal ticker → the per-ticker drill-down screen.
     @State private var signalDetailTarget: SignalDetailTarget?
+    /// A tapped Emerging Frontiers theme → its detail screen (hero + companies).
+    @State private var themeDetailTarget: ThemeDetailTarget?
 
     /// `repository == nil` → the live `HomeRepository` (the app default).
     /// Pass `MockHomeRepository()` for offline previews / tests.
@@ -96,6 +98,12 @@ struct HomeDashboardView: View {
             }
             .preferredColorScheme(.dark)
         }
+        .fullScreenCover(item: $themeDetailTarget) { target in
+            NavigationStack {
+                ThemeDetailView(slug: target.slug)
+            }
+            .preferredColorScheme(.dark)
+        }
     }
 
     // MARK: - Scrollable content
@@ -147,7 +155,7 @@ struct HomeDashboardView: View {
                     if !data.themes.isEmpty {
                         TrendingThemesSection(
                             themes: data.themes,
-                            onThemeTap: { _ in selectedTab = .research }
+                            onThemeTap: { themeDetailTarget = ThemeDetailTarget(slug: $0.slug) }
                         )
                     }
                 }
@@ -254,6 +262,12 @@ private struct SignalDetailTarget: Identifiable {
     let id = UUID()
     let kind: String        // "whale" | "congress"
     let symbol: String
+}
+
+/// A tapped Emerging Frontiers theme, presented as its detail screen.
+private struct ThemeDetailTarget: Identifiable {
+    let id = UUID()
+    let slug: String
 }
 
 #Preview {

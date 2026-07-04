@@ -23,6 +23,7 @@ from app.services.signals_service import get_signals_service
 from app.schemas.home import HomeFeedResponse
 from app.schemas.home_dashboard import HomeDashboardResponse
 from app.schemas.signals_detail import SignalTickerDetailResponse
+from app.schemas.themes_detail import ThemeDetailResponse
 from app.api.error_response import (
     error_response_from_exception,
     make_error_response,
@@ -99,3 +100,36 @@ async def get_signal_ticker_detail(kind: str, ticker: str):
             kind, ticker, type(e).__name__, e, exc_info=True,
         )
         return error_response_from_exception(e, ticker=ticker, step="signal_detail")
+
+
+@router.get("/themes/{slug}", response_model=ThemeDetailResponse)
+async def get_theme_detail(slug: str):
+    """Emerging Frontiers theme drill-down — the theme's hero (title / subtitle /
+    image) + its live constituent companies (price, daily %, market cap). Public
+    (no auth). Reads the `trending_themes` row (editable in Supabase → no app
+    release) and resolves its tickers to live quotes; the constituent list
+    degrades to empty on an FMP hiccup rather than failing the screen. A slug that
+    isn't an active theme → 404 THEME_NOT_FOUND.
+    """
+    if not slug or len(slug) > 100:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Invalid theme slug: {slug!r}",
+            details={"slug": slug},
+        )
+    try:
+        detail = await get_home_dashboard_service().get_theme_detail(slug)
+    except Exception as e:
+        logger.error(
+            "Theme detail failed (%s): %s: %s", slug, type(e).__name__, e, exc_info=True
+        )
+        return error_response_from_exception(
+            e, step="theme_detail", extra_details={"slug": slug}
+        )
+    if detail is None:
+        return make_error_response(
+            ErrorCode.THEME_NOT_FOUND,
+            message=f"No active theme with slug {slug!r}",
+            details={"slug": slug},
+        )
+    return detail

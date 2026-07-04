@@ -157,6 +157,7 @@ enum APIEndpoint: Sendable {
     case getHomeFeed
     case getHomeDashboard
     case getSignalDetail(kind: String, ticker: String)
+    case getThemeDetail(slug: String)
 
     // MARK: - Learn / Investor Journey
     case getJourney
@@ -385,6 +386,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/home/dashboard"
         case .getSignalDetail(let kind, let ticker):
             return "/api/v1/home/signals/\(kind)/\(ticker)"
+        case .getThemeDetail(let slug):
+            return "/api/v1/home/themes/\(slug)"
 
         // Learn / Investor Journey
         case .getJourney:
@@ -621,7 +624,7 @@ enum APIEndpoint: Sendable {
         case .getWhaleList, .getWhaleProfile, .getWhaleTradeGroups, .getWhaleTradeGroupDetail:
             return false
         // Home feed + dashboard use optional auth on the backend (public market data)
-        case .getHomeFeed, .getHomeDashboard, .getSignalDetail:
+        case .getHomeFeed, .getHomeDashboard, .getSignalDetail, .getThemeDetail:
             return false
         // Journey lesson content is public
         case .getJourney:

@@ -24,6 +24,7 @@ from app.services.agents.ticker_report_data_collector import (
     _absolute_threshold_fallback,
     _apply_tam_source,
     _normalize_ai_tam_billions,
+    _build_annual_timeline,
     _build_timeline_prices,
     _build_competitors,
     _directness_from_rank,
@@ -197,6 +198,72 @@ def test_forecast_annual_timeline_edge_cases():
     assert [t["is_forecast"] for t in res1["annual_timeline"]] == [True, True]
     res2 = _build_revenue_forecast_partial([], 10.0, 9.5)  # nothing
     assert res2["annual_timeline"] == []
+
+
+def test_annual_timeline_trims_to_5_actuals_and_5_forecasts():
+    """The Future Forecast window is the last 5 reported years + up to 5 forward
+    estimate years (industry standard), regardless of how deep FMP goes — a
+    company's whole history would swamp the forward view."""
+    income = [  # 8 reported years (2017..2024), newest-first like FMP
+        {"date": f"{y}-12-31", "revenue": (y - 2000) * 1_000_000_000,
+         "epsDiluted": float(y - 2015)}
+        for y in range(2024, 2016, -1)
+    ]
+    estimates = [  # 7 forward years (2025..2031)
+        {"date": f"{y}-12-31", "revenueAvg": (y - 2000) * 1_000_000_000,
+         "epsAvg": float(y - 2015), "numAnalystsRevenue": 9, "numAnalystsEps": 8}
+        for y in range(2025, 2032)
+    ]
+    tl = _build_annual_timeline(income, estimates)
+    actual_years = [t["period"] for t in tl if not t["is_forecast"]]
+    forecast_years = [t["period"] for t in tl if t["is_forecast"]]
+    # Last 5 actuals + first 5 forecasts; nothing older, nothing beyond 5 forward.
+    assert actual_years == ["2020", "2021", "2022", "2023", "2024"]
+    assert forecast_years == ["2025", "2026", "2027", "2028", "2029"]
+    # The leftmost DISPLAYED actual still gets a YoY chip from the off-screen
+    # (2019) anchor — the anchor itself is not emitted.
+    assert tl[0]["period"] == "2020"
+    assert tl[0]["revenue_yoy_pct"] is not None
+
+
+def test_annual_timeline_missing_values_show_na():
+    """A forecast year FMP only partly covered surfaces 'N/A' labels + None analyst
+    counts (never a misleading $0 or a hidden blank), while keeping the numeric 0 so
+    the chart math stays finite. The fully-covered year is untouched."""
+    income = [{"date": "2024-12-31", "revenue": 10_000_000_000, "epsDiluted": 2.0}]
+    estimates = [
+        {"date": "2025-12-31", "revenueAvg": 11_000_000_000, "epsAvg": 2.2,
+         "numAnalystsRevenue": 7, "numAnalystsEps": 6},
+        # Far-out year: revenue estimate only — no EPS, no analyst counts.
+        {"date": "2026-12-31", "revenueAvg": 12_000_000_000},
+    ]
+    tl = _build_annual_timeline(income, estimates)
+    far = next(t for t in tl if t["period"] == "2026")
+    assert far["eps_label"] == "N/A"
+    assert far["eps"] == 0.0                       # numeric stays finite
+    assert far["eps_yoy_pct"] is None
+    assert far["eps_analyst_count"] is None
+    assert far["revenue_analyst_count"] is None
+    assert far["revenue_label"] != "N/A"           # revenue present that year
+    near = next(t for t in tl if t["period"] == "2025")
+    assert near["eps_label"] == "$2.20" and near["eps_analyst_count"] == 6
+
+
+def test_annual_timeline_new_company_shows_only_what_exists():
+    """A young company (2 reported years + 1 forecast) shows exactly those rows —
+    no left-padding to 5, no crash; the leftmost actual has no YoY (no anchor)."""
+    income = [
+        {"date": "2023-12-31", "revenue": 2_000_000_000, "epsDiluted": 0.5},
+        {"date": "2024-12-31", "revenue": 3_000_000_000, "epsDiluted": 0.8},
+    ]
+    estimates = [
+        {"date": "2025-12-31", "revenueAvg": 4_000_000_000, "epsAvg": 1.1,
+         "numAnalystsRevenue": 5, "numAnalystsEps": 4},
+    ]
+    tl = _build_annual_timeline(income, estimates)
+    assert [t["period"] for t in tl] == ["2023", "2024", "2025"]
+    assert [t["is_forecast"] for t in tl] == [False, False, True]
+    assert tl[0]["revenue_yoy_pct"] is None
 
 
 # ── Valuation vital with snapshot fallback ────────────────────────────
@@ -2031,6 +2098,46 @@ def test_build_timeline_prices_weekly_frozen_series():
     # No actual years (forecast-only) or no history → empty.
     assert _build_timeline_prices(historical, [{"period": "2026", "is_forecast": True}]) == []
     assert _build_timeline_prices({}, annual_timeline) == []
+
+
+def test_build_timeline_prices_spans_to_year_min_when_history_reaches():
+    """When the (now ~6y) historical fetch reaches the leftmost actual bar, the
+    weekly price line starts in that year — no more gap between the first bar and
+    the price line's start."""
+    annual_timeline = [
+        {"period": "2020", "is_forecast": False},
+        {"period": "2021", "is_forecast": False},
+        {"period": "2022", "is_forecast": False},
+        {"period": "2023", "is_forecast": True},
+    ]
+    historical = {"historical": [
+        {"date": "2019-11-01", "close": 90.0},    # before year_min (2020) → dropped
+        {"date": "2020-01-06", "close": 100.0},   # first ISO week of year_min → kept
+        {"date": "2021-07-01", "close": 150.0},
+        {"date": "2022-07-01", "close": 175.0},
+    ]}
+    pts = _build_timeline_prices(historical, annual_timeline)
+    assert pts, "expected a price series"
+    assert int(pts[0]["date"][:4]) == 2020        # line begins at the leftmost bar
+    assert all(int(p["date"][:4]) >= 2020 for p in pts)   # nothing before year_min
+    assert all(int(p["date"][:4]) <= 2022 for p in pts)   # no forecast-year price leak
+
+
+def test_build_timeline_prices_new_company_starts_at_first_price():
+    """A young/IPO'd name whose price history begins AFTER the earliest declared
+    bar year is NOT padded left — the line starts at the first available price."""
+    annual_timeline = [
+        {"period": "2020", "is_forecast": False},   # year_min, but no price this early
+        {"period": "2021", "is_forecast": False},
+        {"period": "2022", "is_forecast": False},
+    ]
+    historical = {"historical": [
+        {"date": "2022-03-10", "close": 30.0},      # IPO'd 2022 — nothing before
+        {"date": "2022-09-15", "close": 42.0},
+    ]}
+    pts = _build_timeline_prices(historical, annual_timeline)
+    assert pts, "expected a price series"
+    assert int(pts[0]["date"][:4]) == 2022          # starts at first trade, not padded to 2020
 
 
 def test_apply_tam_rejects_number_without_source_quote():

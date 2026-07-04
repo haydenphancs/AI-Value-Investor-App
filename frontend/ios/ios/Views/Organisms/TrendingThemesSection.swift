@@ -2,7 +2,7 @@
 //  TrendingThemesSection.swift
 //  ios
 //
-//  Organism: the "2026 Trending Themes" carousel. Tiles are grouped into columns
+//  Organism: the "Emerging Frontiers" carousel. Tiles are grouped into columns
 //  of two (a vertical pair); the columns scroll horizontally, so one swipe moves
 //  a whole column — both stacked cards — at once.
 //
@@ -24,11 +24,11 @@ struct TrendingThemesSection: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header (padded; the carousel below bleeds to the screen edges).
             VStack(alignment: .leading, spacing: 0) {
-                Text("2026 Trending Themes")
+                Text("Emerging Frontiers")
                     .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
-                Text("Tap a megatrend to explore its leaders.")
+                Text("The industries shaping the next decade")
                     .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textMuted)
                     .padding(.top, 4)

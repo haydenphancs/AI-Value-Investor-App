@@ -30,9 +30,9 @@ protocol HomeRepositoryProtocol {
 /// formatting and the green/red `isPositive` flag are computed HERE so the
 /// views stay dumb — exactly what the mock did, just from live data.
 ///
-/// Only the Market Pulse strip is served today; the lower sections are returned
-/// empty (which `HomeDashboardView` renders as nothing) until the backend grows
-/// the same response top-to-bottom.
+/// All four sections are served: Market Pulse, Daily Scanners, App-Exclusive
+/// Signals, and Emerging Frontiers themes. A section whose group is null/empty
+/// maps to `[]`, which `HomeDashboardView` renders as nothing (the section hides).
 final class HomeRepository: HomeRepositoryProtocol {
 
     private let apiClient: APIClient
@@ -58,8 +58,7 @@ final class HomeRepository: HomeRepositoryProtocol {
             pulse: dto.pulse.map(mapPulse),
             scanners: mapScanners(dto.scanners),
             signals: mapSignals(dto.signals),
-            // Trending Themes isn't served yet — an empty array renders nothing.
-            themes: []
+            themes: mapThemes(dto.themes)
         )
     }
 
@@ -317,6 +316,26 @@ final class HomeRepository: HomeRepositoryProtocol {
     private static func formatSurprise(_ p: Double) -> String {
         String(format: "%+.0f%%", p)
     }
+
+    // MARK: - Emerging Frontiers (themes) mapping
+
+    /// Map the served theme cards → presentation tiles. Count + signed percent are
+    /// formatted HERE and the badge colour is picked by sign; the accent comes from
+    /// the row's `accent_hex` (editable server-side). A nil `changePercent` → an
+    /// empty `changeText`, so the tile hides the badge.
+    private static func mapThemes(_ dto: ThemesGroupDTO?) -> [TrendingTheme] {
+        guard let dto else { return [] }
+        return dto.themes.map { t in
+            TrendingTheme(
+                title: t.title,
+                count: "\(t.tickerCount) \(t.tickerCount == 1 ? "stock" : "stocks")",
+                changeText: t.changePercent.map { String(format: "%+.1f%%", $0) } ?? "",
+                isPositive: (t.changePercent ?? 0) >= 0,
+                imageUrl: t.imageUrl,
+                accent: Color(hex: t.accentHex)
+            )
+        }
+    }
 }
 
 // MARK: - Mock implementation (UI only)
@@ -494,20 +513,24 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         ),
     ]
 
-    // MARK: - Trending Themes
+    // MARK: - Emerging Frontiers (themes)
+    //
+    // Previews-only: mirrors the live shape (Next-Wave titles, an accent, and a
+    // sign-coloured badge). `imageUrl: nil` exercises the accent-gradient fallback;
+    // one entry is negative to preview the red badge.
 
     static let themes: [TrendingTheme] = [
-        TrendingTheme(title: "AI & Semiconductors", count: "28 stocks", changeText: "+3.4%",
-                      iconSystemName: "cpu.fill", accent: Color(hex: "22D3EE")),
-        TrendingTheme(title: "Clean Energy & Grids", count: "22 stocks", changeText: "+1.2%",
-                      iconSystemName: "sun.max.fill", accent: Color(hex: "34D399")),
-        TrendingTheme(title: "Blockchain & DeFi", count: "18 stocks", changeText: "+5.1%",
-                      iconSystemName: "hexagon.fill", accent: Color(hex: "C084FC")),
-        TrendingTheme(title: "Defense & Aerospace", count: "16 stocks", changeText: "+0.8%",
-                      iconSystemName: "shield.fill", accent: Color(hex: "FBBF24")),
-        TrendingTheme(title: "The Future of Healthcare", count: "24 stocks", changeText: "+2.7%",
-                      iconSystemName: "cross.case.fill", accent: Color(hex: "2DD4BF")),
-        TrendingTheme(title: "Robotics", count: "19 stocks", changeText: "+4.2%",
-                      iconSystemName: "gearshape.2.fill", accent: Color(hex: "FB923C")),
+        TrendingTheme(title: "The Silicon Rush", count: "8 stocks", changeText: "+3.4%",
+                      isPositive: true, imageUrl: nil, accent: Color(hex: "22D3EE")),
+        TrendingTheme(title: "The Modern Battlefield", count: "7 stocks", changeText: "+1.2%",
+                      isPositive: true, imageUrl: nil, accent: Color(hex: "FBBF24")),
+        TrendingTheme(title: "The New Oil", count: "5 stocks", changeText: "-1.2%",
+                      isPositive: false, imageUrl: nil, accent: Color(hex: "FB923C")),
+        TrendingTheme(title: "The Robot Workforce", count: "6 stocks", changeText: "+4.2%",
+                      isPositive: true, imageUrl: nil, accent: Color(hex: "C084FC")),
+        TrendingTheme(title: "Hacking Human Health", count: "6 stocks", changeText: "+2.7%",
+                      isPositive: true, imageUrl: nil, accent: Color(hex: "2DD4BF")),
+        TrendingTheme(title: "The Cyber Wars", count: "6 stocks", changeText: "+5.1%",
+                      isPositive: true, imageUrl: nil, accent: Color(hex: "34D399")),
     ]
 }

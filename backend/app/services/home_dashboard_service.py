@@ -37,6 +37,8 @@ from app.schemas.home_dashboard import (
     ScannerGroupResponse,
     ScannerGroupsResponse,
     ScannerRowResponse,
+    ThemesGroupResponse,
+    TrendingThemeResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,19 @@ _SHORT_MAX_SETTLEMENT_AGE_DAYS = 60
 # cases while bounding the per-build quote burst (rate hygiene under the pre-warm).
 _SHORT_QUOTE_CANDIDATES = 25
 _FLOAT_TTL_SECONDS = 86_400                 # 24h in-mem float cache (float moves slowly)
+
+
+# ── Emerging Frontiers (server-driven Trending Themes) config ─────────
+# Editorial megatrend cards live in the `trending_themes` Supabase table so
+# editors add/remove cards or edit tickers/images with NO app release. Per card
+# the backend computes ticker_count (len of the configured tickers) and
+# change_percent (avg daily % over the RESOLVABLE tickers) from ONE FMP
+# batch-quote fan-out over the deduped union of every active theme's tickers.
+_THEMES_CACHE_TTL_SECONDS = 600             # 10 min — editorial rows + intraday % move slowly
+_THEMES_CACHE_KEY = "themes"
+_THEMES_BUILD_TIMEOUT_SECONDS = 8           # never let a cold themes build block the dashboard
+_THEMES_TABLE = "trending_themes"
+_THEMES_MAX_ROWS = 50                        # sane ceiling on active theme cards
 
 _SHORT_UNIVERSE_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "short_interest_universe.json"
@@ -380,6 +395,29 @@ def _canonical_symbol(symbol: Any) -> str:
     return str(symbol or "").upper().replace(".", "-")
 
 
+def _theme_change(tickers: List[str], change_map: Dict[str, float]) -> Optional[float]:
+    """Average daily % change over an Emerging Frontiers theme's RESOLVABLE tickers.
+
+    ``change_map`` is keyed by ``_canonical_symbol`` and holds ONLY finite
+    percents (quotes FMP actually returned). A ticker with no quote is skipped —
+    the card still reports the full configured ``ticker_count``. Returns ``None``
+    when NO ticker resolves, so the iOS card hides the % badge rather than showing
+    a fabricated 0%. The mean is routed through ``_finite_float`` (defensive
+    against a degenerate all-huge set), rounded to 2 dp, with ``+ 0.0`` collapsing
+    any signed ``-0.0`` (which decodes as positive/green on iOS)."""
+    resolved: List[float] = []
+    for t in tickers:
+        v = change_map.get(_canonical_symbol(t))
+        if v is not None:
+            resolved.append(v)
+    if not resolved:
+        return None
+    avg = _finite_float(sum(resolved) / len(resolved))
+    if avg is None:
+        return None
+    return round(avg, 2) + 0.0
+
+
 def _movers_from_universe(
     profile_map: Dict[str, Dict[str, Any]],
     change_map: Dict[str, float],
@@ -521,6 +559,11 @@ class HomeDashboardService:
     _scanner_cache: Dict[str, Tuple[float, ScannerGroupsResponse]] = {}
     _scanner_inflight: Dict[str, asyncio.Future] = {}
     _float_cache: Dict[str, Tuple[float, Optional[float]]] = {}
+    # Emerging Frontiers themes: own 10-min cache + dedup future (editorial rows
+    # from Supabase + one batch-quote fan-out; cheap but cached to avoid
+    # re-reading + re-quoting on every dashboard request).
+    _themes_cache: Dict[str, Tuple[float, ThemesGroupResponse]] = {}
+    _themes_inflight: Dict[str, asyncio.Future] = {}
 
     def __init__(self) -> None:
         self.fmp: FMPClient = get_fmp_client()
@@ -547,10 +590,11 @@ class HomeDashboardService:
         # from THIS module (same pattern the pre-warmer uses in main.py).
         from app.services.signals_service import get_signals_service
 
-        pulse, scanners, signals = await asyncio.gather(
+        pulse, scanners, signals, themes = await asyncio.gather(
             self._get_pulse_cached(),
             self._get_scanners_guarded(),
             get_signals_service().get_signals_guarded(),
+            self._get_themes_guarded(),
         )
         status_text, is_open = _market_status()
         return HomeDashboardResponse(
@@ -559,6 +603,7 @@ class HomeDashboardService:
             pulse=pulse,
             scanners=scanners,
             signals=signals,
+            themes=themes,
         )
 
     # ── Market Pulse (cache-aside) ────────────────────────────────────
@@ -926,6 +971,157 @@ class HomeDashboardService:
         )
         for head, spark in zip(heads, sparks):
             head.spark = spark
+
+    # ── Emerging Frontiers themes (server-driven, cache-aside + guard) ─
+
+    async def get_themes(self) -> ThemesGroupResponse:
+        """Build the Emerging Frontiers cards, cache-aside (10-min) + in-flight dedup.
+
+        Never re-raises: a build failure returns an empty group (NOT cached, so
+        the next request retries). Mirrors ``get_scanners`` — keeps awaiters
+        unpoisoned and the shielded background build (see ``_get_themes_guarded``)
+        from leaving an unretrieved exception."""
+        cached = self._themes_cache.get(_THEMES_CACHE_KEY)
+        if cached is not None and (time.time() - cached[0]) < _THEMES_CACHE_TTL_SECONDS:
+            logger.debug("Themes served from in-memory cache")
+            return cached[1]
+
+        inflight = self._themes_inflight.get(_THEMES_CACHE_KEY)
+        if inflight is not None:
+            logger.debug("Themes joining in-flight build")
+            return await inflight
+
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._themes_inflight[_THEMES_CACHE_KEY] = fut
+        try:
+            try:
+                result = await self._build_themes()
+                # Cache ONLY a non-empty build — never pin an empty result (a
+                # transient Supabase/FMP blip) for 10 min and blank the section.
+                if result.themes:
+                    self._themes_cache[_THEMES_CACHE_KEY] = (time.time(), result)
+            except Exception as exc:  # noqa: BLE001 — themes must never fail the dashboard
+                logger.warning("Themes build failed: %s: %s", type(exc).__name__, exc)
+                result = ThemesGroupResponse()  # empty; not cached → retries
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except BaseException as exc:
+            # CancelledError (shutdown) must still settle the future or a joined
+            # request hangs on a popped-but-unresolved future. Mirrors get_scanners.
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            self._themes_inflight.pop(_THEMES_CACHE_KEY, None)
+
+    async def _get_themes_guarded(self) -> ThemesGroupResponse:
+        """Await themes up to a hard timeout. ``asyncio.shield`` ensures a timeout
+        never CANCELS the shared build (it keeps running + caches for the next
+        request) — we just stop waiting and ship the dashboard without themes this
+        round, serving the last cached list (any age) if we have one."""
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(self.get_themes()),
+                _THEMES_BUILD_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # TimeoutError or anything unexpected
+            cached = self._themes_cache.get(_THEMES_CACHE_KEY)
+            if cached is not None:
+                logger.info(
+                    "Themes build slow (%s); serving last cached (age=%.0fs)",
+                    type(exc).__name__, time.time() - cached[0],
+                )
+                return cached[1]
+            logger.warning(
+                "Themes not ready this build (no cache yet): %s: %s",
+                type(exc).__name__, exc,
+            )
+            return ThemesGroupResponse()
+
+    def _read_theme_rows(self) -> List[Dict[str, Any]]:
+        """Read active theme rows from Supabase (SYNC — call via ``asyncio.to_thread``).
+
+        Self-guarded: a Supabase failure returns ``[]`` so the section degrades
+        (hides) rather than erroring the dashboard. Function-local import mirrors
+        the signals service (avoids a module import cycle at load time)."""
+        try:
+            from app.database import get_supabase
+
+            sb = get_supabase()
+            res = (
+                sb.table(_THEMES_TABLE)
+                .select("slug, title, image_url, accent_hex, tickers, sort_order")
+                .eq("is_active", True)
+                .order("sort_order")
+                .limit(_THEMES_MAX_ROWS)
+                .execute()
+            )
+            return res.data or []
+        except Exception as exc:  # noqa: BLE001 — degrade the section, never the dashboard
+            logger.warning("Themes table read failed: %s: %s", type(exc).__name__, exc)
+            return []
+
+    async def _build_themes(self) -> ThemesGroupResponse:
+        """Assemble the Emerging Frontiers cards.
+
+        1. Read active rows from ``trending_themes``.
+        2. Build the DEDUPED union of every theme's tickers and fetch quotes ONCE
+           (``get_batch_quotes`` fans out per-ticker; querying per theme would
+           re-fetch shared names N times).
+        3. Per theme: ``ticker_count`` = len(configured tickers); ``change_percent``
+           = avg daily % over the resolvable tickers (``_theme_change``)."""
+        rows = await asyncio.to_thread(self._read_theme_rows)
+        if not rows:
+            return ThemesGroupResponse()
+
+        # Normalize each row's tickers once; build the deduped union for one fetch.
+        row_tickers: List[List[str]] = []
+        union = set()
+        for row in rows:
+            raw = row.get("tickers") or []
+            tickers = [str(t).strip().upper() for t in raw if str(t or "").strip()]
+            row_tickers.append(tickers)
+            union.update(_canonical_symbol(t) for t in tickers)
+
+        change_map: Dict[str, float] = {}
+        if union:
+            # Fetch by the canonical (dash) form — FMP's /quote resolves BRK-B.
+            quotes = await self.fmp.get_batch_quotes(sorted(union))
+            for q in quotes:
+                if not isinstance(q, dict):
+                    continue
+                key = _canonical_symbol(q.get("symbol"))
+                if not key:
+                    continue
+                pct = _parse_pct(q.get("changesPercentage"))
+                if pct is None:
+                    pct = _parse_pct(q.get("changePercentage"))
+                if pct is not None:  # only finite values (NaN/inf already dropped)
+                    change_map[key] = pct
+
+        themes: List[TrendingThemeResponse] = []
+        for row, tickers in zip(rows, row_tickers):
+            slug = str(row.get("slug") or "").strip()
+            title = str(row.get("title") or "").strip()
+            if not slug or not title:
+                logger.warning(
+                    "Skipping theme row with missing slug/title: slug=%r", row.get("slug")
+                )
+                continue
+            accent_hex = (str(row.get("accent_hex") or "").strip()) or "22D3EE"
+            themes.append(
+                TrendingThemeResponse(
+                    slug=slug,
+                    title=title,
+                    image_url=(row.get("image_url") or None),
+                    accent_hex=accent_hex,
+                    ticker_count=len(tickers),
+                    change_percent=_theme_change(tickers, change_map),
+                )
+            )
+        return ThemesGroupResponse(themes=themes)
 
     async def _cached_float(self, ticker: str) -> Optional[float]:
         """Float-shares count for a ticker, 24h in-memory cached (float moves

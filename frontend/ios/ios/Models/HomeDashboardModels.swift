@@ -150,17 +150,23 @@ struct ExclusiveSignal: Identifiable {
     let leaders: [SignalLeader]
 }
 
-// MARK: - Trending Themes
+// MARK: - Emerging Frontiers (Trending Themes)
 
-/// One tile in the "2026 Trending Themes" grid.
+/// One tile in the "Emerging Frontiers" grid — a server-driven megatrend card.
 struct TrendingTheme: Identifiable {
     let id = UUID()
+    /// The "Next-Wave" name shown on the card, e.g. "The Silicon Rush".
     let title: String
-    /// e.g. "28 stocks".
+    /// e.g. "8 stocks".
     let count: String
-    /// e.g. "+3.4%".
+    /// Pre-formatted signed change, e.g. "+3.4%". Empty when the backend had no
+    /// resolvable quotes → the tile hides the badge.
     let changeText: String
-    let iconSystemName: String
+    /// Drives the badge colour (green up / red down).
+    let isPositive: Bool
+    /// Remote card image (Supabase Storage). `nil`/empty → an accent-gradient
+    /// placeholder is drawn instead.
+    let imageUrl: String?
     let accent: Color
 }
 
@@ -193,6 +199,8 @@ struct HomeDashboardResponseDTO: Decodable {
     let scanners: ScannerGroupsDTO?
     /// Optional for the same reason — a backend that predates signals decodes nil.
     let signals: SignalGroupsDTO?
+    /// Optional for the same reason — a backend that predates themes decodes nil.
+    let themes: ThemesGroupDTO?
 
     enum CodingKeys: String, CodingKey {
         case marketStatusText = "market_status_text"
@@ -200,6 +208,7 @@ struct HomeDashboardResponseDTO: Decodable {
         case pulse
         case scanners
         case signals
+        case themes
     }
 }
 
@@ -305,4 +314,38 @@ struct SignalGroupsDTO: Decodable {
     let congress: SignalGroupDTO?
     let whale: SignalGroupDTO?
     let earnings: SignalGroupDTO?
+}
+
+// MARK: - Emerging Frontiers (Trending Theme) DTOs
+
+/// One Emerging Frontiers card as served by the backend (raw numbers; the
+/// repository formats count/percent + picks the badge colour). `category` and the
+/// constituent tickers are NOT on the wire — they drive the metrics server-side,
+/// so editing them in Supabase updates the card with no app release.
+struct TrendingThemeDTO: Decodable {
+    let slug: String
+    let title: String
+    /// Public Supabase Storage URL, or nil → the tile draws an accent gradient.
+    let imageUrl: String?
+    /// 6-digit hex WITHOUT a leading '#', e.g. "22D3EE". Decoded via `Color(hex:)`.
+    let accentHex: String
+    /// Number of configured tickers → "N stocks".
+    let tickerCount: Int
+    /// Avg daily % over the resolvable tickers; nil → the tile hides the % badge.
+    let changePercent: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case slug, title
+        case imageUrl = "image_url"
+        case accentHex = "accent_hex"
+        case tickerCount = "ticker_count"
+        case changePercent = "change_percent"
+    }
+}
+
+/// The Emerging Frontiers list. The wire shape is an OBJECT (`{"themes":[...]}`,
+/// symmetric with ScannerGroupsDTO/SignalGroupsDTO), so this wrapper matches it
+/// exactly — decoding the field as a bare array would crash. Empty list → hidden.
+struct ThemesGroupDTO: Decodable {
+    let themes: [TrendingThemeDTO]
 }

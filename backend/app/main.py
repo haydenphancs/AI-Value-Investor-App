@@ -236,7 +236,10 @@ async def _run_scanner_pre_warmer():
                 # whale is Supabase-only, congress is 2 FMP calls, earnings is 1 —
                 # and get_signals() serves its own cache first (a no-op when warm).
                 await get_signals_service().get_signals()
-                logger.info("Scanner + signals pre-warm: refreshed (regular session open)")
+                # Emerging Frontiers themes ride along too — one batch-quote fan-out
+                # over the small ticker union; get_themes() serves its cache first.
+                await get_home_dashboard_service().get_themes()
+                logger.info("Scanner + signals + themes pre-warm: refreshed (regular session open)")
         except Exception as e:
             logger.error(f"Scanner pre-warmer failed: {e}", exc_info=True)
 

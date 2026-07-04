@@ -25,11 +25,13 @@ from app.schemas.home_dashboard import (
     MarketPulseItemResponse,
     ScannerGroupsResponse,
     SignalsGroupResponse,
+    ThemesGroupResponse,
 )
 from app.services.home_dashboard_service import (
     HomeDashboardService,
     _PULSE_SYMBOLS,
     _SCANNER_CACHE_KEY,
+    _THEMES_CACHE_KEY,
     _downsample,
     _intraday_sparkline,
     _market_status,
@@ -43,7 +45,7 @@ import time as _time
 # The exact snake_case keys the iOS `MarketPulseItemDTO.CodingKeys` expects.
 _ITEM_KEYS = {"symbol", "name", "type", "price", "change_percent", "previous_close", "spark"}
 # The exact snake_case keys the iOS `HomeDashboardResponseDTO.CodingKeys` expects.
-_RESPONSE_KEYS = {"market_status_text", "market_is_open", "pulse", "scanners", "signals"}
+_RESPONSE_KEYS = {"market_status_text", "market_is_open", "pulse", "scanners", "signals", "themes"}
 
 
 def test_market_pulse_item_keys_match_ios_dto():
@@ -70,6 +72,8 @@ def test_dashboard_response_keys_match_ios_dto():
     # Additive + defaulted: a response built without signals ships all-null groups
     # (iOS omits the whole section) rather than a decode-breaking absent key.
     assert dumped["signals"] == {"congress": None, "whale": None, "earnings": None}
+    # Themes likewise defaults to an empty list → iOS hides the Emerging Frontiers section.
+    assert dumped["themes"] == {"themes": []}
 
 
 def test_dashboard_response_validates_worst_case_inputs():
@@ -243,6 +247,12 @@ def _fresh_service() -> tuple[HomeDashboardService, _FakeFMP]:
     SignalsService._cache.clear()
     SignalsService._inflight.clear()
     SignalsService._cache[_SIGNALS_CACHE_KEY] = (_time.time(), SignalsGroupResponse())
+    # Prime an empty themes cache too — get_dashboard() fans out a 4th branch
+    # (Emerging Frontiers). These are PULSE tests; the themes build (Supabase + FMP)
+    # is exercised in test_home_dashboard_themes.py.
+    HomeDashboardService._themes_inflight.clear()
+    HomeDashboardService._themes_cache.clear()
+    HomeDashboardService._themes_cache[_THEMES_CACHE_KEY] = (_time.time(), ThemesGroupResponse())
     svc = HomeDashboardService()
     fake = _FakeFMP()
     svc.fmp = fake  # type: ignore[assignment]

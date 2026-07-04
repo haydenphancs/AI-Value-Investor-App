@@ -21,9 +21,11 @@ struct ContentView: View {
             // Only the selected tab is visible; the others are hidden but retained in memory
             // so their @StateObject instances persist and don't re-trigger data loading.
             //
-            // New Caydex Home dashboard (UI-only, MockHomeRepository). The legacy
-            // `HomeViewWithBinding` is kept below for reference/rollback — swap this
-            // line back to it to restore the previous backend-connected Home.
+            // New Caydex Home dashboard — backend-connected via the live
+            // `HomeRepository` (the ViewModel's default; `MockHomeRepository` is
+            // previews-only). All four sections fetch `GET /home/dashboard`. The
+            // legacy `HomeViewWithBinding` is kept below for reference/rollback —
+            // swap this line back to it to restore the previous Home.
             HomeDashboardView(selectedTab: $selectedTab)
             .opacity(selectedTab == .home ? 1 : 0)
             .allowsHitTesting(selectedTab == .home)

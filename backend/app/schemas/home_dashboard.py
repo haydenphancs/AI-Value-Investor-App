@@ -127,12 +127,41 @@ class SignalsGroupResponse(BaseModel):
     earnings: Optional[SignalGroupResponse] = None
 
 
+# ── Emerging Frontiers (server-driven "Trending Themes") ───────────────
+# Editorial megatrend cards curated in the `trending_themes` Supabase table, so
+# editors add/remove cards or change tickers/images with NO app release. Each
+# card shows only the "Next-Wave" title + a stock count + a live % change; the
+# backend computes count (len of the theme's tickers) and change_percent (avg
+# daily % over the resolvable tickers, one FMP fan-out). The theme's `category`
+# and `tickers` are NOT on the wire — they organize/drive the metrics only.
+
+
+class TrendingThemeResponse(BaseModel):
+    """One Emerging Frontiers card (raw numbers; iOS formats + colours)."""
+
+    slug: str                               # stable id, e.g. "silicon-rush"
+    title: str                              # the "Next-Wave" name shown on the card
+    image_url: Optional[str] = None         # public Supabase Storage URL; null → iOS accent-gradient fallback
+    accent_hex: str                         # card accent (e.g. "22D3EE"); editable in the DB
+    ticker_count: int                       # len(configured tickers) — stable, editorial
+    # Avg daily % over the RESOLVABLE tickers (those FMP returned a quote for).
+    # Null when zero resolvable → iOS hides the % badge (still shows "N stocks").
+    change_percent: Optional[float] = None
+
+
+class ThemesGroupResponse(BaseModel):
+    """The Emerging Frontiers list. Empty list → iOS hides the whole section."""
+
+    themes: List[TrendingThemeResponse] = []
+
+
 class HomeDashboardResponse(BaseModel):
     """Top-level aggregated payload for the Caydex Home dashboard.
 
-    Grows top-to-bottom: the market-status header, Market Pulse strip, and Daily
-    Scanners are populated today. The iOS repository fills the not-yet-served
-    sections (signals / themes) with empty arrays, which render nothing.
+    All four sections are served today: the market-status header + Market Pulse
+    strip, Daily Scanners, App-Exclusive Signals, and Emerging Frontiers themes.
+    Each section defaults empty so a failed sub-build degrades that section only
+    (the iOS views hide an empty section rather than erroring the whole screen).
     """
 
     market_status_text: str     # "Markets Open" | "Markets Closed" | "Pre-Market" | "After Hours"
@@ -144,3 +173,6 @@ class HomeDashboardResponse(BaseModel):
     # Additive + defaulted (same rationale): a failed signals build degrades to
     # all-null groups; old clients ignore the field.
     signals: SignalsGroupResponse = SignalsGroupResponse()
+    # Additive + defaulted (same rationale): a failed/absent themes build
+    # degrades to an empty list; old clients ignore the field.
+    themes: ThemesGroupResponse = ThemesGroupResponse()

@@ -246,10 +246,6 @@ struct RevenueProjectionDTO: Codable {
     let revenueAnalystCount: Int?
     let epsAnalystCount: Int?
     let isForecast: Bool
-    // Free cash flow overlay (actuals-only; nil on forecast rows / older reports).
-    let fcf: Double?
-    let fcfLabel: String?
-    let fcfYoyPct: Double?
 
     enum CodingKeys: String, CodingKey {
         case period, revenue
@@ -261,9 +257,6 @@ struct RevenueProjectionDTO: Codable {
         case revenueAnalystCount = "revenue_analyst_count"
         case epsAnalystCount = "eps_analyst_count"
         case isForecast = "is_forecast"
-        case fcf
-        case fcfLabel = "fcf_label"
-        case fcfYoyPct = "fcf_yoy_pct"
     }
 }
 
@@ -862,8 +855,7 @@ extension TickerReportAPIResponse {
                         epsYoyPct: epsYoy,
                         revenueAnalystCount: p.revenueAnalystCount,
                         epsAnalystCount: p.epsAnalystCount,
-                        isForecast: p.isForecast,
-                        fcf: p.fcf, fcfLabel: p.fcfLabel, fcfYoyPct: p.fcfYoyPct
+                        isForecast: p.isForecast
                     )
                 }
             }(),
@@ -884,8 +876,7 @@ extension TickerReportAPIResponse {
                     eps: $0.eps, epsLabel: $0.epsLabel, epsYoyPct: $0.epsYoyPct,
                     revenueAnalystCount: $0.revenueAnalystCount,
                     epsAnalystCount: $0.epsAnalystCount,
-                    isForecast: $0.isForecast,
-                    fcf: $0.fcf, fcfLabel: $0.fcfLabel, fcfYoyPct: $0.fcfYoyPct
+                    isForecast: $0.isForecast
                 )
             },
             forecastAnalystCount: revenueForecast.forecastAnalystCount,

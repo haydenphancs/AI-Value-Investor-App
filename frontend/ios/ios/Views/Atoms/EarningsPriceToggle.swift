@@ -2,17 +2,13 @@
 //  EarningsPriceToggle.swift
 //  ios
 //
-//  Atom: Bordered pill toggle for an overlay series on the earnings chart
-//  (Price, FCF, …). `label` + `activeColor` default to "Price"/blue for the
-//  original call site; pass them to reuse it for another series.
+//  Atom: Toggle button for showing/hiding price line on earnings chart
 //
 
 import SwiftUI
 
 struct EarningsPriceToggle: View {
     @Binding var isEnabled: Bool
-    var label: String = "Price"
-    var activeColor: Color = AppColors.primaryBlue
 
     var body: some View {
         Button {
@@ -20,14 +16,14 @@ struct EarningsPriceToggle: View {
                 isEnabled.toggle()
             }
         } label: {
-            Text(label)
+            Text("Price")
                 .font(AppTypography.labelSmallEmphasis)
-                .foregroundColor(isEnabled ? activeColor : AppColors.textSecondary)
+                .foregroundColor(isEnabled ? AppColors.primaryBlue : AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                        .stroke(isEnabled ? activeColor : AppColors.cardBackgroundLight, lineWidth: 1)
+                        .stroke(isEnabled ? AppColors.primaryBlue : AppColors.cardBackgroundLight, lineWidth: 1)
                 )
         }
         .buttonStyle(PlainButtonStyle())
@@ -42,8 +38,6 @@ struct EarningsPriceToggle: View {
         VStack(spacing: AppSpacing.lg) {
             EarningsPriceToggle(isEnabled: .constant(false))
             EarningsPriceToggle(isEnabled: .constant(true))
-            EarningsPriceToggle(isEnabled: .constant(true), label: "FCF",
-                                activeColor: AppColors.profitFCFMargin)
         }
     }
 }

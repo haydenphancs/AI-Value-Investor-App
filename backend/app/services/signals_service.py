@@ -43,7 +43,11 @@ from app.services.earnings_service import _compute_surprise
 # Reuse the dashboard's hardened primitives so signals fold class-share variants
 # (BRK.B ↔ BRK-B) and reject NaN/Inf exactly like the scanners do. NOTE: the
 # dashboard service must import THIS module function-locally to avoid a cycle.
-from app.services.home_dashboard_service import _canonical_symbol, _finite_float
+from app.services.home_dashboard_service import (
+    _canonical_symbol,
+    _finite_float,
+    _MOVERS_EXCHANGES,
+)
 from app.services._whale_common import (
     parse_congress_amount_bounds,
     format_amount_range,
@@ -65,11 +69,11 @@ logger = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────
 _SIGNALS_MEM_TTL_SECONDS = 2700          # 45 min in-memory freshness ceiling
 _SIGNALS_SUPABASE_TTL_HOURS = 24         # Tier-2 survives restart; sources daily/quarterly
-_SIGNALS_CACHE_KEY = "signals_v2"        # bump to invalidate stale rows written by the
-                                         # pre-30d-window / pre-10-rows code — the old
-                                         # "signals" row (congress=null, 5 whale) lingers
-                                         # for its 24h TTL but is now ignored, so a redeploy
-                                         # serves fresh data immediately (self-healing).
+_SIGNALS_CACHE_KEY = "signals_v3"        # bump to invalidate stale rows on a semantics change —
+                                         # the old "signals_v2" row (magnitude-ranked earnings, OTC
+                                         # not gated, no names) lingers for its 24h TTL but is now
+                                         # ignored, so a redeploy serves the fresh exchange-gated,
+                                         # recency-first earnings immediately (self-healing).
 _SIGNALS_TABLE = "signals_cache"
 _SIGNALS_BUILD_TIMEOUT_SECONDS = 8       # never let a cold build block the dashboard
 
@@ -89,10 +93,15 @@ _CONGRESS_MIN_MEMBERS = 2                # a "most-bought" headline needs > 1 me
 _WHALE_MIN_FUNDS = 2                     # a "funds loading up" headline needs > 1 fund
 
 # Earnings
-_EARNINGS_WINDOW_DAYS = 10
+_EARNINGS_WINDOW_DAYS = 7                 # bound staleness to ~the past week (was 10); ranking is
+                                          # recency-first so fresher reports always lead the card.
 _EARNINGS_MIN_ABS_SURPRISE = 10.0        # |surprise%| ≥ 10 to count as a "shocker"
-_EARNINGS_MAX_ABS_SURPRISE = 1000.0      # cap penny-EPS blowups (est 0.01 → thousands %)
-_EARNINGS_QUOTE_CANDIDATES = 25          # rank this many, then apply the market-cap floor
+_EARNINGS_MAX_ABS_SURPRISE = 1000.0      # garbage sanity bound (display is capped on iOS at ±200)
+_EARNINGS_MIN_ABS_ESTIMATE = 0.05        # skip near-zero estimates: (actual-est)/|est| explodes when
+                                          # est≈0.01 (penny-EPS artifact); a real low bar like NKE's
+                                          # $0.11 estimate still clears.
+_EARNINGS_QUOTE_CANDIDATES = 40          # over-fetch (was 25) so the exchange + $250M gate below does
+                                          # not starve the final list of real large-cap shockers.
 _EARNINGS_MIN_MARKET_CAP = 250_000_000   # $250M quality floor (parity with the scanner cards)
 
 _BAD_SYMBOLS = {"", "--", "N/A", "NA", "NONE"}
@@ -306,21 +315,21 @@ def _aggregate_earnings(
     max_abs: float = _EARNINGS_MAX_ABS_SURPRISE,
     top_n: int = _SIGNAL_ROWS,
 ) -> Optional[SignalGroupResponse]:
-    """Rank recent US reporters by |EPS surprise %| (beats AND misses), value SIGNED.
+    """Rank recent US reporters FRESHEST-FIRST, then by |EPS surprise %| within a day.
 
-    Reuses ``earnings_service._compute_surprise`` (returns ``None`` for a zero
-    estimate → skipped). Foreign listings (dotted symbols) are dropped; rows
-    missing actual/estimate are skipped; a symbol reported twice keeps the
-    larger-magnitude surprise; ``|surprise|`` outside [min_abs, max_abs] is dropped
-    (upper cap kills penny-EPS artifacts). Returns ``None`` when nothing clears the
-    threshold. NOTE: no market-cap filter here (calendar rows carry none) — the
-    caller ``_build_earnings`` over-ranks candidates then applies the $250M floor.
+    Reuses ``earnings_service._compute_surprise``. A row is skipped when: the symbol
+    is foreign (dotted, e.g. ZOO.L), actual/estimate is missing, ``|estimate|`` is
+    below ``_EARNINGS_MIN_ABS_ESTIMATE`` (near-zero denominators explode the %), or
+    ``|surprise|`` is outside [min_abs, max_abs]. A symbol reporting twice keeps its
+    MOST-RECENT report. Ranking is (date desc, |surprise| desc) so the card leads with
+    the latest shockers, not a stale big one. Returns ``None`` when nothing qualifies.
+    NOTE: no exchange/market-cap filter here (calendar rows carry none) — the caller
+    ``_build_earnings`` over-ranks candidates then applies the exchange + $250M gate.
     """
     if not isinstance(calendar, list):
         return None
 
     best: Dict[str, Dict[str, Any]] = {}
-    latest_dates: Dict[str, str] = {}
     for row in calendar:
         if not isinstance(row, dict):
             continue
@@ -343,6 +352,11 @@ def _aggregate_earnings(
             estimate = _finite_float(row.get("epsEstimate"))
         if actual is None or estimate is None:
             continue
+        # Near-zero estimates make (actual - est)/|est| explode into meaningless
+        # thousands-of-% "surprises" (the est≈0.01 penny-EPS artifact). Skip them at
+        # the source; a genuine low bar like NKE's $0.11 estimate still clears.
+        if abs(estimate) < _EARNINGS_MIN_ABS_ESTIMATE:
+            continue
         surprise = _compute_surprise(actual, estimate)
         if surprise is None:
             continue
@@ -350,21 +364,27 @@ def _aggregate_earnings(
         if not (min_abs <= abs(surprise) <= max_abs):
             continue
         date_str = str(row.get("date") or "")[:10]
-        # Track the latest QUALIFYING report date per symbol independently of which
-        # surprise we keep, so as_of reflects the freshest report — not merely the
-        # date of the largest-magnitude one (a symbol can report twice in a window).
-        if date_str and date_str > latest_dates.get(sym, ""):
-            latest_dates[sym] = date_str
+        # Keep the FRESHEST report per symbol (a name can appear twice near a quarter
+        # boundary): recency drives the card, so a newer report supersedes an older
+        # one; a same-date tie keeps the larger-magnitude surprise.
         cur = best.get(sym)
-        if cur is None or abs(surprise) > abs(cur["surprise"]):
-            best[sym] = {"surprise": surprise}
+        if (
+            cur is None
+            or date_str > cur["date"]
+            or (date_str == cur["date"] and abs(surprise) > abs(cur["surprise"]))
+        ):
+            best[sym] = {"surprise": surprise, "date": date_str}
 
     if not best:
         return None
 
+    # Freshest-first: most-recent report date leads, then larger |surprise| within a
+    # day (reverse=True makes BOTH descending). Older reports only fill lower slots
+    # when there aren't enough fresh ones — so the card reflects THIS week, not last.
     ranked = sorted(
         best.items(),
-        key=lambda kv: (-abs(kv[1]["surprise"]), -kv[1]["surprise"], kv[0]),
+        key=lambda kv: (kv[1]["date"], abs(kv[1]["surprise"])),
+        reverse=True,
     )
     entries = [
         SignalRowResponse(
@@ -373,9 +393,25 @@ def _aggregate_earnings(
         for i, (sym, e) in enumerate(ranked[:top_n])
     ]
     as_of = max(
-        (latest_dates.get(sym, "") for sym, _ in ranked[:top_n]), default=""
+        (e["date"] for _, e in ranked[:top_n]), default=""
     ) or None
     return SignalGroupResponse(kind="earnings", entries=entries, as_of_date=as_of)
+
+
+def _earnings_quote_ok(quote: Any) -> bool:
+    """Quality gate for an earnings-shocker candidate, from its FMP ``/quote`` row.
+
+    Mirrors the Daily Scanners' bar so the card can't fill with OTC/penny junk: the
+    symbol must trade on a major US exchange (drops OTC lines like TCYSF/BKRRF whose
+    caps clear $250M but are illiquid foreign ordinaries) AND clear the $250M
+    market-cap floor. A missing/NaN cap is rejected via ``_finite_float``.
+    """
+    if not isinstance(quote, dict):
+        return False
+    if str(quote.get("exchange") or "").upper() not in _MOVERS_EXCHANGES:
+        return False
+    market_cap = _finite_float(quote.get("marketCap"))
+    return market_cap is not None and market_cap >= _EARNINGS_MIN_MARKET_CAP
 
 
 # ── Service ─────────────────────────────────────────────────────────────
@@ -601,27 +637,32 @@ class SignalsService:
         }
 
         kept: List[SignalRowResponse] = []
-        for e in candidates.entries:  # already ranked by |surprise| desc
-            market_cap = _finite_float(qmap.get(e.symbol, {}).get("marketCap"))
-            if market_cap is None or market_cap < _EARNINGS_MIN_MARKET_CAP:
+        for e in candidates.entries:  # already ranked freshest-first
+            quote = qmap.get(e.symbol, {})
+            if not _earnings_quote_ok(quote):
                 continue
-            kept.append(e)
+            # Fill the company name from the quote already in hand so the card reads
+            # "Nike", not a bare "NKE" (iOS strips the legal suffix for display).
+            kept.append(
+                SignalRowResponse(
+                    rank=len(kept) + 1,
+                    symbol=e.symbol,
+                    name=str(quote.get("name") or ""),
+                    value=e.value,
+                )
+            )
             if len(kept) >= _SIGNAL_ROWS:
                 break
 
         if not kept:
             logger.info(
-                "Earnings Shockers: no candidate cleared the $%dM market-cap floor "
+                "Earnings Shockers: no candidate cleared the exchange + $%dM floor "
                 "— omitting card", _EARNINGS_MIN_MARKET_CAP // 1_000_000,
             )
             return None
 
-        entries = [
-            SignalRowResponse(rank=i + 1, symbol=e.symbol, name=e.name, value=e.value)
-            for i, e in enumerate(kept)
-        ]
         return SignalGroupResponse(
-            kind="earnings", entries=entries, as_of_date=candidates.as_of_date
+            kind="earnings", entries=kept, as_of_date=candidates.as_of_date
         )
 
     # ── Supabase Tier-2 (best-effort) ─────────────────────────────────

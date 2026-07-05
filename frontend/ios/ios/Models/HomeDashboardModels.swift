@@ -132,6 +132,9 @@ struct DailyScanner: Identifiable {
 struct SignalLeader: Identifiable, Hashable {
     let id = UUID()
     let symbol: String
+    /// Cleaned company name (e.g. "Nike"); "" for congress/whale rows (backend sends
+    /// no name there) — the row then shows the ticker alone.
+    let companyName: String
     let stat: String
 }
 

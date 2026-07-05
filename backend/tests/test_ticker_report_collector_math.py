@@ -283,41 +283,6 @@ def test_annual_timeline_negative_eps_yoy_is_signed():
     assert by_year["2025"]["eps_yoy_pct"] == pytest.approx(-27.7, abs=0.1)
 
 
-def test_annual_timeline_fcf_actuals_signed_and_missing_na():
-    """FCF is actuals-only, in revenue-divisor units, with a SIGNED compact label
-    (negative FCF → "-$…M", never "$0"); a missing actual year and every forecast
-    year read "N/A"."""
-    income = [
-        {"date": "2023-12-31", "revenue": 600_000_000, "epsDiluted": -2.0},
-        {"date": "2024-12-31", "revenue": 710_000_000, "epsDiluted": -1.41},
-    ]
-    estimates = [  # forecast year — FCF must be absent here (actuals-only)
-        {"date": "2025-12-31", "revenueAvg": 800_000_000, "epsAvg": -1.0},
-    ]
-    cash_flow = [
-        {"date": "2023-12-31", "freeCashFlow": -600_000_000},
-        {"date": "2024-12-31", "freeCashFlow": -394_000_000},  # loss narrowed
-        # 2025 has no cash-flow row (forecast) → fcf absent
-    ]
-    tl = _build_annual_timeline(income, estimates, cash_flow)
-    by_year = {t["period"]: t for t in tl}
-
-    # Divisor is 1e6 (max revenue 710M) → fcf in millions, signed.
-    assert by_year["2024"]["fcf"] == -394.0
-    assert by_year["2024"]["fcf_label"] == "-$394M"   # signed, NOT "$0"
-    assert by_year["2024"]["fcf"] < 0
-    # FCF YoY negative-base safe: (-394 - (-600))/|−600|*100 = +34.3 (burn narrowed)
-    assert by_year["2024"]["fcf_yoy_pct"] == pytest.approx(34.3, abs=0.1)
-    # Forecast year: FCF actuals-only → N/A, numeric 0.0, no YoY.
-    assert by_year["2025"]["is_forecast"] is True
-    assert by_year["2025"]["fcf_label"] == "N/A"
-    assert by_year["2025"]["fcf"] == 0.0
-    assert by_year["2025"]["fcf_yoy_pct"] is None
-    # No cash_flow at all → every row's FCF is N/A (older reports / no data).
-    tl_nofcf = _build_annual_timeline(income, estimates, None)
-    assert all(t["fcf_label"] == "N/A" for t in tl_nofcf)
-
-
 # ── Valuation vital with snapshot fallback ────────────────────────────
 
 

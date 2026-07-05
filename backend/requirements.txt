@@ -43,6 +43,10 @@ python-dotenv==1.0.1
 # this the cache falls back to a fixed UTC-5 approximation.
 tzdata>=2024.1
 
+# Error monitoring (Sentry) — captures unhandled exceptions + logger.error/exception
+# with stack traces. Fully inert unless SENTRY_DSN is set (see app/main.py).
+sentry-sdk[fastapi]==2.20.0
+
 # Dev/Test
 pytest==8.3.4
 pytest-asyncio==0.24.0

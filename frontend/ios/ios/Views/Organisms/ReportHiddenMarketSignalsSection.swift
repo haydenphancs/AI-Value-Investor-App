@@ -28,8 +28,13 @@ struct ReportHiddenMarketSignalsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            if let congress = data.congress {
+            // Always show the Congressional Trades title. When there are no recent
+            // trades (e.g. PLUG — its only disclosed trades are >12 months old), an
+            // explicit empty state reads as "none in the window", not a load error.
+            if let congress = data.congress, !congress.trades.isEmpty {
                 congressCard(congress)
+            } else {
+                congressEmptyCard()
             }
             if let si = data.shortInterest {
                 shortInterestCard(si)
@@ -99,6 +104,28 @@ struct ReportHiddenMarketSignalsSection: View {
                     }
                 }
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // Empty state — title + a plain "none" line, so a ticker with no recent
+    // congressional trades (correctly filtered out, not an error) still shows the
+    // labelled section. Uses the same header style as the populated card.
+    private func congressEmptyCard() -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Congressional Trades")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textSecondary)
+                Text("Last 12 Months")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+            }
+            Text("No congressional trades in the last 12 months.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, AppSpacing.xs)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

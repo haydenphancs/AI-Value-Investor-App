@@ -26,6 +26,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Error monitoring (Sentry) ──────────────────────────────────────────────
+# Guarded by SENTRY_DSN so local dev (no DSN) is a COMPLETE no-op. When enabled,
+# captures unhandled exceptions AND logger.error/exception (via LoggingIntegration)
+# with full stack traces; INFO logs become breadcrumbs. before_send tags the
+# exception type / error_code so Sentry groups our known failure modes cleanly.
+# Never ships user PII (send_default_pii=False) — this is a fintech backend.
+if settings.SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+    from sentry_sdk.integrations.logging import LoggingIntegration
+
+    def _sentry_before_send(event: dict, hint: dict) -> dict:
+        exc_info = (hint or {}).get("exc_info")
+        if exc_info and exc_info[1] is not None:
+            exc = exc_info[1]
+            tags = event.setdefault("tags", {})
+            tags["exception_type"] = type(exc).__name__
+            code = getattr(exc, "error_code", None) or getattr(exc, "code", None)
+            if code:
+                tags["error_code"] = str(code)
+        return event
+
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENVIRONMENT,
+        release=settings.APP_VERSION,
+        traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+        integrations=[
+            FastApiIntegration(),
+            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+        ],
+        before_send=_sentry_before_send,
+        send_default_pii=False,
+    )
+    logger.info("Sentry error monitoring enabled (environment=%s)", settings.ENVIRONMENT)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

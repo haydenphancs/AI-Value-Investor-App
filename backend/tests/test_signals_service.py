@@ -196,15 +196,17 @@ def test_whale_empty_returns_none_and_passes_through_as_of():
 # ── 3. Earnings aggregation ────────────────────────────────────────────
 
 
-def test_earnings_ranks_by_magnitude_a_miss_can_lead_a_beat():
+def test_earnings_ranks_freshest_first_not_by_magnitude():
+    # Freshest-first: the most-recent report leads even when an OLDER one has a bigger
+    # |surprise| (the "not last week's data" guarantee).
     cal = [
-        {"symbol": "AVGO", "epsActual": 1.22, "epsEstimated": 1.0, "date": "2026-06-27"},  # +22%
-        {"symbol": "XYZ", "epsActual": 0.75, "epsEstimated": 1.0, "date": "2026-06-26"},   # -25%
+        {"symbol": "AVGO", "epsActual": 1.22, "epsEstimated": 1.0, "date": "2026-06-27"},  # +22%, FRESHER
+        {"symbol": "XYZ", "epsActual": 0.75, "epsEstimated": 1.0, "date": "2026-06-26"},   # -25%, older/bigger
         {"symbol": "SMALL", "epsActual": 1.05, "epsEstimated": 1.0, "date": "2026-06-25"}, # +5% (below floor)
     ]
     g = _aggregate_earnings(cal)
     assert g is not None and g.kind == "earnings"
-    assert [(r.symbol, r.value) for r in g.entries] == [("XYZ", -25.0), ("AVGO", 22.0)]
+    assert [(r.symbol, r.value) for r in g.entries] == [("AVGO", 22.0), ("XYZ", -25.0)]
     assert g.as_of_date == "2026-06-27"
 
 
@@ -405,18 +407,18 @@ def test_earnings_drops_foreign_listings():
     assert g is not None and [r.symbol for r in g.entries] == ["AAPL"]
 
 
-def test_earnings_as_of_uses_latest_report_not_largest_surprise():
-    # Same symbol reports 3× in the window: keep the biggest surprise, but as_of must
-    # be the LATEST qualifying report date (not the kept-surprise date).
+def test_earnings_dedup_keeps_freshest_report_and_as_of():
+    # Same symbol reports 3× in the window: keep the MOST-RECENT report (freshest-first),
+    # and as_of is that latest date — NOT the largest-magnitude one.
     cal = [
         {"symbol": "D", "epsActual": 1.15, "epsEstimated": 1.0, "date": "2026-06-20"},  # +15%
-        {"symbol": "D", "epsActual": 0.60, "epsEstimated": 1.0, "date": "2026-06-27"},  # -40% (kept)
-        {"symbol": "D", "epsActual": 1.30, "epsEstimated": 1.0, "date": "2026-06-28"},  # +30% (later)
+        {"symbol": "D", "epsActual": 0.60, "epsEstimated": 1.0, "date": "2026-06-27"},  # -40% (bigger, older)
+        {"symbol": "D", "epsActual": 1.30, "epsEstimated": 1.0, "date": "2026-06-28"},  # +30% (latest → kept)
     ]
     g = _aggregate_earnings(cal)
     assert g is not None and len(g.entries) == 1
-    assert g.entries[0].value == -40.0     # largest magnitude kept
-    assert g.as_of_date == "2026-06-28"    # freshest report, not the -40% date
+    assert g.entries[0].value == 30.0      # freshest report kept, not the largest |surprise|
+    assert g.as_of_date == "2026-06-28"
 
 
 def test_earnings_all_missing_dates_yields_none_as_of():
@@ -469,23 +471,27 @@ class _FakeEarningsFMP:
 
 
 @pytest.mark.asyncio
-async def test_build_earnings_applies_market_cap_floor_and_drops_foreign():
+async def test_build_earnings_applies_exchange_and_market_cap_gate():
     cal = [
-        {"symbol": "BIG", "epsActual": 1.5, "epsEstimated": 1.0, "date": "2026-06-27"},   # +50%, large cap
-        {"symbol": "TINY", "epsActual": 2.0, "epsEstimated": 1.0, "date": "2026-06-26"},  # +100%, micro cap
-        {"symbol": "ZOO.L", "epsActual": 3.0, "epsEstimated": 1.0, "date": "2026-06-27"}, # foreign → dropped pre-quote
+        {"symbol": "OTCBIG", "epsActual": 1.8, "epsEstimated": 1.0, "date": "2026-06-28"}, # +80%, OTC → dropped
+        {"symbol": "BIG", "epsActual": 1.5, "epsEstimated": 1.0, "date": "2026-06-27"},    # +50%, NYSE large cap
+        {"symbol": "TINY", "epsActual": 2.0, "epsEstimated": 1.0, "date": "2026-06-26"},   # +100%, micro cap
+        {"symbol": "ZOO.L", "epsActual": 3.0, "epsEstimated": 1.0, "date": "2026-06-27"},  # foreign → dropped pre-quote
     ]
     quotes = {
-        "BIG": {"symbol": "BIG", "marketCap": 5_000_000_000},
-        "TINY": {"symbol": "TINY", "marketCap": 50_000_000},   # below $250M floor
+        # OTCBIG clears the $250M cap but is OTC → the new exchange gate drops it.
+        "OTCBIG": {"symbol": "OTCBIG", "exchange": "OTC", "marketCap": 5_000_000_000, "name": "OTC Big Corp"},
+        "BIG": {"symbol": "BIG", "exchange": "NYSE", "marketCap": 5_000_000_000, "name": "Big Industries, Inc."},
+        "TINY": {"symbol": "TINY", "exchange": "NASDAQ", "marketCap": 50_000_000, "name": "Tiny Co"},  # below floor
     }
     s = ssvc.SignalsService()
     s.fmp = _FakeEarningsFMP(cal, quotes)  # type: ignore[assignment]
     g = await s._build_earnings()
     assert g is not None
-    # ZOO.L never reaches the quote step (foreign); TINY dropped by the floor.
+    # ZOO.L never reaches quotes (foreign); OTCBIG dropped by the exchange gate; TINY by the floor.
     assert [r.symbol for r in g.entries] == ["BIG"]
     assert g.entries[0].value == 50.0
+    assert g.entries[0].name == "Big Industries, Inc."   # name now populated from the quote
 
 
 @pytest.mark.asyncio

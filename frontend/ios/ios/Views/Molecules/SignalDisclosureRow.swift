@@ -118,9 +118,17 @@ struct SignalDisclosureRow: View {
     private func leaderRow(_ leader: SignalLeader) -> some View {
         Button { onLeaderTap?(signal.kind, leader) } label: {
             HStack {
-                Text(leader.symbol)
-                    .font(AppTypography.labelEmphasis)
-                    .foregroundColor(AppColors.textPrimary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(leader.symbol)
+                        .font(AppTypography.labelEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
+                    if !leader.companyName.isEmpty {
+                        Text(leader.companyName)
+                            .font(AppTypography.captionSmall)
+                            .foregroundColor(AppColors.textMuted)
+                            .lineLimit(1)
+                    }
+                }
                 Spacer()
                 Text(leader.stat)
                     .font(AppTypography.labelSmall)

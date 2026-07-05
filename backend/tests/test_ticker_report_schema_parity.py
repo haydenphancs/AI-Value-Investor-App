@@ -462,14 +462,12 @@ def test_annual_timeline_na_row_validates_and_keeps_ios_keys():
          "numAnalystsRevenue": 7, "numAnalystsEps": 6},
         {"date": "2026-12-31", "revenueAvg": 12_000_000_000},  # no EPS / no analyst counts
     ]
-    cash_flow = [{"date": "2024-12-31", "freeCashFlow": -3_000_000_000}]  # negative FCF
-    timeline = _build_annual_timeline(income, estimates, cash_flow)
+    timeline = _build_annual_timeline(income, estimates)
 
     # Every row carries the full key set the iOS RevenueProjection decodes.
     ios_keys = {
         "period", "revenue", "revenue_label", "revenue_yoy_pct",
         "eps", "eps_label", "eps_yoy_pct",
-        "fcf", "fcf_label", "fcf_yoy_pct",
         "revenue_analyst_count", "eps_analyst_count", "is_forecast",
     }
     for row in timeline:
@@ -492,11 +490,6 @@ def test_annual_timeline_na_row_validates_and_keeps_ios_keys():
     assert na.eps == 0.0
     assert na.eps_yoy_pct is None
     assert na.eps_analyst_count is None and na.revenue_analyst_count is None
-    # FCF: actuals-only → the 2024 actual carries a SIGNED negative label; the 2026
-    # forecast row carries "N/A" (never a $0), and both validate against the schema.
-    actual = next(r for r in model.annual_timeline if r.period == "2024")
-    assert actual.fcf_label == "-$3B" and actual.fcf < 0
-    assert na.fcf_label == "N/A"
 
 
 def test_critical_factors_capped_at_five():

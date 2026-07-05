@@ -245,6 +245,17 @@ final class HomeRepository: HomeRepositoryProtocol {
         return "As of \(shortsAsOfDisplay.string(from: date))"
     }
 
+    /// Earnings-shockers subtitle: shows the freshest report date when the backend
+    /// provides one (window is bounded to ~the past week), else the generic tagline.
+    /// Reuses the shorts "as of" date formatters.
+    private static func earningsSubtitle(_ asOfDate: String?) -> String {
+        guard let asOfDate,
+              let date = shortsAsOfParser.date(from: asOfDate) else {
+            return "Just beat or missed the Street big"
+        }
+        return "Biggest EPS surprises · As of \(shortsAsOfDisplay.string(from: date))"
+    }
+
     // MARK: - App-Exclusive Signals mapping
 
     /// Build the three signal cards. Like the scanners, the presentation chrome
@@ -271,7 +282,9 @@ final class HomeRepository: HomeRepositoryProtocol {
                 topSymbol: top.symbol,
                 topStat: "\(Int(top.value)) members buying",
                 leaders: c.entries.map {
-                    SignalLeader(symbol: $0.symbol, stat: "\(Int($0.value)) buys")
+                    SignalLeader(symbol: $0.symbol,
+                                 companyName: CompanyNameFormatter.clean($0.name ?? ""),
+                                 stat: "\(Int($0.value)) buys")
                 }
             ))
         }
@@ -289,7 +302,9 @@ final class HomeRepository: HomeRepositoryProtocol {
                 // precision. See the plan's whale-source decision.
                 topStat: "\(Int(top.value)) funds adding",
                 leaders: w.entries.map {
-                    SignalLeader(symbol: $0.symbol, stat: "\(Int($0.value)) funds")
+                    SignalLeader(symbol: $0.symbol,
+                                 companyName: CompanyNameFormatter.clean($0.name ?? ""),
+                                 stat: "\(Int($0.value)) funds")
                 }
             ))
         }
@@ -298,13 +313,15 @@ final class HomeRepository: HomeRepositoryProtocol {
             out.append(ExclusiveSignal(
                 kind: "earnings",
                 title: "Earnings Shockers",
-                subtitle: "Just beat or missed the Street big",
+                subtitle: earningsSubtitle(e.asOfDate),
                 iconSystemName: "bolt.fill",
                 accent: AppColors.accentYellow,
                 topSymbol: top.symbol,
                 topStat: "\(formatSurprise(top.value)) surprise",
                 leaders: e.entries.map {
-                    SignalLeader(symbol: $0.symbol, stat: "\(formatSurprise($0.value)) EPS")
+                    SignalLeader(symbol: $0.symbol,
+                                 companyName: CompanyNameFormatter.clean($0.name ?? ""),
+                                 stat: "\(formatSurprise($0.value)) EPS")
                 }
             ))
         }
@@ -312,9 +329,18 @@ final class HomeRepository: HomeRepositoryProtocol {
         return out
     }
 
-    /// Signed integer-percent surprise: `22.0 → "+22%"`, `-25.4 → "-25%"`.
+    /// Display cap for the surprise %: past ±200 the raw number (e.g. Nike +555% on a
+    /// low $0.11 estimate) reads as broken, so it's shown bounded. The true value
+    /// stays in the data; only the label is clamped.
+    private static let earningsDisplayCap: Double = 200
+
+    /// Signed integer-percent surprise: `22.0 → "+22%"`, `-25.4 → "-25%"`, and
+    /// anything beyond ±200 → `"+200%+"` / `"-200%+"`.
     private static func formatSurprise(_ p: Double) -> String {
-        String(format: "%+.0f%%", p)
+        if abs(p) > earningsDisplayCap {
+            return String(format: "%@%.0f%%+", p < 0 ? "-" : "+", earningsDisplayCap)
+        }
+        return String(format: "%+.0f%%", p)
     }
 
     // MARK: - Emerging Frontiers (themes) mapping
@@ -479,9 +505,9 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             topSymbol: "NVDA",
             topStat: "7 members buying",
             leaders: [
-                SignalLeader(symbol: "NVDA", stat: "4 buys"),
-                SignalLeader(symbol: "MSFT", stat: "3 buys"),
-                SignalLeader(symbol: "GOOGL", stat: "2 buys"),
+                SignalLeader(symbol: "NVDA", companyName: "", stat: "4 buys"),
+                SignalLeader(symbol: "MSFT", companyName: "", stat: "3 buys"),
+                SignalLeader(symbol: "GOOGL", companyName: "", stat: "2 buys"),
             ]
         ),
         ExclusiveSignal(
@@ -493,9 +519,9 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             topSymbol: "MSFT",
             topStat: "14 funds adding",
             leaders: [
-                SignalLeader(symbol: "MSFT", stat: "+$2.1B"),
-                SignalLeader(symbol: "AMZN", stat: "+$1.4B"),
-                SignalLeader(symbol: "META", stat: "+$0.9B"),
+                SignalLeader(symbol: "MSFT", companyName: "", stat: "+$2.1B"),
+                SignalLeader(symbol: "AMZN", companyName: "", stat: "+$1.4B"),
+                SignalLeader(symbol: "META", companyName: "", stat: "+$0.9B"),
             ]
         ),
         ExclusiveSignal(
@@ -507,9 +533,9 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             topSymbol: "AVGO",
             topStat: "+22% surprise",
             leaders: [
-                SignalLeader(symbol: "AVGO", stat: "+22% EPS"),
-                SignalLeader(symbol: "CRM", stat: "+15% EPS"),
-                SignalLeader(symbol: "NOW", stat: "+12% EPS"),
+                SignalLeader(symbol: "AVGO", companyName: "Broadcom", stat: "+22% EPS"),
+                SignalLeader(symbol: "CRM", companyName: "Salesforce", stat: "+15% EPS"),
+                SignalLeader(symbol: "NOW", companyName: "ServiceNow", stat: "+12% EPS"),
             ]
         ),
     ]

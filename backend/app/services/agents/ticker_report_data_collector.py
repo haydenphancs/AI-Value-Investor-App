@@ -1595,8 +1595,7 @@ class TickerReportDataCollector:
 
         # ── Revenue forecast (projections + CAGR — guidance from AI) ─
         out.revenue_forecast_partial = _build_revenue_forecast_partial(
-            out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income,
-            out.cash_flow,
+            out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income
         )
 
         # ── Fundamental metrics (4 cards) — deterministic from the
@@ -4306,7 +4305,6 @@ def _int_or_none(v: Any) -> Optional[int]:
 def _build_annual_timeline(
     income: Optional[List[Dict[str, Any]]],
     estimates: Optional[List[Dict[str, Any]]],
-    cash_flow: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """One continuous yearly revenue+EPS series for the Earnings Timeline view:
     the last 5 reported ACTUAL years (is_forecast=False) followed GAPLESSLY by up
@@ -4340,30 +4338,18 @@ def _build_annual_timeline(
         v = _num_or_none(est.get(primary))
         return v if v is not None else _num_or_none(est.get(legacy))
 
-    # Free cash flow by year (ACTUALS-ONLY: FMP has no FCF forecast field). Keyed to
-    # income years so the FCF line rides the same columns as revenue/EPS. Negatives
-    # preserved (PLUG) — surfaced with a signed compact label downstream.
-    fcf_by_year: Dict[int, Optional[float]] = {}
-    for rec in (cash_flow or []):
-        y = _year(rec)
-        if y is not None:
-            fcf_by_year[y] = _num_or_none(rec.get("freeCashFlow"))
-
     # (year, revenue|None, eps|None, is_forecast, revenue_analyst_count,
-    # eps_analyst_count, fcf|None) — revenue/eps/fcf are None when genuinely absent
-    # (→ "N/A"), distinct from a real 0.0.
-    Row = Tuple[
-        int, Optional[float], Optional[float], bool,
-        Optional[int], Optional[int], Optional[float],
-    ]
+    # eps_analyst_count) — revenue/eps are None when genuinely absent (→ "N/A"),
+    # distinct from a real 0.0.
+    Row = Tuple[int, Optional[float], Optional[float], bool, Optional[int], Optional[int]]
     actuals: List[Row] = []
     for rec in sorted((income or []), key=lambda r: r.get("date", "")):
         y = _year(rec)
         if y is not None:
-            # Reported actuals have no analyst coverage; FCF joins by year.
+            # Reported actuals have no analyst coverage.
             actuals.append(
                 (y, _num_or_none(rec.get("revenue")), _num_or_none(rec.get("epsDiluted")),
-                 False, None, None, fcf_by_year.get(y))
+                 False, None, None)
             )
     last_actual = max((y for y, *_ in actuals), default=None)
 
@@ -4381,7 +4367,6 @@ def _build_annual_timeline(
             True,
             _int_or_none(est.get("numAnalystsRevenue")),
             _int_or_none(est.get("numAnalystsEps")),
-            None,  # FCF is actuals-only — no FMP forecast, so the line stops here
         ))
 
     # Window: last 5 actuals DISPLAYED, plus one older actual (when present) kept
@@ -4411,10 +4396,9 @@ def _build_annual_timeline(
 
     series: List[Dict[str, Any]] = []
     for k in range(anchor_offset, len(rows_for_yoy)):
-        year, rev, eps, is_fc, rev_n, eps_n, fcf = rows_for_yoy[k]
+        year, rev, eps, is_fc, rev_n, eps_n = rows_for_yoy[k]
         prior_rev = rows_for_yoy[k - 1][1] if k > 0 else None
         prior_eps = rows_for_yoy[k - 1][2] if k > 0 else None
-        prior_fcf = rows_for_yoy[k - 1][6] if k > 0 else None
         series.append({
             "period": str(year),
             "revenue": round(rev / divisor, 2) if rev else 0.0,
@@ -4423,12 +4407,6 @@ def _build_annual_timeline(
             "eps": round(eps, 2) if eps else 0.0,
             "eps_label": f"${eps:.2f}" if eps is not None else "N/A",
             "eps_yoy_pct": _yoy(eps, prior_eps),
-            # Free cash flow (actuals-only), in the SAME divisor units as revenue so
-            # the iOS line scales against maxAbsRevenue like EPS. Signed compact label
-            # so a negative FCF reads "-$394M", never "$0".
-            "fcf": round(fcf / divisor, 2) if fcf else 0.0,
-            "fcf_label": _format_money_compact(fcf) if fcf is not None else "N/A",
-            "fcf_yoy_pct": _yoy(fcf, prior_fcf),
             "revenue_analyst_count": rev_n,
             "eps_analyst_count": eps_n,
             "is_forecast": is_fc,
@@ -4530,7 +4508,6 @@ def _build_revenue_forecast_partial(
     revenue_cagr: Optional[float],
     eps_cagr: Optional[float],
     income: Optional[List[Dict[str, Any]]] = None,
-    cash_flow: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     # Pick 4 chart-visible projections (current FY + 3 forward) plus the
     # off-screen anchor (FY before "current") for the leftmost bar's YoY
@@ -4596,7 +4573,7 @@ def _build_revenue_forecast_partial(
         # after the last reported year) for the "Earnings Timeline" sheet —
         # independent of the curated `projections` window above (own divisor +
         # YoY). The module chart keeps using `projections`; the sheet uses this.
-        "annual_timeline": _build_annual_timeline(income, estimates, cash_flow),
+        "annual_timeline": _build_annual_timeline(income, estimates),
         "forecast_analyst_count": _forecast_analyst_count(income, estimates),
         "guidance_quote": None,         # AI fills via Stage A (PR 6)
         "guidance_speaker": None,       # AI fills via Stage A (PR 6)

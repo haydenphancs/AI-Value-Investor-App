@@ -33,7 +33,7 @@ struct ThemeConstituentDTO: Decodable {
     func toDisplay() -> ThemeConstituent {
         ThemeConstituent(
             ticker: ticker,
-            name: (companyName?.isEmpty == false) ? companyName! : ticker,
+            name: CompanyNameFormatter.clean((companyName?.isEmpty == false) ? companyName! : ticker),
             priceText: ThemeDetailFormat.price(price),
             changeText: changePercent.map { String(format: "%+.2f%%", $0) } ?? "",
             isPositive: (changePercent ?? 0) >= 0,

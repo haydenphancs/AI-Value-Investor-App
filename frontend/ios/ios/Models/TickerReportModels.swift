@@ -502,24 +502,6 @@ struct RevenueProjection: Identifiable {
     let revenueAnalystCount: Int? // analysts behind a forecast year; nil on actuals
     let epsAnalystCount: Int?     // analysts behind a forecast year; nil on actuals
     let isForecast: Bool
-    // Free cash flow overlay (Earnings Timeline, ACTUALS-ONLY — nil on forecast rows
-    // and older reports that predate the field). `fcf` is in the same units as
-    // `revenue`; `fcfLabel` is a SIGNED compact string ("-$394M"). Defaulted so
-    // sample/preview call sites compile unchanged.
-    let fcf: Double?
-    let fcfLabel: String?
-    let fcfYoyPct: Double?
-
-    init(period: String, revenue: Double, revenueLabel: String, revenueYoyPct: Double?,
-         eps: Double, epsLabel: String, epsYoyPct: Double?,
-         revenueAnalystCount: Int?, epsAnalystCount: Int?, isForecast: Bool,
-         fcf: Double? = nil, fcfLabel: String? = nil, fcfYoyPct: Double? = nil) {
-        self.period = period; self.revenue = revenue; self.revenueLabel = revenueLabel
-        self.revenueYoyPct = revenueYoyPct; self.eps = eps; self.epsLabel = epsLabel
-        self.epsYoyPct = epsYoyPct; self.revenueAnalystCount = revenueAnalystCount
-        self.epsAnalystCount = epsAnalystCount; self.isForecast = isForecast
-        self.fcf = fcf; self.fcfLabel = fcfLabel; self.fcfYoyPct = fcfYoyPct
-    }
 
     /// Compact YoY string for the bar/dot annotations. Returns nil when
     /// we have no anchor — the view should hide the row entirely.
@@ -533,12 +515,6 @@ struct RevenueProjection: Identifiable {
         return String(format: "%@%.0f%%", pct >= 0 ? "+" : "", pct)
     }
 
-    /// FCF has no data on forecast years / old reports → nil hides the popup row.
-    var fcfYoYText: String? {
-        guard let pct = fcfYoyPct else { return nil }
-        return String(format: "%@%.0f%%", pct >= 0 ? "+" : "", pct)
-    }
-
     /// Color for the YoY chip: green for growth, red for decline, gray
     /// when missing (caller should also gate on the *Text property).
     var revenueYoYColor: Color {
@@ -548,11 +524,6 @@ struct RevenueProjection: Identifiable {
 
     var epsYoYColor: Color {
         guard let pct = epsYoyPct else { return AppColors.textMuted }
-        return pct >= 0 ? AppColors.bullish : AppColors.bearish
-    }
-
-    var fcfYoYColor: Color {
-        guard let pct = fcfYoyPct else { return AppColors.textMuted }
         return pct >= 0 ? AppColors.bullish : AppColors.bearish
     }
 }
@@ -1630,9 +1601,9 @@ extension TickerReportData {
             ],
             beatSummary: "Beat 7 of 10",
             annualTimeline: [
-                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, fcf: 12, fcfLabel: "$12B", fcfYoyPct: nil),
-                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, fcf: 8,  fcfLabel: "$8B",  fcfYoyPct: -33),
-                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, fcf: -4, fcfLabel: "-$4B", fcfYoyPct: -150),
+                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
+                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
+                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false),
                 RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67.3B",  revenueYoyPct: 17,  eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: 25,  revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true),
                 RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$88.8B",  revenueYoyPct: 32,  eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,   revenueAnalystCount: 28, epsAnalystCount: 27, isForecast: true),
                 RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130.0B", revenueYoyPct: 46,  eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35,  revenueAnalystCount: 22, epsAnalystCount: 20, isForecast: true)

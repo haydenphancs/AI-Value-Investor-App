@@ -198,7 +198,7 @@ struct WhaleHoldingDTO: Codable {
         WhaleHolding(
             id: id,
             ticker: ticker,
-            companyName: companyName,
+            companyName: CompanyNameFormatter.clean(companyName),
             logoURL: logoUrl,
             allocation: allocation,
             changePercent: changePercent,
@@ -280,7 +280,7 @@ struct WhaleTradeDTO: Codable {
         WhaleTrade(
             id: id,
             ticker: ticker,
-            companyName: companyName,
+            companyName: CompanyNameFormatter.clean(companyName),
             action: WhaleTradeAction(rawValue: action) ?? .bought,
             tradeType: WhaleTradeType(rawValue: tradeType) ?? .increased,
             amount: amount,

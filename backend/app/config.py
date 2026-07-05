@@ -222,6 +222,14 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
 
+    # Error monitoring (Sentry). Optional — an unset DSN keeps the SDK fully inert,
+    # so local dev is a no-op. Set SENTRY_DSN on Railway (prod) only. The digest
+    # job's READ creds (SENTRY_API_TOKEN / SENTRY_ORG / SENTRY_PROJECT) are NOT
+    # here — scripts/error_digest.py reads them straight from the environment, so it
+    # runs standalone and the API process never needs them.
+    SENTRY_DSN: Optional[str] = None
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.0   # 0 = errors only (no perf tracing); cheap
+
     # Disclaimer
     LEGAL_DISCLAIMER: str = (
         "For educational purposes only. Not financial advice. "

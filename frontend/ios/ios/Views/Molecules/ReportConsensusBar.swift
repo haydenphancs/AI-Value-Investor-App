@@ -495,17 +495,23 @@ struct ReportConsensusBar: View {
     }
 
     private var hedgeFundsSection: some View {
-        Group {
-            // Gated on real institutional data (decoupled from the insight, which
-            // now spans the whole card and lives at the bottom).
-            if hasInstitutionalData {
-                VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    Text("Institutions")
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.textSecondary)
+        // Always show the "Institutions" title. When there's no institutional
+        // (13F) data, an explicit empty line reads as "no data" instead of a
+        // silently-missing section (mirrors the Congressional Trades empty state
+        // in Hidden Market Signals).
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            Text("Institutions")
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textSecondary)
 
-                    hedgeFundFlowContent
-                }
+            if hasInstitutionalData {
+                hedgeFundFlowContent
+            } else {
+                Text("No recent institutional trading activity.")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, AppSpacing.xs)
             }
         }
     }

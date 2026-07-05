@@ -44,9 +44,20 @@ struct ReportInsiderActivityTable: View {
         return counts
     }
 
+    /// Whether there's any insider signal to render — informative buy/sell
+    /// counts, a flow chart, or recent transactions. When false, the section
+    /// shows an explicit empty state instead of an all-zero "Buys 0 / Sells 0"
+    /// table (which reads as an error rather than "no activity").
+    private var hasInsiderActivity: Bool {
+        insiderData.transactions.contains { $0.count > 0 }
+            || !insiderData.recentTransactions.isEmpty
+            || (insiderData.insiderFlow.map { !$0.flowData.isEmpty } ?? false)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Header with sentiment badge
+            // Header with sentiment badge. The badge is hidden when there's no
+            // activity — a "Balanced" pill over an all-zero table is noise.
             HStack {
                 Text("Insider Activity")
                     .font(AppTypography.bodySmallEmphasis)
@@ -54,11 +65,13 @@ struct ReportInsiderActivityTable: View {
 
                 Spacer()
 
-                ReportSentimentBadge(
-                    text: insiderData.sentiment.rawValue,
-                    textColor: insiderData.sentiment.color,
-                    backgroundColor: insiderData.sentiment.backgroundColor
-                )
+                if hasInsiderActivity {
+                    ReportSentimentBadge(
+                        text: insiderData.sentiment.rawValue,
+                        textColor: insiderData.sentiment.color,
+                        backgroundColor: insiderData.sentiment.backgroundColor
+                    )
+                }
             }
 
             // Timeframe
@@ -66,6 +79,26 @@ struct ReportInsiderActivityTable: View {
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
 
+            if hasInsiderActivity {
+                insiderContent
+            } else {
+                // Empty state — the "Insider Activity" title + timeframe stay
+                // visible so an absent table reads as "no data", not an error
+                // (mirrors the Congressional Trades empty state).
+                Text("No insider transactions in the last 12 months.")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, AppSpacing.xs)
+            }
+        }
+    }
+
+    /// The full insider readout — buy/sell table, flow chart, recent
+    /// transactions — rendered only when `hasInsiderActivity`.
+    @ViewBuilder
+    private var insiderContent: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Buys/Sells table — gray card (matches the Capital Allocation
             // metrics card: cardBackgroundLight + rounded corner + md padding).
             VStack(spacing: AppSpacing.sm) {

@@ -213,7 +213,9 @@ struct CryptoDetailView: View {
                 chatViewModel.startNewConversation(
                     firstMessage: query,
                     stockId: "\(cryptoSymbol)USD",
-                    context: viewModel.contextForCurrentTab
+                    context: viewModel.contextForCurrentTab,
+                    contextType: .crypto,
+                    referenceId: cryptoSymbol
                 )
                 viewModel.pendingAIQuery = nil
                 showAIChat = true
@@ -309,7 +311,9 @@ struct CryptoDetailView: View {
         chatViewModel.startNewConversation(
             firstMessage: "Give me a comprehensive Deep Analysis of \(cryptoSymbol). Analyze the current price action, market position, key risks, and outlook.",
             stockId: "\(cryptoSymbol)USD",
-            context: viewModel.contextForCurrentTab
+            context: viewModel.contextForCurrentTab,
+            contextType: .crypto,
+            referenceId: cryptoSymbol
         )
         showAIChat = true
     }

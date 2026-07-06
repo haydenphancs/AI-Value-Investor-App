@@ -445,7 +445,9 @@ struct BookCoreDetailView: View {
         inputText = ""
         chatViewModel.startNewConversation(
             firstMessage: text,
-            context: "The user is reading \"\(book.title)\" by \(book.author), core \(currentContent.chapterNumber). Answer in that context."
+            context: "The user is reading \"\(book.title)\" by \(book.author), core \(currentContent.chapterNumber). Answer in that context.",
+            contextType: .book,
+            referenceId: String(book.curriculumOrder)
         )
         // Release the focus-driven compact reason deterministically (the covered TextField's
         // focus-off event is unreliable) so the mini player returns when the chat closes.

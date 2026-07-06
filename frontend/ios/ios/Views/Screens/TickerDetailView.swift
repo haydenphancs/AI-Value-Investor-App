@@ -254,7 +254,7 @@ struct TickerDetailView: View {
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
-                chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol, context: viewModel.contextForCurrentTab)
+                chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol, context: viewModel.contextForCurrentTab, contextType: .stock, referenceId: tickerSymbol)
                 viewModel.pendingAIQuery = nil
                 showAIChat = true
             }
@@ -377,7 +377,9 @@ struct TickerDetailView: View {
             chatViewModel.startNewConversation(
                 firstMessage: "Give me a comprehensive Deep Analysis of \(tickerSymbol). Analyze the fundamentals, valuation, competitive moat, key risks, and outlook.",
                 stockId: tickerSymbol,
-                context: viewModel.contextForCurrentTab
+                context: viewModel.contextForCurrentTab,
+                contextType: .stock,
+                referenceId: tickerSymbol
             )
             showAIChat = true
         }

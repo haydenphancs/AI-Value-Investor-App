@@ -1,18 +1,46 @@
 """Chat schemas matching DB chat_sessions + chat_messages tables."""
 
+from enum import Enum
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict
+
+
+# ── Context types ───────────────────────────────────────────────────
+#
+# The screen the user is asking from. iOS sends {context_type, reference_id}
+# instead of a big raw context string; the backend's ChatContextResolver
+# fetches the already-cached data for that screen and injects a compact
+# grounding block into the Gemini prompt. Carried as plain `Optional[str]`
+# in the request/response models (NOT the enum) so an unknown value from an
+# older client degrades gracefully instead of 422-ing — the resolver
+# normalizes and validates internally.
+
+class ChatContextType(str, Enum):
+    TICKER_REPORT = "TICKER_REPORT"
+    STOCK = "STOCK"
+    ETF = "ETF"
+    CRYPTO = "CRYPTO"
+    INDEX = "INDEX"
+    COMMODITY = "COMMODITY"
+    MONEY_MOVES_ARTICLE = "MONEY_MOVES_ARTICLE"
+    JOURNEY_LESSON = "JOURNEY_LESSON"
+    BOOK = "BOOK"
+    NONE = "NONE"
 
 
 # ── Request Schemas ─────────────────────────────────────────────────
 
 class CreateChatSessionRequest(BaseModel):
-    stock_id: Optional[str] = None  # ticker symbol, optional
+    stock_id: Optional[str] = None  # ticker symbol, optional (back-compat)
+    context_type: Optional[str] = None  # ChatContextType value (screen the user asks from)
+    reference_id: Optional[str] = None  # e.g. ticker, "TICKER|persona", article slug, book order
 
 
 class SendChatMessageRequest(BaseModel):
     message: str
-    context: Optional[str] = None  # rich context from the client (key stats, tab data)
+    context: Optional[str] = None  # legacy/BOOK client context string (title/author/core)
+    context_type: Optional[str] = None  # per-message override of the session's context type
+    reference_id: Optional[str] = None  # per-message override of the session's reference id
 
 
 class UpdateChatSessionRequest(BaseModel):
@@ -96,6 +124,8 @@ class ChatSessionResponse(BaseModel):
     title: Optional[str] = None
     session_type: Optional[str] = "NORMAL"
     stock_id: Optional[str] = None
+    context_type: Optional[str] = None  # screen the chat is grounded on (re-grounds on history reload)
+    reference_id: Optional[str] = None  # ticker / "TICKER|persona" / slug / book order
     preview_message: Optional[str] = None
     message_count: int = 0
     is_saved: bool = False

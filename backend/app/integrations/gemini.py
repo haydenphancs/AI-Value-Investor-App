@@ -301,6 +301,77 @@ class GeminiClient:
             logger.error(f"Gemini text generation failed: {e}", exc_info=True)
             raise
 
+    # ── Streaming text (SSE chat) ─────────────────────────────────────
+    # NOTE: intentionally NOT decorated with @async_retry — retrying a partial
+    # stream would replay already-emitted tokens. Instead we honor the quota
+    # circuit breaker manually (fail-fast if open; record quota errors/success)
+    # and let the caller's SSE endpoint emit an `error` event + fall back.
+    #
+    # The Gemini SDK 0.8.3 `generate_content(stream=True)` is a SYNC iterator;
+    # we drain it on a worker thread and hand chunks to the event loop through
+    # an unbounded asyncio.Queue via call_soon_threadsafe. Function-calling is
+    # deliberately unavailable here (tools ⊗ streaming) — the chat endpoint
+    # injects context + fetches any widget deterministically instead.
+    async def stream_text(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ):
+        """Yield response text chunks as Gemini generates them.
+
+        Raises immediately if the quota circuit is open. Propagates the first
+        error the SDK raises (quota or otherwise) across the thread boundary so
+        the caller can surface an `error` event. A per-chunk timeout guards
+        against a hung stream parking the request forever.
+        """
+        if _quota_circuit.is_open():
+            raise GeminiQuotaError(
+                "Gemini quota circuit open (resource_exhausted) — failing fast"
+            )
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()  # unbounded — chat streams are small
+        _SENTINEL = object()
+
+        def _produce() -> None:
+            try:
+                model = genai.GenerativeModel(
+                    model_name=model_name or self.model_name,
+                    generation_config=self.generation_config,
+                    system_instruction=system_instruction or None,
+                )
+                for chunk in model.generate_content(prompt, stream=True):
+                    # chunk.text raises if the chunk carries no text part
+                    # (safety/finish-only chunks) — treat those as empty.
+                    try:
+                        text = chunk.text or ""
+                    except Exception:
+                        text = ""
+                    if text:
+                        loop.call_soon_threadsafe(queue.put_nowait, text)
+            except Exception as e:  # push the error across the boundary
+                loop.call_soon_threadsafe(queue.put_nowait, e)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
+        fut = loop.run_in_executor(None, _produce)
+        try:
+            while True:
+                item = await asyncio.wait_for(
+                    queue.get(), timeout=settings.GEMINI_REQUEST_TIMEOUT_SECONDS
+                )
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    if _is_quota_error(item):
+                        _quota_circuit.record_quota_error()
+                    raise item
+                yield item
+            _quota_circuit.record_success()
+        finally:
+            fut.cancel()
+
     # ── Context caching (Stage-B narratives) ──────────────────────────
     # The N parallel narrative calls per report share one large evidence blob +
     # persona system prompt. Uploading that shared prefix to a CachedContent

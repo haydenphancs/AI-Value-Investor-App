@@ -46,6 +46,10 @@ from app.api.v1.endpoints.chat import _row_to_message, _row_to_session
 _SESSION_REQUIRED = {"id", "message_count", "is_saved", "created_at"}
 _SESSION_ALL_KEYS = _SESSION_REQUIRED | {
     "title", "session_type", "stock_id", "preview_message", "last_message_at",
+    # Context-aware chat (migration 085): optional on both sides. iOS decodes
+    # them as Optional so absent/null is fine; when present they re-ground a
+    # reloaded session on the same cached data.
+    "context_type", "reference_id",
 }
 _MESSAGE_REQUIRED = {"id", "session_id", "role", "content", "created_at"}
 _MESSAGE_ALL_KEYS = _MESSAGE_REQUIRED | {"widget", "citations", "tokens_used"}
@@ -106,6 +110,30 @@ def test_session_row_with_explicit_null_optionals():
     dumped = _row_to_session(row).model_dump()
     _assert_required_non_null(dumped, _SESSION_REQUIRED, "session-nulls")
     assert dumped["message_count"] == 4 and dumped["is_saved"] is True
+
+
+def test_session_row_carries_context_fields_for_regrounding():
+    """A context-aware session (migration 085) round-trips context_type +
+    reference_id so a history reload re-grounds on the same cached data."""
+    row = {
+        "id": "sess-ctx", "created_at": "2026-07-06T00:00:00.000000+00:00",
+        "session_type": "REPORT",
+        "context_type": "TICKER_REPORT", "reference_id": "AAPL|warren_buffett",
+    }
+    dumped = _row_to_session(row).model_dump()
+    _assert_keys_subset(_SESSION_ALL_KEYS, dumped, "session-ctx")
+    _assert_required_non_null(dumped, _SESSION_REQUIRED, "session-ctx")
+    assert dumped["context_type"] == "TICKER_REPORT"
+    assert dumped["reference_id"] == "AAPL|warren_buffett"
+
+
+def test_legacy_session_row_has_null_context_fields():
+    """A pre-085 row (no context columns) still decodes; iOS reads them as nil."""
+    row = {"id": "sess-legacy", "created_at": "2026-07-06T00:00:00.000000+00:00"}
+    dumped = _row_to_session(row).model_dump()
+    # Keys present (so iOS's optional decode finds them) but null.
+    assert "context_type" in dumped and dumped["context_type"] is None
+    assert "reference_id" in dumped and dumped["reference_id"] is None
 
 
 def test_session_list_shape():

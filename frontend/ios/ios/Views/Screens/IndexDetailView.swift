@@ -225,7 +225,9 @@ struct IndexDetailView: View {
                 chatViewModel.startNewConversation(
                     firstMessage: query,
                     stockId: indexSymbol,
-                    context: viewModel.contextForCurrentTab
+                    context: viewModel.contextForCurrentTab,
+                    contextType: .index,
+                    referenceId: indexSymbol
                 )
                 viewModel.pendingAIQuery = nil
                 showAIChat = true
@@ -252,7 +254,9 @@ struct IndexDetailView: View {
                         chatViewModel.startNewConversation(
                             firstMessage: "Give me a comprehensive Market Deep Dive. Analyze the current market valuation, sector rotation patterns, and macroeconomic risks. Include actionable takeaways and what to watch this week.",
                             stockId: indexSymbol,
-                            context: viewModel.contextForCurrentTab
+                            context: viewModel.contextForCurrentTab,
+                            contextType: .index,
+                            referenceId: indexSymbol
                         )
                         showAIChat = true
                     },

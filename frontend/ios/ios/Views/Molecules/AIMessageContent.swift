@@ -10,15 +10,27 @@ import SwiftUI
 struct AIMessageContent: View {
     let content: [RichContentType]
     let timestamp: String
+    /// When true, a blinking caret trails the content (tokens still streaming in).
+    var isStreaming: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            ForEach(Array(content.enumerated()), id: \.offset) { _, item in
-                renderContent(item)
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            // Cay AI attribution
+            CayAIMessageHeader()
+
+            VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                ForEach(Array(content.enumerated()), id: \.offset) { _, item in
+                    renderContent(item)
+                }
+                if isStreaming {
+                    StreamingCaret()
+                }
             }
 
-            // Timestamp
-            MessageTimestamp(time: timestamp, alignment: .leading)
+            // Timestamp hidden while streaming (final timestamp lands on `done`).
+            if !isStreaming {
+                MessageTimestamp(time: timestamp, alignment: .leading)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -27,10 +39,7 @@ struct AIMessageContent: View {
     private func renderContent(_ content: RichContentType) -> some View {
         switch content {
         case .text(let text):
-            Text(text)
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
+            MarkdownText(text: text)
 
         case .sentimentAnalysis(let analysis):
             SentimentAnalysisCard(analysis: analysis)

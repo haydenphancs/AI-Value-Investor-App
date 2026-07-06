@@ -14,6 +14,56 @@ enum ChatMessageRole {
     case assistant
 }
 
+// MARK: - Chat Context Type
+
+/// The screen a chat is grounded on. iOS sends the raw value + a `reference_id`
+/// so the backend fetches the already-cached data for that screen (report / ETF /
+/// crypto / article / ...) and injects a compact grounding block — instead of the
+/// client shipping a big raw context string. Mirrors the backend `ChatContextType`
+/// enum (backend/app/schemas/chat.py).
+enum ChatContextType: String {
+    case tickerReport = "TICKER_REPORT"
+    case stock = "STOCK"
+    case etf = "ETF"
+    case crypto = "CRYPTO"
+    case index = "INDEX"
+    case commodity = "COMMODITY"
+    case moneyMovesArticle = "MONEY_MOVES_ARTICLE"
+    case journeyLesson = "JOURNEY_LESSON"
+    case book = "BOOK"
+    case none = "NONE"
+
+    /// Short human label + glyph for the "Grounded on …" chip.
+    var groundingLabel: String {
+        switch self {
+        case .tickerReport: return "Research Report"
+        case .stock: return "Stock"
+        case .etf: return "ETF"
+        case .crypto: return "Crypto"
+        case .index: return "Market"
+        case .commodity: return "Commodity"
+        case .moneyMovesArticle: return "Money Moves"
+        case .journeyLesson: return "Lesson"
+        case .book: return "Book"
+        case .none: return ""
+        }
+    }
+
+    var groundingIcon: String {
+        switch self {
+        case .tickerReport: return "doc.text.magnifyingglass"
+        case .stock, .index: return "chart.line.uptrend.xyaxis"
+        case .etf: return "chart.pie.fill"
+        case .crypto: return "bitcoinsign.circle.fill"
+        case .commodity: return "cube.fill"
+        case .moneyMovesArticle: return "newspaper.fill"
+        case .journeyLesson: return "map.fill"
+        case .book: return "book.fill"
+        case .none: return "sparkles"
+        }
+    }
+}
+
 // MARK: - Rich Content Type
 enum RichContentType {
     case text(String)
@@ -28,10 +78,20 @@ enum RichContentType {
 
 // MARK: - Rich Chat Message
 struct RichChatMessage: Identifiable {
-    let id = UUID()
+    let id: UUID
     let role: ChatMessageRole
     let content: [RichContentType]
     let timestamp: Date
+
+    /// `id` defaults to a fresh UUID (existing call sites unaffected). A caller
+    /// can pass a stable id so a streaming message can be replaced in place each
+    /// token without ForEach re-inserting the row.
+    init(id: UUID = UUID(), role: ChatMessageRole, content: [RichContentType], timestamp: Date) {
+        self.id = id
+        self.role = role
+        self.content = content
+        self.timestamp = timestamp
+    }
 
     var formattedTime: String {
         let formatter = DateFormatter()
@@ -394,6 +454,8 @@ struct ChatSessionDTO: Codable, Identifiable, Sendable {
     let title: String?
     let sessionType: String?
     let stockId: String?
+    let contextType: String?
+    let referenceId: String?
     let previewMessage: String?
     let messageCount: Int
     let isSaved: Bool
@@ -404,11 +466,18 @@ struct ChatSessionDTO: Codable, Identifiable, Sendable {
         case id, title
         case sessionType = "session_type"
         case stockId = "stock_id"
+        case contextType = "context_type"
+        case referenceId = "reference_id"
         case previewMessage = "preview_message"
         case messageCount = "message_count"
         case isSaved = "is_saved"
         case createdAt = "created_at"
         case lastMessageAt = "last_message_at"
+    }
+
+    /// Parsed context type (nil for legacy/general sessions).
+    var chatContextType: ChatContextType? {
+        contextType.flatMap { ChatContextType(rawValue: $0) }
     }
 
     /// Map session_type to ChatHistoryItemType for the history panel.

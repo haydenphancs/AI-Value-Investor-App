@@ -9,21 +9,34 @@ import SwiftUI
 
 struct ChatMessagesList: View {
     let messages: [RichChatMessage]
+    /// The id of the message currently streaming (shows a blinking caret). nil = none.
+    var streamingMessageId: UUID? = nil
+
+    /// Changes on a new message AND as the streaming message grows, so the view
+    /// stays pinned to the newest content while tokens arrive (the in-place update
+    /// of the streaming bubble doesn't change `messages.count`).
+    private var scrollKey: Int {
+        let lastTextCount = messages.last?.content.reduce(0) { acc, item in
+            if case .text(let t) = item { return acc + t.count }
+            return acc
+        } ?? 0
+        return messages.count &* 1_000_003 &+ lastTextCount
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: AppSpacing.xl) {
                     ForEach(messages) { message in
-                        ChatMessageRow(message: message)
+                        ChatMessageRow(message: message, isStreaming: message.id == streamingMessageId)
                             .id(message.id)
                     }
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.md)
             }
-            .onChange(of: messages.count) { oldValue, newValue in
-                // Scroll to bottom when new message is added
+            .onChange(of: scrollKey) { _, _ in
+                // Follow new messages AND streaming growth to the bottom.
                 if let lastMessage = messages.last {
                     withAnimation {
                         proxy.scrollTo(lastMessage.id, anchor: .bottom)
@@ -37,6 +50,7 @@ struct ChatMessagesList: View {
 // MARK: - Chat Message Row
 struct ChatMessageRow: View {
     let message: RichChatMessage
+    var isStreaming: Bool = false
 
     var body: some View {
         switch message.role {
@@ -56,7 +70,7 @@ struct ChatMessageRow: View {
     }
 
     private var assistantMessage: some View {
-        AIMessageContent(content: message.content, timestamp: message.formattedTime)
+        AIMessageContent(content: message.content, timestamp: message.formattedTime, isStreaming: isStreaming)
     }
 }
 

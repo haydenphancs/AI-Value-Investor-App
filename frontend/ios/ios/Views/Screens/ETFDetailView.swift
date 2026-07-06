@@ -189,7 +189,7 @@ struct ETFDetailView: View {
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
                 print("[ETFDetailView] Opening AI chat for \(etfSymbol) with query: \(query)")
-                chatViewModel.startNewConversation(firstMessage: query, stockId: etfSymbol, context: viewModel.contextForCurrentTab)
+                chatViewModel.startNewConversation(firstMessage: query, stockId: etfSymbol, context: viewModel.contextForCurrentTab, contextType: .etf, referenceId: etfSymbol)
                 viewModel.pendingAIQuery = nil
                 showAIChat = true
             }

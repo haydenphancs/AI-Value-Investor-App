@@ -136,8 +136,9 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Chat
     case listChatSessions(limit: Int, offset: Int)
-    case createChatSession(stockId: String?)
-    case sendChatMessage(sessionId: String, message: String, context: String? = nil)
+    case createChatSession(stockId: String?, contextType: String? = nil, referenceId: String? = nil)
+    case sendChatMessage(sessionId: String, message: String, context: String? = nil, contextType: String? = nil, referenceId: String? = nil)
+    case streamChatMessage(sessionId: String, message: String, context: String? = nil, contextType: String? = nil, referenceId: String? = nil)
     case getChatHistory(sessionId: String)
     case updateChatSession(sessionId: String, title: String?, isSaved: Bool?)
     case deleteChatSession(sessionId: String)
@@ -353,8 +354,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/chat/sessions"
         case .createChatSession:
             return "/api/v1/chat/sessions"
-        case .sendChatMessage(let sessionId, _, _):
+        case .sendChatMessage(let sessionId, _, _, _, _):
             return "/api/v1/chat/sessions/\(sessionId)/messages"
+        case .streamChatMessage(let sessionId, _, _, _, _):
+            return "/api/v1/chat/sessions/\(sessionId)/messages/stream"
         case .getChatHistory(let sessionId):
             return "/api/v1/chat/sessions/\(sessionId)"
         case .updateChatSession(let sessionId, _, _):
@@ -428,7 +431,7 @@ enum APIEndpoint: Sendable {
         switch self {
         case .signIn, .signUp, .refreshToken, .signOut,
              .addToWatchlist, .generateResearch, .rateReport,
-             .createChatSession, .sendChatMessage,
+             .createChatSession, .sendChatMessage, .streamChatMessage,
              .chatWithTickerReport, .completeLearnItem, .addBookBookmark,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
              .createPortfolio, .regenerateResearchReportPDF,
@@ -560,11 +563,14 @@ enum APIEndpoint: Sendable {
         case .rateReport(_, let rating, let feedback):
             return RateReportRequest(rating: rating, feedback: feedback)
 
-        case .createChatSession(let stockId):
-            return CreateChatSessionRequest(stockId: stockId)
+        case .createChatSession(let stockId, let contextType, let referenceId):
+            return CreateChatSessionRequest(stockId: stockId, contextType: contextType, referenceId: referenceId)
 
-        case .sendChatMessage(_, let message, let context):
-            return SendChatMessageRequest(message: message, context: context)
+        case .sendChatMessage(_, let message, let context, let contextType, let referenceId):
+            return SendChatMessageRequest(message: message, context: context, contextType: contextType, referenceId: referenceId)
+
+        case .streamChatMessage(_, let message, let context, let contextType, let referenceId):
+            return SendChatMessageRequest(message: message, context: context, contextType: contextType, referenceId: referenceId)
 
         case .updateChatSession(_, let title, let isSaved):
             return UpdateChatSessionRequestBody(title: title, isSaved: isSaved)
@@ -649,7 +655,7 @@ enum APIEndpoint: Sendable {
         case .getTrendingAnalyses:
             return false
         // Chat endpoints use optional auth (guest access)
-        case .listChatSessions, .createChatSession, .sendChatMessage, .getChatHistory,
+        case .listChatSessions, .createChatSession, .sendChatMessage, .streamChatMessage, .getChatHistory,
              .updateChatSession, .deleteChatSession:
             return false
         // Everything else requires auth
@@ -668,6 +674,8 @@ enum APIEndpoint: Sendable {
             return 60 // binary PDF download
         case .sendChatMessage, .chatWithTickerReport:
             return 60 // 1 minute for chat
+        case .streamChatMessage:
+            return 120 // SSE stream stays open while tokens arrive
         case .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
              .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail:
             return 45 // 45 seconds for technical indicator computation
@@ -729,11 +737,15 @@ nonisolated struct RateReportRequest: Encodable, Sendable {
 
 nonisolated struct CreateChatSessionRequest: Encodable, Sendable {
     let stockId: String?
+    var contextType: String? = nil   // ChatContextType raw value (screen the user asks from)
+    var referenceId: String? = nil   // ticker / "TICKER|persona" / slug / book order
 }
 
 nonisolated struct SendChatMessageRequest: Encodable, Sendable {
     let message: String
     let context: String?
+    var contextType: String? = nil   // per-message override of the session's context type
+    var referenceId: String? = nil   // per-message override of the session's reference id
 }
 
 nonisolated struct UpdateChatSessionRequestBody: Encodable, Sendable {

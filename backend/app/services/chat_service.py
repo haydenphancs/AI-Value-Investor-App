@@ -142,11 +142,25 @@ class ChatService:
         session_type: str = "NORMAL",
         stock_id: Optional[str] = None,
         context: Optional[str] = None,
+        context_type: Optional[str] = None,
+        reference_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate AI response with RAG context retrieval and optional
         rich-media stock chart widget via Gemini Function Calling.
+
+        When ``context_type`` + ``reference_id`` are supplied, the screen's
+        already-cached data (report / ETF / crypto / article / ...) is fetched
+        server-side and used as the grounding block — so iOS no longer ships a
+        big raw context string. Falls back to any client-sent ``context`` (BOOK,
+        legacy) or none on a miss.
         """
+        # Screen-aware grounding (never raises; degrades to client context/None).
+        from app.services.chat_context_resolver import get_chat_context_resolver
+        context = await get_chat_context_resolver().resolve(
+            context_type, reference_id, client_context=context,
+        )
+
         # Step 1: Conversation history
         history = self._get_recent_messages(session_id, limit=10)
 
@@ -291,6 +305,107 @@ class ChatService:
             result["widget"] = widget
 
         return result
+
+    # ── Streaming prep (SSE path) ───────────────────────────────────
+    async def prepare_stream_generation(
+        self,
+        session_id: str,
+        user_message: str,
+        session_type: str = "NORMAL",
+        stock_id: Optional[str] = None,
+        context: Optional[str] = None,
+        context_type: Optional[str] = None,
+        reference_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build everything a STREAMED response needs, WITHOUT calling Gemini.
+
+        Function-calling can't stream, so instead of letting Gemini pick a tool
+        we (a) resolve the screen's grounding block, (b) build the same system
+        instruction + prompt as ``generate_response``, and (c) fetch any inline
+        widget deterministically by id. The endpoint then streams the prose via
+        ``gemini.stream_text`` and attaches this widget/citations in the terminal
+        ``done`` event.
+
+        Returns ``{prompt, system_instruction, citations, widget}``.
+        """
+        # Screen-aware grounding (never raises).
+        from app.services.chat_context_resolver import get_chat_context_resolver
+        context = await get_chat_context_resolver().resolve(
+            context_type, reference_id, client_context=context,
+        )
+
+        history = self._get_recent_messages(session_id, limit=10)
+
+        # RAG context (same as generate_response, best-effort).
+        chunks: List[Dict] = []
+        citations: List[Dict] = []
+        try:
+            query_embedding = await self.gemini.generate_embedding(
+                user_message, model_name="models/gemini-embedding-001"
+            )
+            if stock_id:
+                chunks = self._search_filing_chunks(query_embedding, stock_id)
+            else:
+                chunks = self._search_all_chunks(query_embedding)
+            for i, chunk in enumerate(chunks):
+                citations.append({
+                    "index": i + 1,
+                    "source": chunk.get("section_title", "Document"),
+                    "text": chunk.get("chunk_text", "")[:200],
+                })
+        except Exception as e:
+            logger.warning(f"RAG retrieval failed (stream), proceeding without context: {e}")
+
+        asset_type = self._detect_asset_type(stock_id) if stock_id else "NORMAL"
+
+        # Stock enrichment (only for STOCK — other types are grounded by the resolver).
+        profit_summary = snapshot_summary = company_profile_summary = None
+        if stock_id and asset_type == "STOCK":
+            profit_summary, snapshot_summary, company_profile_summary = await asyncio.gather(
+                self._get_profit_summary(stock_id),
+                self._get_snapshot_summary(stock_id),
+                self._get_company_profile_summary(stock_id),
+            )
+
+        system_instruction = self._build_system_instruction(
+            session_type, stock_id, profit_summary=profit_summary,
+            snapshot_summary=snapshot_summary,
+            company_profile_summary=company_profile_summary,
+            client_context=context, asset_type=asset_type,
+        )
+        prompt = self._build_prompt(user_message, history, chunks)
+        widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
+
+        return {
+            "prompt": prompt,
+            "system_instruction": system_instruction,
+            "citations": citations if citations else None,
+            "widget": widget,
+        }
+
+    async def _deterministic_widget(
+        self, asset_type: str, stock_id: Optional[str], reference_id: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the inline widget up-front by symbol (no Gemini tool round-trip),
+        so the streamed path keeps the rich stock-chart / market-overview widget.
+        Never raises — a failure just means no widget."""
+        try:
+            symbol = (stock_id or reference_id or "").split("|")[0].strip().upper()
+            if not symbol:
+                return None
+            if asset_type == "STOCK":
+                raw = await self._fetch_stock_widget_data(symbol)
+                if raw and raw.get("widget_type") == "stock_chart":
+                    return raw
+            elif asset_type == "INDEX":
+                raw = await self._fetch_market_overview_data(symbol)
+                if raw and raw.get("widget_type") == "market_overview":
+                    return raw
+        except Exception as e:
+            logger.warning(
+                f"Deterministic widget fetch failed ({asset_type}/{stock_id}/{reference_id}): {e}"
+            )
+        return None
 
     # ── FMP data fetching for the stock widget ──────────────────────
 

@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from typing import Any
 
@@ -47,6 +48,18 @@ except Exception:  # noqa: BLE001
 logger = logging.getLogger("error_digest")
 
 _SENTRY_BASE = os.environ.get("SENTRY_BASE_URL", "https://sentry.io").rstrip("/")
+
+# Defense-in-depth: the backend now redacts secrets before they reach Sentry, but
+# scrub API keys / tokens from issue text HERE too, so the digest can never forward a
+# leaked key to Discord. (Mirrors app/log_redaction.redact_secrets — kept standalone
+# so this script has no app imports.)
+_SECRET_QS_RE = re.compile(
+    r"(?i)([?&](?:api[_-]?key|token|access[_-]?token|secret|password|key)=)[^&\s'\"]+"
+)
+
+
+def _redact(text: Any) -> Any:
+    return _SECRET_QS_RE.sub(r"\1***", text) if isinstance(text, str) else text
 
 
 async def fetch_issues(period: str, limit: int) -> list[dict[str, Any]]:
@@ -89,9 +102,9 @@ def shape(issue: dict[str, Any]) -> dict[str, Any]:
     meta = issue.get("metadata") or {}
     return {
         "id": issue.get("id"),
-        "title": issue.get("title") or meta.get("type") or "(untitled)",
+        "title": _redact(issue.get("title") or meta.get("type") or "(untitled)"),
         "type": meta.get("type"),          # e.g. "FMPRateLimitException"
-        "value": meta.get("value"),        # the exception message
+        "value": _redact(meta.get("value")),   # exception message (secrets scrubbed)
         "culprit": issue.get("culprit"),   # e.g. "app.services.x in fn" → the code site
         "level": issue.get("level"),
         "count": int(issue.get("count") or 0),
@@ -100,6 +113,46 @@ def shape(issue: dict[str, Any]) -> dict[str, Any]:
         "last_seen": issue.get("lastSeen"),
         "permalink": issue.get("permalink"),
     }
+
+
+def _build_discord_embed(issues: list[dict[str, Any]], period: str) -> dict[str, Any]:
+    """Format the digest as one Discord embed (markdown links render inside embeds)."""
+    if not issues:
+        return {"embeds": [{
+            "title": f"Caydex error digest — last {period}",
+            "description": "No unresolved Sentry issues. All clear. ✅",
+            "color": 0x2ECC71,  # green
+        }]}
+    shown = issues[:10]
+    blocks = []
+    for n, i in enumerate(shown, 1):
+        title = (i["title"] or "(untitled)")[:150]
+        link = i.get("permalink") or ""
+        head = f"**{n}. [{title}]({link})**" if link else f"**{n}. {title}**"
+        meta = f"{i['count']}× · {i['users']} users"
+        culprit = f"\n`{i['culprit']}`" if i.get("culprit") else ""
+        blocks.append(f"{head}\n{meta}{culprit}")
+    desc = "\n\n".join(blocks)
+    if len(issues) > len(shown):
+        desc += f"\n\n…and {len(issues) - len(shown)} more."
+    if len(desc) > 4000:
+        desc = desc[:4000] + "…"
+    plural = "s" if len(issues) != 1 else ""
+    return {"embeds": [{
+        "title": f"Caydex error digest — last {period} ({len(issues)} issue{plural})",
+        "description": desc,
+        "color": 0xE74C3C,  # red
+    }]}
+
+
+async def post_to_discord(issues: list[dict[str, Any]], period: str) -> None:
+    """POST the digest embed to the DISCORD_WEBHOOK_URL channel."""
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not webhook:
+        raise SystemExit("DISCORD_WEBHOOK_URL not set (add it to backend/.env or the run env).")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(webhook, json=_build_discord_embed(issues, period))
+        resp.raise_for_status()
 
 
 async def main(args: argparse.Namespace) -> int:
@@ -114,6 +167,14 @@ async def main(args: argparse.Namespace) -> int:
 
     issues = [shape(i) for i in raw if isinstance(i, dict)]
     issues.sort(key=lambda x: (-x["count"], x["last_seen"] or ""))
+
+    if args.discord:
+        try:
+            await post_to_discord(issues, args.period)
+            logger.info("Posted digest to Discord (%d issue(s)).", len(issues))
+        except httpx.HTTPError as e:
+            logger.error("Discord post failed: %s: %s", type(e).__name__, e)
+            return 2
 
     if args.json:
         print(json.dumps(
@@ -142,5 +203,6 @@ if __name__ == "__main__":
     )
     p.add_argument("--period", default="24h", help="Sentry statsPeriod (e.g. 24h, 7d). Default 24h.")
     p.add_argument("--limit", type=int, default=25, help="Max issues to fetch. Default 25.")
+    p.add_argument("--discord", action="store_true", help="Also POST the digest to DISCORD_WEBHOOK_URL.")
     p.add_argument("--json", action="store_true", help="Emit JSON (for the triage agent).")
     sys.exit(asyncio.run(main(p.parse_args())))

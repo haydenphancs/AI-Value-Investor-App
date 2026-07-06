@@ -146,9 +146,14 @@ class FMPClient:
             return response.json()
 
         except httpx.HTTPError as e:
-            # redact_secrets: httpx echoes the full request URL (incl. apikey=) in its
-            # error, which would otherwise leak the FMP key into the log + Sentry.
-            logger.error(f"FMP API request failed: {endpoint} — {redact_secrets(e)}")
+            # 403/404 = "no data / endpoint unavailable" — routinely EXPECTED and handled
+            # by callers (e.g. get_senate_disclosure catches the 404 and falls back to
+            # senate-latest + filter), so log it at WARNING, not ERROR, to keep these
+            # false-positives OUT of Sentry. Real failures (5xx, timeouts) stay ERROR.
+            # redact_secrets strips the apikey= that httpx echoes in the URL.
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            log = logger.warning if status in (403, 404) else logger.error
+            log(f"FMP API request failed: {endpoint} — {redact_secrets(e)}")
             raise
 
     # ── Company profile & quote ─────────────────────────────────────
@@ -501,33 +506,62 @@ class FMPClient:
         "Basic Materials": "XLB",
     }
 
+    async def _latest_perf_snapshot(
+        self, endpoint: str, max_lookback: int = 6
+    ) -> List[Dict[str, Any]]:
+        """Fetch a ``*-performance-snapshot`` for the latest available trading day.
+
+        FMP changed these endpoints in two ways that broke the old param-less
+        calls:
+          1. ``date`` is now REQUIRED — a call without it 400s with
+             ``"Invalid or missing query parameter - date"``.
+          2. The value field was renamed ``changesPercentage`` → ``averageChange``.
+        And a non-trading ``date`` (weekend/holiday) returns ``[]`` rather than
+        the prior session. So walk back from today (UTC) to the most recent date
+        that returns rows, then alias ``averageChange`` → ``changesPercentage``
+        (the key downstream consumers read). Returns ``[]`` if nothing is found
+        within ``max_lookback`` days — callers keep their existing fallbacks.
+        """
+        from datetime import timedelta
+
+        today = datetime.now(timezone.utc).date()
+        for i in range(max_lookback):
+            d = (today - timedelta(days=i)).isoformat()
+            data = await self._make_request(endpoint, params={"date": d})
+            if isinstance(data, list) and data:
+                for row in data:
+                    if (
+                        isinstance(row, dict)
+                        and "averageChange" in row
+                        and "changesPercentage" not in row
+                    ):
+                        row["changesPercentage"] = row["averageChange"]
+                return data
+        return []
+
     async def get_sector_performance(self) -> List[Dict[str, Any]]:
         """
-        Get today's sector performance percentages.
+        Get the latest trading day's sector performance percentages.
 
         Returns list of dicts with keys like:
-          {"sector": "Technology", "changesPercentage": 2.13}
+          {"sector": "Technology", "changesPercentage": 2.13, ...}
 
-        Falls back to sector ETF quotes if the dedicated endpoint is unavailable.
+        Falls back to sector ETF quotes if the snapshot is unavailable.
         """
-        # Try snapshot endpoint
+        # Primary: FMP's dated sector snapshot (see _latest_perf_snapshot for the
+        # date-required + field-rename migration). Passing no `date` previously
+        # 400'd on every call, silently forcing the ETF fallback below.
         try:
-            data = await self._make_request("sector-performance-snapshot")
-            if isinstance(data, list) and data:
+            data = await self._latest_perf_snapshot("sector-performance-snapshot")
+            if data:
                 return data
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Sector performance snapshot failed: {e}")
 
-        # Try legacy endpoint
-        try:
-            data = await self._make_request("sectors-performance")
-            if isinstance(data, list) and data:
-                return data
-        except Exception:
-            pass
-
-        # Fallback: compute from sector ETF quotes
-        logger.info("Sector performance endpoints unavailable, using ETF fallback")
+        # Fallback: compute from sector ETF quotes (approximate; also carries a
+        # 1Y figure the snapshot lacks). The old `sectors-performance` endpoint
+        # was removed by FMP (now 404) and is intentionally no longer tried.
+        logger.info("Sector snapshot unavailable, using ETF fallback")
         return await self._sector_perf_from_etfs()
 
     async def _sector_perf_from_etfs(self) -> List[Dict[str, Any]]:
@@ -584,19 +618,22 @@ class FMPClient:
 
     async def get_industry_performance(self) -> List[Dict[str, Any]]:
         """
-        Get industry-level performance snapshot.
+        Get the latest trading day's industry-level performance snapshot.
 
         Returns list of dicts with keys like:
-          {"industry": "Consumer Electronics", "sector": "Technology",
-           "changesPercentage": 1.5, "exchange": "NASDAQ"}
+          {"industry": "Consumer Electronics", "changesPercentage": 1.5,
+           "averageChange": 1.5, "exchange": "NASDAQ", "date": "2026-07-03"}
+
+        NOTE: FMP's snapshot no longer includes a ``sector`` field (the param-less
+        call also 400'd on every request — see _latest_perf_snapshot). Callers
+        that rank an industry *within its sector* therefore need a separate
+        industry→sector map; ranking off this response alone will not match.
         """
         try:
-            data = await self._make_request("industry-performance-snapshot")
-            if isinstance(data, list) and data:
-                return data
+            return await self._latest_perf_snapshot("industry-performance-snapshot")
         except Exception as e:
-            logger.warning(f"Industry performance endpoint failed: {e}")
-        return []
+            logger.warning(f"Industry performance snapshot failed: {e}")
+            return []
 
     async def get_sp500_constituents(self) -> List[Dict[str, Any]]:
         """Get S&P 500 constituent list with symbol, name, sector, subSector."""

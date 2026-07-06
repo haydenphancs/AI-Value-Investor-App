@@ -62,8 +62,15 @@ def _redact(text: Any) -> Any:
     return _SECRET_QS_RE.sub(r"\1***", text) if isinstance(text, str) else text
 
 
-async def fetch_issues(period: str, limit: int) -> list[dict[str, Any]]:
-    """Return raw Sentry issue dicts for the window, most-frequent first."""
+# Map our --sort choices onto Sentry's `sort` query values.
+#   freq   → most events (biggest fires)          — good for the daily digest
+#   recent → last-seen desc (recently ACTIVE)      — good for on-demand triage
+#   new    → first-seen desc (newly CREATED issues)
+_SENTRY_SORT = {"freq": "freq", "recent": "date", "new": "new"}
+
+
+async def fetch_issues(period: str, limit: int, sort: str = "freq") -> list[dict[str, Any]]:
+    """Return raw Sentry issue dicts for the window, ordered by `sort`."""
     token = os.environ.get("SENTRY_API_TOKEN")
     org = os.environ.get("SENTRY_ORG")
     project = os.environ.get("SENTRY_PROJECT")
@@ -86,7 +93,7 @@ async def fetch_issues(period: str, limit: int) -> list[dict[str, Any]]:
     params = {
         "statsPeriod": period,
         "query": "is:unresolved",
-        "sort": "freq",
+        "sort": _SENTRY_SORT.get(sort, "freq"),
         "limit": str(limit),
     }
     headers = {"Authorization": f"Bearer {token}"}
@@ -157,7 +164,7 @@ async def post_to_discord(issues: list[dict[str, Any]], period: str) -> None:
 
 async def main(args: argparse.Namespace) -> int:
     try:
-        raw = await fetch_issues(args.period, args.limit)
+        raw = await fetch_issues(args.period, args.limit, args.sort)
     except httpx.HTTPStatusError as e:
         logger.error("Sentry API %s: %s", e.response.status_code, e.response.text[:200])
         return 2
@@ -166,7 +173,14 @@ async def main(args: argparse.Namespace) -> int:
         return 2
 
     issues = [shape(i) for i in raw if isinstance(i, dict)]
-    issues.sort(key=lambda x: (-x["count"], x["last_seen"] or ""))
+    # Order the shaped list to match the requested sort (Sentry already returns
+    # them ordered, but re-sort locally so the output is deterministic).
+    if args.sort == "recent":
+        issues.sort(key=lambda x: x["last_seen"] or "", reverse=True)
+    elif args.sort == "new":
+        issues.sort(key=lambda x: x["first_seen"] or "", reverse=True)
+    else:  # freq
+        issues.sort(key=lambda x: (-x["count"], x["last_seen"] or ""))
 
     if args.discord:
         try:
@@ -187,12 +201,15 @@ async def main(args: argparse.Namespace) -> int:
         print(f"No unresolved Sentry issues in the last {args.period}. ✅")
         return 0
 
-    print(f"{len(issues)} unresolved issue(s) in the last {args.period} (by frequency):\n")
+    _order = {"freq": "by frequency", "recent": "most recently active first",
+              "new": "newest first"}[args.sort]
+    print(f"{len(issues)} unresolved issue(s) in the last {args.period} ({_order}):\n")
     for n, i in enumerate(issues, 1):
         print(f"{n:>2}. [{i['count']}x · {i['users']} users] {i['title']}")
         if i["culprit"]:
             print(f"      at: {i['culprit']}")
-        print(f"      last: {i['last_seen']}  ·  {i['permalink']}")
+        print(f"      first: {i['first_seen']}  ·  last: {i['last_seen']}")
+        print(f"      {i['permalink']}")
     return 0
 
 
@@ -203,6 +220,12 @@ if __name__ == "__main__":
     )
     p.add_argument("--period", default="24h", help="Sentry statsPeriod (e.g. 24h, 7d). Default 24h.")
     p.add_argument("--limit", type=int, default=25, help="Max issues to fetch. Default 25.")
+    p.add_argument(
+        "--sort", choices=["freq", "recent", "new"], default="freq",
+        help="Order issues: freq=most events (default, for the digest); "
+             "recent=last-seen desc (what's breaking NOW — use for on-demand triage); "
+             "new=first-seen desc (newly created issues).",
+    )
     p.add_argument("--discord", action="store_true", help="Also POST the digest to DISCORD_WEBHOOK_URL.")
     p.add_argument("--json", action="store_true", help="Emit JSON (for the triage agent).")
     sys.exit(asyncio.run(main(p.parse_args())))

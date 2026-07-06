@@ -19,13 +19,19 @@ from app.api.v1.api import api_router
 from app.integrations.coingecko import close_coingecko_client
 from app.integrations.fmp import close_fmp_client
 from app.services.live_price_manager import get_live_price_manager
-from app.log_redaction import scrub_sentry_event
+from app.log_redaction import scrub_sentry_event, SecretRedactingFilter
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Redact API keys / tokens from EVERY log line before it reaches stdout (Railway
+# logs) — e.g. FMP per-symbol warnings echo the request URL with apikey=. The Sentry
+# side is scrubbed separately in _sentry_before_send below.
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(SecretRedactingFilter())
 
 # ── Error monitoring (Sentry) ──────────────────────────────────────────────
 # Guarded by SENTRY_DSN so local dev (no DSN) is a COMPLETE no-op. When enabled,

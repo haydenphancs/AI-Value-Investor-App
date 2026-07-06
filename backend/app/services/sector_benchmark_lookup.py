@@ -37,6 +37,27 @@ def _cache_set(key: str, value: Any) -> None:
     _cache[key] = (time.time(), value)
 
 
+# ── Transient-error retry (Supabase/httpx blips) ─────────────────────────
+# A "Server disconnected" mid-query is an infra hiccup, not a bug — retry a few
+# times, then log at WARNING (not ERROR) so it doesn't page as a Sentry issue.
+_MAX_FETCH_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = 0.25
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True for a transient connection blip worth retrying + logging quietly."""
+    try:
+        import httpx
+        if isinstance(exc, (
+            httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError,
+            httpx.WriteError, httpx.PoolTimeout, httpx.ConnectTimeout, httpx.ReadTimeout,
+        )):
+            return True
+    except Exception:
+        pass
+    return "server disconnected" in str(exc).lower()
+
+
 # ── Phase 3: mature-period picker (sample-size floor + hold-last-mature) ──
 
 #: A just-closed fiscal period is only partially reported (e.g. annual 2026 has
@@ -157,28 +178,43 @@ class SectorBenchmarkLookup:
         recorded parent (a modal-sector straddler) still gets its industry row
         rather than silently dropping to the sector fallback.
         """
-        rows: List[Dict[str, Any]] = []
-        start = 0
-        while True:
-            query = (
-                self.supabase.table("sector_benchmarks")
-                .select(columns)
-                .eq("period_type", period_type)
-                .in_("metric_name", metrics)
-            )
-            if industry:
-                query = query.eq("industry", industry)
-            else:
-                # SECTOR-aggregate rows only — exclude industry=<name> rows so the
-                # sector lookup never mixes in industry rows.
-                query = query.eq("sector", sector).eq("industry", "")
-            resp = query.range(start, start + self._PAGE - 1).execute()
-            batch = resp.data or []
-            rows.extend(batch)
-            if len(batch) < self._PAGE:
-                break
-            start += self._PAGE
-        return rows
+        for attempt in range(_MAX_FETCH_ATTEMPTS):
+            try:
+                rows: List[Dict[str, Any]] = []
+                start = 0
+                while True:
+                    query = (
+                        self.supabase.table("sector_benchmarks")
+                        .select(columns)
+                        .eq("period_type", period_type)
+                        .in_("metric_name", metrics)
+                    )
+                    if industry:
+                        query = query.eq("industry", industry)
+                    else:
+                        # SECTOR-aggregate rows only — exclude industry=<name> rows so
+                        # the sector lookup never mixes in industry rows.
+                        query = query.eq("sector", sector).eq("industry", "")
+                    resp = query.range(start, start + self._PAGE - 1).execute()
+                    batch = resp.data or []
+                    rows.extend(batch)
+                    if len(batch) < self._PAGE:
+                        break
+                    start += self._PAGE
+                return rows
+            except Exception as e:
+                # Transient Supabase/httpx disconnect (e.g. RemoteProtocolError:
+                # Server disconnected) — retry from the start (idempotent read).
+                if attempt < _MAX_FETCH_ATTEMPTS - 1 and _is_transient(e):
+                    logger.warning(
+                        "sector_benchmarks fetch transient error (attempt %d/%d): "
+                        "%s: %s — retrying",
+                        attempt + 1, _MAX_FETCH_ATTEMPTS, type(e).__name__, e,
+                    )
+                    time.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+                raise
+        return []  # unreachable: the loop always returns or raises
 
     def _query(
         self,
@@ -199,7 +235,9 @@ class SectorBenchmarkLookup:
 
             return result
         except Exception as e:
-            logger.error(f"Sector benchmark lookup failed for {sector}/{period_type}: {e}")
+            _log = logger.warning if _is_transient(e) else logger.error
+            _log("Sector benchmark lookup failed for %s/%s: %s: %s",
+                 sector, period_type, type(e).__name__, e)
             return {m: {} for m in metrics}
 
     # ── Phase 3A: sample-size-aware lookup ──────────────────────────────
@@ -244,9 +282,9 @@ class SectorBenchmarkLookup:
             _cache_set(cache_key, result)
             return result
         except Exception as e:
-            logger.error(
-                f"Sector benchmark with_n lookup failed for {sector}/{period_type}: {e}"
-            )
+            _log = logger.warning if _is_transient(e) else logger.error
+            _log("Sector benchmark with_n lookup failed for %s/%s: %s: %s",
+                 sector, period_type, type(e).__name__, e)
             return {m: {} for m in metrics}
 
     # ── Phase 2: industry-first lookup with per-cell sector fallback ─────
@@ -311,10 +349,9 @@ class SectorBenchmarkLookup:
                         "n": row.get("sample_size") or 0,
                     }
         except Exception as e:
-            logger.error(
-                f"Industry benchmark lookup failed for "
-                f"{industry!r}/{sector!r}/{period_type}: {type(e).__name__}: {e}"
-            )
+            _log = logger.warning if _is_transient(e) else logger.error
+            _log("Industry benchmark lookup failed for %r/%r/%s: %s: %s",
+                 industry, sector, period_type, type(e).__name__, e)
             return {m: {} for m in metrics}
 
         _cache_set(cache_key, result)

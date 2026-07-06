@@ -8,6 +8,7 @@ key. These helpers scrub secret-looking query params to `***` at those exits.
 CLAUDE.md rule: never log secrets.
 """
 
+import logging
 import re
 from typing import Any
 
@@ -58,3 +59,23 @@ def scrub_sentry_event(event: dict, _hint: Any = None) -> dict:
     except Exception:
         pass
     return event
+
+
+class SecretRedactingFilter(logging.Filter):
+    """Scrub secrets from EVERY log record's final message.
+
+    Attach to the root logger's handlers (in main.py) so any module's log line — e.g.
+    the FMP per-symbol warnings that echo the request URL with ``apikey=`` — is redacted
+    on the way to stdout (Railway logs), not just the errors Sentry captures.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            red = redact_secrets(msg)
+            if red != msg:
+                record.msg = red
+                record.args = ()
+        except Exception:
+            pass
+        return True

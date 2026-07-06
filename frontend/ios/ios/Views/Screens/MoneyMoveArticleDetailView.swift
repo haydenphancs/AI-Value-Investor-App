@@ -145,9 +145,11 @@ struct MoneyMoveArticleDetailView: View {
                         let text = aiInputText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !text.isEmpty else { return }
                         aiInputText = ""
+                        // Backend fetches the article by slug — no client context string.
                         chatViewModel.startNewConversation(
                             firstMessage: text,
-                            context: "The user is reading the article \"\(article.title)\" by \(article.author.name). Answer in that context."
+                            contextType: .moneyMovesArticle,
+                            referenceId: article.slug
                         )
                         // Release the focus-driven compact reason deterministically (the covered
                         // TextField's focus-off event is unreliable). AIChatScreen's own forceCompact

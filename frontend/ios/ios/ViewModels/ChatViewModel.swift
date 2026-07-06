@@ -17,8 +17,19 @@
 import Foundation
 import Combine
 
+/// Failure modes of the SSE streaming path — each triggers the non-streaming fallback.
+private enum ChatStreamError: Error {
+    case serverError    // server emitted an `error` frame
+    case incomplete     // stream ended without a terminal `done` frame
+    case malformedDone  // the `done` frame payload didn't decode
+}
+
 @MainActor
 class ChatViewModel: ObservableObject {
+
+    /// Master switch for SSE streaming. The non-streaming endpoint is always the
+    /// fallback, so flipping this to false disables streaming app-wide instantly.
+    static var streamingEnabled = true
 
     // MARK: - Published State
 
@@ -50,6 +61,14 @@ class ChatViewModel: ObservableObject {
     /// `errorMessage` so a failed row action never disturbs the main chat surface.
     @Published var historyActionError: String?
 
+    /// True once the first streamed token arrives (hides the "thinking" dots and shows
+    /// the live streaming text). Distinct from `isAITyping`, which stays true for the
+    /// WHOLE response so the one-in-flight guard still blocks a second send.
+    @Published var isStreaming: Bool = false
+
+    /// Id of the assistant message currently streaming — drives the blinking caret.
+    @Published var streamingMessageId: UUID?
+
     /// Whether we're in an active conversation (vs. empty state)
     var isInConversation: Bool {
         currentSessionId != nil && !messages.isEmpty
@@ -59,7 +78,16 @@ class ChatViewModel: ObservableObject {
 
     private var currentSessionType: String = "NORMAL"
     private var currentStockId: String?
-    private var pendingContext: String?
+    /// Client-sent context string — used only for BOOK grounding (book text is
+    /// bundled in the app, not on the backend) and legacy callers. Re-sent on
+    /// every message so a BOOK chat stays grounded across turns.
+    private var currentContext: String?
+
+    /// The screen this chat is grounded on + its reference id. Persisted on the
+    /// session server-side (so a history reload re-grounds) and surfaced in the
+    /// "Grounded on …" chip. @Published so the chip updates on start/load.
+    @Published var currentContextType: ChatContextType?
+    @Published private(set) var currentReferenceId: String?
 
     // MARK: - Session Management
 
@@ -67,7 +95,9 @@ class ChatViewModel: ObservableObject {
     func startNewConversation(
         firstMessage: String,
         stockId: String? = nil,
-        context: String? = nil
+        context: String? = nil,
+        contextType: ChatContextType? = nil,
+        referenceId: String? = nil
     ) {
         // One seed in flight at a time: block a second synchronous seed (rapid double-tap on the
         // Deep Research / AI Analyst / report-chat buttons, which have no text-field empty-guard)
@@ -78,7 +108,9 @@ class ChatViewModel: ObservableObject {
         errorMessage = nil
         currentStockId = stockId
         currentSessionType = stockId != nil ? "STOCK" : "NORMAL"
-        pendingContext = context
+        currentContext = context
+        currentContextType = contextType
+        currentReferenceId = referenceId
 
         // Add user message immediately for instant feedback
         let userMessage = RichChatMessage(
@@ -91,10 +123,15 @@ class ChatViewModel: ObservableObject {
 
         Task {
             do {
-                // Step 1: Create session
-                print("📡 [ChatVM] Creating chat session (stockId: \(stockId ?? "nil"))...")
+                // Step 1: Create session (persists context_type + reference_id so a
+                // history reload re-grounds on the same cached data).
+                print("📡 [ChatVM] Creating chat session (stockId: \(stockId ?? "nil"), context: \(contextType?.rawValue ?? "none"))...")
                 let session = try await APIClient.shared.request(
-                    endpoint: .createChatSession(stockId: stockId),
+                    endpoint: .createChatSession(
+                        stockId: stockId,
+                        contextType: contextType?.rawValue,
+                        referenceId: referenceId
+                    ),
                     responseType: ChatSessionDTO.self
                 )
                 // If the user navigated to another conversation (loadConversation) while createSession
@@ -106,9 +143,9 @@ class ChatViewModel: ObservableObject {
                 currentSessionId = session.id
                 print("✅ [ChatVM] Session created: \(session.id)")
 
-                // Step 2: Send first message with context as separate field
-                await sendMessageToSession(sessionId: session.id, message: firstMessage, context: pendingContext)
-                pendingContext = nil
+                // Step 2: Send the first message (streams when enabled; context
+                // type/ref are read from instance state).
+                await respond(sessionId: session.id, message: firstMessage)
 
             } catch {
                 print("❌ [ChatVM] Failed to start conversation: \(error)")
@@ -150,7 +187,7 @@ class ChatViewModel: ObservableObject {
         isAITyping = true
 
         Task {
-            await sendMessageToSession(sessionId: sessionId, message: text)
+            await respond(sessionId: sessionId, message: text)
         }
     }
 
@@ -159,9 +196,11 @@ class ChatViewModel: ObservableObject {
         currentSessionId = sessionId
         messages = []
         isLoadingSession = true
-        // Switching conversations cancels any prior "thinking" indicator; a still-in-flight send
-        // for the previous session is dropped by the sessionId guard in sendMessageToSession.
+        // Switching conversations cancels any prior "thinking"/streaming indicator; a
+        // still-in-flight send for the previous session is dropped by the sessionId guard.
         isAITyping = false
+        isStreaming = false
+        streamingMessageId = nil
         errorMessage = nil
 
         Task {
@@ -175,6 +214,11 @@ class ChatViewModel: ObservableObject {
                 messages = history.messages.map { $0.toRichChatMessage() }
                 currentSessionType = history.session.sessionType ?? "NORMAL"
                 currentStockId = history.session.stockId
+                currentContextType = history.session.chatContextType
+                currentReferenceId = history.session.referenceId
+                // The BOOK client-context string isn't persisted server-side; a
+                // resumed book chat stays grounded via its message history instead.
+                currentContext = nil
                 isLoadingSession = false
 
                 print("✅ [ChatVM] Loaded \(messages.count) messages for session \(sessionId)")
@@ -301,8 +345,13 @@ class ChatViewModel: ObservableObject {
         currentSessionId = nil
         currentStockId = nil
         currentSessionType = "NORMAL"
+        currentContext = nil
+        currentContextType = nil
+        currentReferenceId = nil
         messages = []
         isAITyping = false
+        isStreaming = false
+        streamingMessageId = nil
         errorMessage = nil
     }
 
@@ -329,13 +378,18 @@ class ChatViewModel: ObservableObject {
     // MARK: - Private Helpers
 
     /// Send a message to an existing session and handle the AI response.
-    private func sendMessageToSession(sessionId: String, message: String, context: String? = nil) async {
+    private func sendMessageToSession(sessionId: String, message: String) async {
         let startTime = CFAbsoluteTimeGetCurrent()
         print("📡 [ChatVM] Sending message to session \(sessionId): \"\(message.prefix(50))...\"")
 
         do {
             let response = try await APIClient.shared.request(
-                endpoint: .sendChatMessage(sessionId: sessionId, message: message, context: context),
+                endpoint: .sendChatMessage(
+                    sessionId: sessionId, message: message,
+                    context: currentContext,
+                    contextType: currentContextType?.rawValue,
+                    referenceId: currentReferenceId
+                ),
                 responseType: ChatMessageDTO.self
             )
 
@@ -361,6 +415,143 @@ class ChatViewModel: ObservableObject {
             isAITyping = false
             errorMessage = "Failed to get AI response. Please try again."
         }
+    }
+
+    // MARK: - Streaming (SSE)
+
+    /// Route a send to the streaming or non-streaming path. Streaming falls back
+    /// to the non-streaming endpoint automatically on any error.
+    private func respond(sessionId: String, message: String) async {
+        if Self.streamingEnabled {
+            await streamMessageToSession(sessionId: sessionId, message: message)
+        } else {
+            await sendMessageToSession(sessionId: sessionId, message: message)
+        }
+    }
+
+    /// Stream the AI response token-by-token over SSE. On ANY failure (server
+    /// `error` frame, transport error, incomplete stream, malformed `done`) the
+    /// partial live message is removed and we fall back to the non-streaming
+    /// endpoint, which regenerates + persists the turn (the stream persists nothing
+    /// on failure, so there's no duplication).
+    private func streamMessageToSession(sessionId: String, message: String) async {
+        let liveTimestamp = Date()
+        var liveId: UUID?
+        var buffer = ""
+
+        do {
+            let events = APIClient.shared.stream(
+                endpoint: .streamChatMessage(
+                    sessionId: sessionId, message: message,
+                    context: currentContext,
+                    contextType: currentContextType?.rawValue,
+                    referenceId: currentReferenceId
+                )
+            )
+
+            for try await event in events {
+                // Drop the stream if the user navigated to another conversation.
+                guard sessionId == currentSessionId else { return }
+
+                switch event.event {
+                case "token":
+                    guard let delta = Self.decodeDelta(event.data), !delta.isEmpty else { continue }
+                    buffer += delta
+                    if let id = liveId {
+                        updateStreamingMessage(id: id, text: buffer, timestamp: liveTimestamp)
+                    } else {
+                        // First token: create the live bubble + hide the thinking dots.
+                        let id = UUID()
+                        liveId = id
+                        streamingMessageId = id
+                        isStreaming = true
+                        messages.append(RichChatMessage(
+                            id: id, role: .assistant, content: [.text(buffer)], timestamp: liveTimestamp
+                        ))
+                    }
+
+                case "reset":
+                    // Server fell back to full generation — discard partial tokens.
+                    buffer = ""
+                    if let id = liveId { updateStreamingMessage(id: id, text: "", timestamp: liveTimestamp) }
+
+                case "done":
+                    guard let dto = Self.decodeDoneMessage(event.data) else {
+                        throw ChatStreamError.malformedDone
+                    }
+                    let base = dto.toRichChatMessage()
+                    if let id = liveId {
+                        // Keep the SAME id so the row updates in place (no ForEach
+                        // tear-down/flicker) as the live text becomes the final message
+                        // (with widget + citations).
+                        let final = RichChatMessage(
+                            id: id, role: base.role, content: base.content, timestamp: base.timestamp
+                        )
+                        replaceMessage(id: id, with: final)
+                    } else {
+                        messages.append(base)
+                    }
+                    finishStreaming()
+                    return
+
+                case "error":
+                    throw ChatStreamError.serverError
+
+                default:
+                    continue  // "meta" and any unknown frames
+                }
+            }
+            // Stream ended without a terminal `done` frame.
+            throw ChatStreamError.incomplete
+
+        } catch {
+            print("⚠️ [ChatVM] Stream failed (\(error)); falling back to non-streaming")
+            if let id = liveId { messages.removeAll { $0.id == id } }  // drop the partial bubble
+            streamingMessageId = nil
+            isStreaming = false
+            guard sessionId == currentSessionId else {
+                isAITyping = false
+                return
+            }
+            // Show the thinking indicator again while the fallback regenerates.
+            isAITyping = true
+            await sendMessageToSession(sessionId: sessionId, message: message)
+        }
+    }
+
+    /// Replace the streaming message in place (same id → no ForEach re-insert).
+    private func updateStreamingMessage(id: UUID, text: String, timestamp: Date) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[idx] = RichChatMessage(id: id, role: .assistant, content: [.text(text)], timestamp: timestamp)
+    }
+
+    private func replaceMessage(id: UUID, with message: RichChatMessage) {
+        if let idx = messages.firstIndex(where: { $0.id == id }) {
+            messages[idx] = message
+        } else {
+            messages.append(message)
+        }
+    }
+
+    private func finishStreaming() {
+        streamingMessageId = nil
+        isStreaming = false
+        isAITyping = false
+    }
+
+    // MARK: - SSE payload decoding
+
+    private static func decodeDelta(_ json: String) -> String? {
+        struct Token: Decodable { let delta: String }
+        guard let data = json.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(Token.self, from: data))?.delta
+    }
+
+    private static func decodeDoneMessage(_ json: String) -> ChatMessageDTO? {
+        struct Done: Decodable { let message: ChatMessageDTO }
+        guard let data = json.data(using: .utf8) else { return nil }
+        // ChatMessageDTO uses explicit snake_case CodingKeys — no keyDecodingStrategy.
+        return (try? JSONDecoder().decode(Done.self, from: data))?.message
     }
 
     /// Group sessions into TODAY / YESTERDAY / OLDER for the history panel.

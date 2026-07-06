@@ -130,9 +130,13 @@ struct BookDetailView: View {
                         let text = aiInputText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !text.isEmpty else { return }
                         aiInputText = ""
+                        // Book text is bundled in the app, not on the backend — so BOOK
+                        // is the one context that still passes a small client string through.
                         chatViewModel.startNewConversation(
                             firstMessage: text,
-                            context: "The user is reading the book \"\(book.title)\" by \(book.author). Answer in that context."
+                            context: "The user is reading the book \"\(book.title)\" by \(book.author). Answer in that context.",
+                            contextType: .book,
+                            referenceId: String(book.curriculumOrder)
                         )
                         // Release the focus-driven compact reason deterministically (the covered
                         // TextField's focus-off event is unreliable) so the mini player returns when

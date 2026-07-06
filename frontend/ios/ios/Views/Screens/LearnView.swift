@@ -230,7 +230,8 @@ struct LearnContentView: View {
         // OWN VM so it doesn't clobber the resumable Wiser Chat-tab conversation.
         bookChatViewModel.startNewConversation(
             firstMessage: "Tell me about \"\(book.title)\" by \(book.author).",
-            context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas."
+            context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas.",
+            contextType: .book
         )
         showBookChat = true
     }

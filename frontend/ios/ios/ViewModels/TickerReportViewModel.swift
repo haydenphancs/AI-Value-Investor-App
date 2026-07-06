@@ -23,6 +23,11 @@ class TickerReportViewModel: ObservableObject {
     // MARK: - Private Properties
     private let ticker: String
     private let persona: String
+
+    /// The backend persona key the report was generated with (e.g. "warren_buffett").
+    /// Exposed so the report chat can build a `"TICKER|persona"` reference_id that
+    /// hits the same `ticker_report_cache` row for backend context grounding.
+    var personaKey: String { persona }
     /// Backend research_reports row ID. When present, the fetch path
     /// prefers the cached `ticker_report_data` JSONB (instant) over a
     /// fresh /stocks/{ticker}/report call (~30-60s + FMP cost).

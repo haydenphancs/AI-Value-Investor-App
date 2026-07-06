@@ -194,7 +194,9 @@ struct CommodityDetailView: View {
                 chatViewModel.startNewConversation(
                     firstMessage: query,
                     stockId: commoditySymbol,
-                    context: viewModel.contextForCurrentTab
+                    context: viewModel.contextForCurrentTab,
+                    contextType: .commodity,
+                    referenceId: commoditySymbol
                 )
                 viewModel.pendingAIQuery = nil
                 showAIChat = true

@@ -341,14 +341,15 @@ struct TickerReportView: View {
         guard !text.isEmpty else { return }
         viewModel.aiInputText = ""
 
-        let report = viewModel.reportData
-        let summary = String((report?.executiveSummaryText ?? "").prefix(800))
-        let context = "The user is viewing an in-depth research report on \(report?.symbol ?? "this company"). Report summary: \(summary). Answer questions grounded in this report."
+        // Context is fetched server-side by reference_id ("TICKER|persona") — no
+        // more shipping the executive summary from the client on every chat.
+        let symbol = viewModel.reportData?.symbol ?? ""
 
         chatViewModel.startNewConversation(
             firstMessage: text,
-            stockId: report?.symbol,
-            context: context
+            stockId: viewModel.reportData?.symbol,
+            contextType: .tickerReport,
+            referenceId: symbol.isEmpty ? nil : "\(symbol)|\(viewModel.personaKey)"
         )
         showAIChat = true
     }

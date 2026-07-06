@@ -182,6 +182,81 @@ actor APIClient {
         }
     }
 
+    // MARK: - Server-Sent Events (SSE) streaming
+
+    /// Stream an SSE endpoint (e.g. chat `/messages/stream`) as an async sequence
+    /// of `SSEEvent`. `nonisolated` so the returned stream is built synchronously;
+    /// the actor hop (auth/headers/session) happens inside `openStream`, and SSE
+    /// line-parsing runs off the actor. Throws on a non-2xx status or transport
+    /// error — the caller (ChatViewModel) falls back to the non-streaming endpoint.
+    nonisolated func stream(endpoint: APIEndpoint) -> AsyncThrowingStream<SSEEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let bytes = try await self.openStream(endpoint: endpoint)
+                    var eventName = ""
+                    var dataLines: [String] = []
+
+                    func flush() {
+                        guard !dataLines.isEmpty || !eventName.isEmpty else { return }
+                        continuation.yield(SSEEvent(
+                            event: eventName.isEmpty ? "message" : eventName,
+                            data: dataLines.joined(separator: "\n")
+                        ))
+                        eventName = ""
+                        dataLines = []
+                    }
+
+                    for try await line in bytes.lines {
+                        if line.isEmpty {           // blank line = end of one SSE frame
+                            flush()
+                        } else if line.hasPrefix(":") {
+                            continue                // comment / heartbeat
+                        } else if line.hasPrefix("event:") {
+                            eventName = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                        } else if line.hasPrefix("data:") {
+                            let raw = line.dropFirst(5)
+                            dataLines.append(raw.hasPrefix(" ") ? String(raw.dropFirst()) : String(raw))
+                        }
+                    }
+                    flush()                          // frame without a trailing blank line
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Actor-isolated: build the authed request (Accept: text/event-stream) and
+    /// open the byte stream, validating the status line before returning.
+    private func openStream(endpoint: APIEndpoint) async throws -> URLSession.AsyncBytes {
+        var request = try buildRequest(for: endpoint)
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+        logRequest(request, endpoint: endpoint)
+        let (bytes, response) = try await session.bytes(for: request)
+
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.unknown(message: "Invalid response type")
+        }
+        guard (200...299).contains(http.statusCode) else {
+            if isDebugLoggingEnabled {
+                print("❌ SSE stream \(http.statusCode) from \(http.url?.path ?? "")")
+            }
+            switch http.statusCode {
+            case 401: throw APIError.unauthorized
+            case 404: throw APIError.notFound
+            case 429:
+                let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap { Int($0) } ?? 60
+                throw APIError.rateLimited(retryAfter: retryAfter)
+            default: throw APIError.serverError(statusCode: http.statusCode)
+            }
+        }
+        return bytes
+    }
+
     // MARK: - Failover
 
     #if DEBUG
@@ -401,6 +476,15 @@ actor APIClient {
             print("   ⚠️ HTTP error \(response.statusCode) — check backend logs for details")
         }
     }
+}
+
+// MARK: - Server-Sent Event
+
+/// One parsed SSE frame: an event name (e.g. "token", "done", "error") + its
+/// raw JSON `data` payload, which the caller decodes per event type.
+nonisolated struct SSEEvent: Sendable {
+    let event: String
+    let data: String
 }
 
 // MARK: - API Error Response (Backend Format)

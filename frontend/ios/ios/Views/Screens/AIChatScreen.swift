@@ -194,11 +194,32 @@ struct AIChatScreen: View {
 
     private var conversationArea: some View {
         VStack(spacing: 0) {
-            ChatMessagesList(messages: viewModel.messages)
+            // "Grounded on …" chip — shows what Cay AI is reading for this chat.
+            if let ctx = viewModel.currentContextType, ctx != .none {
+                GroundedContextChip(contextType: ctx, referenceLabel: groundingReferenceLabel)
+                    .padding(.top, AppSpacing.sm)
+                    .padding(.bottom, AppSpacing.xs)
+            }
 
-            if viewModel.isAITyping {
+            ChatMessagesList(messages: viewModel.messages, streamingMessageId: viewModel.streamingMessageId)
+
+            // "Thinking" dots only before the first streamed token; once tokens flow
+            // the live message + caret convey progress instead.
+            if viewModel.isAITyping && !viewModel.isStreaming {
                 typingIndicator
             }
+        }
+    }
+
+    /// A user-friendly reference for the grounding chip (a ticker for asset/report
+    /// contexts; hidden for slug/order-based contexts, which aren't readable).
+    private var groundingReferenceLabel: String? {
+        guard let ref = viewModel.currentReferenceId, !ref.isEmpty else { return nil }
+        switch viewModel.currentContextType {
+        case .tickerReport, .stock, .etf, .crypto, .index, .commodity:
+            return ref.split(separator: "|").first.map(String.init)?.uppercased()
+        default:
+            return nil
         }
     }
 

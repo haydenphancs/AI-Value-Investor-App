@@ -19,6 +19,7 @@ from app.api.v1.api import api_router
 from app.integrations.coingecko import close_coingecko_client
 from app.integrations.fmp import close_fmp_client
 from app.services.live_price_manager import get_live_price_manager
+from app.log_redaction import scrub_sentry_event
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -46,7 +47,9 @@ if settings.SENTRY_DSN:
             code = getattr(exc, "error_code", None) or getattr(exc, "code", None)
             if code:
                 tags["error_code"] = str(code)
-        return event
+        # Scrub any API key / token that leaked into the message or exception value
+        # (e.g. FMP's apikey= in a request URL) so it is NEVER stored in Sentry.
+        return scrub_sentry_event(event)
 
     sentry_sdk.init(
         dsn=settings.SENTRY_DSN,

@@ -14,6 +14,7 @@ from typing import Optional, List, Dict, Any
 import logging
 
 from app.config import settings
+from app.log_redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,9 @@ class FMPClient:
             return response.json()
 
         except httpx.HTTPError as e:
-            logger.error(f"FMP API request failed: {endpoint} — {e}")
+            # redact_secrets: httpx echoes the full request URL (incl. apikey=) in its
+            # error, which would otherwise leak the FMP key into the log + Sentry.
+            logger.error(f"FMP API request failed: {endpoint} — {redact_secrets(e)}")
             raise
 
     # ── Company profile & quote ─────────────────────────────────────

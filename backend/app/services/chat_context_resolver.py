@@ -20,10 +20,18 @@ chats from ``stock_id`` (profit / snapshot / company-profile summaries), so the
 resolver defers to that path rather than duplicating those fetches.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Hard bound on how long a single context resolve may take. Cache-only reads
+# (report / money-moves / stock) finish in well under this. The ETF/CRYPTO/INDEX
+# services fall through to a full FMP+Gemini recompute on a cold cache — this
+# ceiling stops that from stalling the FIRST streamed token; on timeout the chat
+# proceeds ungrounded (degraded, never blocked).
+_RESOLVE_TIMEOUT_SECONDS = 4.0
 
 # ── Per-source character caps ───────────────────────────────────────
 # Keep the injected block small. These bound each source; the total block is at
@@ -85,7 +93,17 @@ class ChatContextResolver:
             return client_context
 
         try:
-            block = await handler(self, reference_id, client_context)
+            block = await asyncio.wait_for(
+                handler(self, reference_id, client_context),
+                timeout=_RESOLVE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "chat_context: resolve TIMED OUT (>%.1fs) for %s/%s — likely a cold "
+                "detail-cache recompute; proceeding ungrounded",
+                _RESOLVE_TIMEOUT_SECONDS, context_type, reference_id,
+            )
+            return client_context
         except Exception as e:
             logger.warning(
                 "chat_context: resolve failed for %s/%s: %s: %s — degrading to client context",
@@ -136,8 +154,11 @@ class ChatContextResolver:
             f"{report.get('company_name') or ticker} ({ticker})."
         ]
         score = report.get("quality_score")
+        # quality_score is on a 0-100 scale (persona_scoring clamps to [0,100];
+        # iOS renders it as /100). Label it /100 — a /10 label told Gemini the
+        # report scored e.g. "72/10", poisoning the grounding.
         if isinstance(score, (int, float)):
-            parts.append(f"Overall quality score: {score:.1f}/10.")
+            parts.append(f"Overall quality score: {score:.0f}/100.")
         summary = (report.get("executive_summary_text") or "").strip()
         if summary:
             parts.append("Executive summary: " + _cap(summary, _MAX_REPORT_SUMMARY))
@@ -273,8 +294,21 @@ class ChatContextResolver:
         subtitle = (article.get("subtitle") or "").strip()
         if subtitle:
             parts.append(subtitle)
+        # keyHighlights items are {icon, title, description} dicts (mirrors the
+        # iOS ArticleHighlightDTO), NOT strings — str(dict) would inject a Python
+        # dict repr (SF Symbol names + braces) as the article's key points.
         highlights = article.get("keyHighlights") or []
-        hl_text = [str(h) for h in highlights[:4] if h]
+        hl_text: List[str] = []
+        for h in highlights[:4]:
+            if isinstance(h, dict):
+                title = (h.get("title") or "").strip()
+                desc = (h.get("description") or "").strip()
+                if title and desc:
+                    hl_text.append(f"{title} — {desc}")
+                elif title or desc:
+                    hl_text.append(title or desc)
+            elif h:
+                hl_text.append(str(h))
         if hl_text:
             parts.append("Key highlights: " + "; ".join(hl_text) + ".")
         parts.append("Answer in the context of this article's ideas.")

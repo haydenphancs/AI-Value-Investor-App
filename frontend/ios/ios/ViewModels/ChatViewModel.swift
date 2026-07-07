@@ -513,10 +513,53 @@ class ChatViewModel: ObservableObject {
                 isAITyping = false
                 return
             }
-            // Show the thinking indicator again while the fallback regenerates.
+            // Show the thinking indicator again while we reconcile / regenerate.
             isAITyping = true
-            await sendMessageToSession(sessionId: sessionId, message: message)
+            await reconcileAfterStreamFailure(sessionId: sessionId, message: message)
         }
+    }
+
+    /// After a stream failure, reconcile with server truth BEFORE re-sending. The
+    /// backend persists the turn immediately before the terminal `done` frame, so a
+    /// transport drop in that window has already saved it — re-POSTing would store
+    /// the turn twice (visible as a duplicated Q+A on the next history reload). So:
+    /// reload history; if the turn is already there, adopt it; only regenerate when
+    /// it is genuinely absent (the common early-failure case).
+    private func reconcileAfterStreamFailure(sessionId: String, message: String) async {
+        do {
+            let history = try await APIClient.shared.request(
+                endpoint: .getChatHistory(sessionId: sessionId),
+                responseType: ChatHistoryDTO.self
+            )
+            guard sessionId == currentSessionId else { isAITyping = false; return }
+            if Self.historyContainsTurn(history.messages, userMessage: message) {
+                // The stream DID persist this turn — adopt server state, don't re-send.
+                messages = history.messages.map { $0.toRichChatMessage() }
+                isAITyping = false
+                return
+            }
+        } catch {
+            // History unavailable — fall through to a best-effort regenerate.
+            print("⚠️ [ChatVM] Reconcile history fetch failed: \(error)")
+            guard sessionId == currentSessionId else { isAITyping = false; return }
+        }
+        // Turn was not persisted — safe to regenerate via the non-streaming endpoint.
+        await sendMessageToSession(sessionId: sessionId, message: message)
+    }
+
+    /// True when the tail of history is exactly the turn we just sent: the last
+    /// assistant message is preceded by a user message with matching content.
+    private static func historyContainsTurn(_ messages: [ChatMessageDTO], userMessage: String) -> Bool {
+        guard let lastAssistant = messages.lastIndex(where: { $0.role == "assistant" }) else { return false }
+        let target = userMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        var i = lastAssistant - 1
+        while i >= 0 {
+            if messages[i].role == "user" {
+                return messages[i].content.trimmingCharacters(in: .whitespacesAndNewlines) == target
+            }
+            i -= 1
+        }
+        return false
     }
 
     /// Replace the streaming message in place (same id → no ForEach re-insert).

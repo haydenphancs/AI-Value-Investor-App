@@ -234,3 +234,6 @@ backend/data/book_audio/.clone_cache_*/
 backend/data/book_audio/.tmp_*/
 backend/data/voice_clone/
 dump.rdb
+
+# Sentry CLI configuration file for Xcode
+frontend/ios/ios/.sentryclirc

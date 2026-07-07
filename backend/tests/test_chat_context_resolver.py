@@ -66,7 +66,8 @@ async def test_ticker_report_hit_extracts_summary_score_thesis(resolver, monkeyp
         assert ticker == "AAPL" and persona == "warren_buffett"
         return {
             "company_name": "Apple Inc.",
-            "quality_score": 8.2,
+            # quality_score is a 0-100 value (persona_scoring clamps to [0,100]).
+            "quality_score": 72.0,
             "executive_summary_text": "Apple is a high-quality compounder with durable margins.",
             "core_thesis": {"bull_case": ["Durable ecosystem moat"], "bear_case": ["Valuation is rich"]},
         }
@@ -77,10 +78,26 @@ async def test_ticker_report_hit_extracts_summary_score_thesis(resolver, monkeyp
     block = await resolver.resolve("TICKER_REPORT", "AAPL|warren_buffett", None)
     assert block is not None
     assert "Apple Inc." in block
-    assert "8.2/10" in block
+    # Must be labeled /100 (the real scale) — a /10 label poisons the grounding.
+    assert "72/100" in block
+    assert "/10." not in block, f"score must not be rendered on a /10 scale: {block!r}"
     assert "high-quality compounder" in block
     assert "Durable ecosystem moat" in block
     assert "Valuation is rich" in block
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_score_boundaries_render_on_100_scale(resolver, monkeypatch):
+    """Outlier scores (0, 100, mid) all render on /100, never /10."""
+    for score in (0.0, 50.5, 100.0):
+        async def fake_get(ticker, persona, _s=score):
+            return {"company_name": "X", "quality_score": _s, "executive_summary_text": "s"}
+
+        import app.services.ticker_report_cache as trc
+        monkeypatch.setattr(trc, "get_cached_report", fake_get)
+        block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
+        assert f"{score:.0f}/100" in block
+        assert "/10." not in block
 
 
 @pytest.mark.asyncio
@@ -197,6 +214,27 @@ async def test_etf_empty_symbol_returns_none(resolver):
     assert await resolver.resolve("ETF", "", None) is None
 
 
+@pytest.mark.asyncio
+async def test_resolve_times_out_on_slow_recompute_and_degrades(resolver, monkeypatch):
+    """A cold ETF/crypto/index detail recompute must NOT stall the first token:
+    the resolve timeout bounds it and degrades to the client context."""
+    import asyncio as _a
+    import app.services.chat_context_resolver as ccr
+    import app.services.etf_service as es
+
+    monkeypatch.setattr(ccr, "_RESOLVE_TIMEOUT_SECONDS", 0.05)
+
+    class _SlowSvc:
+        async def get_etf_detail(self, symbol):
+            await _a.sleep(1.0)  # far exceeds the 0.05s bound
+            raise AssertionError("should have been cancelled by the timeout")
+
+    monkeypatch.setattr(es, "get_etf_service", lambda: _SlowSvc())
+
+    block = await resolver.resolve("ETF", "SPY", "fallback ctx")
+    assert block == "fallback ctx"
+
+
 # ── CRYPTO ──────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -237,6 +275,8 @@ async def test_crypto_hit_extracts_stats_from_groups(resolver, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_money_move_hit_extracts_title_author_highlights(resolver, monkeypatch):
+    # keyHighlights are {icon,title,description} dicts (the real served shape) —
+    # the resolver must extract human text, NOT str() the dict.
     class _Resp:
         articles = [
             {
@@ -244,7 +284,10 @@ async def test_money_move_hit_extracts_title_author_highlights(resolver, monkeyp
                 "title": "The Power of Compounding",
                 "subtitle": "Small amounts, big results",
                 "author": {"name": "Jane Doe"},
-                "keyHighlights": ["Start early", "Stay consistent", "Reinvest"],
+                "keyHighlights": [
+                    {"icon": "clock.fill", "title": "Start Early", "description": "Time is the biggest lever"},
+                    {"icon": "arrow.up", "title": "Stay Consistent", "description": "Automate contributions"},
+                ],
             },
             {"slug": "other", "title": "Other Article"},
         ]
@@ -260,7 +303,33 @@ async def test_money_move_hit_extracts_title_author_highlights(resolver, monkeyp
     assert block is not None
     assert "The Power of Compounding" in block
     assert "Jane Doe" in block
-    assert "Start early" in block
+    # Human title + description extracted; NO raw dict/SF-symbol leakage.
+    assert "Start Early" in block
+    assert "Time is the biggest lever" in block
+    assert "clock.fill" not in block
+    assert "'icon'" not in block and "{" not in block
+
+
+@pytest.mark.asyncio
+async def test_money_move_highlights_tolerate_string_and_malformed(resolver, monkeypatch):
+    """Outlier: string highlights (legacy) and empty/None entries degrade cleanly."""
+    class _Resp:
+        articles = [{
+            "slug": "s", "title": "T", "author": "",
+            "keyHighlights": ["plain string", {"title": "OnlyTitle"}, {"description": "OnlyDesc"}, {}, None],
+        }]
+
+    class _Svc:
+        async def get_money_moves(self):
+            return _Resp()
+
+    import app.services.money_moves_content_service as mm
+    monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
+
+    block = await resolver.resolve("MONEY_MOVES_ARTICLE", "s", None)
+    assert block is not None
+    assert "plain string" in block and "OnlyTitle" in block and "OnlyDesc" in block
+    assert "{" not in block and "None" not in block
 
 
 @pytest.mark.asyncio

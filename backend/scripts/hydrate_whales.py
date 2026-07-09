@@ -800,7 +800,7 @@ class WhaleHydrator:
             else:
                 named.append({
                     "name": name,
-                    "allocation": round(weight, 1),
+                    "allocation": min(100.0, round(weight, 1)),
                     "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
                 })
         named.sort(key=lambda x: x["allocation"], reverse=True)
@@ -808,7 +808,7 @@ class WhaleHydrator:
         if other_weight > 0:
             named.append({
                 "name": "Other",
-                "allocation": round(other_weight, 1),
+                "allocation": min(100.0, round(other_weight, 1)),
                 "color_hex": DEFAULT_SECTOR_COLOR,
             })
 
@@ -1344,6 +1344,13 @@ class WhaleHydrator:
         except Exception as e:
             logger.error("  Failed to update whale record: %s", e)
 
+        # Track whether the denormalized writes (steps 3–5) all succeeded. The
+        # dedup skip in _hydrate_one keys on raw_hash; if a denorm write fails
+        # here after the snapshot upsert stamped raw_hash, the next run would
+        # match the hash and skip ("data unchanged"), never repairing the
+        # partially-written tables. We reset raw_hash below if any step failed.
+        denorm_ok = True
+
         # 3. Replace holdings
         try:
             sb.table("whale_holdings").delete().eq(
@@ -1359,6 +1366,7 @@ class WhaleHydrator:
                     "change_percent": h.get("change_percent", 0),
                 }).execute()
         except Exception as e:
+            denorm_ok = False
             logger.error("  Failed to sync holdings: %s", e)
 
         # 4. Replace sector allocations
@@ -1373,6 +1381,7 @@ class WhaleHydrator:
                     "allocation": s["allocation"],
                 }).execute()
         except Exception as e:
+            denorm_ok = False
             logger.error("  Failed to sync sectors: %s", e)
 
         # 5. Insert trade groups + trades (one per filing; skip existing dates)
@@ -1430,7 +1439,27 @@ class WhaleHydrator:
                         "date": trade.get("date", ""),
                     }).execute()
             except Exception as e:
+                denorm_ok = False
                 logger.error("  Failed to sync trade group: %s", e)
+
+        # 5b. If any denormalized write failed, clear the snapshot's raw_hash so
+        # the next scheduled run re-attempts the sync instead of matching the
+        # hash and skipping ("data unchanged"). The snapshot JSONB stays intact,
+        # so the profile still serves; only the dedup key is reset.
+        if snapshot_ok and not denorm_ok:
+            try:
+                sb.table("whale_filing_snapshots").update(
+                    {"raw_hash": None}
+                ).eq("whale_id", whale_id).eq(
+                    "filing_period", snapshot["filing_period"]
+                ).execute()
+                logger.warning(
+                    "  Reset raw_hash for whale_id=%s period=%s — a denormalized "
+                    "write failed; next run will repair.",
+                    whale_id, snapshot.get("filing_period"),
+                )
+            except Exception as e:
+                logger.error("  Failed to reset raw_hash: %s", e)
 
         # 6. Generate alert if significant activity detected
         self._maybe_generate_alert(whale_id, snapshot)

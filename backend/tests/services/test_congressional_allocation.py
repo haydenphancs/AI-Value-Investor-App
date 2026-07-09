@@ -117,6 +117,33 @@ def test_full_sale_zeros_allocation(service):
     assert sale["previous_allocation"] == 50.0
 
 
+def test_full_sale_with_mismatched_buckets_removes_holding(service):
+    # Buy a LARGE bucket, then full-sale a SMALL bucket. The bucket midpoints
+    # differ ($375K buy vs $32.5K sale), so plain midpoint subtraction leaves a
+    # phantom ~$342.5K residual — the fully-exited ticker would linger in
+    # holdings and dilute every other allocation. A "Closed" sale must zero the
+    # position regardless of the sale bucket size.
+    raw = [
+        _make_trade("AAPL", "purchase", "$250,001 - $500,000", "2026-02-10"),
+        _make_trade("MSFT", "purchase", "$15,001 - $50,000", "2026-02-15"),
+        _make_trade("AAPL", "sale_full", "$15,001 - $50,000", "2026-03-10"),
+    ]
+    holdings, groups, _ = service._aggregate_congressional_trades(
+        raw, "2026-04-20"
+    )
+    sale = next(
+        t for t in _all_trades(groups)
+        if t["ticker"] == "AAPL" and t["action"] == "SOLD"
+    )
+    assert sale["trade_type"] == "Closed"
+    assert sale["new_allocation"] == 0.0
+    # AAPL fully exited → absent from current holdings (was a phantom before).
+    assert all(h["ticker"] != "AAPL" for h in holdings)
+    # MSFT is the only remaining position → 100%, not diluted by a phantom AAPL.
+    msft = next(h for h in holdings if h["ticker"] == "MSFT")
+    assert msft["allocation"] == 100.0
+
+
 def test_oversell_clamps_no_negative_allocation(service):
     # Sell more than we bought → position clamps at 0, no negative allocation
     raw = [

@@ -45,54 +45,77 @@ def main():
 
     sb = get_supabase()
 
-    # Fetch existing whales by name for dedup
-    existing = sb.table("whales").select("id, name").execute()
+    # Fetch existing whales for dedup. Match on BOTH name and CIK: a whale RENAME
+    # that keeps its CIK must UPDATE the existing row, not INSERT a new one that
+    # collides on the uq_whales_cik unique index (migration 080). Without the CIK
+    # match the collision raises, and (with per-row isolation below) that one row
+    # is skipped instead of aborting the entire remaining sync.
+    existing = sb.table("whales").select("id, name, cik").execute()
     existing_names = {w["name"]: w["id"] for w in (existing.data or [])}
+    existing_ciks = {
+        w["cik"]: w["id"] for w in (existing.data or []) if w.get("cik")
+    }
 
     created = 0
     updated = 0
+    errors = 0
 
     for whale in registry:
         name = whale["name"]
-        row = {
-            "name": name,
-            "title": whale.get("title", ""),
-            "description": whale.get("description", ""),
-            "category": whale.get("category", "investors"),
-            "data_source": whale.get("data_source", "manual"),
-            # Unconditional (unlike cik/fmp_name below) so a corrected or
-            # removed firm_name propagates on re-sync. Requires migration 080
-            # (adds whales.firm_name) to be applied first.
-            "firm_name": whale.get("firm_name"),
-        }
-        if whale.get("cik"):
-            row["cik"] = whale["cik"]
-        if whale.get("fmp_name"):
-            row["fmp_name"] = whale["fmp_name"]
-        if whale.get("associated_ticker"):
-            row["associated_ticker"] = whale["associated_ticker"]
+        try:
+            row = {
+                "name": name,
+                "title": whale.get("title", ""),
+                "description": whale.get("description", ""),
+                "category": whale.get("category", "investors"),
+                "data_source": whale.get("data_source", "manual"),
+                # Unconditional (unlike cik/fmp_name below) so a corrected or
+                # removed firm_name propagates on re-sync. Requires migration 080
+                # (adds whales.firm_name) to be applied first.
+                "firm_name": whale.get("firm_name"),
+            }
+            if whale.get("cik"):
+                row["cik"] = whale["cik"]
+            if whale.get("fmp_name"):
+                row["fmp_name"] = whale["fmp_name"]
+            if whale.get("associated_ticker"):
+                row["associated_ticker"] = whale["associated_ticker"]
 
-        if name in existing_names:
-            if args.dry_run:
-                logger.info("  [DRY RUN] Would update: %s", name)
+            # Resolve to an existing row by name first, then by CIK (rename case).
+            row_id = existing_names.get(name)
+            if row_id is None and whale.get("cik"):
+                row_id = existing_ciks.get(whale["cik"])
+
+            if row_id is not None:
+                if args.dry_run:
+                    logger.info("  [DRY RUN] Would update: %s", name)
+                else:
+                    sb.table("whales").update(row).eq("id", row_id).execute()
+                    logger.info("  Updated: %s", name)
+                updated += 1
             else:
-                sb.table("whales").update(row).eq(
-                    "id", existing_names[name]
-                ).execute()
-                logger.info("  Updated: %s", name)
-            updated += 1
-        else:
-            if args.dry_run:
-                logger.info("  [DRY RUN] Would create: %s", name)
-            else:
-                sb.table("whales").insert(row).execute()
-                logger.info("  Created: %s", name)
-            created += 1
+                if args.dry_run:
+                    logger.info("  [DRY RUN] Would create: %s", name)
+                else:
+                    sb.table("whales").insert(row).execute()
+                    logger.info("  Created: %s", name)
+                created += 1
+        except Exception as e:
+            # Isolate per-row failures so one bad entry (e.g. a duplicate-CIK
+            # collision) doesn't abort the rest of the registry — which would
+            # silently leave every later whale unsynced. Log loudly and keep
+            # going; the non-zero exit below still flags the run as failed.
+            errors += 1
+            logger.error(
+                "  FAILED to sync %s: %s: %s", name, type(e).__name__, e
+            )
 
     logger.info(
-        "Done. created=%d  updated=%d  total=%d",
-        created, updated, len(registry),
+        "Done. created=%d  updated=%d  errors=%d  total=%d",
+        created, updated, errors, len(registry),
     )
+    if errors:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

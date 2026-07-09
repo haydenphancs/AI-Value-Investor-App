@@ -98,9 +98,13 @@ async def get_whale_profile(
             "[whale_profile] Unhandled error for whale_id=%s, user=%s: %s",
             whale_id, user_id, e, exc_info=True,
         )
+        # Generic client-facing detail — never leak internal exception text
+        # (Python type / message, Postgres/PostgREST errors, field names) to the
+        # client. The full error + stack is captured in the log above
+        # (exc_info=True) for diagnosis. iOS surfaces a generic "unavailable".
         raise HTTPException(
             status_code=503,
-            detail=f"Whale profile temporarily unavailable: {type(e).__name__}: {e}",
+            detail="Whale profile temporarily unavailable. Please try again shortly.",
         )
     if not profile:
         raise HTTPException(status_code=404, detail="Whale not found")

@@ -72,6 +72,36 @@ struct WhaleProfileView: View {
                 .refreshable {
                     await viewModel.refresh()
                 }
+            } else {
+                // Load failed (offline / 500 / whale not found): loadProfile
+                // leaves profile == nil and only sets errorMessage. Without this
+                // branch the screen was a blank dark dead-end with no error text
+                // and no retry (the .refreshable above is unreachable when
+                // profile == nil). Show an actionable error + Retry instead.
+                VStack(spacing: AppSpacing.md) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(AppTypography.iconJumbo)
+                        .foregroundColor(AppColors.alertOrange)
+
+                    Text(viewModel.errorMessage ?? "Failed to load profile.")
+                        .font(AppTypography.body)
+                        .foregroundColor(AppColors.textSecondary)
+                        .multilineTextAlignment(.center)
+
+                    Button {
+                        viewModel.loadProfile()
+                    } label: {
+                        Text("Retry")
+                            .font(AppTypography.bodySmallEmphasis)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.vertical, AppSpacing.sm)
+                            .background(AppColors.primaryBlue)
+                            .cornerRadius(AppCornerRadius.pill)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, AppSpacing.xl)
             }
         }
         .navigationBarBackButtonHidden(true)

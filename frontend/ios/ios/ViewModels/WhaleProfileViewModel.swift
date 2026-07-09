@@ -103,14 +103,16 @@ class WhaleProfileViewModel: ObservableObject {
                     endpoint: .getWhaleProfile(whaleId: self.whaleId),
                     responseType: WhaleProfileDTO.self
                 )
-                var loadedProfile = dto.toWhaleProfile()
+                let loadedProfile = dto.toWhaleProfile()
 
-                // Merge local follow state from WhaleService — in-place
-                // mutation, NOT reconstruction (see updateFollowStatus).
-                let isFollowing = self.whaleService.isFollowing(self.whaleId)
-                if loadedProfile.isFollowing != isFollowing {
-                    loadedProfile.isFollowing = isFollowing
-                }
+                // Trust the freshly-fetched server truth (dto.isFollowing) and
+                // converge the local WhaleService cache to it — do NOT override
+                // the DTO with a possibly-stale local value (that pinned a
+                // "Following" header after a cross-device unfollow). Reconcile is
+                // a local-only cache alignment; it issues no backend call.
+                self.whaleService.reconcileLocalFollow(
+                    self.whaleId, isFollowing: loadedProfile.isFollowing
+                )
 
                 self.profile = loadedProfile
                 self.isLoading = false

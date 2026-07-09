@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		93350E262FFF40D100351547 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 93350E252FFF40D100351547 /* Sentry */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		938B285E2F04A07A00A3CE08 /* ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ios.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -36,16 +40,25 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				93350E262FFF40D100351547 /* Sentry in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		93350E242FFF40D100351547 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		938B28552F04A07A00A3CE08 = {
 			isa = PBXGroup;
 			children = (
 				938B28602F04A07A00A3CE08 /* ios */,
+				93350E242FFF40D100351547 /* Frameworks */,
 				938B285F2F04A07A00A3CE08 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -78,6 +91,7 @@
 			);
 			name = ios;
 			packageProductDependencies = (
+				93350E252FFF40D100351547 /* Sentry */,
 			);
 			productName = ios;
 			productReference = 938B285E2F04A07A00A3CE08 /* ios.app */;
@@ -107,6 +121,9 @@
 			);
 			mainGroup = 938B28552F04A07A00A3CE08;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				93350E232FFF3BA600351547 /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 938B285F2F04A07A00A3CE08 /* Products */;
 			projectDirPath = "";
@@ -355,6 +372,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		93350E232FFF3BA600351547 /* XCRemoteSwiftPackageReference "sentry-cocoa" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/getsentry/sentry-cocoa";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.21.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		93350E252FFF40D100351547 /* Sentry */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 93350E232FFF3BA600351547 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
+			productName = Sentry;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 938B28562F04A07A00A3CE08 /* Project object */;
 }

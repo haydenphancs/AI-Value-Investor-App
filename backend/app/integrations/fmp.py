@@ -47,6 +47,14 @@ class FMPRateLimitException(FMPException):
         self.retry_after = retry_after
 
 
+class FMPUnavailableException(FMPException):
+    """Raised when FMP is transiently unavailable — a 5xx (502/503/504) or a
+    network drop that persisted through retries. Distinct from a 429 (quota):
+    this is upstream flakiness the caller should degrade around, not a bug in
+    our code. Logged at WARNING (handled/degraded), so it does NOT page on-call.
+    """
+
+
 class FMPClient:
     """
     Client for Financial Modeling Prep API (stable endpoints).
@@ -82,6 +90,17 @@ class FMPClient:
             await self._client.aclose()
             self._client = None
 
+    # ── Retry config for transient upstream failures ────────────────
+    # FMP's gateway intermittently returns 5xx (502/503/504) or drops the
+    # connection. These are transient and usually clear on a short retry, so a
+    # single blip must NOT fail the request or page on-call. We retry with
+    # exponential backoff, then degrade to a typed FMPUnavailableException
+    # logged at WARNING (handled/degraded) — keeping it OUT of high-priority
+    # Sentry. Real config errors (401) and quota (429) are NOT retried.
+    _RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+    _MAX_RETRIES = 2            # 3 attempts total
+    _RETRY_BASE_DELAY = 0.5     # seconds; exponential backoff (0.5s, 1.0s)
+
     async def _make_request(
         self,
         endpoint: str,
@@ -89,6 +108,11 @@ class FMPClient:
     ) -> Any:
         """
         Make HTTP request to FMP API using the persistent client.
+
+        Transient upstream failures (5xx in _RETRYABLE_STATUS or network drops)
+        are retried with exponential backoff; when retries are exhausted, raises
+        the typed FMPUnavailableException (logged at WARNING, not ERROR) so
+        callers degrade gracefully and transient FMP blips don't page on-call.
 
         Args:
             endpoint: API endpoint path (relative to base_url)
@@ -98,7 +122,10 @@ class FMPClient:
             Parsed JSON response (list or dict)
 
         Raises:
-            httpx.HTTPError: If request fails
+            FMPAuthException:        401 (bad/expired FMP_API_KEY)
+            FMPRateLimitException:   429 (quota / burst limit)
+            FMPUnavailableException: transient 5xx / network error after retries
+            httpx.HTTPStatusError:   other non-retryable HTTP status (e.g. 400)
         """
         url = f"{self.base_url}/{endpoint}"
 
@@ -106,55 +133,108 @@ class FMPClient:
             params = {}
         params["apikey"] = self.api_key
 
-        try:
-            client = await self._get_client()
-            response = await client.get(url, params=params)
+        for attempt in range(self._MAX_RETRIES + 1):
+            try:
+                client = await self._get_client()
+                response = await client.get(url, params=params)
 
-            # Log rate limit info when headers are present
-            remaining = response.headers.get("X-RateLimit-Remaining")
-            limit = response.headers.get("X-RateLimit-Limit")
-            if remaining is not None:
-                remaining_int = int(remaining)
-                if remaining_int <= 10:
-                    logger.warning(
-                        f"FMP rate limit low: {remaining}/{limit} remaining"
+                # Log rate limit info when headers are present
+                remaining = response.headers.get("X-RateLimit-Remaining")
+                limit = response.headers.get("X-RateLimit-Limit")
+                if remaining is not None:
+                    try:
+                        if int(remaining) <= 10:
+                            logger.warning(
+                                f"FMP rate limit low: {remaining}/{limit} remaining"
+                            )
+                    except (TypeError, ValueError):
+                        pass
+
+                if response.status_code == 401:
+                    logger.error(
+                        f"FMP auth failed on {endpoint}: 401 Unauthorized "
+                        f"— check FMP_API_KEY in backend/.env"
+                    )
+                    raise FMPAuthException(
+                        f"FMP returned 401 Unauthorized for {endpoint} "
+                        f"(check FMP_API_KEY)"
                     )
 
-            if response.status_code == 401:
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After", "unknown")
+                    logger.error(
+                        f"FMP rate limit HIT on {endpoint}. "
+                        f"Retry-After: {retry_after}s. "
+                        f"Limit: {limit}"
+                    )
+                    raise FMPRateLimitException(
+                        f"FMP rate limit hit on {endpoint}",
+                        retry_after=retry_after,
+                    )
+
+                # Transient upstream 5xx — retry with backoff, then degrade.
+                if response.status_code in self._RETRYABLE_STATUS:
+                    if attempt < self._MAX_RETRIES:
+                        delay = self._RETRY_BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            "FMP %s returned %s — transient, retry %d/%d in %.1fs",
+                            endpoint, response.status_code,
+                            attempt + 1, self._MAX_RETRIES, delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.warning(
+                        "FMP %s unavailable: HTTP %s after %d attempts "
+                        "(transient upstream)",
+                        endpoint, response.status_code, self._MAX_RETRIES + 1,
+                    )
+                    raise FMPUnavailableException(
+                        f"FMP returned {response.status_code} for {endpoint} "
+                        f"after {self._MAX_RETRIES + 1} attempts"
+                    )
+
+                response.raise_for_status()
+                return response.json()
+
+            except httpx.TransportError as e:
+                # Network-level transient error (connect/read timeout, reset,
+                # protocol error). Retry with backoff, then degrade.
+                if attempt < self._MAX_RETRIES:
+                    delay = self._RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        "FMP %s network error (%s) — retry %d/%d in %.1fs",
+                        endpoint, type(e).__name__,
+                        attempt + 1, self._MAX_RETRIES, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning(
+                    "FMP %s unavailable after %d attempts: %s",
+                    endpoint, self._MAX_RETRIES + 1, redact_secrets(e),
+                )
+                raise FMPUnavailableException(
+                    f"FMP request to {endpoint} failed after "
+                    f"{self._MAX_RETRIES + 1} attempts: {type(e).__name__}"
+                ) from e
+
+            except httpx.HTTPStatusError as e:
+                # Non-retryable HTTP status (4xx other than 401/429 handled
+                # above, or a 5xx not in the retryable set). 403/404 = expected
+                # "no data / endpoint unavailable", routinely handled by callers
+                # (e.g. get_senate_disclosure catches the 404 and falls back), so
+                # log WARNING to keep them OUT of Sentry; anything else is ERROR.
+                # redact_secrets strips the apikey= that httpx echoes in the URL.
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                log = logger.warning if status in (403, 404) else logger.error
+                log(f"FMP API request failed: {endpoint} — {redact_secrets(e)}")
+                raise
+
+            except httpx.HTTPError as e:
+                # Any other httpx error (decoding, redirect loop) — non-retryable.
                 logger.error(
-                    f"FMP auth failed on {endpoint}: 401 Unauthorized "
-                    f"— check FMP_API_KEY in backend/.env"
+                    f"FMP API request failed: {endpoint} — {redact_secrets(e)}"
                 )
-                raise FMPAuthException(
-                    f"FMP returned 401 Unauthorized for {endpoint} "
-                    f"(check FMP_API_KEY)"
-                )
-
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After", "unknown")
-                logger.error(
-                    f"FMP rate limit HIT on {endpoint}. "
-                    f"Retry-After: {retry_after}s. "
-                    f"Limit: {limit}"
-                )
-                raise FMPRateLimitException(
-                    f"FMP rate limit hit on {endpoint}",
-                    retry_after=retry_after,
-                )
-
-            response.raise_for_status()
-            return response.json()
-
-        except httpx.HTTPError as e:
-            # 403/404 = "no data / endpoint unavailable" — routinely EXPECTED and handled
-            # by callers (e.g. get_senate_disclosure catches the 404 and falls back to
-            # senate-latest + filter), so log it at WARNING, not ERROR, to keep these
-            # false-positives OUT of Sentry. Real failures (5xx, timeouts) stay ERROR.
-            # redact_secrets strips the apikey= that httpx echoes in the URL.
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            log = logger.warning if status in (403, 404) else logger.error
-            log(f"FMP API request failed: {endpoint} — {redact_secrets(e)}")
-            raise
+                raise
 
     # ── Company profile & quote ─────────────────────────────────────
 

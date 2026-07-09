@@ -265,6 +265,13 @@ WHALE_ACTIVITY_CACHE_TTL = 600  # 10 minutes
 _filing_dates_cache: Dict[str, Tuple[float, Any]] = {}
 FILING_DATES_CACHE_TTL = 86400  # 24 hours — filing dates change quarterly
 
+# In-flight profile builds — dedup concurrent cache-miss rebuilds so N
+# simultaneous requests for the same whale share ONE expensive FMP build
+# (CLAUDE.md invariant #4), instead of a thundering herd of redundant fan-outs.
+# The shared build is follow-state-free; each caller overlays its own per-user
+# follow state on the result.
+_whale_profile_inflight: Dict[str, "asyncio.Future"] = {}
+
 
 def _cache_get(cache: Dict, key: str, ttl: int) -> Optional[Any]:
     entry = cache.get(key)
@@ -386,6 +393,19 @@ class WhaleService:
         sb = get_supabase()
         mem_key = f"profile:{whale_id}"
 
+        # force_refresh DESTRUCTIVELY deletes the durable Tier-2 snapshot store
+        # (whale_filing_snapshots) and triggers an unbounded FMP rebuild. It is
+        # an authenticated operator/debug lever — iOS never sends it. Refuse it
+        # for anonymous callers so an unauthenticated GET can't wipe a whale's
+        # snapshots (emptying its holdings/sectors on an FMP outage) or drain the
+        # shared FMP quota by looping ?force_refresh=true over every whale_id.
+        if force_refresh and user_id is None:
+            logger.warning(
+                "Ignoring force_refresh for whale %s — requires an authenticated user",
+                whale_id,
+            )
+            force_refresh = False
+
         if force_refresh:
             logger.info("Force refresh requested for whale %s — busting all caches", whale_id)
             _whale_profile_cache.pop(mem_key, None)
@@ -436,28 +456,53 @@ class WhaleService:
                 )
 
         # ── Tier 3: Build from FMP + DB (slow, authoritative) ──────
-        profile = await self._build_whale_profile(whale_id, user_id)
-        if profile is None:
-            return None
+        # Dedup concurrent same-whale misses (invariant #4): the first caller
+        # builds; others await its follow-state-free result and overlay their
+        # own follow state. force_refresh always rebuilds (it owns the
+        # destructive delete above), so it is excluded from the dedup.
+        if not force_refresh:
+            inflight = _whale_profile_inflight.get(whale_id)
+            if inflight is not None:
+                shared = await inflight
+                if shared is None:
+                    return None
+                return self._overlay_follow_state(shared, user_id, sb)
 
-        # Persist to both caches (without follow state — that's per-user)
-        profile_no_follow = profile.model_copy(update={"is_following": False})
-        _cache_set(_whale_profile_cache, mem_key, profile_no_follow)
+        fut: "asyncio.Future" = asyncio.get_running_loop().create_future()
+        if not force_refresh:
+            _whale_profile_inflight[whale_id] = fut
         try:
-            sb.table("whale_profile_cache").upsert(
-                {
-                    "whale_id": whale_id,
-                    "profile_json": profile_no_follow.model_dump(),
-                    "cached_at": datetime.now().isoformat(),
-                },
-                on_conflict="whale_id",
-            ).execute()
+            # Build follow-state-free (user_id=None); each caller overlays its
+            # own follow state below, so the shared result is user-agnostic.
+            profile_no_follow = await self._build_whale_profile(whale_id, None)
+            if profile_no_follow is not None:
+                _cache_set(_whale_profile_cache, mem_key, profile_no_follow)
+                try:
+                    sb.table("whale_profile_cache").upsert(
+                        {
+                            "whale_id": whale_id,
+                            "profile_json": profile_no_follow.model_dump(),
+                            "cached_at": datetime.now().isoformat(),
+                        },
+                        on_conflict="whale_id",
+                    ).execute()
+                except Exception as e:
+                    logger.warning(
+                        "whale_profile_cache write failed for %s: %s", whale_id, e
+                    )
+            if not fut.done():
+                fut.set_result(profile_no_follow)
         except Exception as e:
-            logger.warning(
-                "whale_profile_cache write failed for %s: %s", whale_id, e
-            )
+            if not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            if not force_refresh:
+                _whale_profile_inflight.pop(whale_id, None)
 
-        return profile
+        if profile_no_follow is None:
+            return None
+        return self._overlay_follow_state(profile_no_follow, user_id, sb)
 
     def _overlay_follow_state(
         self,
@@ -1489,10 +1534,18 @@ class WhaleService:
                 else 0.0
             )
 
-            # Apply trade to running portfolio; clamp at zero on oversell
+            # Apply trade to running portfolio.
             if action == "BOUGHT":
                 running_portfolio[symbol] = prev_value + amount
+            elif raw_type in full_sale_types:
+                # A full sale ("Closed") exits the ENTIRE position. Subtracting
+                # the sale's bucket midpoint would leave a phantom residual (the
+                # buy and full-sale bucket midpoints almost never match), so a
+                # fully-exited ticker would linger in current holdings and skew
+                # every allocation %. Zero it so "Closed" means closed.
+                running_portfolio[symbol] = 0.0
             else:
+                # Partial sale: clamp at zero on oversell (midpoint drift).
                 running_portfolio[symbol] = max(prev_value - amount, 0.0)
 
             # Allocation AFTER applying this trade
@@ -1727,7 +1780,7 @@ class WhaleService:
             else:
                 named.append({
                     "name": name,
-                    "allocation": round(weight, 1),
+                    "allocation": min(100.0, round(weight, 1)),
                     "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
                 })
         named.sort(key=lambda x: x["allocation"], reverse=True)
@@ -1735,7 +1788,7 @@ class WhaleService:
         if other_weight > 0:
             named.append({
                 "name": "Other",
-                "allocation": round(other_weight, 1),
+                "allocation": min(100.0, round(other_weight, 1)),
                 "color_hex": DEFAULT_SECTOR_COLOR,
             })
 
@@ -1868,14 +1921,14 @@ class WhaleService:
                 else:
                     named.append({
                         "name": name,
-                        "allocation": round(weight, 1),
+                        "allocation": min(100.0, round(weight, 1)),
                         "color_hex": SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
                     })
             named.sort(key=lambda x: x["allocation"], reverse=True)
             if other_weight > 0:
                 named.append({
                     "name": "Other",
-                    "allocation": round(other_weight, 1),
+                    "allocation": min(100.0, round(other_weight, 1)),
                     "color_hex": DEFAULT_SECTOR_COLOR,
                 })
             sectors = named[:11]
@@ -2219,7 +2272,11 @@ class WhaleService:
 
         Takes Q4 (Dec 31) snapshots' 1-year performance as calendar-year
         returns, then compounds them geometrically to produce a true CAGR
-        over the observed history. Filters outliers (|return| > 200%).
+        over the observed history. Rejects corrupt/impossible inputs: a yearly
+        return <= -100% is impossible for a long-only 13F portfolio (you can't
+        lose more than 100%), and >= 500% is treated as an extreme outlier.
+        Admitting sub-(-100%) values would let an even count of them multiply
+        to a spuriously POSITIVE product that slips past the product<=0 guard.
         """
         if not perf_list:
             return None
@@ -2229,14 +2286,14 @@ class WhaleService:
             for d in perf_list
             if d.get("date", "").endswith("-12-31")
             and d.get("performancePercentage1year") is not None
-            and -200 < d["performancePercentage1year"] < 500
+            and -100 < d["performancePercentage1year"] < 500
         ]
 
         if not year_end_returns:
             # Fallback: use latest 1-year return if no year-ends available
             latest = perf_list[0] if perf_list else {}
             val = latest.get("performancePercentage1year")
-            if val is not None and -200 < val < 500:
+            if val is not None and -100 < val < 500:
                 return round(float(val), 2)
             return None
 

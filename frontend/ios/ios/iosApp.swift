@@ -13,9 +13,6 @@
 //
 
 import SwiftUI
-#if canImport(Sentry)
-import Sentry
-#endif
 
 @main
 struct iosApp: App {
@@ -129,22 +126,6 @@ struct RootView: View {
                 ToastView(message: toast)
             }
         }
-        // TEMP: Sentry verification button — DEBUG-only, remove after confirming
-        // an event lands in the caydex-apple-ios project.
-        #if DEBUG && canImport(Sentry)
-        .overlay(alignment: .topTrailing) {
-            Button("Sentry test") {
-                SentrySDK.capture(message: "iOS Sentry test event")
-            }
-            .font(.caption.bold())
-            .padding(8)
-            .background(.red)
-            .foregroundColor(.white)
-            .cornerRadius(8)
-            .padding(.top, 60)
-            .padding(.trailing, 12)
-        }
-        #endif
     }
 }
 

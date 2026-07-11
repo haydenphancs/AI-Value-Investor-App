@@ -1,5 +1,8 @@
 [deploy]
-startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+# --proxy-headers + --forwarded-allow-ips='*' so uvicorn honors Railway's
+# X-Forwarded-For and .client.host is the real client IP (per-guest live-price
+# WebSocket cap + accurate IP logging). Safe: Railway's edge is the only ingress.
+startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"

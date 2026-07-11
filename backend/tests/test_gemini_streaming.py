@@ -1,10 +1,8 @@
 """
-Unit tests for GeminiClient.stream_text — the sync-SDK → async-generator bridge
-that powers SSE chat streaming.
+Unit tests for GeminiClient.stream_text — native async streaming (unified google-genai SDK).
 
-No network: genai.GenerativeModel is monkeypatched with a fake that returns a
-sync iterator of fake chunks (mirroring `generate_content(stream=True)`). The
-tests pin the behaviors the SSE endpoint depends on:
+No network: `client._client.aio.models.generate_content_stream` is replaced with a fake that
+returns an async iterator of fake chunks. The tests pin the behaviors the SSE endpoint depends on:
   * text chunks are yielded in order,
   * text-less chunks (safety/finish-only, whose .text raises) are skipped,
   * an error raised mid-stream propagates to the async consumer,
@@ -28,65 +26,73 @@ class _FakeChunk:
         return self._t
 
 
-class _FakeModel:
+class _FakeAioModels:
     def __init__(self, chunks, raise_at=None):
         self._chunks = chunks
         self._raise_at = raise_at
 
-    def generate_content(self, prompt, stream=False):
-        assert stream is True, "stream_text must request stream=True"
+    async def generate_content_stream(self, *, model, contents, config):
+        chunks, raise_at = self._chunks, self._raise_at
 
-        def _iter():
-            for i, c in enumerate(self._chunks):
-                if self._raise_at is not None and i == self._raise_at:
+        async def _gen():
+            for i, c in enumerate(chunks):
+                if raise_at is not None and i == raise_at:
                     raise RuntimeError("boom mid-stream")
                 yield c
 
-        return _iter()
+        return _gen()
 
 
-def _client() -> gem.GeminiClient:
-    """Build a GeminiClient WITHOUT genai.configure (no API key needed)."""
-    client = gem.GeminiClient.__new__(gem.GeminiClient)
-    client.model_name = "gemini-2.5-flash"
-    client.generation_config = {"temperature": 0.7, "max_output_tokens": 128}
-    return client
+class _FakeAio:
+    def __init__(self, models):
+        self.models = models
 
 
-def _install_model(monkeypatch, model):
-    monkeypatch.setattr(gem.genai, "GenerativeModel", lambda *a, **k: model)
-    # Ensure the shared circuit starts closed for a deterministic test.
-    gem._quota_circuit.record_success()
+class _FakeClient:
+    def __init__(self, models):
+        self.aio = _FakeAio(models)
+
+
+def _client(models) -> gem.GeminiClient:
+    """Build a GeminiClient WITHOUT genai.Client (no API key needed)."""
+    c = gem.GeminiClient.__new__(gem.GeminiClient)
+    c.model_name = "gemini-2.5-flash"
+    c._temperature = 0.7
+    c._max_tokens = 128
+    c._client = _FakeClient(models)
+    gem._quota_circuit.record_success()  # deterministic: start with the circuit closed
+    return c
 
 
 @pytest.mark.asyncio
-async def test_stream_text_yields_chunks_in_order(monkeypatch):
-    _install_model(monkeypatch, _FakeModel([_FakeChunk("Apple "), _FakeChunk("is "), _FakeChunk("solid.")]))
-    out = [d async for d in _client().stream_text("prompt")]
+async def test_stream_text_yields_chunks_in_order():
+    c = _client(_FakeAioModels([_FakeChunk("Apple "), _FakeChunk("is "), _FakeChunk("solid.")]))
+    out = [d async for d in c.stream_text("prompt")]
     assert out == ["Apple ", "is ", "solid."]
 
 
 @pytest.mark.asyncio
-async def test_stream_text_skips_textless_chunks(monkeypatch):
-    _install_model(monkeypatch, _FakeModel([_FakeChunk("a"), _FakeChunk(None), _FakeChunk("b")]))
-    out = [d async for d in _client().stream_text("prompt")]
+async def test_stream_text_skips_textless_chunks():
+    c = _client(_FakeAioModels([_FakeChunk("a"), _FakeChunk(None), _FakeChunk("b")]))
+    out = [d async for d in c.stream_text("prompt")]
     assert out == ["a", "b"]
 
 
 @pytest.mark.asyncio
-async def test_stream_text_propagates_midstream_error(monkeypatch):
+async def test_stream_text_propagates_midstream_error():
     # Yields index 0 ("a"), then raises before index 1.
-    _install_model(monkeypatch, _FakeModel([_FakeChunk("a"), _FakeChunk("b")], raise_at=1))
+    c = _client(_FakeAioModels([_FakeChunk("a"), _FakeChunk("b")], raise_at=1))
     got = []
     with pytest.raises(RuntimeError):
-        async for d in _client().stream_text("prompt"):
+        async for d in c.stream_text("prompt"):
             got.append(d)
     assert got == ["a"]
 
 
 @pytest.mark.asyncio
 async def test_stream_text_fails_fast_when_circuit_open(monkeypatch):
+    c = _client(_FakeAioModels([_FakeChunk("x")]))
     monkeypatch.setattr(gem._quota_circuit, "is_open", lambda: True)
     with pytest.raises(gem.GeminiQuotaError):
-        async for _ in _client().stream_text("prompt"):
+        async for _ in c.stream_text("prompt"):
             pass

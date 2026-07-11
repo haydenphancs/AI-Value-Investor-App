@@ -14,11 +14,9 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.18
 
-# Google Gemini — mid-migration: new unified SDK is the target; legacy stays until every
-# `import google.generativeai` is removed (then delete the 0.8.3 line). 1.75.0 is the newest
-# google-genai that keeps pydantic at 2.9+ (so pydantic stays 2.10.4) while giving real thinking
-# tokens (ThinkingConfig.include_thoughts / part.thought), native async, and google_search tool.
-google-generativeai==0.8.3
+# Google Gemini — unified SDK. 1.75.0 is the newest google-genai that keeps pydantic at 2.9+
+# (so pydantic stays 2.10.4) while giving real thinking tokens (ThinkingConfig.include_thoughts /
+# part.thought), native async streaming, and the google_search tool. Requires httpx>=0.28.1.
 google-genai==1.75.0
 
 # HTTP client (for FMP API). 0.28.1 required by google-genai; supabase 2.16 allows it (<0.29).

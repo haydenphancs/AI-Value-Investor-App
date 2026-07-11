@@ -43,6 +43,11 @@ struct BookLibraryView: View {
     /// finished out of order, and advances only once that core itself is completed.
     private var bookmarkedCoreLabel: String? {
         guard let book = bookmarkedBook else { return nil }
+        // A fully-mastered book has no "first unfinished core" — resumeCore returns the last
+        // (completed) core, so surfacing it as a resume target is wrong. Show completion instead.
+        if progress.isMastered(order: book.curriculumOrder, totalCores: book.chapterCount) {
+            return "All cores complete"
+        }
         let n = progress.resumeCore(order: book.curriculumOrder, totalCores: book.chapterCount)
         if let coreTitle = book.coreChapters.first(where: { $0.number == n })?.title, !coreTitle.isEmpty {
             return "Core \(n) · \(coreTitle)"

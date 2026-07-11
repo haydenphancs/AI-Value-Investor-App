@@ -52,6 +52,14 @@ final class LivePriceWebSocketManager: ObservableObject {
     /// Connect to the live price WebSocket for a given ticker.
     /// Auth token is optional — crypto symbols can connect without login.
     func connect(ticker: String, authToken: String? = nil) {
+        // Tear down any existing socket + pending reconnect first. Without this a
+        // second connect() (pull-to-refresh, ticker switch) leaks the prior
+        // URLSessionWebSocketTask — it's never cancelled, so leaked sockets
+        // accumulate against the backend's per-user connection cap.
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        closeConnection()
+
         self.ticker = ticker.uppercased()
         self.authToken = authToken ?? ""
         isIntentionalDisconnect = false

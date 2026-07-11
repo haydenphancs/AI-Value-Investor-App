@@ -126,8 +126,13 @@ struct ChatThinking: Codable, Sendable {
     }
 
     /// Whether the thinking card should render at all: while active (shows "Thinking…"), or once
-    /// there is reasoning / stages to show. (A done message with neither → no card.)
-    var shouldDisplay: Bool { isActive || reasoningText != nil || !stages.isEmpty }
+    /// there is reasoning / stages / grounded sources to show. Sources are gated on `sourceCount`
+    /// (the card owns the source pills) so a finished message whose model skipped the reasoning
+    /// preamble — or that came via the non-streaming fallback (reasoning "", stages []) — still
+    /// surfaces its grounding attribution instead of silently dropping the pills.
+    var shouldDisplay: Bool {
+        isActive || reasoningText != nil || !stages.isEmpty || (sourceCount ?? 0) > 0
+    }
 }
 
 // MARK: - Rich Chat Message
@@ -163,6 +168,14 @@ struct RichChatMessage: Identifiable {
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
         return formatter.string(from: timestamp)
+    }
+
+    /// Concatenated plain text of this message (user bubbles are always a single `.text`). Used by
+    /// the stream-failure reconcile to count how many turns carry the same text.
+    var plainText: String {
+        content.reduce(into: "") { acc, item in
+            if case let .text(t) = item { acc += t }
+        }
     }
 }
 

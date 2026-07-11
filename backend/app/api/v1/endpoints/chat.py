@@ -7,7 +7,7 @@ Frontend: POST /chat/sessions, GET /chat/sessions,
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -180,15 +180,10 @@ async def send_chat_message(
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
-    # Save user message
-    user_msg = {
-        "session_id": session_id,
-        "role": "user",
-        "content": request.message,
-    }
-    supabase.table("chat_messages").insert(user_msg).execute()
-
-    # Generate AI response via chat service
+    # Generate the AI response FIRST, then persist the user + assistant rows TOGETHER in one insert.
+    # A generation failure therefore leaves NOTHING persisted (no orphaned user row for the client's
+    # stream-failure reconcile to later duplicate), and the two rows commit atomically — matching the
+    # streaming endpoint's persist contract.
     try:
         from app.services.chat_service import ChatService
 
@@ -212,22 +207,37 @@ async def send_chat_message(
         # Build the widget payload (if Gemini triggered the stock tool)
         widget_payload = ai_result.get("widget")
 
-        # Save AI message
+        # Explicit created_at keeps user-before-assistant ordering: a single multi-row insert would
+        # otherwise stamp both rows with the same now() default, and get_chat_history orders by
+        # created_at asc — the assistant could sort ahead of the question.
+        now = datetime.now(timezone.utc)
+        user_msg: dict = {
+            "session_id": session_id,
+            "role": "user",
+            "content": request.message,
+            "created_at": now.isoformat(),
+        }
         ai_msg: dict = {
             "session_id": session_id,
             "role": "assistant",
             "content": ai_result["content"],
             "citations": ai_result.get("citations"),
             "tokens_used": ai_result.get("tokens_used"),
+            "created_at": (now + timedelta(milliseconds=1)).isoformat(),
         }
         # Persist widget in rich_content column so history reloads work
         if widget_payload:
             ai_msg["rich_content"] = {"widget": widget_payload}
 
-        result = supabase.table("chat_messages").insert(ai_msg).execute()
+        result = supabase.table("chat_messages").insert([user_msg, ai_msg]).execute()
+        assistant_row = next(
+            (r for r in (result.data or []) if r.get("role") == "assistant"), None
+        )
+        if assistant_row is None:
+            raise RuntimeError("assistant row missing from chat_messages insert result")
 
         # Update session metadata with proper timestamp
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = now.isoformat()
         preview = ai_result["content"][:100]
         current_count = session.data.get("message_count", 0)
 
@@ -254,8 +264,7 @@ async def send_chat_message(
             "id", session_id
         ).execute()
 
-        row = result.data[0]
-        return _row_to_message(row)
+        return _row_to_message(assistant_row)
 
     except Exception as e:
         logger.error(f"Chat response failed: {e}", exc_info=True)
@@ -423,10 +432,6 @@ async def stream_chat_message(
         # (CancelledError is a BaseException — uncaught by the except-Exception guards). Writing the
         # durable turn up-front guarantees the answered exchange is never lost from history.
         try:
-            supabase.table("chat_messages").insert({
-                "session_id": session_id, "role": "user", "content": user_message,
-            }).execute()
-
             # rich_content carries the widget + futuristic-chat fields (thinking / sources /
             # suggestions) in one JSONB column — no schema migration. Suggestions are added AFTER
             # this durable write (below), so they can never block or drop it.
@@ -436,6 +441,16 @@ async def stream_chat_message(
             if sources:
                 rich_content["sources"] = sources
 
+            # Persist the user + assistant rows TOGETHER in ONE insert so the turn is atomic: a
+            # failing assistant write can never leave an orphaned user row for the client's
+            # stream-failure reconcile to later duplicate. Explicit created_at preserves
+            # user-before-assistant ordering (a single multi-row insert would otherwise stamp both
+            # rows with the same now() default, and get_chat_history orders by created_at asc).
+            now = datetime.now(timezone.utc)
+            user_row: dict = {
+                "session_id": session_id, "role": "user", "content": user_message,
+                "created_at": now.isoformat(),
+            }
             ai_msg: dict = {
                 "session_id": session_id,
                 "role": "assistant",
@@ -443,11 +458,17 @@ async def stream_chat_message(
                 "citations": citations,
                 "tokens_used": tokens_used,
                 "rich_content": rich_content,
+                "created_at": (now + timedelta(milliseconds=1)).isoformat(),
             }
-            inserted = supabase.table("chat_messages").insert(ai_msg).execute()
+            inserted = supabase.table("chat_messages").insert([user_row, ai_msg]).execute()
+            assistant_row = next(
+                (r for r in (inserted.data or []) if r.get("role") == "assistant"), None
+            )
+            if assistant_row is None:
+                raise RuntimeError("assistant row missing from chat_messages insert result")
 
             # Session metadata + first-question auto-title (mirrors send_chat_message).
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = now.isoformat()
             current_count = sdata.get("message_count", 0)
             update_payload: dict = {
                 "message_count": current_count + 2,
@@ -472,8 +493,6 @@ async def stream_chat_message(
                 "user_message": "Your answer was generated but couldn't be saved. Please try again.",
             })
             return
-
-        assistant_row = inserted.data[0]
 
         # Follow-up suggestions — best-effort, AFTER the durable write. Being slow or cancelled here
         # can no longer drop the saved turn (worst case: no chips, which degrade gracefully).

@@ -142,8 +142,11 @@ class CommodityDetailViewModel: ObservableObject {
                 self.errorMessage = "Unexpected error. Please try again."
             }
 
-            // Fallback
-            self.commodityData = CommodityDetailData.sampleGold
+            // Do NOT substitute Gold's data (previously sampleGold) for a
+            // different commodity — that's financial misinformation. Keep real
+            // data if a prior load succeeded; otherwise stay in the honest
+            // skeleton/empty state. errorMessage drives any banner; the header
+            // shows the real symbol and pull-to-refresh retries.
         }
     }
 

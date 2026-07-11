@@ -733,17 +733,33 @@ class CryptoService:
 
         # ── Step 2: Extract data from CoinGecko ──────────────────
         md = coin_data.get("market_data", {}) if isinstance(coin_data, dict) else {}
-        price = md.get("current_price", {}).get("usd", 0) or 0
+
+        def _usd(field: str, default: float = 0) -> float:
+            """Read the ``usd`` value from a CoinGecko currency-keyed field.
+
+            CoinGecko returns some fields as JSON ``null`` (not absent) — most
+            commonly ``fully_diluted_valuation`` for uncapped coins. A plain
+            ``md.get(field, {}).get("usd")`` then does ``None.get(...)`` ->
+            AttributeError, 500-ing the WHOLE crypto detail response. Coalescing
+            the sub-object to ``{}`` keeps it safe.
+            """
+            sub = md.get(field)
+            if not isinstance(sub, dict):
+                return default
+            v = sub.get("usd")
+            return v if v is not None else default
+
+        price = _usd("current_price")
         change = md.get("price_change_24h", 0) or 0
         change_pct = md.get("price_change_percentage_24h", 0) or 0
-        day_high = md.get("high_24h", {}).get("usd", 0) or 0
-        day_low = md.get("low_24h", {}).get("usd", 0) or 0
-        volume = md.get("total_volume", {}).get("usd", 0) or 0
-        market_cap = md.get("market_cap", {}).get("usd", 0) or 0
+        day_high = _usd("high_24h")
+        day_low = _usd("low_24h")
+        volume = _usd("total_volume")
+        market_cap = _usd("market_cap")
         circulating_supply = md.get("circulating_supply", 0) or 0
         total_supply = md.get("total_supply", 0) or 0
         max_supply_cg = md.get("max_supply")  # None if no cap
-        fdv = md.get("fully_diluted_valuation", {}).get("usd", 0) or 0
+        fdv = _usd("fully_diluted_valuation")
 
         # 52-week from historical data (more accurate than ATH/ATL)
         year_high = 0
@@ -762,9 +778,9 @@ class CryptoService:
 
         # Fallback to CoinGecko ATH/ATL if no historical data
         if year_high == 0:
-            year_high = md.get("ath", {}).get("usd", 0) or 0
+            year_high = _usd("ath")
         if year_low == 0:
-            year_low = md.get("atl", {}).get("usd", 0) or 0
+            year_low = _usd("atl")
 
         # Avg volume from FMP (CoinGecko doesn't provide 30D avg directly)
         # Compute 30-day average volume from historical data
@@ -781,9 +797,15 @@ class CryptoService:
             crypto_name = profile_meta.get("name", symbol)
 
         # ── Step 3: Compute derived stats ─────────────────────────
-        # Prefer CoinGecko's pre-computed percentages, fall back to historical
-        one_month_return = md.get("price_change_percentage_30d", None) or _compute_return(historical, 30)
-        one_year_return = md.get("price_change_percentage_1y", None) or _compute_return(historical, 365)
+        # Prefer CoinGecko's pre-computed percentages, fall back to historical.
+        # Use an explicit None check, NOT `or`: a legitimate 0.0% is falsy and
+        # would otherwise be discarded and silently recomputed.
+        one_month_return = md.get("price_change_percentage_30d")
+        if one_month_return is None:
+            one_month_return = _compute_return(historical, 30)
+        one_year_return = md.get("price_change_percentage_1y")
+        if one_year_return is None:
+            one_year_return = _compute_return(historical, 365)
         ytd_return = _compute_ytd_return(historical)
         three_year_return = (
             _compute_return(historical, 365 * 3)
@@ -1551,6 +1573,8 @@ Separate each category with "===CATEGORY===" followed by the category name.
         # Create lookup by FMP symbol
         quote_map: Dict[str, Dict] = {}
         for q in raw_quotes:
+            if not isinstance(q, dict):
+                continue  # one non-dict element must not crash the whole response
             fmp_sym = (q.get("symbol") or "").upper()
             quote_map[fmp_sym] = q
 

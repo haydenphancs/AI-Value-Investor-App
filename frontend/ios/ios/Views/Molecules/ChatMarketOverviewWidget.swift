@@ -135,12 +135,13 @@ struct ChatMarketOverviewWidget: View {
 
                     // Performance bar
                     GeometryReader { geo in
-                        let maxPct = max(
-                            abs(data.sectors.first?.changePercent ?? 1),
-                            abs(data.sectors.last?.changePercent ?? 1),
-                            0.1
-                        )
-                        let barWidth = max(2, geo.size.width * CGFloat(abs(sector.changePercent) / maxPct))
+                        // Scale bars against the largest magnitude across ALL sectors, not just
+                        // first/last — the list isn't guaranteed sorted, so a mid-list outlier would
+                        // otherwise make its ratio exceed 1 and push the bar past the container
+                        // (max() clamps only the low end). The min() is a belt-and-suspenders cap.
+                        let maxPct = max(data.sectors.map { abs($0.changePercent) }.max() ?? 0.1, 0.1)
+                        let barWidth = max(2, min(geo.size.width,
+                                                  geo.size.width * CGFloat(abs(sector.changePercent) / maxPct)))
 
                         HStack(spacing: 0) {
                             if sector.isPositive {

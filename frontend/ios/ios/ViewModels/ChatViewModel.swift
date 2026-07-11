@@ -589,13 +589,25 @@ class ChatViewModel: ObservableObject {
     /// reload history; if the turn is already there, adopt it; only regenerate when
     /// it is genuinely absent (the common early-failure case).
     private func reconcileAfterStreamFailure(sessionId: String, message: String) async {
+        // How many user messages with THIS exact text should exist server-side IF the stream
+        // persisted this turn. Local `messages` still holds the optimistic user bubble for this send
+        // (the catch removed only the assistant bubble) and mirrors the server for every prior turn,
+        // so this count already includes the message we're reconciling. Requiring the server to hold
+        // at LEAST this many — not merely one — distinguishes a freshly-persisted turn from a
+        // pre-existing identical one, so a repeated message (e.g. "why?" / "continue") isn't mistaken
+        // for already-answered and silently dropped.
+        let target = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expectedUserMatches = messages.filter {
+            $0.role == .user && $0.plainText.trimmingCharacters(in: .whitespacesAndNewlines) == target
+        }.count
         do {
             let history = try await APIClient.shared.request(
                 endpoint: .getChatHistory(sessionId: sessionId),
                 responseType: ChatHistoryDTO.self
             )
             guard sessionId == currentSessionId else { isAITyping = false; return }
-            if Self.historyContainsTurn(history.messages, userMessage: message) {
+            if Self.historyContainsTurn(history.messages, userMessage: message,
+                                        expectedUserMatches: expectedUserMatches) {
                 // The stream DID persist this turn — adopt server state, don't re-send.
                 messages = history.messages.map { $0.toRichChatMessage() }
                 isAITyping = false
@@ -610,19 +622,21 @@ class ChatViewModel: ObservableObject {
         await sendMessageToSession(sessionId: sessionId, message: message)
     }
 
-    /// True when the tail of history is exactly the turn we just sent: the last
-    /// assistant message is preceded by a user message with matching content.
-    private static func historyContainsTurn(_ messages: [ChatMessageDTO], userMessage: String) -> Bool {
-        guard let lastAssistant = messages.lastIndex(where: { $0.role == "assistant" }) else { return false }
+    /// True when the streamed turn was already persisted server-side, so the caller should ADOPT
+    /// server state instead of regenerating (which would duplicate the turn). Requires BOTH a
+    /// trailing assistant message AND at least `expectedUserMatches` user messages equal to the sent
+    /// text. The count guard is what makes a REPEATED message safe: presence alone would match an
+    /// earlier identical turn and silently drop the new one. The backend persists user+assistant
+    /// atomically, so a persisted turn bumps the matching-user count by exactly one.
+    private static func historyContainsTurn(
+        _ messages: [ChatMessageDTO], userMessage: String, expectedUserMatches: Int
+    ) -> Bool {
+        guard messages.last?.role == "assistant" else { return false }
         let target = userMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        var i = lastAssistant - 1
-        while i >= 0 {
-            if messages[i].role == "user" {
-                return messages[i].content.trimmingCharacters(in: .whitespacesAndNewlines) == target
-            }
-            i -= 1
-        }
-        return false
+        let matchCount = messages.filter {
+            $0.role == "user" && $0.content.trimmingCharacters(in: .whitespacesAndNewlines) == target
+        }.count
+        return matchCount >= expectedUserMatches
     }
 
     // MARK: - Streaming helpers (thinking card + line-by-line reveal)

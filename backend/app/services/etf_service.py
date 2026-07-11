@@ -494,7 +494,28 @@ class ETFService:
         # ── Step 9: Build net yield ───────────────────────────────
         fee_per_10k = expense_ratio * 100  # expense_ratio is in %, so 0.0945% → $9.45
         yield_per_10k = dividend_yield * 100  # 1.22% → $122
-        multiplier = int(round(dividend_yield / expense_ratio)) if expense_ratio > 0 else 0
+
+        # Honest net-yield verdict. Note: expense_ratio == 0 here means the value
+        # is UNAVAILABLE (FMP didn't return it and there's no reference entry),
+        # NOT a genuinely free fund — never claim "$0 fees" / "charges nothing".
+        if expense_ratio <= 0:
+            fee_context = "Expense ratio unavailable for this fund."
+            net_yield_verdict = "We couldn't confirm this fund's fees."
+        elif dividend_yield <= 0:
+            fee_context = f"You pay ${fee_per_10k:.2f} per year on a $10,000 investment."
+            net_yield_verdict = "This fund doesn't currently pay a dividend — you only pay its fees."
+        else:
+            fee_context = f"You pay ${fee_per_10k:.2f} per year on a $10,000 investment."
+            ratio = dividend_yield / expense_ratio
+            if ratio >= 1.05:
+                net_yield_verdict = f"This fund pays you {ratio:.1f}x more in dividends than it charges in fees."
+            elif ratio >= 0.95:
+                net_yield_verdict = "This fund's dividend yield roughly matches its expense ratio."
+            else:
+                net_yield_verdict = (
+                    f"This fund's {expense_ratio:.2f}% fee is higher than its "
+                    f"{dividend_yield:.2f}% dividend yield."
+                )
 
         if not dividend_payments:
             last_payment = ETFDividendPaymentResponse(
@@ -509,17 +530,11 @@ class ETFService:
 
         net_yield = ETFNetYieldResponse(
             expense_ratio=expense_ratio,
-            fee_context=f"You pay ${fee_per_10k:.2f} per year on a $10,000 investment.",
+            fee_context=fee_context,
             dividend_yield=dividend_yield,
             pay_frequency=pay_frequency,
             yield_context=f"You earn ~${yield_per_10k:.0f} per year on a $10,000 investment.",
-            verdict=(
-                f"This fund pays you {multiplier}x more in dividends than it charges in fees."
-                if multiplier > 0
-                else "This fund charges nothing in fees."
-                if expense_ratio == 0
-                else "Dividend yield does not meaningfully exceed the expense ratio."
-            ),
+            verdict=net_yield_verdict,
             last_dividend_payment=last_payment,
             dividend_history=dividend_payments,
         )
@@ -994,17 +1009,27 @@ class ETFService:
 
         result = []
         for p in historical:
-            if p.get("date", "") >= cutoff:
-                close = p.get("close") or p.get("adjClose")
-                if close and close > 0:
-                    result.append({
-                        "date": p.get("date"),
-                        "open": p.get("open"),
-                        "high": p.get("high"),
-                        "low": p.get("low"),
-                        "close": round(float(close), 2),
-                        "volume": p.get("volume"),
-                    })
+            date = p.get("date")
+            # `None >= cutoff` raises TypeError; guard before comparing.
+            if not date or date < cutoff:
+                continue
+            raw_close = p.get("close") or p.get("adjClose")
+            # Coerce BEFORE the > 0 comparison — a string close would raise
+            # TypeError on `close > 0` in Python 3.
+            try:
+                close = float(raw_close) if raw_close is not None else None
+            except (ValueError, TypeError):
+                close = None
+            if close is None or close <= 0:
+                continue
+            result.append({
+                "date": date,
+                "open": p.get("open"),
+                "high": p.get("high"),
+                "low": p.get("low"),
+                "close": round(close, 2),
+                "volume": p.get("volume"),
+            })
         return result
 
     # ── Key statistics builder ────────────────────────────────────
@@ -1204,6 +1229,15 @@ class ETFService:
         top_10 = top_holdings[:10]
         total_weight = sum(h.weight for h in top_10)
         n = len(top_10)
+
+        # No holdings data → report honestly instead of mislabeling an unknown
+        # fund as "well diversified" (green / low-risk) off a 0% total weight.
+        if n == 0:
+            return ETFConcentrationResponse(
+                top_n=0,
+                weight=0.0,
+                insight="Holdings data isn't available for this fund yet.",
+            )
 
         # Boundaries aligned with Swift ETFConcentrationLevel:
         #   < 20% → low (Well Diversified)

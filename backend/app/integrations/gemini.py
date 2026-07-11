@@ -11,7 +11,9 @@ import logging
 import asyncio
 import hashlib
 import re
-import time 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 
 import httpx
@@ -94,6 +96,15 @@ class _QuotaCircuitBreaker:
 
 # Module-level breaker shared by every decorated Gemini call.
 _quota_circuit = _QuotaCircuitBreaker()
+
+
+# Dedicated pool for streaming producer threads. The blocking SDK stream iterator runs in a
+# thread; if the network read stalls or the SSE client disconnects mid-stall, that thread stays
+# parked (fut.cancel() cannot interrupt a running thread). Isolating it from the DEFAULT asyncio
+# executor — which every other to_thread Gemini call (reports, embeddings, generate_json, the chat
+# fallback) shares — means a leaked producer can never starve that shared pool and stall unrelated
+# work app-wide. Worst case, streams queue here and the endpoint degrades to non-streaming.
+_STREAM_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="gemini-stream")
 
 
 # ── Per-call timeout guard ─────────────────────────────────────────
@@ -333,6 +344,10 @@ class GeminiClient:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()  # unbounded — chat streams are small
         _SENTINEL = object()
+        # Cooperative stop: set when the consumer leaves (per-chunk timeout, early break, or the
+        # generator being closed on client disconnect) so the producer stops pulling the next chunk
+        # instead of leaking a parked thread. fut.cancel() alone is a no-op on a running thread.
+        stop = threading.Event()
 
         def _produce() -> None:
             try:
@@ -342,6 +357,8 @@ class GeminiClient:
                     system_instruction=system_instruction or None,
                 )
                 for chunk in model.generate_content(prompt, stream=True):
+                    if stop.is_set():
+                        break
                     # chunk.text raises if the chunk carries no text part
                     # (safety/finish-only chunks) — treat those as empty.
                     try:
@@ -355,7 +372,9 @@ class GeminiClient:
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
-        fut = loop.run_in_executor(None, _produce)
+        # Dedicated executor (not the shared default pool) so a producer that stays blocked on a
+        # hung read can't starve the to_thread pool every other Gemini call depends on.
+        fut = loop.run_in_executor(_STREAM_EXECUTOR, _produce)
         try:
             while True:
                 item = await asyncio.wait_for(
@@ -370,7 +389,8 @@ class GeminiClient:
                 yield item
             _quota_circuit.record_success()
         finally:
-            fut.cancel()
+            stop.set()       # ask the producer to stop at the next chunk boundary
+            fut.cancel()     # cancels only if still queued (no-op once running)
 
     # ── Context caching (Stage-B narratives) ──────────────────────────
     # The N parallel narrative calls per report share one large evidence blob +

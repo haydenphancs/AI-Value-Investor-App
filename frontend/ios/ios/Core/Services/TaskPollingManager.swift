@@ -382,12 +382,16 @@ struct InvestmentThesis: Sendable {
 
 extension InvestmentThesis: Decodable {
     nonisolated init(from decoder: Decoder) throws {
+        // Every backend field is Optional[...] = None (schemas/research.py). A
+        // null/absent subfield must NOT crash the whole report decode (which
+        // would surface a completed report as "failed"). decodeIfPresent + a safe
+        // default degrades gracefully instead.
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.summary = try container.decode(String.self, forKey: .summary)
-        self.keyDrivers = try container.decode([String].self, forKey: .keyDrivers)
-        self.risks = try container.decode([String].self, forKey: .risks)
-        self.timeHorizon = try container.decode(String.self, forKey: .timeHorizon)
-        self.convictionLevel = try container.decode(String.self, forKey: .convictionLevel)
+        self.summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        self.keyDrivers = try container.decodeIfPresent([String].self, forKey: .keyDrivers) ?? []
+        self.risks = try container.decodeIfPresent([String].self, forKey: .risks) ?? []
+        self.timeHorizon = try container.decodeIfPresent(String.self, forKey: .timeHorizon) ?? ""
+        self.convictionLevel = try container.decodeIfPresent(String.self, forKey: .convictionLevel) ?? ""
     }
 }
 
@@ -409,12 +413,14 @@ struct MoatAnalysis: Sendable {
 
 extension MoatAnalysis: Decodable {
     nonisolated init(from decoder: Decoder) throws {
+        // Backend MoatAnalysis fields are all Optional — decodeIfPresent so a null
+        // subfield degrades instead of crashing the whole report decode.
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.moatRating = try container.decode(String.self, forKey: .moatRating)
-        self.moatSources = try container.decode([String].self, forKey: .moatSources)
-        self.moatSustainability = try container.decode(String.self, forKey: .moatSustainability)
-        self.competitivePosition = try container.decode(String.self, forKey: .competitivePosition)
-        self.barriersToEntry = try container.decode([String].self, forKey: .barriersToEntry)
+        self.moatRating = try container.decodeIfPresent(String.self, forKey: .moatRating) ?? ""
+        self.moatSources = try container.decodeIfPresent([String].self, forKey: .moatSources) ?? []
+        self.moatSustainability = try container.decodeIfPresent(String.self, forKey: .moatSustainability) ?? ""
+        self.competitivePosition = try container.decodeIfPresent(String.self, forKey: .competitivePosition) ?? ""
+        self.barriersToEntry = try container.decodeIfPresent([String].self, forKey: .barriersToEntry) ?? []
     }
 }
 
@@ -434,9 +440,11 @@ struct ValuationAnalysis: Sendable {
 
 extension ValuationAnalysis: Decodable {
     nonisolated init(from decoder: Decoder) throws {
+        // valuation_rating / key_metrics are Optional on the backend — decodeIfPresent
+        // so a null value degrades instead of crashing the whole report decode.
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.valuationRating = try container.decode(String.self, forKey: .valuationRating)
-        self.keyMetrics = try container.decode([String: AnyCodable].self, forKey: .keyMetrics)
+        self.valuationRating = try container.decodeIfPresent(String.self, forKey: .valuationRating) ?? ""
+        self.keyMetrics = try container.decodeIfPresent([String: AnyCodable].self, forKey: .keyMetrics) ?? [:]
         self.historicalContext = try container.decodeIfPresent(String.self, forKey: .historicalContext)
         self.marginOfSafety = try container.decodeIfPresent(String.self, forKey: .marginOfSafety)
     }
@@ -458,11 +466,13 @@ struct RiskAssessment: Sendable {
 
 extension RiskAssessment: Decodable {
     nonisolated init(from decoder: Decoder) throws {
+        // Backend RiskAssessment fields are all Optional — decodeIfPresent so a null
+        // subfield degrades instead of crashing the whole report decode.
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.overallRisk = try container.decode(String.self, forKey: .overallRisk)
-        self.businessRisks = try container.decode([String].self, forKey: .businessRisks)
-        self.financialRisks = try container.decode([String].self, forKey: .financialRisks)
-        self.marketRisks = try container.decode([String].self, forKey: .marketRisks)
+        self.overallRisk = try container.decodeIfPresent(String.self, forKey: .overallRisk) ?? ""
+        self.businessRisks = try container.decodeIfPresent([String].self, forKey: .businessRisks) ?? []
+        self.financialRisks = try container.decodeIfPresent([String].self, forKey: .financialRisks) ?? []
+        self.marketRisks = try container.decodeIfPresent([String].self, forKey: .marketRisks) ?? []
     }
 }
 

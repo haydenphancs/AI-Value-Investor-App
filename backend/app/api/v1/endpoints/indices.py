@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any
 import logging
 import traceback
 
+from app.api.error_response import error_response_from_exception
 from app.services.index_service import get_index_service
 from app.schemas.index import IndexDetailResponse
 
@@ -121,17 +122,11 @@ async def get_index_detail(
     except HTTPException:
         raise
     except Exception as e:
-        tb = traceback.format_exc()
+        # Typed structured error (invariant #3) — surfaces FMP rate-limits as an
+        # actionable message + retry instead of a generic "Server error".
         logger.error(
             f"Index detail failed for {symbol} "
-            f"(range={chart_range}, interval={interval}): {e}\n{tb}"
+            f"(range={chart_range}, interval={interval}): {type(e).__name__}: {e}",
+            exc_info=True,
         )
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "index_data_unavailable",
-                "symbol": symbol,
-                "reason": str(e),
-                "hint": "Check FMP API key, network, or Supabase connectivity.",
-            },
-        )
+        return error_response_from_exception(e, ticker=symbol, step="index_detail")

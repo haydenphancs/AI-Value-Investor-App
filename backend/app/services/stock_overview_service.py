@@ -49,6 +49,11 @@ _FUNDAMENTALS_MEM_TTL = 3600   # 1 hour in-memory for fundamentals
 _FUNDAMENTALS_DB_TTL_HOURS = 24  # 24 hours in Supabase for fundamentals
 _SP_HIST_CACHE_TTL = 3600      # 1 hour for S&P historical
 _CACHE_TTL = _VOLATILE_TTL     # default TTL for general cache
+# Hard cap on live entries. Expired rows are only swept lazily on read of the
+# same key, so without a cap this dict grows unbounded in the long-lived Railway
+# process (one entry per ticker×range×key-type). Eviction is least-recently-
+# written; a miss just re-fetches, so there's no correctness impact.
+_CACHE_MAX_ENTRIES = 1024
 
 
 def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
@@ -63,7 +68,13 @@ def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
 
 
 def _cache_set(key: str, value: Any):
+    # Move-to-end on write so the dict head is the least-recently-written, then
+    # evict from the head once we exceed the cap.
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── Sector P/E averages (approximate, for valuation context) ─────

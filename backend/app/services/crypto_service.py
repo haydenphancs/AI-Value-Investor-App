@@ -486,6 +486,9 @@ _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes for CoinGecko data (rate-limit friendly)
 _DB_CACHE_TTL_HOURS = 12  # 12 hours in Supabase (budget-friendly for 10K/month)
 _AI_CACHE_TTL_SECONDS = 1800  # 30 minutes for AI-generated stories
+# Hard cap on live entries — see stock_overview_service for rationale. Eviction
+# is least-recently-written; a miss just re-fetches (no correctness impact).
+_CACHE_MAX_ENTRIES = 1024
 
 
 def _cache_get(key: str, ttl: Optional[float] = None) -> Optional[Any]:
@@ -501,7 +504,11 @@ def _cache_get(key: str, ttl: Optional[float] = None) -> Optional[Any]:
 
 
 def _cache_set(key: str, value: Any):
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── Formatting helpers ───────────────────────────────────────────

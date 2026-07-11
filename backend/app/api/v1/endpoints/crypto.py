@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, Dict, Any
 import logging
 
+from app.api.error_response import error_response_from_exception
 from app.services.crypto_service import get_crypto_service
 from app.schemas.crypto import CryptoDetailResponse
 from app.schemas.technical_analysis import (
@@ -92,11 +93,10 @@ async def get_crypto_detail(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Crypto detail failed for {symbol}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Crypto data service unavailable for {symbol}",
-        )
+        # Typed structured error (invariant #3) — surfaces FMP/CoinGecko rate-limits
+        # as an actionable message + retry instead of a generic "Server error".
+        logger.error(f"Crypto detail failed for {symbol}: {type(e).__name__}: {e}", exc_info=True)
+        return error_response_from_exception(e, ticker=symbol, step="crypto_detail")
 
 
 # ── Crypto News (cache-aside + lazy enrichment) ──────────────────

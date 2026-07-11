@@ -49,6 +49,11 @@ class CryptoDetailViewModel: ObservableObject {
     let livePriceManager = LivePriceWebSocketManager()
     private var chartRefreshTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
+    /// Monotonic token for full-detail fetches (initial load / refresh / chart-range
+    /// change). Each fetch captures the current value before awaiting and only applies
+    /// its result if still current — so a slow out-of-order response can't clobber a
+    /// newer one (e.g. rapid range switching showing a chart for the wrong range).
+    private var detailRequestGen = 0
 
     // News pagination
     private var allNewsArticles: [TickerNewsArticle] = []
@@ -116,6 +121,9 @@ class CryptoDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
+        detailRequestGen += 1
+        let gen = detailRequestGen
+
         Task { [weak self] in
             guard let self = self else { return }
 
@@ -137,6 +145,9 @@ class CryptoDetailViewModel: ObservableObject {
                     ),
                     responseType: CryptoDetailResponse.self
                 )
+
+                // Drop a stale response (a newer load/refresh/range-change superseded it).
+                guard gen == self.detailRequestGen else { return }
 
                 print("✅ [CryptoDetail] Loaded \(response.name) — $\(response.currentPrice)")
                 print("   📊 Chart points: \(response.chartData.count)")
@@ -171,6 +182,8 @@ class CryptoDetailViewModel: ObservableObject {
     func refresh() async {
         isLoading = true
         errorMessage = nil
+        detailRequestGen += 1
+        let gen = detailRequestGen
 
         do {
             print("🪙 [CryptoDetail] Refreshing \(cryptoSymbol)...")
@@ -182,6 +195,7 @@ class CryptoDetailViewModel: ObservableObject {
                 ),
                 responseType: CryptoDetailResponse.self
             )
+            guard gen == self.detailRequestGen else { return }
             print("✅ [CryptoDetail] Refreshed \(response.name)")
             self.cryptoData = response.toModel()
             self.chartDataVersion += 1
@@ -207,6 +221,8 @@ class CryptoDetailViewModel: ObservableObject {
     private func fetchChartForRange() async {
         let range = selectedChartRange
         print("🪙 [CryptoDetail] Updating chart range to \(range.rawValue)")
+        detailRequestGen += 1
+        let gen = detailRequestGen
 
         do {
             let response = try await apiClient.request(
@@ -218,6 +234,8 @@ class CryptoDetailViewModel: ObservableObject {
                 responseType: CryptoDetailResponse.self
             )
 
+            // Drop a stale range response so rapid switching can't clobber a newer range.
+            guard gen == self.detailRequestGen else { return }
             self.cryptoData = response.toModel()
             self.chartDataVersion += 1
             print("✅ [CryptoDetail] Chart range updated — \(response.chartData.count) data points")
@@ -245,6 +263,12 @@ class CryptoDetailViewModel: ObservableObject {
             case .decodingError(let decodingError):
                 self.errorMessage = "Failed to parse crypto data."
                 print("   🧩 Decoding error: \(decodingError)")
+            case .rateLimited:
+                self.errorMessage = "High demand right now — please try again in a moment."
+            case .businessError(_, let message):
+                // Backend typed error (e.g. FMP_RATE_LIMITED / FMP_UNAVAILABLE) —
+                // surface its actionable user_message instead of a generic string.
+                self.errorMessage = message
             default:
                 self.errorMessage = "Something went wrong. Please try again."
                 print("   ⚠️ API error: \(apiError)")

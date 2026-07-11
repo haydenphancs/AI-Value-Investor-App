@@ -89,6 +89,19 @@ class ChatViewModel: ObservableObject {
     @Published var currentContextType: ChatContextType?
     @Published private(set) var currentReferenceId: String?
 
+    // MARK: - Line-by-line reveal buffer
+    //
+    // Gemini streams a FEW LARGE chunks (not per-token), so appending each chunk verbatim makes
+    // the answer jump in big blocks. We buffer the raw network text and meter it out one line at
+    // a time on a timer for a smooth reveal. `revealShown` is what's visible; `revealPending` is
+    // received-but-not-yet-shown. On `done` the reveal drains, then the authoritative content
+    // replaces it (so no text is ever lost).
+    private var revealPending = ""
+    private var revealShown = ""
+    private var revealFinished = false            // network stream ended → drain the rest, then stop
+    private var revealTask: Task<Void, Never>?
+    private static let revealStepNanos: UInt64 = 45_000_000  // ~45ms per revealed line
+
     // MARK: - Session Management
 
     /// Create a new chat session and optionally send the first message.
@@ -202,6 +215,7 @@ class ChatViewModel: ObservableObject {
         isStreaming = false
         streamingMessageId = nil
         errorMessage = nil
+        cancelReveal()
 
         Task {
             do {
@@ -353,6 +367,7 @@ class ChatViewModel: ObservableObject {
         isStreaming = false
         streamingMessageId = nil
         errorMessage = nil
+        cancelReveal()
     }
 
     /// Drop a session from the local history list + regroup, resetting the conversation if it was active.
@@ -437,7 +452,23 @@ class ChatViewModel: ObservableObject {
     private func streamMessageToSession(sessionId: String, message: String) async {
         let liveTimestamp = Date()
         var liveId: UUID?
-        var buffer = ""
+
+        // Fresh reveal buffer for this turn.
+        cancelReveal()
+
+        // Create (or reuse) the assistant bubble. It's created on the FIRST thinking/sources/token
+        // event so the thinking card can render at the top of the bubble immediately (empty text
+        // until tokens flow). Same id throughout → the row never re-inserts.
+        func ensureBubble() -> UUID {
+            if let id = liveId { return id }
+            let id = UUID()
+            liveId = id
+            messages.append(RichChatMessage(
+                id: id, role: .assistant, content: [], timestamp: liveTimestamp,
+                thinking: ChatThinking(stages: [], sourceCount: 0, elapsedMs: nil)
+            ))
+            return id
+        }
 
         do {
             let events = APIClient.shared.stream(
@@ -451,43 +482,54 @@ class ChatViewModel: ObservableObject {
 
             for try await event in events {
                 // Drop the stream if the user navigated to another conversation.
-                guard sessionId == currentSessionId else { return }
+                guard sessionId == currentSessionId else { cancelReveal(); return }
 
                 switch event.event {
+                case "thinking":
+                    // Synthesized progress stage → grow the active thinking card.
+                    guard let stage = Self.decodeThinkingStage(event.data), !stage.isEmpty else { continue }
+                    appendThinkingStage(id: ensureBubble(), stage: stage)
+
+                case "sources":
+                    // Grounded-context source pills for the thinking card.
+                    guard let srcs = Self.decodeSources(event.data), !srcs.isEmpty else { continue }
+                    applyLiveSources(id: ensureBubble(), sources: srcs)
+
                 case "token":
                     guard let delta = Self.decodeDelta(event.data), !delta.isEmpty else { continue }
-                    buffer += delta
-                    if let id = liveId {
-                        updateStreamingMessage(id: id, text: buffer, timestamp: liveTimestamp)
-                    } else {
-                        // First token: create the live bubble + hide the thinking dots.
-                        let id = UUID()
-                        liveId = id
+                    let id = ensureBubble()
+                    if streamingMessageId == nil {
+                        // First token: show the caret + start metering the reveal.
                         streamingMessageId = id
                         isStreaming = true
-                        messages.append(RichChatMessage(
-                            id: id, role: .assistant, content: [.text(buffer)], timestamp: liveTimestamp
-                        ))
                     }
+                    revealPending += delta
+                    ensureRevealRunning(id: id)
 
                 case "reset":
-                    // Server fell back to full generation — discard partial tokens.
-                    buffer = ""
-                    if let id = liveId { updateStreamingMessage(id: id, text: "", timestamp: liveTimestamp) }
+                    // Server fell back to full generation — discard partial tokens + reveal buffer.
+                    revealTask?.cancel(); revealTask = nil
+                    revealPending = ""; revealShown = ""; revealFinished = false
+                    if let id = liveId { setMessageText(id: id, text: "") }
 
                 case "done":
                     guard let dto = Self.decodeDoneMessage(event.data) else {
                         throw ChatStreamError.malformedDone
                     }
                     let base = dto.toRichChatMessage()
-                    if let id = liveId {
-                        // Keep the SAME id so the row updates in place (no ForEach
-                        // tear-down/flicker) as the live text becomes the final message
-                        // (with widget + citations).
-                        let final = RichChatMessage(
-                            id: id, role: base.role, content: base.content, timestamp: base.timestamp
+                    // Let the reveal drain any remaining buffered lines smoothly (bounded), THEN
+                    // finalize with the authoritative content + thinking/sources/suggestions so no
+                    // text is ever lost even if the reveal lagged the network.
+                    revealFinished = true
+                    await revealTask?.value
+                    revealTask = nil
+                    guard sessionId == currentSessionId else { cancelReveal(); return }
+                    if let id = liveId, let idx = messages.firstIndex(where: { $0.id == id }) {
+                        // Same id → the row updates in place (no ForEach tear-down/flicker).
+                        messages[idx] = RichChatMessage(
+                            id: id, role: base.role, content: base.content, timestamp: base.timestamp,
+                            thinking: base.thinking, sources: base.sources, suggestions: base.suggestions
                         )
-                        replaceMessage(id: id, with: final)
                     } else {
                         messages.append(base)
                     }
@@ -498,7 +540,7 @@ class ChatViewModel: ObservableObject {
                     throw ChatStreamError.serverError
 
                 default:
-                    continue  // "meta" and any unknown frames
+                    continue  // "meta"/"suggestions" and any unknown frames — final state lands on `done`
                 }
             }
             // Stream ended without a terminal `done` frame.
@@ -506,6 +548,7 @@ class ChatViewModel: ObservableObject {
 
         } catch {
             print("⚠️ [ChatVM] Stream failed (\(error)); falling back to non-streaming")
+            cancelReveal()
             if let id = liveId { messages.removeAll { $0.id == id } }  // drop the partial bubble
             streamingMessageId = nil
             isStreaming = false
@@ -562,10 +605,90 @@ class ChatViewModel: ObservableObject {
         return false
     }
 
-    /// Replace the streaming message in place (same id → no ForEach re-insert).
-    private func updateStreamingMessage(id: UUID, text: String, timestamp: Date) {
+    // MARK: - Streaming helpers (thinking card + line-by-line reveal)
+
+    /// Append a synthesized thinking stage to the (active) assistant bubble.
+    private func appendThinkingStage(id: UUID, stage: String) {
         guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[idx] = RichChatMessage(id: id, role: .assistant, content: [.text(text)], timestamp: timestamp)
+        var stages = messages[idx].thinking?.stages ?? []
+        if stages.last != stage { stages.append(stage) }
+        messages[idx].thinking = ChatThinking(
+            stages: stages, sourceCount: messages[idx].sources?.count ?? 0, elapsedMs: nil
+        )
+    }
+
+    /// Attach the grounded source pills to the (active) assistant bubble.
+    private func applyLiveSources(id: UUID, sources: [ChatSource]) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[idx].sources = sources
+        let stages = messages[idx].thinking?.stages ?? []
+        messages[idx].thinking = ChatThinking(stages: stages, sourceCount: sources.count, elapsedMs: nil)
+    }
+
+    /// Set the visible text of the streaming bubble in place (preserves thinking/sources).
+    private func setMessageText(id: UUID, text: String) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[idx].content = [.text(text)]
+    }
+
+    /// Start the line-by-line reveal loop if it isn't already running. Runs on the main actor
+    /// (this VM is @MainActor) interleaving with token arrival via its per-line sleep.
+    private func ensureRevealRunning(id: UUID) {
+        guard revealTask == nil else { return }
+        revealTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.revealTick(id: id) { return }   // drained + network finished → stop
+                try? await Task.sleep(nanoseconds: Self.revealStepNanos)
+            }
+        }
+    }
+
+    /// Reveal the next line (or word-chunk / remainder). Returns true when the buffer is fully
+    /// drained AND the network stream has finished (so the loop can stop).
+    private func revealTick(id: UUID) -> Bool {
+        if revealPending.isEmpty { return revealFinished }
+        let chunk = Self.nextRevealChunk(&revealPending, finished: revealFinished)
+        guard !chunk.isEmpty else { return false }   // waiting for the current line to complete
+        revealShown += chunk
+        setMessageText(id: id, text: revealShown)
+        return false
+    }
+
+    /// Pull the next reveal chunk off the front of `pending`:
+    ///  • up to & including the next newline (one line), else
+    ///  • the whole remainder once the network has finished, else
+    ///  • a word-bounded chunk when a single line grows long (so it doesn't stall), else
+    ///  • "" to wait for the current line to complete.
+    private static func nextRevealChunk(_ pending: inout String, finished: Bool) -> String {
+        if let nl = pending.firstIndex(of: "\n") {
+            let upto = pending.index(after: nl)
+            let chunk = String(pending[..<upto])
+            pending.removeSubrange(pending.startIndex..<upto)
+            return chunk
+        }
+        if finished {
+            let chunk = pending; pending = ""; return chunk
+        }
+        if pending.count > 140 {
+            let soft = pending.index(pending.startIndex, offsetBy: min(80, pending.count))
+            if let space = pending[soft...].firstIndex(of: " ") {
+                let upto = pending.index(after: space)
+                let chunk = String(pending[..<upto])
+                pending.removeSubrange(pending.startIndex..<upto)
+                return chunk
+            }
+        }
+        return ""
+    }
+
+    /// Cancel the reveal loop and clear its buffers.
+    private func cancelReveal() {
+        revealTask?.cancel()
+        revealTask = nil
+        revealPending = ""
+        revealShown = ""
+        revealFinished = false
     }
 
     private func replaceMessage(id: UUID, with message: RichChatMessage) {
@@ -580,6 +703,7 @@ class ChatViewModel: ObservableObject {
         streamingMessageId = nil
         isStreaming = false
         isAITyping = false
+        cancelReveal()
     }
 
     // MARK: - SSE payload decoding
@@ -595,6 +719,18 @@ class ChatViewModel: ObservableObject {
         guard let data = json.data(using: .utf8) else { return nil }
         // ChatMessageDTO uses explicit snake_case CodingKeys — no keyDecodingStrategy.
         return (try? JSONDecoder().decode(Done.self, from: data))?.message
+    }
+
+    private static func decodeThinkingStage(_ json: String) -> String? {
+        struct Stage: Decodable { let stage: String }
+        guard let data = json.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(Stage.self, from: data))?.stage
+    }
+
+    private static func decodeSources(_ json: String) -> [ChatSource]? {
+        struct Payload: Decodable { let sources: [ChatSource] }
+        guard let data = json.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(Payload.self, from: data))?.sources
     }
 
     /// Group sessions into TODAY / YESTERDAY / OLDER for the history panel.

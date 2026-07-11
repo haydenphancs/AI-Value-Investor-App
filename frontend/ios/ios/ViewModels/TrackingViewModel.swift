@@ -294,9 +294,12 @@ class TrackingViewModel: ObservableObject {
     /// totals look identical to alerts that come straight from the server.
     private static func formatDollars(_ value: Double) -> String {
         let amt = abs(value)
-        if amt >= 1_000_000_000 { return String(format: "$%.2fB", amt / 1_000_000_000) }
-        if amt >= 1_000_000     { return String(format: "$%.1fM", amt / 1_000_000) }
-        if amt >= 1_000         { return String(format: "$%.0fK", amt / 1_000) }
+        // Roll up to the next unit when rounding would render a 4-digit
+        // mantissa in the lower unit (mirrors backend _format_amount):
+        // 999_600 → "$1.0M" (not "$1000K"), 999_960_000 → "$1.00B".
+        if amt >= 999_950_000 { return String(format: "$%.2fB", amt / 1_000_000_000) }
+        if amt >= 999_500     { return String(format: "$%.1fM", amt / 1_000_000) }
+        if amt >= 1_000       { return String(format: "$%.0fK", amt / 1_000) }
         return String(format: "$%.0f", amt)
     }
 
@@ -459,12 +462,12 @@ class TrackingViewModel: ObservableObject {
             return true
         } catch {
             print("[TrackingVM] ❌ Tracking feed failed: \(error)")
-            // Fallback to sample data on first load if empty
-            if trackedAssets.isEmpty {
-                trackedAssets = TrackedAsset.sampleData
-                alerts = AppAlert.sampleData
-                print("[TrackingVM] ⚠️ Using sample data as fallback")
-            }
+            // Do NOT seed fabricated sample prices/alerts here. Rendering a
+            // fake $178.42 quote or a "$2.4B Warren Buffett bought" rollup as
+            // if it were the user's real holdings/alerts is worse than an
+            // honest empty state. Leave the lists as-is (empty on a first-load
+            // failure); the 30s timer and pull-to-refresh retry. `sampleData`
+            // stays preview-only.
             return false
         }
     }

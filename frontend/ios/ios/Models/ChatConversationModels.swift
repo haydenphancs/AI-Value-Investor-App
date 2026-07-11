@@ -9,7 +9,7 @@ import Foundation
 import SwiftUI
 
 // MARK: - Chat Message Role
-enum ChatMessageRole {
+enum ChatMessageRole: Equatable {
     case user
     case assistant
 }
@@ -76,21 +76,65 @@ enum RichContentType {
     case bulletPoints([ChatBulletPoint])
 }
 
+// MARK: - Thinking / Sources (futuristic chat)
+
+/// One grounded-context "source" pill for the thinking card (a screen context or a filing
+/// section). Codable — the JSON keys (`label`/`detail`) match the backend `_build_sources`
+/// output directly, so no CodingKeys are needed.
+struct ChatSource: Codable, Identifiable, Sendable, Hashable {
+    var id: String { label + "|" + (detail ?? "") }
+    let label: String
+    let detail: String?
+}
+
+/// Thinking-process summary shown in the collapsible "Done in Xs · N sources" card.
+/// `stages` are the server-authored progress labels. `elapsedMs` is nil WHILE the answer is
+/// generating (the card renders an active "Thinking…" state) and set on completion.
+struct ChatThinking: Codable, Sendable {
+    let stages: [String]
+    let sourceCount: Int?
+    let elapsedMs: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case stages
+        case sourceCount = "source_count"
+        case elapsedMs = "elapsed_ms"
+    }
+
+    /// True while the answer is still being produced (drives the animated header).
+    var isActive: Bool { elapsedMs == nil }
+
+    /// Elapsed seconds for the "Done in Xs" label (min 1s so it never reads "0s").
+    var elapsedSeconds: Int { max(1, Int((Double(elapsedMs ?? 0) / 1000).rounded())) }
+}
+
 // MARK: - Rich Chat Message
 struct RichChatMessage: Identifiable {
     let id: UUID
     let role: ChatMessageRole
-    let content: [RichContentType]
+    /// `var` so the streaming path can grow the text in place (same id → no ForEach re-insert).
+    var content: [RichContentType]
     let timestamp: Date
+    /// Thinking-process summary (assistant only). Present while generating (active) and after
+    /// completion (collapsed card). nil for user messages + legacy rows.
+    var thinking: ChatThinking?
+    /// Grounded-context source pills shown inside the thinking card.
+    var sources: [ChatSource]?
+    /// AI follow-up questions shown under the latest answer.
+    var suggestions: [String]?
 
     /// `id` defaults to a fresh UUID (existing call sites unaffected). A caller
     /// can pass a stable id so a streaming message can be replaced in place each
     /// token without ForEach re-inserting the row.
-    init(id: UUID = UUID(), role: ChatMessageRole, content: [RichContentType], timestamp: Date) {
+    init(id: UUID = UUID(), role: ChatMessageRole, content: [RichContentType], timestamp: Date,
+         thinking: ChatThinking? = nil, sources: [ChatSource]? = nil, suggestions: [String]? = nil) {
         self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
+        self.thinking = thinking
+        self.sources = sources
+        self.suggestions = suggestions
     }
 
     var formattedTime: String {
@@ -521,6 +565,11 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
     let widget: ChatWidgetData?
     let citations: [ChatCitationDTO]?
     let tokensUsed: Int?
+    // Futuristic-chat fields — all Optional so old backend responses (which omit them) decode
+    // unchanged (synthesized Codable uses decodeIfPresent for optionals → absent = nil).
+    let sources: [ChatSource]?
+    let suggestions: [String]?
+    let thinking: ChatThinking?
     let createdAt: String
 
     enum CodingKeys: String, CodingKey {
@@ -528,6 +577,7 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         case sessionId = "session_id"
         case role, content, widget, citations
         case tokensUsed = "tokens_used"
+        case sources, suggestions, thinking
         case createdAt = "created_at"
     }
 
@@ -553,7 +603,8 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
 
         let timestamp = BackendISO8601.date(from: createdAt) ?? Date()
 
-        return RichChatMessage(role: msgRole, content: richContent, timestamp: timestamp)
+        return RichChatMessage(role: msgRole, content: richContent, timestamp: timestamp,
+                               thinking: thinking, sources: sources, suggestions: suggestions)
     }
 }
 

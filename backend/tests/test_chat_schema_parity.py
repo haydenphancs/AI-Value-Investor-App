@@ -52,7 +52,12 @@ _SESSION_ALL_KEYS = _SESSION_REQUIRED | {
     "context_type", "reference_id",
 }
 _MESSAGE_REQUIRED = {"id", "session_id", "role", "content", "created_at"}
-_MESSAGE_ALL_KEYS = _MESSAGE_REQUIRED | {"widget", "citations", "tokens_used"}
+_MESSAGE_ALL_KEYS = _MESSAGE_REQUIRED | {
+    "widget", "citations", "tokens_used",
+    # Futuristic-chat additions (rich_content-backed; all Optional on iOS so absent/null is
+    # fine and old builds ignore them): the thinking card + sources pills + follow-up chips.
+    "sources", "suggestions", "thinking",
+}
 
 # iOS StockChartWidgetData / MarketOverviewWidgetData non-optional properties.
 _STOCK_WIDGET_REQUIRED = {
@@ -169,6 +174,51 @@ def test_message_empty_content_still_valid():
     dumped = _row_to_message(row).model_dump()
     _assert_required_non_null(dumped, _MESSAGE_REQUIRED, "message-empty")
     assert dumped["content"] == ""
+
+
+def test_worst_case_message_row_has_null_futuristic_fields():
+    """A pre-feature row (no rich_content) → sources/suggestions/thinking all None. Old iOS
+    builds ignore the keys; new builds decode them as Optional. No crash either way."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "hi",
+        "created_at": "2026-07-09T00:00:00.000000+00:00",
+    }
+    dumped = _row_to_message(row).model_dump()
+    _assert_keys_subset(_MESSAGE_ALL_KEYS, dumped, "worst-case futuristic")
+    assert dumped["sources"] is None
+    assert dumped["suggestions"] is None
+    assert dumped["thinking"] is None
+
+
+def test_message_surfaces_thinking_sources_suggestions_from_rich_content():
+    """A full futuristic-chat row round-trips the thinking card + sources + follow-ups (all
+    stored under rich_content, no migration) so a HISTORY RELOAD re-shows them."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "answer",
+        "created_at": "2026-07-09T00:00:00.000000+00:00",
+        "rich_content": {
+            "widget": _stock_widget_payload(),
+            "sources": [
+                {"label": "Cay research report", "detail": "AAPL"},
+                {"label": "SEC filing", "detail": "Risk Factors"},
+            ],
+            "suggestions": ["What's the valuation?", "How wide is the moat?"],
+            "thinking": {
+                "stages": ["Reading AAPL's data", "Reviewing the sources", "Writing your answer"],
+                "source_count": 2, "elapsed_ms": 4200,
+            },
+        },
+    }
+    dumped = _row_to_message(row).model_dump()
+    _assert_keys_subset(_MESSAGE_ALL_KEYS, dumped, "futuristic message")
+    _assert_required_non_null(dumped, _MESSAGE_REQUIRED, "futuristic message")
+    # widget still extracted alongside the new fields
+    assert dumped["widget"]["widget_type"] == "stock_chart"
+    assert isinstance(dumped["sources"], list)
+    assert dumped["sources"][0]["label"] == "Cay research report"
+    assert dumped["suggestions"] == ["What's the valuation?", "How wide is the moat?"]
+    assert dumped["thinking"]["source_count"] == 2
+    assert dumped["thinking"]["elapsed_ms"] == 4200
 
 
 def test_message_citations_are_objects_not_scalars():

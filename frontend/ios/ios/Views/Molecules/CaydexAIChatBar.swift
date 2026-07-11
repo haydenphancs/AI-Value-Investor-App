@@ -55,6 +55,15 @@ struct CaydexAIChatBar: View {
                     .font(AppTypography.body)
                     .foregroundColor(AppColors.textPrimary)
                     .focused($isFocused)
+                    // Tapping the bar just focuses the field (keyboard opens inline, the
+                    // full chat cover stays closed) so the user can keep reading while typing.
+                    // Hitting return fires the same send path as the button → opens the chat.
+                    .submitLabel(.send)
+                    .onSubmit {
+                        if canSend {
+                            onSend?()
+                        }
+                    }
 
                 // Send button
                 Button(action: {

@@ -83,9 +83,13 @@ def _sse(event: str, data: dict) -> str:
 
 def _row_to_message(row: dict) -> ChatMessageResponse:
     """Map a Supabase chat_messages row to the response schema."""
-    stored_widget = None
-    if row.get("rich_content") and isinstance(row["rich_content"], dict):
-        stored_widget = row["rich_content"].get("widget")
+    rc = row.get("rich_content") if isinstance(row.get("rich_content"), dict) else None
+    stored_widget = rc.get("widget") if rc else None
+    # Futuristic-chat fields live in rich_content (no schema migration). Absent → None,
+    # so legacy rows and old iOS builds decode unchanged.
+    sources = rc.get("sources") if rc else None
+    suggestions = rc.get("suggestions") if rc else None
+    thinking = rc.get("thinking") if rc else None
 
     return ChatMessageResponse(
         id=row["id"],
@@ -96,6 +100,9 @@ def _row_to_message(row: dict) -> ChatMessageResponse:
         rich_content=row.get("rich_content"),
         citations=row.get("citations"),
         tokens_used=row.get("tokens_used"),
+        sources=sources,
+        suggestions=suggestions,
+        thinking=thinking,
         created_at=row["created_at"],
     )
 
@@ -293,10 +300,12 @@ async def stream_chat_message(
     user_message = request.message
 
     async def event_gen():
+        import time as _time
         from app.services.chat_service import ChatService
         from app.integrations.gemini import _is_quota_error
 
         chat_service = ChatService()
+        started = _time.monotonic()
 
         grounded = (
             f"{ctx_type}:{ref_id}"
@@ -309,9 +318,27 @@ async def stream_chat_message(
         citations = None
         widget = None
         tokens_used = None
+        sources = None
+        suggestions = None
         streamed_any = False
 
+        # Synthesized "thinking" stages tied to the REAL pipeline steps (resolve context →
+        # RAG/enrich → stream). Server-authored strings only — never model text — so there is
+        # zero identity-leak risk. Collected so a reloaded message re-shows the same card.
+        # Only surface the ticker for ticker-shaped contexts; a Money Moves / Journey / Book
+        # reference_id is an internal slug and must NOT leak into the user-facing card.
+        ticker_label = ""
+        if ctx_type and ctx_type.strip().upper() in ChatService._TICKER_CONTEXTS:
+            ticker_label = (ref_id or stock_id or "").split("|")[0].strip().upper()
+        thinking_stages: List[str] = []
+
+        def _stage(label: str) -> str:
+            thinking_stages.append(label)
+            return _sse("thinking", {"stage": label, "index": len(thinking_stages), "total": 3})
+
         try:
+            yield _stage(f"Reading {ticker_label}'s data" if ticker_label else "Reading your screen")
+
             prep = await chat_service.prepare_stream_generation(
                 session_id=session_id,
                 user_message=user_message,
@@ -321,6 +348,16 @@ async def stream_chat_message(
                 context_type=ctx_type,
                 reference_id=ref_id,
             )
+            # Capture sources up-front so they survive even if streaming later fails and we
+            # fall back to full generation below.
+            sources = prep.get("sources")
+
+            yield _stage("Reviewing the sources")
+            if sources:
+                yield _sse("sources", {"sources": sources})
+
+            yield _stage("Writing your answer")
+
             acc: List[str] = []
             async for delta in chat_service.gemini.stream_text(
                 prep["prompt"], system_instruction=prep["system_instruction"]
@@ -376,11 +413,31 @@ async def stream_chat_message(
             })
             return
 
-        # Persist the turn (user + assistant) only now that the answer is complete.
+        elapsed_ms = int((_time.monotonic() - started) * 1000)
+        thinking_payload = {
+            "stages": thinking_stages,
+            "source_count": len(sources) if sources else 0,
+            "elapsed_ms": elapsed_ms,
+        }
+
+        # Persist the turn FIRST — BEFORE the best-effort follow-up-suggestions call below. That
+        # call can park for minutes on a throttled Gemini (retry × 90s timeout); the user has
+        # already read the streamed answer, so a disconnect in that window CANCELS this generator
+        # (CancelledError is a BaseException — uncaught by the except-Exception guards). Writing the
+        # durable turn up-front guarantees the answered exchange is never lost from history.
         try:
             supabase.table("chat_messages").insert({
                 "session_id": session_id, "role": "user", "content": user_message,
             }).execute()
+
+            # rich_content carries the widget + futuristic-chat fields (thinking / sources /
+            # suggestions) in one JSONB column — no schema migration. Suggestions are added AFTER
+            # this durable write (below), so they can never block or drop it.
+            rich_content: dict = {"thinking": thinking_payload}
+            if widget:
+                rich_content["widget"] = widget
+            if sources:
+                rich_content["sources"] = sources
 
             ai_msg: dict = {
                 "session_id": session_id,
@@ -388,9 +445,8 @@ async def stream_chat_message(
                 "content": content,
                 "citations": citations,
                 "tokens_used": tokens_used,
+                "rich_content": rich_content,
             }
-            if widget:
-                ai_msg["rich_content"] = {"widget": widget}
             inserted = supabase.table("chat_messages").insert(ai_msg).execute()
 
             # Session metadata + first-question auto-title (mirrors send_chat_message).
@@ -412,14 +468,44 @@ async def stream_chat_message(
             supabase.table("chat_sessions").update(update_payload).eq(
                 "id", session_id
             ).execute()
-
-            yield _sse("done", {"message": _row_to_message(inserted.data[0]).model_dump()})
         except Exception as e:
             logger.error("Chat stream persist failed: %s", e, exc_info=True)
             yield _sse("error", {
                 "error_code": "INTERNAL_ERROR",
                 "user_message": "Your answer was generated but couldn't be saved. Please try again.",
             })
+            return
+
+        assistant_row = inserted.data[0]
+
+        # Follow-up suggestions — best-effort, AFTER the durable write. Being slow or cancelled here
+        # can no longer drop the saved turn (worst case: no chips, which degrade gracefully).
+        try:
+            suggestions = await chat_service.generate_followup_suggestions(
+                user_message=user_message,
+                answer=content,
+                context_type=ctx_type,
+                reference_id=ref_id,
+            )
+            if suggestions:
+                yield _sse("suggestions", {"questions": suggestions})
+                # Reflect them in the terminal `done` message + persist so a reload shows the chips.
+                rich_content["suggestions"] = suggestions
+                assistant_row["rich_content"] = rich_content
+                try:
+                    supabase.table("chat_messages").update(
+                        {"rich_content": rich_content}
+                    ).eq("id", assistant_row["id"]).execute()
+                except Exception as e:
+                    logger.warning(
+                        "Chat suggestions persist failed (%s: %s) — chips shown live only",
+                        type(e).__name__, e,
+                    )
+        except Exception as e:
+            logger.warning("Chat suggestions step failed (%s: %s) — skipping", type(e).__name__, e)
+            suggestions = None
+
+        yield _sse("done", {"message": _row_to_message(assistant_row).model_dump()})
 
     return StreamingResponse(
         event_gen(),

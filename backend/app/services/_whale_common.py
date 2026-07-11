@@ -135,11 +135,14 @@ def sum_amount_bounds(
 
 
 def format_amount_short(value: float) -> str:
-    """Compact dollar label with no sign: ``$8K`` / ``$1.5M`` / ``$2.34B``."""
+    """Compact dollar label with no sign: ``$8K`` / ``$1.5M`` / ``$2.34B``.
+
+    Rolls up to the next unit when rounding would render a four-digit mantissa
+    in the lower unit (999_600 → ``$1.0M``, not ``$1000K``)."""
     amt = abs(value)
-    if amt >= 1_000_000_000:
+    if amt >= 1_000_000_000 or round(amt / 1_000_000, 1) >= 1000:
         return f"${amt / 1_000_000_000:.2f}B"
-    if amt >= 1_000_000:
+    if amt >= 1_000_000 or round(amt / 1_000, 0) >= 1000:
         return f"${amt / 1_000_000:.1f}M"
     if amt >= 1_000:
         return f"${amt / 1_000:.0f}K"

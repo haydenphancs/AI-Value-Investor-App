@@ -128,10 +128,17 @@ class TrackingService:
             return TrackingFeedResponse()
 
         tickers = [item["ticker"] for item in watchlist]
+        # Ticker → asset_type so the sparkline fetch can keep crypto (24/7) on
+        # its full intraday series instead of clipping it to US market hours.
+        asset_types = {
+            item["ticker"]: str(item.get("asset_type") or "").lower()
+            for item in watchlist
+            if item.get("ticker")
+        }
 
         # 2. Fetch data concurrently
         quotes_task = self._get_batch_quotes(tickers)
-        sparklines_task = self._get_all_sparklines(tickers)
+        sparklines_task = self._get_all_sparklines(tickers, asset_types)
         earnings_task = self._get_earnings_alerts(tickers)
         whale_task = self._get_whale_trade_alerts(tickers)
         analyst_task = self._get_analyst_rating_alerts(tickers)
@@ -193,7 +200,16 @@ class TrackingService:
                 quote = quotes_map.get(ticker, {})
                 sparkline = sparklines_map.get(ticker, [])
 
-                change_pct = quote.get("changePercentage") or 0
+                # FMP spells this `changePercentage` for equities but
+                # `changesPercentage` (plural) for crypto / indices /
+                # commodities on the SAME /quote path — read both or those
+                # non-stock rows always report a flat +0.00%. Mirrors the
+                # defensive read in stock_overview_service / index_service.
+                change_pct = (
+                    quote.get("changePercentage")
+                    or quote.get("changesPercentage")
+                    or 0
+                )
                 price = quote.get("price") or 0
                 prev_close_raw = quote.get("previousClose")
                 market_cap_raw = quote.get("marketCap")
@@ -256,9 +272,16 @@ class TrackingService:
     # ── Sparklines ──────────────────────────────────────────────────
 
     async def _get_all_sparklines(
-        self, tickers: List[str]
+        self, tickers: List[str], asset_types: Optional[Dict[str, str]] = None
     ) -> Dict[str, List[float]]:
-        """Fetch sparkline data for all tickers concurrently."""
+        """Fetch sparkline data for all tickers concurrently.
+
+        ``asset_types`` maps ticker → lowercase asset_type so a 24/7 asset
+        (crypto) keeps its full intraday series instead of being clipped to
+        US regular market hours (which would fold most of its session away and
+        diverge from the crypto detail 1D chart, which uses extended hours).
+        """
+        asset_types = asset_types or {}
 
         async def _fetch_one(ticker: str) -> Tuple[str, List[float]]:
             # Check per-ticker cache
@@ -273,7 +296,12 @@ class TrackingService:
                 # sparkline visually consistent with the chart the user sees
                 # when they open the ticker — the old path drew a ~1-month
                 # daily-EOD line, which looked nothing like the 1D chart.
-                bars = await fetch_chart_data(self.fmp, ticker, "1D")
+                # Crypto trades 24/7, so it (and only it) keeps extended hours,
+                # mirroring crypto_service's detail chart.
+                extended_hours = asset_types.get(ticker, "") == "crypto"
+                bars = await fetch_chart_data(
+                    self.fmp, ticker, "1D", extended_hours=extended_hours
+                )
                 if not bars:
                     # Honest empty — never fabricate. iOS SparklineView draws
                     # nothing for an empty/1-point series.
@@ -430,17 +458,22 @@ class TrackingService:
             logger.warning("[Tracking] whale_trades query failed: %s", exc)
             return []
 
-        # First pass: bucket by (ticker, action) — each bucket becomes one item.
+        # First pass: bucket by (ticker, action, is_congress) — each bucket
+        # becomes one item. Institutional (13F) and congressional trades on the
+        # SAME ticker/action are kept in SEPARATE buckets so a precise 13F
+        # figure is never flipped into a fuzzy STOCK-Act range (and mislabeled
+        # is_congress) just because a congressperson also traded it that week.
         # Each row contributes (low, high) dollar bounds: for congress trades the
         # STOCK Act range; for institutional trades an exact point (low == high).
         # Summing the bounds yields an honest range for congress and collapses to
         # a single figure when everything is exact (13F only).
-        buckets: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        buckets: Dict[Tuple[str, str, bool], Dict[str, Any]] = {}
         for row in rows:
             ticker = (row.get("ticker") or "").upper()
             action = (row.get("action") or "").upper()
             if not ticker or action not in ("BOUGHT", "SOLD"):
                 continue
+            is_congress_row = bool(row.get("amount_range"))
             # BACKFILL GUARD (13F only): the query windows on created_at, but a
             # newly added whale's FIRST hydration inserts months-old filings
             # with created_at=now — without this, the "this week" alert would
@@ -450,11 +483,11 @@ class TrackingService:
             # their `date` is the TRANSACTION date, which legitimately lags
             # the disclosure that makes the trade newsworthy. Missing/blank
             # date → keep (degrade to the old created_at-only behavior).
-            if not row.get("amount_range"):
+            if not is_congress_row:
                 trade_date = str(row.get("date") or "")[:10]
                 if trade_date and trade_date < cutoff_date:
                     continue
-            key = (ticker, action)
+            key = (ticker, action, is_congress_row)
             bucket = buckets.setdefault(
                 key,
                 {
@@ -510,7 +543,7 @@ class TrackingService:
             "sold": [],
         }
         action_has_congress: Dict[str, bool] = {"bought": False, "sold": False}
-        for (ticker, action), bucket in buckets.items():
+        for (ticker, action, _is_congress_key), bucket in buckets.items():
             whale_count = len(bucket["whale_ids"])
             if whale_count == 0:
                 continue
@@ -556,8 +589,11 @@ class TrackingService:
                 action_has_congress[action_word],
             )
             title = "Whales Bought" if action_word == "bought" else "Whales Sold"
+            # Dedup tickers for the sentence — a ticker can now appear as two
+            # items (a congress bucket + a 13F bucket) in the same action group.
+            desc_tickers = list(dict.fromkeys(it.ticker for it in items))
             description = (
-                f"{_join_tickers([it.ticker for it in items])} this week"
+                f"{_join_tickers(desc_tickers)} this week"
                 f" — totaling {total_label}."
             )
             alerts.append(
@@ -585,15 +621,21 @@ class TrackingService:
 
         cutoff = datetime.now() - timedelta(days=14)
 
-        async def _fetch_one(ticker: str) -> Optional[AnalystRatingItemResponse]:
+        async def _fetch_one(ticker: str) -> List[AnalystRatingItemResponse]:
+            """Return EVERY material grade change on this ticker within the
+            window (deduped to one per firm), not just the first — otherwise a
+            ticker with two firm actions surfaces only one and the rolled-up
+            'N rating changes' count silently under-reports."""
             try:
                 grades = await self.fmp.get_grades(ticker, limit=20)
             except Exception as exc:
                 logger.warning("Analyst grades for %s failed: %s", ticker, exc)
-                return None
+                return []
             if not isinstance(grades, list) or not grades:
-                return None
+                return []
 
+            matches: List[AnalystRatingItemResponse] = []
+            seen_firms: set = set()
             for entry in grades:
                 date_str = entry.get("publishedDate") or entry.get("date") or ""
                 dt = _parse_date(date_str)
@@ -620,27 +662,40 @@ class TrackingService:
                     # Keep scanning for a material action within the window.
                     continue
 
-                price_target = _opt_float(entry.get("priceTarget"))
-                previous_price_target = _opt_float(entry.get("previousPriceTarget"))
+                # One entry per firm — grades come newest-first, so the first
+                # material row from a firm is its latest action. Guards against
+                # a firm double-counting when it appears twice in the window.
+                firm_key = firm.strip().lower()
+                if firm_key in seen_firms:
+                    continue
+                seen_firms.add(firm_key)
 
-                return AnalystRatingItemResponse(
-                    ticker=ticker.upper(),
-                    firm_name=firm,
-                    rating_action=rating_action,
-                    new_rating=new_rating,
-                    previous_rating=previous_rating,
-                    price_target=price_target,
-                    previous_price_target=previous_price_target,
-                    day=dt.day,
-                    month=dt.strftime("%b").upper(),
+                matches.append(
+                    AnalystRatingItemResponse(
+                        ticker=ticker.upper(),
+                        firm_name=firm,
+                        rating_action=rating_action,
+                        new_rating=new_rating,
+                        previous_rating=previous_rating,
+                        price_target=_opt_float(entry.get("priceTarget")),
+                        previous_price_target=_opt_float(
+                            entry.get("previousPriceTarget")
+                        ),
+                        day=dt.day,
+                        month=dt.strftime("%b").upper(),
+                    )
                 )
-            return None
+                # Bound the card: a ticker rarely has >5 material changes in
+                # two weeks and the alert only shows a handful.
+                if len(matches) >= 5:
+                    break
+            return matches
 
         results = await asyncio.gather(
             *[_fetch_one(t) for t in watchlist_tickers], return_exceptions=True
         )
         items: List[AnalystRatingItemResponse] = [
-            r for r in results if isinstance(r, AnalystRatingItemResponse)
+            it for r in results if isinstance(r, list) for it in r
         ]
         if not items:
             return []
@@ -649,12 +704,14 @@ class TrackingService:
         rank = {"upgrade": 0, "downgrade": 1, "initiate": 2, "reiterate": 3}
         items.sort(key=lambda it: rank.get(it.rating_action, 4))
 
-        tickers = [it.ticker for it in items]
+        # Dedup tickers for the sentence (a single ticker can now carry several
+        # firm changes) while the count reflects the true number of changes.
+        unique_tickers = list(dict.fromkeys(it.ticker for it in items))
         count_label = (
             "1 rating change" if len(items) == 1 else f"{len(items)} rating changes"
         )
         description = (
-            f"{count_label} on {_join_tickers(tickers)} this week."
+            f"{count_label} on {_join_tickers(unique_tickers)} this week."
         )
         return [
             AlertResponse(
@@ -781,7 +838,10 @@ class TrackingService:
             items = action_groups[action_word]
             if not items:
                 continue
-            items.sort(key=lambda it: _amount_sort_key(it.amount), reverse=True)
+            # Largest first by the EXACT numeric amount — never by re-parsing the
+            # formatted label (rounding collisions like "$1000K" vs "$1.0M" can
+            # otherwise order a smaller position above a larger one).
+            items.sort(key=lambda it: it.raw_amount, reverse=True)
             total_label = _format_amount(action_totals[action_word])
             title = "Insider Bought" if action_word == "bought" else "Insider Sold"
             description = (
@@ -807,11 +867,15 @@ class TrackingService:
 
 
 def _format_amount(value: float) -> str:
-    """Format a dollar amount as $X.XB / $X.XM / $XK."""
+    """Format a dollar amount as $X.XB / $X.XM / $XK.
+
+    Rolls a value up to the next unit when rounding would otherwise render a
+    four-digit mantissa in the lower unit — e.g. 999_600 → "$1.0M" (not
+    "$1000K"), 999_960_000 → "$1.00B" (not "$1000.0M")."""
     amt = abs(value)
-    if amt >= 1_000_000_000:
+    if amt >= 1_000_000_000 or round(amt / 1_000_000, 1) >= 1000:
         return f"${amt / 1_000_000_000:.2f}B"
-    if amt >= 1_000_000:
+    if amt >= 1_000_000 or round(amt / 1_000, 0) >= 1000:
         return f"${amt / 1_000_000:.1f}M"
     if amt >= 1_000:
         return f"${amt / 1_000:.0f}K"

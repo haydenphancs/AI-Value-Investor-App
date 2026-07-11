@@ -32,7 +32,12 @@ enum AssetSortOption: String, CaseIterable {
 
 // MARK: - Tracked Asset
 struct TrackedAsset: Identifiable {
-    let id = UUID()
+    /// Stable identity = ticker (unique within a watchlist). A per-instance
+    /// `UUID()` was re-minted on every feed decode, so the Holdings `ForEach`
+    /// saw an all-new id set on each 30s price refresh and tore down/rebuilt
+    /// every row (a flash + any half-open swipe snapping shut). Keying on the
+    /// ticker keeps identity stable so only genuinely-changed rows re-render.
+    var id: String { ticker }
     let ticker: String
     let companyName: String
     let price: Double
@@ -123,13 +128,25 @@ enum AppAlert: Identifiable {
     case analystRating(AnalystRatingAlertData)
     case insiderTransaction(InsiderTransactionAlertData)
 
-    var id: UUID {
+    /// Deterministic, content-derived identity. The three rollup cases are
+    /// rebuilt (each with a fresh per-instance `UUID()`) every time
+    /// `filteredAlerts` is read and on every 30s feed reload, so a UUID-based
+    /// id churned the `ForEach` on each render (needless subtree rebuilds; a
+    /// mid-tap press could be dropped). Deriving the id from stable content
+    /// keeps identity steady across refreshes and trims that don't change the
+    /// membership shown.
+    var id: String {
         switch self {
-        case .earnings(let data): return data.id
-        case .market(let data): return data.id
-        case .whaleTrade(let data): return data.id
-        case .analystRating(let data): return data.id
-        case .insiderTransaction(let data): return data.id
+        case .earnings(let data):
+            return "earnings_\(data.ticker)_\(data.month)\(data.day)"
+        case .market(let data):
+            return "market_\(data.eventName)_\(data.month)\(data.day)"
+        case .whaleTrade(let data):
+            return "whale_\(data.action.rawValue)_\(data.tickers.sorted().joined(separator: ","))"
+        case .analystRating(let data):
+            return "analyst_\(data.tickers.sorted().joined(separator: ","))"
+        case .insiderTransaction(let data):
+            return "insider_\(data.action.rawValue)_\(data.tickers.sorted().joined(separator: ","))"
         }
     }
 

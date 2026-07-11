@@ -107,9 +107,15 @@ struct MoneyMovesDetailView: View {
         cards += MoneyMove.sampleData.filter { !authoredTitles.contains($0.title) }
 
         featured = MoneyMovesContentStore.shared.featuredArticle()
-        blueprints = cards.filter { $0.category == .blueprints && !$0.isFeatured }
-        valueTraps = cards.filter { $0.category == .valueTraps && !$0.isFeatured }
-        battles = cards.filter { $0.category == .battles && !$0.isFeatured }
+        // Exclude ONLY the one card actually promoted to the hero (matched by slug). Filtering on
+        // `isFeatured` instead would make a SECOND article flagged isFeatured (e.g. a new weekly
+        // hero seeded before the old one is un-flagged) vanish entirely — not the hero, not in any
+        // row. Keyed by the hero's slug, an extra featured article still shows in its category row.
+        let heroSlug = featured?.slug ?? ""
+        func isHero(_ move: MoneyMove) -> Bool { !heroSlug.isEmpty && move.slug == heroSlug }
+        blueprints = cards.filter { $0.category == .blueprints && !isHero($0) }
+        valueTraps = cards.filter { $0.category == .valueTraps && !isHero($0) }
+        battles = cards.filter { $0.category == .battles && !isHero($0) }
     }
 
     /// Unread moves on the left, completed ones at the end (stable within each group). Recomputed
@@ -121,10 +127,20 @@ struct MoneyMovesDetailView: View {
     }
 
     private func handleMoveTap(_ move: MoneyMove) {
-        // Prefer authored content (backend → bundled) for this card; fall back to
-        // generated placeholder content for cards not yet authored.
-        selectedArticle = MoneyMovesContentStore.shared.article(forTitle: move.title)
+        // Resolve by slug first (canonical id — a shared title can't open the wrong article), then
+        // by title, then fall back to generated placeholder content for cards not yet authored.
+        let store = MoneyMovesContentStore.shared
+        selectedArticle = store.article(forSlug: move.slug)
+            ?? store.article(forTitle: move.title)
             ?? createArticleFromMove(move)
+    }
+
+    /// Stable pseudo-count in `range`, derived from a string (survives re-generation, unlike
+    /// Int.random). A plain unicode-scalar sum — Swift's `hashValue` is per-run randomized.
+    private static func stableCount(for key: String, in range: ClosedRange<Int>) -> Int {
+        let span = range.upperBound - range.lowerBound + 1
+        let sum = key.unicodeScalars.reduce(0) { ($0 &+ Int($1.value)) & 0x7fffffff }
+        return range.lowerBound + (sum % span)
     }
 
     /// Creates a full MoneyMoveArticle from a MoneyMove card data
@@ -154,7 +170,10 @@ struct MoneyMovesDetailView: View {
             publishedAt: Date(),
             readTimeMinutes: move.estimatedMinutes,
             viewCount: move.learnerCount,
-            commentCount: Int.random(in: 20...200),
+            // Deterministic (not Int.random): the placeholder re-generates on every tap, so a random
+            // count would flicker (e.g. "147 comments" then "58") above the 2 sample comments each
+            // open. Derive a stable pseudo-count from the title instead.
+            commentCount: Self.stableCount(for: move.title, in: 20...200),
             isBookmarked: false,
             hasAudioVersion: false,   // placeholder card: no narration audio (real articles carry audioUrl)
             heroGradientColors: gradientColors,

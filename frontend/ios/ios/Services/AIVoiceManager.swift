@@ -22,6 +22,12 @@ class AIVoiceManager: NSObject, ObservableObject {
     private var currentText: String = ""
     private var wordRanges: [NSRange] = []
     private var onComplete: (() -> Void)?
+    // The utterance currently owning the state. Delegate callbacks arrive on a background queue and
+    // hop to the main actor via `Task {}`, so a `didCancel`/`didFinish` from a stopped utterance can
+    // land AFTER the next `speak()` has already begun. Every delegate callback is gated on
+    // `utterance === currentUtterance`, so a stale callback can't stomp the new card's isPlaying /
+    // progress / word-highlight / onComplete. Cleared by stop() and playClip() (synth not in use).
+    private var currentUtterance: AVSpeechUtterance?
 
     // Pre-recorded clip playback (used when a card has a bundled narration file)
     private var player: AVPlayer?
@@ -84,6 +90,7 @@ class AIVoiceManager: NSObject, ObservableObject {
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0
 
+        currentUtterance = utterance   // gate stale delegate callbacks from the previous utterance
         isPlaying = true
         synthesizer.speak(utterance)
     }
@@ -94,6 +101,7 @@ class AIVoiceManager: NSObject, ObservableObject {
     func playClip(named name: String, text: String, readAlong: [ReadAlongWord]? = nil, onComplete: (() -> Void)? = nil) {
         // Stop anything currently playing
         synthesizer?.stopSpeaking(at: .immediate)
+        currentUtterance = nil   // synth not in use for this clip → ignore any late synth callbacks
         teardownPlayer()
 
         // `name` is either a remote Storage URL (http...) or a bundled resource basename.
@@ -175,6 +183,7 @@ class AIVoiceManager: NSObject, ObservableObject {
     /// Stop speaking completely (synth or clip)
     func stop() {
         synthesizer?.stopSpeaking(at: .immediate)
+        currentUtterance = nil   // state is reset synchronously below → drop the resulting didCancel
         teardownPlayer()
         isPlaying = false
         currentWordIndex = 0
@@ -282,16 +291,19 @@ class AIVoiceManager: NSObject, ObservableObject {
     private func calculateWordRanges(for text: String) -> [NSRange] {
         var ranges: [NSRange] = []
 
-        // Use natural language processing to find word boundaries
-        var currentIndex = 0
+        // Advance the search cursor with a `String.Index` (grapheme space), NOT an Int derived from
+        // NSRange lengths (UTF-16 space). Mixing the two — `text.index(startIndex, offsetBy:)` fed a
+        // UTF-16 offset — over-counts by one per non-BMP char (emoji, flags) or combining sequence,
+        // and a clustered run (e.g. "🇺🇸🇬🇧 a b") pushes the offset past endIndex → a fatal
+        // "String index is out of bounds" the instant narration starts. Staying in String.Index
+        // space is correct for any Unicode; NSRange conversion happens only for the returned range.
+        var searchStart = text.startIndex
         let words = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
 
         for word in words {
-            if let range = text.range(of: word, range: text.index(text.startIndex, offsetBy: currentIndex)..<text.endIndex) {
-                let nsRange = NSRange(range, in: text)
-                ranges.append(nsRange)
-                currentIndex = nsRange.location + nsRange.length
-            }
+            guard let range = text.range(of: word, range: searchStart..<text.endIndex) else { continue }
+            ranges.append(NSRange(range, in: text))
+            searchStart = range.upperBound
         }
 
         return ranges
@@ -313,6 +325,7 @@ class AIVoiceManager: NSObject, ObservableObject {
 extension AIVoiceManager: AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
         Task { @MainActor in
+            guard utterance === self.currentUtterance else { return }   // stale utterance
             self.currentWordRange = characterRange
             self.currentWordIndex = self.wordIndex(forCharacterAt: characterRange.location)
 
@@ -326,6 +339,8 @@ extension AIVoiceManager: AVSpeechSynthesizerDelegate {
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor in
+            guard utterance === self.currentUtterance else { return }   // a stale finish must not fire the new card's onComplete
+            self.currentUtterance = nil
             self.isPlaying = false
             self.progress = 1.0
             self.onComplete?()
@@ -334,18 +349,24 @@ extension AIVoiceManager: AVSpeechSynthesizerDelegate {
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didPause utterance: AVSpeechUtterance) {
         Task { @MainActor in
+            guard utterance === self.currentUtterance else { return }
             self.isPlaying = false
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didContinue utterance: AVSpeechUtterance) {
         Task { @MainActor in
+            guard utterance === self.currentUtterance else { return }
             self.isPlaying = true
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         Task { @MainActor in
+            // Gate on the owning utterance: a cancel from the PREVIOUS card (triggered by
+            // stopSpeaking during navigation) can land after the next speak() already set
+            // isPlaying=true, and would otherwise freeze the orb/highlight for the whole new card.
+            guard utterance === self.currentUtterance else { return }
             self.isPlaying = false
             self.currentWordIndex = 0
             self.progress = 0.0

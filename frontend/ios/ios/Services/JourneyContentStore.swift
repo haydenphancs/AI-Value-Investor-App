@@ -16,13 +16,36 @@
 import Foundation
 
 // MARK: - Backend DTOs (GET /api/v1/learn/journey)
+//
+// Decoding is LENIENT by design. The backend serves each lesson's `story_content` JSONB verbatim
+// (no card-shape validation), so a single row hand-edited in Supabase Studio — a card missing
+// `type`, a card that isn't even an object, a lesson missing `title` — must NOT fail the decode of
+// the WHOLE response. Swift array decoding is all-or-nothing, so one bad card would otherwise throw
+// and drop ALL ~27 lessons back to the text-only bundled fallback (every DB-only lesson vanishes,
+// every lesson loses its remote audio + read-along). Instead, a bad card/lesson is dropped and the
+// rest survive — the same defensive stance ReadAlongSentence already takes for its timings.
+
+/// Never-throwing wrapper: a failed element decodes to `nil` instead of failing the whole array.
+private struct FailableDecodable<Wrapped: Decodable>: Decodable {
+    let value: Wrapped?
+    init(from decoder: Decoder) throws {
+        value = try? Wrapped(from: decoder)
+    }
+}
 
 private struct JourneyAPIResponse: Decodable {
     let lessons: [JourneyAPILesson]
+
+    private enum CodingKeys: String, CodingKey { case lessons }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = ((try? c.decodeIfPresent([FailableDecodable<JourneyAPILesson>].self, forKey: .lessons)) ?? nil) ?? []
+        lessons = raw.compactMap { $0.value }   // drop any lesson that failed (e.g. missing title)
+    }
 }
 
 private struct JourneyAPILesson: Decodable {
-    let title: String
+    let title: String              // required: it's the stable lesson key; a title-less lesson is dropped
     let storyContent: JourneyAPIStory?
 
     enum CodingKeys: String, CodingKey {
@@ -33,6 +56,13 @@ private struct JourneyAPILesson: Decodable {
 
 private struct JourneyAPIStory: Decodable {
     let cards: [JourneyAPICard]
+
+    private enum CodingKeys: String, CodingKey { case cards }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = ((try? c.decodeIfPresent([FailableDecodable<JourneyAPICard>].self, forKey: .cards)) ?? nil) ?? []
+        cards = raw.compactMap { $0.value }   // drop malformed cards; keep the good ones
+    }
 }
 
 private struct JourneyAPICard: Decodable {
@@ -44,6 +74,24 @@ private struct JourneyAPICard: Decodable {
     let videoUrl: String?
     let cta: String?
     let readAlongWords: [ReadAlongWord]?   // per-word narration timings (forced-aligned)
+
+    enum CodingKeys: String, CodingKey {
+        case type, headline, text, audioUrl, imageUrl, videoUrl, cta, readAlongWords
+    }
+
+    init(from decoder: Decoder) throws {
+        // A card object with a missing/null `type` still decodes — it maps to a content card
+        // (makeCard's default branch) rather than throwing and dropping every sibling card.
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = (((try? c.decodeIfPresent(String.self, forKey: .type)) ?? nil) ?? "content")
+        self.headline = ((try? c.decodeIfPresent(String.self, forKey: .headline)) ?? nil)
+        self.text = ((try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil)
+        self.audioUrl = ((try? c.decodeIfPresent(String.self, forKey: .audioUrl)) ?? nil)
+        self.imageUrl = ((try? c.decodeIfPresent(String.self, forKey: .imageUrl)) ?? nil)
+        self.videoUrl = ((try? c.decodeIfPresent(String.self, forKey: .videoUrl)) ?? nil)
+        self.cta = ((try? c.decodeIfPresent(String.self, forKey: .cta)) ?? nil)
+        self.readAlongWords = ((try? c.decodeIfPresent([ReadAlongWord].self, forKey: .readAlongWords)) ?? nil)
+    }
 }
 
 // MARK: - Bundled DTOs (journey_lessons.json)

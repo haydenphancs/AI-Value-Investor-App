@@ -18,11 +18,12 @@ Routes:
   GET    /tracking/portfolio-insights   → Optional[PortfolioInsightsResponse]
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from supabase import Client
 from typing import List, Optional
 import logging
 
+from app.api.error_response import ErrorCode, make_error_response
 from app.database import get_supabase
 from app.dependencies import get_current_user_or_guest
 from app.integrations.fmp import get_fmp_client
@@ -85,37 +86,48 @@ async def add_holding(
     FMP company profile when available.
     """
     if request.shares is None and request.market_value is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide either `shares` or `market_value`.",
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="Provide either `shares` or `market_value`.",
+            user_message="Enter a share count or a dollar amount for this holding.",
         )
     if request.shares is not None and request.shares <= 0:
-        raise HTTPException(status_code=400, detail="`shares` must be positive.")
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="`shares` must be positive.",
+            user_message="Shares must be a positive number.",
+        )
     if request.market_value is not None and request.market_value < 0:
-        raise HTTPException(
-            status_code=400, detail="`market_value` cannot be negative."
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="`market_value` cannot be negative.",
+            user_message="Amount can't be negative.",
         )
 
     ticker = request.ticker.upper()
 
     # Enrich with FMP profile + current price. The profile also seeds the
     # diversification signals (industry / market_cap / beta) so Portfolio
-    # Insights has them without a second lazy fetch.
-    sector = None
-    industry = None
+    # Insights has them without a second lazy fetch. Everything here starts
+    # unset so that ONLY values we actually resolve get written to the row —
+    # a failed/partial FMP fetch during a re-add must not overwrite good
+    # enrichment already stored (the "$0.00 / Other-sector after re-add" bug).
+    resolved_company_name: Optional[str] = request.company_name or None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
     market_cap: Optional[float] = None
     beta: Optional[float] = None
-    country = "US"
-    company_name = request.company_name or ticker
+    country: Optional[str] = None
     current_price: Optional[float] = None
     try:
         fmp = get_fmp_client()
         profile = await fmp.get_company_profile(ticker)
         if profile:
-            company_name = request.company_name or profile.get("companyName", ticker)
-            sector = profile.get("sector")
-            industry = profile.get("industry")
-            country = profile.get("country", "US")
+            if not resolved_company_name:
+                resolved_company_name = profile.get("companyName") or None
+            sector = profile.get("sector") or None
+            industry = profile.get("industry") or None
+            country = profile.get("country") or None
             mc = profile.get("marketCap") or profile.get("mktCap")
             if mc:
                 try:
@@ -134,31 +146,34 @@ async def add_holding(
     except Exception as e:
         logger.warning("Could not enrich holding for %s from FMP: %s", ticker, e)
 
-    if request.market_value is not None:
-        market_value = request.market_value
-    elif request.shares is not None and current_price is not None:
-        market_value = request.shares * current_price
-    else:
-        market_value = 0.0
-
-    data = {
+    data: dict = {
         "user_id": user["id"],
         "ticker": ticker,
-        "company_name": company_name,
         "shares": request.shares,
-        "market_value": market_value,
-        "sector": sector,
         "asset_type": request.asset_type or "Stock",
-        "country": country,
     }
-    # Only persist enrichment we actually resolved, so a failed/partial profile
-    # fetch doesn't null out values already on the row during the upsert.
+    # Persist only resolved enrichment — an omitted key leaves the existing
+    # column untouched on upsert (vs. clobbering it with None/'US').
+    if resolved_company_name is not None:
+        data["company_name"] = resolved_company_name
+    if sector is not None:
+        data["sector"] = sector
+    if country is not None:
+        data["country"] = country
     if industry is not None:
         data["industry"] = industry
     if market_cap is not None:
         data["market_cap"] = market_cap
     if beta is not None:
         data["beta"] = beta
+    # market_value: the user's explicit amount, or shares×live price when both
+    # are known. When shares is set but the price couldn't be fetched, OMIT it
+    # rather than persisting a misleading 0.0 (which would show $0.00 and count
+    # as a zero-weight position) or clobbering a previously stored value.
+    if request.market_value is not None:
+        data["market_value"] = request.market_value
+    elif request.shares is not None and current_price is not None:
+        data["market_value"] = request.shares * current_price
 
     result = (
         supabase.table("watchlist_items")
@@ -180,19 +195,29 @@ async def update_holding(
     updates: dict = {}
     if request.shares is not None:
         if request.shares <= 0:
-            raise HTTPException(status_code=400, detail="`shares` must be positive.")
+            return make_error_response(
+                ErrorCode.INVALID_INPUT,
+                message="`shares` must be positive.",
+                user_message="Shares must be a positive number.",
+            )
         updates["shares"] = request.shares
     if request.market_value is not None:
         if request.market_value < 0:
-            raise HTTPException(
-                status_code=400, detail="`market_value` cannot be negative."
+            return make_error_response(
+                ErrorCode.INVALID_INPUT,
+                message="`market_value` cannot be negative.",
+                user_message="Amount can't be negative.",
             )
         updates["market_value"] = request.market_value
     if request.asset_type is not None:
         updates["asset_type"] = request.asset_type
 
     if not updates:
-        raise HTTPException(status_code=400, detail="No fields to update")
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="No fields to update.",
+            user_message="Nothing to update.",
+        )
 
     result = (
         supabase.table("watchlist_items")
@@ -203,7 +228,12 @@ async def update_holding(
     )
 
     if not result.data:
-        raise HTTPException(status_code=404, detail="Holding not found")
+        return make_error_response(
+            ErrorCode.TICKER_NOT_FOUND,
+            status_code=404,
+            message=f"Holding not found for {ticker.upper()}",
+            user_message="That holding is no longer in your portfolio.",
+        )
 
     return _row_to_holding(result.data[0])
 

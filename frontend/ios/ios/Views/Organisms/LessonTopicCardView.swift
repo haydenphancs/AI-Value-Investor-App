@@ -244,13 +244,17 @@ struct LessonTopicCardView: View {
     private func startReadingCurrentCard() {
         stopAutoAdvanceTimer()
 
+        // Reaching the final card finishes the lesson — whether it's an explicit completion card
+        // OR (for remote content authored without one) just the last content card. Keying completion
+        // solely on cardType == .completion would leave such a lesson permanently "incomplete": the
+        // learner could read every card yet never get the local UserDefaults write / progress POST.
+        if isCompletionCard || currentIndex >= storyContent.totalCards - 1 {
+            markLessonCompletedOnce()
+        }
+
         guard !isCompletionCard else {
-            // No voice for completion card. Reaching it means the lesson is finished.
+            // No voice for the completion card; show its progress segment full.
             cardProgress = 1.0
-            if !didMarkCompleted {
-                didMarkCompleted = true
-                onLessonCompleted?()
-            }
             return
         }
 
@@ -277,11 +281,24 @@ struct LessonTopicCardView: View {
         }
     }
 
+    /// Fire the lesson-completed callback exactly once for this presentation.
+    private func markLessonCompletedOnce() {
+        guard !didMarkCompleted else { return }
+        didMarkCompleted = true
+        onLessonCompleted?()
+    }
+
     private func scheduleAutoAdvance(delay: TimeInterval) {
         stopAutoAdvanceTimer()
 
+        // A Timer that has ALREADY fired can't be cancelled by a later invalidate(): its callback is
+        // queued. If the learner manually navigates in that window, the stale callback would advance
+        // a SECOND time and skip a card (its narration never plays). Pin the source index and only
+        // advance if we're still on it.
+        let sourceIndex = currentIndex
         autoAdvanceTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
             Task { @MainActor in
+                guard currentIndex == sourceIndex else { return }   // manual nav already moved on
                 if currentIndex < storyContent.totalCards - 1 {
                     goToNext()
                 }

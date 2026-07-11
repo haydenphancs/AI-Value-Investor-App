@@ -10,6 +10,7 @@ analysis so the SwiftUI frontend can render a native chart widget.
 
 import asyncio
 import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
@@ -375,13 +376,102 @@ class ChatService:
         )
         prompt = self._build_prompt(user_message, history, chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
+        sources = self._build_sources(context_type, reference_id, citations)
 
         return {
             "prompt": prompt,
             "system_instruction": system_instruction,
             "citations": citations if citations else None,
             "widget": widget,
+            "sources": sources if sources else None,
         }
+
+    # Screen context_type → the human "source" label shown in the thinking card.
+    # Mirrors the ChatContextResolver branches; identity-safe (server-authored strings).
+    _CONTEXT_SOURCE_LABEL = {
+        "TICKER_REPORT": "Cay research report",
+        "STOCK": "Company financials",
+        "ETF": "ETF profile",
+        "CRYPTO": "Crypto profile",
+        "INDEX": "Index data",
+        "COMMODITY": "Commodity data",
+        "MONEY_MOVES_ARTICLE": "Money Moves article",
+        "JOURNEY_LESSON": "Investor Journey lesson",
+        "BOOK": "Book",
+    }
+    # context_types whose reference_id is a user-readable ticker (vs. a slug/order id).
+    _TICKER_CONTEXTS = {"TICKER_REPORT", "STOCK", "ETF", "CRYPTO", "INDEX", "COMMODITY"}
+
+    @classmethod
+    def _build_sources(
+        cls,
+        context_type: Optional[str],
+        reference_id: Optional[str],
+        citations: Optional[List[Dict]],
+    ) -> List[Dict[str, Any]]:
+        """Build the small "sources" list for the thinking card from the grounding we
+        already resolved: one pill for the screen context + one per distinct SEC-filing
+        section surfaced by RAG. No web/URL sources — this is our cached grounding only.
+        Never raises; returns [] when there's nothing to show."""
+        sources: List[Dict[str, Any]] = []
+        ctype = (context_type or "").strip().upper()
+        label = cls._CONTEXT_SOURCE_LABEL.get(ctype)
+        if label:
+            detail = None
+            ref = (reference_id or "").strip()
+            if ref and ctype in cls._TICKER_CONTEXTS:
+                detail = ref.split("|")[0].strip().upper() or None
+            sources.append({"label": label, "detail": detail})
+
+        # RAG citations → distinct SEC-filing sections (skip the generic "Document" fallback).
+        if citations:
+            seen: set = set()
+            for c in citations:
+                if not isinstance(c, dict):
+                    continue
+                section = (c.get("source") or "").strip()
+                key = section.lower()
+                if not section or key in seen or key == "document":
+                    continue
+                seen.add(key)
+                sources.append({"label": "SEC filing", "detail": section})
+                if len(sources) >= 6:  # keep the card compact
+                    break
+
+        return sources
+
+    async def generate_followup_suggestions(
+        self,
+        user_message: str,
+        answer: str,
+        context_type: Optional[str] = None,
+        reference_id: Optional[str] = None,
+    ) -> List[str]:
+        """Best-effort: 2 short follow-up questions the user might ask next, phrased as the
+        USER would. Identity-guarded — reuses the Cay AI system instruction so the model can
+        never leak "Gemini/LLM/language model" into a suggestion. Never raises: on any failure
+        (quota, timeout, bad JSON) returns [] so the answer + card are unaffected."""
+        try:
+            system = self._build_system_instruction("NORMAL", None)
+            prompt = (
+                "Given this question-and-answer, propose EXACTLY 2 short follow-up questions "
+                "the user is likely to ask next. Rules: each under 60 characters; specific to "
+                "the topic just discussed; phrased in first person as the user would type it; "
+                "no numbering, no quotes.\n\n"
+                f"USER ASKED:\n{user_message}\n\n"
+                f"CAY AI ANSWERED:\n{answer[:1500]}\n\n"
+                'Return ONLY JSON of the form {"suggestions": ["...", "..."]}.'
+            )
+            result = await self.gemini.generate_json(prompt, system_instruction=system)
+            data = json.loads(result.get("text") or "{}")
+            raw = data.get("suggestions") or []
+            out = [s.strip() for s in raw if isinstance(s, str) and s.strip()]
+            return out[:2]
+        except Exception as e:
+            logger.warning(
+                "Follow-up suggestions failed (%s: %s) — skipping", type(e).__name__, e
+            )
+            return []
 
     async def _deterministic_widget(
         self, asset_type: str, stock_id: Optional[str], reference_id: Optional[str]

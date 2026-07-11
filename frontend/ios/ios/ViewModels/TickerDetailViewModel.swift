@@ -72,6 +72,11 @@ class TickerDetailViewModel: ObservableObject {
     private let newsPageSize: Int = 10
     private var chartRefreshTask: Task<Void, Never>?
     private var quotePollTask: Task<Void, Never>?
+    /// Monotonic token for chart fetches. Each fetchChartData captures the value
+    /// before awaiting and only applies its result if still current — so a slow
+    /// response for a no-longer-selected range can't clobber a newer one
+    /// (last-write-wins during rapid range/interval switching).
+    private var chartRequestGen = 0
 
     // MARK: - Initialization
 
@@ -341,6 +346,10 @@ class TickerDetailViewModel: ObservableObject {
     private func pollQuotePrice() async {
         do {
             let quote = try await stockRepository.getStockQuote(ticker: tickerSymbol)
+            // The WebSocket may have connected DURING this fetch. It's the
+            // authoritative + fresher source, so drop this (now-stale) REST quote
+            // rather than clobbering the live price during the connect handoff.
+            guard !self.livePriceManager.isConnected else { return }
             guard var data = self.tickerData, let price = quote.price else { return }
 
             data.currentPrice = price
@@ -878,10 +887,15 @@ class TickerDetailViewModel: ObservableObject {
     private func fetchChartData(_ ticker: String, range: ChartTimeRange) async {
         let rangeString = range.rawValue  // e.g. "3M", "1Y", "1D"
         print("📈 TickerDetailVM: Fetching chart data for \(ticker), range=\(rangeString)")
+        chartRequestGen += 1
+        let gen = chartRequestGen
         do {
             let intervalString = chartSettings.selectedInterval.rawValue
             let useExtendedHours = chartSettings.showExtendedHours && chartSettings.selectedInterval.isIntraday
             let chartResponse = try await stockRepository.getStockChart(ticker: ticker, range: rangeString, interval: intervalString, extendedHours: useExtendedHours)
+            // Drop a stale chart response so rapid range/interval switching can't
+            // apply a chart for a no-longer-selected range (last-write-wins).
+            guard gen == self.chartRequestGen else { return }
             let pricePoints = chartResponse.prices
             print("✅ TickerDetailVM: Got \(pricePoints.count) chart data points for \(ticker)")
             if !pricePoints.isEmpty {

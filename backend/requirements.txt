@@ -5,18 +5,24 @@ pydantic==2.10.4
 pydantic-settings==2.7.0
 
 # Supabase
-supabase==2.10.0
+# 2.16 (from 2.10) relaxes the httpx cap to <0.29 — required so google-genai (httpx>=0.28.1)
+# can coexist. Pulls postgrest 1.1.x / storage3 0.12.x / supafunc 0.10.x; runtime-verified.
+supabase==2.16.0
 
 # Security
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.18
 
-# Google Gemini
+# Google Gemini — mid-migration: new unified SDK is the target; legacy stays until every
+# `import google.generativeai` is removed (then delete the 0.8.3 line). 1.75.0 is the newest
+# google-genai that keeps pydantic at 2.9+ (so pydantic stays 2.10.4) while giving real thinking
+# tokens (ThinkingConfig.include_thoughts / part.thought), native async, and google_search tool.
 google-generativeai==0.8.3
+google-genai==1.75.0
 
-# HTTP client (for FMP API)
-httpx[socks]==0.27.2
+# HTTP client (for FMP API). 0.28.1 required by google-genai; supabase 2.16 allows it (<0.29).
+httpx[socks]==0.28.1
 
 # WebSocket (for live price streaming)
 websockets>=12.0

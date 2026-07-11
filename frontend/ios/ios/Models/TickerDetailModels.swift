@@ -794,7 +794,8 @@ struct AnalystPriceTarget {
     }
 
     var upsidePercent: Double {
-        ((averagePrice - currentPrice) / currentPrice) * 100
+        guard currentPrice != 0 else { return 0 }  // avoid /0 -> NaN/Inf
+        return ((averagePrice - currentPrice) / currentPrice) * 100
     }
 
     var formattedUpside: String {
@@ -802,14 +803,17 @@ struct AnalystPriceTarget {
         return "\(sign)\(String(format: "%.1f", upsidePercent))% upside"
     }
 
+    // Clamped to [0, 1]: when the live price is below the analysts' low or above
+    // their high, the raw fraction goes out of range and the marker renders off
+    // the bar. Clamp keeps it pinned to the ends.
     var currentPricePosition: Double {
         guard highPrice > lowPrice else { return 0.5 }
-        return (currentPrice - lowPrice) / (highPrice - lowPrice)
+        return min(max((currentPrice - lowPrice) / (highPrice - lowPrice), 0), 1)
     }
-    
+
     var averagePricePosition: Double {
         guard highPrice > lowPrice else { return 0.5 }
-        return (averagePrice - lowPrice) / (highPrice - lowPrice)
+        return min(max((averagePrice - lowPrice) / (highPrice - lowPrice), 0), 1)
     }
 }
 

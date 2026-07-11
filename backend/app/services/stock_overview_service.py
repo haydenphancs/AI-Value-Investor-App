@@ -177,6 +177,24 @@ def _safe_float(d: Dict, key: str, default: float = 0.0) -> float:
     return f if math.isfinite(f) else default
 
 
+def _finite(v: Any) -> Optional[float]:
+    """Coerce to a finite float, or None (drops NaN/Inf and non-numeric).
+
+    Used for chart OHLCV — those flow into ``chart_data: List[Dict[str, Any]]``
+    (no Pydantic guard) and a non-finite value would serialize as an invalid
+    JSON ``NaN``/``Infinity`` token and crash the iOS decode of the whole
+    response. Mirrors ``_safe_float`` but returns None instead of a default so
+    optional OHLC fields stay absent rather than fabricated as 0.
+    """
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (ValueError, TypeError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 # ── Return computation helpers (same as etf_service) ─────────────
 
 
@@ -274,16 +292,20 @@ def _extract_chart_data(prices: List[Dict], chart_range: str) -> List[Dict]:
     relevant = prices[-days:] if len(prices) > days else prices
     result = []
     for p in relevant:
-        close = p.get("close") or p.get("adjClose")
-        if close:
-            result.append({
-                "date": p.get("date"),
-                "open": p.get("open"),
-                "high": p.get("high"),
-                "low": p.get("low"),
-                "close": float(close),
-                "volume": p.get("volume"),
-            })
+        date = p.get("date")
+        if not date:
+            continue
+        close = _finite(p.get("close") or p.get("adjClose"))
+        if close is None or close <= 0:
+            continue
+        result.append({
+            "date": date,
+            "open": _finite(p.get("open")),
+            "high": _finite(p.get("high")),
+            "low": _finite(p.get("low")),
+            "close": close,
+            "volume": _finite(p.get("volume")),
+        })
     return result
 
 
@@ -334,6 +356,18 @@ class StockOverviewService:
         fundamentals, volatile, live_sector_perf, live_industry_perf, prof_snapshot, growth_snapshot, val_snapshot, health_snapshot, ownership_snapshot = await asyncio.gather(
             fund_task, vol_task, sector_perf_task, industry_perf_task, prof_task, growth_task, val_task, health_task, ownership_task, return_exceptions=True,
         )
+        # `fundamentals` and `volatile` are load-bearing (dict-mutated + price
+        # source below). With return_exceptions=True a failed FMP fan-out returns
+        # an Exception object here; using it as a dict would raise a bare
+        # TypeError/AttributeError -> 502. Re-raise so the typed exception maps to
+        # a proper ErrorCode instead of an opaque crash. (The 5 snapshots below
+        # degrade to None; these two cannot.)
+        if isinstance(fundamentals, Exception):
+            logger.error(f"Fundamentals fetch failed for {ticker}: {type(fundamentals).__name__}: {fundamentals}")
+            raise fundamentals
+        if isinstance(volatile, Exception):
+            logger.error(f"Volatile (quote/chart) fetch failed for {ticker}: {type(volatile).__name__}: {volatile}")
+            raise volatile
         # Override cached sector/industry perf with fresh data
         if not isinstance(live_sector_perf, Exception) and isinstance(live_sector_perf, list) and live_sector_perf:
             fundamentals["sector_perf"] = live_sector_perf

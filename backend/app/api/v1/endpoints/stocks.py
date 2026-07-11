@@ -226,7 +226,7 @@ def _get_asset_type(item: Dict[str, Any]) -> Optional[str]:
 @router.get("/search", response_model=List[StockSearchResult])
 async def search_stocks(
     q: str = Query(..., min_length=1),
-    limit: int = Query(10, le=50),
+    limit: int = Query(10, ge=1, le=50),
 ):
     """Search stocks and crypto by ticker or name. Crypto matched from local map (zero API cost)."""
     fmp = get_fmp_client()
@@ -502,16 +502,26 @@ async def get_stock_fundamentals(ticker: str):
     ticker = _validate_ticker(ticker)
     fmp = get_fmp_client()
     try:
+        # return_exceptions=True so ONE failing FMP call degrades that section to
+        # [] instead of 502-ing the whole endpoint (metrics + ratios are
+        # independent — a caller can still render whichever succeeded).
         metrics, ratios = await asyncio.gather(
             fmp.get_key_metrics(ticker, period="annual", limit=5),
             fmp.get_financial_ratios(ticker, period="annual", limit=5),
+            return_exceptions=True,
         )
+        if isinstance(metrics, Exception):
+            logger.warning(f"Key metrics failed for {ticker}: {type(metrics).__name__}: {metrics}")
+            metrics = []
+        if isinstance(ratios, Exception):
+            logger.warning(f"Financial ratios failed for {ticker}: {type(ratios).__name__}: {ratios}")
+            ratios = []
         return {
             "key_metrics": normalize_fmp_list(metrics) if metrics else [],
             "financial_ratios": normalize_fmp_list(ratios) if ratios else [],
         }
     except Exception as e:
-        logger.error(f"Fundamentals failed: {e}")
+        logger.error(f"Fundamentals failed for {ticker}: {type(e).__name__}: {e}")
         raise HTTPException(status_code=502, detail="Fundamentals service unavailable")
 
 
@@ -594,17 +604,10 @@ async def get_stock_financials_full(ticker: str):
     fmp = get_fmp_client()
 
     try:
-        (
-            income_annual,
-            income_quarterly,
-            balance_annual,
-            balance_quarterly,
-            cashflow_annual,
-            cashflow_quarterly,
-            key_metrics,
-            fin_ratios,
-            analyst_est,
-        ) = await asyncio.gather(
+        # return_exceptions=True so one failing statement (e.g. an FMP 429 on the
+        # analyst-estimates call) degrades that section to [] instead of 502-ing
+        # the entire financials screen. Each section is independent.
+        _raw = await asyncio.gather(
             fmp.get_income_statement(ticker, period="annual", limit=5),
             fmp.get_income_statement(ticker, period="quarter", limit=8),
             fmp.get_balance_sheet(ticker, period="annual", limit=5),
@@ -614,7 +617,23 @@ async def get_stock_financials_full(ticker: str):
             fmp.get_key_metrics(ticker, period="annual", limit=5),
             fmp.get_financial_ratios(ticker, period="annual", limit=5),
             fmp.get_analyst_estimates(ticker, period="annual", limit=3),
+            return_exceptions=True,
         )
+        _labels = [
+            "income_annual", "income_quarterly", "balance_annual", "balance_quarterly",
+            "cashflow_annual", "cashflow_quarterly", "key_metrics", "fin_ratios", "analyst_est",
+        ]
+        _cleaned = []
+        for _lbl, _r in zip(_labels, _raw):
+            if isinstance(_r, Exception):
+                logger.warning(f"financials-full '{_lbl}' failed for {ticker}: {type(_r).__name__}: {_r}")
+                _cleaned.append([])
+            else:
+                _cleaned.append(_r)
+        (
+            income_annual, income_quarterly, balance_annual, balance_quarterly,
+            cashflow_annual, cashflow_quarterly, key_metrics, fin_ratios, analyst_est,
+        ) = _cleaned
 
         return {
             "symbol": ticker.upper(),
@@ -645,7 +664,7 @@ async def get_stock_financials_full(ticker: str):
 @router.get("/{ticker}/news")
 async def get_stock_news(
     ticker: str,
-    limit: int = Query(50, le=50),
+    limit: int = Query(50, ge=1, le=50),
 ):
     """
     Get news for a specific ticker (raw + any previously enriched).

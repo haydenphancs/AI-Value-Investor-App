@@ -154,7 +154,10 @@ struct ChartCrosshairGesture: View {
 
     private func updateCrosshair(at location: CGPoint, in size: CGSize) {
         let count = pricePoints.count
-        guard count > 1 else { return }
+        // size.width > 0 is required: a zero-width GeometryReader (transient layout
+        // while scrubbing) makes `x / size.width` = NaN, and `Int(round(NaN))`
+        // TRAPS (hard crash) at the index computation below.
+        guard count > 1, size.width > 0 else { return }
         let x = min(max(location.x, 0), size.width)
 
         let clampedIdx: Int

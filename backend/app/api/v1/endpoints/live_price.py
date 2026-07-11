@@ -110,6 +110,11 @@ async def live_price_ws(
             "message": "US markets are currently closed"
         })
         await websocket.close(code=1000, reason="Market closed")
+        # This early return is BEFORE the try/finally that decrements the counter,
+        # so we must release the slot here — otherwise every market-closed connect
+        # (e.g. all weekend) permanently leaks a slot and locks the user/IP out
+        # after _MAX_CONNECTIONS_PER_KEY attempts.
+        _active_connections[conn_key] = max(0, _active_connections[conn_key] - 1)
         return
 
     # Subscribe to the ticker room

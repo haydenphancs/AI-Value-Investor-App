@@ -303,7 +303,11 @@ class CommodityService:
         # ── Step 2: Extract quote data ────────────────────────────
         price = quote.get("price") or 0
         change = quote.get("change") or 0
-        change_pct = quote.get("changePercentage") or 0
+        # FMP /quote returns the daily move under `changesPercentage` (plural) for
+        # most symbols; some feeds use `changePercentage`. Read both, then fall
+        # back to computing it from change/previousClose so commodity screens
+        # never show a hard 0.00%.
+        change_pct = quote.get("changePercentage") or quote.get("changesPercentage") or 0
         day_high = quote.get("dayHigh") or 0
         day_low = quote.get("dayLow") or 0
         year_high = quote.get("yearHigh") or 0
@@ -312,13 +316,20 @@ class CommodityService:
         avg_volume = quote.get("avgVolume") or 0
         open_price = quote.get("open") or 0
         prev_close = quote.get("previousClose") or 0
+        if not change_pct and change and prev_close:
+            try:
+                change_pct = round((float(change) / float(prev_close)) * 100, 4)
+            except (ValueError, TypeError, ZeroDivisionError):
+                change_pct = 0
 
         # ── Step 3: Build chart data ──────────────────────────────
         from app.services.chart_helper import fetch_chart_data, resolve_interval
         resolved = resolve_interval(chart_range, interval)
         if resolved != "daily" or chart_range == "ALL":
+            # Commodities trade nearly 24h — do NOT apply the equity 09:30–16:00 ET
+            # regular-hours filter (it would gut a ~23h market to a 6.5h slice).
             chart_points = await fetch_chart_data(
-                self.fmp, fmp_symbol, chart_range, interval
+                self.fmp, fmp_symbol, chart_range, interval, extended_hours=True
             )
         else:
             chart_points = self._extract_chart_data(historical, chart_range)
@@ -502,17 +513,26 @@ class CommodityService:
 
         result = []
         for p in historical:
-            if p.get("date", "") >= cutoff:
-                close = p.get("close") or p.get("adjClose")
-                if close and close > 0:
-                    result.append({
-                        "date": p.get("date"),
-                        "open": p.get("open"),
-                        "high": p.get("high"),
-                        "low": p.get("low"),
-                        "close": round(float(close), 2),
-                        "volume": p.get("volume"),
-                    })
+            date = p.get("date")
+            # `date` may be None (explicit null); `None >= cutoff` / `None < cutoff`
+            # raises TypeError, so guard before comparing.
+            if not date or date < cutoff:
+                continue
+            raw_close = p.get("close") or p.get("adjClose")
+            try:
+                close = float(raw_close) if raw_close is not None else None
+            except (ValueError, TypeError):
+                close = None
+            if close is None or close <= 0:
+                continue
+            result.append({
+                "date": date,
+                "open": p.get("open"),
+                "high": p.get("high"),
+                "low": p.get("low"),
+                "close": round(close, 2),
+                "volume": p.get("volume"),
+            })
         return result
 
     def _build_performance(self, historical: List[Dict]) -> List[PerformancePeriodResponse]:

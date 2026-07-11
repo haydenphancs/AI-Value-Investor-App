@@ -261,13 +261,7 @@ class ChatService:
 
         # Check Market Deep Dive cache for index/ETF/crypto/commodity
         cached_report = None
-        is_deep_dive = (
-            not is_stock
-            and stock_id
-            and "deep dive" in user_message.lower()
-            or "deep analysis" in user_message.lower()
-            or "market deep dive" in user_message.lower()
-        )
+        is_deep_dive = self._is_deep_dive_request(is_stock, stock_id, user_message)
         if is_deep_dive and context:
             cached_report = self._check_deep_dive_cache(stock_id, context)
 
@@ -574,24 +568,7 @@ class ChatService:
                 ticker, from_date=from_date, to_date=to_date
             )
 
-            historical_data: List[Dict[str, Any]] = []
-            # FMP's /stable/historical-price-eod/full returns a bare LIST (the legacy /api/v3
-            # endpoint returned {"historical": [...]}). Handle both, else the chart is empty.
-            if isinstance(hist_raw, list):
-                hist_list = hist_raw
-            elif isinstance(hist_raw, dict):
-                hist_list = hist_raw.get("historical", [])
-            else:
-                hist_list = []
-            for day in sorted(hist_list, key=lambda d: d.get("date", "")):
-                historical_data.append({
-                    "date": day.get("date", ""),
-                    "open": day.get("open", 0),
-                    "high": day.get("high", 0),
-                    "low": day.get("low", 0),
-                    "close": day.get("close", 0),
-                    "volume": int(day.get("volume", 0)),
-                })
+            historical_data = self._normalize_historical(hist_raw)
 
             # FMP's /stable/quote returns avgVolume=0 (documented elsewhere in the codebase). Fall
             # back to the company profile's averageVolume (what every other service uses), then to
@@ -614,30 +591,75 @@ class ChatService:
             from app.services.home_dashboard_service import _market_status
             is_market_open = _market_status()[1]
 
-            widget = StockChartWidget(
-                ticker=ticker,
-                company_name=quote.get("name", ticker),
-                current_price=quote.get("price", 0),
-                change=quote.get("change", 0),
-                change_percent=quote.get("changesPercentage", 0),
-                day_high=quote.get("dayHigh", 0),
-                day_low=quote.get("dayLow", 0),
-                volume=int(quote.get("volume", 0)),
-                avg_volume=avg_volume,
-                market_cap=quote.get("marketCap"),
-                pe_ratio=quote.get("pe"),
-                year_high=quote.get("yearHigh"),
-                year_low=quote.get("yearLow"),
-                is_market_open=is_market_open,
-                historical_data=[
-                    HistoricalDataPoint(**d) for d in historical_data
-                ],
+            return self._build_stock_widget(
+                ticker, quote, historical_data, avg_volume, is_market_open
             )
-            return widget.model_dump()
 
         except Exception as e:
             logger.error(f"FMP stock widget fetch failed for {ticker}: {e}")
             return {"error": str(e)}
+
+    # FMP fields arrive as present-but-null for halted / thinly-traded / pre-market / newly-listed
+    # tickers. `dict.get(k, 0)` only substitutes on an ABSENT key, so int(None) — or a None fed into
+    # a non-Optional float field — would abort the WHOLE widget (caught above → no chart at all).
+    # These two pure helpers coerce with the `or 0` idiom every sibling FMP service already uses,
+    # and are unit-tested directly (no network) for the null/malformed-row outliers.
+    @staticmethod
+    def _normalize_historical(hist_raw: Any) -> List[Dict[str, Any]]:
+        """FMP EOD history → sorted, null-safe OHLCV rows. Handles the /stable bare-LIST shape, the
+        legacy ``{"historical": [...]}`` dict shape, None, and non-dict / null-field rows (a single
+        bad day is coerced/skipped, never aborting the chart)."""
+        if isinstance(hist_raw, list):
+            hist_list = hist_raw
+        elif isinstance(hist_raw, dict):
+            hist_list = hist_raw.get("historical", [])
+        else:
+            hist_list = []
+        rows: List[Dict[str, Any]] = []
+        for day in sorted(
+            (d for d in hist_list if isinstance(d, dict)),
+            key=lambda d: d.get("date") or "",
+        ):
+            rows.append({
+                "date": day.get("date") or "",
+                "open": day.get("open") or 0,
+                "high": day.get("high") or 0,
+                "low": day.get("low") or 0,
+                "close": day.get("close") or 0,
+                "volume": int(day.get("volume") or 0),
+            })
+        return rows
+
+    @staticmethod
+    def _build_stock_widget(
+        ticker: str,
+        quote: Dict[str, Any],
+        historical_data: List[Dict[str, Any]],
+        avg_volume: int,
+        is_market_open: Optional[bool],
+    ) -> Dict[str, Any]:
+        """Build the StockChartWidget payload from a raw FMP quote + normalized history. Null-coerces
+        the REQUIRED numeric fields (`or 0`) so a null price/change/volume degrades to 0 instead of
+        raising a Pydantic ValidationError that drops the entire card; the genuinely-optional fields
+        (market_cap / pe / year hi-lo) stay None when absent."""
+        widget = StockChartWidget(
+            ticker=ticker,
+            company_name=quote.get("name") or ticker,
+            current_price=quote.get("price") or 0,
+            change=quote.get("change") or 0,
+            change_percent=quote.get("changesPercentage") or 0,
+            day_high=quote.get("dayHigh") or 0,
+            day_low=quote.get("dayLow") or 0,
+            volume=int(quote.get("volume") or 0),
+            avg_volume=avg_volume,
+            market_cap=quote.get("marketCap"),
+            pe_ratio=quote.get("pe"),
+            year_high=quote.get("yearHigh"),
+            year_low=quote.get("yearLow"),
+            is_market_open=is_market_open,
+            historical_data=[HistoricalDataPoint(**d) for d in historical_data],
+        )
+        return widget.model_dump()
 
     # ── FMP data fetching for the analyst tool ─────────────────────
 
@@ -906,6 +928,18 @@ class ChatService:
     # ── Deep dive cache ───────────────────────────────────────────
 
     _DEEP_DIVE_TTL_HOURS = 24
+
+    @staticmethod
+    def _is_deep_dive_request(is_stock: bool, stock_id: Optional[str], user_message: str) -> bool:
+        """Whether to route this message through the Market Deep Dive cache. That cache is for the
+        canned NON-stock request (index / ETF / crypto / commodity) and is keyed by (symbol, context)
+        — NOT by the message. The parentheses are load-bearing: without them Python's `and`/`or`
+        precedence lets 'deep analysis' / 'market deep dive' fire for ANY chat, which on a stock chat
+        serves a stale, message-agnostic cached report answering a different question."""
+        if is_stock or not stock_id:
+            return False
+        msg = user_message.lower()
+        return any(kw in msg for kw in ("deep dive", "deep analysis", "market deep dive"))
 
     def _check_deep_dive_cache(self, symbol: str, context: str) -> Optional[str]:
         """Check Supabase market_deep_dive_cache (24h TTL)."""

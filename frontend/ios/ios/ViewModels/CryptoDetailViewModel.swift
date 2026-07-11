@@ -254,10 +254,15 @@ class CryptoDetailViewModel: ObservableObject {
             print("   ⚠️ Unexpected: \(error.localizedDescription)")
         }
 
-        // Fallback to sample data so the screen isn't completely empty
-        print("   🔄 Falling back to sample data for \(cryptoSymbol)")
-        self.cryptoData = CryptoDetailData.sampleEthereum
-        self.newsArticles = TickerNewsArticle.sampleDataForTicker(cryptoSymbol)
+        // Do NOT substitute another asset's data (previously sampleEthereum) —
+        // showing Ethereum's price / ATH / snapshots on a *different* coin's
+        // screen is financial misinformation. If a prior load succeeded, keep that
+        // real data (a transient refresh failure shouldn't blank a good screen);
+        // otherwise stay in the honest skeleton/empty state. The header still shows
+        // the real symbol and pull-to-refresh retries; errorMessage drives any banner.
+        if self.cryptoData == nil {
+            self.newsArticles = []
+        }
     }
 
     // MARK: - User Actions

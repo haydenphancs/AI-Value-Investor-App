@@ -3,10 +3,28 @@ Shared chart data fetching — handles intraday, daily, and aggregated intervals
 for all asset types (stocks, crypto, ETFs, indices, commodities).
 """
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import FMPClient
+
+
+def _finite_or_none(v: Any) -> Optional[float]:
+    """Coerce to a finite float, or None.
+
+    Non-finite (NaN/Inf) and non-numeric values become None so they never reach
+    a JSON payload as an invalid ``NaN``/``Infinity`` token — which crashes the
+    iOS JSONDecoder on the WHOLE response (the chart arrays are typed
+    ``List[Dict[str, Any]]`` / ``close: float`` and get no Pydantic guard).
+    """
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (ValueError, TypeError):
+        return None
+    return f if math.isfinite(f) else None
 
 # Valid interval values
 INTRADAY_INTERVALS = {"1min", "5min", "15min", "30min", "1hour", "4hour"}
@@ -233,19 +251,29 @@ def _parse_historical(raw) -> List[Dict]:
 
 
 def _normalize_prices(prices: List[Dict]) -> List[Dict]:
-    """Extract standard OHLCV fields from price data."""
+    """Extract standard OHLCV fields from price data.
+
+    Rows with a missing/blank ``date`` or a non-finite / non-positive ``close``
+    are dropped: a ``date=None`` crashes ``_filter_regular_hours`` (``len(None)``)
+    and downstream schemas that require ``date: str``, and a non-finite close
+    poisons a REQUIRED numeric field with an invalid JSON token.
+    """
     result = []
     for p in prices:
-        close = p.get("close") or p.get("adjClose")
-        if close and float(close) > 0:
-            result.append({
-                "date": p.get("date"),
-                "open": p.get("open"),
-                "high": p.get("high"),
-                "low": p.get("low"),
-                "close": float(close),
-                "volume": p.get("volume"),
-            })
+        date = p.get("date")
+        if not date:
+            continue
+        close = _finite_or_none(p.get("close") or p.get("adjClose"))
+        if close is None or close <= 0:
+            continue
+        result.append({
+            "date": date,
+            "open": _finite_or_none(p.get("open")),
+            "high": _finite_or_none(p.get("high")),
+            "low": _finite_or_none(p.get("low")),
+            "close": close,
+            "volume": _finite_or_none(p.get("volume")),
+        })
     return result
 
 
@@ -279,15 +307,14 @@ def _aggregate_prices(
     result = []
     for key in sorted(groups.keys()):
         candles = groups[key]
-        opens = [c.get("open") for c in candles if c.get("open")]
-        highs = [c.get("high") for c in candles if c.get("high")]
-        lows = [c.get("low") for c in candles if c.get("low")]
+        opens = [f for f in (_finite_or_none(c.get("open")) for c in candles) if f is not None]
+        highs = [f for f in (_finite_or_none(c.get("high")) for c in candles) if f is not None]
+        lows = [f for f in (_finite_or_none(c.get("low")) for c in candles) if f is not None]
         closes = [
-            c.get("close") or c.get("adjClose")
-            for c in candles
-            if c.get("close") or c.get("adjClose")
+            f for f in (_finite_or_none(c.get("close") or c.get("adjClose")) for c in candles)
+            if f is not None and f > 0
         ]
-        volumes = [c.get("volume") or 0 for c in candles]
+        volumes = [f for f in (_finite_or_none(c.get("volume")) for c in candles) if f]
 
         if closes:
             result.append({
@@ -295,7 +322,7 @@ def _aggregate_prices(
                 "open": opens[0] if opens else None,
                 "high": max(highs) if highs else None,
                 "low": min(lows) if lows else None,
-                "close": float(closes[-1]),
-                "volume": sum(v for v in volumes if v),
+                "close": closes[-1],
+                "volume": sum(volumes),
             })
     return result

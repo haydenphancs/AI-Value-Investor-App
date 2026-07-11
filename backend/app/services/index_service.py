@@ -223,10 +223,13 @@ def _compute_index_pe_from_sectors() -> Optional[float]:
         # Sort periods descending (Q1'26 > Q4'25 > Q3'25 ...) and pick
         # the most recent one with >= 8 sectors
         def period_sort_key(label: str) -> str:
-            # Convert Q1'25 → 2025-1, Q4'24 → 2024-4 for proper sorting
+            # Labels are "Q1'25" / "Q4'24" (no space) — sort by year then quarter.
+            # The old `.split()` (whitespace) returned a single token for the
+            # spaceless label, so `q, y = ...` always raised and every label fell
+            # back to a raw lexicographic sort that ordered Q4'24 ahead of Q1'25.
             try:
-                q, y = label.replace("'", "").replace("Q", "").split()
-                return f"20{y}-{q}"
+                q_part, y_part = label.replace("Q", "").split("'")
+                return f"{int(y_part):02d}-{int(q_part):02d}"
             except Exception:
                 return label
 

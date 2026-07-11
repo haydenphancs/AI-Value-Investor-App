@@ -265,7 +265,10 @@ struct MACDRenderer: View {
 
             let allValues = (visibleMACD + visibleSignal + visibleHistogram).compactMap { $0 }
             guard !allValues.isEmpty else { return }
-            let maxVal = allValues.map { abs($0) }.max() ?? 1
+            // Clamp away from 0: a flat/halted stock yields all-zero MACD, so
+            // `.max()` is 0 and `value / maxVal` = 0/0 = NaN, producing NaN Path
+            // coordinates. A tiny floor keeps every bar/line at y = midY instead.
+            let maxVal = max(allValues.map { abs($0) }.max() ?? 1, 1e-9)
             let midY = canvasSize.height / 2
 
             func yPos(_ value: Double) -> CGFloat {

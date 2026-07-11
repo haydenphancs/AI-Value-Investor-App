@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
 
-import google.generativeai as genai
+from google.genai import types
 
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
@@ -27,9 +27,9 @@ logger = logging.getLogger(__name__)
 
 # ── Gemini Function-Calling tool declaration ────────────────────────
 
-_STOCK_CHART_TOOL = genai.protos.Tool(
+_STOCK_CHART_TOOL = types.Tool(
     function_declarations=[
-        genai.protos.FunctionDeclaration(
+        types.FunctionDeclaration(
             name="get_stock_chart_data",
             description=(
                 "Fetch current stock quote and 30-day historical price data "
@@ -37,11 +37,11 @@ _STOCK_CHART_TOOL = genai.protos.Tool(
                 "asks about a specific stock's price, performance, chart, or "
                 "whether they should buy/sell a stock."
             ),
-            parameters=genai.protos.Schema(
-                type=genai.protos.Type.OBJECT,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
                 properties={
-                    "ticker": genai.protos.Schema(
-                        type=genai.protos.Type.STRING,
+                    "ticker": types.Schema(
+                        type=types.Type.STRING,
                         description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
                     ),
                 },
@@ -51,9 +51,9 @@ _STOCK_CHART_TOOL = genai.protos.Tool(
     ]
 )
 
-_ANALYST_ANALYSIS_TOOL = genai.protos.Tool(
+_ANALYST_ANALYSIS_TOOL = types.Tool(
     function_declarations=[
-        genai.protos.FunctionDeclaration(
+        types.FunctionDeclaration(
             name="get_analyst_analysis",
             description=(
                 "Fetch Wall Street analyst ratings, consensus, price targets, "
@@ -62,11 +62,11 @@ _ANALYST_ANALYSIS_TOOL = genai.protos.Tool(
                 "consensus ratings, price targets, upgrades, downgrades, or "
                 "why a stock is rated as a buy or sell."
             ),
-            parameters=genai.protos.Schema(
-                type=genai.protos.Type.OBJECT,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
                 properties={
-                    "ticker": genai.protos.Schema(
-                        type=genai.protos.Type.STRING,
+                    "ticker": types.Schema(
+                        type=types.Type.STRING,
                         description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
                     ),
                 },
@@ -76,9 +76,9 @@ _ANALYST_ANALYSIS_TOOL = genai.protos.Tool(
     ]
 )
 
-_SENTIMENT_ANALYSIS_TOOL = genai.protos.Tool(
+_SENTIMENT_ANALYSIS_TOOL = types.Tool(
     function_declarations=[
-        genai.protos.FunctionDeclaration(
+        types.FunctionDeclaration(
             name="get_sentiment_analysis",
             description=(
                 "Fetch market sentiment analysis and mood data for a given ticker symbol. "
@@ -87,11 +87,11 @@ _SENTIMENT_ANALYSIS_TOOL = genai.protos.Tool(
                 "mood, why a stock feels bearish or bullish, social media buzz, or "
                 "what people are saying about a stock."
             ),
-            parameters=genai.protos.Schema(
-                type=genai.protos.Type.OBJECT,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
                 properties={
-                    "ticker": genai.protos.Schema(
-                        type=genai.protos.Type.STRING,
+                    "ticker": types.Schema(
+                        type=types.Type.STRING,
                         description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
                     ),
                 },
@@ -102,9 +102,9 @@ _SENTIMENT_ANALYSIS_TOOL = genai.protos.Tool(
 )
 
 
-_MARKET_OVERVIEW_TOOL = genai.protos.Tool(
+_MARKET_OVERVIEW_TOOL = types.Tool(
     function_declarations=[
-        genai.protos.FunctionDeclaration(
+        types.FunctionDeclaration(
             name="get_market_overview",
             description=(
                 "Fetch current market valuation (P/E ratio, forward P/E, earnings yield), "
@@ -113,11 +113,11 @@ _MARKET_OVERVIEW_TOOL = genai.protos.Tool(
                 "market deep dive, sector rotation, market valuation, or macro outlook. "
                 "This is for INDEX analysis only, not individual stocks."
             ),
-            parameters=genai.protos.Schema(
-                type=genai.protos.Type.OBJECT,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
                 properties={
-                    "symbol": genai.protos.Schema(
-                        type=genai.protos.Type.STRING,
+                    "symbol": types.Schema(
+                        type=types.Type.STRING,
                         description="The index symbol (e.g. ^GSPC, ^DJI, ^IXIC).",
                     ),
                 },

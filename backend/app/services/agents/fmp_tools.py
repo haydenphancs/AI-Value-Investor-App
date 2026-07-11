@@ -7,13 +7,13 @@ These tools let it request ADDITIONAL data based on what it discovers — e.g.,
 quarterly financials to spot trends, dividend history for yield analysis,
 sector data for competitive context.
 
-Uses google.generativeai.protos for Gemini-compatible function declarations.
+Uses google.genai types for Gemini-compatible function declarations.
 """
 
 import logging
 from typing import Dict, Any, Callable, Awaitable
 
-import google.generativeai.protos as protos
+from google.genai import types
 
 from app.integrations.fmp import FMPClient
 
@@ -23,106 +23,106 @@ logger = logging.getLogger(__name__)
 # ── Gemini Function Declarations ──────────────────────────────────────────────
 
 
-def build_fmp_tool_declarations() -> protos.Tool:
+def build_fmp_tool_declarations() -> types.Tool:
     """Build Gemini Tool with FMP function declarations for agentic research."""
 
-    return protos.Tool(
+    return types.Tool(
         function_declarations=[
-            protos.FunctionDeclaration(
+            types.FunctionDeclaration(
                 name="fetch_quarterly_financials",
                 description=(
                     "Fetch quarterly financial statements to analyze seasonal trends, "
                     "recent quarter performance, or detect acceleration/deceleration "
                     "in revenue and margins."
                 ),
-                parameters=protos.Schema(
-                    type=protos.Type.OBJECT,
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
                     properties={
-                        "ticker": protos.Schema(
-                            type=protos.Type.STRING,
+                        "ticker": types.Schema(
+                            type=types.Type.STRING,
                             description="Stock ticker symbol",
                         ),
-                        "statement_type": protos.Schema(
-                            type=protos.Type.STRING,
+                        "statement_type": types.Schema(
+                            type=types.Type.STRING,
                             description="Type of financial statement",
                             enum=["income", "balance_sheet", "cash_flow"],
                         ),
-                        "limit": protos.Schema(
-                            type=protos.Type.INTEGER,
+                        "limit": types.Schema(
+                            type=types.Type.INTEGER,
                             description="Number of quarters (default 8)",
                         ),
                     },
                     required=["ticker", "statement_type"],
                 ),
             ),
-            protos.FunctionDeclaration(
+            types.FunctionDeclaration(
                 name="fetch_dividend_history",
                 description=(
                     "Fetch dividend payment history to analyze yield trends, "
                     "payout ratio sustainability, and dividend growth rate."
                 ),
-                parameters=protos.Schema(
-                    type=protos.Type.OBJECT,
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
                     properties={
-                        "ticker": protos.Schema(
-                            type=protos.Type.STRING,
+                        "ticker": types.Schema(
+                            type=types.Type.STRING,
                             description="Stock ticker symbol",
                         ),
-                        "limit": protos.Schema(
-                            type=protos.Type.INTEGER,
+                        "limit": types.Schema(
+                            type=types.Type.INTEGER,
                             description="Number of dividend records (default 20)",
                         ),
                     },
                     required=["ticker"],
                 ),
             ),
-            protos.FunctionDeclaration(
+            types.FunctionDeclaration(
                 name="fetch_sector_performance",
                 description=(
                     "Fetch current sector performance to contextualize the stock's "
                     "performance relative to its sector and broader market trends."
                 ),
-                parameters=protos.Schema(
-                    type=protos.Type.OBJECT,
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
                     properties={},
                 ),
             ),
-            protos.FunctionDeclaration(
+            types.FunctionDeclaration(
                 name="fetch_more_news",
                 description=(
                     "Fetch additional recent news articles about a company to "
                     "identify catalysts, risks, or sentiment shifts."
                 ),
-                parameters=protos.Schema(
-                    type=protos.Type.OBJECT,
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
                     properties={
-                        "ticker": protos.Schema(
-                            type=protos.Type.STRING,
+                        "ticker": types.Schema(
+                            type=types.Type.STRING,
                             description="Stock ticker symbol",
                         ),
-                        "limit": protos.Schema(
-                            type=protos.Type.INTEGER,
+                        "limit": types.Schema(
+                            type=types.Type.INTEGER,
                             description="Number of articles (default 10)",
                         ),
                     },
                     required=["ticker"],
                 ),
             ),
-            protos.FunctionDeclaration(
+            types.FunctionDeclaration(
                 name="fetch_extended_financials",
                 description=(
                     "Fetch extended annual financial history (up to 10 years) "
                     "for long-term trend analysis on income, balance sheet, or cash flow."
                 ),
-                parameters=protos.Schema(
-                    type=protos.Type.OBJECT,
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
                     properties={
-                        "ticker": protos.Schema(
-                            type=protos.Type.STRING,
+                        "ticker": types.Schema(
+                            type=types.Type.STRING,
                             description="Stock ticker symbol",
                         ),
-                        "statement_type": protos.Schema(
-                            type=protos.Type.STRING,
+                        "statement_type": types.Schema(
+                            type=types.Type.STRING,
                             description="Type of financial statement",
                             enum=["income", "balance_sheet", "cash_flow"],
                         ),
@@ -130,18 +130,18 @@ def build_fmp_tool_declarations() -> protos.Tool:
                     required=["ticker", "statement_type"],
                 ),
             ),
-            protos.FunctionDeclaration(
+            types.FunctionDeclaration(
                 name="research_complete",
                 description=(
                     "Signal that you have gathered enough data and are ready to "
                     "produce the final analysis. Call this when you don't need "
                     "any additional financial data."
                 ),
-                parameters=protos.Schema(
-                    type=protos.Type.OBJECT,
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
                     properties={
-                        "summary": protos.Schema(
-                            type=protos.Type.STRING,
+                        "summary": types.Schema(
+                            type=types.Type.STRING,
                             description="Brief summary of key findings from your research",
                         ),
                     },

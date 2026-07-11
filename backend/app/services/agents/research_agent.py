@@ -32,8 +32,7 @@ import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-import google.generativeai as genai
-import google.generativeai.protos as protos
+from google.genai import types
 
 from app.integrations.fmp import FMPClient
 from app.integrations.gemini import GeminiClient, _call_with_timeout
@@ -63,17 +62,25 @@ logger = logging.getLogger(__name__)
 MAX_AGENTIC_ROUNDS = 4
 
 
+def _response_parts(response: Any) -> List[Any]:
+    """Parts of the first candidate. The unified SDK has no top-level
+    `response.parts`; parts live under `candidates[0].content.parts`."""
+    try:
+        cand = (response.candidates or [None])[0]
+        if cand and cand.content and cand.content.parts:
+            return list(cand.content.parts)
+    except (AttributeError, TypeError, IndexError):
+        pass
+    return []
+
+
 def _safe_response_text(response: Any) -> str:
     """Defensive accessor for Gemini's `response.text`.
 
-    The SDK's `.text` property is a quick accessor that raises ValueError
-    when the candidate has no text Part (e.g. only function calls, or
-    `finish_reason=STOP` with empty content). `hasattr(response, "text")`
-    returns True even in those cases because `text` is a declared property
-    — so we have to wrap the access itself.
-
-    Falls back to walking `response.parts` and concatenating any text
-    parts we can find, then returns "" as a last resort.
+    The SDK's `.text` property raises ValueError when the candidate has no text
+    Part (e.g. only function calls, or `finish_reason=STOP` with empty content),
+    so we wrap the access itself. Falls back to walking the candidate's parts and
+    concatenating any text parts, then returns "" as a last resort.
     """
     try:
         return response.text or ""
@@ -81,7 +88,7 @@ def _safe_response_text(response: Any) -> str:
         pass
     try:
         chunks: List[str] = []
-        for p in (response.parts or []):
+        for p in _response_parts(response):
             try:
                 t = p.text
             except (ValueError, AttributeError):
@@ -89,7 +96,7 @@ def _safe_response_text(response: Any) -> str:
             if t:
                 chunks.append(t)
         return "\n".join(chunks)
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return ""
 
 
@@ -222,16 +229,12 @@ class ResearchAgent:
         )
 
         try:
-            model = genai.GenerativeModel(
-                model_name=self.gemini.model_name,
-                generation_config={
-                    "temperature": 0.7,
-                    "max_output_tokens": 8192,
-                },
+            chat = self.gemini.create_tool_chat(
                 system_instruction=persona_instruction,
                 tools=[tools],
+                temperature=0.7,
+                max_output_tokens=8192,
             )
-            chat = model.start_chat(history=[])
 
             final_text = ""
             response = None
@@ -243,13 +246,13 @@ class ResearchAgent:
 
                 if round_num == 0:
                     response = await _call_with_timeout(
-                        chat.send_message, research_prompt,
+                        chat.send_message(research_prompt)
                     )
 
                 # Walk parts: handle function calls; collect tool responses
                 has_function_call = False
-                response_parts: List[protos.Part] = []
-                for part in response.parts:
+                response_parts: List[types.Part] = []
+                for part in _response_parts(response):
                     fc = part.function_call
                     if not (fc and fc.name):
                         continue
@@ -281,19 +284,17 @@ class ResearchAgent:
                             result = {"error": str(e)}
 
                     response_parts.append(
-                        protos.Part(
-                            function_response=protos.FunctionResponse(
-                                name=fc.name,
-                                response={
-                                    "result": json.dumps(result, default=str)[:5000]
-                                },
-                            )
+                        types.Part.from_function_response(
+                            name=fc.name,
+                            response={
+                                "result": json.dumps(result, default=str)[:5000]
+                            },
                         )
                     )
 
                 if has_function_call and response_parts:
                     response = await _call_with_timeout(
-                        chat.send_message, response_parts,
+                        chat.send_message(response_parts)
                     )
                     continue
 

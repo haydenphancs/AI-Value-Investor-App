@@ -76,6 +76,9 @@ class StockChartWidget(BaseModel):
     pe_ratio: Optional[float] = None
     year_high: Optional[float] = None
     year_low: Optional[float] = None
+    # None = unknown (old builds/data); True = US session open → the card shows a green "Live"
+    # dot, otherwise "Closed". Optional so old iOS builds ignore it (subset parity holds).
+    is_market_open: Optional[bool] = None
     historical_data: List[HistoricalDataPoint] = []
 
 

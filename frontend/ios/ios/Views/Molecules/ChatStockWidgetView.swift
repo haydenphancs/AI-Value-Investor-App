@@ -68,11 +68,11 @@ struct ChatStockWidgetView: View {
 
             Spacer()
 
-            // Live dot
+            // Market status: green "Live" only while the US session is open, else a muted "Closed".
             Circle()
-                .fill(AppColors.bullish)
+                .fill((widget.isMarketOpen ?? false) ? AppColors.bullish : AppColors.textMuted)
                 .frame(width: 6, height: 6)
-            Text("Live")
+            Text((widget.isMarketOpen ?? false) ? "Live" : "Closed")
                 .font(AppTypography.captionSmall)
                 .foregroundColor(AppColors.textMuted)
         }
@@ -178,29 +178,26 @@ struct ChatStockWidgetView: View {
 
     // MARK: - Stats Grid
     private var statsGrid: some View {
-        VStack(spacing: AppSpacing.md) {
-            HStack {
-                WidgetStatItem(label: "Day High", value: widget.formattedDayHigh)
-                Spacer()
-                WidgetStatItem(label: "Day Low", value: widget.formattedDayLow)
+        // A real fixed 2-column grid so every stat aligns in a column (the old hand-rolled HStack +
+        // Spacer rows floated Market Cap to the right edge). Order puts Market Cap in the LEFT column,
+        // aligned under Volume / Day High.
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(), alignment: .leading),
+                GridItem(.flexible(), alignment: .leading),
+            ],
+            alignment: .leading,
+            spacing: AppSpacing.md
+        ) {
+            WidgetStatItem(label: "Day High", value: widget.formattedDayHigh)
+            WidgetStatItem(label: "Day Low", value: widget.formattedDayLow)
+            WidgetStatItem(label: "Volume", value: widget.formattedVolume)
+            WidgetStatItem(label: "Avg Volume", value: widget.formattedAvgVolume)
+            if let mc = widget.formattedMarketCap {
+                WidgetStatItem(label: "Market Cap", value: mc)
             }
-
-            HStack {
-                WidgetStatItem(label: "Volume", value: widget.formattedVolume)
-                Spacer()
-                WidgetStatItem(label: "Avg Volume", value: widget.formattedAvgVolume)
-            }
-
-            if widget.peRatio != nil || widget.formattedMarketCap != nil {
-                HStack {
-                    if let pe = widget.peRatio {
-                        WidgetStatItem(label: "P/E Ratio", value: String(format: "%.1f", pe))
-                    }
-                    Spacer()
-                    if let mc = widget.formattedMarketCap {
-                        WidgetStatItem(label: "Market Cap", value: mc)
-                    }
-                }
+            if let pe = widget.peRatio {
+                WidgetStatItem(label: "P/E Ratio", value: String(format: "%.1f", pe))
             }
         }
     }

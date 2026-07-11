@@ -94,11 +94,23 @@ struct ChatThinking: Codable, Sendable {
     let stages: [String]
     let sourceCount: Int?
     let elapsedMs: Int?
+    /// The model's streamed reasoning preamble — replaces the old canned "stages". nil/empty for
+    /// legacy rows (which still carry `stages`). (Backend always sends `stages`, now as `[]`.)
+    let reasoning: String?
 
     enum CodingKeys: String, CodingKey {
-        case stages
+        case stages, reasoning
         case sourceCount = "source_count"
         case elapsedMs = "elapsed_ms"
+    }
+
+    // Defaulted init so callers can construct without every field (a `let` optional is otherwise
+    // required by the synthesized memberwise init). Codable decode/encode stay synthesized.
+    init(stages: [String] = [], sourceCount: Int? = nil, elapsedMs: Int? = nil, reasoning: String? = nil) {
+        self.stages = stages
+        self.sourceCount = sourceCount
+        self.elapsedMs = elapsedMs
+        self.reasoning = reasoning
     }
 
     /// True while the answer is still being produced (drives the animated header).
@@ -106,6 +118,16 @@ struct ChatThinking: Codable, Sendable {
 
     /// Elapsed seconds for the "Done in Xs" label (min 1s so it never reads "0s").
     var elapsedSeconds: Int { max(1, Int((Double(elapsedMs ?? 0) / 1000).rounded())) }
+
+    /// Trimmed reasoning text if non-empty (the card renders reasoning when present, else stages).
+    var reasoningText: String? {
+        guard let r = reasoning?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty else { return nil }
+        return r
+    }
+
+    /// Whether the thinking card should render at all: while active (shows "Thinking…"), or once
+    /// there is reasoning / stages to show. (A done message with neither → no card.)
+    var shouldDisplay: Bool { isActive || reasoningText != nil || !stages.isEmpty }
 }
 
 // MARK: - Rich Chat Message
@@ -166,6 +188,8 @@ struct StockChartWidgetData: Codable, Identifiable {
     let peRatio: Double?
     let yearHigh: Double?
     let yearLow: Double?
+    /// nil = unknown; true = US session open → the card shows a green "Live" dot, else "Closed".
+    let isMarketOpen: Bool?
     let historicalData: [HistoricalDataPointDTO]
 
     enum CodingKeys: String, CodingKey {
@@ -183,6 +207,7 @@ struct StockChartWidgetData: Codable, Identifiable {
         case peRatio = "pe_ratio"
         case yearHigh = "year_high"
         case yearLow = "year_low"
+        case isMarketOpen = "is_market_open"
         case historicalData = "historical_data"
     }
 
@@ -746,6 +771,7 @@ extension StockChartWidgetData {
         peRatio: 62.3,
         yearHigh: 299.29,
         yearLow: 138.80,
+        isMarketOpen: true,
         historicalData: [
             HistoricalDataPointDTO(date: "2026-01-30", open: 220, high: 223, low: 218, close: 220, volume: 80_000_000),
             HistoricalDataPointDTO(date: "2026-01-31", open: 221, high: 227, low: 220, close: 225, volume: 85_000_000),

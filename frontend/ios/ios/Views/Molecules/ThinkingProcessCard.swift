@@ -21,7 +21,7 @@ struct ThinkingProcessCard: View {
 
     private var headerText: String {
         if thinking.isActive {
-            return thinking.stages.last ?? "Thinking…"
+            return thinking.reasoningText != nil ? "Thinking…" : (thinking.stages.last ?? "Thinking…")
         }
         let n = thinking.sourceCount ?? sources.count
         let src = n > 0 ? " · \(n) source\(n == 1 ? "" : "s")" : ""
@@ -85,18 +85,27 @@ struct ThinkingProcessCard: View {
 
     private var expandedBody: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            // Progress steps
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(Array(thinking.stages.enumerated()), id: \.offset) { idx, stage in
-                    let isCurrent = thinking.isActive && idx == thinking.stages.count - 1
-                    HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: isCurrent ? "circle.dashed" : "checkmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(isCurrent ? AppColors.primaryBlue : AppColors.textMuted)
-                            .frame(width: 12)
-                        Text(stage)
-                            .font(AppTypography.captionSmall)
-                            .foregroundColor(AppColors.textSecondary)
+            if let reasoning = thinking.reasoningText {
+                // The model's streamed reasoning (grows sentence-by-sentence while active).
+                Text(reasoning)
+                    .font(AppTypography.captionSmall)
+                    .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                // Legacy discrete stages (older messages, or the non-reasoning fallback path).
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(thinking.stages.enumerated()), id: \.offset) { idx, stage in
+                        let isCurrent = thinking.isActive && idx == thinking.stages.count - 1
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: isCurrent ? "circle.dashed" : "checkmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(isCurrent ? AppColors.primaryBlue : AppColors.textMuted)
+                                .frame(width: 12)
+                            Text(stage)
+                                .font(AppTypography.captionSmall)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
                     }
                 }
             }

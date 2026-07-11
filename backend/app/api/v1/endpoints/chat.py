@@ -322,23 +322,15 @@ async def stream_chat_message(
         suggestions = None
         streamed_any = False
 
-        # Synthesized "thinking" stages tied to the REAL pipeline steps (resolve context →
-        # RAG/enrich → stream). Server-authored strings only — never model text — so there is
-        # zero identity-leak risk. Collected so a reloaded message re-shows the same card.
-        # Only surface the ticker for ticker-shaped contexts; a Money Moves / Journey / Book
-        # reference_id is an internal slug and must NOT leak into the user-facing card.
-        ticker_label = ""
-        if ctx_type and ctx_type.strip().upper() in ChatService._TICKER_CONTEXTS:
-            ticker_label = (ref_id or stock_id or "").split("|")[0].strip().upper()
-        thinking_stages: List[str] = []
-
-        def _stage(label: str) -> str:
-            thinking_stages.append(label)
-            return _sse("thinking", {"stage": label, "index": len(thinking_stages), "total": 3})
+        # The model streams a short REASONING preamble, then a `===ANSWER===` line, then the answer.
+        # The splitter routes the preamble to the thinking card (`reasoning` frames) and the answer to
+        # the bubble (`token` frames); it's robust if the model ignores the format (everything → answer,
+        # so the answer is never lost). Reasoning is model text → it rides the same identity-guarded
+        # system instruction which forbids "AI/model" mentions.
+        from app.services.chat_service import ReasoningStreamSplitter
+        reasoning_text = ""
 
         try:
-            yield _stage(f"Reading {ticker_label}'s data" if ticker_label else "Reading your screen")
-
             prep = await chat_service.prepare_stream_generation(
                 session_id=session_id,
                 user_message=user_message,
@@ -351,25 +343,29 @@ async def stream_chat_message(
             # Capture sources up-front so they survive even if streaming later fails and we
             # fall back to full generation below.
             sources = prep.get("sources")
-
-            yield _stage("Reviewing the sources")
             if sources:
                 yield _sse("sources", {"sources": sources})
 
-            yield _stage("Writing your answer")
-
-            acc: List[str] = []
+            splitter = ReasoningStreamSplitter()
             async for delta in chat_service.gemini.stream_text(
                 prep["prompt"], system_instruction=prep["system_instruction"]
             ):
-                acc.append(delta)
                 streamed_any = True
-                yield _sse("token", {"delta": delta})
+                r_chunks, a_chunk = splitter.feed(delta)
+                for rc in r_chunks:
+                    yield _sse("reasoning", {"delta": rc})
+                if a_chunk:
+                    yield _sse("token", {"delta": a_chunk})
+            r_chunks, a_chunk = splitter.finish()
+            for rc in r_chunks:
+                yield _sse("reasoning", {"delta": rc})
+            if a_chunk:
+                yield _sse("token", {"delta": a_chunk})
 
-            joined = "".join(acc).strip()
-            if not joined:
+            if not splitter.answer.strip():
                 raise RuntimeError("empty stream result")
-            content = "".join(acc)
+            content = splitter.answer
+            reasoning_text = splitter.reasoning
             citations = prep.get("citations")
             widget = prep.get("widget")
 
@@ -415,7 +411,8 @@ async def stream_chat_message(
 
         elapsed_ms = int((_time.monotonic() - started) * 1000)
         thinking_payload = {
-            "stages": thinking_stages,
+            "stages": [],                    # canned steps replaced by the streamed reasoning below
+            "reasoning": reasoning_text,
             "source_count": len(sources) if sources else 0,
             "elapsed_ms": elapsed_ms,
         }

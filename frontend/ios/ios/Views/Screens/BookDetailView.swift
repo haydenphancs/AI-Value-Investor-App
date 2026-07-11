@@ -416,6 +416,12 @@ private struct BookDetailListenRow: View {
         progress.hasProgress(order: book.curriculumOrder)
     }
 
+    // Every core finished — resumeCore returns the last core in this state, so "Continue Core N"
+    // would wrongly point at an already-read core; show a restart affordance instead.
+    private var isMastered: Bool {
+        progress.isMastered(order: book.curriculumOrder, totalCores: book.chapterCount)
+    }
+
     // The core to resume from: the first one they haven't finished yet.
     private var resumeCoreNumber: Int {
         progress.resumeCore(order: book.curriculumOrder, totalCores: book.chapterCount)
@@ -425,13 +431,17 @@ private struct BookDetailListenRow: View {
     private var bookAudioEpisode: AudioEpisode { book.audioEpisode }
 
     private var resumeStartSeconds: TimeInterval {
-        TimeInterval(book.coreStartSeconds(resumeCoreNumber) ?? 0)
+        // A fully-read book "Listen Again"s from the top; otherwise resume at the first unfinished core.
+        if isMastered { return 0 }
+        return TimeInterval(book.coreStartSeconds(resumeCoreNumber) ?? 0)
     }
 
     // Button label based on state
     private var buttonLabel: String {
         if isResumeCorePlaying {
             return "Now Playing"
+        } else if isMastered {
+            return "Listen Again"
         } else if hasProgress {
             return "Continue Core \(resumeCoreNumber)"
         } else {

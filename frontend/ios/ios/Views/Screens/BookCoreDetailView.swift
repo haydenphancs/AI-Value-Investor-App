@@ -75,12 +75,49 @@ struct BookCoreDetailView: View {
         return audioManager.currentTime
     }
 
-    /// Index of the narrated block currently being read (drives auto-scroll), if any.
-    private var activeReadAlongBlock: Int? {
-        guard let t = readAlongActiveTime else { return nil }
-        return readAlongBlocks.firstIndex { blk in
-            blk.sentences.contains { t >= $0.start && t < $0.end }
+    /// Read-along block for each content SECTION index, matched by text in render order — NOT by raw
+    /// position. The read-along table drops non-narrated sections (e.g. the "The Action Plan"
+    /// heading), so `content.sections[i]` is NOT always `readAlongBlocks[i]`: when two headings sit
+    /// consecutively before the action plan, the dropped heading shifts every later block by one, so
+    /// a positional pairing renders the WRONG heading, drops one, and duplicates the last paragraph
+    /// (seen in book4/core6, book6/core12, book9/core3). Walking both lists and consuming a block
+    /// only when its text matches the section keeps every section on its OWN text; a narrated
+    /// section that fails to match simply renders without the live highlight (never someone else's
+    /// text).
+    private var readAlongBySection: [Int: ReadAlongBlock] {
+        let blocks = readAlongBlocks
+        guard !blocks.isEmpty else { return [:] }
+        var map: [Int: ReadAlongBlock] = [:]
+        var b = 0
+        for (i, section) in content.sections.enumerated() {
+            guard b < blocks.count, let text = Self.narratedText(of: section) else { continue }
+            if Self.readAlongKey(text) == Self.readAlongKey(blocks[b].joinedText) {
+                map[i] = blocks[b]
+                b += 1
+            }
         }
+        return map
+    }
+
+    /// The text a section contributes to the narration (heading/paragraph); nil for non-text blocks
+    /// (quote/action-plan/etc.) which never carry read-along timings.
+    private static func narratedText(of section: CoreChapterSection) -> String? {
+        if case let .text(t) = section.content { return t }
+        return nil
+    }
+
+    /// Match key: alphanumerics only, lowercased — robust to whitespace / punctuation / smart-quote
+    /// differences between the authored section text and the force-aligned sentence splits.
+    private static func readAlongKey(_ s: String) -> String {
+        String(String.UnicodeScalarView(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }))
+    }
+
+    /// SECTION index of the block currently being read (drives auto-scroll), if any.
+    private var activeReadAlongSection: Int? {
+        guard let t = readAlongActiveTime else { return nil }
+        return readAlongBySection.first { _, block in
+            block.sentences.contains { t >= $0.start && t < $0.end }
+        }?.key
     }
 
     private var isCurrentCoreCompleted: Bool {
@@ -134,10 +171,11 @@ struct BookCoreDetailView: View {
                     // narrated prefix) renders normally. readAlongBlocks aligns 1:1 with the
                     // narrated sections, so index < count == "this section is narrated".
                     LazyVStack(alignment: .leading, spacing: AppSpacing.xxl) {
+                        let blockBySection = readAlongBySection
                         ForEach(Array(content.sections.enumerated()), id: \.element.id) { index, section in
-                            if index < readAlongBlocks.count {
+                            if let block = blockBySection[index] {
                                 ReadAlongBlockView(
-                                    block: readAlongBlocks[index],
+                                    block: block,
                                     activeTime: readAlongActiveTime
                                 )
                                 .id("readAlongBlock-\(index)")
@@ -175,7 +213,7 @@ struct BookCoreDetailView: View {
             .onPreferenceChange(CoreDetailScrollOffsetKey.self) { value in
                 handleScrollChange(newOffset: value)
             }
-            .onChange(of: activeReadAlongBlock) { _, newValue in
+            .onChange(of: activeReadAlongSection) { _, newValue in
                 // Follow the narration: gently center the block being read, without tripping the
                 // scroll-driven player hide. Only while actually playing.
                 guard audioManager.isPlaying, let idx = newValue else { return }
@@ -454,6 +492,13 @@ struct BookCoreDetailView: View {
         audioManager.setCompactMode(false, reason: compactToken)
         showAIChat = true
     }
+}
+
+// MARK: - Read-along block text
+private extension ReadAlongBlock {
+    /// The block's full narrated text — its sentence texts rejoined (used to match a block to the
+    /// content section that produced it).
+    var joinedText: String { sentences.map(\.text).joined(separator: " ") }
 }
 
 // MARK: - Scroll Offset Preference Key

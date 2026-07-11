@@ -46,18 +46,13 @@ struct AIChatScreen: View {
             ZStack {
                 AppColors.background.ignoresSafeArea()
 
-                // Futuristic aura — soft blue→cyan glow behind the top bar and the input bar.
-                // Sibling/overlay layer only (never wraps interactive content); hidden with history.
+                // Futuristic aura — a single subtle, STATIC blue→cyan wash across the WHOLE screen
+                // (one full-screen gradient, no localized blobs → no visible seam). Sibling/overlay
+                // layer only (never wraps interactive content); hidden while history is shown.
                 if !showingHistory {
-                    VStack {
-                        ChatAuraGlow()
-                            .frame(height: 240)
-                        Spacer()
-                        ChatAuraGlow(intensity: 0.9)
-                            .frame(height: 220)
-                    }
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
+                    ChatAuraGlow()
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
                 }
 
                 // Chat content (hidden when history is shown)

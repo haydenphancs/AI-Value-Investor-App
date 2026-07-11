@@ -341,8 +341,12 @@ struct LibraryBook: Identifiable {
     }
 
     var formattedAudioDuration: String {
-        let minutes = audioDurationSeconds / 60
-        let seconds = audioDurationSeconds % 60
+        // Prefer the REAL measured narration length (what the player scrubs) over the word-count
+        // estimate — they diverge for every book (e.g. Rich Dad est 17:34 vs real 23:06), so the
+        // estimate under the Play button mismatched the actual audio. Mirrors audioEpisode.duration.
+        let total = bookAudioInfo?.totalSeconds ?? audioDurationSeconds
+        let minutes = total / 60
+        let seconds = total % 60
         return String(format: "%d:%02d", minutes, seconds)
     }
 

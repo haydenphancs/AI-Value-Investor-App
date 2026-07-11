@@ -2,10 +2,12 @@
 //  ChatAuraGlow.swift
 //  ios
 //
-//  Atom: a soft, slowly-pulsing blue→cyan radial "aura" used to give the AI chat screen a
-//  futuristic feel behind the top bar and the input bar. Purely decorative — never wraps
-//  interactive content (a `.repeatForever` glow on an ancestor of an expandable row once froze
-//  the main thread; see ExclusiveSignalsSection). Place it as a sibling/overlay layer only.
+//  Atom: a subtle, STATIC blue→cyan "aura" that washes the WHOLE chat screen to give it a
+//  futuristic feel. Two soft radial glows (top behind the bar + a fainter one at the bottom
+//  behind the input) whose fades extend all the way to the screen corners, so there is NO hard
+//  edge / seam between aura and background. Purely decorative — never wraps interactive content
+//  (a `.repeatForever` glow on an ancestor of an expandable row once froze the main thread; see
+//  ExclusiveSignalsSection). Place as a sibling/overlay layer only.
 //
 
 import SwiftUI
@@ -13,49 +15,50 @@ import SwiftUI
 struct ChatAuraGlow: View {
     /// Inner (hotter) color — defaults to the app's AI-accent cyan.
     var inner: Color = AppColors.accentCyan
-    /// Outer color that fades to clear — defaults to the brand blue.
+    /// Outer color that fades toward clear — defaults to the brand blue.
     var outer: Color = AppColors.primaryBlue
-    /// Overall strength (0…1). Kept subtle by default.
+    /// Overall strength multiplier (0…1). Deliberately faint by default.
     var intensity: Double = 1.0
-
-    @State private var pulse = false
 
     var body: some View {
         GeometryReader { geo in
-            let maxR = max(geo.size.width, geo.size.height)
-            RadialGradient(
-                colors: [
-                    inner.opacity(0.22 * intensity),
-                    outer.opacity(0.10 * intensity),
-                    .clear
-                ],
-                center: .center,
-                startRadius: 0,
-                endRadius: maxR * 0.75
-            )
-            .frame(width: geo.size.width, height: geo.size.height)
-            .scaleEffect(pulse ? 1.08 : 0.92)
-            .opacity(pulse ? 1.0 : 0.65)
-        }
-        .blendMode(.plusLighter)          // additive glow reads cleanly on the dark background
-        .allowsHitTesting(false)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) {
-                pulse = true
+            // Diagonal → the fade reaches the far corners, so no visible ring lands on-screen.
+            let diag = sqrt(geo.size.width * geo.size.width + geo.size.height * geo.size.height)
+            ZStack {
+                // Top wash — strongest behind the top bar, fading gently DOWN the whole screen.
+                RadialGradient(
+                    colors: [
+                        inner.opacity(0.10 * intensity),
+                        outer.opacity(0.045 * intensity),
+                        .clear,
+                    ],
+                    center: UnitPoint(x: 0.5, y: 0.0),
+                    startRadius: 0,
+                    endRadius: diag
+                )
+                // Bottom wash — a fainter lift behind the input bar.
+                RadialGradient(
+                    colors: [
+                        inner.opacity(0.06 * intensity),
+                        outer.opacity(0.028 * intensity),
+                        .clear,
+                    ],
+                    center: UnitPoint(x: 0.5, y: 1.0),
+                    startRadius: 0,
+                    endRadius: diag * 0.85
+                )
             }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
+        .blendMode(.plusLighter)   // additive glow reads cleanly on the dark background
+        .allowsHitTesting(false)
     }
 }
 
 #Preview {
     ZStack {
         AppColors.background.ignoresSafeArea()
-        VStack {
-            ChatAuraGlow().frame(height: 220)
-            Spacer()
-            ChatAuraGlow().frame(height: 200)
-        }
-        .ignoresSafeArea()
+        ChatAuraGlow().ignoresSafeArea()
     }
     .preferredColorScheme(.dark)
 }

@@ -44,6 +44,9 @@ _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes for market data
 _AI_CACHE_TTL_SECONDS = 3600  # 1 hour for AI-generated snapshots
 _SP_HIST_CACHE_TTL = 3600  # 1 hour for S&P 500 historical (shared across ETFs)
+# Hard cap on live entries — see stock_overview_service for rationale. Eviction
+# is least-recently-written; a miss just re-fetches (no correctness impact).
+_CACHE_MAX_ENTRIES = 1024
 
 
 def _cache_get(key: str, ttl: float = _CACHE_TTL_SECONDS) -> Optional[Any]:
@@ -58,7 +61,11 @@ def _cache_get(key: str, ttl: float = _CACHE_TTL_SECONDS) -> Optional[Any]:
 
 
 def _cache_set(key: str, value: Any):
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── Related ETF mappings ─────────────────────────────────────────

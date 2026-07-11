@@ -100,6 +100,9 @@ _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes for market data
 _AI_CACHE_TTL_SECONDS = 3600  # 1 hour for AI-generated stories
 _MACRO_CACHE_TTL_DAYS = 7  # 7 days for macro forecast (changes weekly)
+# Hard cap on live entries — see stock_overview_service for rationale. Eviction
+# is least-recently-written; a miss just re-fetches (no correctness impact).
+_CACHE_MAX_ENTRIES = 1024
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -114,7 +117,11 @@ def _cache_get(key: str) -> Optional[Any]:
 
 
 def _cache_set(key: str, value: Any, ttl: Optional[float] = None):
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value, ttl or _CACHE_TTL_SECONDS)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── Helpers ──────────────────────────────────────────────────────

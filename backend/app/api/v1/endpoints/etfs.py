@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 import logging
 
+from app.api.error_response import error_response_from_exception
 from app.services.etf_service import get_etf_service
 from app.schemas.etf import ETFDetailResponse, ETFDividendHistoryResponse, ETFHoldingsRiskResponse, ETFProfileResponse
 
@@ -43,11 +44,12 @@ async def get_etf_detail(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"ETF detail failed for {symbol}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"ETF data service unavailable for {symbol}",
-        )
+        # Structured typed error (invariant #3) so an FMP rate-limit surfaces as
+        # FMP_RATE_LIMITED with an actionable user_message + retry, not a generic
+        # "Server error". iOS APIClient decodes the 5xx structured body into
+        # businessError(code, message).
+        logger.error(f"ETF detail failed for {symbol}: {type(e).__name__}: {e}", exc_info=True)
+        return error_response_from_exception(e, ticker=symbol, step="etf_detail")
 
 
 @router.get("/{symbol}/dividends", response_model=ETFDividendHistoryResponse)

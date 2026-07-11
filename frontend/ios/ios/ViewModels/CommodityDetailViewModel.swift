@@ -51,6 +51,10 @@ class CommodityDetailViewModel: ObservableObject {
     private let apiClient = APIClient.shared
     private var cancellables = Set<AnyCancellable>()
     private var chartRefreshTask: Task<Void, Never>?
+    /// Monotonic token for detail/chart fetches. Each captures the value before
+    /// awaiting and only applies its result if still current — so a slow
+    /// out-of-order response can't clobber a newer one during rapid range switching.
+    private var detailRequestGen = 0
 
     // MARK: - Initialization
 
@@ -104,6 +108,8 @@ class CommodityDetailViewModel: ObservableObject {
     private func fetchCommodityDetail() async {
         let range = selectedChartRange
         let startTime = CFAbsoluteTimeGetCurrent()
+        detailRequestGen += 1
+        let gen = detailRequestGen
 
         do {
             let response = try await apiClient.request(
@@ -115,6 +121,8 @@ class CommodityDetailViewModel: ObservableObject {
                 responseType: CommodityDetailResponseDTO.self
             )
 
+            // Drop a stale response (a newer load/refresh/range-change superseded it).
+            guard gen == self.detailRequestGen else { return }
             let elapsed = String(format: "%.1f", CFAbsoluteTimeGetCurrent() - startTime)
             self.commodityData = response.toDisplayModel()
             self.chartDataVersion += 1
@@ -135,6 +143,12 @@ class CommodityDetailViewModel: ObservableObject {
                     self.errorMessage = "Server error (\(code)). Please try again."
                 case .notFound:
                     self.errorMessage = "Commodity data not found for \(commoditySymbol)."
+                case .rateLimited:
+                    self.errorMessage = "High demand right now — please try again in a moment."
+                case .businessError(_, let message):
+                    // Backend typed error (e.g. FMP_RATE_LIMITED) — surface its
+                    // actionable user_message instead of a generic string.
+                    self.errorMessage = message
                 default:
                     self.errorMessage = "Something went wrong. Please try again."
                 }
@@ -154,6 +168,8 @@ class CommodityDetailViewModel: ObservableObject {
 
     private func fetchChartForRange() async {
         let range = selectedChartRange
+        detailRequestGen += 1
+        let gen = detailRequestGen
         do {
             let response = try await apiClient.request(
                 endpoint: .getCommodityDetail(
@@ -163,6 +179,8 @@ class CommodityDetailViewModel: ObservableObject {
                 ),
                 responseType: CommodityDetailResponseDTO.self
             )
+            // Drop a stale range response so rapid switching can't clobber a newer range.
+            guard gen == self.detailRequestGen else { return }
             self.commodityData = response.toDisplayModel()
             self.chartDataVersion += 1
             print("✅ [CommodityDetailVM] Chart updated — \(response.chartData.count) data points")

@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, Dict, Any
 import logging
 
+from app.api.error_response import error_response_from_exception
 from app.services.commodity_service import get_commodity_service
 from app.schemas.commodity import CommodityDetailResponse
 
@@ -133,8 +134,7 @@ async def get_commodity_detail(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Commodity detail failed for {symbol}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Commodity data service unavailable for {symbol}",
-        )
+        # Typed structured error (invariant #3) — surfaces FMP rate-limits as an
+        # actionable message + retry instead of a generic "Server error".
+        logger.error(f"Commodity detail failed for {symbol}: {type(e).__name__}: {e}", exc_info=True)
+        return error_response_from_exception(e, ticker=symbol, step="commodity_detail")

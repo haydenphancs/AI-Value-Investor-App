@@ -89,6 +89,24 @@ struct TickerChartView: View {
         return sliced
     }
 
+    /// Index in the FULL `pricePoints` where `visiblePoints` begins.
+    ///
+    /// For 1D stock charts `filterToLatestDay` drops the leading (earlier-day)
+    /// points from the viewport slice, so the true start sits further right than
+    /// `viewportState.visibleStart`. SubChartCanvas builds its indicator window as
+    /// `[visibleStartIndex, visibleStartIndex + visiblePoints.count)` and maps
+    /// scrub readouts via `visibleStartIndex + visibleIndex` — passing the raw
+    /// (unfiltered) start made the RSI/MACD/Stoch sub-charts render the WRONG
+    /// trading day's values. filterToLatestDay keeps a contiguous suffix (data is
+    /// chronological), so the real start = end - visibleCount + 1.
+    private var subChartVisibleStart: Int {
+        let count = visiblePoints.count
+        guard count > 0, !pricePoints.isEmpty else { return 0 }
+        let start = max(0, min(viewportState.visibleStart, pricePoints.count - 1))
+        let end = max(start, min(pricePoints.count - 1, viewportState.visibleEnd))
+        return max(0, end - count + 1)
+    }
+
     /// Close prices preceding the visible range so MA/Bollinger
     /// calculations have warm-up data and lines start from the left edge.
     private var overlayLookbackCloses: [Double] {
@@ -185,7 +203,7 @@ struct TickerChartView: View {
                     indicator: indicator,
                     pricePoints: visiblePoints,
                     allPricePoints: pricePoints,
-                    visibleStartIndex: viewportState.visibleStart,
+                    visibleStartIndex: subChartVisibleStart,
                     crosshairState: crosshairState
                 )
             }

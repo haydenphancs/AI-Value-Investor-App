@@ -240,88 +240,6 @@ class EarningsService:
         _cache_set(cache_key, result)
         return result
 
-    async def _fetch_earnings_calendar_for_symbol(
-        self, ticker: str, accepted_dates: List[str]
-    ) -> List[dict]:
-        """Fetch earnings-calendar data for a specific symbol.
-
-        Uses the bulk earnings-calendar endpoint with narrow date-range queries
-        around the income statement acceptedDate. Earnings are typically reported
-        1-10 days before the SEC filing date.
-
-        Uses two narrow windows per quarter to avoid hitting the 4000-record API cap:
-        - Window A: acceptedDate-10 to acceptedDate-4 (early reports)
-        - Window B: acceptedDate-4 to acceptedDate+1 (late reports / filing-day)
-        """
-        if not accepted_dates:
-            return []
-
-        async def _fetch_window(fr: str, to: str) -> List[dict]:
-            """Fetch earnings-calendar for a date range, filter by symbol."""
-            try:
-                data = await self.fmp._make_request(
-                    "earnings-calendar", params={"from": fr, "to": to}
-                )
-                if isinstance(data, list):
-                    return [r for r in data if r.get("symbol") == ticker]
-            except Exception as e:
-                logger.warning(f"earnings-calendar query failed for {ticker} ({fr} to {to}): {e}")
-            return []
-
-        # Build two windows per accepted date
-        tasks = []
-        for ad in accepted_dates:
-            try:
-                dt = datetime.strptime(ad[:10], "%Y-%m-%d")
-            except Exception:
-                continue
-            # Window A: captures reports 5-10 days before filing
-            fr_a = (dt - timedelta(days=10)).strftime("%Y-%m-%d")
-            to_a = (dt - timedelta(days=4)).strftime("%Y-%m-%d")
-            # Window B: captures reports 0-4 days before filing
-            fr_b = (dt - timedelta(days=4)).strftime("%Y-%m-%d")
-            to_b = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
-            tasks.append(_fetch_window(fr_a, to_a))
-            tasks.append(_fetch_window(fr_b, to_b))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Collect and deduplicate
-        all_records: List[dict] = []
-        for r in results:
-            if isinstance(r, list):
-                all_records.extend(r)
-            elif isinstance(r, Exception):
-                logger.warning(f"earnings-calendar query error: {r}")
-
-        seen = set()
-        unique: List[dict] = []
-        for rec in all_records:
-            d = (rec.get("date") or "")[:10]
-            if d and d not in seen:
-                seen.add(d)
-                unique.append(rec)
-
-        logger.info(f"earnings-calendar found {len(unique)} records for {ticker}")
-        return unique
-
-    async def _fetch_earnings_calendar_window(
-        self, ticker: str, from_date: str, to_date: str
-    ) -> List[dict]:
-        """Fetch earnings-calendar for an arbitrary window, filter to ticker."""
-        try:
-            data = await self.fmp._make_request(
-                "earnings-calendar", params={"from": from_date, "to": to_date}
-            )
-            if isinstance(data, list):
-                return [r for r in data if r.get("symbol") == ticker]
-        except Exception as e:
-            logger.warning(
-                f"earnings-calendar forward window failed for {ticker} "
-                f"({from_date} to {to_date}): {e}"
-            )
-        return []
-
     async def _build_earnings(self, ticker: str) -> EarningsResponse:
         today = date.today()
         # 6 years (was 4) so the Earnings Timeline's oldest actual year (annual
@@ -357,63 +275,25 @@ class EarningsService:
             key=lambda r: r["date"],
         )
 
-        # Phase 2: Fetch earnings-calendar data for this symbol using accepted dates
-        accepted_dates = []
-        for rec in income_sorted:
-            ad = rec.get("acceptedDate", rec.get("filingDate", rec["date"]))
-            accepted_dates.append(ad[:10] if ad else rec["date"][:10])
-
-        # Fetch both the historical windows (around past filings) AND a
-        # series of forward windows so we capture upcoming earnings dates
-        # for ``next_earnings_date``. Without the forward fetch the service
-        # falls back to analyst-estimates (which returns quarter-end dates
-        # like Jun 30 instead of real report dates like Apr 29).
+        # Phase 2: Earnings announcements (past + upcoming) for this symbol — ONE call.
         #
-        # FMP's ``earnings-calendar`` caps at 4000 records per query, so a
-        # single 90-day window silently drops liquid tickers. We walk
-        # forward in 14-day hops — same window size the alert feed uses
-        # — so results are stable for quarterly reporters up to ~70 days.
-        forward_tasks = []
-        for i in range(5):
-            fr = (today + timedelta(days=i * 14)).strftime("%Y-%m-%d")
-            to_ = (today + timedelta(days=(i + 1) * 14)).strftime("%Y-%m-%d")
-            forward_tasks.append(
-                self._fetch_earnings_calendar_window(ticker, fr, to_)
-            )
-
-        results = await asyncio.gather(
-            # Per-symbol /stable/earnings — ALL announcements (past + upcoming) with
-            # paired epsActual/epsEstimated in ONE call. This is the AUTHORITATIVE
-            # source: the windowed fetch below queries only [acceptedDate-10,
-            # acceptedDate+1], which MISSES a fiscal-Q4 announcement when the 10-K is
-            # filed >10 days after the earnings release (Oracle FY26 Q4: announced
-            # 06-10, 10-K accepted 06-22 → the record fell outside the window, so Q4
-            # dropped to GAAP income-statement EPS vs a non-GAAP estimate = a bogus
-            # -26% "miss"). The per-symbol call has no date-window blind spot and no
-            # 4000-record cap risk, so every reported quarter gets its apples-to-
-            # apples non-GAAP actual vs estimate.
-            self.fmp.get_earning_calendar_full(ticker),
-            self._fetch_earnings_calendar_for_symbol(ticker, accepted_dates),
-            *forward_tasks,
-            return_exceptions=True,
-        )
-        full_ec = results[0] if isinstance(results[0], list) else []
-        historical_ec = results[1] if isinstance(results[1], list) else []
-        forward_ec: List[dict] = []
-        for r in results[2:]:
-            if isinstance(r, list):
-                forward_ec.extend(r)
-
-        # Per-symbol records win on date collisions (added first); the windowed +
-        # forward fetches only fill any date the per-symbol call didn't return
-        # (keeps next_earnings_date coverage intact).
-        ec_records = list(full_ec)
-        seen_dates = {(r.get("date") or "")[:10] for r in ec_records}
-        for rec in list(historical_ec) + forward_ec:
-            d = (rec.get("date") or "")[:10]
-            if d and d not in seen_dates:
-                seen_dates.add(d)
-                ec_records.append(rec)
+        # The per-symbol /stable/earnings?symbol=X endpoint returns ALL of a ticker's
+        # announcements, historical AND upcoming, with paired epsActual/epsEstimated and
+        # revenueActual/revenueEstimated. It's the authoritative source: no date-window
+        # blind spot (a fiscal-Q4 whose 10-K is filed >10 days after the release is still
+        # included — Oracle FY26 Q4: announced 06-10, 10-K accepted 06-22) and no
+        # 4000-record cap risk, so every reported quarter gets its apples-to-apples
+        # non-GAAP actual vs estimate, and the upcoming date feeds next_earnings_date.
+        #
+        # This REPLACES the old per-quarter global `earnings-calendar` fan-out
+        # (_fetch_earnings_calendar_for_symbol = ~2 windows/quarter + 5 forward windows),
+        # which downloaded the ENTIRE market's calendar (up to 4000 companies per call)
+        # and discarded all but this ticker — that single path was ~99% of the app's FMP
+        # bandwidth (4.3 GB/mo, ~10k calls). One per-symbol call (~KB) carries the same
+        # data; next_earnings_date still falls back to analyst-estimates if a future
+        # announcement isn't listed yet.
+        full_ec = await self.fmp.get_earning_calendar_full(ticker)
+        ec_records = list(full_ec) if isinstance(full_ec, list) else []
 
         # Build earnings-calendar lookup keyed by report date
         # We'll match these to income statements by date proximity

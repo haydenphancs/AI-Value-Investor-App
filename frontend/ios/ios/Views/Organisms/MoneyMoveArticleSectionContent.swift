@@ -46,7 +46,7 @@ struct MoneyMoveArticleSectionContent: View {
     private func renderContent(_ content: ArticleSectionContent, readAlong: ReadAlongGroup?) -> some View {
         switch content {
         case .paragraph(let text):
-            if case let .sentences(spans) = readAlong {
+            if case let .sentences(spans) = readAlong, !spans.isEmpty {
                 ReadAlongText(spans: spans, activeTime: activeTime, font: AppTypography.body, base: AppColors.textPrimary)
             } else {
                 Text(text)
@@ -80,7 +80,7 @@ struct MoneyMoveArticleSectionContent: View {
             .padding(.leading, AppSpacing.sm)
 
         case .subheading(let text):
-            if case let .sentences(spans) = readAlong {
+            if case let .sentences(spans) = readAlong, !spans.isEmpty {
                 ReadAlongText(spans: spans, activeTime: activeTime, font: AppTypography.headingSmall, base: AppColors.textPrimary)
                     .padding(.top, AppSpacing.sm)
             } else {
@@ -103,9 +103,10 @@ struct MoneyMoveArticleSectionContent: View {
         }
     }
 
-    /// Unwrap a `.sentences` group (text blocks); nil otherwise.
+    /// Unwrap a `.sentences` group (text blocks); nil otherwise (incl. an empty span list, so the
+    /// quote/callout falls back to plain `text` instead of rendering blank).
     private func sentenceSpans(_ group: ReadAlongGroup?) -> [ReadAlongSentence]? {
-        if case let .sentences(spans) = group { return spans }
+        if case let .sentences(spans) = group, !spans.isEmpty { return spans }
         return nil
     }
 }

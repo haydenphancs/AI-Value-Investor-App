@@ -7,9 +7,10 @@
 //  model closely enough to render the card when the network call fails.
 //
 //  Each dimension earns points = quality × maxPoints; the budgets sum to 100,
-//  so the bars add up to the overall score. Market-cap data isn't available
-//  offline (the holdings feed carries no market cap), so the three remaining
-//  budgets absorb its share (35 / 35 / 30). Geography is excluded (US-only).
+//  so the bars add up to the overall score. Budgets match the backend:
+//  position 40 / sector 40 / market-cap 20 when market cap is a measurable
+//  signal (≥2 buckets, ≥half the book priced), else market-cap's share folds
+//  into position 50 / sector 50. Geography is excluded (US-only).
 //
 
 import Foundation
@@ -25,7 +26,11 @@ struct DiversificationCalculator {
 
     /// Calculate the offline diversification score. Returns `nil` below the
     /// minimum holdings or when the total value is non-positive.
-    static func calculate(holdings: [PortfolioHolding]) -> DiversificationScore? {
+    static func calculate(holdings rawHoldings: [PortfolioHolding]) -> DiversificationScore? {
+        // Drop zero/negative-value positions before weighting (mirrors backend
+        // score_holdings): a failed price lookup can leave marketValue == 0,
+        // which would inflate n and deflate the normalized-HHI denominators.
+        let holdings = rawHoldings.filter { $0.marketValue > 0 }
         guard holdings.count >= DiversificationThresholds.minimumHoldings else {
             return nil
         }
@@ -58,7 +63,12 @@ struct DiversificationCalculator {
                 knownCapWeight += h.weight
             }
         }
-        let marketcapAvailable = knownCapWeight > 0
+        // Only score market-cap MIX when it's a measurable signal: at least two
+        // distinct buckets AND at least half the book priced (mirrors backend).
+        // Gating on "any single holding has a cap" was non-monotonic (one cap
+        // datum could drop the score) and unfairly capped a single-bucket
+        // blue-chip book at 80.
+        let marketcapAvailable = capWeights.count >= 2 && knownCapWeight >= 0.5
         let marketcapQ = marketcapAvailable
             ? normalizedHHI(capWeights.values.map { $0 / knownCapWeight }, capWeights.count)
             : 0.0

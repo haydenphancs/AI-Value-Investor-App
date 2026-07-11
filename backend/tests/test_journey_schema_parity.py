@@ -19,14 +19,22 @@ No network / Supabase — data shape only.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from app.schemas.journey import JourneyResponse
 
-_BUNDLE_JSON = (
-    Path(__file__).resolve().parents[2]
-    / "frontend/ios/ios/Resources/Journey/journey_lessons.json"
-)
+_REPO = Path(__file__).resolve().parents[2]
+_BUNDLE_JSON = _REPO / "frontend/ios/ios/Resources/Journey/journey_lessons.json"
+_SEED_JOURNEY_PY = _REPO / "backend/scripts/seed_journey.py"
+_JOURNEY_STORE_SWIFT = _REPO / "frontend/ios/ios/Services/JourneyContentStore.swift"
+
+# The camelCase card keys the backend serves (from seed_journey.build_story_content) and the iOS
+# JourneyAPICard decoder consumes. Pinned here so a rename on EITHER side without the other fails
+# loudly — that drift is exactly what silently drops remote lessons on the device.
+_CANONICAL_REMOTE_CARD_KEYS = {
+    "type", "headline", "text", "audioUrl", "imageUrl", "videoUrl", "cta", "readAlongWords",
+}
 
 
 def _strip_markup(s: str) -> str:
@@ -108,3 +116,72 @@ def test_bundled_journey_json_decodes_and_word_timings_align():
                 "— would break iOS word highlighting"
             )
     assert aligned > 0, "expected at least some cards to carry readAlongWords"
+
+
+# --- Remote (seeder) card-shape parity ---------------------------------------------------------
+# The bundled-JSON tests above exercise the OFFLINE card shape (audioClip / hasImage). They do NOT
+# exercise the REMOTE shape the backend actually serves (audioUrl / imageUrl / videoUrl), which is
+# what iOS decodes in production. These pin that remote contract on both sides so a drift can't ship.
+
+
+def _seeder_card_keys() -> set[str]:
+    """The card dict keys seed_journey.build_story_content writes into story_content.cards."""
+    src = _SEED_JOURNEY_PY.read_text()
+    start = src.index("cards_out.append({")
+    block = src[start : src.index("})", start)]
+    return set(re.findall(r'"(\w+)"\s*:', block))
+
+
+def _ios_card_coding_keys() -> set[str]:
+    """The CodingKeys the iOS JourneyAPICard decoder declares."""
+    src = _JOURNEY_STORE_SWIFT.read_text()
+    seg = src[src.index("struct JourneyAPICard") :]
+    m = re.search(r"enum CodingKeys[^{]*\{(.*?)\}", seg, re.S)
+    assert m, "JourneyAPICard CodingKeys block not found — did the struct move/rename?"
+    keys: set[str] = set()
+    for case_line in re.findall(r"\bcase\s+([^\n]+)", m.group(1)):
+        for part in case_line.split("//")[0].split(","):
+            name = part.strip().split("=")[0].strip()
+            if name:
+                keys.add(name)
+    return keys
+
+
+def test_seeder_writes_the_canonical_remote_card_keys():
+    assert _seeder_card_keys() == _CANONICAL_REMOTE_CARD_KEYS, (
+        "seed_journey.build_story_content card keys drifted from the iOS contract"
+    )
+
+
+def test_ios_decoder_declares_the_canonical_remote_card_keys():
+    assert _ios_card_coding_keys() == _CANONICAL_REMOTE_CARD_KEYS, (
+        "iOS JourneyAPICard CodingKeys drifted from the seeder/backend card shape"
+    )
+
+
+def test_backend_and_ios_card_shapes_agree():
+    """The real cross-language guard: seeder output keys == iOS decoder keys, byte-for-byte."""
+    assert _seeder_card_keys() == _ios_card_coding_keys()
+
+
+def test_card_missing_type_passes_backend_and_is_ios_tolerated():
+    """A card missing `type` (e.g. hand-edited in Supabase Studio) must not be a poison pill.
+
+    The backend passes story_content through verbatim (does not reject it), and the iOS decoder
+    defaults a missing `type` to a content card (JourneyAPICard.init) rather than throwing and
+    dropping ALL remote lessons. This pins the backend half of that contract.
+    """
+    lesson = _worst_case_lesson()
+    lesson["story_content"]["cards"].append({"headline": "no type here"})
+    resp = JourneyResponse(lessons=[lesson])  # does NOT raise
+    typeless = resp.lessons[0].story_content["cards"][-1]
+    assert "type" not in typeless  # served verbatim; iOS is responsible for tolerating it
+
+
+def test_non_object_card_in_array_still_serves_verbatim():
+    """A card that isn't even an object rides through the backend (Optional[Dict] validates the
+    story_content dict, not its cards). iOS drops just that element via FailableDecodable."""
+    lesson = _worst_case_lesson()
+    lesson["story_content"]["cards"].append("not-an-object")  # type: ignore[arg-type]
+    resp = JourneyResponse(lessons=[lesson])  # does NOT raise
+    assert resp.lessons[0].story_content["cards"][-1] == "not-an-object"

@@ -169,6 +169,16 @@ def score_holdings(
     if len(holdings) < MIN_HOLDINGS:
         return None
 
+    # Drop zero/negative-value positions before weighting. A failed FMP price
+    # refresh (or a shares==0 row) can leave market_value == 0; such a phantom
+    # holding contributes no weight but would still inflate ``n`` and the
+    # sector/cap bucket counts, deflating the normalized-HHI denominators and
+    # dragging the score down (and making holdings_count disagree with
+    # effective_holdings). Exclude them so every count agrees.
+    holdings = [h for h in holdings if h.market_value and h.market_value > 0]
+    if len(holdings) < MIN_HOLDINGS:
+        return None
+
     total_value = sum(h.market_value for h in holdings)
     if total_value <= 0:
         return None
@@ -193,7 +203,13 @@ def score_holdings(
         if bucket:
             cap_group[bucket] = cap_group.get(bucket, 0.0) + w
             known_cap_weight += w
-    marketcap_available = known_cap_weight > 0
+    # Only score market-cap MIX when it is actually a measurable diversity
+    # signal: at least two distinct cap buckets AND at least half the book
+    # priced. Gating on "any single holding has a cap" was both non-monotonic
+    # (adding one cap datum could flip 100→80) and unfair to a legitimately
+    # single-bucket blue-chip book (one bucket → normalized-HHI 0 → capped at
+    # 80). When it doesn't qualify, its 20-pt budget folds into position/sector.
+    marketcap_available = len(cap_group) >= 2 and known_cap_weight >= 0.5
     marketcap_q = (
         normalized_hhi_score(
             [w / known_cap_weight for w in cap_group.values()], len(cap_group)

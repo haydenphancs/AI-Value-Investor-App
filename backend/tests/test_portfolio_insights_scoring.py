@@ -427,3 +427,73 @@ async def test_compute_insights_for_portfolio_none_below_min(monkeypatch):
     _install_fakes(monkeypatch, supabase, _FakeFMP())
     res = await svc.PortfolioInsightsService().compute_insights_for_portfolio("u1", "p1")
     assert res is None
+
+
+# ═══════════ 4. Zero-value holdings + market-cap gate (regressions) ═══════
+
+
+def test_zero_value_holding_excluded_from_scoring():
+    """A phantom market_value==0 holding (failed price refresh / shares==0) must
+    not inflate n or deflate the normalized-HHI denominators."""
+    with_phantom = score_holdings([
+        _h("A", 0, "Technology", "US", None),
+        _h("B", 5000, "Healthcare", "US", None),
+        _h("C", 5000, "Energy", "US", None),
+    ])
+    without = score_holdings([
+        _h("B", 5000, "Healthcare", "US", None),
+        _h("C", 5000, "Energy", "US", None),
+    ])
+    assert with_phantom is not None and without is not None
+    assert with_phantom.score == without.score
+    assert with_phantom.holdings_count == 2            # phantom not counted
+    assert with_phantom.effective_holdings == without.effective_holdings
+
+
+def test_single_funded_holding_returns_none():
+    # One real position + one zero-value phantom → below MIN once filtered.
+    assert score_holdings([_h("A", 5000), _h("B", 0)]) is None
+
+
+def test_single_cap_bucket_folds_to_position_sector():
+    """An all-mega, multi-sector, equal-weight book is a single cap bucket, which
+    is NOT a measurable size-mix signal — its budget folds into position/sector
+    rather than scoring 0 and capping the total at 80."""
+    res = score_holdings([
+        _h("AAPL", 5000, "Technology", "US", 3e12),          # Mega
+        _h("JPM", 5000, "Financial Services", "US", 5e11),   # Mega
+        _h("PFE", 5000, "Healthcare", "US", 2e11),           # Mega
+    ])
+    assert res is not None
+    assert {s.key for s in res.sub_scores} == {"position", "sector"}
+    assert sum(s.max_points for s in res.sub_scores) == 100
+    assert res.score == 100                                # not capped at 80
+
+
+def test_market_cap_gate_is_monotonic():
+    """Learning one holding's cap must never LOWER the score (adding
+    information can't make a portfolio look less diversified)."""
+    no_caps = score_holdings([
+        _h("A", 5000, "Technology", "US", None),
+        _h("B", 5000, "Healthcare", "US", None),
+        _h("C", 5000, "Energy", "US", None),
+    ])
+    one_cap = score_holdings([
+        _h("A", 5000, "Technology", "US", 3e12),
+        _h("B", 5000, "Healthcare", "US", None),
+        _h("C", 5000, "Energy", "US", None),
+    ])
+    assert no_caps is not None and one_cap is not None
+    assert one_cap.score >= no_caps.score
+
+
+def test_market_cap_scored_when_two_buckets_and_half_priced():
+    """The size dimension still appears when it IS a real signal: ≥2 buckets and
+    ≥half the book priced."""
+    res = score_holdings([
+        _h("MEGA", 5000, "Technology", "US", 3e12),   # Mega
+        _h("SMALL", 5000, "Healthcare", "US", 1e9),   # Small
+    ])
+    assert res is not None
+    assert {s.key for s in res.sub_scores} == {"position", "sector", "marketcap"}
+    assert sum(s.max_points for s in res.sub_scores) == 100

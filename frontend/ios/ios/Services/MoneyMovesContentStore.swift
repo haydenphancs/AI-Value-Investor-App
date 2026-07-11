@@ -20,6 +20,10 @@ final class MoneyMovesContentStore {
 
     private var bundledByTitle: [String: MoneyMoveArticle] = [:]
     private var remoteByTitle: [String: MoneyMoveArticle] = [:]
+    // Slug-keyed too: slug is the canonical id (title can collide across articles). Card taps
+    // resolve by slug first so two articles sharing a title still open the right one.
+    private var bundledBySlug: [String: MoneyMoveArticle] = [:]
+    private var remoteBySlug: [String: MoneyMoveArticle] = [:]
     // Ordered card lists (by sortOrder) so the catalog can be served from content
     // instead of hardcoded in the view. Remote is authoritative; bundled is the
     // offline fallback for whatever shipped in the binary.
@@ -40,6 +44,13 @@ final class MoneyMovesContentStore {
     /// generates placeholder content).
     func article(forTitle title: String) -> MoneyMoveArticle? {
         remoteByTitle[title] ?? bundledByTitle[title]
+    }
+
+    /// Full article by slug (the canonical id). Preferred over title lookup so a title collision
+    /// can't open the wrong article. nil for an empty slug (placeholder cards) or no match.
+    func article(forSlug slug: String) -> MoneyMoveArticle? {
+        guard !slug.isEmpty else { return nil }
+        return remoteBySlug[slug] ?? bundledBySlug[slug]
     }
 
     func hasContent(forTitle title: String) -> Bool {
@@ -75,11 +86,13 @@ final class MoneyMovesContentStore {
             )
             let ordered = response.articles.sorted { ($0.sortOrder ?? .max) < ($1.sortOrder ?? .max) }
             remoteByTitle = [:]
+            remoteBySlug = [:]
             remoteCards = []
             remoteFeatured = nil
             for dto in ordered {
                 let art = dto.toArticle()
                 remoteByTitle[dto.title] = art
+                if !dto.slug.isEmpty { remoteBySlug[dto.slug] = art }
                 remoteCards.append(dto.toCard())
                 if dto.isFeatured == true, remoteFeatured == nil { remoteFeatured = art }
             }
@@ -107,6 +120,7 @@ final class MoneyMovesContentStore {
             for dto in ordered {
                 let art = dto.toArticle()
                 bundledByTitle[dto.title] = art
+                if !dto.slug.isEmpty { bundledBySlug[dto.slug] = art }
                 bundledCards.append(dto.toCard())
                 if dto.isFeatured == true, bundledFeatured == nil { bundledFeatured = art }
             }

@@ -22,13 +22,22 @@ final class MoneyMovesProgressStore: ObservableObject {
     /// Slugs of the articles the learner has completed.
     @Published private(set) var completed: Set<String> = []
 
+    /// Slugs the user un-completed whose backend DELETE hasn't confirmed yet. hydrate()'s union-merge
+    /// would otherwise resurrect a just-unmarked slug the moment the GET races ahead of (or the
+    /// device is offline for) the DELETE — flipping the article back to "Completed" against the
+    /// user's explicit tap. Persisted so an offline unmark survives relaunch; cleared once the
+    /// DELETE confirms (or the user re-completes).
+    private var pendingUncompleted: Set<String> = []
+
     private static let defaultsKey = "moneyMoves.completedSlugs"
+    private static let pendingKey = "moneyMoves.pendingUncompletedSlugs"
     private static let contentType = "money_move"
     private let apiClient: APIClient
 
     private init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
         completed = Set(UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? [])
+        pendingUncompleted = Set(UserDefaults.standard.stringArray(forKey: Self.pendingKey) ?? [])
     }
 
     // MARK: - Reads
@@ -45,6 +54,7 @@ final class MoneyMovesProgressStore: ObservableObject {
         let s = slug.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty, !completed.contains(s) else { return }
         completed.insert(s)
+        pendingUncompleted.remove(s)   // re-completing supersedes any pending un-completion tombstone
         persistLocal()
         Task { await self.pushCompletion(s) }
     }
@@ -55,6 +65,7 @@ final class MoneyMovesProgressStore: ObservableObject {
         let s = slug.trimmingCharacters(in: .whitespacesAndNewlines)
         guard completed.contains(s) else { return }
         completed.remove(s)
+        pendingUncompleted.insert(s)   // tombstone until the DELETE confirms; blocks hydrate() resurrection
         persistLocal()
         Task { await self.pushUncompletion(s) }
     }
@@ -66,8 +77,9 @@ final class MoneyMovesProgressStore: ObservableObject {
 
     /// Clear all progress (debug / reset). Local only.
     func reset() {
-        guard !completed.isEmpty else { return }
+        guard !completed.isEmpty || !pendingUncompleted.isEmpty else { return }
         completed.removeAll()
+        pendingUncompleted.removeAll()
         persistLocal()
     }
 
@@ -103,14 +115,19 @@ final class MoneyMovesProgressStore: ObservableObject {
                 endpoint: .uncompleteLearnItem(contentType: Self.contentType, key: slug),
                 responseType: LearnProgressResponse.self
             )
+            pendingUncompleted.remove(slug)   // DELETE confirmed → the slug is gone server-side, drop the tombstone
+            persistLocal()
             merge(resp)
         } catch {
-            // Stays removed locally; re-pushes the delete next time it's toggled.
+            // Stays tombstoned (pendingUncompleted) so a racing/next hydrate() can't resurrect it;
+            // re-pushes the delete next time it's toggled.
         }
     }
 
     private func merge(_ resp: LearnProgressResponse) {
-        let remote = Set(resp.keys)
+        // Subtract not-yet-confirmed un-completions so the union can't resurrect a slug the user
+        // just removed while its DELETE is still in flight (or failed offline).
+        let remote = Set(resp.keys).subtracting(pendingUncompleted)
         guard !remote.isSubset(of: completed) else { return }
         completed.formUnion(remote)
         persistLocal()
@@ -118,6 +135,7 @@ final class MoneyMovesProgressStore: ObservableObject {
 
     private func persistLocal() {
         UserDefaults.standard.set(Array(completed), forKey: Self.defaultsKey)
+        UserDefaults.standard.set(Array(pendingUncompleted), forKey: Self.pendingKey)
     }
 }
 

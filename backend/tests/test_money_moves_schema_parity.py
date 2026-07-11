@@ -169,3 +169,38 @@ def test_bundled_money_moves_json_decodes_and_serves():
 
     for article in resp.articles:
         _assert_article_shape(article)
+
+
+def test_backend_serves_malformed_article_verbatim_so_ios_must_tolerate():
+    """The backend does NO shape validation — it passes each row's `content` dict through as-is. A
+    response carrying one article missing iOS-required fields therefore validates fine here. This
+    pins the CONTRACT: because the backend can serve a malformed article, the iOS decoder MUST
+    tolerate it (MoneyMovesContentModels decodes the article array leniently, dropping the bad one
+    and keeping the rest) — otherwise one bad row would blank the entire catalog + all audio."""
+    good = _worst_case_article()
+    malformed = {"title": "Only a title — missing slug/subtitle/category/author/sections/..."}
+    resp = MoneyMovesResponse(
+        articles=[good, malformed, {**good, "slug": "second-good", "title": "Second Good"}]
+    )
+    # Backend passes ALL THREE through unchanged, including the malformed one (List[Dict] passthrough).
+    assert len(resp.articles) == 3
+    assert resp.articles[1] == malformed
+    # The malformed article is missing required keys — the guard the iOS side must survive.
+    assert _REQUIRED_ARTICLE_KEYS - resp.articles[1].keys()
+
+
+def test_bundle_has_at_most_one_featured_article():
+    """The hero shows the FIRST isFeatured article and the detail screen hides only that one card
+    (by slug) from the category rows. Authoring two featured articles is a mistake — a transient
+    two-featured state was the trigger for the 'second featured vanishes' bug. Keep it to one."""
+    data = json.loads(_BUNDLE_JSON.read_text())
+    featured = [a["slug"] for a in data["articles"] if a.get("isFeatured")]
+    assert len(featured) <= 1, f"more than one isFeatured article in bundle: {featured}"
+
+
+def test_bundle_titles_are_unique():
+    """Card taps resolve by slug first, but a duplicate TITLE still muddies title-keyed lookups and
+    the dedup in the catalog. Keep authored titles unique."""
+    data = json.loads(_BUNDLE_JSON.read_text())
+    titles = [a["title"] for a in data["articles"]]
+    assert len(titles) == len(set(titles)), f"duplicate titles in bundle: {titles}"

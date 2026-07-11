@@ -11,6 +11,8 @@ struct ChatMessagesList: View {
     let messages: [RichChatMessage]
     /// The id of the message currently streaming (shows a blinking caret). nil = none.
     var streamingMessageId: UUID? = nil
+    /// Tapping a follow-up suggestion under the LATEST answer sends it as a new message.
+    var onFollowUpTap: ((String) -> Void)? = nil
 
     /// Changes on a new message AND as the streaming message grows, so the view
     /// stays pinned to the newest content while tokens arrive (the in-place update
@@ -28,8 +30,13 @@ struct ChatMessagesList: View {
             ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: AppSpacing.xl) {
                     ForEach(messages) { message in
-                        ChatMessageRow(message: message, isStreaming: message.id == streamingMessageId)
-                            .id(message.id)
+                        ChatMessageRow(
+                            message: message,
+                            isStreaming: message.id == streamingMessageId,
+                            isLast: message.id == messages.last?.id,
+                            onFollowUpTap: onFollowUpTap
+                        )
+                        .id(message.id)
                     }
                 }
                 .padding(.horizontal, AppSpacing.lg)
@@ -51,6 +58,9 @@ struct ChatMessagesList: View {
 struct ChatMessageRow: View {
     let message: RichChatMessage
     var isStreaming: Bool = false
+    /// The last message in the list — only it shows follow-up suggestion chips.
+    var isLast: Bool = false
+    var onFollowUpTap: ((String) -> Void)? = nil
 
     var body: some View {
         switch message.role {
@@ -70,7 +80,16 @@ struct ChatMessageRow: View {
     }
 
     private var assistantMessage: some View {
-        AIMessageContent(content: message.content, timestamp: message.formattedTime, isStreaming: isStreaming)
+        AIMessageContent(
+            content: message.content,
+            timestamp: message.formattedTime,
+            isStreaming: isStreaming,
+            thinking: message.thinking,
+            sources: message.sources,
+            suggestions: message.suggestions,
+            showFollowUps: isLast,
+            onFollowUpTap: onFollowUpTap
+        )
     }
 }
 

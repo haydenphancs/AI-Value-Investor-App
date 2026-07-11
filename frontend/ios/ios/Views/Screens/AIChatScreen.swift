@@ -46,6 +46,20 @@ struct AIChatScreen: View {
             ZStack {
                 AppColors.background.ignoresSafeArea()
 
+                // Futuristic aura — soft blue→cyan glow behind the top bar and the input bar.
+                // Sibling/overlay layer only (never wraps interactive content); hidden with history.
+                if !showingHistory {
+                    VStack {
+                        ChatAuraGlow()
+                            .frame(height: 240)
+                        Spacer()
+                        ChatAuraGlow(intensity: 0.9)
+                            .frame(height: 220)
+                    }
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                }
+
                 // Chat content (hidden when history is shown)
                 chatContent
                     .opacity(showingHistory ? 0 : 1)
@@ -201,11 +215,16 @@ struct AIChatScreen: View {
                     .padding(.bottom, AppSpacing.xs)
             }
 
-            ChatMessagesList(messages: viewModel.messages, streamingMessageId: viewModel.streamingMessageId)
+            ChatMessagesList(
+                messages: viewModel.messages,
+                streamingMessageId: viewModel.streamingMessageId,
+                onFollowUpTap: handleFollowUpTap
+            )
 
-            // "Thinking" dots only before the first streamed token; once tokens flow
-            // the live message + caret convey progress instead.
-            if viewModel.isAITyping && !viewModel.isStreaming {
+            // Brief "thinking" dots only in the tiny window BEFORE the assistant bubble appears
+            // (its thinking card then conveys progress). This also covers the non-streaming
+            // fallback path, which emits no thinking events.
+            if viewModel.isAITyping && viewModel.messages.last?.role == .user {
                 typingIndicator
             }
         }
@@ -553,6 +572,12 @@ struct AIChatScreen: View {
     private func handleSuggestionTap(_ chip: SuggestionChip) {
         inputText = chip.text
         handleSend()
+    }
+
+    /// A follow-up chip under the latest answer → send it as the next message.
+    /// `sendMessage`'s `guard !isAITyping` keeps a double-tap from firing two requests.
+    private func handleFollowUpTap(_ question: String) {
+        viewModel.sendMessage(question)
     }
 
     private func handleSend() {

@@ -18,18 +18,55 @@
 
 import Foundation
 
+// MARK: - Lenient array decoding
+//
+// The backend serves each row's `content` JSONB VERBATIM (schemas/money_moves.py = List[Dict], no
+// shape validation; the service only skips non-dict rows). MoneyMoveArticleDTO has ~10 required
+// fields, and Swift's synthesized array decode is all-or-nothing — so ONE served article missing a
+// required field (a row hand-edited in Supabase Studio, a legacy/partial row, a null slug) would
+// throw and drop EVERY remote article (all content + audio) back to the stale bundle, not just the
+// bad row. Decode the article array element-by-element instead: a bad article is skipped, the rest
+// survive — mirroring the per-row hardening money_moves_content_service._load already does.
+
+/// Never-throwing wrapper: a failed element decodes to `nil` instead of failing the whole array.
+private struct FailableDecodable<Wrapped: Decodable>: Decodable {
+    let value: Wrapped?
+    init(from decoder: Decoder) throws { value = try? Wrapped(from: decoder) }
+}
+
+private extension KeyedDecodingContainer {
+    /// Decode an array, dropping any element that fails to decode. Missing/non-array key => [].
+    func lenientArray<T: Decodable>(_ type: T.Type, forKey key: Key) -> [T] {
+        let wrapped = ((try? decodeIfPresent([FailableDecodable<T>].self, forKey: key)) ?? nil) ?? []
+        return wrapped.compactMap { $0.value }
+    }
+}
+
 // MARK: - Top-level containers
 
 /// Bundled file `Resources/MoneyMoves/money_moves.json`.
 struct MoneyMovesContentFile: Decodable {
     let version: Int?
     let articles: [MoneyMoveArticleDTO]
+
+    private enum CodingKeys: String, CodingKey { case version, articles }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = ((try? c.decodeIfPresent(Int.self, forKey: .version)) ?? nil)
+        articles = c.lenientArray(MoneyMoveArticleDTO.self, forKey: .articles)
+    }
 }
 
 /// Backend response from `GET /api/v1/learn/money-moves` — each article is the row's
 /// `content` blob (same shape as the bundle's articles).
 struct MoneyMovesAPIResponse: Decodable {
     let articles: [MoneyMoveArticleDTO]
+
+    private enum CodingKeys: String, CodingKey { case articles }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        articles = c.lenientArray(MoneyMoveArticleDTO.self, forKey: .articles)
+    }
 }
 
 // MARK: - Article DTO
@@ -184,11 +221,17 @@ struct ArticleSectionContentDTO: Decodable {
     let itemsReadAlong: [[ReadAlongSentence]]?   // per-item sentence timings (bulletList)
 
     /// Read-along timings for this block, shaped to match its type (nil => none yet).
+    /// An EMPTY (but non-nil) timings array is treated as "no timings" — otherwise `.sentences([])`
+    /// would drive ReadAlongText with zero spans and render the block's prose BLANK (the empty
+    /// AttributedString shows nothing). Empty can come from an alignment run that produced no spans
+    /// for a block, or a hand-edited Studio row; it must degrade to plain text, not vanish.
     func readAlongGroup() -> ReadAlongGroup? {
         if type == "bulletList" {
-            return itemsReadAlong.map { .items($0) }
+            guard let items = itemsReadAlong, !items.isEmpty else { return nil }
+            return .items(items)
         }
-        return readAlong.map { .sentences($0) }
+        guard let ra = readAlong, !ra.isEmpty else { return nil }
+        return .sentences(ra)
     }
 
     func toContent() -> ArticleSectionContent? {

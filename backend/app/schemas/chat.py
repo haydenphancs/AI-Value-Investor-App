@@ -116,6 +116,13 @@ class ChatMessageResponse(BaseModel):
     rich_content: Optional[Any] = None
     citations: Optional[List[Any]] = None
     tokens_used: Optional[int] = None
+    # Futuristic-chat additions (all Optional → legacy rows + old iOS builds stay valid):
+    #  • sources     — grounded-context "source" pills shown in the thinking card
+    #  • suggestions — 1-2 AI-generated follow-up questions to show after the answer
+    #  • thinking    — {stages: [str], source_count: int, elapsed_ms: int} for the "Done in Xs · N sources" card
+    sources: Optional[List[Any]] = None
+    suggestions: Optional[List[str]] = None
+    thinking: Optional[Dict[str, Any]] = None
     created_at: str
 
 

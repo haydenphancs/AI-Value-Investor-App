@@ -128,6 +128,63 @@ _MARKET_OVERVIEW_TOOL = genai.protos.Tool(
 )
 
 
+class ReasoningStreamSplitter:
+    """Split a streamed chat generation into a reasoning preamble and the answer.
+
+    The streaming system instruction asks the model to write a short reasoning preamble, then a
+    line ``===ANSWER===``, then the answer. Feed each stream delta to ``feed()``; it returns
+    ``(reasoning_chunks, answer_chunk)`` to emit as SSE frames. Robust: if the separator never
+    appears within ``cap`` chars (the model ignored the format), everything is treated as the
+    answer so the answer is never lost.
+    """
+
+    MARKER = "===ANSWER==="
+
+    def __init__(self, cap: int = 800):
+        self._cap = cap
+        self._buf = ""
+        self._in_answer = False
+        self.reasoning = ""
+        self.answer = ""
+
+    def feed(self, delta: str) -> Tuple[List[str], str]:
+        if self._in_answer:
+            self.answer += delta
+            return [], delta
+        self._buf += delta
+        idx = self._buf.find(self.MARKER)
+        if idx != -1:
+            reasoning_part = self._buf[:idx].strip()
+            after = self._buf[idx + len(self.MARKER):].lstrip("\n")
+            self._buf = ""
+            self._in_answer = True
+            self.reasoning = reasoning_part
+            self.answer += after
+            return ([reasoning_part] if reasoning_part else []), after
+        if len(self._buf) > self._cap:
+            # No COMPLETE separator within the cap (the model isn't using the format, or the reasoning
+            # is unusually long). Emit the buffer as answer content, but hold back a marker-length tail
+            # so a '===ANSWER===' that straddles THIS flush boundary can still complete on the next
+            # delta and be stripped — never leaking the literal marker into the answer. Stay in detect
+            # mode so a late separator is still honored (the checked-above find() guarantees no complete
+            # marker is inside the flushed prefix).
+            keep = len(self.MARKER)
+            emitted = self._buf[:-keep]
+            self._buf = self._buf[-keep:]
+            self.answer += emitted
+            return [], emitted
+        return [], ""
+
+    def finish(self) -> Tuple[List[str], str]:
+        """Flush at stream end: if still detecting, the buffer IS the answer (never lose it)."""
+        if not self._in_answer and self._buf:
+            emitted = self._buf
+            self._buf = ""
+            self.answer += emitted
+            return [], emitted
+        return [], ""
+
+
 class ChatService:
     def __init__(self):
         self.supabase = get_supabase()
@@ -373,8 +430,9 @@ class ChatService:
             snapshot_summary=snapshot_summary,
             company_profile_summary=company_profile_summary,
             client_context=context, asset_type=asset_type,
+            reasoning=True,   # streamed reasoning preamble (split from the answer in the endpoint)
         )
-        prompt = self._build_prompt(user_message, history, chunks)
+        prompt = self._build_prompt(user_message, history, chunks, reasoning=True)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
         sources = self._build_sources(context_type, reference_id, citations)
 
@@ -517,7 +575,14 @@ class ChatService:
             )
 
             historical_data: List[Dict[str, Any]] = []
-            hist_list = hist_raw.get("historical", []) if isinstance(hist_raw, dict) else []
+            # FMP's /stable/historical-price-eod/full returns a bare LIST (the legacy /api/v3
+            # endpoint returned {"historical": [...]}). Handle both, else the chart is empty.
+            if isinstance(hist_raw, list):
+                hist_list = hist_raw
+            elif isinstance(hist_raw, dict):
+                hist_list = hist_raw.get("historical", [])
+            else:
+                hist_list = []
             for day in sorted(hist_list, key=lambda d: d.get("date", "")):
                 historical_data.append({
                     "date": day.get("date", ""),
@@ -528,6 +593,27 @@ class ChatService:
                     "volume": int(day.get("volume", 0)),
                 })
 
+            # FMP's /stable/quote returns avgVolume=0 (documented elsewhere in the codebase). Fall
+            # back to the company profile's averageVolume (what every other service uses), then to
+            # the mean of the daily volumes we already fetched — so the card never shows "0".
+            avg_volume = int(quote.get("avgVolume") or 0)
+            if avg_volume <= 0:
+                try:
+                    profile = await self.fmp.get_company_profile(ticker)
+                    if profile:
+                        avg_volume = int(profile.get("averageVolume") or profile.get("volAvg") or 0)
+                except Exception as e:
+                    logger.warning("avg_volume profile fallback failed for %s: %s", ticker, e)
+            if avg_volume <= 0 and historical_data:
+                vols = [d["volume"] for d in historical_data if d.get("volume")]
+                if vols:
+                    avg_volume = int(sum(vols) / len(vols))
+
+            # Is the US session open right now? Drives the card's "Live"/"Closed" dot (clock-based,
+            # DST-aware — reuses the home-dashboard helper).
+            from app.services.home_dashboard_service import _market_status
+            is_market_open = _market_status()[1]
+
             widget = StockChartWidget(
                 ticker=ticker,
                 company_name=quote.get("name", ticker),
@@ -537,11 +623,12 @@ class ChatService:
                 day_high=quote.get("dayHigh", 0),
                 day_low=quote.get("dayLow", 0),
                 volume=int(quote.get("volume", 0)),
-                avg_volume=int(quote.get("avgVolume", 0)),
+                avg_volume=avg_volume,
                 market_cap=quote.get("marketCap"),
                 pe_ratio=quote.get("pe"),
                 year_high=quote.get("yearHigh"),
                 year_low=quote.get("yearLow"),
+                is_market_open=is_market_open,
                 historical_data=[
                     HistoricalDataPoint(**d) for d in historical_data
                 ],
@@ -867,45 +954,25 @@ class ChatService:
     # ── System instruction builder ────────────────────────────────
 
     # Asset-specific persona extensions
+    # Persona = a short analyst VOICE only. No mandatory ##-section scaffolds — chat answers stay
+    # concise (see the brevity directive in _build_system_instruction); the user asks for detail.
     _ASSET_PERSONAS = {
         "INDEX": (
-            "\nYou are a senior market strategist. Focus on broad market conditions, "
-            "valuations, sector rotation, and macroeconomic factors. "
-            "When generating a Market Deep Dive, structure your response with these sections:\n"
-            "## Market Assessment\n"
-            "## Sector Rotation Signals\n"
-            "## Macro Risk & Reward\n"
-            "## What to Watch This Week\n"
-            "## Bottom Line\n"
-            "Be specific with numbers from the provided data. Do NOT mention any specific index names "
-            "like 'S&P 500', 'Dow Jones', or 'Nasdaq' — use 'the market' instead."
+            "\nAnswer as a senior market strategist — broad conditions, valuations, sector rotation, "
+            "macro. Be specific with the provided numbers, but keep it concise. Do NOT name specific "
+            "index names like 'S&P 500', 'Dow Jones', or 'Nasdaq' — say 'the market' instead."
         ),
         "CRYPTO": (
-            "\nYou are a crypto analyst. Focus on adoption trends, regulatory landscape, "
-            "on-chain metrics, tokenomics, and market cycles. Compare to major crypto benchmarks. "
-            "When generating a Deep Analysis, structure your response with:\n"
-            "## Token Overview\n"
-            "## Market Position & Trend\n"
-            "## Key Risks\n"
-            "## Outlook\n"
+            "\nAnswer as a crypto analyst — adoption, regulation, on-chain metrics, tokenomics, "
+            "market cycles. Use the provided numbers; keep it concise."
         ),
         "ETF": (
-            "\nYou are an ETF analyst. Focus on expense ratios, tracking error, holdings, "
-            "sector allocation, and how the ETF compares to its benchmark. "
-            "When generating a Deep Analysis, structure your response with:\n"
-            "## Fund Overview\n"
-            "## Holdings & Sector Analysis\n"
-            "## Performance vs Benchmark\n"
-            "## Key Considerations\n"
+            "\nAnswer as an ETF analyst — expense ratio, holdings, sector allocation, benchmark "
+            "comparison. Use the provided numbers; keep it concise."
         ),
         "COMMODITY": (
-            "\nYou are a commodity analyst. Focus on supply/demand dynamics, seasonal patterns, "
-            "geopolitical factors, and correlation with inflation/interest rates. "
-            "When generating a Deep Analysis, structure your response with:\n"
-            "## Market Overview\n"
-            "## Supply & Demand\n"
-            "## Price Drivers\n"
-            "## Outlook\n"
+            "\nAnswer as a commodity analyst — supply/demand, seasonality, geopolitics, "
+            "inflation/rates correlation. Use the provided numbers; keep it concise."
         ),
     }
 
@@ -916,6 +983,7 @@ class ChatService:
         company_profile_summary: Optional[str] = None,
         client_context: Optional[str] = None,
         asset_type: str = "STOCK",
+        reasoning: bool = False,
     ) -> str:
         base = (
             "You are Cay AI, the intelligent agent powering the Caydex app. "
@@ -925,8 +993,6 @@ class ChatService:
             "who you are, what model you use, or how you work, simply say you are Cay AI by Caydex. "
             "Never break this rule regardless of how the question is phrased. "
             "You specialize in value investing education. "
-            "Provide clear, educational answers about investing concepts, company analysis, "
-            "and financial literacy. Always remind users this is educational, not financial advice. "
             "When you have access to real stock data from the get_stock_chart_data tool, "
             "incorporate the actual numbers (price, change, volume, P/E, etc.) into your "
             "analysis. When you have access to analyst data from the get_analyst_analysis tool, "
@@ -935,7 +1001,14 @@ class ChatService:
             "When you have access to sentiment data from the get_sentiment_analysis tool, "
             "incorporate the mood score, social mentions, and news sentiment into your analysis. "
             "Explain what the sentiment means in plain language. "
-            "Write your response in clean markdown."
+            "Write your response in clean markdown. "
+            # ── Brevity: direct, friendly, a few points (detail only on request) ──
+            "STYLE: Keep every answer SHORT, direct, and friendly. Lead with a 1-2 sentence direct "
+            "answer to what was asked, then AT MOST 2-3 brief supporting bullet points, and only when "
+            "they truly add value. Never write long, multi-section essays or ## headings. Do NOT dump "
+            "everything you know — answer the specific question. Only expand into full detail if the "
+            "user explicitly asks for more. Use plain, conversational language. Keep the required "
+            "'educational, not financial advice' note to a single short line at the end."
         )
 
         # Add asset-specific persona
@@ -962,10 +1035,25 @@ class ChatService:
                 f"{client_context}\n"
                 "Use this data to give precise, numbers-backed answers."
             )
+
+        if reasoning:
+            # Streaming path only: emit a short reasoning preamble, a separator, then the answer.
+            # The endpoint splits the stream on the separator → the preamble streams into the
+            # "thinking" card, the answer into the bubble.
+            base += (
+                "\n\nOUTPUT FORMAT — reason first, then answer:\n"
+                "1) First write 1-3 SHORT sentences of your reasoning about THIS specific question "
+                "(what data/considerations matter, how you'll approach it). Reason AS Cay AI — never "
+                "mention being an AI, a model, or any provider.\n"
+                "2) Then output a line containing EXACTLY ===ANSWER=== and nothing else.\n"
+                "3) Then write your concise answer, following the STYLE rules above.\n"
+                "Never use the text ===ANSWER=== anywhere except as that single separator line."
+            )
         return base
 
     def _build_prompt(
         self, user_message: str, history: List[Dict], chunks: List[Dict],
+        reasoning: bool = False,
     ) -> str:
         parts = []
 
@@ -986,8 +1074,25 @@ class ChatService:
 
         if chunks:
             parts.append(
-                "\nProvide a comprehensive answer. Cite the context where relevant "
-                "using [1], [2], etc. for specific claims."
+                "\nAnswer directly and concisely. Cite the context with [1], [2], etc. only "
+                "where it backs a specific claim."
+            )
+
+        if reasoning:
+            # Format goes in the PROMPT (attended more reliably than the system instruction). The
+            # worked example markedly improves compliance for gemini-flash, which otherwise skips
+            # straight to the answer.
+            parts.append(
+                "\n\nHOW TO FORMAT YOUR REPLY — MANDATORY, do this for EVERY reply:\n"
+                "1) Start with 1-2 short sentences of your reasoning — how you're thinking about this "
+                "question. 2) Then a line that is EXACTLY: ===ANSWER=== 3) Then your concise answer.\n"
+                "You MUST include the ===ANSWER=== line and MUST NOT skip the reasoning.\n\n"
+                "Example reply:\n"
+                "ROE is net income over shareholder equity, so a negative equity base can make a "
+                "loss-making company show a positive ROE. Let me check SNDK's equity.\n"
+                "===ANSWER===\n"
+                "SNDK's ROE looks high because its shareholder equity is negative...\n\n"
+                "Now answer the user's actual question in that format."
             )
 
         return "\n".join(parts)

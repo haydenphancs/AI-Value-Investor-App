@@ -20,10 +20,9 @@ struct AIMessageContent: View {
     var showFollowUps: Bool = false
     var onFollowUpTap: ((String) -> Void)? = nil
 
-    /// True while the thinking card is still "working" (stages present, not yet completed).
+    /// True while the thinking card is still "working" (reasoning/answer streaming, not yet done).
     private var thinkingActive: Bool {
-        guard let t = thinking else { return false }
-        return t.isActive && !t.stages.isEmpty
+        thinking?.isActive ?? false
     }
 
     var body: some View {
@@ -32,7 +31,7 @@ struct AIMessageContent: View {
             CayAIMessageHeader()
 
             // Thinking card at the TOP of the answer (Copilot-style).
-            if let thinking = thinking, !thinking.stages.isEmpty {
+            if let thinking = thinking, thinking.shouldDisplay {
                 ThinkingProcessCard(thinking: thinking, sources: sources ?? [])
             }
 

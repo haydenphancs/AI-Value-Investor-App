@@ -204,7 +204,8 @@ def test_message_surfaces_thinking_sources_suggestions_from_rich_content():
             ],
             "suggestions": ["What's the valuation?", "How wide is the moat?"],
             "thinking": {
-                "stages": ["Reading AAPL's data", "Reviewing the sources", "Writing your answer"],
+                "stages": [],
+                "reasoning": "ROE can exceed margins when equity is small; check the equity base.",
                 "source_count": 2, "elapsed_ms": 4200,
             },
         },
@@ -219,6 +220,7 @@ def test_message_surfaces_thinking_sources_suggestions_from_rich_content():
     assert dumped["suggestions"] == ["What's the valuation?", "How wide is the moat?"]
     assert dumped["thinking"]["source_count"] == 2
     assert dumped["thinking"]["elapsed_ms"] == 4200
+    assert dumped["thinking"]["reasoning"].startswith("ROE can exceed")
 
 
 def test_message_citations_are_objects_not_scalars():
@@ -245,7 +247,7 @@ def _stock_widget_payload() -> dict:
     return StockChartWidget(
         ticker="AAPL", company_name="Apple Inc.", current_price=200.0, change=1.5,
         change_percent=0.75, day_high=201.0, day_low=198.0, volume=50_000_000,
-        avg_volume=60_000_000,
+        avg_volume=60_000_000, is_market_open=True,
         historical_data=[HistoricalDataPoint(date="2026-06-27", open=199, high=201,
                                              low=198, close=200, volume=50_000_000)],
     ).model_dump()
@@ -272,6 +274,8 @@ def test_stock_chart_widget_matches_ios_required_keys():
     assert widget["widget_type"] == "stock_chart"
     assert widget["widget_type"] in _IOS_WIDGET_TYPES
     _assert_keys_subset(_STOCK_WIDGET_REQUIRED, widget, "stock_chart widget")
+    # Market-open flag (Optional; iOS drives the "Live"/"Closed" dot from it).
+    assert widget["is_market_open"] is True
     assert isinstance(widget["historical_data"], list)
     for point in widget["historical_data"]:
         _assert_keys_subset(_HISTPOINT_REQUIRED, point, "historical_data point")

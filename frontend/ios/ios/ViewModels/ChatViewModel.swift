@@ -102,6 +102,12 @@ class ChatViewModel: ObservableObject {
     private var revealTask: Task<Void, Never>?
     private static let revealStepNanos: UInt64 = 45_000_000  // ~45ms per revealed line
 
+    // Second reveal channel for the streamed REASONING preamble → meters into the thinking card.
+    private var reasonPending = ""
+    private var reasonShown = ""
+    private var reasonFinished = false
+    private var reasonTask: Task<Void, Never>?
+
     // MARK: - Session Management
 
     /// Create a new chat session and optionally send the first message.
@@ -495,6 +501,15 @@ class ChatViewModel: ObservableObject {
                     guard let srcs = Self.decodeSources(event.data), !srcs.isEmpty else { continue }
                     applyLiveSources(id: ensureBubble(), sources: srcs)
 
+                case "reasoning":
+                    // The model's streamed reasoning preamble → meter it into the thinking card
+                    // sentence-by-sentence (arrives as one complete frame, before the answer tokens).
+                    guard let delta = Self.decodeDelta(event.data), !delta.isEmpty else { continue }
+                    let id = ensureBubble()
+                    reasonPending += delta
+                    reasonFinished = true
+                    ensureReasonRevealRunning(id: id)
+
                 case "token":
                     guard let delta = Self.decodeDelta(event.data), !delta.isEmpty else { continue }
                     let id = ensureBubble()
@@ -507,9 +522,11 @@ class ChatViewModel: ObservableObject {
                     ensureRevealRunning(id: id)
 
                 case "reset":
-                    // Server fell back to full generation — discard partial tokens + reveal buffer.
+                    // Server fell back to full generation — discard partial tokens + both reveal buffers.
                     revealTask?.cancel(); revealTask = nil
                     revealPending = ""; revealShown = ""; revealFinished = false
+                    reasonTask?.cancel(); reasonTask = nil
+                    reasonPending = ""; reasonShown = ""; reasonFinished = false
                     if let id = liveId { setMessageText(id: id, text: "") }
 
                 case "done":
@@ -521,8 +538,11 @@ class ChatViewModel: ObservableObject {
                     // finalize with the authoritative content + thinking/sources/suggestions so no
                     // text is ever lost even if the reveal lagged the network.
                     revealFinished = true
+                    reasonFinished = true
                     await revealTask?.value
+                    await reasonTask?.value
                     revealTask = nil
+                    reasonTask = nil
                     guard sessionId == currentSessionId else { cancelReveal(); return }
                     if let id = liveId, let idx = messages.firstIndex(where: { $0.id == id }) {
                         // Same id → the row updates in place (no ForEach tear-down/flicker).
@@ -631,6 +651,15 @@ class ChatViewModel: ObservableObject {
         messages[idx].content = [.text(text)]
     }
 
+    /// Set the streaming REASONING text on the thinking card in place (preserves stages/sources).
+    private func setMessageReasoning(id: UUID, text: String) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        let t = messages[idx].thinking
+        messages[idx].thinking = ChatThinking(
+            stages: t?.stages ?? [], sourceCount: t?.sourceCount, elapsedMs: t?.elapsedMs, reasoning: text
+        )
+    }
+
     /// Start the line-by-line reveal loop if it isn't already running. Runs on the main actor
     /// (this VM is @MainActor) interleaving with token arrival via its per-line sleep.
     private func ensureRevealRunning(id: UUID) {
@@ -644,27 +673,48 @@ class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Reveal the next line (or word-chunk / remainder). Returns true when the buffer is fully
-    /// drained AND the network stream has finished (so the loop can stop).
+    /// Reveal the next chunk of the ANSWER. Returns true when the buffer is fully drained AND the
+    /// network stream has finished (so the loop can stop).
     private func revealTick(id: UUID) -> Bool {
         if revealPending.isEmpty { return revealFinished }
         let chunk = Self.nextRevealChunk(&revealPending, finished: revealFinished)
-        guard !chunk.isEmpty else { return false }   // waiting for the current line to complete
+        guard !chunk.isEmpty else { return false }   // waiting for the current line/sentence to complete
         revealShown += chunk
         setMessageText(id: id, text: revealShown)
         return false
     }
 
+    /// Reveal loop for the REASONING channel → writes into the thinking card.
+    private func ensureReasonRevealRunning(id: UUID) {
+        guard reasonTask == nil else { return }
+        reasonTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.reasonTick(id: id) { return }
+                try? await Task.sleep(nanoseconds: Self.revealStepNanos)
+            }
+        }
+    }
+
+    private func reasonTick(id: UUID) -> Bool {
+        if reasonPending.isEmpty { return reasonFinished }
+        let chunk = Self.nextRevealChunk(&reasonPending, finished: reasonFinished)
+        guard !chunk.isEmpty else { return false }
+        reasonShown += chunk
+        setMessageReasoning(id: id, text: reasonShown)
+        return false
+    }
+
     /// Pull the next reveal chunk off the front of `pending`:
-    ///  • up to & including the next newline (one line), else
-    ///  • the whole remainder once the network has finished, else
-    ///  • a word-bounded chunk when a single line grows long (so it doesn't stall), else
-    ///  • "" to wait for the current line to complete.
+    ///  • up to & including the earliest boundary — a newline OR a sentence end (". "/"! "/"? "/": ")
+    ///    so even a short, single-line answer reveals progressively, else
+    ///  • the whole remainder once the stream has finished, else
+    ///  • a word-bounded chunk when a fragment grows long (so it doesn't stall), else
+    ///  • "" to wait for the current sentence/line to complete.
     private static func nextRevealChunk(_ pending: inout String, finished: Bool) -> String {
-        if let nl = pending.firstIndex(of: "\n") {
-            let upto = pending.index(after: nl)
-            let chunk = String(pending[..<upto])
-            pending.removeSubrange(pending.startIndex..<upto)
+        if let end = firstBoundaryIndex(in: pending) {
+            let chunk = String(pending[..<end])
+            pending.removeSubrange(pending.startIndex..<end)
             return chunk
         }
         if finished {
@@ -682,13 +732,32 @@ class ChatViewModel: ObservableObject {
         return ""
     }
 
-    /// Cancel the reveal loop and clear its buffers.
+    /// Index just past the earliest reveal boundary: the first newline, or the first
+    /// sentence terminator (`.` `!` `?` `:`) immediately followed by a space. nil = none yet.
+    private static func firstBoundaryIndex(in s: String) -> String.Index? {
+        var best: String.Index? = s.firstIndex(of: "\n").map { s.index(after: $0) }
+        var i = s.startIndex
+        while i < s.endIndex {
+            let c = s[i]
+            if c == "." || c == "!" || c == "?" || c == ":" {
+                let next = s.index(after: i)
+                if next < s.endIndex, s[next] == " " {
+                    let boundary = s.index(after: next)   // include the punctuation + the space
+                    if best == nil || boundary < best! { best = boundary }
+                    break   // earliest sentence boundary found
+                }
+            }
+            i = s.index(after: i)
+        }
+        return best
+    }
+
+    /// Cancel BOTH reveal loops (answer + reasoning) and clear their buffers.
     private func cancelReveal() {
-        revealTask?.cancel()
-        revealTask = nil
-        revealPending = ""
-        revealShown = ""
-        revealFinished = false
+        revealTask?.cancel(); revealTask = nil
+        revealPending = ""; revealShown = ""; revealFinished = false
+        reasonTask?.cancel(); reasonTask = nil
+        reasonPending = ""; reasonShown = ""; reasonFinished = false
     }
 
     private func replaceMessage(id: UUID, with message: RichChatMessage) {

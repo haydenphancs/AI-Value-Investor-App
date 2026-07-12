@@ -410,8 +410,13 @@ class IndexDetailViewModel: ObservableObject {
                 print("   🔍 API Error detail: \(apiError)")
             }
 
-            self.errorMessage = "Unable to load index data. Pull to refresh."
-            loadFallbackData()
+            // Don't let a STALE request's failure clobber data a newer range fetch
+            // already painted (or is about to) — only surface the error/fallback if
+            // this is still the latest request.
+            if token == self.chartRequestToken {
+                self.errorMessage = "Unable to load index data. Pull to refresh."
+                loadFallbackData()
+            }
             self.isLoading = false
         }
     }

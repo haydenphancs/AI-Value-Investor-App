@@ -180,6 +180,14 @@ class Settings(BaseSettings):
     # specialists in parallel + a synthesizer. Kill switch → the plain single-agent streaming path.
     CHAT_MULTI_AGENT_ENABLED: bool = True
 
+    # Chat RAG quality (Phase 4). Query rewrite resolves follow-ups ("why is it down?") into a
+    # standalone search query (only when the message looks context-dependent, so standalone questions
+    # skip the call). Rerank pulls a wider candidate set then LLM-scores it down to top-K. Both are
+    # cheap flash-lite calls with graceful fallback; kill switches here.
+    CHAT_QUERY_REWRITE_ENABLED: bool = True
+    CHAT_RERANK_ENABLED: bool = True
+    RAG_RERANK_CANDIDATES: int = 20  # wider vector search before reranking down to RAG_TOP_K_RESULTS
+
     # Report pre-warming. After each market close the persona-neutral
     # ticker_data_cache goes stale; warming the top watchlist tickers means the
     # first report (and any same-session burst) skips re-collecting it. This runs

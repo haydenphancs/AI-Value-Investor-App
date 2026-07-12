@@ -204,7 +204,12 @@ struct TickerChartView: View {
                     pricePoints: visiblePoints,
                     allPricePoints: pricePoints,
                     visibleStartIndex: subChartVisibleStart,
-                    crosshairState: crosshairState
+                    crosshairState: crosshairState,
+                    // Share the main price chart's 1D intraday time-of-session mapping so
+                    // volume bars + the sub-chart crosshair align with the price line.
+                    timeFractions: (selectedRange == .oneDay && assetContext != .crypto)
+                        ? TradingDayHelper.timeFractions(for: visiblePoints)
+                        : nil
                 )
             }
 

@@ -9,12 +9,32 @@
 
 import SwiftUI
 
+/// Maps a visible-slice index → x-position. On the 1D intraday chart the main
+/// price chart positions points by time-of-session (non-linear) via
+/// `timeFractions`, with pre/after-hours points clamped to 0/1; the sub-panes
+/// (volume/RSI/MACD/Stoch) and the sub-chart crosshair must use the SAME mapping
+/// or they drift from the price line — volume bars stretch and the crosshair
+/// lands on a different bar than the main-chart price dot for the same point.
+/// `timeFractions == nil` (every non-1D range) preserves the original linear
+/// index mapping exactly, so this is a no-op off the 1D intraday path.
+private func subChartX(_ index: Int, width: CGFloat, count: Int, timeFractions: [CGFloat]?) -> CGFloat {
+    if let f = timeFractions, index >= 0, index < f.count {
+        return f[index] * width
+    }
+    return CGFloat(index) * width / CGFloat(max(1, count - 1))
+}
+
 struct SubChartCanvas: View {
     let indicator: TechnicalIndicatorType
     let pricePoints: [StockPricePoint]          // visible slice (for rendering positions)
     var allPricePoints: [StockPricePoint]? = nil // full dataset (for indicator computation)
     var visibleStartIndex: Int = 0               // where visible slice starts in allPricePoints
     @ObservedObject var crosshairState: CrosshairState
+
+    /// 1D intraday time-of-session x-positions for the visible slice — the SAME
+    /// array the main price chart + crosshair use. nil on every non-1D range,
+    /// where sub-panes fall back to linear index mapping (unchanged behavior).
+    var timeFractions: [CGFloat]? = nil
 
     /// The data used for indicator calculation (full dataset if available)
     private var computePoints: [StockPricePoint] {
@@ -57,25 +77,29 @@ struct SubChartCanvas: View {
                         case .volume:
                             VolumeBarRenderer(
                                 pricePoints: pricePoints,
-                                size: size
+                                size: size,
+                                timeFractions: timeFractions
                             )
                         case .rsi14:
                             RSIRenderer(
                                 allCloses: computePoints.map { $0.close },
                                 visibleRange: visibleRange,
-                                size: size
+                                size: size,
+                                timeFractions: timeFractions
                             )
                         case .macd:
                             MACDRenderer(
                                 allCloses: computePoints.map { $0.close },
                                 visibleRange: visibleRange,
-                                size: size
+                                size: size,
+                                timeFractions: timeFractions
                             )
                         case .stochastic:
                             StochasticRenderer(
                                 allPricePoints: computePoints,
                                 visibleRange: visibleRange,
-                                size: size
+                                size: size,
+                                timeFractions: timeFractions
                             )
                         default:
                             EmptyView()
@@ -84,7 +108,7 @@ struct SubChartCanvas: View {
                         // Crosshair vertical line on sub-chart
                         if crosshairState.isDragging, let idx = crosshairState.selectedIndex,
                            idx >= 0, idx < pricePoints.count {
-                            let x = CGFloat(idx) * size.width / CGFloat(max(1, pricePoints.count - 1))
+                            let x = subChartX(idx, width: size.width, count: pricePoints.count, timeFractions: timeFractions)
                             Path { path in
                                 path.move(to: CGPoint(x: x, y: 0))
                                 path.addLine(to: CGPoint(x: x, y: size.height))
@@ -157,6 +181,7 @@ struct SubChartCanvas: View {
 struct VolumeBarRenderer: View {
     let pricePoints: [StockPricePoint]
     let size: CGSize
+    var timeFractions: [CGFloat]? = nil
 
     var body: some View {
         Canvas { context, canvasSize in
@@ -171,7 +196,7 @@ struct VolumeBarRenderer: View {
 
             for (index, point) in pricePoints.enumerated() {
                 guard let vol = point.volume, vol > 0 else { continue }
-                let x = CGFloat(index) * canvasSize.width / CGFloat(max(1, count - 1))
+                let x = subChartX(index, width: canvasSize.width, count: count, timeFractions: timeFractions)
                 let barHeight = CGFloat(vol / maxVol) * canvasSize.height * 0.9
 
                 let previousClose = index > 0 ? pricePoints[index - 1].close : point.close
@@ -196,6 +221,7 @@ struct RSIRenderer: View {
     let allCloses: [Double]
     let visibleRange: Range<Int>
     let size: CGSize
+    var timeFractions: [CGFloat]? = nil
 
     var body: some View {
         let rsiData = TechnicalIndicatorCalculator.rsi(closes: allCloses, period: 14)
@@ -231,7 +257,7 @@ struct RSIRenderer: View {
             var started = false
             for (index, value) in visibleValues.enumerated() {
                 guard let v = value else { continue }
-                let x = CGFloat(index) * canvasSize.width / CGFloat(max(1, count - 1))
+                let x = subChartX(index, width: canvasSize.width, count: count, timeFractions: timeFractions)
                 let y = canvasSize.height * (1 - CGFloat(v) / 100.0)
                 if !started {
                     rsiPath.move(to: CGPoint(x: x, y: y))
@@ -251,6 +277,7 @@ struct MACDRenderer: View {
     let allCloses: [Double]
     let visibleRange: Range<Int>
     let size: CGSize
+    var timeFractions: [CGFloat]? = nil
 
     var body: some View {
         let macdData = TechnicalIndicatorCalculator.macd(closes: allCloses)
@@ -285,7 +312,7 @@ struct MACDRenderer: View {
             let barWidth = max(1, canvasSize.width / CGFloat(count) * 0.5)
             for (index, value) in visibleHistogram.enumerated() {
                 guard let v = value else { continue }
-                let x = CGFloat(index) * canvasSize.width / CGFloat(max(1, count - 1))
+                let x = subChartX(index, width: canvasSize.width, count: count, timeFractions: timeFractions)
                 let barY = yPos(v)
                 let rect = CGRect(
                     x: x - barWidth / 2,
@@ -310,7 +337,7 @@ struct MACDRenderer: View {
         var started = false
         for (index, value) in values.enumerated() {
             guard let v = value else { continue }
-            let x = CGFloat(index) * canvasWidth / CGFloat(max(1, count - 1))
+            let x = subChartX(index, width: canvasWidth, count: count, timeFractions: timeFractions)
             let y = yPos(v)
             if !started {
                 path.move(to: CGPoint(x: x, y: y))
@@ -329,6 +356,7 @@ struct StochasticRenderer: View {
     let allPricePoints: [StockPricePoint]
     let visibleRange: Range<Int>
     let size: CGSize
+    var timeFractions: [CGFloat]? = nil
 
     var body: some View {
         let closes = allPricePoints.map { $0.close }
@@ -370,7 +398,7 @@ struct StochasticRenderer: View {
         var started = false
         for (index, value) in values.enumerated() {
             guard let v = value else { continue }
-            let x = CGFloat(index) * canvasSize.width / CGFloat(max(1, count - 1))
+            let x = subChartX(index, width: canvasSize.width, count: count, timeFractions: timeFractions)
             let y = canvasSize.height * (1 - CGFloat(v) / 100.0)
             if !started {
                 path.move(to: CGPoint(x: x, y: y))

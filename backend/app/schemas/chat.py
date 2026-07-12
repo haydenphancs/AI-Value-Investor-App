@@ -115,7 +115,8 @@ class ChatMessageResponse(BaseModel):
     session_id: str
     role: str
     content: str
-    widget: Optional[Any] = None  # StockChartWidget or MarketOverviewWidget (discriminated by widget_type)
+    widget: Optional[Any] = None  # single widget (back-compat); StockChartWidget/MarketOverviewWidget
+    widgets: Optional[List[Any]] = None  # Phase 2: multi-widget list (chart + comparison charts, …)
     rich_content: Optional[Any] = None
     citations: Optional[List[Any]] = None
     tokens_used: Optional[int] = None

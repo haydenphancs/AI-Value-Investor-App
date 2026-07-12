@@ -53,9 +53,10 @@ _SESSION_ALL_KEYS = _SESSION_REQUIRED | {
 }
 _MESSAGE_REQUIRED = {"id", "session_id", "role", "content", "created_at"}
 _MESSAGE_ALL_KEYS = _MESSAGE_REQUIRED | {
-    "widget", "citations", "tokens_used",
+    "widget", "widgets", "citations", "tokens_used",
     # Futuristic-chat additions (rich_content-backed; all Optional on iOS so absent/null is
     # fine and old builds ignore them): the thinking card + sources pills + follow-up chips.
+    # `widgets` (Phase 2) is the multi-widget list; `widget` stays for back-compat.
     "sources", "suggestions", "thinking",
 }
 
@@ -295,6 +296,45 @@ def test_market_overview_widget_matches_ios_required_keys():
         _assert_keys_subset({"sector", "change_percent"}, sec, "sector entry")
     for macro in widget["macro_indicators"]:
         _assert_keys_subset({"title", "signal"}, macro, "macro item")
+
+
+def test_multi_widget_list_and_legacy_fallback():
+    """Phase 2 multi-widget contract. `rich_content.widgets` is a LIST of widget payloads; the
+    single `widget` stays for back-compat. A Phase-2 row exposes the full list AND mirrors the
+    first into `widget` (old iOS renders one); a LEGACY row (only `widget`) exposes
+    widgets == [widget] (new iOS renders the list); no widget → both None."""
+    w1, w2 = _stock_widget_payload(), _market_widget_payload()
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "compare",
+        "created_at": "2026-06-28T00:00:00.000000+00:00",
+        "rich_content": {"widgets": [w1, w2], "widget": w1},
+    }
+    dumped = _row_to_message(row).model_dump()
+    assert isinstance(dumped["widgets"], list) and len(dumped["widgets"]) == 2
+    assert dumped["widgets"][0]["widget_type"] == "stock_chart"
+    assert dumped["widgets"][1]["widget_type"] == "market_overview"
+    assert dumped["widget"]["widget_type"] == "stock_chart"      # back-compat single
+    for w in dumped["widgets"]:
+        assert w["widget_type"] in _IOS_WIDGET_TYPES
+
+    # Legacy row (single widget only) → widgets falls back to [widget] for new iOS builds.
+    legacy = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "chart",
+        "created_at": "2026-06-28T00:00:00.000000+00:00",
+        "rich_content": {"widget": _stock_widget_payload()},
+    }
+    d2 = _row_to_message(legacy).model_dump()
+    assert d2["widget"] is not None
+    assert isinstance(d2["widgets"], list) and len(d2["widgets"]) == 1
+    assert d2["widgets"][0]["widget_type"] == "stock_chart"
+
+    # No widget at all → both None (plain text message).
+    plain = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "hi",
+        "created_at": "2026-06-28T00:00:00.000000+00:00", "rich_content": {},
+    }
+    d3 = _row_to_message(plain).model_dump()
+    assert d3["widget"] is None and d3["widgets"] is None
 
 
 def test_canonical_widgets_only_emit_ios_decodable_types():

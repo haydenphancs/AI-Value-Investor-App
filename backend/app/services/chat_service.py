@@ -378,6 +378,7 @@ class ChatService:
             "citations": citations if citations else None,
             "widget": widget,
             "sources": sources if sources else None,
+            "asset_type": asset_type,
         }
 
     # Screen context_type → the human "source" label shown in the thinking card.

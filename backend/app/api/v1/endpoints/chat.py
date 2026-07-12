@@ -84,7 +84,12 @@ def _sse(event: str, data: dict) -> str:
 def _row_to_message(row: dict) -> ChatMessageResponse:
     """Map a Supabase chat_messages row to the response schema."""
     rc = row.get("rich_content") if isinstance(row.get("rich_content"), dict) else None
+    # `widgets` (list) is the Phase-2 multi-widget field; `widget` (single) stays for back-compat
+    # with old iOS builds. Fall the list back to the single widget for legacy rows.
+    stored_widgets = rc.get("widgets") if rc else None
     stored_widget = rc.get("widget") if rc else None
+    if not stored_widgets and stored_widget:
+        stored_widgets = [stored_widget]
     # Futuristic-chat fields live in rich_content (no schema migration). Absent → None,
     # so legacy rows and old iOS builds decode unchanged.
     sources = rc.get("sources") if rc else None
@@ -97,6 +102,7 @@ def _row_to_message(row: dict) -> ChatMessageResponse:
         role=row["role"],
         content=row["content"],
         widget=stored_widget,
+        widgets=stored_widgets,
         rich_content=row.get("rich_content"),
         citations=row.get("citations"),
         tokens_used=row.get("tokens_used"),
@@ -325,7 +331,7 @@ async def stream_chat_message(
 
         content: Optional[str] = None
         citations = None
-        widget = None
+        widgets: list = []
         tokens_used = None
         sources = None
         suggestions = None
@@ -355,23 +361,48 @@ async def stream_chat_message(
             if sources:
                 yield _sse("sources", {"sources": sources})
 
-            async for kind, delta in chat_service.gemini.stream_text(
-                prep["prompt"], system_instruction=prep["system_instruction"]
+            # Agentic streaming: the model may call tools (analyst / sentiment / chart / …)
+            # mid-stream. thought → reasoning card, answer → bubble, tool → progress + widget.
+            from app.services.agents.chat_tools import (
+                build_chat_tool_declarations, build_chat_tool_handlers,
+                widget_from_tool_result, widget_key,
+            )
+            asset_type = prep.get("asset_type") or "NORMAL"
+            tools = build_chat_tool_declarations(include_market_overview=(asset_type == "INDEX"))
+            handlers = build_chat_tool_handlers(chat_service)
+
+            # Start with the deterministic base widget (so an asset-detail chat always shows its
+            # chart); agentic tool calls add more, deduped by (widget_type, ticker).
+            seen_widgets: set = set()
+            base_widget = prep.get("widget")
+            if base_widget:
+                widgets.append(base_widget)
+                seen_widgets.add(widget_key(base_widget))
+
+            async for kind, payload in chat_service.gemini.stream_agentic(
+                prep["prompt"], tools=tools, tool_handlers=handlers,
+                system_instruction=prep["system_instruction"],
             ):
                 streamed_any = True
                 if kind == "thought":
-                    reasoning_parts.append(delta)
-                    yield _sse("reasoning", {"delta": delta})
-                else:
-                    answer_parts.append(delta)
-                    yield _sse("token", {"delta": delta})
+                    reasoning_parts.append(payload)
+                    yield _sse("reasoning", {"delta": payload})
+                elif kind == "answer":
+                    answer_parts.append(payload)
+                    yield _sse("token", {"delta": payload})
+                elif kind == "tool":
+                    # Real progress into the thinking card + collect any renderable widget.
+                    yield _sse("tool_step", {"name": payload.get("name"), "args": payload.get("args")})
+                    w = widget_from_tool_result(payload.get("result"))
+                    if w is not None and widget_key(w) not in seen_widgets:
+                        seen_widgets.add(widget_key(w))
+                        widgets.append(w)
 
             content = "".join(answer_parts)
             reasoning_text = "".join(reasoning_parts)
             if not content.strip():
                 raise RuntimeError("empty stream result")
             citations = prep.get("citations")
-            widget = prep.get("widget")
 
         except Exception as e:
             # Stream failed (quota / timeout / empty / disconnect). Fall back to
@@ -392,7 +423,8 @@ async def stream_chat_message(
                 )
                 content = ai_result.get("content")
                 citations = ai_result.get("citations")
-                widget = ai_result.get("widget")
+                fb_widget = ai_result.get("widget")
+                widgets = [fb_widget] if fb_widget else []  # discard streamed widgets; fallback replaces
                 tokens_used = ai_result.get("tokens_used")
                 # The aborted stream's thoughts don't correspond to this fallback answer — drop them
                 # so the persisted thinking card matches (the `reset` frame clears the live display).
@@ -434,8 +466,9 @@ async def stream_chat_message(
             # suggestions) in one JSONB column — no schema migration. Suggestions are added AFTER
             # this durable write (below), so they can never block or drop it.
             rich_content: dict = {"thinking": thinking_payload}
-            if widget:
-                rich_content["widget"] = widget
+            if widgets:
+                rich_content["widgets"] = widgets
+                rich_content["widget"] = widgets[0]   # back-compat: old iOS builds read `widget`
             if sources:
                 rich_content["sources"] = sources
 

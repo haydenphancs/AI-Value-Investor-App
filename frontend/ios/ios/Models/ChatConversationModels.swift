@@ -601,6 +601,9 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
     let role: String
     let content: String
     let widget: ChatWidgetData?
+    /// Phase-2 multi-widget list (a turn can emit chart + comparison chart, …). Optional so old
+    /// backend rows/builds decode unchanged; when absent, fall back to the single `widget`.
+    let widgets: [ChatWidgetData]?
     let citations: [ChatCitationDTO]?
     let tokensUsed: Int?
     // Futuristic-chat fields — all Optional so old backend responses (which omit them) decode
@@ -613,7 +616,7 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id
         case sessionId = "session_id"
-        case role, content, widget, citations
+        case role, content, widget, widgets, citations
         case tokensUsed = "tokens_used"
         case sources, suggestions, thinking
         case createdAt = "created_at"
@@ -624,9 +627,11 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         let msgRole: ChatMessageRole = role == "user" ? .user : .assistant
         var richContent: [RichContentType] = []
 
-        // If there's a widget, add it first (polymorphic)
-        if let widget = widget {
-            switch widget {
+        // Widgets first (polymorphic). Prefer the Phase-2 `widgets` list; fall back to the single
+        // `widget` for legacy rows / old backends. Each renders in order (chart, comparison, …).
+        let allWidgets = widgets ?? widget.map { [$0] } ?? []
+        for w in allWidgets {
+            switch w {
             case .stockChart(let data):
                 richContent.append(.stockChart(data))
             case .marketOverview(let data):

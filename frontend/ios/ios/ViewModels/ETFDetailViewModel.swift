@@ -179,11 +179,15 @@ class ETFDetailViewModel: ObservableObject {
                 print("[ETFDetailVM] API Error detail: \(apiError)")
             }
 
-            self.errorMessage = "Unable to load ETF data. Pull to refresh."
             self.isLoading = false
 
-            // Load fallback data so the screen isn't empty
-            loadFallbackData()
+            // Load fallback data so the screen isn't empty — but only if this is
+            // still the latest request, so a STALE fetch's failure can't clobber
+            // data a newer range fetch already painted.
+            if token == self.chartRequestToken {
+                self.errorMessage = "Unable to load ETF data. Pull to refresh."
+                loadFallbackData()
+            }
         }
     }
 

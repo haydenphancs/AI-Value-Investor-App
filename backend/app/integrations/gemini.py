@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any, Callable
 import logging
 import asyncio
 import hashlib
+import json
 import re
 import time
 from functools import wraps
@@ -784,6 +785,98 @@ class GeminiClient:
                 tools=list(tools),
             ),
         )
+
+    async def stream_agentic(
+        self,
+        prompt: str,
+        tools: List[Any],
+        tool_handlers: Dict[str, Callable],
+        system_instruction: Optional[str] = None,
+        max_rounds: int = 4,
+        model_name: Optional[str] = None,
+    ):
+        """Stream a MULTI-ROUND agentic answer: the model can call function-calling tools
+        mid-stream (manual FC), while reasoning + answer stream throughout.
+
+        Yields tagged events:
+          * ("thought", str) — a reasoning summary chunk (→ the thinking card)
+          * ("answer", str)  — an answer text chunk (→ the message bubble)
+          * ("tool", {"name","args","result"}) — AFTER a tool ran (→ tool_step + widget extraction)
+
+        client.aio.chats auto-preserves the model's turns (incl. thought signatures) across rounds;
+        we only feed tool responses back. Bounded by max_rounds, with a final answer round if the
+        model is still calling tools at the cap (so the user always gets a reply). Honors the quota
+        circuit breaker manually (a partial stream can't be safely @async_retry'd)."""
+        if _quota_circuit.is_open():
+            raise GeminiQuotaError("Gemini quota circuit open (resource_exhausted) — failing fast")
+        config = self._config(
+            system_instruction=system_instruction,
+            tools=tools,
+            thinking_config=types.ThinkingConfig(include_thoughts=True),
+        )
+        # Manual function calling — we run handlers ourselves (AFC-while-streaming is buggy upstream).
+        config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
+        chat = self._client.aio.chats.create(model=model_name or self.model_name, config=config)
+
+        message: Any = prompt
+        try:
+            for _round in range(max_rounds):
+                fcalls: List[Any] = []
+                stream = await chat.send_message_stream(message)
+                async for chunk in stream:
+                    for part in _iter_parts(chunk):
+                        fc = getattr(part, "function_call", None)
+                        if fc and fc.name:
+                            fcalls.append(fc)
+                            continue
+                        try:
+                            text = part.text or ""
+                        except (ValueError, AttributeError):
+                            text = ""
+                        if text:
+                            yield ("thought" if getattr(part, "thought", False) else "answer"), text
+                if not fcalls:
+                    _quota_circuit.record_success()
+                    return
+                # Run the requested tools, emit a "tool" event each, feed responses back next round.
+                response_parts: List[Any] = []
+                for fc in fcalls:
+                    args = dict(fc.args) if fc.args else {}
+                    handler = tool_handlers.get(fc.name)
+                    if handler is None:
+                        logger.warning("Agentic chat requested unknown tool: %s", fc.name)
+                        result = {"error": f"unknown tool: {fc.name}"}
+                    else:
+                        try:
+                            result = await handler(args)
+                        except Exception as e:
+                            logger.warning("Agentic tool %s failed: %s: %s", fc.name, type(e).__name__, e)
+                            result = {"error": str(e)}
+                    yield "tool", {"name": fc.name, "args": args, "result": result}
+                    response_parts.append(types.Part.from_function_response(
+                        name=fc.name,
+                        response={"result": json.dumps(result, default=str)[:8000]},
+                    ))
+                message = response_parts
+
+            # max_rounds exhausted while still calling tools — one final answer round (tools ignored)
+            # so the user always gets a reply.
+            final_stream = await chat.send_message_stream(message)
+            async for chunk in final_stream:
+                for part in _iter_parts(chunk):
+                    if getattr(part, "function_call", None):
+                        continue
+                    try:
+                        text = part.text or ""
+                    except (ValueError, AttributeError):
+                        text = ""
+                    if text:
+                        yield ("thought" if getattr(part, "thought", False) else "answer"), text
+            _quota_circuit.record_success()
+        except Exception as e:
+            if _is_quota_error(e):
+                _quota_circuit.record_quota_error()
+            raise
 
 
 # Global client instance

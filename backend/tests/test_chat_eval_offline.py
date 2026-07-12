@@ -38,8 +38,19 @@ def _make_service(*, chunks=None, profit=None, snapshot=None, profile=None,
     svc.gemini = _FakeGemini(raises=embed_raises)
 
     svc._get_recent_messages = lambda session_id, limit=10: list(history or [])
-    svc._search_filing_chunks = lambda emb, ticker: list(chunks or [])
-    svc._search_all_chunks = lambda emb: list(chunks or [])
+
+    # Phase 4: RAG goes through a single _retrieve_context entry point (rewrite → embed → search →
+    # rerank). Stub it here to return the canned chunks + citations (or nothing on the failure case),
+    # mirroring its never-raise contract — no need to stub the internal steps.
+    async def _retrieve(_user_message, _stock_id, _hist):
+        if embed_raises:
+            return [], []
+        cs = list(chunks or [])
+        cits = [{"index": i + 1, "source": c.get("section_title", "Document"),
+                 "text": (c.get("chunk_text") or "")[:200]} for i, c in enumerate(cs)]
+        return cs, cits
+
+    svc._retrieve_context = _retrieve
 
     async def _profit(_t):
         return profit

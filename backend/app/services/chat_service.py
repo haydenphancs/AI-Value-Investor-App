@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from google.genai import types
 
@@ -165,26 +165,8 @@ class ChatService:
         # Step 1: Conversation history
         history = self._get_recent_messages(session_id, limit=10)
 
-        # Step 2: RAG context
-        chunks: List[Dict] = []
-        citations: List[Dict] = []
-        try:
-            query_embedding = await self.gemini.generate_embedding(
-                user_message, model_name="models/gemini-embedding-001"
-            )
-            if stock_id:
-                chunks = self._search_filing_chunks(query_embedding, stock_id)
-            else:
-                chunks = self._search_all_chunks(query_embedding)
-
-            for i, chunk in enumerate(chunks):
-                citations.append({
-                    "index": i + 1,
-                    "source": chunk.get("section_title", "Document"),
-                    "text": chunk.get("chunk_text", "")[:200],
-                })
-        except Exception as e:
-            logger.warning(f"RAG retrieval failed, proceeding without context: {e}")
+        # Step 2: RAG context (query-rewrite → RETRIEVAL_QUERY embed → wider search → LLM-rerank).
+        chunks, citations = await self._retrieve_context(user_message, stock_id, history)
 
         # Step 3: Build prompt (includes RAG context + history)
         # Detect asset type from stock_id
@@ -331,25 +313,8 @@ class ChatService:
 
         history = self._get_recent_messages(session_id, limit=10)
 
-        # RAG context (same as generate_response, best-effort).
-        chunks: List[Dict] = []
-        citations: List[Dict] = []
-        try:
-            query_embedding = await self.gemini.generate_embedding(
-                user_message, model_name="models/gemini-embedding-001"
-            )
-            if stock_id:
-                chunks = self._search_filing_chunks(query_embedding, stock_id)
-            else:
-                chunks = self._search_all_chunks(query_embedding)
-            for i, chunk in enumerate(chunks):
-                citations.append({
-                    "index": i + 1,
-                    "source": chunk.get("section_title", "Document"),
-                    "text": chunk.get("chunk_text", "")[:200],
-                })
-        except Exception as e:
-            logger.warning(f"RAG retrieval failed (stream), proceeding without context: {e}")
+        # RAG context (same pipeline as generate_response, best-effort).
+        chunks, citations = await self._retrieve_context(user_message, stock_id, history)
 
         asset_type = self._detect_asset_type(stock_id) if stock_id else "NORMAL"
 
@@ -770,12 +735,123 @@ class ChatService:
         except Exception:
             return []
 
-    def _search_filing_chunks(self, embedding: List[float], ticker: str) -> List[Dict]:
+    # ── RAG retrieval (Phase 4: query-rewrite → RETRIEVAL_QUERY embed → wider search → LLM-rerank) ──
+
+    _REWRITE_PRONOUNS = frozenset({
+        "it", "its", "that", "this", "they", "them", "those", "these", "their", "there", "here",
+    })
+
+    @classmethod
+    def _needs_rewrite(cls, user_message: str) -> bool:
+        """Cheap heuristic: only rewrite a message that looks context-dependent (a short fragment, or
+        one carrying pronouns/ellipsis), so standalone questions skip the extra LLM call."""
+        m = (user_message or "").strip()
+        if len(m) < 15:
+            return True
+        words = {w.strip(".,!?;:'\"()").lower() for w in m.split()}
+        return bool(words & cls._REWRITE_PRONOUNS)
+
+    async def _rewrite_query(self, user_message: str, history: List[Dict]) -> str:
+        """Resolve a follow-up into a standalone search query using recent turns (cheap flash-lite).
+        Skips the call when the message isn't context-dependent. Never raises → the original message."""
+        if not history or not self._needs_rewrite(user_message):
+            return user_message
+        try:
+            convo = "\n".join(
+                f"{'User' if m.get('role') == 'user' else 'Assistant'}: {(m.get('content') or '')[:200]}"
+                for m in history[-4:]
+            )
+            prompt = (
+                "Rewrite the user's LATEST question into a short, standalone search query for a "
+                "document search — resolve pronouns/ellipsis using the conversation, keep it "
+                "keyword-rich, and do NOT answer it.\n\n"
+                f"CONVERSATION:\n{convo}\n\nLATEST QUESTION: {user_message}\n\nStandalone search query:"
+            )
+            res = await self.gemini.generate_text(prompt, model_name="gemini-2.5-flash-lite")
+            rewritten = (res.get("text") or "").strip().strip('"').strip()
+            return rewritten if 0 < len(rewritten) <= 400 else user_message
+        except Exception as e:
+            logger.warning("Query rewrite failed (%s: %s) — using original", type(e).__name__, e)
+            return user_message
+
+    async def _rerank_chunks(self, query: str, chunks: List[Dict], top_k: int) -> List[Dict]:
+        """LLM-rerank candidate chunks by relevance to `query`, keeping `top_k` (cheap flash-lite).
+        Never raises → returns the first `top_k` in vector order on any failure."""
+        if len(chunks) <= top_k:
+            return chunks
+        try:
+            listing = "\n".join(
+                f"[{i}] {(c.get('chunk_text') or '')[:280]}" for i, c in enumerate(chunks)
+            )
+            prompt = (
+                f"QUERY: {query}\n\nPASSAGES:\n{listing}\n\n"
+                f"Return the indices of the {top_k} passages MOST relevant to answering the query, "
+                'best first, as JSON: {"indices": [numbers]}.'
+            )
+            res = await self.gemini.generate_json(prompt, model_name="gemini-2.5-flash-lite")
+            data = json.loads((res.get("text") or "{}") or "{}")
+            picked: List[Dict] = []
+            seen: set = set()
+            for i in (data.get("indices") or []):
+                if isinstance(i, int) and 0 <= i < len(chunks) and i not in seen:
+                    seen.add(i)
+                    picked.append(chunks[i])
+                    if len(picked) >= top_k:
+                        break
+            # Backfill from vector order if the model returned too few valid indices.
+            for i, c in enumerate(chunks):
+                if len(picked) >= top_k:
+                    break
+                if i not in seen:
+                    picked.append(c)
+            return picked[:top_k]
+        except Exception as e:
+            logger.warning("Chunk rerank failed (%s: %s) — using vector order", type(e).__name__, e)
+            return chunks[:top_k]
+
+    async def _retrieve_context(
+        self, user_message: str, stock_id: Optional[str], history: List[Dict],
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """Chat RAG retrieval: (query-rewrite) → RETRIEVAL_QUERY embed → wider vector search →
+        (LLM-rerank) → top-K, plus the citations built from the surviving chunks. Never raises → ([], [])."""
+        chunks: List[Dict] = []
+        citations: List[Dict] = []
+        try:
+            query = user_message
+            if settings.CHAT_QUERY_REWRITE_ENABLED:
+                query = await self._rewrite_query(user_message, history)
+            query_embedding = await self.gemini.generate_embedding(
+                query, model_name="models/gemini-embedding-001", task_type="RETRIEVAL_QUERY",
+            )
+            top_k = settings.RAG_TOP_K_RESULTS
+            rerank = settings.CHAT_RERANK_ENABLED
+            match_count = settings.RAG_RERANK_CANDIDATES if rerank else top_k
+            if stock_id:
+                candidates = self._search_filing_chunks(query_embedding, stock_id, match_count)
+            else:
+                candidates = self._search_all_chunks(query_embedding, match_count)
+            if rerank and len(candidates) > top_k:
+                chunks = await self._rerank_chunks(query, candidates, top_k)
+            else:
+                chunks = candidates[:top_k]
+            for i, chunk in enumerate(chunks):
+                citations.append({
+                    "index": i + 1,
+                    "source": chunk.get("section_title", "Document"),
+                    "text": chunk.get("chunk_text", "")[:200],
+                })
+        except Exception as e:
+            logger.warning("RAG retrieval failed, proceeding without context: %s", e)
+        return chunks, citations
+
+    def _search_filing_chunks(
+        self, embedding: List[float], ticker: str, match_count: Optional[int] = None
+    ) -> List[Dict]:
         try:
             result = self.supabase.rpc("search_filing_chunks", {
                 "query_embedding": embedding,
                 "match_threshold": settings.VECTOR_SIMILARITY_THRESHOLD,
-                "match_count": settings.RAG_TOP_K_RESULTS,
+                "match_count": match_count or settings.RAG_TOP_K_RESULTS,
                 "filter_ticker": ticker.upper(),
             }).execute()
             return result.data or []
@@ -783,12 +859,12 @@ class ChatService:
             logger.warning(f"Filing chunk search failed: {e}")
             return []
 
-    def _search_all_chunks(self, embedding: List[float]) -> List[Dict]:
+    def _search_all_chunks(self, embedding: List[float], match_count: Optional[int] = None) -> List[Dict]:
         try:
             result = self.supabase.rpc("search_all_chunks", {
                 "query_embedding": embedding,
                 "match_threshold": settings.VECTOR_SIMILARITY_THRESHOLD,
-                "match_count": settings.RAG_TOP_K_RESULTS,
+                "match_count": match_count or settings.RAG_TOP_K_RESULTS,
             }).execute()
             return result.data or []
         except Exception as e:

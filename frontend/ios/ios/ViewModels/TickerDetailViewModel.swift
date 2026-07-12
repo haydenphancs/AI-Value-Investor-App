@@ -498,7 +498,10 @@ class TickerDetailViewModel: ObservableObject {
             print("✅ TickerDetailVM: Got earnings for \(ticker) — \(dto.epsQuarters.count) EPS quarters")
         } catch {
             print("⚠️ TickerDetailVM: Earnings failed for \(ticker): \(error)")
-            self.earningsData = EarningsData.sampleData
+            // Leave nil on failure — do NOT substitute .sampleData (hardcoded Apple
+            // figures). Placeholder data would render as THIS ticker's real financials
+            // and leak into the AI chat context. An honest empty section is correct.
+            self.earningsData = nil
         }
     }
 
@@ -509,7 +512,9 @@ class TickerDetailViewModel: ObservableObject {
             print("✅ TickerDetailVM: Got growth for \(ticker)")
         } catch {
             print("⚠️ TickerDetailVM: Growth failed for \(ticker): \(error)")
-            self.growthData = GrowthSectionData.sampleData
+            // No .sampleData fallback — see fetchEarnings. Fabricated growth curves
+            // must never masquerade as this ticker's data or feed financialsContext.
+            self.growthData = nil
         }
     }
 
@@ -520,7 +525,8 @@ class TickerDetailViewModel: ObservableObject {
             print("✅ TickerDetailVM: Got profit power for \(ticker)")
         } catch {
             print("⚠️ TickerDetailVM: Profit power failed for \(ticker): \(error)")
-            self.profitPowerData = ProfitPowerSectionData.sampleData
+            // No .sampleData fallback — see fetchEarnings.
+            self.profitPowerData = nil
         }
     }
 
@@ -531,7 +537,8 @@ class TickerDetailViewModel: ObservableObject {
             print("✅ TickerDetailVM: Got health check for \(ticker)")
         } catch {
             print("⚠️ TickerDetailVM: Health check failed for \(ticker): \(error)")
-            self.healthCheckData = HealthCheckSectionData.sampleData
+            // No .sampleData fallback — see fetchEarnings.
+            self.healthCheckData = nil
         }
     }
 
@@ -542,7 +549,8 @@ class TickerDetailViewModel: ObservableObject {
             print("✅ TickerDetailVM: Got signal of confidence for \(ticker)")
         } catch {
             print("⚠️ TickerDetailVM: Signal of confidence failed for \(ticker): \(error)")
-            self.signalOfConfidenceData = SignalOfConfidenceSectionData.sampleData
+            // No .sampleData fallback — see fetchEarnings.
+            self.signalOfConfidenceData = nil
         }
     }
 
@@ -991,11 +999,11 @@ class TickerDetailViewModel: ObservableObject {
             chartPricePoints: existingChart,
             keyStatistics: keyStats,
             keyStatisticsGroups: keyStatsGroups,
-            performancePeriods: PerformancePeriod.sampleData,   // No API backing yet
-            snapshots: SnapshotItem.sampleData,                 // No API backing yet
+            performancePeriods: [],   // Honest empty — never seed .sampleData (fabricated
+            snapshots: [],            // data would render as THIS ticker's real figures on
             sectorIndustry: sectorIndustry,
             companyProfile: companyProfile,
-            relatedTickers: RelatedTicker.sampleData,           // No API backing yet
+            relatedTickers: [],       // the /overview-failed fallback path). Sections hide when empty.
             benchmarkSummary: nil                               // No API backing yet
         )
     }

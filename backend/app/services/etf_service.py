@@ -402,10 +402,13 @@ class ETFService:
                 _cache_set(sp_cache_key, spy_hist)
 
         # ── Step 2: Extract quote data ────────────────────────────
-        price = float(quote.get("price") or 0)
-        change = float(quote.get("change") or 0)
-        change_pct = float(quote.get("changePercentage") or quote.get("changesPercentage") or 0)
-        prev_close = float(quote.get("previousClose") or 0)
+        # _finite_num (not raw float) — FMP can emit a NaN/Infinity JSON token for
+        # a computed field; float("nan") succeeds and, forwarded into a REQUIRED
+        # response float, makes Starlette (allow_nan=False) 500 the whole ETF detail.
+        price = _finite_num(quote.get("price"))
+        change = _finite_num(quote.get("change"))
+        change_pct = _finite_num(quote.get("changePercentage") or quote.get("changesPercentage"))
+        prev_close = _finite_num(quote.get("previousClose"))
         # Safety net: compute from change/previousClose if FMP didn't return percentage
         if not change_pct and change and prev_close > 0:
             change_pct = round((change / prev_close) * 100, 4)
@@ -416,21 +419,21 @@ class ETFService:
             or etf_info.get("avgVolume")
             or 0
         )
-        year_high = float(quote.get("yearHigh") or 0)
-        year_low = float(quote.get("yearLow") or 0)
-        price_avg_50 = float(quote.get("priceAvg50") or 0)
-        market_cap = quote.get("marketCap") or profile.get("marketCap") or 0
-        beta = float(profile.get("beta") or quote.get("beta") or 0)
+        year_high = _finite_num(quote.get("yearHigh"))
+        year_low = _finite_num(quote.get("yearLow"))
+        price_avg_50 = _finite_num(quote.get("priceAvg50"))
+        market_cap = _finite_num(quote.get("marketCap") or profile.get("marketCap"))
+        beta = _finite_num(profile.get("beta") or quote.get("beta"))
 
         # ETF-specific data (etf_info may be empty if FMP plan doesn't include it)
         # Fall back to static reference table for popular ETFs
         ref = _ETF_REFERENCE.get(symbol, {})
 
-        expense_ratio = float(etf_info.get("expenseRatio") or ref.get("expense_ratio") or 0)
-        nav = float(etf_info.get("navPrice") or etf_info.get("nav") or price)
-        total_assets = float(
+        expense_ratio = _finite_num(etf_info.get("expenseRatio") or ref.get("expense_ratio"))
+        nav = _finite_num(etf_info.get("navPrice") or etf_info.get("nav"), default=price)
+        total_assets = _finite_num(
             etf_info.get("assetsUnderManagement") or etf_info.get("totalAssets")
-            or etf_info.get("aum") or etf_info.get("netAssets") or market_cap or 0
+            or etf_info.get("aum") or etf_info.get("netAssets") or market_cap
         )
         holdings_count = int(
             etf_info.get("holdingsCount") or etf_info.get("numberOfHoldings")
@@ -455,11 +458,11 @@ class ETFService:
         elif website.startswith("http://"):
             website = website[7:]
         description = etf_info.get("description") or profile.get("description") or ""
-        turnover = float(etf_info.get("turnover") or ref.get("turnover") or 0)
+        turnover = _finite_num(etf_info.get("turnover") or ref.get("turnover"))
 
         # Dividend yield: prefer etf_info, then compute from lastDividend / price
-        last_div_dollar = float(profile.get("lastDividend") or profile.get("lastDiv") or 0)
-        dividend_yield = float(etf_info.get("dividendYield") or quote.get("dividendYield") or 0)
+        last_div_dollar = _finite_num(profile.get("lastDividend") or profile.get("lastDiv"))
+        dividend_yield = _finite_num(etf_info.get("dividendYield") or quote.get("dividendYield"))
         if not dividend_yield and last_div_dollar > 0 and price > 0:
             dividend_yield = round((last_div_dollar / price) * 100, 2)
 
@@ -1041,28 +1044,28 @@ class ETFService:
         days = range_days.get(chart_range, 90)
         cutoff = (today - timedelta(days=days)).isoformat()
 
+        from app.services.chart_helper import _finite_or_none
+
         result = []
         for p in historical:
             date = p.get("date")
             # `None >= cutoff` raises TypeError; guard before comparing.
             if not date or date < cutoff:
                 continue
-            raw_close = p.get("close") or p.get("adjClose")
-            # Coerce BEFORE the > 0 comparison — a string close would raise
-            # TypeError on `close > 0` in Python 3.
-            try:
-                close = float(raw_close) if raw_close is not None else None
-            except (ValueError, TypeError):
-                close = None
+            # A NaN close survives `close <= 0` (nan comparisons are False) and a
+            # non-finite open/high/low/volume forwarded raw serialize as an invalid
+            # JSON `NaN`/`Infinity` token — Starlette (allow_nan=False) then 500s
+            # the WHOLE ETF detail. Route every OHLCV value through _finite_or_none.
+            close = _finite_or_none(p.get("close") or p.get("adjClose"))
             if close is None or close <= 0:
                 continue
             result.append({
                 "date": date,
-                "open": p.get("open"),
-                "high": p.get("high"),
-                "low": p.get("low"),
+                "open": _finite_or_none(p.get("open")),
+                "high": _finite_or_none(p.get("high")),
+                "low": _finite_or_none(p.get("low")),
                 "close": round(close, 2),
-                "volume": p.get("volume"),
+                "volume": _finite_or_none(p.get("volume")),
             })
         return result
 

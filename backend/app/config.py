@@ -175,6 +175,11 @@ class Settings(BaseSettings):
     GEMINI_CONTEXT_CACHE_ENABLED: bool = True
     GEMINI_CONTEXT_CACHE_TTL_MINUTES: int = 10
 
+    # Multi-agent chat (Phase 3): a cheap router classifies each question and routes to a topic
+    # specialist (valuation/technicals/macro/…); genuinely cross-domain questions run several
+    # specialists in parallel + a synthesizer. Kill switch → the plain single-agent streaming path.
+    CHAT_MULTI_AGENT_ENABLED: bool = True
+
     # Report pre-warming. After each market close the persona-neutral
     # ticker_data_cache goes stale; warming the top watchlist tickers means the
     # first report (and any same-session burst) skips re-collecting it. This runs

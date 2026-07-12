@@ -78,6 +78,14 @@ def get_specialist(key: str) -> ChatSpecialist:
 
 
 def apply_specialist(system_instruction: str, key: str) -> str:
-    """Append the specialist's focus lens to the base system instruction. General → unchanged."""
+    """Append the specialist's focus lens to the base system instruction. General → unchanged.
+    Includes a guard so the model answers WITH the emphasis without narrating it (no "lens"/"as a
+    valuation specialist" meta-phrasing leaking into the user-facing answer)."""
     focus = get_specialist(key).focus
-    return f"{system_instruction}\n\n{focus}" if focus else system_instruction
+    if not focus:
+        return system_instruction
+    return (
+        f"{system_instruction}\n\n{focus}\n"
+        "Answer WITH this emphasis, but never mention it — do not use the words 'lens', "
+        "'perspective', or 'specialist', and don't say 'as a … analyst'. Just answer."
+    )

@@ -1651,7 +1651,7 @@ class StockOverviewService:
         from datetime import date as _date, datetime as _dt
 
         stock_end = stock_hist[-1].get("close") or stock_hist[-1].get("adjClose")
-        end_date_str = stock_hist[-1].get("date") or ""[:10]
+        end_date_str = (stock_hist[-1].get("date") or "")[:10]
         if not stock_end or stock_end <= 0:
             return None
 
@@ -1683,7 +1683,7 @@ class StockOverviewService:
         # Fallback: use the earliest available price in stock_hist
         if alltime_stock is None:
             stock_start = stock_hist[0].get("close") or stock_hist[0].get("adjClose")
-            ipo_start_date = stock_hist[0].get("date") or ""[:10]
+            ipo_start_date = (stock_hist[0].get("date") or "")[:10]
             alltime_stock = _cagr_from(stock_start, stock_end, ipo_start_date, end_date_str)
 
         # Format since date
@@ -1698,31 +1698,31 @@ class StockOverviewService:
             sp_start_price = None
             sp_found_date = ""
             for p in spy_hist:
-                if p.get("date") or ""[:10] >= ipo_start_date:
+                if (p.get("date") or "")[:10] >= ipo_start_date:
                     sp_start_price = p.get("close") or p.get("adjClose")
-                    sp_found_date = p.get("date") or ""[:10]
+                    sp_found_date = (p.get("date") or "")[:10]
                     break
             if sp_start_price is None and spy_hist:
                 sp_start_price = spy_hist[0].get("close") or spy_hist[0].get("adjClose")
-                sp_found_date = spy_hist[0].get("date") or ""[:10]
+                sp_found_date = (spy_hist[0].get("date") or "")[:10]
             sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
             alltime_sp = _cagr_from(sp_start_price, sp_end_price, sp_found_date, end_date_str)
         alltime_sp = alltime_sp or 0.0
 
         # ── 5-year windowed CAGR (primary display) ─────────────────
         five_year_cutoff = (_date.today() - timedelta(days=365 * 5)).isoformat()
-        hist_5y = [p for p in stock_hist if p.get("date") or ""[:10] >= five_year_cutoff]
+        hist_5y = [p for p in stock_hist if (p.get("date") or "")[:10] >= five_year_cutoff]
 
         if len(hist_5y) >= 252:
             s5 = hist_5y[0].get("close") or hist_5y[0].get("adjClose")
-            stock_5y = _cagr_from(s5, stock_end, hist_5y[0].get("date") or ""[:10], end_date_str)
+            stock_5y = _cagr_from(s5, stock_end, (hist_5y[0].get("date") or "")[:10], end_date_str)
 
-            spy_5y = [p for p in spy_hist if p.get("date") or ""[:10] >= five_year_cutoff] if spy_hist else []
+            spy_5y = [p for p in spy_hist if (p.get("date") or "")[:10] >= five_year_cutoff] if spy_hist else []
             sp_5y_val = 0.0
             if len(spy_5y) >= 2:
                 sp5_s = spy_5y[0].get("close") or spy_5y[0].get("adjClose")
                 sp5_e = spy_5y[-1].get("close") or spy_5y[-1].get("adjClose")
-                sp_5y_val = _cagr_from(sp5_s, sp5_e, spy_5y[0].get("date") or ""[:10], end_date_str) or 0.0
+                sp_5y_val = _cagr_from(sp5_s, sp5_e, (spy_5y[0].get("date") or "")[:10], end_date_str) or 0.0
 
             try:
                 since_5y_display = _date.fromisoformat(five_year_cutoff).strftime("%b %Y")

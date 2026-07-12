@@ -705,7 +705,7 @@ class IndexService:
 
         result = []
         for p in historical:
-            if p.get("date") or "" >= cutoff:
+            if (p.get("date") or "") >= cutoff:
                 close = p.get("close") or p.get("adjClose")
                 if close and close > 0:
                     result.append(ChartDataPointResponse(

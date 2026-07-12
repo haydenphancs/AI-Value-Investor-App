@@ -556,7 +556,7 @@ class CommodityService:
                 year_start = datetime.now(tz=timezone.utc).strftime("%Y-01-01")
                 past_close = None
                 for p in historical:
-                    if p.get("date") or "" >= year_start:
+                    if (p.get("date") or "") >= year_start:
                         past_close = p.get("close")
                         break
                 if not past_close or past_close <= 0:

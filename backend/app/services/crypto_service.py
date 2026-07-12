@@ -778,7 +778,7 @@ class CryptoService:
             one_year_ago = (today - timedelta(days=365)).isoformat()
             year_prices = [
                 p for p in historical
-                if p.get("date") or "" >= one_year_ago
+                if (p.get("date") or "") >= one_year_ago
             ]
             if year_prices:
                 highs = [p.get("high", 0) or 0 for p in year_prices]
@@ -990,8 +990,8 @@ class CryptoService:
                 return 0.0
 
             # Compute actual years from date strings
-            start_date_str = prices[0].get("date") or ""[:10]
-            end_date_str = prices[-1].get("date") or ""[:10]
+            start_date_str = (prices[0].get("date") or "")[:10]
+            end_date_str = (prices[-1].get("date") or "")[:10]
             try:
                 from datetime import date as _date
                 sd = _date.fromisoformat(start_date_str)
@@ -1011,7 +1011,7 @@ class CryptoService:
 
         # Helper: filter prices to those on or after a cutoff date
         def _filter_from(prices: list, cutoff: str) -> list:
-            return [p for p in prices if p.get("date") or ""[:10] >= cutoff]
+            return [p for p in prices if (p.get("date") or "")[:10] >= cutoff]
 
         # Helper: CAGR for benchmark aligned to a start date
         def _cagr_aligned(bench_prices: list, start_date: str) -> float:
@@ -1021,7 +1021,7 @@ class CryptoService:
             return _cagr(aligned) if aligned else _cagr(bench_prices)
 
         # ── All-time CAGR ──────────────────────────────────────────
-        asset_start_date = historical[0].get("date") or ""[:10] if historical else ""
+        asset_start_date = (historical[0].get("date") or "")[:10] if historical else ""
         alltime_asset = _cagr(historical)
         alltime_bench = 0.0
         if symbol == "BTC" and spy_hist:
@@ -1107,7 +1107,7 @@ class CryptoService:
 
         result = []
         for p in historical:
-            if p.get("date") or "" >= cutoff:
+            if (p.get("date") or "") >= cutoff:
                 close = p.get("close") or p.get("adjClose")
                 if close and close > 0:
                     result.append({

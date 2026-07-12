@@ -131,7 +131,7 @@ async def _fetch_all_daily(fmp: FMPClient, symbol: str) -> List[Dict]:
             break
 
         # Next request: fetch everything before the earliest date in this page
-        earliest = page[0].get("date") or ""[:10]
+        earliest = (page[0].get("date") or "")[:10]
         if not earliest or earliest <= from_date:
             break
         # Set to_date to day before earliest to avoid overlap
@@ -145,7 +145,7 @@ async def _fetch_all_daily(fmp: FMPClient, symbol: str) -> List[Dict]:
     seen = set()
     deduped = []
     for p in all_data:
-        d = p.get("date") or ""[:10]
+        d = (p.get("date") or "")[:10]
         if d not in seen:
             seen.add(d)
             deduped.append(p)
@@ -286,7 +286,7 @@ def _aggregate_prices(
 
     groups: Dict[str, List[Dict]] = {}
     for p in daily_prices:
-        date_str = p.get("date") or ""[:10]
+        date_str = (p.get("date") or "")[:10]
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
@@ -318,7 +318,7 @@ def _aggregate_prices(
 
         if closes:
             result.append({
-                "date": candles[-1].get("date") or ""[:10],
+                "date": (candles[-1].get("date") or "")[:10],
                 "open": opens[0] if opens else None,
                 "high": max(highs) if highs else None,
                 "low": min(lows) if lows else None,

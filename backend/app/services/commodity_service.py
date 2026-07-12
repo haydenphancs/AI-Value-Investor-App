@@ -298,7 +298,9 @@ class CommodityService:
             historical = hist_raw.get("historical", [])
         elif isinstance(hist_raw, list):
             historical = hist_raw
-        historical.sort(key=lambda p: p.get("date", ""))
+        # `date` may be an explicit JSON null (not just absent); .get(k, "") only
+        # covers a MISSING key, so `or ""` is needed to avoid None<str TypeError.
+        historical.sort(key=lambda p: p.get("date") or "")
 
         # ── Step 2: Extract quote data ────────────────────────────
         price = quote.get("price") or 0
@@ -463,7 +465,7 @@ class CommodityService:
         if historical and len(historical) >= 252 and price:
             earliest = historical[0]
             earliest_close = earliest.get("close") or 0
-            earliest_date = earliest.get("date", "")
+            earliest_date = earliest.get("date") or ""
             if earliest_close and earliest_close > 0:
                 total_return = ((price - earliest_close) / earliest_close) * 100
                 # Compute years from earliest date
@@ -554,7 +556,7 @@ class CommodityService:
                 year_start = datetime.now(tz=timezone.utc).strftime("%Y-01-01")
                 past_close = None
                 for p in historical:
-                    if p.get("date", "") >= year_start:
+                    if p.get("date") or "" >= year_start:
                         past_close = p.get("close")
                         break
                 if not past_close or past_close <= 0:

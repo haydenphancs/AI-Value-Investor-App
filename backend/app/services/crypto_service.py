@@ -552,12 +552,15 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     """Compute % return over the last N trading days."""
     if not prices or len(prices) < 2:
         return None
+    # Not enough history to cover the requested window: return None so the caller
+    # OMITS this period rather than mislabeling a shorter (e.g. since-inception)
+    # return under a "1Y"/"3Y"/... label (a young coin would otherwise show its
+    # full-history return mislabeled as "1 Year"). Genuine since-inception rows use
+    # the dedicated _compute_all_time_return, not this fallback.
     if len(prices) <= days_back:
-        start = prices[0].get("close") or prices[0].get("adjClose")
-        end = prices[-1].get("close") or prices[-1].get("adjClose")
-    else:
-        start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
-        end = prices[-1].get("close") or prices[-1].get("adjClose")
+        return None
+    start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
+    end = prices[-1].get("close") or prices[-1].get("adjClose")
     if not start or not end or start == 0:
         return None
     return ((end - start) / start) * 100
@@ -568,7 +571,7 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
         return None
     current_year = datetime.now(tz=timezone.utc).year
     for p in prices:
-        date_str = p.get("date", "")
+        date_str = p.get("date") or ""
         if date_str.startswith(str(current_year)):
             start_price = p.get("close") or p.get("adjClose")
             end_price = prices[-1].get("close") or prices[-1].get("adjClose")
@@ -736,7 +739,7 @@ class CryptoService:
             historical = hist_raw.get("historical", [])
         elif isinstance(hist_raw, list):
             historical = hist_raw
-        historical.sort(key=lambda p: p.get("date", ""))
+        historical.sort(key=lambda p: p.get("date") or "")
 
         # ── Step 2: Extract data from CoinGecko ──────────────────
         md = coin_data.get("market_data", {}) if isinstance(coin_data, dict) else {}
@@ -775,7 +778,7 @@ class CryptoService:
             one_year_ago = (today - timedelta(days=365)).isoformat()
             year_prices = [
                 p for p in historical
-                if p.get("date", "") >= one_year_ago
+                if p.get("date") or "" >= one_year_ago
             ]
             if year_prices:
                 highs = [p.get("high", 0) or 0 for p in year_prices]
@@ -850,7 +853,7 @@ class CryptoService:
                         spy_hist = spy_raw
                     else:
                         spy_hist = []
-                    spy_hist.sort(key=lambda p: p.get("date", ""))
+                    spy_hist.sort(key=lambda p: p.get("date") or "")
                     if spy_hist:
                         _cache_set(spy_cache_key, spy_hist)
                 except Exception as e:
@@ -884,7 +887,7 @@ class CryptoService:
                         btc_hist = btc_raw
                     else:
                         btc_hist = []
-                    btc_hist.sort(key=lambda p: p.get("date", ""))
+                    btc_hist.sort(key=lambda p: p.get("date") or "")
                     if btc_hist:
                         _cache_set(btc_hist_cache_key, btc_hist)
                 except Exception as e:
@@ -987,8 +990,8 @@ class CryptoService:
                 return 0.0
 
             # Compute actual years from date strings
-            start_date_str = prices[0].get("date", "")[:10]
-            end_date_str = prices[-1].get("date", "")[:10]
+            start_date_str = prices[0].get("date") or ""[:10]
+            end_date_str = prices[-1].get("date") or ""[:10]
             try:
                 from datetime import date as _date
                 sd = _date.fromisoformat(start_date_str)
@@ -1008,7 +1011,7 @@ class CryptoService:
 
         # Helper: filter prices to those on or after a cutoff date
         def _filter_from(prices: list, cutoff: str) -> list:
-            return [p for p in prices if p.get("date", "")[:10] >= cutoff]
+            return [p for p in prices if p.get("date") or ""[:10] >= cutoff]
 
         # Helper: CAGR for benchmark aligned to a start date
         def _cagr_aligned(bench_prices: list, start_date: str) -> float:
@@ -1018,7 +1021,7 @@ class CryptoService:
             return _cagr(aligned) if aligned else _cagr(bench_prices)
 
         # ── All-time CAGR ──────────────────────────────────────────
-        asset_start_date = historical[0].get("date", "")[:10] if historical else ""
+        asset_start_date = historical[0].get("date") or ""[:10] if historical else ""
         alltime_asset = _cagr(historical)
         alltime_bench = 0.0
         if symbol == "BTC" and spy_hist:
@@ -1104,7 +1107,7 @@ class CryptoService:
 
         result = []
         for p in historical:
-            if p.get("date", "") >= cutoff:
+            if p.get("date") or "" >= cutoff:
                 close = p.get("close") or p.get("adjClose")
                 if close and close > 0:
                     result.append({
@@ -1305,9 +1308,16 @@ class CryptoService:
             ("3 Years", three_year, bench_3y),
             ("5 Years", five_year, bench_5y),
         ]
-        # Crypto: always show "10 Years" instead of "All Time"
-        # Gracefully skipped if ten_year is None (not enough history)
-        entries.append(("10 Years", ten_year, bench_10y))
+        # Prefer a real "10 Years" row; if the coin lacks 10y of daily history,
+        # surface the already-computed all-time return (previously discarded — the
+        # `all_time` kwarg was accepted but never read, so most altcoins showed NO
+        # long-horizon row) under an "All Time" label instead of dropping it. No
+        # window-aligned benchmark exists for a since-inception span, so leave
+        # vs-market empty rather than comparing to the benchmark's full history.
+        if ten_year is not None:
+            entries.append(("10 Years", ten_year, bench_10y))
+        elif all_time is not None:
+            entries.append(("All Time", all_time, None))
         for label, asset_val, bench_val in entries:
             # Skip periods where the crypto doesn't have enough history
             if asset_val is None:

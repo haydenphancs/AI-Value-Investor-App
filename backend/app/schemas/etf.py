@@ -91,6 +91,10 @@ class ETFAssetAllocationResponse(BaseModel):
     equities: float
     bonds: float
     crypto: float
+    # Commodity/gold funds belong in neither equities nor cash; kept optional with
+    # a 0.0 default so pre-existing cached ETF payloads (which lack the key) still
+    # validate and the iOS decoder (commodities is Optional) never breaks.
+    commodities: float = 0.0
     cash: float
     total_assets: str  # e.g. "$562.3B"
 

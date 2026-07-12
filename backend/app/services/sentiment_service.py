@@ -497,7 +497,7 @@ class SentimentService:
                 hist = raw
             else:
                 hist = []
-            hist.sort(key=lambda p: p.get("date", ""))
+            hist.sort(key=lambda p: p.get("date") or "")
             return hist
         except Exception as e:
             logger.warning(f"Historical prices fetch failed for {ticker}: {e}")

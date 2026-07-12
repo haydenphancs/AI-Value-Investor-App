@@ -206,6 +206,45 @@ def _finite(v: Any) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
+def _safe_int(v: Any, default: int = 0) -> int:
+    """Coerce an FMP field to an int, tolerating comma-grouped / decimal strings.
+
+    FMP ``/stable/profile`` returns ``fullTimeEmployees`` as a string; a bare
+    ``int("164,000")`` / ``int("12345.0")`` raises ValueError, which — since the
+    profile is built with no surrounding try/except — would 500 the ENTIRE
+    /overview response (blanking a screen whose price/chart/stats all succeeded).
+    Parse defensively; non-numeric / non-finite → ``default``.
+    """
+    if v is None or isinstance(v, bool):
+        return default
+    try:
+        f = float(str(v).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return default
+    return int(f) if math.isfinite(f) else default
+
+
+def _first_present_float(*sources: tuple, default: float = 0.0) -> float:
+    """Return the first (dict, key) whose value is PRESENT (key exists, non-None,
+    finite) — so a legitimate ``0.0`` from a fresher source is NOT discarded in
+    favour of a staler fallback the way Python ``or`` (0.0 is falsy) would. Used
+    for price change / change%, where 0.0 is a valid flat-day value.
+    """
+    for d, key in sources:
+        if not isinstance(d, dict):
+            continue
+        v = d.get(key)
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (ValueError, TypeError):
+            continue
+        if math.isfinite(f):
+            return f
+    return default
+
+
 # ── Return computation helpers (same as etf_service) ─────────────
 
 
@@ -213,12 +252,15 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     """Compute % return over the last N trading days."""
     if not prices or len(prices) < 2:
         return None
+    # Not enough history to cover the requested window: return None so the caller
+    # OMITS this period rather than mislabeling a shorter (e.g. since-inception)
+    # return under a "3Y"/"5Y"/"10Y" label (a young stock would otherwise show its
+    # full-history return identically for 3Y/5Y/10Y). Genuine since-inception rows
+    # use a dedicated helper, not this fallback.
     if len(prices) <= days_back:
-        start = prices[0].get("close") or prices[0].get("adjClose")
-        end = prices[-1].get("close") or prices[-1].get("adjClose")
-    else:
-        start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
-        end = prices[-1].get("close") or prices[-1].get("adjClose")
+        return None
+    start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
+    end = prices[-1].get("close") or prices[-1].get("adjClose")
 
     if not start or not end or start == 0:
         return None
@@ -230,7 +272,7 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
         return None
     current_year = datetime.now(tz=timezone.utc).year
     for p in prices:
-        date_str = p.get("date", "")
+        date_str = p.get("date") or ""
         if date_str.startswith(str(current_year)):
             start_price = p.get("close") or p.get("adjClose")
             end_price = prices[-1].get("close") or prices[-1].get("adjClose")
@@ -280,7 +322,9 @@ def _parse_historical(hist_raw) -> List[Dict]:
         historical = hist_raw.get("historical", [])
     elif isinstance(hist_raw, list):
         historical = hist_raw
-    historical.sort(key=lambda p: p.get("date", ""))
+    # `date` may be an explicit JSON null (not just absent); `or ""` avoids a
+    # None<str TypeError when sorting a malformed FMP row.
+    historical.sort(key=lambda p: p.get("date") or "")
     return historical
 
 
@@ -424,10 +468,10 @@ class StockOverviewService:
                 else:
                     ipo_prices = []
                 if ipo_prices:
-                    ipo_prices.sort(key=lambda p: p.get("date", ""))
+                    ipo_prices.sort(key=lambda p: p.get("date") or "")
                     ipo_price_data = {
                         "price": ipo_prices[0].get("close") or ipo_prices[0].get("adjClose"),
-                        "date": ipo_prices[0].get("date", ""),
+                        "date": ipo_prices[0].get("date") or "",
                     }
             except Exception as e:
                 logger.warning(f"IPO price fetch failed for {ticker}: {e}")
@@ -698,12 +742,16 @@ class StockOverviewService:
 
         # Same price extraction as the full builder (_build_full_response).
         price = _safe_float(quote, "price") or _safe_float(profile, "price")
-        change = _safe_float(quote, "change") or _safe_float(profile, "changes")
-        change_pct = (
-            _safe_float(quote, "changePercentage")
-            or _safe_float(quote, "changesPercentage")
-            or _safe_float(profile, "changePercentage")
-            or _safe_float(profile, "changesPercentage")
+        # Prefer the (fresher) quote, falling back to the profile only when the
+        # quote key is ABSENT — not when it is a legitimate 0.0 (a genuinely flat
+        # day). Python `or` treats 0.0 as falsy, so the old `or`-chain discarded a
+        # real 0.0 change and surfaced the staler profile's nonzero %, contradicting
+        # the (correctly 0.0) price_change. (Fallback key was also wrong: stable
+        # profile exposes "change", not "changes".)
+        change = _first_present_float((quote, "change"), (profile, "change"))
+        change_pct = _first_present_float(
+            (quote, "changePercentage"), (quote, "changesPercentage"),
+            (profile, "changePercentage"), (profile, "changesPercentage"),
         )
         company_name = profile.get("companyName") or quote.get("name") or ticker
         # NEVER slice from stock_historical here — that requires the slow bundle.
@@ -791,12 +839,16 @@ class StockOverviewService:
 
         # Price from volatile quote, fallback to profile
         price = _safe_float(quote, "price") or _safe_float(profile, "price")
-        change = _safe_float(quote, "change") or _safe_float(profile, "changes")
-        change_pct = (
-            _safe_float(quote, "changePercentage")
-            or _safe_float(quote, "changesPercentage")
-            or _safe_float(profile, "changePercentage")
-            or _safe_float(profile, "changesPercentage")
+        # Prefer the (fresher) quote, falling back to the profile only when the
+        # quote key is ABSENT — not when it is a legitimate 0.0 (a genuinely flat
+        # day). Python `or` treats 0.0 as falsy, so the old `or`-chain discarded a
+        # real 0.0 change and surfaced the staler profile's nonzero %, contradicting
+        # the (correctly 0.0) price_change. (Fallback key was also wrong: stable
+        # profile exposes "change", not "changes".)
+        change = _first_present_float((quote, "change"), (profile, "change"))
+        change_pct = _first_present_float(
+            (quote, "changePercentage"), (quote, "changesPercentage"),
+            (profile, "changePercentage"), (profile, "changesPercentage"),
         )
         company_name = profile.get("companyName") or quote.get("name") or ticker
 
@@ -952,12 +1004,12 @@ class StockOverviewService:
             future_ests = []
             for est in analyst_est:
                 if isinstance(est, dict):
-                    est_date = est.get("date", "")
+                    est_date = est.get("date") or ""
                     if est_date >= today_str:
                         future_ests.append(est)
             # Pick the nearest future estimate
             if future_ests:
-                future_ests.sort(key=lambda x: x.get("date", ""))
+                future_ests.sort(key=lambda x: x.get("date") or "")
                 nearest = future_ests[0]
                 fwd_eps = _safe_float(nearest, "epsAvg") or _safe_float(nearest, "estimatedEpsAvg")
                 if fwd_eps and fwd_eps > 0:
@@ -1541,7 +1593,7 @@ class StockOverviewService:
             description=profile.get("description") or "No description available.",
             ceo=profile.get("ceo") or "N/A",
             founded=profile.get("ipoDate") or "N/A",
-            employees=int(profile.get("fullTimeEmployees") or 0),
+            employees=_safe_int(profile.get("fullTimeEmployees")),
             headquarters=hq,
             website=website,
             sector=sector_industry.sector if sector_industry else profile.get("sector") or "N/A",
@@ -1599,7 +1651,7 @@ class StockOverviewService:
         from datetime import date as _date, datetime as _dt
 
         stock_end = stock_hist[-1].get("close") or stock_hist[-1].get("adjClose")
-        end_date_str = stock_hist[-1].get("date", "")[:10]
+        end_date_str = stock_hist[-1].get("date") or ""[:10]
         if not stock_end or stock_end <= 0:
             return None
 
@@ -1631,7 +1683,7 @@ class StockOverviewService:
         # Fallback: use the earliest available price in stock_hist
         if alltime_stock is None:
             stock_start = stock_hist[0].get("close") or stock_hist[0].get("adjClose")
-            ipo_start_date = stock_hist[0].get("date", "")[:10]
+            ipo_start_date = stock_hist[0].get("date") or ""[:10]
             alltime_stock = _cagr_from(stock_start, stock_end, ipo_start_date, end_date_str)
 
         # Format since date
@@ -1646,31 +1698,31 @@ class StockOverviewService:
             sp_start_price = None
             sp_found_date = ""
             for p in spy_hist:
-                if p.get("date", "")[:10] >= ipo_start_date:
+                if p.get("date") or ""[:10] >= ipo_start_date:
                     sp_start_price = p.get("close") or p.get("adjClose")
-                    sp_found_date = p.get("date", "")[:10]
+                    sp_found_date = p.get("date") or ""[:10]
                     break
             if sp_start_price is None and spy_hist:
                 sp_start_price = spy_hist[0].get("close") or spy_hist[0].get("adjClose")
-                sp_found_date = spy_hist[0].get("date", "")[:10]
+                sp_found_date = spy_hist[0].get("date") or ""[:10]
             sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
             alltime_sp = _cagr_from(sp_start_price, sp_end_price, sp_found_date, end_date_str)
         alltime_sp = alltime_sp or 0.0
 
         # ── 5-year windowed CAGR (primary display) ─────────────────
         five_year_cutoff = (_date.today() - timedelta(days=365 * 5)).isoformat()
-        hist_5y = [p for p in stock_hist if p.get("date", "")[:10] >= five_year_cutoff]
+        hist_5y = [p for p in stock_hist if p.get("date") or ""[:10] >= five_year_cutoff]
 
         if len(hist_5y) >= 252:
             s5 = hist_5y[0].get("close") or hist_5y[0].get("adjClose")
-            stock_5y = _cagr_from(s5, stock_end, hist_5y[0].get("date", "")[:10], end_date_str)
+            stock_5y = _cagr_from(s5, stock_end, hist_5y[0].get("date") or ""[:10], end_date_str)
 
-            spy_5y = [p for p in spy_hist if p.get("date", "")[:10] >= five_year_cutoff] if spy_hist else []
+            spy_5y = [p for p in spy_hist if p.get("date") or ""[:10] >= five_year_cutoff] if spy_hist else []
             sp_5y_val = 0.0
             if len(spy_5y) >= 2:
                 sp5_s = spy_5y[0].get("close") or spy_5y[0].get("adjClose")
                 sp5_e = spy_5y[-1].get("close") or spy_5y[-1].get("adjClose")
-                sp_5y_val = _cagr_from(sp5_s, sp5_e, spy_5y[0].get("date", "")[:10], end_date_str) or 0.0
+                sp_5y_val = _cagr_from(sp5_s, sp5_e, spy_5y[0].get("date") or ""[:10], end_date_str) or 0.0
 
             try:
                 since_5y_display = _date.fromisoformat(five_year_cutoff).strftime("%b %Y")

@@ -153,12 +153,14 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     if not prices or len(prices) < 2:
         return None
     # prices are sorted chronologically (oldest first)
+    # Not enough history to cover the requested window: return None so the caller
+    # OMITS this period rather than mislabeling a shorter return under a longer
+    # horizon label. (Supported indices have decades of history so this is a
+    # defensive guard, but it keeps the helper consistent with stock/etf/crypto.)
     if len(prices) <= days_back:
-        start = prices[0].get("close") or prices[0].get("adjClose")
-        end = prices[-1].get("close") or prices[-1].get("adjClose")
-    else:
-        start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
-        end = prices[-1].get("close") or prices[-1].get("adjClose")
+        return None
+    start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
+    end = prices[-1].get("close") or prices[-1].get("adjClose")
 
     if not start or not end or start == 0:
         return None
@@ -189,7 +191,7 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
     current_year = datetime.now(tz=timezone.utc).year
     # Find the first trading day of the current year
     for p in prices:
-        date_str = p.get("date", "")
+        date_str = p.get("date") or ""
         if date_str.startswith(str(current_year)):
             start_price = p.get("close") or p.get("adjClose")
             end_price = prices[-1].get("close") or prices[-1].get("adjClose")
@@ -507,7 +509,7 @@ class IndexService:
             historical = hist_raw.get("historical", [])
         elif isinstance(hist_raw, list):
             historical = hist_raw
-        historical.sort(key=lambda p: p.get("date", ""))
+        historical.sort(key=lambda p: p.get("date") or "")
 
         # ── Step 2: Extract quote data ────────────────────────────
         if isinstance(quote, Exception) or not quote:
@@ -703,7 +705,7 @@ class IndexService:
 
         result = []
         for p in historical:
-            if p.get("date", "") >= cutoff:
+            if p.get("date") or "" >= cutoff:
                 close = p.get("close") or p.get("adjClose")
                 if close and close > 0:
                     result.append(ChartDataPointResponse(
@@ -762,7 +764,11 @@ class IndexService:
             periods.append(PerformancePeriodResponse(
                 label=label,
                 change_percent=round(val, 2),
-                vs_market_percent=round(val, 2),
+                # An index IS the market — there is no separate benchmark return for
+                # this window. Echoing the index's own return here made the UI render
+                # a bogus "S&P: +X%" line where X was the index's OWN %. Leave unset
+                # so the vs-market line is hidden (both sides are Optional).
+                vs_market_percent=None,
             ))
         return periods
 

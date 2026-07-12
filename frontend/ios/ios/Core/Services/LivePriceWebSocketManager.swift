@@ -154,7 +154,17 @@ final class LivePriceWebSocketManager: ObservableObject {
         case "price_update":
             guard let price = msg.price else { return }
 
-            if !isConnected { isConnected = true }
+            if !isConnected {
+                isConnected = true
+                // A successful price_update confirms the (re)connection is live, so
+                // reset the lifetime attempt counter — each future transient drop then
+                // gets a fresh set of retries. Without this the counter accumulated
+                // across the whole screen session and permanently gave up after 3
+                // TOTAL drops even on a healthy network (the socket froze silently
+                // until the user left and re-entered). Mirrors the backend reader,
+                // which resets its own counter on a successful reconnect.
+                reconnectAttempts = 0
+            }
 
             withAnimation(.snappy(duration: 0.3)) {
                 self.livePrice = price

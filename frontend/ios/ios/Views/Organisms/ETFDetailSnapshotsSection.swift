@@ -504,6 +504,7 @@ struct ETFAssetAllocationBar: View {
             ("Equities", allocation.equities, AppColors.bullish),
             ("Bonds", allocation.bonds, AppColors.primaryBlue),
             ("Crypto", allocation.crypto, Color.purple),
+            ("Commodities", allocation.commodities, Color.orange),
             ("Cash", allocation.cash, AppColors.textMuted)
         ].filter { $0.value >= 0.1 }  // Hide segments below 0.1%
     }

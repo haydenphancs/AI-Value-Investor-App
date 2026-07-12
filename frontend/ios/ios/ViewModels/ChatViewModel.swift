@@ -502,21 +502,23 @@ class ChatViewModel: ObservableObject {
                     applyLiveSources(id: ensureBubble(), sources: srcs)
 
                 case "reasoning":
-                    // The model's streamed reasoning preamble → meter it into the thinking card
-                    // sentence-by-sentence (arrives as one complete frame, before the answer tokens).
+                    // The model's REAL streamed reasoning (thought parts) → meter it into the thinking
+                    // card. It now arrives as MULTIPLE incremental frames, so DON'T mark reasoning
+                    // finished here — it's complete once the answer tokens begin (see "token").
                     guard let delta = Self.decodeDelta(event.data), !delta.isEmpty else { continue }
                     let id = ensureBubble()
                     reasonPending += delta
-                    reasonFinished = true
                     ensureReasonRevealRunning(id: id)
 
                 case "token":
                     guard let delta = Self.decodeDelta(event.data), !delta.isEmpty else { continue }
                     let id = ensureBubble()
                     if streamingMessageId == nil {
-                        // First token: show the caret + start metering the reveal.
+                        // First token: show the caret + start metering the reveal. Thoughts precede
+                        // the answer, so reasoning is complete now — let its reveal drain + stop.
                         streamingMessageId = id
                         isStreaming = true
+                        reasonFinished = true
                     }
                     revealPending += delta
                     ensureRevealRunning(id: id)

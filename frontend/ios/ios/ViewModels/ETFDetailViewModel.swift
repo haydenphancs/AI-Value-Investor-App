@@ -37,6 +37,15 @@ class ETFDetailViewModel: ObservableObject {
     let etfSymbol: String
     private let repository: StockRepository = .shared
     private var cancellables = Set<AnyCancellable>()
+    /// Monotonic token for ETF-detail fetches. fetchETFDetail and fetchChartForRange
+    /// hit the same endpoint and write the whole etfData snapshot; each captures the
+    /// token before awaiting and applies its result only if still current, so a slow
+    /// earlier range can't clobber the chart the user has since switched to.
+    private var chartRequestToken = 0
+    /// True while the range sink assigns the range's default interval, so the
+    /// interval sink doesn't ALSO reload (one range change would otherwise fire two
+    /// identical fetches when the range crosses an interval boundary).
+    private var suppressIntervalReload = false
 
     // MARK: - Initialization
 
@@ -49,7 +58,12 @@ class ETFDetailViewModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] newRange in
                 guard let self = self else { return }
+                // Setting the interval fires the interval sink SYNCHRONOUSLY; suppress
+                // its reload so a range change drives exactly one fetch (not two when
+                // the new range crosses an interval boundary).
+                self.suppressIntervalReload = true
                 self.chartSettings.selectedInterval = newRange.defaultInterval
+                self.suppressIntervalReload = false
 
                 // Restart or stop chart refresh timer based on new range
                 if newRange.defaultInterval.isIntraday && self.livePriceManager.isConnected {
@@ -62,12 +76,14 @@ class ETFDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe interval changes and re-fetch chart data
+        // Observe interval changes and re-fetch chart data (manual interval picker)
         chartSettings.$selectedInterval
             .dropFirst()
             .removeDuplicates()
             .sink { [weak self] _ in
                 guard let self = self else { return }
+                // Skip the reload the range sink already owns (see suppress flag).
+                guard !self.suppressIntervalReload else { return }
                 Task { await self.fetchChartForRange(self.selectedChartRange) }
             }
             .store(in: &cancellables)
@@ -123,6 +139,8 @@ class ETFDetailViewModel: ObservableObject {
     /// Fetches ETF detail from the backend and maps to display models.
     private func fetchETFDetail() async {
         let startTime = CFAbsoluteTimeGetCurrent()
+        chartRequestToken += 1
+        let token = chartRequestToken
 
         do {
             print("[ETFDetailVM] Fetching ETF detail for \(etfSymbol), range: \(selectedChartRange.rawValue)")
@@ -137,9 +155,13 @@ class ETFDetailViewModel: ObservableObject {
             print("[ETFDetailVM] ✅ ETF detail loaded in \(String(format: "%.2f", elapsed))s — \(response.symbol) @ $\(response.currentPrice)")
 
             self.errorMessage = nil
-            self.etfData = response.toDisplayModel()
-            self.chartDataVersion += 1
-            self.newsArticles = response.toNewsArticles()
+            // Apply only if still the latest request — a newer range change may have
+            // already painted fresher data that this slower response must not clobber.
+            if token == self.chartRequestToken {
+                self.etfData = response.toDisplayModel()
+                self.chartDataVersion += 1
+                self.newsArticles = response.toNewsArticles()
+            }
             self.isLoading = false
 
             // Start live price streaming + chart refresh if market is active
@@ -173,6 +195,8 @@ class ETFDetailViewModel: ObservableObject {
     /// Called by the Combine observer when selectedChartRange changes.
     private func fetchChartForRange(_ range: ChartTimeRange) async {
         print("[ETFDetailVM] Updating chart range to \(range.rawValue)")
+        chartRequestToken += 1
+        let token = chartRequestToken
 
         do {
             let response = try await repository.getETFDetail(
@@ -183,6 +207,9 @@ class ETFDetailViewModel: ObservableObject {
 
             print("[ETFDetailVM] ✅ Chart range updated — \(response.chartData.count) data points")
 
+            // Drop a stale response so a slow earlier range can't overwrite the chart
+            // the user has since switched to (last-write-wins).
+            guard token == self.chartRequestToken else { return }
             self.etfData = response.toDisplayModel()
             self.chartDataVersion += 1
             self.newsArticles = response.toNewsArticles()

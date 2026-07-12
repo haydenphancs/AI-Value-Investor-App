@@ -331,13 +331,13 @@ async def stream_chat_message(
         suggestions = None
         streamed_any = False
 
-        # The model streams a short REASONING preamble, then a `===ANSWER===` line, then the answer.
-        # The splitter routes the preamble to the thinking card (`reasoning` frames) and the answer to
-        # the bubble (`token` frames); it's robust if the model ignores the format (everything → answer,
-        # so the answer is never lost). Reasoning is model text → it rides the same identity-guarded
-        # system instruction which forbids "AI/model" mentions.
-        from app.services.chat_service import ReasoningStreamSplitter
+        # The model streams REAL reasoning: stream_text tags each chunk as ("thought"|"answer", text).
+        # Thoughts → the thinking card (`reasoning` frames), answer → the bubble (`token` frames).
+        # Reasoning is model text → it rides the same identity-guarded system instruction which
+        # forbids "AI/model" mentions.
         reasoning_text = ""
+        answer_parts: list = []
+        reasoning_parts: list = []
 
         try:
             prep = await chat_service.prepare_stream_generation(
@@ -355,26 +355,21 @@ async def stream_chat_message(
             if sources:
                 yield _sse("sources", {"sources": sources})
 
-            splitter = ReasoningStreamSplitter()
-            async for delta in chat_service.gemini.stream_text(
+            async for kind, delta in chat_service.gemini.stream_text(
                 prep["prompt"], system_instruction=prep["system_instruction"]
             ):
                 streamed_any = True
-                r_chunks, a_chunk = splitter.feed(delta)
-                for rc in r_chunks:
-                    yield _sse("reasoning", {"delta": rc})
-                if a_chunk:
-                    yield _sse("token", {"delta": a_chunk})
-            r_chunks, a_chunk = splitter.finish()
-            for rc in r_chunks:
-                yield _sse("reasoning", {"delta": rc})
-            if a_chunk:
-                yield _sse("token", {"delta": a_chunk})
+                if kind == "thought":
+                    reasoning_parts.append(delta)
+                    yield _sse("reasoning", {"delta": delta})
+                else:
+                    answer_parts.append(delta)
+                    yield _sse("token", {"delta": delta})
 
-            if not splitter.answer.strip():
+            content = "".join(answer_parts)
+            reasoning_text = "".join(reasoning_parts)
+            if not content.strip():
                 raise RuntimeError("empty stream result")
-            content = splitter.answer
-            reasoning_text = splitter.reasoning
             citations = prep.get("citations")
             widget = prep.get("widget")
 
@@ -399,6 +394,9 @@ async def stream_chat_message(
                 citations = ai_result.get("citations")
                 widget = ai_result.get("widget")
                 tokens_used = ai_result.get("tokens_used")
+                # The aborted stream's thoughts don't correspond to this fallback answer — drop them
+                # so the persisted thinking card matches (the `reset` frame clears the live display).
+                reasoning_text = ""
                 if streamed_any:
                     # Discard any partial tokens before the full answer replaces them.
                     yield _sse("reset", {})

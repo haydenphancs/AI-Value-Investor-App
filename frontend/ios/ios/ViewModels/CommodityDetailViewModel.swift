@@ -55,6 +55,10 @@ class CommodityDetailViewModel: ObservableObject {
     /// awaiting and only applies its result if still current — so a slow
     /// out-of-order response can't clobber a newer one during rapid range switching.
     private var detailRequestGen = 0
+    /// True while the range sink assigns the range's default interval, so the
+    /// interval sink doesn't ALSO reload (one range change would otherwise fire two
+    /// identical fetches when the range crosses an interval boundary).
+    private var suppressIntervalReload = false
 
     // MARK: - Initialization
 
@@ -66,7 +70,11 @@ class CommodityDetailViewModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] range in
                 guard let self = self else { return }
+                // Assigning the interval fires the interval sink SYNCHRONOUSLY;
+                // suppress its reload so a range change drives exactly one fetch.
+                self.suppressIntervalReload = true
                 self.chartSettings.selectedInterval = range.defaultInterval
+                self.suppressIntervalReload = false
                 Task { await self.fetchChartForRange() }
             }
             .store(in: &cancellables)
@@ -76,6 +84,7 @@ class CommodityDetailViewModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] _ in
                 guard let self = self else { return }
+                guard !self.suppressIntervalReload else { return }
                 Task { await self.fetchChartForRange() }
             }
             .store(in: &cancellables)

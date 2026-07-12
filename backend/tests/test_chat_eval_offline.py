@@ -128,17 +128,20 @@ async def test_identity_and_brevity_always_in_system_instruction(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reasoning_scaffolding_present_when_streaming(monkeypatch):
-    """CURRENT CONTRACT (the `===ANSWER===` prompt hack). Phase 1a must preserve it; Phase 1b
-    replaces it with real streamed thinking tokens and UPDATES this assertion."""
+async def test_no_reasoning_scaffolding_after_thinking_migration(monkeypatch):
+    """Phase 1b: real thinking tokens replaced the `===ANSWER===` prompt hack, so the scaffolding
+    must be GONE from both the system instruction and the prompt. Reasoning now comes from the
+    model's native thought parts (requested via ThinkingConfig in stream_text)."""
     _patch_resolver(monkeypatch, None)
     svc = _make_service()
     out = await svc.prepare_stream_generation(
         session_id="s1", user_message="q",
         stock_id="AAPL", context_type="STOCK", reference_id="AAPL",
     )
-    assert "===ANSWER===" in out["system_instruction"]
-    assert "===ANSWER===" in out["prompt"]
+    assert "===ANSWER===" not in out["system_instruction"]
+    assert "===ANSWER===" not in out["prompt"]
+    # The identity + brevity directives remain (not part of the reasoning hack).
+    assert "Cay AI" in out["system_instruction"]
 
 
 @pytest.mark.asyncio

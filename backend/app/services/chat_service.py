@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 from google.genai import types
 
@@ -126,63 +126,6 @@ _MARKET_OVERVIEW_TOOL = types.Tool(
         )
     ]
 )
-
-
-class ReasoningStreamSplitter:
-    """Split a streamed chat generation into a reasoning preamble and the answer.
-
-    The streaming system instruction asks the model to write a short reasoning preamble, then a
-    line ``===ANSWER===``, then the answer. Feed each stream delta to ``feed()``; it returns
-    ``(reasoning_chunks, answer_chunk)`` to emit as SSE frames. Robust: if the separator never
-    appears within ``cap`` chars (the model ignored the format), everything is treated as the
-    answer so the answer is never lost.
-    """
-
-    MARKER = "===ANSWER==="
-
-    def __init__(self, cap: int = 800):
-        self._cap = cap
-        self._buf = ""
-        self._in_answer = False
-        self.reasoning = ""
-        self.answer = ""
-
-    def feed(self, delta: str) -> Tuple[List[str], str]:
-        if self._in_answer:
-            self.answer += delta
-            return [], delta
-        self._buf += delta
-        idx = self._buf.find(self.MARKER)
-        if idx != -1:
-            reasoning_part = self._buf[:idx].strip()
-            after = self._buf[idx + len(self.MARKER):].lstrip("\n")
-            self._buf = ""
-            self._in_answer = True
-            self.reasoning = reasoning_part
-            self.answer += after
-            return ([reasoning_part] if reasoning_part else []), after
-        if len(self._buf) > self._cap:
-            # No COMPLETE separator within the cap (the model isn't using the format, or the reasoning
-            # is unusually long). Emit the buffer as answer content, but hold back a marker-length tail
-            # so a '===ANSWER===' that straddles THIS flush boundary can still complete on the next
-            # delta and be stripped — never leaking the literal marker into the answer. Stay in detect
-            # mode so a late separator is still honored (the checked-above find() guarantees no complete
-            # marker is inside the flushed prefix).
-            keep = len(self.MARKER)
-            emitted = self._buf[:-keep]
-            self._buf = self._buf[-keep:]
-            self.answer += emitted
-            return [], emitted
-        return [], ""
-
-    def finish(self) -> Tuple[List[str], str]:
-        """Flush at stream end: if still detecting, the buffer IS the answer (never lose it)."""
-        if not self._in_answer and self._buf:
-            emitted = self._buf
-            self._buf = ""
-            self.answer += emitted
-            return [], emitted
-        return [], ""
 
 
 class ChatService:
@@ -424,9 +367,8 @@ class ChatService:
             snapshot_summary=snapshot_summary,
             company_profile_summary=company_profile_summary,
             client_context=context, asset_type=asset_type,
-            reasoning=True,   # streamed reasoning preamble (split from the answer in the endpoint)
         )
-        prompt = self._build_prompt(user_message, history, chunks, reasoning=True)
+        prompt = self._build_prompt(user_message, history, chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
         sources = self._build_sources(context_type, reference_id, citations)
 
@@ -1017,7 +959,6 @@ class ChatService:
         company_profile_summary: Optional[str] = None,
         client_context: Optional[str] = None,
         asset_type: str = "STOCK",
-        reasoning: bool = False,
     ) -> str:
         base = (
             "You are Cay AI, the intelligent agent powering the Caydex app. "
@@ -1070,24 +1011,10 @@ class ChatService:
                 "Use this data to give precise, numbers-backed answers."
             )
 
-        if reasoning:
-            # Streaming path only: emit a short reasoning preamble, a separator, then the answer.
-            # The endpoint splits the stream on the separator → the preamble streams into the
-            # "thinking" card, the answer into the bubble.
-            base += (
-                "\n\nOUTPUT FORMAT — reason first, then answer:\n"
-                "1) First write 1-3 SHORT sentences of your reasoning about THIS specific question "
-                "(what data/considerations matter, how you'll approach it). Reason AS Cay AI — never "
-                "mention being an AI, a model, or any provider.\n"
-                "2) Then output a line containing EXACTLY ===ANSWER=== and nothing else.\n"
-                "3) Then write your concise answer, following the STYLE rules above.\n"
-                "Never use the text ===ANSWER=== anywhere except as that single separator line."
-            )
         return base
 
     def _build_prompt(
         self, user_message: str, history: List[Dict], chunks: List[Dict],
-        reasoning: bool = False,
     ) -> str:
         parts = []
 
@@ -1112,21 +1039,5 @@ class ChatService:
                 "where it backs a specific claim."
             )
 
-        if reasoning:
-            # Format goes in the PROMPT (attended more reliably than the system instruction). The
-            # worked example markedly improves compliance for gemini-flash, which otherwise skips
-            # straight to the answer.
-            parts.append(
-                "\n\nHOW TO FORMAT YOUR REPLY — MANDATORY, do this for EVERY reply:\n"
-                "1) Start with 1-2 short sentences of your reasoning — how you're thinking about this "
-                "question. 2) Then a line that is EXACTLY: ===ANSWER=== 3) Then your concise answer.\n"
-                "You MUST include the ===ANSWER=== line and MUST NOT skip the reasoning.\n\n"
-                "Example reply:\n"
-                "ROE is net income over shareholder equity, so a negative equity base can make a "
-                "loss-making company show a positive ROE. Let me check SNDK's equity.\n"
-                "===ANSWER===\n"
-                "SNDK's ROE looks high because its shareholder equity is negative...\n\n"
-                "Now answer the user's actual question in that format."
-            )
 
         return "\n".join(parts)

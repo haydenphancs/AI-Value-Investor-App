@@ -483,6 +483,13 @@ async def stream_chat_message(
             })
             return
 
+        # Guardrail monitoring (non-blocking): surface advice-boundary / identity-leak drift for
+        # review. We log, not block — a false positive dropping a good answer is worse than a flag.
+        from app.services.agents.chat_guardrails import scan_answer
+        _issues = scan_answer(content)
+        if _issues:
+            logger.warning("Chat guardrail flags %s (session=%s): %r", _issues, session_id, content[:200])
+
         elapsed_ms = int((_time.monotonic() - started) * 1000)
         thinking_payload = {
             "stages": [],                    # canned steps replaced by the streamed reasoning below

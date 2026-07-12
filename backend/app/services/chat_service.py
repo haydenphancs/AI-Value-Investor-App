@@ -163,7 +163,7 @@ class ChatService:
         )
 
         # Step 1: Conversation history
-        history = self._get_recent_messages(session_id, limit=10)
+        history = self._get_recent_messages(session_id, limit=20)
 
         # Step 2: RAG context (query-rewrite → RETRIEVAL_QUERY embed → wider search → LLM-rerank).
         chunks, citations = await self._retrieve_context(user_message, stock_id, history)
@@ -197,7 +197,7 @@ class ChatService:
             client_context=context,
             asset_type=asset_type,
         )
-        prompt = self._build_prompt(user_message, history, chunks)
+        prompt = self._build_prompt(user_message, await self._condense_history(history), chunks)
 
         # Step 4: Generate with function-calling tools
         widget: Optional[Dict[str, Any]] = None
@@ -311,7 +311,7 @@ class ChatService:
             context_type, reference_id, client_context=context,
         )
 
-        history = self._get_recent_messages(session_id, limit=10)
+        history = self._get_recent_messages(session_id, limit=20)
 
         # RAG context (same pipeline as generate_response, best-effort).
         chunks, citations = await self._retrieve_context(user_message, stock_id, history)
@@ -333,7 +333,7 @@ class ChatService:
             company_profile_summary=company_profile_summary,
             client_context=context, asset_type=asset_type,
         )
-        prompt = self._build_prompt(user_message, history, chunks)
+        prompt = self._build_prompt(user_message, await self._condense_history(history), chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
         sources = self._build_sources(context_type, reference_id, citations)
 
@@ -1123,7 +1123,9 @@ class ChatService:
             "answer to what was asked, then AT MOST 2-3 brief supporting bullet points, and only when "
             "they truly add value. Never write long, multi-section essays or ## headings. Do NOT dump "
             "everything you know — answer the specific question. Only expand into full detail if the "
-            "user explicitly asks for more. Use plain, conversational language. Keep the required "
+            "user explicitly asks for more. Use plain, conversational language. "
+            "NEVER give a personal buy/sell/hold directive (don't say 'you should buy/sell') — "
+            "explain the tradeoffs and let the user decide. Keep the required "
             "'educational, not financial advice' note to a single short line at the end."
         )
 
@@ -1154,8 +1156,47 @@ class ChatService:
 
         return base
 
+    # ── Conversation memory (Phase 5: rolling summary for long chats) ──────────
+
+    _RECENT_TURNS = 6  # last N messages kept verbatim; older ones roll into a summary
+
+    @staticmethod
+    def _fmt_turns(msgs: List[Dict], cap: int = 500) -> str:
+        return "\n".join(
+            f"{'User' if m.get('role') == 'user' else 'Assistant'}: {(m.get('content') or '')[:cap]}"
+            for m in msgs
+        )
+
+    async def _condense_history(self, history: List[Dict]) -> str:
+        """Build the conversation block for the prompt. Short chats → recent turns verbatim. Long
+        chats → a rolling SUMMARY of the older turns + the last few verbatim, so early context
+        (tickers, goals, numbers) isn't dropped by simple truncation. Never raises → recent-only."""
+        if not history:
+            return ""
+        recent = history[-self._RECENT_TURNS:]
+        older = history[:-self._RECENT_TURNS]
+        if not older:
+            return f"CONVERSATION HISTORY:\n{self._fmt_turns(recent)}"
+        summary = ""
+        try:
+            prompt = (
+                "Summarize the earlier part of this conversation in 3-5 short bullet points — keep "
+                "the user's goals and any specifics (tickers, numbers, preferences) so it can ground "
+                "later answers. No preamble.\n\n" + self._fmt_turns(older, cap=400)
+            )
+            res = await self.gemini.generate_text(prompt, model_name="gemini-2.5-flash-lite")
+            summary = (res.get("text") or "").strip()
+        except Exception as e:
+            logger.warning("History condense failed (%s: %s) — recent turns only", type(e).__name__, e)
+        if summary:
+            return (
+                f"EARLIER CONVERSATION (summary):\n{summary}\n\n"
+                f"RECENT MESSAGES:\n{self._fmt_turns(recent)}"
+            )
+        return f"CONVERSATION HISTORY:\n{self._fmt_turns(recent)}"
+
     def _build_prompt(
-        self, user_message: str, history: List[Dict], chunks: List[Dict],
+        self, user_message: str, conversation_block: str, chunks: List[Dict],
     ) -> str:
         parts = []
 
@@ -1165,12 +1206,8 @@ class ChatService:
             )
             parts.append(f"RELEVANT CONTEXT:\n{context_text}\n\n---\n")
 
-        if history:
-            conv = "\n".join(
-                f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:300]}"
-                for m in history[-6:]
-            )
-            parts.append(f"CONVERSATION HISTORY:\n{conv}\n\n---\n")
+        if conversation_block:
+            parts.append(f"{conversation_block}\n\n---\n")
 
         parts.append(f"USER MESSAGE:\n{user_message}")
 
@@ -1179,6 +1216,5 @@ class ChatService:
                 "\nAnswer directly and concisely. Cite the context with [1], [2], etc. only "
                 "where it backs a specific claim."
             )
-
 
         return "\n".join(parts)

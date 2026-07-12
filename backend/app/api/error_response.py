@@ -323,6 +323,45 @@ def error_response_from_exception(
     )
 
 
+# Codes that represent a KNOWN upstream / lookup failure worth surfacing to the
+# user with an actionable message (as opposed to an unexpected internal error,
+# which detail endpoints keep mapping to their own generic 502 so we don't
+# mislabel it with report-pipeline copy).
+_UPSTREAM_CODES = frozenset({
+    ErrorCode.FMP_RATE_LIMITED,
+    ErrorCode.FMP_UNAVAILABLE,
+    ErrorCode.GEMINI_QUOTA_EXCEEDED,
+    ErrorCode.GEMINI_UNAVAILABLE,
+    ErrorCode.TICKER_NOT_FOUND,
+})
+
+
+def upstream_error_response(
+    exc: BaseException,
+    *,
+    ticker: Optional[str] = None,
+    step: Optional[str] = None,
+    extra_details: Optional[Dict[str, Any]] = None,
+) -> Optional[JSONResponse]:
+    """Return a structured `JSONResponse` IFF `exc` classifies as a known
+    upstream/lookup failure (FMP rate-limit/unavailable, Gemini, ticker-not-found);
+    otherwise return ``None`` so the caller keeps its own generic fallback.
+
+    This lets the detail endpoints (stocks/etfs/crypto/indices/commodities) honor
+    the iOS `APIErrorResponse` contract — surfacing e.g. `FMP_RATE_LIMITED` +
+    `retry_later` with an actionable message — instead of a bare
+    `HTTPException(502, {"detail": ...})` that iOS can only render as a generic
+    "Server error". Importing this (from `app.api.error_response`) keeps the
+    endpoint layer free of any `app.integrations` import.
+    """
+    code, _status = classify_exception(exc)
+    if code in _UPSTREAM_CODES:
+        return error_response_from_exception(
+            exc, ticker=ticker, step=step, extra_details=extra_details
+        )
+    return None
+
+
 def error_body_from_exception(
     exc: BaseException,
     *,

@@ -18,6 +18,7 @@ from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
+from app.api.error_response import upstream_error_response
 from app.schemas.stock import StockSearchResult
 from app.schemas.stock_overview import StockOverviewResponse, StockOverviewCoreResponse
 from app.schemas.analyst import AnalystAnalysisResponse
@@ -355,12 +356,16 @@ async def get_stock_details(ticker: str):
         price = profile.get("price")
         if analyst_est and isinstance(analyst_est, list) and price and float(price) > 0:
             today_str = datetime.now().date().isoformat()
+            # Guard the VALUE, not just a missing key: FMP can return a row with an
+            # explicit null date (`{"date": null, ...}`). `e.get("date", "")` yields
+            # None there, and `None >= today_str` raises TypeError → the whole
+            # /stocks/{ticker} profile 502s despite every other field succeeding.
             future_ests = [
                 e for e in analyst_est
-                if isinstance(e, dict) and e.get("date", "") >= today_str
+                if isinstance(e, dict) and isinstance(e.get("date"), str) and e["date"] >= today_str
             ]
             if future_ests:
-                future_ests.sort(key=lambda x: x.get("date", ""))
+                future_ests.sort(key=lambda x: x.get("date") or "")
                 fwd_eps = future_ests[0].get("epsAvg") or future_ests[0].get("estimatedEpsAvg")
                 if fwd_eps and float(fwd_eps) > 0:
                     response["pe_forward"] = round(float(price) / float(fwd_eps), 2)
@@ -369,7 +374,12 @@ async def get_stock_details(ticker: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Stock detail failed: {e}")
+        logger.error(f"Stock detail failed for {ticker}: {e}", exc_info=True)
+        # Surface known upstream failures (FMP rate-limit/unavailable, ticker-not-found)
+        # via the structured APIErrorResponse contract iOS decodes; only fall through
+        # to a generic 502 for genuinely-unexpected errors.
+        if (resp := upstream_error_response(e, ticker=ticker, step="stock_detail")) is not None:
+            return resp
         raise HTTPException(status_code=502, detail="Stock data service unavailable")
 
 
@@ -400,6 +410,8 @@ async def get_stock_overview(
         raise
     except Exception as e:
         logger.error(f"Stock overview failed for {ticker}: {e}", exc_info=True)
+        if (resp := upstream_error_response(e, ticker=ticker, step="overview")) is not None:
+            return resp
         raise HTTPException(
             status_code=502,
             detail=f"Stock overview service unavailable for {ticker}",
@@ -434,6 +446,8 @@ async def get_stock_overview_core(
         raise
     except Exception as e:
         logger.error(f"Stock overview core failed for {ticker}: {e}", exc_info=True)
+        if (resp := upstream_error_response(e, ticker=ticker, step="overview_core")) is not None:
+            return resp
         raise HTTPException(
             status_code=502,
             detail=f"Stock overview core service unavailable for {ticker}",
@@ -492,7 +506,9 @@ async def get_stock_quote(ticker: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Stock quote failed: {e}")
+        logger.error(f"Stock quote failed for {ticker}: {e}", exc_info=True)
+        if (resp := upstream_error_response(e, ticker=ticker, step="quote")) is not None:
+            return resp
         raise HTTPException(status_code=502, detail="Quote service unavailable")
 
 
@@ -585,7 +601,9 @@ async def get_stock_chart(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Chart data failed for {ticker}: {e}")
+        logger.error(f"Chart data failed for {ticker}: {e}", exc_info=True)
+        if (resp := upstream_error_response(e, ticker=ticker, step="chart")) is not None:
+            return resp
         raise HTTPException(status_code=502, detail="Chart data service unavailable")
 
 

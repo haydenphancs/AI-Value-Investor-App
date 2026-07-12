@@ -381,6 +381,70 @@ class ChatService:
             "asset_type": asset_type,
         }
 
+    async def stream_synthesis(self, prep, user_message, route, tools, tool_handlers):
+        """Cross-domain multi-agent: run each specialist's agentic answer in PARALLEL (non-streamed),
+        then STREAM a synthesized answer that merges their perspectives.
+
+        Yields the same (kind, payload) events the endpoint consumes: ("thought"|"answer", str) plus
+        ("widget", dict) for each specialist's renderable widget (the endpoint dedups). Bounded
+        (max_rounds=2 per specialist, ≤3 specialists from the router). Degrades to a single general
+        agentic stream if every specialist fails, so the user always gets a reply."""
+        from app.services.agents.chat_specialists import apply_specialist, get_specialist
+        from app.services.agents.chat_tools import widget_from_tool_result
+
+        keys = route["specialists"]
+        # Progress note into the thinking card while the specialists work (no answer tokens yet).
+        yield "thought", f"Consulting the {', '.join(route['labels'])} perspectives, then synthesizing…"
+
+        async def _run(key: str):
+            sys = apply_specialist(prep["system_instruction"], key)
+            texts, wgts = [], []
+            try:
+                async for kind, payload in self.gemini.stream_agentic(
+                    prep["prompt"], tools=tools, tool_handlers=tool_handlers,
+                    system_instruction=sys, max_rounds=2,
+                ):
+                    if kind == "answer":
+                        texts.append(payload)
+                    elif kind == "tool":
+                        w = widget_from_tool_result(payload.get("result"))
+                        if w is not None:
+                            wgts.append(w)
+            except Exception as e:
+                logger.warning("Synthesis specialist %s failed: %s: %s", key, type(e).__name__, e)
+            return {"label": get_specialist(key).label, "answer": "".join(texts).strip(), "widgets": wgts}
+
+        results = await asyncio.gather(*[_run(k) for k in keys], return_exceptions=True)
+        results = [r for r in results if isinstance(r, dict) and r.get("answer")]
+
+        # Emit each specialist's widgets (the endpoint dedups against the base + across specialists).
+        for r in results:
+            for w in r["widgets"]:
+                yield "widget", w
+
+        if not results:
+            # Every specialist failed → a single general agentic answer so the turn still completes.
+            async for ev in self.gemini.stream_agentic(
+                prep["prompt"], tools=tools, tool_handlers=tool_handlers,
+                system_instruction=prep["system_instruction"],
+            ):
+                yield ev
+            return
+
+        # Synthesize: stream ONE unified answer (no tools — the data's already gathered).
+        perspectives = "\n\n".join(f"[{r['label']} view]\n{r['answer'][:1200]}" for r in results)
+        synth_prompt = (
+            f"USER QUESTION:\n{user_message}\n\n"
+            f"You considered these analyst perspectives:\n\n{perspectives}\n\n"
+            "Write ONE concise, unified answer that INTEGRATES the perspectives above — do NOT list "
+            "them separately and do NOT mention 'perspectives'/'specialists'/'views'. Lead with the "
+            "direct answer, then the 2-3 points that matter most across the lenses. Follow the STYLE rules."
+        )
+        async for kind, text in self.gemini.stream_text(
+            synth_prompt, system_instruction=prep["system_instruction"],
+        ):
+            yield kind, text
+
     # Screen context_type → the human "source" label shown in the thinking card.
     # Mirrors the ChatContextResolver branches; identity-safe (server-authored strings).
     _CONTEXT_SOURCE_LABEL = {

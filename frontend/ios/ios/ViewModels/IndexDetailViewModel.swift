@@ -374,24 +374,24 @@ class IndexDetailViewModel: ObservableObject {
             )
             let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
 
-            // Clear previous error on success
-            self.errorMessage = nil
-
             // Map DTOs → display models — but only if this is still the latest
             // request; a newer range change may have already painted fresher data,
-            // and this (slower, earlier) response must not clobber it.
+            // and this (slower, earlier) response must not clobber it. The SAME
+            // token gates errorMessage + streaming so a stale success can't clear a
+            // newer request's error banner or start streaming on a superseded load.
             if token == self.chartRequestToken {
+                self.errorMessage = nil
                 self.indexData = response.toDisplayModel()
                 self.chartDataVersion += 1
+
+                // Connect live price after successful data load
+                self.connectLivePrice()
+                self.startChartRefreshTimer()
             }
 
             // News and technical analysis are fetched via separate concurrent tasks
 
             self.isLoading = false
-
-            // Connect live price after successful data load
-            self.connectLivePrice()
-            self.startChartRefreshTimer()
 
             print("✅ [IndexDetailVM] Index detail loaded in \(elapsed)s")
             print("   💰 Price: \(response.currentPrice) | Change: \(response.priceChange) (\(response.priceChangePercent)%)")

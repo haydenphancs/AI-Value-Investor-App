@@ -513,6 +513,8 @@ class CommodityService:
         days = range_days.get(chart_range, 90)
         cutoff = (today - timedelta(days=days)).isoformat()
 
+        from app.services.chart_helper import _finite_or_none
+
         result = []
         for p in historical:
             date = p.get("date")
@@ -520,20 +522,19 @@ class CommodityService:
             # raises TypeError, so guard before comparing.
             if not date or date < cutoff:
                 continue
-            raw_close = p.get("close") or p.get("adjClose")
-            try:
-                close = float(raw_close) if raw_close is not None else None
-            except (ValueError, TypeError):
-                close = None
+            # A NaN close survives `close <= 0`, and raw open/high/low/volume can
+            # carry a NaN/Inf token — either serializes to invalid JSON and 500s
+            # the whole commodity detail. Route every OHLCV value through the guard.
+            close = _finite_or_none(p.get("close") or p.get("adjClose"))
             if close is None or close <= 0:
                 continue
             result.append({
                 "date": date,
-                "open": p.get("open"),
-                "high": p.get("high"),
-                "low": p.get("low"),
+                "open": _finite_or_none(p.get("open")),
+                "high": _finite_or_none(p.get("high")),
+                "low": _finite_or_none(p.get("low")),
                 "close": round(close, 2),
-                "volume": p.get("volume"),
+                "volume": _finite_or_none(p.get("volume")),
             })
         return result
 

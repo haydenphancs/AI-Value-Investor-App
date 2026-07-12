@@ -6,6 +6,7 @@ Frontend: POST /chat/sessions, GET /chat/sessions,
           PATCH /chat/sessions/{id} (update title)
 """
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -15,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from supabase import Client
 import logging
 
+from app.config import settings
 from app.database import get_supabase
 from app.dependencies import get_current_user_or_guest
 from app.schemas.chat import (
@@ -346,7 +348,11 @@ async def stream_chat_message(
         reasoning_parts: list = []
 
         try:
-            prep = await chat_service.prepare_stream_generation(
+            # Multi-agent (Phase 3): a cheap router picks the specialist lens(es). Run it in PARALLEL
+            # with prep so the router's ~400ms hides behind the RAG/widget work. Never raises → general.
+            from app.services.agents.chat_router import route_question
+            from app.services.agents.chat_specialists import apply_specialist
+            prep_coro = chat_service.prepare_stream_generation(
                 session_id=session_id,
                 user_message=user_message,
                 session_type=session_type,
@@ -355,11 +361,26 @@ async def stream_chat_message(
                 context_type=ctx_type,
                 reference_id=ref_id,
             )
+            if settings.CHAT_MULTI_AGENT_ENABLED:
+                prep, route = await asyncio.gather(
+                    prep_coro, route_question(chat_service.gemini, user_message),
+                )
+            else:
+                prep = await prep_coro
+                route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
+
             # Capture sources up-front so they survive even if streaming later fails and we
             # fall back to full generation below.
             sources = prep.get("sources")
             if sources:
                 yield _sse("sources", {"sources": sources})
+            # Surface the routing decision (a real specialist / a synthesis) for the thinking card.
+            if route["specialists"] != ["general"]:
+                yield _sse("routing", {
+                    "specialists": route["specialists"],
+                    "labels": route["labels"],
+                    "mode": route["mode"],
+                })
 
             # Agentic streaming: the model may call tools (analyst / sentiment / chart / …)
             # mid-stream. thought → reasoning card, answer → bubble, tool → progress + widget.
@@ -379,10 +400,19 @@ async def stream_chat_message(
                 widgets.append(base_widget)
                 seen_widgets.add(widget_key(base_widget))
 
-            async for kind, payload in chat_service.gemini.stream_agentic(
-                prep["prompt"], tools=tools, tool_handlers=handlers,
-                system_instruction=prep["system_instruction"],
-            ):
+            # Single mode: one specialist streams its focused agentic answer. Synthesize mode: several
+            # specialists run in parallel + a merged answer streams (their widgets arrive as
+            # ("widget", …) events since the specialist runs aren't streamed to the client directly).
+            if route["mode"] == "synthesize":
+                answer_stream = chat_service.stream_synthesis(prep, user_message, route, tools, handlers)
+            else:
+                system_instruction = apply_specialist(prep["system_instruction"], route["specialists"][0])
+                answer_stream = chat_service.gemini.stream_agentic(
+                    prep["prompt"], tools=tools, tool_handlers=handlers,
+                    system_instruction=system_instruction,
+                )
+
+            async for kind, payload in answer_stream:
                 streamed_any = True
                 if kind == "thought":
                     reasoning_parts.append(payload)
@@ -397,6 +427,11 @@ async def stream_chat_message(
                     if w is not None and widget_key(w) not in seen_widgets:
                         seen_widgets.add(widget_key(w))
                         widgets.append(w)
+                elif kind == "widget":
+                    # Synthesis path: a specialist's widget (already the full payload).
+                    if payload is not None and widget_key(payload) not in seen_widgets:
+                        seen_widgets.add(widget_key(payload))
+                        widgets.append(payload)
 
             content = "".join(answer_parts)
             reasoning_text = "".join(reasoning_parts)

@@ -703,18 +703,23 @@ class IndexService:
         days = range_days.get(chart_range, 90 + _WARMUP_CALENDAR_DAYS)
         cutoff = (today - timedelta(days=days)).isoformat()
 
+        from app.services.chart_helper import _finite_or_none
+
         result = []
         for p in historical:
             if (p.get("date") or "") >= cutoff:
-                close = p.get("close") or p.get("adjClose")
-                if close and close > 0:
+                # A non-finite (Inf) close slips past a bare `close > 0`, and raw
+                # open/high/low/volume can carry a NaN/Inf token — either serializes
+                # to invalid JSON and 500s the whole index detail. Sanitize all.
+                close = _finite_or_none(p.get("close") or p.get("adjClose"))
+                if close is not None and close > 0:
                     result.append(ChartDataPointResponse(
                         date=p.get("date"),
-                        open=p.get("open"),
-                        high=p.get("high"),
-                        low=p.get("low"),
-                        close=round(float(close), 2),
-                        volume=p.get("volume"),
+                        open=_finite_or_none(p.get("open")),
+                        high=_finite_or_none(p.get("high")),
+                        low=_finite_or_none(p.get("low")),
+                        close=round(close, 2),
+                        volume=_finite_or_none(p.get("volume")),
                     ))
         return result
 

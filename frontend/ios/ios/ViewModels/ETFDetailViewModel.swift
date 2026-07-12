@@ -154,22 +154,24 @@ class ETFDetailViewModel: ObservableObject {
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
             print("[ETFDetailVM] ✅ ETF detail loaded in \(String(format: "%.2f", elapsed))s — \(response.symbol) @ $\(response.currentPrice)")
 
-            self.errorMessage = nil
             // Apply only if still the latest request — a newer range change may have
             // already painted fresher data that this slower response must not clobber.
+            // The SAME token gates errorMessage + streaming so a stale success can't
+            // clear a newer request's error banner or start streaming on stale data.
             if token == self.chartRequestToken {
+                self.errorMessage = nil
                 self.etfData = response.toDisplayModel()
                 self.chartDataVersion += 1
                 self.newsArticles = response.toNewsArticles()
+
+                // Start live price streaming + chart refresh if market is active
+                if let status = self.etfData?.marketStatus,
+                   MarketHoursUtil.shouldStreamLivePrice(for: status) {
+                    self.connectLivePrice()
+                    self.startChartRefreshTimer()
+                }
             }
             self.isLoading = false
-
-            // Start live price streaming + chart refresh if market is active
-            if let status = self.etfData?.marketStatus,
-               MarketHoursUtil.shouldStreamLivePrice(for: status) {
-                self.connectLivePrice()
-                self.startChartRefreshTimer()
-            }
 
         } catch {
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
@@ -226,6 +228,11 @@ class ETFDetailViewModel: ObservableObject {
     // MARK: - Fallback Data
 
     private func loadFallbackData() {
+        // Only seed the SPY sample into an EMPTY screen (first-load failure) — never
+        // clobber already-loaded real data. Mirrors IndexDetailViewModel.loadFallbackData.
+        // A failed pull-to-refresh must keep the real ETF on screen (just show the
+        // error banner), not flip the whole card to hard-coded SPY figures.
+        guard etfData == nil else { return }
         print("[ETFDetailVM] Loading fallback sample data")
         self.etfData = ETFDetailData.sampleSPY
         self.newsArticles = TickerNewsArticle.sampleDataForTicker(etfSymbol)

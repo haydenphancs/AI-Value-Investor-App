@@ -521,9 +521,21 @@ class StockOverviewService:
         logger.info(f"Fundamentals MISS for {ticker} — fetching from APIs")
         data = await self._fetch_fundamentals(ticker)
 
-        # Cache in both tiers
-        _cache_set(mem_key, data)
-        self._upsert_fundamentals_db(ticker, data)
+        # Only cache a *usable* result. A transient FMP failure degrades the
+        # profile call to {} (see _fetch_fundamentals' _safe/_list defaults); if
+        # we wrote that to the 24h Supabase tier it would pin a blank profile
+        # (company_name=ticker, no sector/industry, all key stats "—") for the
+        # full TTL even after FMP recovers seconds later. Gate on a non-empty
+        # profile so a blip can't poison the cache.
+        profile_ok = isinstance(data.get("profile"), dict) and bool(data["profile"])
+        if profile_ok:
+            _cache_set(mem_key, data)
+            self._upsert_fundamentals_db(ticker, data)
+        else:
+            logger.warning(
+                f"Skipping fundamentals cache write for {ticker}: empty profile "
+                f"(transient upstream failure) — will re-fetch on next request"
+            )
 
         return data
 
@@ -1484,7 +1496,15 @@ class StockOverviewService:
         def _fmt_own(val) -> str:
             if val is None:
                 return "—"
-            v = float(val)
+            # FMP can hand back "" / "N/A" for absent numeric fields — a raw
+            # float() would ValueError and 500 the whole /overview. Degrade to
+            # "—" (honest absent) rather than fabricating a 0.0%.
+            try:
+                v = float(val)
+            except (ValueError, TypeError):
+                return "—"
+            if not math.isfinite(v):
+                return "—"
             if v < 1:
                 v *= 100
             return f"{v:.1f}%"

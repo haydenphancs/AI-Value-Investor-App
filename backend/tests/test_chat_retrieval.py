@@ -176,3 +176,38 @@ async def test_retrieve_context_never_raises_on_embed_failure():
     s = _svc(_FakeGemini(raises=True))
     chunks, citations = await s._retrieve_context("q", stock_id="AAPL", history=[])
     assert chunks == [] and citations == []
+
+
+# ── _condense_history (Phase 5 rolling-summary memory) ──────────────────────
+
+@pytest.mark.asyncio
+async def test_condense_empty_history():
+    assert await _svc(_FakeGemini())._condense_history([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_condense_short_history_is_verbatim_no_summary():
+    s = _svc(_FakeGemini(rewrite="SHOULD NOT SUMMARIZE"))
+    hist = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello there"}]
+    block = await s._condense_history(hist)
+    assert "CONVERSATION HISTORY" in block and "hi" in block and "hello there" in block
+    assert "summary" not in block.lower()          # short → no summary call used
+
+
+@pytest.mark.asyncio
+async def test_condense_long_history_summarizes_older_keeps_recent():
+    s = _svc(_FakeGemini(rewrite="- user asked about AAPL\n- discussed valuation"))
+    hist = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg{i}"} for i in range(10)]
+    block = await s._condense_history(hist)
+    assert "EARLIER CONVERSATION (summary)" in block
+    assert "user asked about AAPL" in block         # the rolling summary
+    assert "RECENT MESSAGES" in block and "msg9" in block   # last turns verbatim
+    assert "msg0" not in block                      # older rolled into the summary, not verbatim
+
+
+@pytest.mark.asyncio
+async def test_condense_summary_failure_falls_back_to_recent():
+    s = _svc(_FakeGemini(raises=True))
+    hist = [{"role": "user", "content": f"m{i}"} for i in range(10)]
+    block = await s._condense_history(hist)
+    assert "CONVERSATION HISTORY" in block and "m9" in block   # recent-only, no crash

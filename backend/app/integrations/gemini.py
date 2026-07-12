@@ -226,27 +226,37 @@ def _cache_key(*parts: str) -> str:
 
 # ── Response accessors (defensive; the SDK's .text raises on no-text parts) ──
 
+def _iter_parts(response: Any) -> List[Any]:
+    """Parts of the first candidate — works for a full response OR a streaming chunk.
+    The unified SDK has no top-level `.parts`; they live under candidates[0].content.parts."""
+    try:
+        cand = (response.candidates or [None])[0]
+        if cand and cand.content and cand.content.parts:
+            return list(cand.content.parts)
+    except (AttributeError, TypeError, IndexError):
+        pass
+    return []
+
+
 def _response_text(response: Any) -> str:
     """Safe `.text` — the SDK property raises ValueError when the candidate has
-    no text Part (function-call-only / finish-only). Falls back to walking parts."""
+    no text Part (function-call-only / finish-only). Falls back to walking parts.
+    Skips thought parts so real reasoning never leaks into the answer text."""
     try:
         return response.text or ""
     except (ValueError, AttributeError):
         pass
-    try:
-        cand = (response.candidates or [None])[0]
-        parts = (cand.content.parts if cand and cand.content else None) or []
-        chunks: List[str] = []
-        for p in parts:
-            try:
-                t = p.text
-            except (ValueError, AttributeError):
-                continue
-            if t:
-                chunks.append(t)
-        return "\n".join(chunks)
-    except (ValueError, AttributeError, TypeError):
-        return ""
+    chunks: List[str] = []
+    for p in _iter_parts(response):
+        if getattr(p, "thought", False):
+            continue
+        try:
+            t = p.text
+        except (ValueError, AttributeError):
+            continue
+        if t:
+            chunks.append(t)
+    return "\n".join(chunks)
 
 
 def _response_tokens(response: Any) -> Optional[int]:
@@ -294,6 +304,7 @@ class GeminiClient:
         response_mime_type: Optional[str] = None,
         response_schema: Optional[Any] = None,
         cached_content: Optional[str] = None,
+        thinking_config: Optional[Any] = None,
     ) -> types.GenerateContentConfig:
         """Assemble a GenerateContentConfig from the knobs that used to live in
         the legacy generation_config dict + per-call GenerativeModel kwargs."""
@@ -311,6 +322,8 @@ class GeminiClient:
             kwargs["response_schema"] = response_schema
         if cached_content:
             kwargs["cached_content"] = cached_content
+        if thinking_config is not None:
+            kwargs["thinking_config"] = thinking_config
         return types.GenerateContentConfig(**kwargs)
 
     @async_retry(max_attempts=2, delay=2.0)
@@ -362,31 +375,38 @@ class GeminiClient:
         system_instruction: Optional[str] = None,
         model_name: Optional[str] = None,
     ):
-        """Yield response text chunks as Gemini generates them.
+        """Yield ``(kind, text)`` chunks as Gemini generates.
 
-        Raises immediately if the quota circuit is open. Propagates the first
-        error the SDK raises (quota or otherwise) so the caller can surface an
-        `error` event. The client-level HTTP timeout guards a hung read.
+        `kind` is "thought" (real reasoning summary → the thinking card) or "answer"
+        (→ the message bubble). Thinking is requested via ThinkingConfig(include_thoughts=True);
+        each streamed part carries a `.thought` flag we branch on — no more prompt-hack
+        separator. Raises immediately if the quota circuit is open; propagates the first SDK
+        error so the caller can surface an `error` event; the client HTTP timeout guards a hung read.
         """
         if _quota_circuit.is_open():
             raise GeminiQuotaError(
                 "Gemini quota circuit open (resource_exhausted) — failing fast"
             )
+        config = self._config(
+            system_instruction=system_instruction,
+            thinking_config=types.ThinkingConfig(include_thoughts=True),
+        )
         try:
             stream = await self._client.aio.models.generate_content_stream(
                 model=model_name or self.model_name,
                 contents=prompt,
-                config=self._config(system_instruction=system_instruction),
+                config=config,
             )
             async for chunk in stream:
-                # chunk.text raises if the chunk carries no text part
-                # (safety/finish-only chunks) — treat those as empty.
-                try:
-                    text = chunk.text or ""
-                except (ValueError, AttributeError):
-                    text = ""
-                if text:
-                    yield text
+                for part in _iter_parts(chunk):
+                    # part.text raises on non-text parts (finish-only) — treat as empty.
+                    try:
+                        text = part.text or ""
+                    except (ValueError, AttributeError):
+                        text = ""
+                    if not text:
+                        continue
+                    yield ("thought" if getattr(part, "thought", False) else "answer"), text
             _quota_circuit.record_success()
         except Exception as e:
             if _is_quota_error(e):

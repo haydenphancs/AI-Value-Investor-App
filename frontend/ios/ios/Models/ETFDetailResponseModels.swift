@@ -137,11 +137,14 @@ struct ETFAssetAllocationDTO: Decodable {
     let equities: Double
     let bonds: Double
     let crypto: Double
+    /// Optional: absent on pre-existing cached ETF payloads. Gold/commodity funds
+    /// route here instead of being mislabeled as equities (or 100% cash).
+    let commodities: Double?
     let cash: Double
     let totalAssets: String
 
     enum CodingKeys: String, CodingKey {
-        case equities, bonds, crypto, cash
+        case equities, bonds, crypto, commodities, cash
         case totalAssets = "total_assets"
     }
 }
@@ -288,6 +291,7 @@ extension ETFHoldingsRiskDTO {
             equities: assetAllocation.equities,
             bonds: assetAllocation.bonds,
             crypto: assetAllocation.crypto,
+            commodities: assetAllocation.commodities ?? 0,
             cash: assetAllocation.cash,
             totalAssets: assetAllocation.totalAssets
         )
@@ -425,6 +429,7 @@ extension ETFDetailResponseDTO {
             equities: holdingsRisk.assetAllocation.equities,
             bonds: holdingsRisk.assetAllocation.bonds,
             crypto: holdingsRisk.assetAllocation.crypto,
+            commodities: holdingsRisk.assetAllocation.commodities ?? 0,
             cash: holdingsRisk.assetAllocation.cash,
             totalAssets: holdingsRisk.assetAllocation.totalAssets
         )

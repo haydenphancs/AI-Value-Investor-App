@@ -54,6 +54,10 @@ class CryptoDetailViewModel: ObservableObject {
     /// its result if still current — so a slow out-of-order response can't clobber a
     /// newer one (e.g. rapid range switching showing a chart for the wrong range).
     private var detailRequestGen = 0
+    /// True while the range sink assigns the range's default interval, so the
+    /// interval sink doesn't ALSO reload (one range change would otherwise fire two
+    /// identical getCryptoDetail calls when the range crosses an interval boundary).
+    private var suppressIntervalReload = false
 
     // News pagination
     private var allNewsArticles: [TickerNewsArticle] = []
@@ -70,17 +74,22 @@ class CryptoDetailViewModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] range in
                 guard let self = self else { return }
+                // Assigning the interval fires the interval sink SYNCHRONOUSLY;
+                // suppress its reload so a range change drives exactly one fetch.
+                self.suppressIntervalReload = true
                 self.chartSettings.selectedInterval = range.defaultInterval
+                self.suppressIntervalReload = false
                 Task { await self.fetchChartForRange() }
             }
             .store(in: &cancellables)
 
-        // Observe interval changes and re-fetch chart data
+        // Observe interval changes and re-fetch chart data (manual interval picker)
         chartSettings.$selectedInterval
             .dropFirst()
             .removeDuplicates()
             .sink { [weak self] _ in
                 guard let self = self else { return }
+                guard !self.suppressIntervalReload else { return }
                 Task { await self.fetchChartForRange() }
             }
             .store(in: &cancellables)
@@ -414,6 +423,12 @@ class CryptoDetailViewModel: ObservableObject {
     /// Lightweight chart-only refresh — bypasses cache for fresh intraday data
     private func refreshChartOnly() async {
         let fmpSymbol = "\(cryptoSymbol)USD"
+        // Capture the request generation so a range change during the await
+        // invalidates this background refresh (last-write-wins), mirroring
+        // fetchChartForRange. Do NOT bump the gen — this is a timer refresh, not a
+        // user selection; without this a stale 1D refresh could clobber a chart the
+        // user just switched to 1Y (and, being non-intraday, never self-correct).
+        let gen = detailRequestGen
         do {
             let chartResponse = try await apiClient.request(
                 endpoint: .getStockChart(
@@ -424,13 +439,22 @@ class CryptoDetailViewModel: ObservableObject {
                 ),
                 responseType: StockChartResponse.self
             )
+            guard gen == self.detailRequestGen else { return }
             let pricePoints = chartResponse.prices
             if !pricePoints.isEmpty, var data = self.cryptoData {
-                _ = data.chartPricePoints.count
                 data.chartPricePoints = pricePoints
-                // Update current price from latest candle
+                // Update current price from the latest candle AND keep priceChange /
+                // priceChangePercent consistent with it. They drive the header %/change
+                // and the chart's dashed baseline (previousClose = currentPrice -
+                // priceChange); updating currentPrice alone desynced the header and
+                // shifted the baseline off the true prior close.
                 if let lastClose = pricePoints.last?.close {
+                    let anchor = data.currentPrice - data.priceChange  // true prior close
                     data.currentPrice = lastClose
+                    data.priceChange = lastClose - anchor
+                    data.priceChangePercent = anchor != 0
+                        ? (data.priceChange / anchor) * 100
+                        : data.priceChangePercent
                 }
                 self.cryptoData = data
                 self.chartDataVersion += 1

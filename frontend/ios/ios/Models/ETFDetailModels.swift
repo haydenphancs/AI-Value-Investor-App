@@ -87,6 +87,7 @@ struct ETFAssetAllocation {
     let equities: Double
     let bonds: Double
     let crypto: Double
+    let commodities: Double
     let cash: Double
     let totalAssets: String
 }
@@ -309,6 +310,7 @@ extension ETFDetailData {
                 equities: 99.5,
                 bonds: 0.0,
                 crypto: 0.0,
+                commodities: 0.0,
                 cash: 0.5,
                 totalAssets: "$562.3B"
             ),

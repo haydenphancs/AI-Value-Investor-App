@@ -51,6 +51,15 @@ class IndexDetailViewModel: ObservableObject {
     private let indexSymbol: String
     private var cancellables = Set<AnyCancellable>()
     private var chartRefreshTask: Task<Void, Never>?
+    /// Monotonic token for index-detail fetches. Both fetchIndexDetail and
+    /// loadChartData hit the same endpoint and write the whole indexData snapshot;
+    /// each captures the token before awaiting and only applies its result if still
+    /// current, so a slow earlier response can't clobber a newer range's chart.
+    private var chartRequestToken = 0
+    /// True while the range sink is assigning the range's default interval, so the
+    /// interval sink doesn't ALSO reload (a single range change would otherwise fire
+    /// two identical fetches when the range crosses an interval boundary).
+    private var suppressIntervalReload = false
 
     // MARK: - Initialization
 
@@ -63,7 +72,12 @@ class IndexDetailViewModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] newRange in
                 guard let self = self else { return }
+                // Setting the interval fires the interval sink SYNCHRONOUSLY; suppress
+                // its reload so the range change drives exactly one fetch (not two when
+                // the new range crosses an interval boundary, e.g. 3M→5Y daily→weekly).
+                self.suppressIntervalReload = true
                 self.chartSettings.selectedInterval = newRange.defaultInterval
+                self.suppressIntervalReload = false
 
                 if newRange.defaultInterval.isIntraday && self.livePriceManager.isConnected {
                     self.startChartRefreshTimer()
@@ -77,12 +91,14 @@ class IndexDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe interval changes and re-fetch chart data
+        // Observe interval changes and re-fetch chart data (manual interval picker)
         chartSettings.$selectedInterval
             .dropFirst()
             .removeDuplicates()
             .sink { [weak self] _ in
                 guard let self = self else { return }
+                // Skip the reload the range sink already owns (see suppress flag).
+                guard !self.suppressIntervalReload else { return }
                 Task {
                     await self.loadChartData(range: self.selectedChartRange)
                 }
@@ -345,6 +361,8 @@ class IndexDetailViewModel: ObservableObject {
     private func fetchIndexDetail() async {
         let startTime = CFAbsoluteTimeGetCurrent()
         let range = selectedChartRange.rawValue
+        chartRequestToken += 1
+        let token = chartRequestToken
         let endpoint = APIEndpoint.getIndexDetail(symbol: indexSymbol, range: range, interval: chartSettings.selectedInterval.rawValue)
 
         print("📡 [IndexDetailVM] Fetching index detail for \(indexSymbol) (range: \(range)) from \(APIConfig.baseURL.absoluteString)\(endpoint.path) ...")
@@ -359,9 +377,13 @@ class IndexDetailViewModel: ObservableObject {
             // Clear previous error on success
             self.errorMessage = nil
 
-            // Map DTOs → display models
-            self.indexData = response.toDisplayModel()
-            self.chartDataVersion += 1
+            // Map DTOs → display models — but only if this is still the latest
+            // request; a newer range change may have already painted fresher data,
+            // and this (slower, earlier) response must not clobber it.
+            if token == self.chartRequestToken {
+                self.indexData = response.toDisplayModel()
+                self.chartDataVersion += 1
+            }
 
             // News and technical analysis are fetched via separate concurrent tasks
 
@@ -398,6 +420,8 @@ class IndexDetailViewModel: ObservableObject {
     private func loadChartData(range: ChartTimeRange) async {
         let startTime = CFAbsoluteTimeGetCurrent()
         print("📡 [IndexDetailVM] Reloading chart for \(indexSymbol) range: \(range.rawValue)")
+        chartRequestToken += 1
+        let token = chartRequestToken
 
         do {
             let response = try await APIClient.shared.request(
@@ -407,6 +431,9 @@ class IndexDetailViewModel: ObservableObject {
 
             let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
 
+            // Drop a stale response so a slow earlier range can't overwrite the chart
+            // the user has since switched to (last-write-wins).
+            guard token == self.chartRequestToken else { return }
             // Update all data — the backend returns a fresh snapshot
             self.indexData = response.toDisplayModel()
             self.chartDataVersion += 1

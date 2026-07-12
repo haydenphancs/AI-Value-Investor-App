@@ -131,7 +131,7 @@ async def _fetch_all_daily(fmp: FMPClient, symbol: str) -> List[Dict]:
             break
 
         # Next request: fetch everything before the earliest date in this page
-        earliest = page[0].get("date", "")[:10]
+        earliest = page[0].get("date") or ""[:10]
         if not earliest or earliest <= from_date:
             break
         # Set to_date to day before earliest to avoid overlap
@@ -145,11 +145,11 @@ async def _fetch_all_daily(fmp: FMPClient, symbol: str) -> List[Dict]:
     seen = set()
     deduped = []
     for p in all_data:
-        d = p.get("date", "")[:10]
+        d = p.get("date") or ""[:10]
         if d not in seen:
             seen.add(d)
             deduped.append(p)
-    deduped.sort(key=lambda p: p.get("date", ""))
+    deduped.sort(key=lambda p: p.get("date") or "")
     return deduped
 
 
@@ -191,7 +191,7 @@ async def fetch_chart_data(
             to_date=to_date,
         )
         if isinstance(raw, list):
-            raw.sort(key=lambda p: p.get("date", ""))
+            raw.sort(key=lambda p: p.get("date") or "")
             prices = _normalize_prices(raw)
             if not extended_hours:
                 prices = _filter_regular_hours(prices)
@@ -223,7 +223,7 @@ def _filter_regular_hours(prices: List[Dict]) -> List[Dict]:
     et = ZoneInfo("America/New_York")
     filtered = []
     for p in prices:
-        date_str = p.get("date", "")
+        date_str = p.get("date") or ""
         if len(date_str) <= 10:
             # Daily data — always include
             filtered.append(p)
@@ -246,7 +246,7 @@ def _parse_historical(raw) -> List[Dict]:
         historical = raw.get("historical", [])
     elif isinstance(raw, list):
         historical = raw
-    historical.sort(key=lambda p: p.get("date", ""))
+    historical.sort(key=lambda p: p.get("date") or "")
     return historical
 
 
@@ -286,7 +286,7 @@ def _aggregate_prices(
 
     groups: Dict[str, List[Dict]] = {}
     for p in daily_prices:
-        date_str = p.get("date", "")[:10]
+        date_str = p.get("date") or ""[:10]
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
@@ -318,7 +318,7 @@ def _aggregate_prices(
 
         if closes:
             result.append({
-                "date": candles[-1].get("date", "")[:10],
+                "date": candles[-1].get("date") or ""[:10],
                 "open": opens[0] if opens else None,
                 "high": max(highs) if highs else None,
                 "low": min(lows) if lows else None,

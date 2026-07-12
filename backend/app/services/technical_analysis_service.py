@@ -207,7 +207,7 @@ class TechnicalAnalysisService:
             )
 
         # Sort oldest-first
-        historical.sort(key=lambda p: p.get("date", ""))
+        historical.sort(key=lambda p: p.get("date") or "")
 
         df = pd.DataFrame(historical)
         df["date"] = pd.to_datetime(df["date"])

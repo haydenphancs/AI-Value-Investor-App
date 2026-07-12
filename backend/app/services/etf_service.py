@@ -8,6 +8,7 @@ Serves the ETFDetailView screen on iOS.
 import asyncio
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -127,6 +128,24 @@ _ETF_REFERENCE: Dict[str, Dict[str, Any]] = {
 # ── Helpers ──────────────────────────────────────────────────────
 
 
+def _finite_num(v: Any, default: float = 0.0) -> float:
+    """Coerce to a finite float, or ``default``.
+
+    FMP weight / price / change fields are forwarded straight into REQUIRED
+    response floats (``weight``/``price``/``change_percent``) that have no Pydantic
+    finiteness guard. ``float("NaN")`` / ``float("inf")`` SUCCEED (the string
+    ``try`` only catches ValueError/TypeError), so a malformed holdings row could
+    put a non-finite into the response — Starlette renders with ``allow_nan=False``
+    and would raise, 500-ing the ENTIRE ETF detail (blanking valid price/chart/
+    profile). Reject non-finite here, mirroring ``chart_helper._finite_or_none``.
+    """
+    try:
+        f = float(v)
+    except (ValueError, TypeError):
+        return default
+    return f if math.isfinite(f) else default
+
+
 def _fmt(value: Optional[float], decimals: int = 2, prefix: str = "$") -> str:
     """Format a number with commas and N decimal places."""
     if value is None:
@@ -157,12 +176,15 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     """Compute % return over the last N trading days."""
     if not prices or len(prices) < 2:
         return None
+    # Not enough history to cover the requested window: return None so the caller
+    # OMITS this period rather than mislabeling a shorter (e.g. since-inception)
+    # return under a "3Y"/"5Y"/"10Y" label (a young ETF would otherwise show its
+    # full-history return identically for 3Y/5Y/10Y). Genuine since-inception CAGR
+    # uses _build_benchmark_summary, not this fallback.
     if len(prices) <= days_back:
-        start = prices[0].get("close") or prices[0].get("adjClose")
-        end = prices[-1].get("close") or prices[-1].get("adjClose")
-    else:
-        start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
-        end = prices[-1].get("close") or prices[-1].get("adjClose")
+        return None
+    start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
+    end = prices[-1].get("close") or prices[-1].get("adjClose")
 
     if not start or not end or start == 0:
         return None
@@ -174,7 +196,7 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
         return None
     current_year = datetime.now(tz=timezone.utc).year
     for p in prices:
-        date_str = p.get("date", "")
+        date_str = p.get("date") or ""
         if date_str.startswith(str(current_year)):
             start_price = p.get("close") or p.get("adjClose")
             end_price = prices[-1].get("close") or prices[-1].get("adjClose")
@@ -367,7 +389,7 @@ class ETFService:
             historical = hist_raw.get("historical", [])
         elif isinstance(hist_raw, list):
             historical = hist_raw
-        historical.sort(key=lambda p: p.get("date", ""))
+        historical.sort(key=lambda p: p.get("date") or "")
 
         # Parse SPY historical prices
         if cached_spy is not None:
@@ -375,7 +397,7 @@ class ETFService:
         else:
             spy_raw = _safe(spy_task_idx) if spy_task_idx is not None else {}
             spy_hist_raw = spy_raw.get("historical", []) if isinstance(spy_raw, dict) else (spy_raw if isinstance(spy_raw, list) else [])
-            spy_hist = sorted(spy_hist_raw, key=lambda p: p.get("date", ""))
+            spy_hist = sorted(spy_hist_raw, key=lambda p: p.get("date") or "")
             if spy_hist:
                 _cache_set(sp_cache_key, spy_hist)
 
@@ -938,7 +960,7 @@ class ETFService:
 
             results.append(ETFSectorWeightResponse(
                 name=name,
-                weight=round(float(weight), 2),
+                weight=round(_finite_num(weight), 2),
             ))
 
         results.sort(key=lambda x: x.weight, reverse=True)
@@ -980,12 +1002,16 @@ class ETFService:
         # Determine primary allocation from asset class
         remaining = round(100.0 - cash_pct, 2)
 
+        commodities = 0.0
         if is_bond_etf:
             equities, bonds, crypto = 0.0, remaining, 0.0
         elif "crypto" in ac or "bitcoin" in ac or "digital" in ac:
             equities, bonds, crypto = 0.0, 0.0, remaining
         elif "commodity" in ac or "gold" in ac or "alternative" in ac:
-            equities, bonds, crypto = remaining, 0.0, 0.0
+            # Commodities are neither equity nor cash; a gold ETF shown as
+            # "equities" (or the sibling _infer path's "100% cash") corrupts the
+            # allocation donut. Route into the dedicated commodities bucket.
+            equities, bonds, crypto, commodities = 0.0, 0.0, 0.0, remaining
         else:
             # Default: equity
             equities, bonds, crypto = remaining, 0.0, 0.0
@@ -994,6 +1020,7 @@ class ETFService:
             equities=equities,
             bonds=bonds,
             crypto=crypto,
+            commodities=commodities,
             cash=cash_pct,
             total_assets=_fmt(total_assets),
         )
@@ -1157,7 +1184,7 @@ class ETFService:
 
         etf_start = etf_hist[0].get("close") or etf_hist[0].get("adjClose")
         etf_end = etf_hist[-1].get("close") or etf_hist[-1].get("adjClose")
-        etf_start_date = etf_hist[0].get("date", "")
+        etf_start_date = etf_hist[0].get("date") or ""
 
         if not etf_start or not etf_end or etf_start <= 0 or etf_years <= 0:
             return None
@@ -1170,7 +1197,7 @@ class ETFService:
         if spy_hist and len(spy_hist) >= 252:
             sp_start_price = spy_hist[0].get("close") or spy_hist[0].get("adjClose")
             sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
-            sp_start_date = spy_hist[0].get("date", "")
+            sp_start_date = spy_hist[0].get("date") or ""
             sp_days = len(spy_hist) - 1
             sp_years = sp_days / 252
 
@@ -1202,7 +1229,7 @@ class ETFService:
             results.append(ETFTopHoldingResponse(
                 symbol=h.get("asset") or h.get("symbol") or "—",
                 name=h.get("name") or h.get("companyName") or "—",
-                weight=round(float(weight), 2),
+                weight=round(_finite_num(weight), 2),
             ))
         return results
 
@@ -1222,7 +1249,7 @@ class ETFService:
             sector_name = s.get("sector") or s.get("name") or "—"
             results.append(ETFSectorWeightResponse(
                 name=sector_name,
-                weight=round(float(weight), 2),
+                weight=round(_finite_num(weight), 2),
             ))
         # Sort largest first
         results.sort(key=lambda x: x.weight, reverse=True)
@@ -1331,12 +1358,16 @@ class ETFService:
     ) -> ETFAssetAllocationResponse:
         """Infer asset allocation from asset class (FMP doesn't provide granular breakdown)."""
         ac = asset_class.lower()
+        commodities = 0.0
         if "bond" in ac or "fixed" in ac:
             equities, bonds, crypto, cash = 0, 95, 0, 5
         elif "crypto" in ac or "bitcoin" in ac:
             equities, bonds, crypto, cash = 0, 0, 95, 5
-        elif "commodity" in ac or "gold" in ac:
-            equities, bonds, crypto, cash = 0, 0, 0, 100  # commodities mapped as cash/other
+        elif "commodity" in ac or "gold" in ac or "alternative" in ac:
+            # Was "0,0,0,100" (a gold ETF shown as 100% cash). Route into the
+            # dedicated commodities bucket, matching _build_asset_allocation so the
+            # detail screen and /holdings-risk endpoint agree.
+            equities, bonds, crypto, cash, commodities = 0, 0, 0, 5, 95
         elif "real estate" in ac or "reit" in ac:
             equities, bonds, crypto, cash = 95, 0, 0, 5
         else:
@@ -1346,6 +1377,7 @@ class ETFService:
             equities=equities,
             bonds=bonds,
             crypto=crypto,
+            commodities=commodities,
             cash=cash,
             total_assets=_fmt(total_assets),
         )
@@ -1398,9 +1430,9 @@ class ETFService:
             related.append(RelatedTickerResponse(
                 symbol=sym,
                 name=res.get("name") or sym,
-                price=float(res.get("price") or 0),
-                change_percent=round(float(
-                    res.get("changePercentage") or res.get("changesPercentage") or 0
+                price=_finite_num(res.get("price")),
+                change_percent=round(_finite_num(
+                    res.get("changePercentage") or res.get("changesPercentage")
                 ), 2),
             ))
         return related

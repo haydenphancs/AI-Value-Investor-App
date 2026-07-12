@@ -77,6 +77,10 @@ class TickerDetailViewModel: ObservableObject {
     /// response for a no-longer-selected range can't clobber a newer one
     /// (last-write-wins during rapid range/interval switching).
     private var chartRequestGen = 0
+    /// True while the range observer assigns the range's default interval, so the
+    /// interval observer doesn't ALSO re-fetch (one range change would otherwise fire
+    /// two chart requests when the range crosses an interval boundary).
+    private var suppressIntervalReload = false
 
     // MARK: - Initialization
 
@@ -91,7 +95,12 @@ class TickerDetailViewModel: ObservableObject {
             .sink { [weak self] range in
                 guard let self = self else { return }
                 print("📈 TickerDetailVM: Chart range changed to \(range.rawValue)")
+                // Assigning the interval fires the interval observer SYNCHRONOUSLY;
+                // suppress its re-fetch so a range change drives exactly one chart
+                // request (not two when the range crosses an interval boundary).
+                self.suppressIntervalReload = true
                 self.chartSettings.selectedInterval = range.defaultInterval
+                self.suppressIntervalReload = false
 
                 // Restart or stop chart refresh timer based on new range
                 if range.defaultInterval.isIntraday && self.livePriceManager.isConnected {
@@ -107,12 +116,14 @@ class TickerDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe interval changes and re-fetch chart data
+        // Observe interval changes and re-fetch chart data (manual interval picker)
         chartSettings.$selectedInterval
             .dropFirst()
             .removeDuplicates()
             .sink { [weak self] _ in
                 guard let self = self else { return }
+                // Skip the re-fetch the range observer already owns (see suppress flag).
+                guard !self.suppressIntervalReload else { return }
                 Task { [weak self] in
                     guard let self = self else { return }
                     await self.fetchChartData(self.tickerSymbol, range: self.selectedChartRange)

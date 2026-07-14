@@ -277,6 +277,12 @@ class ChatService:
         if is_deep_dive and context and stock_id and len(ai_text) > 100:
             self._upsert_deep_dive_cache(stock_id, context, ai_text)
 
+        # No tool widget (text-only question, or the FC round failed and degraded to plain text
+        # above) → fall back to the deterministic screen-scoped widget, so an asset-detail chat
+        # keeps its inline chart on this non-streaming path too (matching prepare_stream_generation).
+        if widget is None:
+            widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
+
         result: Dict[str, Any] = {
             "content": ai_text,
             "citations": citations if citations else None,
@@ -446,6 +452,10 @@ class ChatService:
     # context_types whose reference_id is a user-readable ticker (vs. a slug/order id).
     _TICKER_CONTEXTS = {"TICKER_REPORT", "STOCK", "ETF", "CRYPTO", "INDEX", "COMMODITY"}
 
+    # RAG chunk source_type → the human "source" pill label. Absent/unknown → "SEC filing"
+    # (the filing-only stock path, whose chunks carry no source_type).
+    _RAG_SOURCE_TYPE_LABEL = {"book": "Book", "article": "Article", "filing": "SEC filing"}
+
     @classmethod
     def _build_sources(
         cls,
@@ -467,18 +477,25 @@ class ChatService:
                 detail = ref.split("|")[0].strip().upper() or None
             sources.append({"label": label, "detail": detail})
 
-        # RAG citations → distinct SEC-filing sections (skip the generic "Document" fallback).
+        # RAG citations → one pill per distinct source. Label by the chunk's source_type
+        # (book / article / filing) instead of a hardcoded "SEC filing", so once the RAG
+        # corpus is ingested a book/article chunk isn't mis-attributed to a filing. Absent
+        # source_type (the filing-only stock path) still labels "SEC filing".
         if citations:
             seen: set = set()
             for c in citations:
                 if not isinstance(c, dict):
                     continue
                 section = (c.get("source") or "").strip()
-                key = section.lower()
-                if not section or key in seen or key == "document":
+                detail = (c.get("source_label") or "").strip() or section
+                key = detail.lower()
+                if not detail or key in seen or key == "document":
                     continue
                 seen.add(key)
-                sources.append({"label": "SEC filing", "detail": section})
+                label = cls._RAG_SOURCE_TYPE_LABEL.get(
+                    (c.get("source_type") or "").strip().lower(), "SEC filing"
+                )
+                sources.append({"label": label, "detail": detail})
                 if len(sources) >= 6:  # keep the card compact
                     break
 
@@ -731,7 +748,12 @@ class ChatService:
             return {"error": str(e)}
 
     @staticmethod
-    def _get_valuation_level(pe: float) -> str:
+    def _get_valuation_level(pe: Optional[float]) -> str:
+        # A missing / non-positive P/E means "no earnings data" (e.g. the index sector-benchmark
+        # fallback returned 0 on a thin or failed recompute) — that is NOT cheap. Guard first so
+        # 0 never renders as "Bargain"; mirrors the guarded index-detail valuation label.
+        if pe is None or pe <= 0:
+            return "Unknown"
         if pe < 18:
             return "Bargain"
         elif pe < 24:
@@ -858,6 +880,8 @@ class ChatService:
                 citations.append({
                     "index": i + 1,
                     "source": chunk.get("section_title", "Document"),
+                    "source_type": chunk.get("source_type"),
+                    "source_label": chunk.get("source_label"),
                     "text": chunk.get("chunk_text", "")[:200],
                 })
         except Exception as e:
@@ -1012,13 +1036,9 @@ class ChatService:
         sid = stock_id.upper()
         if sid.startswith("^"):
             return "INDEX"
-        # Common crypto suffixes
-        if sid.endswith("USD") or sid.endswith("USDT") or sid in {
-            "BTC", "ETH", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK",
-            "XRP", "DOGE", "SHIB", "UNI", "AAVE", "LTC", "BCH", "ATOM",
-        }:
-            return "CRYPTO"
-        # Common commodity symbols
+        # Commodity symbols FIRST — the FMP USD-suffixed codes (GCUSD/CLUSD/SIUSD/…) would
+        # otherwise be swallowed by the generic endswith("USD") crypto heuristic below and
+        # mis-voiced as crypto. No symbol collides between the commodity and crypto sets.
         if sid in {
             "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "HGUSD",
             "ZSUSD", "ZCUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
@@ -1026,6 +1046,12 @@ class ChatService:
             "GOLD", "SILVER", "OIL", "NATGAS", "PLATINUM", "COPPER",
         }:
             return "COMMODITY"
+        # Common crypto suffixes
+        if sid.endswith("USD") or sid.endswith("USDT") or sid in {
+            "BTC", "ETH", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK",
+            "XRP", "DOGE", "SHIB", "UNI", "AAVE", "LTC", "BCH", "ATOM",
+        }:
+            return "CRYPTO"
         return "STOCK"
 
     # ── Deep dive cache ───────────────────────────────────────────

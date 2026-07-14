@@ -66,7 +66,7 @@ struct MoneyMoveArticleSectionContent: View {
                             .frame(width: 6, height: 6)
                             .padding(.top, 7)
 
-                        if let spans = itemSpans, i < spans.count {
+                        if let spans = itemSpans, i < spans.count, !spans[i].isEmpty {
                             ReadAlongText(spans: spans[i], activeTime: activeTime, font: AppTypography.body, base: AppColors.textPrimary)
                         } else {
                             Text(item)

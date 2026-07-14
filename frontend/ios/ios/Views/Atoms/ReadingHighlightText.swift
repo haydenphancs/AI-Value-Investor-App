@@ -127,10 +127,16 @@ struct ReadingHighlightSegmentedText: View {
         }
 
         var attributedString = AttributedString()
-        var currentPosition = 0
+        var currentPosition = 0   // UTF-16 offset into fullText — MUST match currentWordRange's units
 
         for segment in segments {
-            let segmentLength = segment.text.count
+            // Measure in UTF-16 (NSString length), NOT grapheme count (`String.count`): every offset
+            // here is compared against / used to substring `currentWordRange` and the NSString
+            // segments, which are UTF-16. Mixing the two shifts the highlight onto the wrong
+            // characters once any segment before the word contains a non-BMP char (emoji/flag) or a
+            // combining sequence — a 🇺🇸 flag is 1 Character but 4 UTF-16 units. For pure-ASCII text
+            // the two counts are identical, so this changes nothing for today's authored lessons.
+            let segmentLength = (segment.text as NSString).length
             let segmentEnd = currentPosition + segmentLength
 
             // Determine how this segment relates to the current reading position

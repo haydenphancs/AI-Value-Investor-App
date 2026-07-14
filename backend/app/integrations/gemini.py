@@ -711,45 +711,53 @@ class GeminiClient:
             tool_results: List[Dict[str, Any]] = []
             candidate = (response.candidates or [None])[0]
             parts = (candidate.content.parts if candidate and candidate.content else None) or []
-            for part in parts:
-                fn_call = getattr(part, "function_call", None)
-                if fn_call and fn_call.name:
-                    handler = tool_handlers.get(fn_call.name)
-                    if handler is None:
-                        logger.warning(f"Gemini called unknown tool: {fn_call.name}")
-                        continue
-                    args = dict(fn_call.args) if fn_call.args else {}
-                    logger.info(f"Gemini invoked tool '{fn_call.name}' with args: {args}")
-                    handler_result = await handler(args)
-                    tool_results.append(handler_result)
 
-                    # Feed the tool result back. Append the model's turn VERBATIM
-                    # (candidate.content) so any thought_signature is preserved,
-                    # then the function response as a user turn.
-                    follow_up = await _call_with_timeout(
-                        self._client.aio.models.generate_content(
-                            model=model,
-                            contents=[
-                                types.Content(role="user", parts=[types.Part(text=prompt)]),
-                                candidate.content,
-                                types.Content(
-                                    role="user",
-                                    parts=[types.Part.from_function_response(
-                                        name=fn_call.name,
-                                        response={"result": handler_result},
-                                    )],
-                                ),
-                            ],
-                            config=config,
-                        )
+            # Collect EVERY function_call in the model's turn — gemini-2.5 can emit several in
+            # parallel. Handling only the first (while echoing candidate.content, which carries ALL
+            # the calls) sent back a function_response count that mismatched the call count → the API
+            # 400s and the whole tool round is lost. Mirror stream_agentic: run each call and append
+            # ONE function_response per call (an error response for an unknown handler) so counts match.
+            fn_calls = [
+                p.function_call for p in parts
+                if getattr(p, "function_call", None) and p.function_call.name
+            ]
+            if fn_calls:
+                response_parts: List[Any] = []
+                for fc in fn_calls:
+                    args = dict(fc.args) if fc.args else {}
+                    handler = tool_handlers.get(fc.name)
+                    if handler is None:
+                        logger.warning(f"Gemini called unknown tool: {fc.name}")
+                        handler_result = {"error": f"unknown tool: {fc.name}"}
+                    else:
+                        logger.info(f"Gemini invoked tool '{fc.name}' with args: {args}")
+                        handler_result = await handler(args)
+                        tool_results.append(handler_result)
+                    response_parts.append(types.Part.from_function_response(
+                        name=fc.name,
+                        response={"result": handler_result},
+                    ))
+
+                # Feed the results back. Append the model's turn VERBATIM (candidate.content) so any
+                # thought_signature is preserved, then ONE user turn with a response per call.
+                follow_up = await _call_with_timeout(
+                    self._client.aio.models.generate_content(
+                        model=model,
+                        contents=[
+                            types.Content(role="user", parts=[types.Part(text=prompt)]),
+                            candidate.content,
+                            types.Content(role="user", parts=response_parts),
+                        ],
+                        config=config,
                     )
-                    return {
-                        "text": _response_text(follow_up),
-                        "model": self.model_name,
-                        "tokens_used": _response_tokens(follow_up),
-                        "finish_reason": _response_finish(follow_up),
-                        "tool_results": tool_results,
-                    }
+                )
+                return {
+                    "text": _response_text(follow_up),
+                    "model": self.model_name,
+                    "tokens_used": _response_tokens(follow_up),
+                    "finish_reason": _response_finish(follow_up),
+                    "tool_results": tool_results,
+                }
 
             # No function call — return normal text response.
             return {

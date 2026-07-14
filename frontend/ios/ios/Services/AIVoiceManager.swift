@@ -316,7 +316,9 @@ class AIVoiceManager: NSObject, ObservableObject {
                 return index
             }
         }
-        return wordRanges.count - 1
+        // Clamp to 0 for an empty word list — `wordRanges.count - 1` would be -1, a negative index
+        // published on `currentWordIndex` (e.g. after speak("")), a landmine for any future subscript.
+        return max(0, wordRanges.count - 1)
     }
 }
 

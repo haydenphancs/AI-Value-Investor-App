@@ -108,6 +108,12 @@ class ChatViewModel: ObservableObject {
     private var reasonFinished = false
     private var reasonTask: Task<Void, Never>?
 
+    /// The in-flight turn Task (create-session + stream/non-stream response). Stored so navigating
+    /// away, resetting, or deleting the current session can CANCEL it. Without this the abandoned SSE
+    /// stream keeps running and its late resume/error clobbers the now-active session's shared reveal
+    /// buffers + `isAITyping` one-in-flight guard (mid-stream bubble collapse + duplicate persisted turn).
+    private var respondTask: Task<Void, Never>?
+
     // MARK: - Session Management
 
     /// Create a new chat session and optionally send the first message.
@@ -140,7 +146,8 @@ class ChatViewModel: ObservableObject {
         messages = [userMessage]
         isAITyping = true
 
-        Task {
+        respondTask?.cancel()
+        respondTask = Task {
             do {
                 // Step 1: Create session (persists context_type + reference_id so a
                 // history reload re-grounds on the same cached data).
@@ -205,18 +212,22 @@ class ChatViewModel: ObservableObject {
         messages.append(userMessage)
         isAITyping = true
 
-        Task {
+        respondTask?.cancel()
+        respondTask = Task {
             await respond(sessionId: sessionId, message: text)
         }
     }
 
     /// Load a previous conversation from the history panel.
     func loadConversation(sessionId: String) {
+        // Cancel any in-flight turn for the PREVIOUS session so its abandoned SSE stream actually
+        // stops (cancelling the consumer trips APIClient.stream's onTermination → the byte-task
+        // cancels) and can't later resume to clobber this session's reveal/typing state. The
+        // stream's for-await throws CancellationError, which its catch drops via the stale guard.
+        respondTask?.cancel()
         currentSessionId = sessionId
         messages = []
         isLoadingSession = true
-        // Switching conversations cancels any prior "thinking"/streaming indicator; a
-        // still-in-flight send for the previous session is dropped by the sessionId guard.
         isAITyping = false
         isStreaming = false
         streamingMessageId = nil
@@ -362,6 +373,9 @@ class ChatViewModel: ObservableObject {
 
     /// Reset to the initial empty state (new chat).
     func resetConversation() {
+        // Cancel any in-flight turn so a stream from the session being cleared (e.g. deleteSession of
+        // the current chat) can't resume and mutate the reset state.
+        respondTask?.cancel()
         currentSessionId = nil
         currentStockId = nil
         currentSessionType = "NORMAL"
@@ -487,8 +501,10 @@ class ChatViewModel: ObservableObject {
             )
 
             for try await event in events {
-                // Drop the stream if the user navigated to another conversation.
-                guard sessionId == currentSessionId else { cancelReveal(); return }
+                // Drop the stream if the user navigated to another conversation. Do NOT touch shared
+                // reveal state here — it now belongs to the active session (navigation already reset
+                // it); cancelReveal() would wipe the CURRENT session's live reveal.
+                guard sessionId == currentSessionId else { return }
 
                 switch event.event {
                 case "thinking":
@@ -545,7 +561,9 @@ class ChatViewModel: ObservableObject {
                     await reasonTask?.value
                     revealTask = nil
                     reasonTask = nil
-                    guard sessionId == currentSessionId else { cancelReveal(); return }
+                    // User navigated away DURING the drain await → the active session owns the reveal
+                    // state now; return without cancelReveal (which would wipe the active session's).
+                    guard sessionId == currentSessionId else { return }
                     if let id = liveId, let idx = messages.firstIndex(where: { $0.id == id }) {
                         // Same id → the row updates in place (no ForEach tear-down/flicker).
                         messages[idx] = RichChatMessage(
@@ -569,15 +587,16 @@ class ChatViewModel: ObservableObject {
             throw ChatStreamError.incomplete
 
         } catch {
+            // If this stream belongs to a session the user already navigated away from — or the turn
+            // Task was cancelled (navigation/reset cancels respondTask, which surfaces here as a
+            // CancellationError) — do NOT touch any shared reveal/typing state: it belongs to the
+            // now-active session. Just stop; the active session owns its own lifecycle.
+            guard sessionId == currentSessionId, !Task.isCancelled else { return }
             print("⚠️ [ChatVM] Stream failed (\(error)); falling back to non-streaming")
             cancelReveal()
             if let id = liveId { messages.removeAll { $0.id == id } }  // drop the partial bubble
             streamingMessageId = nil
             isStreaming = false
-            guard sessionId == currentSessionId else {
-                isAITyping = false
-                return
-            }
             // Show the thinking indicator again while we reconcile / regenerate.
             isAITyping = true
             await reconcileAfterStreamFailure(sessionId: sessionId, message: message)

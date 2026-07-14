@@ -241,3 +241,108 @@ async def test_stream_synthesis_degrades_to_specialist_answer_when_merge_fails()
     events = [ev async for ev in svc.stream_synthesis(prep, "is it a buy?", route, tools=[], tool_handlers={})]
     answers = [p for k, p in events if k == "answer"]
     assert any("looks cheap" in a for a in answers)   # a real answer survived the merge failure
+
+
+# ── generate_with_tools: parallel / multiple function calls (non-streaming path) ──
+
+class _FakeResp:
+    """A generate_content response shaped like the bits GeminiClient reads."""
+    def __init__(self, parts, text=None, finish="STOP", tokens=7):
+        self.candidates = [SimpleNamespace(
+            content=SimpleNamespace(parts=list(parts)),
+            finish_reason=SimpleNamespace(name=finish),
+        )]
+        self.usage_metadata = SimpleNamespace(total_token_count=tokens)
+        self._text = text
+
+    @property
+    def text(self):
+        if self._text is None:
+            raise ValueError("no text in this response")
+        return self._text
+
+
+class _FakeModels:
+    """Returns the canned responses in order; records each call's `contents`."""
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self._i = 0
+        self.calls = []
+
+    async def generate_content(self, *, model, contents, config):
+        self.calls.append(contents)
+        r = self._responses[min(self._i, len(self._responses) - 1)]
+        self._i += 1
+        return r
+
+
+def _tools_client(models) -> gem.GeminiClient:
+    c = gem.GeminiClient.__new__(gem.GeminiClient)
+    c.model_name = "gemini-2.5-flash"
+    c._temperature = 0.7
+    c._max_tokens = 128
+    c._client = SimpleNamespace(aio=SimpleNamespace(models=models))
+    gem._quota_circuit.record_success()
+    return c
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_handles_parallel_function_calls():
+    """The confirmed bug: gemini-2.5 can emit MULTIPLE function_call parts in one turn. The loop
+    handled only the FIRST and echoed candidate.content (holding ALL the calls) with a SINGLE
+    function_response → an N-call/1-response mismatch the API 400s on, silently dropping every
+    tool/widget + burning a round-trip. The fix runs every call and sends one response per call."""
+    fc1 = _FakeFC("get_stock_chart_data", {"ticker": "AAPL"})
+    fc2 = _FakeFC("get_analyst_analysis", {"ticker": "AAPL"})
+    first = _FakeResp(parts=[_FakePart(function_call=fc1), _FakePart(function_call=fc2)])
+    final = _FakeResp(parts=[_FakePart(text="Chart + ratings.")], text="Chart + ratings.")
+    models = _FakeModels([first, final])
+    c = _tools_client(models)
+
+    ran = []
+
+    async def chart(args):
+        ran.append(("chart", dict(args)))
+        return {"widget_type": "stock_chart", "ticker": args["ticker"]}
+
+    async def analyst(args):
+        ran.append(("analyst", dict(args)))
+        return {"consensus": "BUY"}
+
+    result = await c.generate_with_tools(
+        "compare AAPL chart and ratings", tools=[_TOOL],
+        tool_handlers={"get_stock_chart_data": chart, "get_analyst_analysis": analyst},
+    )
+
+    # BOTH handlers ran (not just the first parallel call).
+    assert ("chart", {"ticker": "AAPL"}) in ran
+    assert ("analyst", {"ticker": "AAPL"}) in ran
+    # A follow-up round was issued and returned the final text; both results are carried.
+    assert result["text"] == "Chart + ratings."
+    assert len(result["tool_results"]) == 2
+    # Crux: the follow-up user turn carried ONE function_response PER call (2), so the response
+    # count matches the 2-call model turn — no INVALID_ARGUMENT.
+    follow_up_contents = models.calls[1]
+    assert len(follow_up_contents[-1].parts) == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_unknown_among_parallel_calls_keeps_counts_matched():
+    """An unknown handler among several parallel calls still gets an error function_response, so the
+    response count keeps matching the call count (rather than being silently dropped → mismatch)."""
+    fc1 = _FakeFC("get_stock_chart_data", {"ticker": "MSFT"})
+    fc2 = _FakeFC("mystery_tool", {"ticker": "MSFT"})
+    first = _FakeResp(parts=[_FakePart(function_call=fc1), _FakePart(function_call=fc2)])
+    final = _FakeResp(parts=[_FakePart(text="ok")], text="ok")
+    models = _FakeModels([first, final])
+    c = _tools_client(models)
+
+    async def chart(args):
+        return {"widget_type": "stock_chart", "ticker": args["ticker"]}
+
+    result = await c.generate_with_tools(
+        "x", tools=[_TOOL], tool_handlers={"get_stock_chart_data": chart},
+    )
+    # Only the known handler's result is surfaced, but BOTH calls were answered back to the model.
+    assert len(result["tool_results"]) == 1
+    assert len(models.calls[1][-1].parts) == 2

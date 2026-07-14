@@ -204,3 +204,71 @@ def test_bundle_titles_are_unique():
     data = json.loads(_BUNDLE_JSON.read_text())
     titles = [a["title"] for a in data["articles"]]
     assert len(titles) == len(set(titles)), f"duplicate titles in bundle: {titles}"
+
+
+# --- Malformed-shape contract pins ------------------------------------------------------------
+# The backend serves `content` VERBATIM (List[Dict] passthrough, no shape validation), so the shapes
+# below reach iOS unchanged. iOS was hardened (MoneyMovesContentModels) to DEGRADE on each rather
+# than drop the whole article — closing the asymmetry with the always-lenient Journey path. These
+# tests pin the backend half of that contract: the payloads must serve without the backend rejecting
+# them, so the iOS-tolerance behavior is the load-bearing guarantee. (iOS has no XCTest target; the
+# iOS side is verified by build + the guard logic in MoneyMovesContentModels/MoneyMoveArticleSectionContent.)
+
+
+def _article_with_content(blocks: list) -> dict:
+    art = _worst_case_article()
+    art["sections"][0]["content"] = blocks
+    return art
+
+
+def test_backend_serves_flat_itemsReadAlong_verbatim():
+    """`itemsReadAlong` authored FLAT ([{...}]) instead of nested ([[...]]) is an easy authoring slip
+    (text blocks use flat `readAlong`, bulletLists use nested). The backend passes it through; iOS
+    must decode it with `try?` and degrade to no-timings rather than dropping the whole article."""
+    flat = _article_with_content([
+        {"type": "bulletList", "items": ["a", "b"],
+         "itemsReadAlong": [{"text": "a", "start": 0.0, "end": 1.0}]},  # FLAT, should be [[...]]
+    ])
+    resp = MoneyMovesResponse(articles=[flat])
+    assert resp.articles[0]["sections"][0]["content"][0]["itemsReadAlong"] == [
+        {"text": "a", "start": 0.0, "end": 1.0}
+    ]
+
+
+def test_backend_serves_empty_inner_itemsReadAlong_verbatim():
+    """An empty INNER span list (`[[...], [], [...]]`) — an alignment run that produced no spans for
+    one bullet — is served verbatim. iOS must render that bullet as plain text, not blank (F1)."""
+    art = _article_with_content([
+        {"type": "bulletList", "items": ["a", "b", "c"],
+         "itemsReadAlong": [
+             [{"text": "a", "start": 0.0, "end": 1.0}],
+             [],  # <-- the F1 trigger: no spans for bullet #2
+             [{"text": "c", "start": 2.0, "end": 3.0}],
+         ]},
+    ])
+    resp = MoneyMovesResponse(articles=[art])
+    items_ra = resp.articles[0]["sections"][0]["content"][0]["itemsReadAlong"]
+    assert items_ra[1] == [], "empty inner span list must survive passthrough (iOS renders plain text)"
+
+
+def test_backend_serves_wrong_typed_scalars_verbatim():
+    """A numeric `viewCount` / fractional `readTimeMinutes` (Studio edit or programmatic build) is
+    served verbatim; iOS must COERCE them rather than drop the article on a type mismatch (F2)."""
+    art = _worst_case_article()
+    art["viewCount"] = 1_200_000        # number, not the "4.2M" string iOS expects
+    art["readTimeMinutes"] = 5.5        # fractional, not Int
+    resp = MoneyMovesResponse(articles=[art])
+    assert resp.articles[0]["viewCount"] == 1_200_000
+    assert resp.articles[0]["readTimeMinutes"] == 5.5
+
+
+def test_backend_serves_typeless_content_block_verbatim():
+    """A content block missing its `type` discriminator is served verbatim; iOS must drop just that
+    block (toContent -> nil) rather than throwing and dropping the whole article (F2)."""
+    art = _article_with_content([
+        {"text": "orphaned block with no type"},   # no `type`
+        {"type": "paragraph", "text": "this one is fine"},
+    ])
+    resp = MoneyMovesResponse(articles=[art])
+    blocks = resp.articles[0]["sections"][0]["content"]
+    assert "type" not in blocks[0] and blocks[1]["type"] == "paragraph"

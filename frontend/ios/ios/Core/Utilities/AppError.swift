@@ -144,6 +144,19 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         }
     }
 
+    /// True for the routine "we're just offline or signed out" failures that best-effort background
+    /// sync (progress/bookmark `hydrate()`) is expected to swallow quietly. Everything else — a decode
+    /// / contract drift (surfaces as `.unknown`), a 5xx, an unexpected code — should be LOGGED rather
+    /// than silently hiding just-synced content, per the no-silent-swallow rule.
+    var isExpectedOffline: Bool {
+        switch self {
+        case .noConnection, .timeout, .unauthorized, .tokenExpired, .forbidden:
+            return true
+        default:
+            return false
+        }
+    }
+
     // MARK: - Factory
 
     /// Create AppError from any Error

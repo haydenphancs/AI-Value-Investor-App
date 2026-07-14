@@ -40,6 +40,30 @@ private extension KeyedDecodingContainer {
         let wrapped = ((try? decodeIfPresent([FailableDecodable<T>].self, forKey: key)) ?? nil) ?? []
         return wrapped.compactMap { $0.value }
     }
+
+    /// Decode an Int that tolerates a value authored as a JSON float (`5.0`/`5.5`) or numeric string
+    /// (`"5"`). A wrong TYPE must degrade to nil (or a caller default), NOT throw and drop the whole
+    /// article — the backend serves `content` verbatim, so a Studio/programmatic row can carry these.
+    func flexibleInt(forKey key: Key) -> Int? {
+        if let i = (try? decodeIfPresent(Int.self, forKey: key)) ?? nil { return i }
+        if let d = (try? decodeIfPresent(Double.self, forKey: key)) ?? nil, d.isFinite { return Int(d.rounded()) }
+        if let s = (try? decodeIfPresent(String.self, forKey: key)) ?? nil {
+            if let i = Int(s) { return i }
+            if let d = Double(s), d.isFinite { return Int(d.rounded()) }
+        }
+        return nil
+    }
+
+    /// Decode a String that tolerates a value authored as a JSON number/bool by stringifying it.
+    func flexibleString(forKey key: Key) -> String? {
+        if let s = (try? decodeIfPresent(String.self, forKey: key)) ?? nil { return s }
+        if let i = (try? decodeIfPresent(Int.self, forKey: key)) ?? nil { return String(i) }
+        if let d = (try? decodeIfPresent(Double.self, forKey: key)) ?? nil {
+            return d == d.rounded() ? String(Int(d)) : String(d)
+        }
+        if let b = (try? decodeIfPresent(Bool.self, forKey: key)) ?? nil { return String(b) }
+        return nil
+    }
 }
 
 // MARK: - Top-level containers
@@ -153,6 +177,59 @@ struct MoneyMoveArticleDTO: Decodable {
     }
 }
 
+// MARK: - Defensive decoding (mirror the always-lenient Journey path)
+//
+// The backend serves each article's `content` JSONB VERBATIM (no shape validation). Journey's iOS
+// decoder degrades at every layer (lenient card array, `type` defaults, timings via `try?`); Money
+// Moves used to be lenient ONLY at the outer article array, so ONE malformed nested value (a content
+// block missing `type`, a FLAT `itemsReadAlong`, a section missing `title`, a numeric `viewCount`, a
+// fractional `readTimeMinutes`) threw and SILENTLY dropped the whole article (with no log — the outer
+// lenient decode still succeeds). These custom inits route every inner array through `lenientArray`
+// and coerce the scalar types, so a bad nested value degrades in place. Well-formed content (the whole
+// current bundle) decodes identically. Defined in extensions to preserve the memberwise inits.
+
+extension MoneyMoveArticleDTO {
+    private enum CodingKeys: String, CodingKey {
+        case slug, title, subtitle, cardSubtitle, category, author, readTimeMinutes, viewCount,
+             learnerCount, sortOrder, commentCount, publishedDaysAgo, tagLabel, isFeatured,
+             hasAudioVersion, audioUrl, audioDurationSeconds, heroGradientColors, keyHighlights,
+             sections, statistics, comments, relatedArticles
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Identity fields: a missing slug/title SHOULD drop just this article (via the outer lenient
+        // article array) — an article with no stable identity is unusable.
+        slug = try c.decode(String.self, forKey: .slug)
+        title = try c.decode(String.self, forKey: .title)
+        // Everything else degrades in place rather than dropping the whole article.
+        subtitle = ((try? c.decodeIfPresent(String.self, forKey: .subtitle)) ?? nil) ?? ""
+        cardSubtitle = c.flexibleString(forKey: .cardSubtitle)
+        category = ((try? c.decodeIfPresent(String.self, forKey: .category)) ?? nil) ?? "blueprints"
+        author = ((try? c.decodeIfPresent(ArticleAuthorDTO.self, forKey: .author)) ?? nil) ?? .placeholder
+        readTimeMinutes = c.flexibleInt(forKey: .readTimeMinutes) ?? 0
+        viewCount = c.flexibleString(forKey: .viewCount) ?? ""
+        learnerCount = c.flexibleString(forKey: .learnerCount)
+        sortOrder = c.flexibleInt(forKey: .sortOrder)
+        commentCount = c.flexibleInt(forKey: .commentCount)
+        publishedDaysAgo = c.flexibleInt(forKey: .publishedDaysAgo)
+        tagLabel = c.flexibleString(forKey: .tagLabel)
+        isFeatured = (try? c.decodeIfPresent(Bool.self, forKey: .isFeatured)) ?? nil
+        hasAudioVersion = (try? c.decodeIfPresent(Bool.self, forKey: .hasAudioVersion)) ?? nil
+        audioUrl = (try? c.decodeIfPresent(String.self, forKey: .audioUrl)) ?? nil
+        audioDurationSeconds = c.flexibleInt(forKey: .audioDurationSeconds)
+        heroGradientColors = c.lenientArray(String.self, forKey: .heroGradientColors)
+        keyHighlights = c.lenientArray(ArticleHighlightDTO.self, forKey: .keyHighlights)
+        sections = c.lenientArray(ArticleSectionDTO.self, forKey: .sections)
+        let stats = c.lenientArray(ArticleStatisticDTO.self, forKey: .statistics)
+        statistics = stats.isEmpty ? nil : stats
+        let cmts = c.lenientArray(ArticleCommentDTO.self, forKey: .comments)
+        comments = cmts.isEmpty ? nil : cmts
+        let related = c.lenientArray(RelatedArticleDTO.self, forKey: .relatedArticles)
+        relatedArticles = related.isEmpty ? nil : related
+    }
+}
+
 // MARK: - Nested DTOs
 
 struct ArticleAuthorDTO: Decodable {
@@ -160,6 +237,12 @@ struct ArticleAuthorDTO: Decodable {
     let title: String
     let isVerified: Bool?
     let followerCount: String?
+
+    /// Fallback when a served article omits/malforms its author, so the article still renders instead
+    /// of being dropped whole (a missing required author field would otherwise throw the DTO decode).
+    static let placeholder = ArticleAuthorDTO(
+        name: "Caydex", title: "Research", isVerified: nil, followerCount: nil
+    )
 
     func toAuthor() -> ArticleAuthor {
         ArticleAuthor(
@@ -187,6 +270,18 @@ struct ArticleSectionDTO: Decodable {
     let icon: String?
     let hasGlowEffect: Bool?
     let content: [ArticleSectionContentDTO]
+
+    private enum CodingKeys: String, CodingKey { case title, icon, hasGlowEffect, content }
+
+    /// Defensive decode: `content` goes through `lenientArray` so one malformed block drops just that
+    /// block, not the whole article; a missing section title degrades to "".
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = ((try? c.decodeIfPresent(String.self, forKey: .title)) ?? nil) ?? ""
+        icon = (try? c.decodeIfPresent(String.self, forKey: .icon)) ?? nil
+        hasGlowEffect = (try? c.decodeIfPresent(Bool.self, forKey: .hasGlowEffect)) ?? nil
+        content = c.lenientArray(ArticleSectionContentDTO.self, forKey: .content)
+    }
 
     func toSection() -> ArticleSection {
         // Build content and its parallel read-along array in lockstep, so dropped (unknown-type)
@@ -263,6 +358,29 @@ struct ArticleSectionContentDTO: Decodable {
         case "highlight": return .highlight
         default: return .info
         }
+    }
+}
+
+extension ArticleSectionContentDTO {
+    private enum CodingKeys: String, CodingKey {
+        case type, text, items, attribution, icon, style, readAlong, itemsReadAlong
+    }
+
+    /// Defensive decode. A missing/blank `type` decodes cleanly, then `toContent()` drops just this
+    /// block (returns nil) instead of throwing and dropping the whole article. `readAlong` /
+    /// `itemsReadAlong` decode via `try?` so a mis-shaped timing container — most likely a FLAT
+    /// `itemsReadAlong` authored where the nested `[[…]]` is expected — degrades to nil rather than
+    /// dropping the article. Leaf spans are already defensively decoded (ReadAlongModels).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = ((try? c.decodeIfPresent(String.self, forKey: .type)) ?? nil) ?? ""
+        text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil
+        items = (try? c.decodeIfPresent([String].self, forKey: .items)) ?? nil
+        attribution = (try? c.decodeIfPresent(String.self, forKey: .attribution)) ?? nil
+        icon = (try? c.decodeIfPresent(String.self, forKey: .icon)) ?? nil
+        style = (try? c.decodeIfPresent(String.self, forKey: .style)) ?? nil
+        readAlong = (try? c.decodeIfPresent([ReadAlongSentence].self, forKey: .readAlong)) ?? nil
+        itemsReadAlong = (try? c.decodeIfPresent([[ReadAlongSentence]].self, forKey: .itemsReadAlong)) ?? nil
     }
 }
 

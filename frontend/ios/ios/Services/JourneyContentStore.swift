@@ -95,14 +95,35 @@ private struct JourneyAPICard: Decodable {
 }
 
 // MARK: - Bundled DTOs (journey_lessons.json)
+//
+// Decoded with the SAME leniency as the remote path above. The bundle ships in-binary, so a bad
+// element is an authoring mistake rather than a Studio edit — but a single bundled card missing
+// `type` (or a lesson missing `title`) would otherwise throw in JSONDecoder().decode and drop the
+// ENTIRE offline fallback (all 27 lessons), taking down offline mode AND the offline fallback for
+// remote-only content. Drop the one bad element, keep the rest — matching JourneyAPICard.
 
 private struct JourneyBundleFile: Decodable {
     let lessons: [JourneyBundleLesson]
+
+    private enum CodingKeys: String, CodingKey { case lessons }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = ((try? c.decodeIfPresent([FailableDecodable<JourneyBundleLesson>].self, forKey: .lessons)) ?? nil) ?? []
+        lessons = raw.compactMap { $0.value }
+    }
 }
 
 private struct JourneyBundleLesson: Decodable {
     let title: String
     let cards: [JourneyBundleCard]
+
+    private enum CodingKeys: String, CodingKey { case title, cards }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decode(String.self, forKey: .title)   // title-less lesson dropped by the outer lenient array
+        let raw = ((try? c.decodeIfPresent([FailableDecodable<JourneyBundleCard>].self, forKey: .cards)) ?? nil) ?? []
+        cards = raw.compactMap { $0.value }
+    }
 }
 
 private struct JourneyBundleCard: Decodable {
@@ -113,6 +134,20 @@ private struct JourneyBundleCard: Decodable {
     let hasImage: Bool?
     let cta: String?
     let readAlongWords: [ReadAlongWord]?   // baked in by align_journey_audio.py
+
+    private enum CodingKeys: String, CodingKey {
+        case type, headline, text, audioClip, hasImage, cta, readAlongWords
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = (((try? c.decodeIfPresent(String.self, forKey: .type)) ?? nil) ?? "content")
+        headline = ((try? c.decodeIfPresent(String.self, forKey: .headline)) ?? nil)
+        text = ((try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil)
+        audioClip = ((try? c.decodeIfPresent(String.self, forKey: .audioClip)) ?? nil)
+        hasImage = ((try? c.decodeIfPresent(Bool.self, forKey: .hasImage)) ?? nil)
+        cta = ((try? c.decodeIfPresent(String.self, forKey: .cta)) ?? nil)
+        readAlongWords = ((try? c.decodeIfPresent([ReadAlongWord].self, forKey: .readAlongWords)) ?? nil)
+    }
 }
 
 // MARK: - Store

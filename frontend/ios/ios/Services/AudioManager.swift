@@ -460,7 +460,17 @@ final class AudioManager: ObservableObject {
             if let episode = currentEpisode {
                 play(episode)
             }
-        default:
+        case .error:
+            // RETRY after a load/stream failure (404 / expired URL / mid-stream network drop).
+            // handlePlaybackFailure tore the player down but left `currentEpisode` + `currentTime`
+            // intact, and the full-screen player stays visible (it's gated on `showFullScreenPlayer`,
+            // not `hasActiveEpisode`), so its play button must DO something rather than be a dead
+            // no-op. resume() rebuilds the player at the last position via the exact same path it uses
+            // to resume after natural completion; if the URL is still bad it simply returns to .error
+            // and the user can tap again. This deliberately does NOT touch the load-bearing
+            // `hasActiveEpisode` gating (the broader error/retry UI remains a separate follow-up).
+            if currentEpisode != nil { resume() }
+        case .loading:
             break
         }
     }

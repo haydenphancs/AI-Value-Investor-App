@@ -82,7 +82,12 @@ final class BookmarkStore: ObservableObject {
             )
             merge(resp.bookmarks)
         } catch {
-            // Offline or signed out: keep whatever is local.
+            // Offline or signed out: keep whatever is local — but a decode/contract or 5xx failure
+            // silently hides synced bookmarks, so surface it (stays quiet on routine offline).
+            let appError = AppError.from(error)
+            if !appError.isExpectedOffline {
+                print("[BookmarkStore] hydrate failed [\(appError.title)]: \(appError.message) — raw: \(error)")
+            }
         }
     }
 

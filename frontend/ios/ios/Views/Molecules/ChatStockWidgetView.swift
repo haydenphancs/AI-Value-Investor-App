@@ -104,7 +104,10 @@ struct ChatStockWidgetView: View {
     // MARK: - Chart (native Charts framework)
     private var chartSection: some View {
         Chart {
-            ForEach(Array(widget.historicalData.enumerated()), id: \.element.date) { index, point in
+            // Key on the always-unique enumeration offset (also the x-value), NOT the date string:
+            // null-coerced ("") or duplicate FMP dates would otherwise collide the ForEach id and
+            // drop/collapse chart marks ("undefined results").
+            ForEach(Array(widget.historicalData.enumerated()), id: \.offset) { index, point in
                 LineMark(
                     x: .value("Day", index),
                     y: .value("Price", point.close)

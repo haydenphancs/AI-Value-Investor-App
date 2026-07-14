@@ -120,7 +120,12 @@ final class BookProgressStore: ObservableObject {
             )
             merge(resp)
         } catch {
-            // Offline or signed out: keep whatever is local.
+            // Offline or signed out: keep whatever is local — but a decode/contract or 5xx failure
+            // silently hides synced progress, so surface it (stays quiet on routine offline).
+            let appError = AppError.from(error)
+            if !appError.isExpectedOffline {
+                print("[BookProgressStore] hydrate failed [\(appError.title)]: \(appError.message) — raw: \(error)")
+            }
         }
     }
 

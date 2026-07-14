@@ -164,3 +164,103 @@ def test_end_to_end_null_row_does_not_drop_widget():
     w = ChatService._build_stock_widget("HALT", {"price": None, "volume": None}, hist, 0, None)
     assert w["widget_type"] == "stock_chart"
     assert w["historical_data"][0]["volume"] == 0
+
+
+# ── _detect_asset_type (commodity USD codes must beat the crypto endswith heuristic) ──
+
+def test_detect_commodity_usd_symbols_beat_crypto_heuristic():
+    """The confirmed bug: `endswith('USD')` (crypto) ran BEFORE the commodity set, so every
+    USD-suffixed FMP commodity code (gold GCUSD, oil CLUSD, …) mis-classified as CRYPTO and got the
+    crypto analyst voice — the entire commodity-USD branch was dead code."""
+    for sym in ("GCUSD", "CLUSD", "SIUSD", "NGUSD", "PLUSD", "HGUSD", "ZCUSD", "KCUSD"):
+        assert ChatService._detect_asset_type(sym) == "COMMODITY"
+
+
+def test_detect_commodity_plain_aliases():
+    for sym in ("GOLD", "SILVER", "OIL", "NATGAS", "PLATINUM", "COPPER"):
+        assert ChatService._detect_asset_type(sym) == "COMMODITY"
+
+
+def test_detect_crypto_still_wins_for_non_commodity_usd():
+    # USD-suffixed symbols NOT in the commodity set stay CRYPTO (no regression).
+    for sym in ("BTCUSD", "ETHUSD", "SOLUSD", "ADAUSDT"):
+        assert ChatService._detect_asset_type(sym) == "CRYPTO"
+    for sym in ("BTC", "ETH", "DOGE"):
+        assert ChatService._detect_asset_type(sym) == "CRYPTO"
+
+
+def test_detect_index_stock_and_empty():
+    assert ChatService._detect_asset_type("^GSPC") == "INDEX"
+    assert ChatService._detect_asset_type("AAPL") == "STOCK"
+    assert ChatService._detect_asset_type("") == "NORMAL"
+    assert ChatService._detect_asset_type(None) == "NORMAL"
+
+
+def test_detect_is_case_insensitive():
+    assert ChatService._detect_asset_type("gcusd") == "COMMODITY"
+    assert ChatService._detect_asset_type("btcusd") == "CRYPTO"
+
+
+# ── _get_valuation_level (missing / non-positive P/E must not read as "Bargain") ──
+
+def test_valuation_level_zero_or_negative_is_unknown():
+    """The bug: the index sector-benchmark fallback yields pe=0 on a thin/failed recompute; without
+    a guard, 0 < 18 rendered as 'Bargain' — a no-data market looked attractively cheap."""
+    assert ChatService._get_valuation_level(0) == "Unknown"
+    assert ChatService._get_valuation_level(0.0) == "Unknown"
+    assert ChatService._get_valuation_level(-5) == "Unknown"
+    assert ChatService._get_valuation_level(None) == "Unknown"
+
+
+def test_valuation_level_bands():
+    assert ChatService._get_valuation_level(15) == "Bargain"
+    assert ChatService._get_valuation_level(17.9) == "Bargain"
+    assert ChatService._get_valuation_level(18) == "Fair Value"
+    assert ChatService._get_valuation_level(23.9) == "Fair Value"
+    assert ChatService._get_valuation_level(24) == "Expensive"
+    assert ChatService._get_valuation_level(29.9) == "Expensive"
+    assert ChatService._get_valuation_level(30) == "Overheated"
+    assert ChatService._get_valuation_level(45) == "Overheated"
+
+
+# ── _build_sources (RAG source_type → correct pill label, not always "SEC filing") ──
+
+def test_build_sources_labels_book_and_article_by_type():
+    """The latent bug: every RAG citation was labeled 'SEC filing'; once the corpus is ingested a
+    book/article chunk would be mis-attributed to a filing. source_type now drives the label."""
+    citations = [
+        {"index": 1, "source": "Chapter 20", "source_type": "book",
+         "source_label": "The Intelligent Investor by Benjamin Graham", "text": "..."},
+        {"index": 2, "source": "Section 3", "source_type": "article",
+         "source_label": "Understanding Moats", "text": "..."},
+        {"index": 3, "source": "Risk Factors", "source_type": "filing",
+         "source_label": "AAPL 10-K 2024", "text": "..."},
+    ]
+    labels = {(s["label"], s["detail"]) for s in ChatService._build_sources(None, None, citations)}
+    assert ("Book", "The Intelligent Investor by Benjamin Graham") in labels
+    assert ("Article", "Understanding Moats") in labels
+    assert ("SEC filing", "AAPL 10-K 2024") in labels
+
+
+def test_build_sources_absent_source_type_defaults_to_sec_filing():
+    # The current filing-only stock path: chunks carry no source_type / source_label → detail is the
+    # section title and the label stays 'SEC filing' (unchanged behavior).
+    citations = [{"index": 1, "source": "Management Discussion", "text": "..."}]
+    sources = ChatService._build_sources(None, None, citations)
+    assert {"label": "SEC filing", "detail": "Management Discussion"} in sources
+
+
+def test_build_sources_context_pill_and_dedup():
+    citations = [
+        {"index": 1, "source": "Risk Factors", "source_type": "filing", "source_label": "MD&A", "text": ""},
+        {"index": 2, "source": "Risk Factors", "source_type": "filing", "source_label": "MD&A", "text": ""},
+    ]
+    sources = ChatService._build_sources("STOCK", "AAPL", citations)
+    # Screen-context pill first, then ONE deduped filing pill (the duplicate MD&A collapses).
+    assert sources[0] == {"label": "Company financials", "detail": "AAPL"}
+    assert [s for s in sources if s["label"] == "SEC filing"] == [{"label": "SEC filing", "detail": "MD&A"}]
+
+
+def test_build_sources_skips_document_fallback():
+    citations = [{"index": 1, "source": "Document", "text": ""}]
+    assert ChatService._build_sources(None, None, citations) == []

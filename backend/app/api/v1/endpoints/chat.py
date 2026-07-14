@@ -244,8 +244,10 @@ async def send_chat_message(
         if assistant_row is None:
             raise RuntimeError("assistant row missing from chat_messages insert result")
 
-        # Update session metadata with proper timestamp
-        now_iso = now.isoformat()
+        # Update session metadata. message_count + last_message_at are maintained atomically by the
+        # trg_chat_message_count AFTER-INSERT trigger (one +1 per inserted row), so we do NOT set them
+        # here — an absolute `current_count + 2` from a request-start snapshot both double-counts the
+        # trigger and races/undercounts on concurrent same-session sends.
         preview = ai_result["content"][:100]
         current_count = session.data.get("message_count", 0)
 
@@ -255,9 +257,7 @@ async def send_chat_message(
         # (message_count == 0), so a later message or a user rename is never clobbered. Guard against
         # an empty/whitespace first message so we never blank a useful title.
         update_payload: dict = {
-            "message_count": current_count + 2,
             "preview_message": preview,
-            "last_message_at": now_iso,
         }
         existing_title = session.data.get("title")
         is_generic_title = (
@@ -540,13 +540,12 @@ async def stream_chat_message(
             if assistant_row is None:
                 raise RuntimeError("assistant row missing from chat_messages insert result")
 
-            # Session metadata + first-question auto-title (mirrors send_chat_message).
-            now_iso = now.isoformat()
+            # Session metadata + first-question auto-title (mirrors send_chat_message). message_count
+            # and last_message_at are maintained by the trg_chat_message_count AFTER-INSERT trigger, so
+            # we don't set them here (avoids double-counting the trigger + the concurrent-send race).
             current_count = sdata.get("message_count", 0)
             update_payload: dict = {
-                "message_count": current_count + 2,
                 "preview_message": content[:100],
-                "last_message_at": now_iso,
             }
             existing_title = sdata.get("title")
             is_generic_title = (

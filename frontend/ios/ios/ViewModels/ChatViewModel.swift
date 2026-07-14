@@ -706,7 +706,14 @@ class ChatViewModel: ObservableObject {
         reasonTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if self.reasonTick(id: id) { return }
+                if self.reasonTick(id: id) {
+                    // Self-terminated (drained + finished). Clear the handle so a LATER reasoning
+                    // frame can restart the reveal — in a multi-round agentic turn, more thoughts
+                    // can arrive AFTER the first answer token set reasonFinished; without this the
+                    // late delta would sit unrendered in reasonPending until the `done` frame.
+                    self.reasonTask = nil
+                    return
+                }
                 try? await Task.sleep(nanoseconds: Self.revealStepNanos)
             }
         }

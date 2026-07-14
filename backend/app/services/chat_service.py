@@ -165,8 +165,12 @@ class ChatService:
         # Step 1: Conversation history
         history = self._get_recent_messages(session_id, limit=20)
 
-        # Step 2: RAG context (query-rewrite → RETRIEVAL_QUERY embed → wider search → LLM-rerank).
-        chunks, citations = await self._retrieve_context(user_message, stock_id, history)
+        # Step 2: RAG context + conversation memory — independent, so run concurrently to shave a
+        # serial LLM round-trip off time-to-first-token.
+        (chunks, citations), conversation_block = await asyncio.gather(
+            self._retrieve_context(user_message, stock_id, history),
+            self._condense_history(history),
+        )
 
         # Step 3: Build prompt (includes RAG context + history)
         # Detect asset type from stock_id
@@ -197,7 +201,7 @@ class ChatService:
             client_context=context,
             asset_type=asset_type,
         )
-        prompt = self._build_prompt(user_message, await self._condense_history(history), chunks)
+        prompt = self._build_prompt(user_message, conversation_block, chunks)
 
         # Step 4: Generate with function-calling tools
         widget: Optional[Dict[str, Any]] = None
@@ -313,8 +317,11 @@ class ChatService:
 
         history = self._get_recent_messages(session_id, limit=20)
 
-        # RAG context (same pipeline as generate_response, best-effort).
-        chunks, citations = await self._retrieve_context(user_message, stock_id, history)
+        # RAG context + conversation memory — independent, run concurrently (same as generate_response).
+        (chunks, citations), conversation_block = await asyncio.gather(
+            self._retrieve_context(user_message, stock_id, history),
+            self._condense_history(history),
+        )
 
         asset_type = self._detect_asset_type(stock_id) if stock_id else "NORMAL"
 
@@ -333,7 +340,7 @@ class ChatService:
             company_profile_summary=company_profile_summary,
             client_context=context, asset_type=asset_type,
         )
-        prompt = self._build_prompt(user_message, await self._condense_history(history), chunks)
+        prompt = self._build_prompt(user_message, conversation_block, chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
         sources = self._build_sources(context_type, reference_id, citations)
 
@@ -405,10 +412,23 @@ class ChatService:
             "them separately and do NOT mention 'perspectives'/'specialists'/'views'. Lead with the "
             "direct answer, then the 2-3 points that matter most across the lenses. Follow the STYLE rules."
         )
-        async for kind, text in self.gemini.stream_text(
-            synth_prompt, system_instruction=prep["system_instruction"],
-        ):
-            yield kind, text
+        # If the merge itself fails (e.g. the quota circuit opened between the specialists finishing
+        # and this call), degrade to the already-computed specialist answer instead of throwing away
+        # real work — the endpoint would otherwise fall back to another Gemini call and error out.
+        merge_yielded = False
+        try:
+            async for kind, text in self.gemini.stream_text(
+                synth_prompt, system_instruction=prep["system_instruction"],
+            ):
+                if kind == "answer" and text:
+                    merge_yielded = True
+                yield kind, text
+        except Exception as e:
+            logger.warning("Synthesis merge failed (%s: %s) — using the top specialist answer",
+                           type(e).__name__, e)
+            if not merge_yielded:
+                # No Gemini needed — the answer is already in hand.
+                yield "answer", results[0]["answer"]
 
     # Screen context_type → the human "source" label shown in the thinking card.
     # Mirrors the ChatContextResolver branches; identity-safe (server-authored strings).

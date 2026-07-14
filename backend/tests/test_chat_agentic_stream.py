@@ -212,3 +212,32 @@ def test_widget_key_dedups_by_type_and_ticker():
     b = chat_tools.widget_key({"widget_type": "stock_chart", "ticker": "AAPL"})
     c = chat_tools.widget_key({"widget_type": "stock_chart", "ticker": "MSFT"})
     assert a == b and a != c
+
+
+# ── stream_synthesis degradation (adversarial-review fix) ────────────────────
+
+@pytest.mark.asyncio
+async def test_stream_synthesis_degrades_to_specialist_answer_when_merge_fails():
+    """If the final MERGE call fails (e.g. the quota circuit opens after the specialists finished),
+    stream_synthesis must NOT throw away the already-computed specialist answers — it degrades to the
+    top one instead of propagating an error (which would leave the user with nothing)."""
+    from app.services.chat_service import ChatService
+
+    class _G:
+        async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
+                                 system_instruction=None, max_rounds=4, model_name=None):
+            yield ("answer", "valuation view: looks cheap")
+
+        async def stream_text(self, prompt, system_instruction=None, model_name=None):
+            raise RuntimeError("quota circuit open (resource_exhausted)")
+            yield  # pragma: no cover — makes this an async generator
+
+    svc = object.__new__(ChatService)
+    svc.gemini = _G()
+    prep = {"system_instruction": "sys", "prompt": "p"}
+    route = {"specialists": ["valuation", "fundamentals"],
+             "labels": ["Valuation", "Fundamentals"], "mode": "synthesize"}
+
+    events = [ev async for ev in svc.stream_synthesis(prep, "is it a buy?", route, tools=[], tool_handlers={})]
+    answers = [p for k, p in events if k == "answer"]
+    assert any("looks cheap" in a for a in answers)   # a real answer survived the merge failure

@@ -451,7 +451,10 @@ class CommodityService:
         for sym, rq in related_quotes:
             rel_name = _resolve_name(sym.replace("USD", ""))
             rel_price = rq.get("price") or 0
-            rel_change = rq.get("changePercentage") or 0
+            # FMP returns the daily move under `changesPercentage` (plural) for most
+            # symbols; reading only the singular key left every related commodity at
+            # +0.00%. Mirror the main quote (both keys).
+            rel_change = rq.get("changePercentage") or rq.get("changesPercentage") or 0
             related_commodities.append(RelatedCommodityResponse(
                 symbol=sym,
                 name=rel_name,
@@ -539,6 +542,8 @@ class CommodityService:
         return result
 
     def _build_performance(self, historical: List[Dict]) -> List[PerformancePeriodResponse]:
+        from app.services.chart_helper import _finite_or_none
+
         periods = [
             ("1M", 21), ("3M", 63), ("6M", 126), ("YTD", None),
             ("1Y", 252), ("3Y", 756), ("5Y", 1260), ("10Y", 2520),
@@ -547,8 +552,12 @@ class CommodityService:
         if not historical:
             return result
 
-        current_close = historical[-1].get("close") or 0
-        if not current_close:
+        # A NaN/Inf close is truthy and survives `not x` / `x <= 0`, so it would flow
+        # into change_percent as NaN and serialize to an invalid-JSON `NaN` token that
+        # crashes the iOS decode of the whole screen. Route every close through the
+        # finite guard (the chart path already does this).
+        current_close = _finite_or_none(historical[-1].get("close"))
+        if not current_close or current_close <= 0:
             return result
 
         for label, days in periods:
@@ -558,13 +567,18 @@ class CommodityService:
                 past_close = None
                 for p in historical:
                     if (p.get("date") or "") >= year_start:
-                        past_close = p.get("close")
+                        past_close = _finite_or_none(p.get("close"))
                         break
                 if not past_close or past_close <= 0:
                     continue
             else:
-                idx = max(0, len(historical) - days)
-                past_close = historical[idx].get("close") or 0
+                # Not enough history to cover the window: OMIT the period rather than
+                # clamp idx to 0 and mislabel a shorter return under the longer horizon
+                # (e.g. a ~3y-old commodity's "10Y" figure). Matches the index helper.
+                if len(historical) < days:
+                    continue
+                idx = len(historical) - days
+                past_close = _finite_or_none(historical[idx].get("close"))
                 if not past_close or past_close <= 0:
                     continue
 

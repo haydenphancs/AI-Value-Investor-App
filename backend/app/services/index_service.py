@@ -159,8 +159,12 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     # defensive guard, but it keeps the helper consistent with stock/etf/crypto.)
     if len(prices) <= days_back:
         return None
-    start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
-    end = prices[-1].get("close") or prices[-1].get("adjClose")
+    # A NaN/Inf close is truthy and slips past `not start`/`start == 0`, yielding a
+    # NaN return that serializes to invalid-JSON `NaN` and crashes the iOS decode.
+    # Route through the finite guard (as the chart path does) so it degrades to None.
+    from app.services.chart_helper import _finite_or_none
+    start = _finite_or_none(prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose"))
+    end = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
 
     if not start or not end or start == 0:
         return None
@@ -188,13 +192,16 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
     if not prices or len(prices) < 2:
         return None
 
+    from app.services.chart_helper import _finite_or_none
     current_year = datetime.now(tz=timezone.utc).year
     # Find the first trading day of the current year
     for p in prices:
         date_str = p.get("date") or ""
         if date_str.startswith(str(current_year)):
-            start_price = p.get("close") or p.get("adjClose")
-            end_price = prices[-1].get("close") or prices[-1].get("adjClose")
+            # Finite-guard both ends so a NaN/Inf close degrades to an omitted period
+            # rather than a NaN change_percent that breaks the iOS JSON decode.
+            start_price = _finite_or_none(p.get("close") or p.get("adjClose"))
+            end_price = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
             if start_price and end_price and start_price > 0:
                 return ((end_price - start_price) / start_price) * 100
             break

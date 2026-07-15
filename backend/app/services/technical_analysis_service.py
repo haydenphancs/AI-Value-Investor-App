@@ -535,8 +535,13 @@ class TechnicalAnalysisService:
     @staticmethod
     def _compute_volume_analysis(df: pd.DataFrame) -> VolumeAnalysisData:
         """Volume metrics: current, change, 30d avg, trend, OBV, MFI."""
-        current_vol = float(df["volume"].iloc[-1] or 0)
-        prev_vol = float(df["volume"].iloc[-2] or 0) if len(df) >= 2 else 0.0
+        # df is dropna'd on `close` only, so the latest bar can carry a NaN volume
+        # (pd.to_numeric coerced a missing/non-numeric value). `NaN or 0` is NaN
+        # (truthy), which would land in current_volume and serialize to an invalid
+        # -JSON `NaN` that crashes the iOS decode. _safe_float degrades NaN→None→0.0,
+        # matching every other indicator in this file.
+        current_vol = _safe_float(df["volume"].iloc[-1]) or 0.0
+        prev_vol = (_safe_float(df["volume"].iloc[-2]) or 0.0) if len(df) >= 2 else 0.0
 
         avg_30d = (
             float(df["volume"].tail(30).mean())

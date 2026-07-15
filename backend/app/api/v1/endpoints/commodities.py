@@ -50,7 +50,7 @@ def _normalize_commodity_symbol(symbol: str) -> str:
 @router.get("/{symbol}/news")
 async def get_commodity_news(
     symbol: str,
-    limit: int = Query(50, le=50),
+    limit: int = Query(50, ge=1, le=50),
 ):
     """
     Get news for a commodity using ETF/stock proxy tickers.

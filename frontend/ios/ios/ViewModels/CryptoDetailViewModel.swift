@@ -143,6 +143,18 @@ class CryptoDetailViewModel: ObservableObject {
                 _ = try? await self.stockRepository.getCryptoSentiment(symbol: self.cryptoSymbol)
             }
 
+            // One-time setup that must run even if a concurrent range change supersedes
+            // the detail response below. These don't depend on the detail snapshot, and
+            // gating them on the generation guard meant a fast range tap during the
+            // initial load permanently dropped live price (crypto is 24/7!), the
+            // chart-refresh timer, News, Analysis, and the watchlist star until a manual
+            // refresh. Only the cryptoData paint stays gen-guarded (mirrors Commodity VM).
+            self.connectLivePrice()
+            self.startChartRefreshTimer()
+            async let newsTask: () = self.fetchCryptoNews()
+            async let analysisTask: () = self.fetchCryptoAnalysis()
+            async let watchlistTask: () = self.checkWatchlistStatus()
+
             do {
                 print("🪙 [CryptoDetail] Fetching data for \(self.cryptoSymbol) range=\(self.selectedChartRange.rawValue)")
 
@@ -155,36 +167,32 @@ class CryptoDetailViewModel: ObservableObject {
                     responseType: CryptoDetailResponse.self
                 )
 
-                // Drop a stale response (a newer load/refresh/range-change superseded it).
-                guard gen == self.detailRequestGen else { return }
+                // Only paint the detail snapshot if it's still the latest — a newer
+                // load/refresh/range-change may have superseded it. The setup above
+                // already ran regardless of supersession.
+                if gen == self.detailRequestGen {
+                    print("✅ [CryptoDetail] Loaded \(response.name) — $\(response.currentPrice)")
+                    print("   📊 Chart points: \(response.chartData.count)")
+                    print("   📰 News articles: \(response.newsArticles.count)")
+                    print("   🔗 Related cryptos: \(response.relatedCryptos.count)")
+                    print("   📸 Snapshots: \(response.snapshots.count)")
 
-                print("✅ [CryptoDetail] Loaded \(response.name) — $\(response.currentPrice)")
-                print("   📊 Chart points: \(response.chartData.count)")
-                print("   📰 News articles: \(response.newsArticles.count)")
-                print("   🔗 Related cryptos: \(response.relatedCryptos.count)")
-                print("   📸 Snapshots: \(response.snapshots.count)")
-
-                // Map API response → UI models
-                self.cryptoData = response.toModel()
-                self.chartDataVersion += 1
-
-                self.isLoading = false
-                self.errorMessage = nil
-
-                // Crypto is 24/7 — always connect live price + start chart refresh
-                self.connectLivePrice()
-                self.startChartRefreshTimer()
-
-                // Fetch news, analysis, and watchlist status in parallel
-                async let newsTask: () = self.fetchCryptoNews()
-                async let analysisTask: () = self.fetchCryptoAnalysis()
-                async let watchlistTask: () = self.checkWatchlistStatus()
-                _ = await (newsTask, analysisTask, watchlistTask)
-
+                    // Map API response → UI models
+                    self.cryptoData = response.toModel()
+                    self.chartDataVersion += 1
+                    self.isLoading = false
+                    self.errorMessage = nil
+                }
             } catch {
-                print("❌ [CryptoDetail] Failed to load \(self.cryptoSymbol): \(error)")
-                self.handleLoadError(error)
+                // Only surface the error if this load is still the latest.
+                if gen == self.detailRequestGen {
+                    print("❌ [CryptoDetail] Failed to load \(self.cryptoSymbol): \(error)")
+                    self.handleLoadError(error)
+                }
             }
+
+            // Await the independent setup tasks so they aren't cancelled early.
+            _ = await (newsTask, analysisTask, watchlistTask)
         }
     }
 

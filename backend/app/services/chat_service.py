@@ -877,12 +877,15 @@ class ChatService:
             else:
                 chunks = candidates[:top_k]
             for i, chunk in enumerate(chunks):
+                # `(x or default)` — a nullable section_title / present-but-null chunk_text
+                # would make `.get(k, default)[:200]` slice a None (TypeError). Belt-and-suspenders
+                # for the RAG-ingest path (chunk_text is NOT NULL today; section_title is nullable).
                 citations.append({
                     "index": i + 1,
-                    "source": chunk.get("section_title", "Document"),
+                    "source": chunk.get("section_title") or "Document",
                     "source_type": chunk.get("source_type"),
                     "source_label": chunk.get("source_label"),
-                    "text": chunk.get("chunk_text", "")[:200],
+                    "text": (chunk.get("chunk_text") or "")[:200],
                 })
         except Exception as e:
             logger.warning("RAG retrieval failed, proceeding without context: %s", e)
@@ -1241,14 +1244,18 @@ class ChatService:
             )
         return f"CONVERSATION HISTORY:\n{self._fmt_turns(recent)}"
 
+    @staticmethod
     def _build_prompt(
-        self, user_message: str, conversation_block: str, chunks: List[Dict],
+        user_message: str, conversation_block: str, chunks: List[Dict],
     ) -> str:
         parts = []
 
         if chunks:
+            # `(x or "")` not `.get(k, "")`: a chunk row can carry a present-but-NULL chunk_text
+            # once the RAG corpus is ingested, and `str.join` on a None raises — and this call is
+            # OUTSIDE any try/except, so it would abort the whole prompt build (→ error frame).
             context_text = "\n\n---\n\n".join(
-                c.get("chunk_text", "") for c in chunks[:5]
+                (c.get("chunk_text") or "") for c in chunks[:5]
             )
             parts.append(f"RELEVANT CONTEXT:\n{context_text}\n\n---\n")
 

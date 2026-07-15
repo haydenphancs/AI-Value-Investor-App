@@ -105,7 +105,7 @@ async def get_crypto_detail(
 @router.get("/{symbol}/news")
 async def get_crypto_news(
     symbol: str,
-    limit: int = Query(50, le=50),
+    limit: int = Query(50, ge=1, le=50),
 ):
     """
     Get news for a crypto symbol (raw + any previously enriched).

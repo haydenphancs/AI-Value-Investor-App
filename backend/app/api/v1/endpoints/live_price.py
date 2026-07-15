@@ -105,16 +105,22 @@ async def live_price_ws(
 
     # Check market hours for stocks — crypto trades 24/7
     if not is_crypto and not is_market_active():
-        await websocket.send_json({
-            "type": "market_closed",
-            "message": "US markets are currently closed"
-        })
-        await websocket.close(code=1000, reason="Market closed")
-        # This early return is BEFORE the try/finally that decrements the counter,
-        # so we must release the slot here — otherwise every market-closed connect
-        # (e.g. all weekend) permanently leaks a slot and locks the user/IP out
-        # after _MAX_CONNECTIONS_PER_KEY attempts.
-        _active_connections[conn_key] = max(0, _active_connections[conn_key] - 1)
+        # This early return is BEFORE the try/finally that decrements the counter, so
+        # the slot must be released here on EVERY exit path. send_json/close can raise
+        # (ConnectionClosed/RuntimeError) if the client dropped in the accept→send
+        # race; a bare decrement AFTER the send would then be skipped, permanently
+        # leaking the slot and locking the user/IP out after _MAX_CONNECTIONS_PER_KEY
+        # market-closed connects (e.g. all weekend). The finally guarantees release.
+        try:
+            await websocket.send_json({
+                "type": "market_closed",
+                "message": "US markets are currently closed"
+            })
+            await websocket.close(code=1000, reason="Market closed")
+        except Exception as e:
+            logger.warning(f"Market-closed notify failed for {ticker_upper}: {type(e).__name__}: {e}")
+        finally:
+            _active_connections[conn_key] = max(0, _active_connections[conn_key] - 1)
         return
 
     # Subscribe to the ticker room

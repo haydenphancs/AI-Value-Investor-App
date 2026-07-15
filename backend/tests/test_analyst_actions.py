@@ -16,7 +16,7 @@ from app.services._analyst_common import (
     normalize_fmp_action,
     _infer_rating_direction,
 )
-from app.services.analyst_service import _compute_actions_summary
+from app.services.analyst_service import _compute_actions_summary, _compute_momentum
 
 
 def test_explicit_actions_pass_through():
@@ -66,3 +66,37 @@ def test_compute_actions_summary_counts_and_12mo_window():
     assert summ.upgrades == 1
     assert summ.downgrades == 2  # explicit + the maintain-labeled Sector cut
     assert summ.maintains == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Analyst Momentum must classify actions with the SAME normalizer as the Actions
+# Summary shown on the same tab — reading the raw FMP action dropped
+# maintain-labeled upgrades and initiations, contradicting the summary.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_momentum_counts_maintain_labeled_upgrade_and_initiation_as_positive():
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    grades = [
+        # FMP labels a real Hold→Buy "maintain"; must count as positive.
+        {"date": today, "action": "maintain", "previousGrade": "Hold", "newGrade": "Buy"},
+        # New-coverage initiation ("initiated" not "init"); must count as positive.
+        {"date": today, "action": "initiated", "previousGrade": None, "newGrade": "Buy"},
+        {"date": today, "action": "downgrade", "previousGrade": "Buy", "newGrade": "Hold"},
+    ]
+    _months, total_pos, total_neg = _compute_momentum(grades)
+    assert total_pos == 2   # raw-action code counted 0 here — the bug
+    assert total_neg == 1
+
+
+def test_momentum_net_agrees_with_actions_summary():
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    grades = [
+        {"date": today, "action": "maintain", "previousGrade": "Hold", "newGrade": "Buy"},   # upgrade
+        {"date": today, "action": "maintain", "previousGrade": "Buy", "newGrade": "Buy"},     # true maintain
+        {"date": today, "action": "downgrade", "previousGrade": "Buy", "newGrade": "Sell"},   # downgrade
+    ]
+    _m, pos, neg = _compute_momentum(grades)
+    summ = _compute_actions_summary(grades)
+    # No initiations here, so momentum-positive == summary upgrades exactly.
+    assert pos == summ.upgrades == 1
+    assert neg == summ.downgrades == 1

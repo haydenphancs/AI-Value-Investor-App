@@ -8,6 +8,7 @@ updates to all connected iOS clients watching that ticker.
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional, Any
 
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 FMP_WS_URL = "wss://websockets.financialmodelingprep.com"
 
+# Min seconds between previous-close re-fetch attempts, so a genuinely-empty quote
+# (or repeated failures) can't hammer the FMP REST API on every trade tick.
+_PREV_CLOSE_RETRY_SECONDS = 60.0
+
 
 @dataclass
 class TickerRoom:
@@ -31,6 +36,12 @@ class TickerRoom:
     reader_task: Optional[asyncio.Task] = None
     last_message: Optional[dict] = None
     previous_close: float = 0.0
+    # UTC epoch-day the previous_close was fetched for (proxy for the trading day);
+    # lets the reader detect a crossed day-boundary and refresh the reference close.
+    previous_close_epoch_day: Optional[int] = None
+    # Monotonic time of the last previous_close fetch ATTEMPT (success or failure),
+    # used to throttle retries.
+    last_prev_close_attempt: float = 0.0
 
 
 class LivePriceManager:
@@ -91,20 +102,70 @@ class LivePriceManager:
                 await self._destroy_room(room)
                 del self._rooms[ticker]
 
+    async def _fetch_previous_close(self, room: TickerRoom) -> None:
+        """Fetch (or refresh) the room's previous close via the FMP REST quote.
+
+        Records the attempt time unconditionally (for throttling) and only
+        overwrites ``previous_close`` on a usable value — a transient failure or a
+        quote missing ``previousClose`` leaves the prior value untouched instead of
+        pinning it to 0.0, which would freeze change/change_percent at +0.00% for
+        the room's lifetime.
+        """
+        room.last_prev_close_attempt = time.monotonic()
+        try:
+            fmp = get_fmp_client()
+            quote = await fmp.get_stock_price_quote(room.ticker)
+            pc = quote.get("previousClose", 0.0) or 0.0
+            if pc and pc > 0:
+                room.previous_close = float(pc)
+                room.previous_close_epoch_day = int(time.time()) // 86400
+                logger.info(f"Room {room.ticker}: previous close = {room.previous_close}")
+            else:
+                logger.warning(
+                    f"Room {room.ticker}: quote had no usable previousClose "
+                    f"(keeping {room.previous_close})"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Room {room.ticker}: failed to fetch previous close: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    async def _ensure_previous_close(self, room: TickerRoom, tick_epoch: Any) -> None:
+        """Lazily (re)fetch previous_close from the reader loop when it's missing or
+        stale, throttled so an empty/failing quote can't hammer FMP per tick.
+
+        Missing: never successfully fetched (still 0.0). Stale: this trade tick is on
+        a later UTC day than the day the close was fetched — ticks only arrive during
+        market hours, so the first tick of a new trading day trips this and refreshes
+        the reference close (fixing change% measured against the wrong prior close)."""
+        needs = not room.previous_close or room.previous_close <= 0
+        if not needs and room.previous_close_epoch_day is not None:
+            try:
+                ts = float(tick_epoch) if tick_epoch else 0.0
+                # FMP timestamps are usually epoch SECONDS but some feeds send
+                # milliseconds; normalize so the epoch-day math is correct either way
+                # (else a ms timestamp always reads as a new day → wasteful refetch).
+                if ts > 1e11:
+                    ts /= 1000.0
+                tick_day = int(ts) // 86400 if ts else None
+            except (TypeError, ValueError):
+                tick_day = None
+            if tick_day is not None and tick_day > room.previous_close_epoch_day:
+                needs = True
+        if not needs:
+            return
+        if time.monotonic() - room.last_prev_close_attempt < _PREV_CLOSE_RETRY_SECONDS:
+            return
+        await self._fetch_previous_close(room)
+
     async def _create_room(self, ticker: str) -> TickerRoom:
         """Open an upstream FMP WebSocket and start the reader task."""
         room = TickerRoom(ticker=ticker)
 
-        # Fetch previous close for computing change/changePercent
-        try:
-            fmp = get_fmp_client()
-            quote = await fmp.get_stock_price_quote(ticker)
-            room.previous_close = quote.get("previousClose", 0.0) or 0.0
-            logger.info(
-                f"Room {ticker}: previous close = {room.previous_close}"
-            )
-        except Exception as e:
-            logger.warning(f"Room {ticker}: failed to fetch previous close: {e}")
+        # Fetch previous close for computing change/changePercent (best-effort; the
+        # reader loop lazily retries if this fails so change% never stays pinned at 0).
+        await self._fetch_previous_close(room)
 
         # Connect to FMP WebSocket
         try:
@@ -245,6 +306,11 @@ class LivePriceManager:
                 last_price = data.get("lp")
                 if last_price is None:
                     continue
+
+                # Refresh previous_close if it was never fetched (transient failure at
+                # room creation) or is stale across a trading-day boundary — otherwise
+                # change/change_percent would stay pinned at +0.00% forever.
+                await self._ensure_previous_close(room, data.get("t"))
 
                 # Compute change from previous close
                 change = 0.0

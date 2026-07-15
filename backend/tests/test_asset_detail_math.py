@@ -48,8 +48,10 @@ from app.services.crypto_service import (
 )
 from app.services.index_service import (
     _compute_return as index_compute_return,
+    _compute_ytd_return as index_compute_ytd,
     IndexService,
 )
+from app.services.commodity_service import CommodityService
 
 
 def _rows(closes):
@@ -338,3 +340,143 @@ def test_compute_all_time_return_direct():
     prices = _rows([100.0, 150.0])
     assert _compute_all_time_return(prices) == pytest.approx(50.0)
     assert _compute_all_time_return([]) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ETF gold/commodity: 100%-"Cash & Others" sectorsList must NOT render 100% cash
+# (FMP lumps a non-decomposable physical-gold fund's holdings into one cash row)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_build_asset_allocation_gold_all_cash_sector_is_not_100pct_cash():
+    svc = object.__new__(ETFService)
+    # FMP's shape for a fund it can't break down: one 100% "Cash & Others" row.
+    alloc = svc._build_asset_allocation(
+        sectors_list=[{"industry": "Cash & Others", "exposure": 100}],
+        asset_class="Gold",
+        total_assets=1e9,
+    )
+    assert alloc.commodities > 0        # routed to the commodities bucket
+    assert alloc.cash < 100             # NOT "100% cash"
+    assert alloc.equities == 0.0        # and not mislabeled as equities
+
+
+def test_build_asset_allocation_all_cash_sector_agrees_across_asset_classes():
+    svc = object.__new__(ETFService)
+    for ac, bucket in (("Commodity", "commodities"), ("Bond", "bonds")):
+        alloc = svc._build_asset_allocation(
+            sectors_list=[{"industry": "Cash & Others", "exposure": 100}],
+            asset_class=ac, total_assets=1e9,
+        )
+        assert getattr(alloc, bucket) > 0
+        assert alloc.cash < 100
+
+
+def test_build_asset_allocation_real_cash_pct_still_respected():
+    # A genuine partial cash allocation (not the all-cash sentinel) is preserved.
+    svc = object.__new__(ETFService)
+    alloc = svc._build_asset_allocation(
+        sectors_list=[{"industry": "Cash & Others", "exposure": 3}],
+        asset_class="Equity", total_assets=1e9,
+    )
+    assert alloc.cash == 3
+    assert alloc.equities == pytest.approx(97.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commodity performance: NaN-safe + short-history omission (not clamped mislabel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_commodity_performance_empty_when_latest_close_nonfinite():
+    svc = object.__new__(CommodityService)
+    hist = _rows([100.0 + i for i in range(300)])
+    hist[-1]["close"] = float("nan")  # FMP NaN token parsed to float('nan')
+    assert svc._build_performance(hist) == []  # no NaN change_percent leaks out
+
+
+def test_commodity_performance_skips_period_with_nonfinite_past_close():
+    svc = object.__new__(CommodityService)
+    hist = _rows([100.0 + i for i in range(300)])
+    hist[-21]["close"] = float("inf")  # the 1M (21-back) reference is non-finite
+    periods = svc._build_performance(hist)
+    for p in periods:
+        assert math.isfinite(p.change_percent)  # nothing serializes to invalid JSON
+    assert "1M" not in [p.label for p in periods]  # that one period omitted
+
+
+def test_commodity_performance_omits_long_horizon_on_short_history():
+    svc = object.__new__(CommodityService)
+    hist = _rows([100.0 + i for i in range(800)])  # ~3.2y of daily data
+    labels = [p.label for p in svc._build_performance(hist)]
+    # 10Y/5Y need 2520/1260 rows — must be OMITTED, not a clamped mislabel of the
+    # ~3y (earliest-available) return under a longer horizon (the original bug).
+    assert "10Y" not in labels and "5Y" not in labels
+    # 3Y (756) and 1Y (252) DO have enough history here, so they must still appear.
+    assert "3Y" in labels and "1Y" in labels
+
+
+def test_commodity_performance_omits_3y_when_under_three_years():
+    svc = object.__new__(CommodityService)
+    hist = _rows([100.0 + i for i in range(400)])  # ~1.6y: enough for 1Y, not 3Y
+    labels = [p.label for p in svc._build_performance(hist)]
+    assert "1Y" in labels
+    assert "3Y" not in labels and "5Y" not in labels and "10Y" not in labels
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Index return helpers: a NaN/Inf close must degrade to None, never a NaN return
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_index_compute_return_nonfinite_end_returns_none():
+    rows = _rows([100.0] * 300)
+    rows[-1]["close"] = float("nan")
+    assert index_compute_return(rows, 30) is None
+
+
+def test_index_compute_return_nonfinite_start_returns_none():
+    rows = _rows([100.0] * 300)
+    rows[-31]["close"] = float("inf")  # the 30-back start row
+    assert index_compute_return(rows, 30) is None
+
+
+def test_index_compute_return_finite_history_still_works():
+    rows = _rows([100.0] * 269 + [110.0] * 31)  # 30-back close is 110
+    # end=110, start=110 → 0.0 (sanity: guard doesn't break the happy path)
+    assert index_compute_return(rows, 30) == pytest.approx(0.0)
+
+
+def test_index_compute_ytd_nonfinite_returns_none():
+    # First row of the current year carries a NaN close → YTD omitted, not NaN.
+    from datetime import datetime, timezone
+    year = datetime.now(tz=timezone.utc).year
+    rows = [
+        {"date": f"{year}-01-02", "close": float("nan")},
+        {"date": f"{year}-06-01", "close": 120.0},
+    ]
+    assert index_compute_ytd(rows) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALL asset services: a NaN/Inf close must degrade to None, never a NaN return —
+# change_percent is a NON-optional Double on iOS, and a NaN token anywhere breaks
+# the decode of the WHOLE detail screen (stock/etf/crypto/index share the DTO).
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "fn", [stock_compute_return, etf_compute_return, crypto_compute_return, index_compute_return]
+)
+def test_compute_return_nonfinite_close_returns_none_all_services(fn):
+    rows = _rows([100.0] * 300)
+    rows[-1]["close"] = float("nan")     # latest close NaN → end non-finite
+    assert fn(rows, 30) is None
+    rows2 = _rows([100.0] * 300)
+    rows2[-31]["close"] = float("inf")   # 30-back start non-finite
+    assert fn(rows2, 30) is None
+
+
+def test_crypto_all_time_return_nonfinite_returns_none():
+    rows = _rows([100.0, 150.0, 200.0])
+    rows[-1]["close"] = float("nan")
+    assert _compute_all_time_return(rows) is None
+    rows2 = _rows([100.0, 150.0, 200.0])
+    rows2[0]["close"] = float("inf")
+    assert _compute_all_time_return(rows2) is None

@@ -194,9 +194,15 @@ struct RevenueBreakdownChartView: View {
         let revenueBarHeight = CGFloat(data.totalRevenue / chartRange) * height
         let zeroOffset = zeroLinePosition * height // Distance from bottom to zero line
 
-        // Calculate segment heights proportionally within the revenue bar
+        // Calculate segment heights proportionally within the revenue bar.
+        // Guard the divisor: the backend emits a single value=0 "Total Revenue" row
+        // when a ticker has no segmentation, so totalRevenue can be 0 — source.value /
+        // 0 is NaN/Inf, which yields a non-finite .frame(height:) ("Invalid frame
+        // dimension"). Degrade to a finite, non-negative height (matches the other
+        // guarded divisors in this view: chartTopValue, chartRange, percentageLabels).
         let segments: [(color: Color, height: CGFloat)] = data.revenueSources.map { source in
-            (source.color, CGFloat(source.value / data.totalRevenue) * revenueBarHeight)
+            let fraction = data.totalRevenue > 0 ? source.value / data.totalRevenue : 0
+            return (source.color, max(0, CGFloat(fraction) * revenueBarHeight))
         }
 
         return VStack(spacing: 0) {

@@ -342,23 +342,39 @@ struct MarketOverviewWidgetData: Codable, Identifiable, Sendable {
 enum ChatWidgetData: Codable, Sendable {
     case stockChart(StockChartWidgetData)
     case marketOverview(MarketOverviewWidgetData)
+    /// An unrenderable widget — a future/unknown `widget_type`, or a known type whose payload
+    /// failed to decode. Kept as a case (instead of throwing) so ONE bad widget can never fail
+    /// its whole message, and one bad message can never fail the entire `[ChatMessageDTO]`
+    /// history decode (Swift array decoding is all-or-nothing). It renders as nothing.
+    case unknown
 
     private enum TypeKey: String, CodingKey {
         case widgetType = "widget_type"
     }
 
+    /// Total (never-throwing) decode. An unknown `widget_type`, or a known type whose concrete
+    /// payload doesn't decode, degrades to `.unknown` rather than propagating — so a forward-compat
+    /// widget type shipped by the backend can't blank a user's conversation on an older app build.
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: TypeKey.self)
-
-        // Try to read widget_type — if missing, fall back to stock_chart
-        let type = try container.decodeIfPresent(String.self, forKey: .widgetType) ?? "stock_chart"
+        // `widget_type` read leniently (absent/empty → the legacy stock_chart path). Coalesce to
+        // "" so the switch matches plain string literals unambiguously. `decode` (not
+        // decodeIfPresent) yields a single-level `String?` under `try?` — absent/null/wrong-type
+        // all fall through to "".
+        var type = ""
+        if let container = try? decoder.container(keyedBy: TypeKey.self),
+           let decoded = try? container.decode(String.self, forKey: .widgetType) {
+            type = decoded
+        }
 
         switch type {
         case "market_overview":
-            self = .marketOverview(try MarketOverviewWidgetData(from: decoder))
+            self = (try? MarketOverviewWidgetData(from: decoder)).map(Self.marketOverview) ?? .unknown
+        case "stock_chart", "":
+            // Back-compat: legacy rows with no `widget_type` are stock charts.
+            self = (try? StockChartWidgetData(from: decoder)).map(Self.stockChart) ?? .unknown
         default:
-            // Default to stock chart for backward compatibility
-            self = .stockChart(try StockChartWidgetData(from: decoder))
+            // A renderable type this build doesn't know yet — skip it, never crash.
+            self = .unknown
         }
     }
 
@@ -368,6 +384,8 @@ enum ChatWidgetData: Codable, Sendable {
             try data.encode(to: encoder)
         case .marketOverview(let data):
             try data.encode(to: encoder)
+        case .unknown:
+            break  // nothing to persist — unknown widgets are dropped, not round-tripped
         }
     }
 }
@@ -636,6 +654,8 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
                 richContent.append(.stockChart(data))
             case .marketOverview(let data):
                 richContent.append(.marketOverview(data))
+            case .unknown:
+                continue  // unrenderable/future widget → render text-only, don't crash
             }
         }
 

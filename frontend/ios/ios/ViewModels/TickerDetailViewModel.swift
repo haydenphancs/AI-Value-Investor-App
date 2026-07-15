@@ -42,6 +42,9 @@ class TickerDetailViewModel: ObservableObject {
     @Published var selectedTab: TickerDetailTab = .overview
     @Published var selectedChartRange: ChartTimeRange = .oneDay
     @Published var isFavorite: Bool = false
+    /// Set once the user taps the star. The initial (async) watchlist check must not
+    /// clobber a user toggle with a snapshot taken before the add/remove landed.
+    private var userToggledFavorite = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
     @Published var pendingTickerNavigation: String?
@@ -222,20 +225,24 @@ class TickerDetailViewModel: ObservableObject {
             // Phase 1: Get price/chart data — show UI as soon as this arrives
             do {
                 let useExtendedHours = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
-                // Range the overview is fetched for, captured now (before the await).
+                // Range + interval the overview is fetched for, captured now (before
+                // the await) so we can detect a selection change during the slow load.
                 let requestedRange = self.selectedChartRange
+                let requestedInterval = self.chartSettings.selectedInterval
                 let response = try await self.stockRepository.getStockOverview(
                     ticker: ticker, range: requestedRange.rawValue,
-                    interval: self.chartSettings.selectedInterval.rawValue,
+                    interval: requestedInterval.rawValue,
                     extendedHours: useExtendedHours
                 )
                 self.tickerData = response.toDisplayModel()
                 self.chartDataVersion += 1
-                // If the user changed the range while the (slow) overview was loading
-                // — now possible because the fast-core chart is interactive — the
-                // overview's chart is for the OLD range. Re-fetch so the chart matches
-                // the currently-selected pill instead of silently reverting.
-                if self.selectedChartRange != requestedRange {
+                // If the user changed the range OR the interval while the (slow)
+                // overview was loading — now possible because the fast-core chart is
+                // interactive — the overview's chart is for the OLD selection. Re-fetch
+                // so the chart matches the currently-selected pill/interval instead of
+                // silently reverting (the tickerData write above is not gen-guarded).
+                if self.selectedChartRange != requestedRange
+                    || self.chartSettings.selectedInterval != requestedInterval {
                     await self.fetchChartData(ticker, range: self.selectedChartRange)
                 }
                 print("✅ TickerDetailVM: Overview loaded for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
@@ -796,6 +803,7 @@ class TickerDetailViewModel: ObservableObject {
 
     func toggleFavorite() {
         print("⭐ TickerDetailVM: toggleFavorite called — isFavorite was \(isFavorite)")
+        userToggledFavorite = true // the user's intent now wins over the initial check
         let wasInWatchlist = isFavorite
         isFavorite.toggle() // optimistic UI update
         print("⭐ TickerDetailVM: isFavorite is now \(isFavorite)")
@@ -826,6 +834,13 @@ class TickerDetailViewModel: ObservableObject {
                 endpoint: .getWatchlist,
                 responseType: [WatchlistItemDTO].self
             )
+            // If the user already toggled the star, their optimistic state + write is
+            // authoritative — this snapshot may predate that write and would wrongly
+            // revert it. Only apply the server snapshot when the user hasn't acted.
+            guard !self.userToggledFavorite else {
+                print("⏭️ TickerDetailVM: Watchlist check skipped — user already toggled favorite")
+                return
+            }
             self.isFavorite = watchlist.contains { $0.ticker.uppercased() == tickerSymbol.uppercased() }
             print("✅ TickerDetailVM: Watchlist check — \(tickerSymbol) isFavorite=\(isFavorite)")
         } catch {

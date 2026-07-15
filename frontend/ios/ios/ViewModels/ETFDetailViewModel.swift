@@ -164,12 +164,8 @@ class ETFDetailViewModel: ObservableObject {
                 self.chartDataVersion += 1
                 self.newsArticles = response.toNewsArticles()
 
-                // Start live price streaming + chart refresh if market is active
-                if let status = self.etfData?.marketStatus,
-                   MarketHoursUtil.shouldStreamLivePrice(for: status) {
-                    self.connectLivePrice()
-                    self.startChartRefreshTimer()
-                }
+                // Start live price streaming + chart refresh if market is active.
+                self.maybeStartStreaming()
             }
             self.isLoading = false
 
@@ -220,9 +216,27 @@ class ETFDetailViewModel: ObservableObject {
             self.chartDataVersion += 1
             self.newsArticles = response.toNewsArticles()
 
+            // If a range change superseded the initial fetchETFDetail before it could
+            // connect, this is now the path that paints etfData — so ensure streaming
+            // starts here too (idempotent; no-op if already connected or market closed).
+            self.maybeStartStreaming()
+
         } catch {
             print("[ETFDetailVM] ⚠️ Chart range update failed, keeping existing data — \(error)")
         }
+    }
+
+    /// Start live-price streaming + the chart-refresh timer if the market is active
+    /// and we aren't already streaming. Idempotent, so any path that paints etfData
+    /// (initial fetch OR a range change that supersedes it) can call it without
+    /// double-connecting — closing the race where a fast range tap during the initial
+    /// load left the ETF with no live price.
+    private func maybeStartStreaming() {
+        guard !livePriceManager.isConnected,
+              let status = etfData?.marketStatus,
+              MarketHoursUtil.shouldStreamLivePrice(for: status) else { return }
+        connectLivePrice()
+        startChartRefreshTimer()
     }
 
     // MARK: - Fallback Data

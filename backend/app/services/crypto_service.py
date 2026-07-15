@@ -559,8 +559,13 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     # the dedicated _compute_all_time_return, not this fallback.
     if len(prices) <= days_back:
         return None
-    start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
-    end = prices[-1].get("close") or prices[-1].get("adjClose")
+    # Finite-guard both ends: a NaN/Inf close is truthy and slips past
+    # `not start`/`start == 0`, producing a NaN change_percent that serializes to an
+    # invalid-JSON `NaN` token and crashes the iOS decode of the whole detail screen
+    # (change_percent is a non-optional Double on iOS). Matches index/commodity.
+    from app.services.chart_helper import _finite_or_none
+    start = _finite_or_none(prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose"))
+    end = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
     if not start or not end or start == 0:
         return None
     return ((end - start) / start) * 100
@@ -570,11 +575,14 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
     if not prices or len(prices) < 2:
         return None
     current_year = datetime.now(tz=timezone.utc).year
+    from app.services.chart_helper import _finite_or_none
     for p in prices:
         date_str = p.get("date") or ""
         if date_str.startswith(str(current_year)):
-            start_price = p.get("close") or p.get("adjClose")
-            end_price = prices[-1].get("close") or prices[-1].get("adjClose")
+            # Finite-guard so a NaN/Inf close degrades to an omitted period, not a
+            # NaN change_percent that breaks the (non-optional) iOS decode.
+            start_price = _finite_or_none(p.get("close") or p.get("adjClose"))
+            end_price = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
             if start_price and end_price and start_price > 0:
                 return ((end_price - start_price) / start_price) * 100
             break
@@ -585,8 +593,9 @@ def _compute_all_time_return(prices: List[Dict]) -> Optional[float]:
     """Compute % return from first available price to latest."""
     if not prices or len(prices) < 2:
         return None
-    start = prices[0].get("close") or prices[0].get("adjClose")
-    end = prices[-1].get("close") or prices[-1].get("adjClose")
+    from app.services.chart_helper import _finite_or_none
+    start = _finite_or_none(prices[0].get("close") or prices[0].get("adjClose"))
+    end = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
     if not start or not end or start == 0:
         return None
     return ((end - start) / start) * 100
@@ -860,9 +869,14 @@ class CryptoService:
                     logger.warning(f"SPY historical fetch failed: {e}")
                     spy_hist = []
             if spy_hist:
-                bench_1m = _compute_return(spy_hist, 30)
+                # SPY history is TRADING days (~252/yr). _compute_return looks back by
+                # array POSITION, so 1M/1Y must use trading-day counts (21/252) — using
+                # 30/365 looked back ~6 weeks / ~1.45 yr, so the "1 Month"/"1 Year"
+                # benchmark (and the vs-market delta derived from it) were wrong. Matches
+                # the 252*N convention already used for 3Y/5Y/10Y below.
+                bench_1m = _compute_return(spy_hist, 21)
                 bench_ytd = _compute_ytd_return(spy_hist)
-                bench_1y = _compute_return(spy_hist, 365)
+                bench_1y = _compute_return(spy_hist, 252)
                 bench_3y = _compute_return(spy_hist, 252 * 3) if len(spy_hist) > 252 * 3 else None
                 bench_5y = _compute_return(spy_hist, 252 * 5) if len(spy_hist) > 252 * 5 else None
                 bench_10y = _compute_return(spy_hist, 252 * 10) if len(spy_hist) > 252 * 10 else None

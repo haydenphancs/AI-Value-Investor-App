@@ -264,3 +264,46 @@ def test_build_sources_context_pill_and_dedup():
 def test_build_sources_skips_document_fallback():
     citations = [{"index": 1, "source": "Document", "text": ""}]
     assert ChatService._build_sources(None, None, citations) == []
+
+
+# ── _build_prompt (a present-but-null chunk_text must not TypeError the join) ──
+#
+# The latent bug: `"\n---\n".join(c.get("chunk_text", "") …)` — `.get(k, "")` returns None on a
+# present-but-NULL key (only ABSENT keys get the default), and `str.join` on a None raises
+# TypeError. `_build_prompt` runs OUTSIDE any try/except (generate_response /
+# prepare_stream_generation), so a single malformed chunk row (reachable once the RAG corpus is
+# ingested — chunk_text is NOT NULL today but the ingest path is new) would abort the whole prompt
+# build → the user gets an error frame instead of an answer. The fix uses `(x or "")`.
+
+def test_build_prompt_null_chunk_text_does_not_crash():
+    chunks = [
+        {"chunk_text": None, "section_title": None},   # the crash trigger pre-fix
+        {"chunk_text": "real evidence text"},
+    ]
+    prompt = ChatService._build_prompt("What is the moat?", "", chunks)
+    # Did not raise; the real chunk survives and the null chunk contributes an empty string
+    # (never the literal "None") — no poisoned context reaches the model.
+    assert "real evidence text" in prompt
+    assert "None" not in prompt
+    assert "RELEVANT CONTEXT" in prompt
+    assert "What is the moat?" in prompt
+
+
+def test_build_prompt_all_null_chunks_still_builds():
+    prompt = ChatService._build_prompt("hi", "", [{"chunk_text": None}, {"chunk_text": None}])
+    assert "None" not in prompt
+    assert "hi" in prompt
+
+
+def test_build_prompt_no_chunks_no_context_section():
+    prompt = ChatService._build_prompt("just a question", "CONVERSATION HISTORY:\nUser: hey", [])
+    assert "RELEVANT CONTEXT" not in prompt          # no chunks → no context block, no citation note
+    assert "CONVERSATION HISTORY" in prompt
+    assert "just a question" in prompt
+
+
+def test_build_prompt_missing_chunk_text_key_absent_is_empty():
+    # Absent key (not null) already worked via the default; assert the fix didn't regress it.
+    prompt = ChatService._build_prompt("q", "", [{"section_title": "S"}])
+    assert "None" not in prompt
+    assert "RELEVANT CONTEXT" in prompt

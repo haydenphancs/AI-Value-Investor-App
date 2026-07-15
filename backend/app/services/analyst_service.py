@@ -219,10 +219,17 @@ def _compute_momentum(
         if sort_key not in monthly:
             continue
 
-        action = g.get("action", "").lower().strip()
-        if action in ("upgrade", "init"):
+        # Classify via the shared normalizer (same as _compute_actions_summary /
+        # _build_actions) so an FMP row labeled action="maintain" that actually
+        # changed the grade (Hold→Buy) is counted as an upgrade, and initiations
+        # aren't dropped. Reading the raw action made this chart's net-positive/
+        # negative contradict the Actions Summary shown on the same Analysis tab.
+        normalized = normalize_fmp_action(
+            g.get("action"), g.get("previousGrade"), g.get("newGrade")
+        )
+        if normalized in ("upgrade", "initiate"):
             monthly[sort_key]["positive"] += 1
-        elif action == "downgrade":
+        elif normalized == "downgrade":
             monthly[sort_key]["negative"] += 1
 
     # Build result in chronological order

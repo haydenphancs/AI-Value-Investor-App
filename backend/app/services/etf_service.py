@@ -183,8 +183,13 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     # uses _build_benchmark_summary, not this fallback.
     if len(prices) <= days_back:
         return None
-    start = prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose")
-    end = prices[-1].get("close") or prices[-1].get("adjClose")
+    # Finite-guard both ends: a NaN/Inf close is truthy and slips past
+    # `not start`/`start == 0`, producing a NaN change_percent that serializes to an
+    # invalid-JSON `NaN` token and crashes the iOS decode of the whole ETF detail
+    # screen (change_percent is a non-optional Double on iOS). Matches index/commodity.
+    from app.services.chart_helper import _finite_or_none
+    start = _finite_or_none(prices[-(days_back + 1)].get("close") or prices[-(days_back + 1)].get("adjClose"))
+    end = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
 
     if not start or not end or start == 0:
         return None
@@ -195,11 +200,14 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
     if not prices or len(prices) < 2:
         return None
     current_year = datetime.now(tz=timezone.utc).year
+    from app.services.chart_helper import _finite_or_none
     for p in prices:
         date_str = p.get("date") or ""
         if date_str.startswith(str(current_year)):
-            start_price = p.get("close") or p.get("adjClose")
-            end_price = prices[-1].get("close") or prices[-1].get("adjClose")
+            # Finite-guard so a NaN/Inf close degrades to an omitted period, not a
+            # NaN change_percent that breaks the (non-optional) iOS decode.
+            start_price = _finite_or_none(p.get("close") or p.get("adjClose"))
+            end_price = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
             if start_price and end_price and start_price > 0:
                 return ((end_price - start_price) / start_price) * 100
             break
@@ -985,6 +993,11 @@ class ETFService:
         """
         ac = asset_class.lower()
         is_bond_etf = "bond" in ac or "fixed" in ac or "income" in ac
+        # Physical-commodity / gold / alternative funds are the OTHER case FMP can't
+        # decompose: it lumps the whole fund into "Cash & Others". Without this a
+        # 100%-Cash gold ETF renders as 100% cash in the donut (remaining=0 → the
+        # commodities branch below gets nothing), diverging from the _infer path.
+        is_commodity_etf = "commodity" in ac or "gold" in ac or "alternative" in ac
 
         # Extract real cash % from sectorsList
         cash_pct = 0.0
@@ -993,11 +1006,13 @@ class ETFService:
             name = (s.get("industry") or s.get("sector") or "").lower()
             if "cash" in name and "other" in name:
                 raw_cash = round(float(s.get("exposure") or s.get("weightPercentage") or 0), 2)
-                # If "Cash & Others" is ~100% AND this is a bond ETF,
-                # FMP is lumping all bonds into "Cash & Others" — don't treat as cash
-                if raw_cash >= 95 and is_bond_etf:
+                # If "Cash & Others" is ~100% AND FMP can't break this fund down
+                # (bond OR commodity/gold/alternative), the 100% is really the
+                # underlying asset, not cash — keep only a token operational cash so
+                # `remaining` flows into the correct bucket below.
+                if raw_cash >= 95 and (is_bond_etf or is_commodity_etf):
                     has_only_cash_sector = True
-                    cash_pct = 5.0  # Typical operational cash for bond ETFs
+                    cash_pct = 5.0  # Typical operational cash
                 else:
                     cash_pct = raw_cash
                 break

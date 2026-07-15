@@ -143,6 +143,14 @@ class IndexDetailViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self = self else { return }
+            // One-time setup that must NOT be gated on the detail request token: a
+            // range change during the initial fetch supersedes it, and the stale
+            // response then skipped the connect, leaving the index with no live
+            // updates / no 30s refresh until a manual refresh. connectLivePrice is
+            // independent of the response, so start streaming here. The timer + the
+            // WebSocket both self-gate on market hours, so this is a no-op when closed.
+            self.connectLivePrice()
+            self.startChartRefreshTimer()
             async let fetchTask: () = self.fetchIndexDetail()
             async let newsTask: () = self.fetchIndexNews()
             async let watchlistTask: () = self.checkWatchlistStatus()
@@ -383,10 +391,9 @@ class IndexDetailViewModel: ObservableObject {
                 self.errorMessage = nil
                 self.indexData = response.toDisplayModel()
                 self.chartDataVersion += 1
-
-                // Connect live price after successful data load
-                self.connectLivePrice()
-                self.startChartRefreshTimer()
+                // NOTE: live-price connect + refresh timer are started once in
+                // loadIndexData (independent of this request token), so a range change
+                // that supersedes this fetch can't leave the index unstreamed.
             }
 
             // News and technical analysis are fetched via separate concurrent tasks

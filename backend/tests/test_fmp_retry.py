@@ -12,6 +12,7 @@ the backoff adds no wall-clock. Run via `python -m pytest` from backend/.
 """
 
 import asyncio
+import logging
 
 import httpx
 import pytest
@@ -105,6 +106,40 @@ def test_429_is_not_retried():
     with pytest.raises(FMPRateLimitException):
         asyncio.run(c._make_request("profile", {"symbol": "CSWI"}))
     assert fake.calls == 1  # quota errors don't get retried
+
+
+def test_429_extracts_retry_after_onto_exception():
+    fake = _FakeClient([_FakeResponse(429, headers={"Retry-After": "5"})])
+    c = _client_with(fake)
+    with pytest.raises(FMPRateLimitException) as ei:
+        asyncio.run(c._make_request("ratios-ttm", {"symbol": "AAPL"}))
+    assert ei.value.retry_after == "5"
+
+
+def test_429_missing_retry_after_is_none_not_unknown():
+    # FMP /stable often omits Retry-After / X-RateLimit-* headers; retry_after must be
+    # a clean None, not the old "unknown" string sentinel.
+    fake = _FakeClient([_FakeResponse(429)])
+    c = _client_with(fake)
+    with pytest.raises(FMPRateLimitException) as ei:
+        asyncio.run(c._make_request("key-metrics-ttm", {"symbol": "AAPL"}))
+    assert ei.value.retry_after is None
+
+
+def test_429_logs_at_warning_not_error(caplog):
+    # A handled/degraded rate-limit (raised as a typed exception, degraded by the
+    # caller) must log at WARNING — logging it at ERROR pages it to Sentry as a bug.
+    fake = _FakeClient([_FakeResponse(429)])
+    c = _client_with(fake)
+    with caplog.at_level(logging.WARNING, logger="app.integrations.fmp"):
+        with pytest.raises(FMPRateLimitException):
+            asyncio.run(c._make_request("key-metrics-ttm", {"symbol": "AAPL"}))
+    hits = [r for r in caplog.records if "rate limit HIT" in r.getMessage()]
+    assert hits, "expected a rate-limit log record"
+    assert all(r.levelno == logging.WARNING for r in hits)  # never ERROR
+    msg = hits[0].getMessage()
+    assert "unknowns" not in msg          # the old "unknown" + "s" glitch is gone
+    assert "not provided" in msg          # absent headers render cleanly (not "None")
 
 
 def test_non_retryable_4xx_is_not_retried():

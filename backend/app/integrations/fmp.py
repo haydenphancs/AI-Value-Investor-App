@@ -161,11 +161,19 @@ class FMPClient:
                     )
 
                 if response.status_code == 429:
-                    retry_after = response.headers.get("Retry-After", "unknown")
-                    logger.error(
-                        f"FMP rate limit HIT on {endpoint}. "
-                        f"Retry-After: {retry_after}s. "
-                        f"Limit: {limit}"
+                    # A 429 is handled/expected backpressure (esp. during the benchmark
+                    # recompute's TTM burst): it's raised as a typed exception and the
+                    # caller degrades/backs off via return_exceptions. Log at WARNING —
+                    # NOT ERROR — so it doesn't page on-call as a bug, matching the
+                    # FMPUnavailableException convention and the "warning = rate limits"
+                    # logging rule. FMP /stable often omits Retry-After / X-RateLimit-*,
+                    # so render those cleanly instead of "unknowns" / "None".
+                    retry_after = response.headers.get("Retry-After")
+                    logger.warning(
+                        "FMP rate limit HIT on %s (Retry-After: %s, X-RateLimit-Limit: %s)",
+                        endpoint,
+                        retry_after or "not provided",
+                        limit if limit is not None else "not provided",
                     )
                     raise FMPRateLimitException(
                         f"FMP rate limit hit on {endpoint}",

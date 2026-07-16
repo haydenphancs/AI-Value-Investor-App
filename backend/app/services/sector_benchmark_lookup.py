@@ -53,9 +53,20 @@ def _is_transient(exc: BaseException) -> bool:
             httpx.WriteError, httpx.PoolTimeout, httpx.ConnectTimeout, httpx.ReadTimeout,
         )):
             return True
+        # A stale HTTP/2 pooled connection that Supabase closed (GOAWAY / idle
+        # timeout) surfaces on REUSE as LocalProtocolError('... in state
+        # ConnectionState.CLOSED') from the h2 state machine — a connection-reuse
+        # race, not a malformed-request bug. Retrying opens a fresh connection and
+        # succeeds. (A GENUINE local protocol bug would not carry the "closed" state,
+        # so it still surfaces as ERROR.)
+        if isinstance(exc, httpx.LocalProtocolError) and "closed" in str(exc).lower():
+            return True
     except Exception:
         pass
-    return "server disconnected" in str(exc).lower()
+    msg = str(exc).lower()
+    # String fallbacks so the classification holds even if the error arrives as a raw
+    # httpcore/h2 type (not wrapped as an httpx exception).
+    return "server disconnected" in msg or "connectionstate.closed" in msg
 
 
 # ── Phase 3: mature-period picker (sample-size floor + hold-last-mature) ──

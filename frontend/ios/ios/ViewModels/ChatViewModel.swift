@@ -160,10 +160,14 @@ class ChatViewModel: ObservableObject {
                     ),
                     responseType: ChatSessionDTO.self
                 )
-                // If the user navigated to another conversation (loadConversation) while createSession
-                // was in flight, abandon this seed so it doesn't clobber the now-active session.
-                guard currentSessionId == nil else {
-                    print("⚠️ [ChatVM] Abandoning stale seed; active session is \(currentSessionId ?? "nil")")
+                // Abandon this seed if the turn Task was cancelled (New chat / reset / navigate away
+                // during createSession) OR the user navigated into another conversation. resetConversation
+                // both cancels respondTask AND nils currentSessionId, so `currentSessionId == nil` alone
+                // can't distinguish "still seeding" from "was reset" — the Task.isCancelled check does,
+                // preventing a late-returning createSession from reviving the abandoned turn into the
+                // now-cleared chat (mirrors the streaming path's cancellation guard).
+                guard !Task.isCancelled, currentSessionId == nil else {
+                    print("⚠️ [ChatVM] Abandoning stale/cancelled seed; active session is \(currentSessionId ?? "nil")")
                     return
                 }
                 currentSessionId = session.id
@@ -175,9 +179,11 @@ class ChatViewModel: ObservableObject {
 
             } catch {
                 print("❌ [ChatVM] Failed to start conversation: \(error)")
-                // Only surface the error if this seed is still the active context (the user did not
-                // navigate to another conversation during the createSession round-trip).
-                guard currentSessionId == nil else { return }
+                // A cancelled seed (reset / New chat / navigate mid-createSession — cancelling the Task
+                // makes the in-flight request throw) must NOT paint an error on the now-cleared chat.
+                // Mirror the streaming catch's `!Task.isCancelled` guard; only surface a genuine failure
+                // that happened while this seed is still the active, un-cancelled context.
+                guard !Task.isCancelled, currentSessionId == nil else { return }
                 isAITyping = false
                 errorMessage = "Failed to start conversation. Please try again."
             }

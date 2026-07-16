@@ -432,9 +432,15 @@ class ChatService:
         except Exception as e:
             logger.warning("Synthesis merge failed (%s: %s) — using the top specialist answer",
                            type(e).__name__, e)
-            if not merge_yielded:
-                # No Gemini needed — the answer is already in hand.
-                yield "answer", results[0]["answer"]
+        # Salvage the already-computed specialist work whenever the merge produced NO answer text —
+        # whether it RAISED, or completed cleanly with only thoughts / a safety-filtered / empty
+        # answer (e.g. MAX_TOKENS spent during thinking). Without covering the clean-but-empty case,
+        # stream_synthesis would yield nothing → the endpoint sees empty content, raises "empty
+        # stream result", and burns a THIRD full generate_response (non-synthesized), discarding both
+        # specialist answers. The merge_yielded guard still prevents a double answer when partial
+        # text already streamed. No Gemini call needed — the answer is already in hand.
+        if not merge_yielded:
+            yield "answer", results[0]["answer"]
 
     # Screen context_type → the human "source" label shown in the thinking card.
     # Mirrors the ChatContextResolver branches; identity-safe (server-authored strings).
@@ -526,7 +532,18 @@ class ChatService:
             result = await self.gemini.generate_json(prompt, system_instruction=system)
             data = json.loads(result.get("text") or "{}")
             raw = data.get("suggestions") or []
-            out = [s.strip() for s in raw if isinstance(s, str) and s.strip()]
+            # Dedup case-insensitively, preserving order: the model can echo the same question twice,
+            # and duplicate chips collide the iOS `ForEach(id: \.self)` (a dropped row + a warning)
+            # besides being poor UX.
+            out: List[str] = []
+            seen: set = set()
+            for s in raw:
+                if not isinstance(s, str):
+                    continue
+                t = s.strip()
+                if t and t.lower() not in seen:
+                    seen.add(t.lower())
+                    out.append(t)
             return out[:2]
         except Exception as e:
             logger.warning(
@@ -716,6 +733,11 @@ class ChatService:
             service = get_index_service()
             # Fetch the full index detail (will use Supabase cache if available)
             detail = await service.get_index_detail(symbol)
+            # Guard the None / missing-snapshots case cleanly (mirrors the resolver's INDEX branch) so
+            # a cold/failed index fetch degrades to "no widget" via a legible error dict rather than a
+            # noisy AttributeError on `detail.snapshots_data.valuation`.
+            if not detail or not getattr(detail, "snapshots_data", None):
+                return {"error": f"No index detail available for {symbol}"}
 
             val = detail.snapshots_data.valuation
             sp = detail.snapshots_data.sector_performance
@@ -749,10 +771,12 @@ class ChatService:
 
     @staticmethod
     def _get_valuation_level(pe: Optional[float]) -> str:
-        # A missing / non-positive P/E means "no earnings data" (e.g. the index sector-benchmark
-        # fallback returned 0 on a thin or failed recompute) — that is NOT cheap. Guard first so
-        # 0 never renders as "Bargain"; mirrors the guarded index-detail valuation label.
-        if pe is None or pe <= 0:
+        # A missing / non-positive / NaN P/E means "no earnings data" (e.g. the index
+        # sector-benchmark fallback returned 0 — or round(nan) — on a thin or failed recompute) —
+        # that is NOT cheap. Guard first so it never renders as a real band. `pe != pe` catches NaN,
+        # which slips past every `<` comparison below and would otherwise fall through to the
+        # most-expensive "Overheated" band — the exact inverse of the truth.
+        if pe is None or pe != pe or pe <= 0:
             return "Unknown"
         if pe < 18:
             return "Bargain"

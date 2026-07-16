@@ -156,7 +156,11 @@ struct ChatStockWidgetView: View {
         guard let minVal = closes.min(), let maxVal = closes.max() else {
             return 0...1
         }
-        let padding = (maxVal - minVal) * 0.1
+        // A flat series (single point / all-equal closes → min == max) makes the 10% padding 0, so
+        // the domain would collapse to X...X and Charts' (v-min)/(max-min) normalization divides by
+        // zero → a degenerate/invisible line. Fall back to a nominal pad so the flat line renders
+        // centered.
+        let padding = maxVal > minVal ? (maxVal - minVal) * 0.1 : max(abs(maxVal) * 0.01, 1)
         return (minVal - padding)...(maxVal + padding)
     }
 

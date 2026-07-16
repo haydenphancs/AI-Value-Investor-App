@@ -18,11 +18,16 @@ struct ChatMessagesList: View {
     /// stays pinned to the newest content while tokens arrive (the in-place update
     /// of the streaming bubble doesn't change `messages.count`).
     private var scrollKey: Int {
-        let lastTextCount = messages.last?.content.reduce(0) { acc, item in
+        let last = messages.last
+        let lastTextCount = last?.content.reduce(0) { acc, item in
             if case .text(let t) = item { return acc + t.count }
             return acc
         } ?? 0
-        return messages.count &* 1_000_003 &+ lastTextCount
+        // Also track the reasoning card's growth: during the pre-token phase the answer text is empty
+        // and only `thinking.reasoning` grows, so keying on text length alone left the view un-pinned
+        // (no auto-scroll) until the first answer token arrived.
+        let lastReasonCount = last?.thinking?.reasoning?.count ?? 0
+        return messages.count &* 1_000_003 &+ lastTextCount &+ lastReasonCount
     }
 
     var body: some View {

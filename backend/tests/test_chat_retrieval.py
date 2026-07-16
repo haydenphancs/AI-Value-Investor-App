@@ -211,3 +211,42 @@ async def test_condense_summary_failure_falls_back_to_recent():
     hist = [{"role": "user", "content": f"m{i}"} for i in range(10)]
     block = await s._condense_history(hist)
     assert "CONVERSATION HISTORY" in block and "m9" in block   # recent-only, no crash
+
+
+# ── generate_followup_suggestions (dedup) ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_followup_suggestions_dedup_case_insensitive():
+    """The model can echo the same follow-up twice; duplicates collide the iOS ForEach(id: \\.self)
+    (a dropped row + a warning) and are poor UX. Dedup is case-insensitive, order-preserving, cap 2."""
+    class _G:
+        async def generate_json(self, prompt, system_instruction=None, model_name=None):
+            return {"text": json.dumps({"suggestions": [
+                "What's the P/E?", "what's the p/e?", "How risky is it?",
+            ]})}
+
+    svc = object.__new__(ChatService)
+    svc.gemini = _G()
+    out = await svc.generate_followup_suggestions("q", "a")
+    assert out == ["What's the P/E?", "How risky is it?"]   # case-insensitive dup dropped, order kept
+
+
+@pytest.mark.asyncio
+async def test_condense_boundary_at_recent_turns():
+    """The summary kicks in only once `older` is non-empty — i.e. at MORE than _RECENT_TURNS (6)
+    messages. Exactly 6 → all verbatim, no summary call; 7 → the single older message is summarized
+    and the six recent kept verbatim."""
+    # Exactly _RECENT_TURNS: older == [] → verbatim, no summary.
+    s6 = _svc(_FakeGemini(rewrite="SHOULD NOT SUMMARIZE"))
+    hist6 = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(6)]
+    block6 = await s6._condense_history(hist6)
+    assert "CONVERSATION HISTORY" in block6 and "EARLIER CONVERSATION" not in block6
+    assert "m0" in block6                                   # nothing rolled into a summary
+
+    # One over the threshold: the oldest message summarizes, the recent 6 stay verbatim.
+    s7 = _svc(_FakeGemini(rewrite="- earlier: the user opened with m0"))
+    hist7 = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(7)]
+    block7 = await s7._condense_history(hist7)
+    assert "EARLIER CONVERSATION (summary)" in block7
+    assert "earlier: the user opened with m0" in block7     # the rolling summary
+    assert "RECENT MESSAGES" in block7 and "m6" in block7   # last turns verbatim

@@ -212,6 +212,13 @@ def test_valuation_level_zero_or_negative_is_unknown():
     assert ChatService._get_valuation_level(None) == "Unknown"
 
 
+def test_valuation_level_nan_is_unknown():
+    """The bug: NaN slips past `nan <= 0` AND every `nan < band` (all False), so it fell through to
+    the most-expensive 'Overheated' band — the exact inverse of the 0/negative guard's intent. NaN is
+    reachable: index_service does `round(pe,1) if pe else 0`, and `round(float('nan'),1) == nan`."""
+    assert ChatService._get_valuation_level(float("nan")) == "Unknown"
+
+
 def test_valuation_level_bands():
     assert ChatService._get_valuation_level(15) == "Bargain"
     assert ChatService._get_valuation_level(17.9) == "Bargain"

@@ -85,6 +85,27 @@ struct ChatSource: Codable, Identifiable, Sendable, Hashable {
     var id: String { label + "|" + (detail ?? "") }
     let label: String
     let detail: String?
+
+    init(label: String, detail: String?) {
+        self.label = label
+        self.detail = detail
+    }
+
+    private enum CodingKeys: String, CodingKey { case label, detail }
+
+    /// Total (never-throwing) decode. `sources` is an OPTIONAL field on `ChatMessageDTO`, but
+    /// `decodeIfPresent` only swallows an absent/null ARRAY — a present array whose element is a
+    /// malformed object (missing the non-optional `label`) still rethrows, and array decoding is
+    /// all-or-nothing, so ONE bad pill would collapse the entire `[ChatMessageDTO]` history decode
+    /// (blank conversation). A missing label degrades to "" (dropped at render), never a crash —
+    /// mirrors the `ChatWidgetData.unknown` hardening.
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            self.label = ""; self.detail = nil; return
+        }
+        self.label = (try? c.decode(String.self, forKey: .label)) ?? ""
+        self.detail = try? c.decode(String.self, forKey: .detail)
+    }
 }
 
 /// Thinking-process summary shown in the collapsible "Done in Xs · N sources" card.
@@ -105,12 +126,30 @@ struct ChatThinking: Codable, Sendable {
     }
 
     // Defaulted init so callers can construct without every field (a `let` optional is otherwise
-    // required by the synthesized memberwise init). Codable decode/encode stay synthesized.
+    // required by the synthesized memberwise init). `encode(to:)` stays synthesized.
     init(stages: [String] = [], sourceCount: Int? = nil, elapsedMs: Int? = nil, reasoning: String? = nil) {
         self.stages = stages
         self.sourceCount = sourceCount
         self.elapsedMs = elapsedMs
         self.reasoning = reasoning
+    }
+
+    /// Total (never-throwing) decode. `thinking` is OPTIONAL on `ChatMessageDTO`, but `decodeIfPresent`
+    /// only swallows an absent/null OBJECT — a PRESENT object that fails to decode (missing/null/
+    /// wrong-type `stages`, which is non-optional) rethrows and collapses the whole all-or-nothing
+    /// `[ChatMessageDTO]` history decode → a blank conversation. Default every field so any shape
+    /// degrades gracefully (mirrors the `ChatWidgetData.unknown` hardening). Not producible by today's
+    /// backend (it always writes `stages: []` + an int `elapsed_ms`), but a future/hand-edited row
+    /// must never be able to blank a user's history.
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            self.stages = []; self.sourceCount = nil; self.elapsedMs = nil; self.reasoning = nil
+            return
+        }
+        self.stages = (try? c.decode([String].self, forKey: .stages)) ?? []
+        self.sourceCount = try? c.decode(Int.self, forKey: .sourceCount)
+        self.elapsedMs = try? c.decode(Int.self, forKey: .elapsedMs)
+        self.reasoning = try? c.decode(String.self, forKey: .reasoning)
     }
 
     /// True while the answer is still being produced (drives the animated header).
@@ -666,8 +705,11 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
 
         let timestamp = BackendISO8601.date(from: createdAt) ?? Date()
 
+        // Drop any empty-label source pill (only possible from a malformed row via the total
+        // ChatSource decode above) so it renders as nothing rather than a blank chip.
         return RichChatMessage(role: msgRole, content: richContent, timestamp: timestamp,
-                               thinking: thinking, sources: sources, suggestions: suggestions)
+                               thinking: thinking, sources: sources?.filter { !$0.label.isEmpty },
+                               suggestions: suggestions)
     }
 }
 

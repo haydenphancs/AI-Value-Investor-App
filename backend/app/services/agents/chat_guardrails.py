@@ -8,6 +8,7 @@ logged flag a human can review. The primary defense stays the system prompt (ide
 advice-boundary directive); this is the safety net that makes drift observable.
 """
 
+import re
 from typing import List
 
 # Personal directives (imperative "you should buy/sell/hold" style). Kept targeted — explaining
@@ -30,12 +31,24 @@ _IDENTITY_PATTERNS = (
 )
 
 
+def _boundary_regex(patterns) -> "re.Pattern":
+    """Match any phrase as a whole token, not a substring. `(?<!\\w)…(?!\\w)` stops the short/fragile
+    tokens from firing on innocent supersets — the reported class was `as an ai` matching inside
+    `as an aid` / `as an aircraft`, flagging a benign answer as an identity leak."""
+    alternation = "|".join(re.escape(p) for p in patterns)
+    return re.compile(r"(?<!\w)(?:" + alternation + r")(?!\w)")
+
+
+_ADVICE_RE = _boundary_regex(_ADVICE_PATTERNS)
+_IDENTITY_RE = _boundary_regex(_IDENTITY_PATTERNS)
+
+
 def scan_answer(answer: str) -> List[str]:
     """Return the guardrail issue tags detected in `answer` (empty = clean). Never raises."""
     text = (answer or "").lower()
     issues: List[str] = []
-    if any(p in text for p in _ADVICE_PATTERNS):
+    if _ADVICE_RE.search(text):
         issues.append("advice_directive")
-    if any(p in text for p in _IDENTITY_PATTERNS):
+    if _IDENTITY_RE.search(text):
         issues.append("identity_leak")
     return issues

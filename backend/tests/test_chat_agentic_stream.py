@@ -346,3 +346,99 @@ async def test_generate_with_tools_unknown_among_parallel_calls_keeps_counts_mat
     # Only the known handler's result is surfaced, but BOTH calls were answered back to the model.
     assert len(result["tool_results"]) == 1
     assert len(models.calls[1][-1].parts) == 2
+
+
+# ── stream_agentic: parallel function calls in a SINGLE streamed round ────────
+
+@pytest.mark.asyncio
+async def test_stream_agentic_parallel_function_calls_in_one_round():
+    """gemini-2.5 can emit MULTIPLE function_call parts in one streamed round. Both handlers must run,
+    two ('tool', …) events fire, and the NEXT round is fed one function_response PER call (2) so the
+    follow-up doesn't 400 on a call/response count mismatch. The non-streaming generate_with_tools has
+    a dedicated parallel-FC test; the streaming path (the one chat actually uses) had none."""
+    fc1 = _FakeFC("get_x", {"ticker": "AAPL"})
+    fc2 = _FakeFC("get_y", {"ticker": "MSFT"})
+    chat = _FakeChat(rounds=[
+        [_chunk(_FakePart(function_call=fc1), _FakePart(function_call=fc2))],  # round 0: two calls
+        [_chunk(_FakePart(text="both done"))],                                  # round 1: answer
+    ])
+    c = _client(chat)
+    ran = []
+
+    async def hx(args):
+        ran.append(("x", dict(args)))
+        return {"widget_type": "stock_chart", "ticker": args["ticker"]}
+
+    async def hy(args):
+        ran.append(("y", dict(args)))
+        return {"widget_type": "stock_chart", "ticker": args["ticker"]}
+
+    events = [ev async for ev in c.stream_agentic(
+        "prompt", tools=[_TOOL], tool_handlers={"get_x": hx, "get_y": hy})]
+
+    tool_names = [p["name"] for k, p in events if k == "tool"]
+    assert tool_names == ["get_x", "get_y"]           # BOTH parallel calls emitted a tool event
+    assert ("x", {"ticker": "AAPL"}) in ran and ("y", {"ticker": "MSFT"}) in ran
+    assert ("answer", "both done") in events
+    # Round 1 was fed a LIST of two function_response parts (one per call) — count matches the turn.
+    assert isinstance(chat.sent[1], list) and len(chat.sent[1]) == 2
+
+
+# ── stream_synthesis: clean-but-empty merge + all-specialists-fail fallback ───
+
+@pytest.mark.asyncio
+async def test_stream_synthesis_clean_but_empty_merge_uses_specialist_answer():
+    """The bug: the specialist-salvage lived ONLY in the merge's `except`. If stream_text completes
+    WITHOUT raising but emits zero `answer` parts (all-thoughts / MAX_TOKENS-during-thinking /
+    safety-filtered empty), stream_synthesis yielded no answer → the endpoint sees empty content and
+    burns a THIRD full generation. The salvage now also runs after a clean-but-empty merge."""
+    from app.services.chat_service import ChatService
+
+    class _G:
+        async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
+                                 system_instruction=None, max_rounds=4, model_name=None):
+            yield ("answer", "fundamentals view: solid balance sheet")
+
+        async def stream_text(self, prompt, system_instruction=None, model_name=None):
+            # Clean completion, but ONLY a thought — never an answer token.
+            yield ("thought", "weighing the two lenses…")
+
+    svc = object.__new__(ChatService)
+    svc.gemini = _G()
+    prep = {"system_instruction": "sys", "prompt": "p"}
+    route = {"specialists": ["valuation", "fundamentals"],
+             "labels": ["Valuation", "Fundamentals"], "mode": "synthesize"}
+    events = [ev async for ev in svc.stream_synthesis(prep, "is it a buy?", route, tools=[], tool_handlers={})]
+    answers = [p for k, p in events if k == "answer"]
+    assert any("solid balance sheet" in a for a in answers)   # salvaged despite the clean-empty merge
+
+
+@pytest.mark.asyncio
+async def test_stream_synthesis_all_specialists_fail_falls_back_to_general():
+    """When EVERY specialist produces no answer (results == []), stream_synthesis must degrade to a
+    single general agentic stream so the user still gets a reply — the 'user always gets an answer'
+    guarantee. The general fallback shares the same stream_agentic, so a call counter distinguishes
+    the (answerless) specialist runs from the fallback run that comes strictly after the gather."""
+    from app.services.chat_service import ChatService
+
+    class _G:
+        def __init__(self):
+            self.calls = 0
+
+        async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
+                                 system_instruction=None, max_rounds=4, model_name=None):
+            self.calls += 1
+            n = self.calls
+            if n <= 2:                       # the two specialist runs → only a thought → empty answer
+                yield ("thought", "specialist thinking")
+            else:                            # the general fallback run → a real answer
+                yield ("answer", "general fallback answer")
+
+    svc = object.__new__(ChatService)
+    svc.gemini = _G()
+    prep = {"system_instruction": "sys", "prompt": "p"}
+    route = {"specialists": ["valuation", "fundamentals"],
+             "labels": ["Valuation", "Fundamentals"], "mode": "synthesize"}
+    events = [ev async for ev in svc.stream_synthesis(prep, "is it a buy?", route, tools=[], tool_handlers={})]
+    answers = [p for k, p in events if k == "answer"]
+    assert answers == ["general fallback answer"]   # the guarantee held; no empty stream

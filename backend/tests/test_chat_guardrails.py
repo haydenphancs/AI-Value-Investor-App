@@ -41,3 +41,15 @@ def test_bare_google_company_is_not_a_leak():
 def test_both_issues_detected_together():
     issues = scan_answer("As an AI, I think you should buy it.")
     assert set(issues) == {"advice_directive", "identity_leak"}
+
+
+def test_no_false_positive_on_identity_substring():
+    """The bug: bare substring `"as an ai" in text` fired inside 'as an aid' / 'as an aircraft' /
+    'as an aim' — flagging a perfectly benign investing answer as an identity leak. Word-boundary
+    matching must keep these clean while still catching the real token."""
+    assert scan_answer("Treasuries can serve as an aid to managing downside risk.") == []
+    assert scan_answer("Boeing sells to every major carrier as an aircraft maker.") == []
+    assert scan_answer("Dollar-cost averaging works as an aim for long-term savers.") == []
+    # The real leak still trips (whole-token match).
+    assert "identity_leak" in scan_answer("As an AI, I can't predict prices.")
+    assert "identity_leak" in scan_answer("Honestly, as an ai — I can't give a target.")

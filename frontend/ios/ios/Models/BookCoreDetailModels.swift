@@ -29,6 +29,39 @@ struct CoreChapterContent: Identifiable {
     var formattedChapterLabel: String {
         "Core \(chapterNumber)"
     }
+
+    /// A plain-text rendering of the chapter body, capped, for grounding the AI chat on the PASSAGE
+    /// the user is actually reading. The reader renders the full sections, but the chat otherwise
+    /// only receives a "title/author/core N" pointer — so it can't reason about the on-screen content
+    /// unless the model already knows the book. This strips styling and concatenates each section's
+    /// title + text (all section content types) so "explain this part" / "what does this mean?" works.
+    func plainTextForGrounding(maxChars: Int = 2600) -> String {
+        var out: [String] = []
+        for section in sections {
+            if let t = section.title, !t.isEmpty { out.append(t + ":") }
+            switch section.content {
+            case .text(let s):
+                if !s.isEmpty { out.append(s) }
+            case .richText(let a):
+                let s = String(a.characters)
+                if !s.isEmpty { out.append(s) }
+            case .quote(let q):
+                out.append("\"\(q.text)\"" + (q.author.isEmpty ? "" : " — \(q.author)"))
+            case .assetList(let items):
+                out.append(contentsOf: items.map { "\($0.title): \($0.description)" })
+            case .actionPlan(let steps):
+                out.append(contentsOf: steps.map { "\($0.title): \($0.description)" })
+            case .bulletPoints(let bullets):
+                out.append(contentsOf: bullets.map { $0.text })
+            case .callout(let c):
+                out.append((c.title.isEmpty ? "" : "\(c.title): ") + c.text)
+            }
+        }
+        let joined = out.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard joined.count > maxChars else { return joined }
+        let idx = joined.index(joined.startIndex, offsetBy: maxChars)
+        return String(joined[..<idx]) + "…"
+    }
 }
 
 // MARK: - Core Chapter Section

@@ -13,6 +13,8 @@ a lazy import inside the resolver, so patching the module attribute before the
 call takes effect.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.services.chat_context_resolver import (
@@ -443,6 +445,261 @@ async def test_money_move_unknown_slug_returns_none(resolver, monkeypatch):
     monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
 
     assert await resolver.resolve("MONEY_MOVES_ARTICLE", "missing", None) is None
+
+
+# ── Enriched grounding: asset details (ETF / CRYPTO / INDEX) ────────
+
+@pytest.mark.asyncio
+async def test_etf_grounds_holdings_dividend_sectors_performance(resolver, monkeypatch):
+    detail = SimpleNamespace(
+        name="Vanguard S&P 500", symbol="VOO", current_price=500.0, price_change_percent=0.5,
+        key_statistics=[SimpleNamespace(label="AUM", value="$400B")],
+        etf_profile=SimpleNamespace(description="Tracks the S&P 500 index of US large caps.", index_tracked="S&P 500"),
+        net_yield=SimpleNamespace(
+            dividend_yield=1.30, expense_ratio=0.03, pay_frequency="Quarterly",
+            last_dividend_payment=SimpleNamespace(dividend_per_share="$1.77", pay_date="Jan 31, 2026"),
+        ),
+        holdings_risk=SimpleNamespace(
+            top_holdings=[SimpleNamespace(symbol="AAPL", name="Apple", weight=7.1),
+                          SimpleNamespace(symbol="MSFT", name="Microsoft", weight=6.5)],
+            top_sectors=[SimpleNamespace(name="Technology", weight=30.2)],
+            asset_allocation=SimpleNamespace(equities=99.0, bonds=0.0, commodities=0.0, cash=1.0, total_assets="$400B"),
+            concentration=SimpleNamespace(top_n=10, weight=32.0, insight="Top 10 holdings are ~a third of the fund."),
+        ),
+        performance_periods=[SimpleNamespace(label="1Y", change_percent=12.3)],
+        benchmark_summary=SimpleNamespace(avg_annual_return=13.1, sp_benchmark=13.1),
+        identity_rating=SimpleNamespace(volatility_label="Moderate Volatility"),
+        strategy=SimpleNamespace(hook="Cheap, broad, passive exposure to US large caps.", tags=["Passive", "Index"]),
+    )
+
+    class _Svc:
+        async def get_etf_detail(self, s):
+            return detail
+
+    import app.services.etf_service as es
+    monkeypatch.setattr(es, "get_etf_service", lambda: _Svc())
+
+    block = await resolver.resolve("ETF", "voo", None)
+    assert "dividend yield 1.30% (paid quarterly)" in block
+    assert "expense ratio 0.03%" in block
+    assert "AAPL 7.1%" in block and "MSFT 6.5%" in block
+    assert "Technology 30.2%" in block
+    assert "1Y +12.3%" in block
+    assert "Tracks the S&P 500 index" in block
+    # The secondary fields fold in too.
+    assert "equities 99%" in block and "AUM $400B" in block
+    assert "Top 10 holdings are ~a third" in block
+    assert "Last dividend $1.77 paid Jan 31, 2026" in block
+    assert "avg annual return 13.1% vs S&P 13.1%" in block
+    assert "Volatility: Moderate Volatility" in block
+    assert "Strategy: Cheap, broad, passive" in block
+
+
+@pytest.mark.asyncio
+async def test_crypto_grounds_snapshots_and_description(resolver, monkeypatch):
+    detail = SimpleNamespace(
+        name="Ethereum", symbol="ETH", current_price=3000.0, price_change_percent=-1.2,
+        crypto_profile=SimpleNamespace(description="A programmable blockchain for smart contracts.",
+                                       blockchain="Ethereum", consensus_mechanism="Proof of Stake",
+                                       launch_date="Jul 2015"),
+        snapshots=[
+            SimpleNamespace(category="Tokenomics", paragraphs=["ETH has no fixed max supply; issuance is offset by EIP-1559 burns."]),
+            SimpleNamespace(category="Risks", paragraphs=["Regulatory classification and L2 competition are key risks."]),
+        ],
+        key_statistics_groups=[SimpleNamespace(statistics=[SimpleNamespace(label="Market Cap", value="$360B")])],
+        performance_periods=[SimpleNamespace(label="1Y", change_percent=42.0, benchmark_label="BTC")],
+    )
+
+    class _Svc:
+        async def get_crypto_detail(self, s):
+            return detail
+
+    import app.services.crypto_service as cs
+    monkeypatch.setattr(cs, "get_crypto_service", lambda: _Svc())
+
+    block = await resolver.resolve("CRYPTO", "eth", None)
+    assert "programmable blockchain for smart contracts" in block
+    assert "Tokenomics:" in block and "EIP-1559 burns" in block
+    assert "Risks:" in block and "L2 competition" in block
+    assert "Market Cap: $360B" in block
+    assert "consensus Proof of Stake" in block
+    assert "launched Jul 2015" in block
+    assert "Performance (vs BTC) — 1Y +42.0%" in block
+
+
+@pytest.mark.asyncio
+async def test_index_grounds_name_price_sectors_macro(resolver, monkeypatch):
+    snap = SimpleNamespace(
+        valuation=SimpleNamespace(pe_ratio=21.0, forward_pe=18.5, earnings_yield=4.7,
+                                  historical_avg_pe=17.5, historical_period="10Y"),
+        sector_performance=SimpleNamespace(sectors=[SimpleNamespace(sector="Technology", change_percent=0.8),
+                                                    SimpleNamespace(sector="Energy", change_percent=-0.4)]),
+        macro_forecast=SimpleNamespace(indicators=[SimpleNamespace(title="Inflation", description="cooling", signal="neutral")]),
+    )
+    detail = SimpleNamespace(index_name="S&P 500", current_price=5200.0, price_change_percent=0.3,
+                             index_profile=SimpleNamespace(description="500 large-cap US stocks.",
+                                                           number_of_constituents=500,
+                                                           weighting_methodology="Market-cap",
+                                                           index_provider="S&P Dow Jones"),
+                             performance_periods=[SimpleNamespace(label="1Y", change_percent=11.0)],
+                             snapshots_data=snap)
+
+    class _Svc:
+        async def get_index_detail(self, s):
+            return detail
+
+    import app.services.index_service as ixs
+    monkeypatch.setattr(ixs, "get_index_service", lambda: _Svc())
+
+    block = await resolver.resolve("INDEX", "^GSPC", None)
+    assert "S&P 500" in block
+    assert "Level 5,200.00 (+0.30%)" in block
+    assert "P/E 21.0 (fwd 18.5)" in block
+    assert "10Y avg P/E 17.5" in block
+    assert "Technology +0.8%" in block and "Energy -0.4%" in block
+    assert "Inflation: neutral" in block
+    assert "500 large-cap US stocks" in block
+    assert "500 constituents" in block and "Market-cap-weighted" in block
+    assert "Performance — 1Y +11.0%" in block
+
+
+@pytest.mark.asyncio
+async def test_asset_detail_missing_enrichment_fields_no_crash(resolver, monkeypatch):
+    """A bare detail (only price/stats, none of the new fields) still grounds the basics without a crash."""
+    detail = SimpleNamespace(name="X", symbol="X", current_price=1.0, price_change_percent=0.0,
+                             key_statistics=[SimpleNamespace(label="AUM", value="$1B")],
+                             etf_profile=SimpleNamespace(index_tracked="Idx"))
+
+    class _Svc:
+        async def get_etf_detail(self, s):
+            return detail
+
+    import app.services.etf_service as es
+    monkeypatch.setattr(es, "get_etf_service", lambda: _Svc())
+
+    block = await resolver.resolve("ETF", "x", None)
+    assert block is not None and "AUM: $1B" in block and "Tracks: Idx" in block
+    assert "None" not in block
+
+
+# ── Enriched grounding: COMMODITY (bundled profile appended to iOS context) ──
+
+@pytest.mark.asyncio
+async def test_commodity_appends_bundled_profile_to_client_context(resolver, monkeypatch):
+    import app.services.commodity_service as cms
+    monkeypatch.setattr(cms, "_get_meta", lambda s: {
+        "description": "Gold is a safe-haven precious metal.",
+        "major_producers": "China, Australia, Russia",
+        "major_consumers": "China, India, USA",
+        "category": "metals", "exchange": "COMEX",
+        "trading_hours": "Sun–Fri 6PM–5PM ET", "contract_size": "100 troy ounces",
+    })
+    client = "COMMODITY CONTEXT: Symbol GCUSD, Price $2000."
+    block = await resolver.resolve("COMMODITY", "GCUSD", client)
+    assert client in block                                  # the iOS context is preserved, not replaced
+    assert "Commodity profile —" in block
+    assert "safe-haven precious metal" in block
+    assert "Major producers: China, Australia, Russia." in block
+    assert "Major consumers: China, India, USA." in block
+    assert "trades on COMEX" in block and "contract 100 troy ounces" in block
+
+
+@pytest.mark.asyncio
+async def test_commodity_unknown_symbol_degrades_to_client_context(resolver, monkeypatch):
+    import app.services.commodity_service as cms
+    monkeypatch.setattr(cms, "_get_meta", lambda s: {})     # unknown symbol → empty meta
+    assert await resolver.resolve("COMMODITY", "ZZUSD", "cc") == "cc"
+    assert await resolver.resolve("COMMODITY", "ZZUSD", None) is None
+
+
+# ── Enriched grounding: Learn content bodies (Money Moves + Journey) ──
+
+@pytest.mark.asyncio
+async def test_money_move_grounds_article_body(resolver, monkeypatch):
+    resp = SimpleNamespace(articles=[{
+        "slug": "compounding", "title": "The Magic of Compounding", "subtitle": "Small sums, big time.",
+        "author": {"name": "Jane"}, "keyHighlights": [{"title": "Start early", "description": "time is the lever"}],
+        "statistics": [{"value": "8%", "label": "Avg annual return", "trend": "up", "trendValue": "x"}],
+        "sections": [
+            {"title": "Why it works", "content": [
+                {"type": "paragraph", "text": "Compounding reinvests returns so growth accelerates."},
+                {"type": "bulletList", "items": ["Reinvest dividends", "Avoid interrupting the curve"]},
+                {"type": "quote", "text": "Compound interest is the eighth wonder.", "attribution": "Einstein"},
+            ]},
+        ],
+    }])
+
+    class _Svc:
+        async def get_money_moves(self):
+            return resp
+
+    import app.services.money_moves_content_service as mm
+    monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
+
+    block = await resolver.resolve("MONEY_MOVES_ARTICLE", "compounding", None)
+    assert "Article content:" in block
+    assert "Compounding reinvests returns" in block
+    assert "Reinvest dividends" in block                    # bulletList items
+    assert "eighth wonder" in block and "Einstein" in block  # quote + attribution
+    assert "Key figures: Avg annual return: 8%" in block     # stat callouts
+
+
+@pytest.mark.asyncio
+async def test_money_move_malformed_sections_no_crash(resolver, monkeypatch):
+    resp = SimpleNamespace(articles=[{"slug": "x", "title": "T", "sections": "not-a-list"}])
+
+    class _Svc:
+        async def get_money_moves(self):
+            return resp
+
+    import app.services.money_moves_content_service as mm
+    monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
+
+    block = await resolver.resolve("MONEY_MOVES_ARTICLE", "x", None)
+    assert block is not None                                 # base block still returns
+    assert "Article content" not in block                   # malformed sections skipped
+    assert "None" not in block
+
+
+@pytest.mark.asyncio
+async def test_journey_grounds_lesson_body_and_strips_markup(resolver, monkeypatch):
+    lesson = SimpleNamespace(id="1", title="Risk 101", description="Intro to risk.",
+                             story_content={"cards": [
+                                 {"type": "title", "headline": "Risk 101", "text": "Risk is the chance of loss."},
+                                 {"type": "content", "headline": None, "text": "Diversification **reduces** unsystematic risk."},
+                             ]})
+    resp = SimpleNamespace(lessons=[lesson])
+
+    class _Svc:
+        async def get_journey(self):
+            return resp
+
+    import app.services.journey_content_service as jc
+    monkeypatch.setattr(jc, "get_journey_content_service", lambda: _Svc())
+
+    block = await resolver.resolve("JOURNEY_LESSON", "1", None)
+    assert "Lesson content:" in block
+    assert "Risk is the chance of loss." in block
+    assert "Diversification reduces unsystematic risk." in block   # ** markup stripped
+    assert "**" not in block
+
+
+@pytest.mark.asyncio
+async def test_journey_null_story_content_no_crash(resolver, monkeypatch):
+    lesson = SimpleNamespace(id="2", title="L2", description="d", story_content=None)  # Optional → None
+    resp = SimpleNamespace(lessons=[lesson])
+
+    class _Svc:
+        async def get_journey(self):
+            return resp
+
+    import app.services.journey_content_service as jc
+    monkeypatch.setattr(jc, "get_journey_content_service", lambda: _Svc())
+
+    block = await resolver.resolve("JOURNEY_LESSON", "2", None)
+    assert block is not None
+    assert "Lesson content" not in block
+    assert "None" not in block
 
 
 # ── Singleton ───────────────────────────────────────────────────────

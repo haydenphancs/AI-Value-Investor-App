@@ -37,6 +37,7 @@ _RESOLVE_TIMEOUT_SECONDS = 4.0
 # Keep the injected block small. These bound each source; the total block is at
 # most one source's worth (we resolve exactly one screen).
 _MAX_REPORT_SUMMARY = 800
+_MAX_REPORT_MODULE = 280  # per on-screen module insight (price move, moat, revenue, …)
 _MAX_ARTICLE = 700
 _MAX_ASSET = 700
 _MAX_LESSON = 600
@@ -162,6 +163,50 @@ class ChatContextResolver:
         summary = (report.get("executive_summary_text") or "").strip()
         if summary:
             parts.append("Executive summary: " + _cap(summary, _MAX_REPORT_SUMMARY))
+
+        # Recent Price Movement — the on-screen "Insight" that explains WHY the stock moved (the
+        # single most common report-chat question, and the reported grounding gap). Special-format
+        # it with the % move + the catalyst tag so a "why did it move recently?" answer can cite the
+        # real reason instead of restating the raw price numbers.
+        pa = report.get("price_action")
+        if isinstance(pa, dict):
+            narrative = (pa.get("narrative") or "").strip()
+            if narrative:
+                bits: List[str] = []
+                change = pa.get("change_pct")
+                window = (pa.get("window_label") or "").strip()
+                if isinstance(change, (int, float)) and change == change:   # `== change` skips NaN
+                    bits.append(f"{change:+.1f}%" + (f" over {window}" if window else ""))
+                tag = (pa.get("tag") or "").strip()
+                if tag:
+                    bits.append(tag)
+                head = f"Recent price movement ({'; '.join(bits)}): " if bits else "Recent price movement: "
+                parts.append(head + _cap(narrative, _MAX_REPORT_MODULE))
+
+        # Other visible module insights — each labeled + capped so the chat can ground an answer on
+        # ANY section the user sees, not just the price move. Read defensively: a malformed / absent
+        # module is skipped, never dropping the rest of the block (the whole resolver runs under one
+        # try/except that would otherwise degrade EVERYTHING to ungrounded on a single bad module).
+        def _module_line(label: str, key: str, field: str) -> None:
+            try:
+                blk = report.get(key)
+                if isinstance(blk, dict):
+                    txt = (blk.get(field) or "").strip()
+                    if txt:
+                        parts.append(f"{label}: {_cap(txt, _MAX_REPORT_MODULE)}")
+            except Exception:  # a single bad module must never nuke the whole grounding block
+                pass
+
+        for _label, _key, _field in (
+            ("Forward outlook", "revenue_forecast", "insight"),
+            ("Earnings track record", "revenue_forecast", "beat_summary"),
+            ("Revenue mix", "revenue_engine", "analysis_note"),
+            ("Moat", "moat_competition", "competitive_insight"),
+            ("Ownership", "key_management", "ownership_insight"),
+            ("Wall Street view", "wall_street_consensus", "wall_street_insight"),
+        ):
+            _module_line(_label, _key, _field)
+
         thesis = report.get("core_thesis") or {}
         bull = thesis.get("bull_case") or []
         bear = thesis.get("bear_case") or []

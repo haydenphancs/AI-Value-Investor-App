@@ -175,6 +175,104 @@ async def test_ticker_report_summary_is_capped(resolver, monkeypatch):
     assert len(block) < 1400
 
 
+@pytest.mark.asyncio
+async def test_ticker_report_grounds_recent_price_movement(resolver, monkeypatch):
+    """The reported grounding gap: the on-screen 'Recent Price Movement' insight
+    (price_action.narrative) must reach the grounding so a 'why did the price move?' answer can cite
+    the real reason (e.g. semiconductor oversupply) instead of restating raw price numbers."""
+    async def fake_get(ticker, persona):
+        return {
+            "company_name": "SanDisk",
+            "executive_summary_text": "A memory maker.",
+            "price_action": {
+                "narrative": "Fell on broader semiconductor oversupply fears following TSMC's earnings.",
+                "change_pct": -24.1,
+                "window_label": "Last 7 Days",
+                "tag": "Semiconductor Sector Concerns",
+            },
+        }
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+
+    block = await resolver.resolve("TICKER_REPORT", "SNDK|warren_buffett", None)
+    assert "Recent price movement" in block
+    assert "-24.1% over Last 7 Days" in block
+    assert "Semiconductor Sector Concerns" in block
+    assert "semiconductor oversupply fears following TSMC's earnings" in block
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_grounds_module_insights(resolver, monkeypatch):
+    """The other visible module insights ground the chat too (moat, revenue, ownership, Wall Street,
+    forward outlook, earnings track record) — each on its own labeled line."""
+    async def fake_get(ticker, persona):
+        return {
+            "company_name": "X",
+            "executive_summary_text": "s",
+            "revenue_forecast": {"insight": "Growth reaccelerates on AI demand.", "beat_summary": "Beat 6 of 8"},
+            "revenue_engine": {"analysis_note": "Cloud is now the largest segment."},
+            "moat_competition": {"competitive_insight": "Switching costs anchor the moat."},
+            "key_management": {"ownership_insight": "Founder-led with high insider ownership."},
+            "wall_street_consensus": {"wall_street_insight": "Analysts see modest upside to consensus."},
+        }
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+
+    block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
+    assert "Forward outlook: Growth reaccelerates on AI demand." in block
+    assert "Earnings track record: Beat 6 of 8" in block
+    assert "Revenue mix: Cloud is now the largest segment." in block
+    assert "Moat: Switching costs anchor the moat." in block
+    assert "Ownership: Founder-led with high insider ownership." in block
+    assert "Wall Street view: Analysts see modest upside to consensus." in block
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_module_outliers_never_crash_or_leak_none(resolver, monkeypatch):
+    """Absent / non-dict / null-field / empty modules are skipped silently — the base block still
+    returns, a single malformed module never drops the others, and 'None' never leaks into the text."""
+    async def fake_get(ticker, persona):
+        return {
+            "company_name": "X",
+            "executive_summary_text": "base summary.",
+            "price_action": "oops-not-a-dict",                            # malformed → skipped
+            "revenue_engine": {"analysis_note": None},                    # null field → skipped
+            "moat_competition": {"competitive_insight": ""},              # empty → skipped
+            "wall_street_consensus": {"wall_street_insight": "Real analyst view."},  # valid → survives
+        }
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+
+    block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
+    assert block is not None
+    assert "base summary." in block
+    assert "None" not in block                              # no null leaked into grounding
+    assert "Recent price movement" not in block             # malformed price_action skipped
+    assert "Wall Street view: Real analyst view." in block  # a valid module still survived the bad one
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_price_action_nan_change_still_grounds_narrative(resolver, monkeypatch):
+    """A NaN change_pct must be dropped from the framing (not rendered), while the narrative + tag
+    still ground the answer."""
+    async def fake_get(ticker, persona):
+        return {
+            "company_name": "X",
+            "price_action": {"narrative": "Moved on news.", "change_pct": float("nan"), "tag": "Catalyst"},
+        }
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+
+    block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
+    assert "Recent price movement (Catalyst):" in block
+    assert "Moved on news." in block
+    assert "nan" not in block.lower()   # NaN change never rendered
+
+
 # ── ETF ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

@@ -5,44 +5,63 @@ token-budgeted grounding block for the Cay AI chat prompt.
 The iOS client sends only the screen type + a reference id (a ticker,
 "TICKER|persona", an article slug, a book curriculum order, ...). This resolver
 fetches the ALREADY-CACHED data for that screen from the existing service layer
-and returns a short text block that ``chat_service`` injects into the Gemini
-system instruction. The whole point is that iOS stops shipping big raw context
-strings — so every branch is token-budgeted.
+and returns a text block that ``chat_service`` injects into the Gemini system
+instruction, so iOS stops shipping big raw context strings.
+
+Grounding strategy — "prune-then-dump" (one generic serializer, not per-field
+curation): a short curated LEAD guarantees the highest-value facts survive the
+cap, then ``_flatten_for_grounding`` dumps the WHOLE payload the resolver already
+holds (a cached report dict / a Pydantic ``model_dump`` / a bundled article dict)
+as compact ``key: value`` text — MINUS the heavy non-semantic keys a text model
+can't use (price/chart float series, audio read-along timing arrays, gradients,
+urls, embeddings). This grounds the chat on ~all of the screen's data, auto-picks
+up new fields, and stays cheap because ``_DUMP_CAP`` bounds every block.
 
 Contract:
   * Never recomputes — only reads existing caches / bundled content.
   * Never raises — any miss / failure degrades to the client-provided context
-    (or ``None``) with a ``logger.warning`` carrying context_type + reference_id,
-    so a chat can always proceed (ungrounded at worst).
+    (or ``None``) with a ``logger.warning``, so a chat can always proceed.
 
 STOCK is intentionally a no-op here: ``chat_service`` already enriches stock
-chats from ``stock_id`` (profit / snapshot / company-profile summaries), so the
-resolver defers to that path rather than duplicating those fetches.
+chats from ``stock_id`` (profit / snapshot / company-profile summaries) + the
+iOS current-tab context, so the resolver defers to that path.
 """
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Hard bound on how long a single context resolve may take. Cache-only reads
-# (report / money-moves / stock) finish in well under this. The ETF/CRYPTO/INDEX
-# services fall through to a full FMP+Gemini recompute on a cold cache — this
-# ceiling stops that from stalling the FIRST streamed token; on timeout the chat
-# proceeds ungrounded (degraded, never blocked).
+# (report / money-moves) finish well under this; the ETF/CRYPTO/INDEX services
+# fall through to a cold recompute — this ceiling stops that from stalling the
+# FIRST streamed token; on timeout the chat proceeds ungrounded (never blocked).
 _RESOLVE_TIMEOUT_SECONDS = 4.0
 
-# ── Per-source character caps ───────────────────────────────────────
-# Keep the injected block small. These bound each source; the total block is at
-# most one source's worth (we resolve exactly one screen).
-_MAX_REPORT_SUMMARY = 800
-_MAX_REPORT_MODULE = 280   # per on-screen module insight (price move, moat, revenue, profile blurb, …)
-_MAX_ASSET = 1600          # ETF / crypto / index — holdings / AI snapshots / sector board / allocation / …
-_MAX_ARTICLE = 2600        # Money Moves — whole block (title + highlights + body)
-_MAX_ARTICLE_BODY = 2000   # the article body portion (sections → plain text)
-_MAX_LESSON = 1800         # Investor Journey — whole block (title + description + body)
-_MAX_LESSON_BODY = 1600    # the lesson body portion (story cards → plain text)
+# ── Grounding caps ──────────────────────────────────────────────────
+_MAX_REPORT_SUMMARY = 800   # executive-summary portion of the report lead
+_MAX_REPORT_MODULE = 280    # the price-move narrative / commodity blurb in a lead
+_DUMP_CAP = 2800            # the flattened-payload portion (per screen). Lead adds ~0.2–1.2k on top.
+_STR_CAP = 400              # any single string field is trimmed to this in the dump
+
+# Keys dropped ANYWHERE in the payload during the dump — heavy, non-semantic data
+# a text model can't use (measured: 48–84% of a raw payload). Compared case-
+# insensitively, so both snake_case (`chart_data`) and camelCase (`readAlong`,
+# `heroGradientColors`, `audioUrl`) forms match.
+_DROP_KEYS = frozenset({
+    # numeric / chart / price series (raw coordinates)
+    "chart_data", "prices", "recent_prices", "recent_price_dates", "timeline_prices",
+    "hedge_fund_price_data", "hedge_fund_flow_data", "data_points", "history",
+    "dividend_history", "dividends", "growth_chart", "profit_power", "earnings_track_record",
+    "news_articles", "news",
+    # audio read-along timing arrays + UI cosmetics
+    "readalong", "readalongwords", "itemsreadalong", "herogradientcolors",
+    "audiourl", "imageurl", "videourl", "logo_url", "logourl", "icon", "heroimage",
+    "website", "whitepaper", "url", "uri", "source_url", "sourceurl",
+    # embeddings / bulky source lists
+    "embedding", "query_embedding", "sources",
+})
 
 # agent_tag → full persona key, so a reference_id built from EITHER form
 # ("AAPL|buffett" or "AAPL|warren_buffett") resolves to the same cache row.
@@ -68,6 +87,90 @@ def _cap(text: str, limit: int) -> str:
     return cut + "…"
 
 
+def _num(v: Any) -> Optional[str]:
+    """Format a number plainly (comma-grouped, no scientific notation, no trailing zeros).
+    Returns None for NaN so it never leaks into the grounding."""
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, int):
+        return f"{v:,}"
+    if isinstance(v, float):
+        if v != v:  # NaN
+            return None
+        if v.is_integer():
+            return f"{int(v):,}"
+        return f"{v:,.4f}".rstrip("0").rstrip(".")
+    return None
+
+
+def _flatten_for_grounding(
+    payload: Any, max_chars: int, str_cap: int = _STR_CAP, skip_top: Tuple[str, ...] = (),
+) -> str:
+    """Render a JSON-ish payload (a cached dict / a ``model_dump`` / an article dict) to compact
+    ``key: value`` grounding lines. Drops ``_DROP_KEYS`` anywhere in the tree + ``skip_top`` at the top
+    level (case-insensitive), truncates long strings to ``str_cap``, caps total output at ``max_chars``,
+    and NEVER raises (a bad node is skipped). Lists are inlined (scalars) or walked per-item (dicts),
+    both capped at 12 elements so one long array can't blow the budget."""
+    lines: List[str] = []
+    remaining = [max_chars]
+    skip_top_l = {s.lower() for s in skip_top}
+
+    def _scalar(v: Any) -> Optional[str]:
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            return (s[:str_cap] + "…") if len(s) > str_cap else s
+        return _num(v)
+
+    def _emit(key: str, s: str) -> bool:
+        line = f"{key}: {s}" if key else s
+        lines.append(line)
+        remaining[0] -= len(line) + 1
+        return remaining[0] > 0
+
+    def _walk(o: Any, prefix: str, top: bool = False) -> bool:
+        if remaining[0] <= 0:
+            return False
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if not isinstance(k, str):
+                    continue
+                kl = k.lower()
+                if kl in _DROP_KEYS or (top and kl in skip_top_l):
+                    continue
+                if v is None or v == "" or v == [] or v == {}:
+                    continue
+                key = f"{prefix}.{k}" if prefix else k
+                if isinstance(v, (dict, list)):
+                    if not _walk(v, key):
+                        return False
+                else:
+                    sv = _scalar(v)
+                    if sv is not None and not _emit(key, sv):
+                        return False
+        elif isinstance(o, list):
+            if all(not isinstance(x, (dict, list)) for x in o):   # pure-scalar list → inline
+                vals = [s for s in (_scalar(x) for x in o[:12]) if s is not None]
+                if vals and not _emit(prefix, ", ".join(vals)):
+                    return False
+            else:                                                 # mixed / dict list → per item
+                for i, item in enumerate(o[:12]):
+                    if not _walk(item, f"{prefix}[{i}]"):
+                        return False
+        else:                                                     # a scalar reached via a list item
+            sv = _scalar(o)
+            if sv is not None and not _emit(prefix, sv):
+                return False
+        return True
+
+    try:
+        _walk(payload, "", top=True)
+    except Exception as e:   # a malformed node must never drop the whole grounding block
+        logger.debug("chat_context: flatten stopped early (%s: %s)", type(e).__name__, e)
+    return "\n".join(lines)
+
+
 class ChatContextResolver:
     """Dispatches {context_type, reference_id} → compact grounding text."""
 
@@ -83,7 +186,7 @@ class ChatContextResolver:
         if ctype in _NO_CONTEXT:
             return client_context
         # BOOK has no backend text (book content is bundled in the iOS app), so
-        # the client sends a small context string we pass through verbatim.
+        # the client sends a context string (title/author + the passage) we pass through.
         if ctype == "BOOK":
             return client_context
 
@@ -129,6 +232,19 @@ class ChatContextResolver:
             "JOURNEY_LESSON": cls._resolve_journey_lesson,
         }
 
+    @staticmethod
+    def _as_dict(obj: Any) -> Dict[str, Any]:
+        """Best-effort dict view for the dump (a Pydantic model → model_dump; a dict → itself)."""
+        if isinstance(obj, dict):
+            return obj
+        dump = getattr(obj, "model_dump", None)
+        if callable(dump):
+            try:
+                return dump()
+            except Exception:
+                return {}
+        return {}
+
     # ── TICKER_REPORT ────────────────────────────────────────────────
     async def _resolve_ticker_report(
         self, reference_id: Optional[str], client_context: Optional[str]
@@ -152,77 +268,51 @@ class ChatContextResolver:
             )
             return None
 
-        parts: List[str] = [
+        # LEAD — guarantee the highest-value, most-asked facts survive the cap.
+        lead: List[str] = [
             f"The user is viewing the in-depth Cay research report for "
             f"{report.get('company_name') or ticker} ({ticker})."
         ]
         score = report.get("quality_score")
-        # quality_score is on a 0-100 scale (persona_scoring clamps to [0,100];
-        # iOS renders it as /100). Label it /100 — a /10 label told Gemini the
-        # report scored e.g. "72/10", poisoning the grounding.
+        # 0-100 scale (iOS renders /100). A /10 label told Gemini "72/10", poisoning grounding.
         if isinstance(score, (int, float)):
-            parts.append(f"Overall quality score: {score:.0f}/100.")
-        summary = (report.get("executive_summary_text") or "").strip()
-        if summary:
-            parts.append("Executive summary: " + _cap(summary, _MAX_REPORT_SUMMARY))
-
-        # Recent Price Movement — the on-screen "Insight" that explains WHY the stock moved (the
-        # single most common report-chat question, and the reported grounding gap). Special-format
-        # it with the % move + the catalyst tag so a "why did it move recently?" answer can cite the
-        # real reason instead of restating the raw price numbers.
+            lead.append(f"Overall quality score: {score:.0f}/100.")
         pa = report.get("price_action")
         if isinstance(pa, dict):
             narrative = (pa.get("narrative") or "").strip()
             if narrative:
                 bits: List[str] = []
                 change = pa.get("change_pct")
-                window = (pa.get("window_label") or "").strip()
                 if isinstance(change, (int, float)) and change == change:   # `== change` skips NaN
+                    window = (pa.get("window_label") or "").strip()
                     bits.append(f"{change:+.1f}%" + (f" over {window}" if window else ""))
                 tag = (pa.get("tag") or "").strip()
                 if tag:
                     bits.append(tag)
                 head = f"Recent price movement ({'; '.join(bits)}): " if bits else "Recent price movement: "
-                parts.append(head + _cap(narrative, _MAX_REPORT_MODULE))
+                lead.append(head + _cap(narrative, _MAX_REPORT_MODULE))
+        summary = (report.get("executive_summary_text") or "").strip()
+        if summary:
+            lead.append("Executive summary: " + _cap(summary, _MAX_REPORT_SUMMARY))
 
-        # Other visible module insights — each labeled + capped so the chat can ground an answer on
-        # ANY section the user sees, not just the price move. Read defensively: a malformed / absent
-        # module is skipped, never dropping the rest of the block (the whole resolver runs under one
-        # try/except that would otherwise degrade EVERYTHING to ungrounded on a single bad module).
-        def _module_line(label: str, key: str, field: str) -> None:
-            try:
-                blk = report.get(key)
-                if isinstance(blk, dict):
-                    txt = (blk.get(field) or "").strip()
-                    if txt:
-                        parts.append(f"{label}: {_cap(txt, _MAX_REPORT_MODULE)}")
-            except Exception:  # a single bad module must never nuke the whole grounding block
-                pass
-
-        for _label, _key, _field in (
-            ("Forward outlook", "revenue_forecast", "insight"),
-            ("Earnings track record", "revenue_forecast", "beat_summary"),
-            ("Revenue mix", "revenue_engine", "analysis_note"),
-            ("Moat", "moat_competition", "competitive_insight"),
-            ("Ownership", "key_management", "ownership_insight"),
-            ("Wall Street view", "wall_street_consensus", "wall_street_insight"),
-        ):
-            _module_line(_label, _key, _field)
-
-        thesis = report.get("core_thesis") or {}
-        bull = thesis.get("bull_case") or []
-        bear = thesis.get("bear_case") or []
-        if bull:
-            parts.append("Top bull point: " + str(bull[0]))
-        if bear:
-            parts.append("Top bear point: " + str(bear[0]))
-        parts.append(
-            "Answer questions grounded in THIS report; if asked about something "
-            "the report doesn't cover, say so rather than inventing figures."
+        # DUMP — every other section the user can see (thesis, fundamentals, revenue, moat, ownership,
+        # Wall Street, macro, critical factors) minus the lead keys + the heavy chart/price arrays.
+        dump = _flatten_for_grounding(
+            report, _DUMP_CAP,
+            skip_top=("symbol", "company_name", "exchange", "agent", "quality_score",
+                      "live_date", "price_close_date", "price_action", "executive_summary_text",
+                      "disclaimer_text"),
         )
-        return " ".join(parts)
+        parts = list(lead)
+        if dump:
+            parts.append("Full report data the user can see:\n" + dump)
+        parts.append(
+            "Answer grounded in THIS report; if asked about something it doesn't cover, say so "
+            "rather than inventing figures."
+        )
+        return "\n".join(parts)
 
-    # ── STOCK (no-op — chat_service enriches via stock_id) ───────────
+    # ── STOCK (no-op — chat_service enriches via stock_id + iOS tab context) ──
     async def _resolve_stock(
         self, reference_id: Optional[str], client_context: Optional[str]
     ) -> Optional[str]:
@@ -240,92 +330,15 @@ class ChatContextResolver:
         detail = await get_etf_service().get_etf_detail(symbol)
         if not detail:
             return None
-        parts: List[str] = [
+        lead = (
             f"The user is viewing the ETF detail screen for {detail.name} ({detail.symbol}). "
             f"Price ${detail.current_price:,.2f} ({detail.price_change_percent:+.2f}%)."
-        ]
-        prof = getattr(detail, "etf_profile", None)
-        desc = (getattr(prof, "description", "") or "").strip() if prof else ""
-        if desc:
-            parts.append("About: " + _cap(desc, _MAX_REPORT_MODULE))
-        # Yield & fees — the top ETF question, entirely absent before.
-        ny = getattr(detail, "net_yield", None)
-        if ny is not None:
-            ybits: List[str] = []
-            yld = getattr(ny, "dividend_yield", None)
-            freq = (getattr(ny, "pay_frequency", "") or "").strip()
-            if isinstance(yld, (int, float)):
-                ybits.append(f"dividend yield {yld:.2f}%" + (f" (paid {freq.lower()})" if freq else ""))
-            exp = getattr(ny, "expense_ratio", None)
-            if isinstance(exp, (int, float)):
-                ybits.append(f"expense ratio {exp:.2f}%")
-            if ybits:
-                parts.append("Yield & fees — " + "; ".join(ybits) + ".")
-        # Top holdings + sector allocation — the "what's inside it" questions.
-        hr = getattr(detail, "holdings_risk", None)
-        if hr is not None:
-            hold = [
-                f"{(getattr(h, 'symbol', '') or getattr(h, 'name', '') or '').strip()} "
-                f"{getattr(h, 'weight', 0) or 0:.1f}%".strip()
-                for h in (getattr(hr, "top_holdings", None) or [])[:6]
-            ]
-            hold = [h for h in hold if h and not h.startswith("0.0%")]
-            if hold:
-                parts.append("Top holdings — " + ", ".join(hold) + ".")
-            sec = [
-                f"{(getattr(s, 'name', '') or '').strip()} {getattr(s, 'weight', 0) or 0:.1f}%".strip()
-                for s in (getattr(hr, "top_sectors", None) or [])[:6]
-            ]
-            sec = [s for s in sec if s and not s.startswith("0.0%")]
-            if sec:
-                parts.append("Sector weights — " + ", ".join(sec) + ".")
-        stats = [f"{i.label}: {i.value}" for i in (getattr(detail, "key_statistics", None) or [])[:6]]
-        if stats:
-            parts.append("Key stats — " + "; ".join(stats) + ".")
-        perf = [
-            f"{(getattr(p, 'label', '') or '').strip()} {getattr(p, 'change_percent', 0) or 0:+.1f}%"
-            for p in (getattr(detail, "performance_periods", None) or [])[:5]
-        ]
-        if perf:
-            parts.append("Performance — " + ", ".join(perf) + ".")
-        # Asset mix + AUM, concentration risk, dividend schedule, long-run return, volatility, strategy —
-        # the rest of the ETF screen a user might ask about.
-        aa = getattr(hr, "asset_allocation", None) if hr else None
-        if aa is not None:
-            mix = [f"{lbl} {v:.0f}%" for lbl, v in (
-                ("equities", getattr(aa, "equities", 0)), ("bonds", getattr(aa, "bonds", 0)),
-                ("commodities", getattr(aa, "commodities", 0)), ("cash", getattr(aa, "cash", 0)),
-            ) if isinstance(v, (int, float)) and v]
-            tot = (getattr(aa, "total_assets", "") or "").strip()
-            if mix or tot:
-                parts.append("Allocation — " + ", ".join(mix) + (f"; AUM {tot}" if tot else "") + ".")
-        conc = getattr(hr, "concentration", None) if hr else None
-        cinsight = (getattr(conc, "insight", "") or "").strip() if conc else ""
-        if cinsight:
-            parts.append("Concentration: " + _cap(cinsight, 200))
-        ldp = getattr(ny, "last_dividend_payment", None) if ny is not None else None
-        dps = (getattr(ldp, "dividend_per_share", "") or "").strip() if ldp is not None else ""
-        if dps:
-            payd = (getattr(ldp, "pay_date", "") or "").strip()
-            parts.append(f"Last dividend {dps}" + (f" paid {payd}" if payd else "") + ".")
-        bs = getattr(detail, "benchmark_summary", None)
-        ar = getattr(bs, "avg_annual_return", None) if bs is not None else None
-        if isinstance(ar, (int, float)):
-            spb = getattr(bs, "sp_benchmark", None)
-            parts.append(f"Long-run: avg annual return {ar:.1f}%" +
-                         (f" vs S&P {spb:.1f}%" if isinstance(spb, (int, float)) else "") + ".")
-        ident = getattr(detail, "identity_rating", None)
-        vol = (getattr(ident, "volatility_label", "") or "").strip() if ident else ""
-        if vol:
-            parts.append(f"Volatility: {vol}.")
-        strat = getattr(detail, "strategy", None)
-        hook = (getattr(strat, "hook", "") or "").strip() if strat else ""
-        if hook:
-            parts.append(f"Strategy: {hook}")
-        idx = getattr(prof, "index_tracked", None) if prof else None
-        if idx:
-            parts.append(f"Tracks: {idx}.")
-        return _cap(" ".join(parts), _MAX_ASSET)
+        )
+        dump = _flatten_for_grounding(
+            self._as_dict(detail), _DUMP_CAP,
+            skip_top=("symbol", "name", "current_price", "price_change_percent"),
+        )
+        return lead + ("\nScreen data the user can see:\n" + dump if dump else "")
 
     # ── CRYPTO ────────────────────────────────────────────────────────
     async def _resolve_crypto(
@@ -339,54 +352,17 @@ class ChatContextResolver:
         detail = await get_crypto_service().get_crypto_detail(symbol)
         if not detail:
             return None
-        parts: List[str] = [
+        lead = (
             f"The user is viewing the crypto detail screen for {detail.name} ({detail.symbol}). "
             f"Price ${detail.current_price:,.4f} ({detail.price_change_percent:+.2f}%)."
-        ]
-        prof = getattr(detail, "crypto_profile", None)
-        desc = (getattr(prof, "description", "") or "").strip() if prof else ""
-        if desc:
-            parts.append("About: " + _cap(desc, _MAX_REPORT_MODULE))
-        # The on-screen AI writeup (Origin & Technology / Tokenomics / Next Big Moves / Risks) — the
-        # core analysis the user is reading. Take each category's first paragraphs, capped.
-        for snap in (getattr(detail, "snapshots", None) or [])[:4]:
-            cat = (getattr(snap, "category", "") or "").strip()
-            paras = getattr(snap, "paragraphs", None) or []
-            body = " ".join(p.strip() for p in paras if isinstance(p, str) and p.strip())
-            if cat and body:
-                parts.append(f"{cat}: {_cap(body, 240)}")
-        stats: List[str] = []
-        for group in (getattr(detail, "key_statistics_groups", None) or []):
-            for item in (getattr(group, "statistics", None) or []):
-                stats.append(f"{item.label}: {item.value}")
-                if len(stats) >= 6:
-                    break
-            if len(stats) >= 6:
-                break
-        if stats:
-            parts.append("Key stats — " + "; ".join(stats) + ".")
-        cbits: List[str] = []
-        chain = (getattr(prof, "blockchain", "") or "").strip() if prof else ""
-        if chain:
-            cbits.append(f"blockchain {chain}")
-        consensus = (getattr(prof, "consensus_mechanism", "") or "").strip() if prof else ""
-        if consensus:
-            cbits.append(f"consensus {consensus}")
-        launch = (getattr(prof, "launch_date", "") or "").strip() if prof else ""
-        if launch:
-            cbits.append(f"launched {launch}")
-        if cbits:
-            parts.append("Chain — " + ", ".join(cbits) + ".")
-        bl = "BTC"
-        perf = []
-        for p in (getattr(detail, "performance_periods", None) or [])[:5]:
-            bl = (getattr(p, "benchmark_label", "") or bl).strip() or bl
-            perf.append(f"{(getattr(p, 'label', '') or '').strip()} {getattr(p, 'change_percent', 0) or 0:+.1f}%")
-        if perf:
-            parts.append(f"Performance (vs {bl}) — " + ", ".join(perf) + ".")
-        return _cap(" ".join(parts), _MAX_ASSET)
+        )
+        dump = _flatten_for_grounding(
+            self._as_dict(detail), _DUMP_CAP,
+            skip_top=("symbol", "name", "current_price", "price_change_percent"),
+        )
+        return lead + ("\nScreen data the user can see:\n" + dump if dump else "")
 
-    # ── INDEX (best-effort; reuses index snapshots) ──────────────────
+    # ── INDEX ────────────────────────────────────────────────────────
     async def _resolve_index(
         self, reference_id: Optional[str], client_context: Optional[str]
     ) -> Optional[str]:
@@ -399,69 +375,16 @@ class ChatContextResolver:
         if not detail:
             return None
         name = (getattr(detail, "index_name", "") or "").strip()
-        head = f"The user is viewing the market/index detail screen for {name or symbol}."
+        lead = f"The user is viewing the market/index detail screen for {name or symbol}."
         price = getattr(detail, "current_price", None)
         chg = getattr(detail, "price_change_percent", None)
         if isinstance(price, (int, float)) and isinstance(chg, (int, float)):
-            head += f" Level {price:,.2f} ({chg:+.2f}%)."
-        parts: List[str] = [head]
-        prof = getattr(detail, "index_profile", None)
-        desc = (getattr(prof, "description", "") or "").strip() if prof else ""
-        if desc:
-            parts.append("About: " + _cap(desc, _MAX_REPORT_MODULE))
-        snap = getattr(detail, "snapshots_data", None)
-        val = getattr(snap, "valuation", None) if snap else None
-        if val is not None:
-            pe = getattr(val, "pe_ratio", None)
-            fpe = getattr(val, "forward_pe", None)
-            ey = getattr(val, "earnings_yield", None)
-            vbits: List[str] = []
-            if isinstance(pe, (int, float)) and pe == pe:   # `== pe` skips NaN
-                vbits.append(f"P/E {pe:.1f}" + (f" (fwd {fpe:.1f})" if isinstance(fpe, (int, float)) and fpe else ""))
-            if isinstance(ey, (int, float)):
-                vbits.append(f"earnings yield {ey:.1f}%")
-            hpe = getattr(val, "historical_avg_pe", None)
-            if isinstance(hpe, (int, float)) and hpe:
-                hper = (getattr(val, "historical_period", "") or "").strip()
-                vbits.append(f"{hper + ' ' if hper else ''}avg P/E {hpe:.1f}")
-            if vbits:
-                parts.append("Valuation — " + "; ".join(vbits) + ".")
-        # Sector board + macro outlook the user is literally looking at.
-        sp = getattr(snap, "sector_performance", None) if snap else None
-        sectors = [
-            f"{(getattr(s, 'sector', '') or '').strip()} {getattr(s, 'change_percent', 0) or 0:+.1f}%"
-            for s in (getattr(sp, "sectors", None) or [])[:8]
-        ] if sp else []
-        if sectors:
-            parts.append("Sectors today — " + ", ".join(sectors) + ".")
-        macro = getattr(snap, "macro_forecast", None) if snap else None
-        inds = [
-            f"{(getattr(m, 'title', '') or '').strip()}: {(getattr(m, 'signal', '') or '').strip()}"
-            for m in (getattr(macro, "indicators", None) or [])[:6]
-        ] if macro else []
-        inds = [i for i in inds if i.strip(": ")]
-        if inds:
-            parts.append("Macro outlook — " + ", ".join(inds) + ".")
-        # How the index is built + its returns — "how many stocks / how is it weighted / how's it done?"
-        pbits: List[str] = []
-        nc = getattr(prof, "number_of_constituents", None) if prof else None
-        if isinstance(nc, int) and nc:
-            pbits.append(f"{nc} constituents")
-        wm = (getattr(prof, "weighting_methodology", "") or "").strip() if prof else ""
-        if wm:
-            pbits.append(f"{wm}-weighted")
-        provider = (getattr(prof, "index_provider", "") or "").strip() if prof else ""
-        if provider:
-            pbits.append(f"by {provider}")
-        if pbits:
-            parts.append("Index — " + ", ".join(pbits) + ".")
-        perf = [
-            f"{(getattr(p, 'label', '') or '').strip()} {getattr(p, 'change_percent', 0) or 0:+.1f}%"
-            for p in (getattr(detail, "performance_periods", None) or [])[:5]
-        ]
-        if perf:
-            parts.append("Performance — " + ", ".join(perf) + ".")
-        return _cap(" ".join(parts), _MAX_ASSET)
+            lead += f" Level {price:,.2f} ({chg:+.2f}%)."
+        dump = _flatten_for_grounding(
+            self._as_dict(detail), _DUMP_CAP,
+            skip_top=("symbol", "index_name", "current_price", "price_change_percent"),
+        )
+        return lead + ("\nScreen data the user can see:\n" + dump if dump else "")
 
     # ── COMMODITY ────────────────────────────────────────────────────
     async def _resolve_commodity(
@@ -482,34 +405,10 @@ class ChatContextResolver:
             return client_context
         if not isinstance(meta, dict) or not meta:
             return client_context
-        bits: List[str] = []
-        desc = (meta.get("description") or "").strip()
-        if desc:
-            bits.append(_cap(desc, _MAX_REPORT_MODULE))
-        producers = (meta.get("major_producers") or "").strip()
-        if producers:
-            bits.append(f"Major producers: {producers}.")
-        consumers = (meta.get("major_consumers") or "").strip()
-        if consumers:
-            bits.append(f"Major consumers: {consumers}.")
-        tbits: List[str] = []
-        cat = (meta.get("category") or "").strip()
-        if cat:
-            tbits.append(cat)
-        exch = (meta.get("exchange") or "").strip()
-        if exch:
-            tbits.append(f"trades on {exch}")
-        hours = (meta.get("trading_hours") or "").strip()
-        if hours:
-            tbits.append(hours)
-        size = (meta.get("contract_size") or "").strip()
-        if size:
-            tbits.append(f"contract {size}")
-        if tbits:
-            bits.append("Trading — " + ", ".join(tbits) + ".")
-        if not bits:
+        dump = _flatten_for_grounding(meta, _DUMP_CAP, skip_top=("fmp_symbol", "related", "tick_size", "unit"))
+        if not dump:
             return client_context
-        profile_block = "Commodity profile — " + " ".join(bits)
+        profile_block = "Commodity profile (what the user is viewing):\n" + dump
         return f"{client_context}\n\n{profile_block}" if client_context else profile_block
 
     # ── MONEY_MOVES_ARTICLE ──────────────────────────────────────────
@@ -531,72 +430,29 @@ class ChatContextResolver:
             return None
         author = article.get("author") or {}
         author_name = author.get("name") if isinstance(author, dict) else str(author or "")
-        parts: List[str] = [
+        lead = [
             f'The user is reading the Money Moves article "{article.get("title", "")}"'
             + (f" by {author_name}" if author_name else "") + "."
         ]
         subtitle = (article.get("subtitle") or "").strip()
         if subtitle:
-            parts.append(subtitle)
-        # keyHighlights items are {icon, title, description} dicts (mirrors the
-        # iOS ArticleHighlightDTO), NOT strings — str(dict) would inject a Python
-        # dict repr (SF Symbol names + braces) as the article's key points.
-        highlights = article.get("keyHighlights") or []
-        hl_text: List[str] = []
-        for h in highlights[:4]:
-            if isinstance(h, dict):
-                title = (h.get("title") or "").strip()
-                desc = (h.get("description") or "").strip()
-                if title and desc:
-                    hl_text.append(f"{title} — {desc}")
-                elif title or desc:
-                    hl_text.append(title or desc)
-            elif h:
-                hl_text.append(str(h))
-        if hl_text:
-            parts.append("Key highlights: " + "; ".join(hl_text) + ".")
-        # Stat callouts the article surfaces (value + label; trend fields ignored).
-        stat_text: List[str] = []
-        for s in (article.get("statistics") or [])[:5]:
-            if isinstance(s, dict):
-                sval = (s.get("value") or "").strip()
-                slbl = (s.get("label") or "").strip()
-                if sval and slbl:
-                    stat_text.append(f"{slbl}: {sval}")
-        if stat_text:
-            parts.append("Key figures: " + "; ".join(stat_text) + ".")
-        # Article BODY — the actual prose the user is reading, so the chat can answer about specific
-        # ideas in it (not just the title/highlights). `sections` is opaque JSONB; guard every level.
-        # Each block's text is in `text` (paragraph / callout / subheading / quote) or `items`
-        # (bulletList); quotes add `attribution`.
-        body_parts: List[str] = []
-        for section in (article.get("sections") or []):
-            if not isinstance(section, dict):
-                continue
-            stitle = (section.get("title") or "").strip()
-            if stitle:
-                body_parts.append(stitle + ":")
-            for block in (section.get("content") or []):
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "bulletList":
-                    body_parts.extend(
-                        i.strip() for i in (block.get("items") or []) if isinstance(i, str) and i.strip()
-                    )
-                    continue
-                txt = (block.get("text") or "").strip()
-                if txt:
-                    body_parts.append(txt)
-                if block.get("type") == "quote":
-                    attr = (block.get("attribution") or "").strip()
-                    if attr:
-                        body_parts.append(f"— {attr}")
-        if body_parts:
-            parts.append("Article content: " + _cap(" ".join(body_parts), _MAX_ARTICLE_BODY))
+            lead.append(subtitle)
+        # Dump the article MINUS the engagement/cosmetic metadata (so the budget goes to the body +
+        # highlights + statistics). The drop set strips the read-along timing arrays + gradients.
+        dump = _flatten_for_grounding(
+            article, _DUMP_CAP,
+            skip_top=("slug", "title", "subtitle", "author", "cardsubtitle", "category",
+                      "readtimeminutes", "viewcount", "learnercount", "sortorder", "commentcount",
+                      "publisheddaysago", "taglabel", "isfeatured", "hasaudioversion",
+                      "audiodurationseconds"),
+        )
+        parts = list(lead)
+        if dump:
+            parts.append("Article content the user can see:\n" + dump)
         parts.append("Answer in the context of this article's ideas.")
-        return _cap(" ".join(parts), _MAX_ARTICLE)
+        return "\n".join(parts)
 
-    # ── JOURNEY_LESSON (fast-follow) ─────────────────────────────────
+    # ── JOURNEY_LESSON ───────────────────────────────────────────────
     async def _resolve_journey_lesson(
         self, reference_id: Optional[str], client_context: Optional[str]
     ) -> Optional[str]:
@@ -617,30 +473,21 @@ class ChatContextResolver:
             return None
         get = lesson.get if isinstance(lesson, dict) else lambda k, d=None: getattr(lesson, k, d)
         title = get("title", "") or ""
+        lead = [f'The user is on the Investor Journey lesson "{title}".']
         desc = (get("description", "") or "").strip()
-        parts = [f'The user is on the Investor Journey lesson "{title}".']
         if desc:
-            parts.append(desc)
-        # Lesson BODY — the story cards the user is reading, so the chat can answer about the lesson's
-        # actual content. `story_content` is Optional (service coerces a non-dict blob → None); each
-        # card carries `text` (all 234 cards) + an optional `headline` (title/completion cards only).
-        # `text` uses `**bold**` markup — strip it for clean grounding.
-        story = get("story_content", None)
-        if isinstance(story, dict):
-            body_parts: List[str] = []
-            for card in (story.get("cards") or []):
-                if not isinstance(card, dict):
-                    continue
-                headline = (card.get("headline") or "").strip()
-                if headline:
-                    body_parts.append(headline + ":")
-                text = (card.get("text") or "").strip().replace("**", "")
-                if text:
-                    body_parts.append(text)
-            if body_parts:
-                parts.append("Lesson content: " + _cap(" ".join(body_parts), _MAX_LESSON_BODY))
+            lead.append(desc)
+        # Dump the lesson body (story_content.cards[].text) + metadata; the drop set strips the
+        # per-word read-along timing arrays.
+        dump = _flatten_for_grounding(
+            self._as_dict(lesson), _DUMP_CAP,
+            skip_top=("id", "title", "description", "sort_order", "level", "category", "duration_minutes"),
+        )
+        parts = list(lead)
+        if dump:
+            parts.append("Lesson content the user can see:\n" + dump)
         parts.append("Answer in the context of this lesson.")
-        return _cap(" ".join(parts), _MAX_LESSON)
+        return "\n".join(parts)
 
 
 # ── Module-level singleton (matches every other service) ────────────

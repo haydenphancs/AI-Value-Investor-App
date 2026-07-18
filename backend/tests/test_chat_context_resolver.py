@@ -1,31 +1,100 @@
 """
-Unit tests for ChatContextResolver (backend context orchestration).
+Unit tests for ChatContextResolver (backend context orchestration) + its prune-then-dump serializer.
 
-The resolver turns {context_type, reference_id} into a compact grounding block
-by reading ALREADY-CACHED services. It must:
+The resolver turns {context_type, reference_id} into a grounding block by reading ALREADY-CACHED
+services, then a short lead + `_flatten_for_grounding` dumps the whole payload MINUS heavy noise keys.
+It must:
   * never raise — a miss / failure degrades to the client context (or None),
   * pass BOOK / unknown / NONE straight through to the client context,
   * defer STOCK to chat_service (returns None so stock_id enrichment runs),
-  * extract the right fields on a hit.
+  * ground the answer on the on-screen VALUES (we assert the values reach the block, since the labels
+    are now generic key-paths), and drop the heavy non-semantic arrays (chart/price series, read-along
+    timings, urls, embeddings).
 
-No network / Supabase — the cached services are monkeypatched. Each branch does
-a lazy import inside the resolver, so patching the module attribute before the
-call takes effect.
+No network / Supabase — the cached services are monkeypatched. Each branch does a lazy import inside
+the resolver, so patching the module attribute before the call takes effect.
 """
-
-from types import SimpleNamespace
 
 import pytest
 
 from app.services.chat_context_resolver import (
     ChatContextResolver,
     get_chat_context_resolver,
+    _flatten_for_grounding,
 )
+
+
+class _Obj:
+    """A mock detail object: attribute access (for the resolver's lead, e.g. `detail.name`) AND a
+    recursive `model_dump()` (for the prune-then-dump flatten). Mirrors a Pydantic model closely
+    enough for the resolver, which reads a few attrs for the lead and dumps the rest."""
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+    def model_dump(self):
+        def conv(v):
+            if isinstance(v, _Obj):
+                return v.model_dump()
+            if isinstance(v, list):
+                return [conv(x) for x in v]
+            if isinstance(v, dict):
+                return {k: conv(x) for k, x in v.items()}
+            return v
+        return {k: conv(v) for k, v in self.__dict__.items()}
 
 
 @pytest.fixture
 def resolver() -> ChatContextResolver:
     return ChatContextResolver()
+
+
+# ── _flatten_for_grounding (the generic serializer) ─────────────────
+
+def test_flatten_drops_noise_keys():
+    payload = {
+        "name": "AAPL",
+        "chart_data": [1, 2, 3],
+        "price_action": {"narrative": "up on news", "prices": [1.0, 2.0, 3.0]},
+        "readAlong": [{"t": 1}], "heroGradientColors": ["#fff"],
+        "logo_url": "http://x.png", "embedding": [0.1] * 10,
+    }
+    out = _flatten_for_grounding(payload, 2000)
+    assert "AAPL" in out and "up on news" in out          # semantic content kept
+    assert "chart_data" not in out and "prices" not in out
+    assert "readAlong" not in out and "heroGradientColors" not in out
+    assert "http://x.png" not in out and "0.1" not in out  # url + embedding dropped
+
+
+def test_flatten_nested_dicts_and_lists():
+    payload = {"a": {"b": "x"}, "items": [{"k": "v1"}, {"k": "v2"}], "tags": ["p", "q"]}
+    out = _flatten_for_grounding(payload, 2000)
+    assert "a.b: x" in out
+    assert "v1" in out and "v2" in out           # list of dicts → per item
+    assert "p, q" in out                         # pure-scalar list → inlined
+
+
+def test_flatten_handles_mixed_list_with_scalars():
+    # A legacy string mixed with dicts (e.g. old keyHighlights) must not be dropped.
+    payload = {"h": ["plain string", {"title": "T"}, None, {}]}
+    out = _flatten_for_grounding(payload, 2000)
+    assert "plain string" in out and "T" in out
+    assert "None" not in out
+
+
+def test_flatten_caps_total_and_truncates_strings():
+    payload = {"big": "z" * 5000, "many": {str(i): "y" * 100 for i in range(200)}}
+    out = _flatten_for_grounding(payload, 500, str_cap=50)
+    assert len(out) <= 800                       # bounded near the cap
+    assert "z" * 51 not in out                   # a single field truncated to str_cap
+
+
+def test_flatten_never_leaks_none_or_nan_or_raises():
+    payload = {"a": None, "b": "", "c": [], "d": {"e": None}, "f": float("nan"), "g": "keep"}
+    out = _flatten_for_grounding(payload, 2000)
+    assert "keep" in out
+    assert "None" not in out and "nan" not in out.lower()
+    # A bare scalar payload is fine; a bad structure must never raise.
+    assert _flatten_for_grounding("just text", 100) == "just text"
 
 
 # ── Pass-through / no-context branches ──────────────────────────────
@@ -40,10 +109,9 @@ async def test_none_context_returns_client_context(resolver):
 
 @pytest.mark.asyncio
 async def test_book_passes_client_context_through(resolver):
-    ctx = 'The user is reading the book "The Psychology of Money" by Morgan Housel.'
+    ctx = 'The user is reading "The Psychology of Money" by Morgan Housel. The passage: …'
     assert await resolver.resolve("BOOK", "3", ctx) == ctx
-    # Case-insensitive on the type.
-    assert await resolver.resolve("book", "3", ctx) == ctx
+    assert await resolver.resolve("book", "3", ctx) == ctx   # case-insensitive
 
 
 @pytest.mark.asyncio
@@ -54,8 +122,6 @@ async def test_unknown_type_passes_through_and_never_raises(resolver):
 
 @pytest.mark.asyncio
 async def test_stock_defers_to_none(resolver):
-    # STOCK returns None so chat_service's stock_id enrichment runs; resolve()
-    # then returns the client context (None here).
     assert await resolver.resolve("STOCK", "AAPL", None) is None
     assert await resolver.resolve("STOCK", "AAPL", "cc") == "cc"
 
@@ -63,34 +129,31 @@ async def test_stock_defers_to_none(resolver):
 # ── TICKER_REPORT ───────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_ticker_report_hit_extracts_summary_score_thesis(resolver, monkeypatch):
+async def test_ticker_report_lead_and_dump(resolver, monkeypatch):
     async def fake_get(ticker, persona):
         assert ticker == "AAPL" and persona == "warren_buffett"
         return {
             "company_name": "Apple Inc.",
-            # quality_score is a 0-100 value (persona_scoring clamps to [0,100]).
             "quality_score": 72.0,
             "executive_summary_text": "Apple is a high-quality compounder with durable margins.",
             "core_thesis": {"bull_case": ["Durable ecosystem moat"], "bear_case": ["Valuation is rich"]},
+            "price_action": {"prices": [1.0, 2.0, 3.0]},   # heavy array → must be dropped
         }
 
     import app.services.ticker_report_cache as trc
     monkeypatch.setattr(trc, "get_cached_report", fake_get)
 
     block = await resolver.resolve("TICKER_REPORT", "AAPL|warren_buffett", None)
-    assert block is not None
     assert "Apple Inc." in block
-    # Must be labeled /100 (the real scale) — a /10 label poisons the grounding.
-    assert "72/100" in block
-    assert "/10." not in block, f"score must not be rendered on a /10 scale: {block!r}"
-    assert "high-quality compounder" in block
-    assert "Durable ecosystem moat" in block
+    assert "72/100" in block and "/10." not in block            # /100 scale, not /10
+    assert "high-quality compounder" in block                   # lead summary
+    assert "Durable ecosystem moat" in block                    # dumped thesis
     assert "Valuation is rich" in block
+    assert "1.0, 2.0, 3.0" not in block and "prices" not in block  # price series dropped
 
 
 @pytest.mark.asyncio
 async def test_ticker_report_score_boundaries_render_on_100_scale(resolver, monkeypatch):
-    """Outlier scores (0, 100, mid) all render on /100, never /10."""
     for score in (0.0, 50.5, 100.0):
         async def fake_get(ticker, persona, _s=score):
             return {"company_name": "X", "quality_score": _s, "executive_summary_text": "s"}
@@ -103,94 +166,16 @@ async def test_ticker_report_score_boundaries_render_on_100_scale(resolver, monk
 
 
 @pytest.mark.asyncio
-async def test_ticker_report_agent_tag_maps_to_full_persona_key(resolver, monkeypatch):
-    seen = {}
-
-    async def fake_get(ticker, persona):
-        seen["ticker"] = ticker
-        seen["persona"] = persona
-        return {"company_name": "Microsoft", "executive_summary_text": "solid."}
-
-    import app.services.ticker_report_cache as trc
-    monkeypatch.setattr(trc, "get_cached_report", fake_get)
-
-    await resolver.resolve("TICKER_REPORT", "msft|buffett", None)
-    assert seen["ticker"] == "MSFT"          # uppercased
-    assert seen["persona"] == "warren_buffett"  # agent_tag → full key
-
-
-@pytest.mark.asyncio
-async def test_ticker_report_missing_persona_defaults(resolver, monkeypatch):
-    seen = {}
-
-    async def fake_get(ticker, persona):
-        seen["persona"] = persona
-        return {"company_name": "X", "executive_summary_text": "s"}
-
-    import app.services.ticker_report_cache as trc
-    monkeypatch.setattr(trc, "get_cached_report", fake_get)
-
-    await resolver.resolve("TICKER_REPORT", "TSLA", None)  # no "|persona"
-    assert seen["persona"] == "warren_buffett"
-
-
-@pytest.mark.asyncio
-async def test_ticker_report_cache_miss_returns_none(resolver, monkeypatch):
-    async def fake_get(ticker, persona):
-        return None
-
-    import app.services.ticker_report_cache as trc
-    monkeypatch.setattr(trc, "get_cached_report", fake_get)
-
-    assert await resolver.resolve("TICKER_REPORT", "AAPL|warren_buffett", None) is None
-
-
-@pytest.mark.asyncio
-async def test_ticker_report_service_error_degrades_to_client_context(resolver, monkeypatch):
-    async def boom(ticker, persona):
-        raise RuntimeError("db down")
-
-    import app.services.ticker_report_cache as trc
-    monkeypatch.setattr(trc, "get_cached_report", boom)
-
-    assert await resolver.resolve("TICKER_REPORT", "AAPL|warren_buffett", "cc") == "cc"
-
-
-@pytest.mark.asyncio
-async def test_ticker_report_empty_ref_returns_none(resolver):
-    assert await resolver.resolve("TICKER_REPORT", "", "cc") == "cc"  # no ticker → None → client ctx
-    assert await resolver.resolve("TICKER_REPORT", "", None) is None
-
-
-@pytest.mark.asyncio
-async def test_ticker_report_summary_is_capped(resolver, monkeypatch):
-    long_summary = "word " * 400  # ~2000 chars
-
-    async def fake_get(ticker, persona):
-        return {"company_name": "X", "executive_summary_text": long_summary}
-
-    import app.services.ticker_report_cache as trc
-    monkeypatch.setattr(trc, "get_cached_report", fake_get)
-
-    block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
-    # The summary portion must be bounded (cap 800 + framing), not the full 2000.
-    assert len(block) < 1400
-
-
-@pytest.mark.asyncio
 async def test_ticker_report_grounds_recent_price_movement(resolver, monkeypatch):
-    """The reported grounding gap: the on-screen 'Recent Price Movement' insight
-    (price_action.narrative) must reach the grounding so a 'why did the price move?' answer can cite
-    the real reason (e.g. semiconductor oversupply) instead of restating raw price numbers."""
+    """The reported gap: the on-screen 'Recent Price Movement' insight must lead the grounding so a
+    'why did it move?' answer cites the real reason instead of restating raw price numbers."""
     async def fake_get(ticker, persona):
         return {
             "company_name": "SanDisk",
             "executive_summary_text": "A memory maker.",
             "price_action": {
                 "narrative": "Fell on broader semiconductor oversupply fears following TSMC's earnings.",
-                "change_pct": -24.1,
-                "window_label": "Last 7 Days",
-                "tag": "Semiconductor Sector Concerns",
+                "change_pct": -24.1, "window_label": "Last 7 Days", "tag": "Semiconductor Sector Concerns",
             },
         }
 
@@ -205,44 +190,39 @@ async def test_ticker_report_grounds_recent_price_movement(resolver, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_ticker_report_grounds_module_insights(resolver, monkeypatch):
-    """The other visible module insights ground the chat too (moat, revenue, ownership, Wall Street,
-    forward outlook, earnings track record) — each on its own labeled line."""
+async def test_ticker_report_dumps_every_module(resolver, monkeypatch):
+    """Every visible module's text grounds the chat (values reach the block; labels are key-paths)."""
     async def fake_get(ticker, persona):
         return {
-            "company_name": "X",
-            "executive_summary_text": "s",
+            "company_name": "X", "executive_summary_text": "s",
             "revenue_forecast": {"insight": "Growth reaccelerates on AI demand.", "beat_summary": "Beat 6 of 8"},
             "revenue_engine": {"analysis_note": "Cloud is now the largest segment."},
             "moat_competition": {"competitive_insight": "Switching costs anchor the moat."},
             "key_management": {"ownership_insight": "Founder-led with high insider ownership."},
-            "wall_street_consensus": {"wall_street_insight": "Analysts see modest upside to consensus."},
+            "wall_street_consensus": {"wall_street_insight": "Analysts see modest upside."},
+            "macro_data": {"headline": "Rates are the swing factor.", "intelligence_brief": "Watch CPI."},
         }
 
     import app.services.ticker_report_cache as trc
     monkeypatch.setattr(trc, "get_cached_report", fake_get)
 
     block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
-    assert "Forward outlook: Growth reaccelerates on AI demand." in block
-    assert "Earnings track record: Beat 6 of 8" in block
-    assert "Revenue mix: Cloud is now the largest segment." in block
-    assert "Moat: Switching costs anchor the moat." in block
-    assert "Ownership: Founder-led with high insider ownership." in block
-    assert "Wall Street view: Analysts see modest upside to consensus." in block
+    for phrase in ("Growth reaccelerates on AI demand.", "Beat 6 of 8", "Cloud is now the largest segment.",
+                   "Switching costs anchor the moat.", "Founder-led with high insider ownership.",
+                   "Analysts see modest upside.", "Rates are the swing factor.", "Watch CPI."):
+        assert phrase in block, phrase
 
 
 @pytest.mark.asyncio
-async def test_ticker_report_module_outliers_never_crash_or_leak_none(resolver, monkeypatch):
-    """Absent / non-dict / null-field / empty modules are skipped silently — the base block still
-    returns, a single malformed module never drops the others, and 'None' never leaks into the text."""
+async def test_ticker_report_outliers_never_crash_or_leak_none(resolver, monkeypatch):
     async def fake_get(ticker, persona):
         return {
             "company_name": "X",
             "executive_summary_text": "base summary.",
-            "price_action": "oops-not-a-dict",                            # malformed → skipped
+            "price_action": "oops-not-a-dict",                            # malformed → no lead, skip_top'd
             "revenue_engine": {"analysis_note": None},                    # null field → skipped
             "moat_competition": {"competitive_insight": ""},              # empty → skipped
-            "wall_street_consensus": {"wall_street_insight": "Real analyst view."},  # valid → survives
+            "wall_street_consensus": {"wall_street_insight": "Real analyst view."},  # valid → dumped
         }
 
     import app.services.ticker_report_cache as trc
@@ -251,20 +231,16 @@ async def test_ticker_report_module_outliers_never_crash_or_leak_none(resolver, 
     block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
     assert block is not None
     assert "base summary." in block
-    assert "None" not in block                              # no null leaked into grounding
-    assert "Recent price movement" not in block             # malformed price_action skipped
-    assert "Wall Street view: Real analyst view." in block  # a valid module still survived the bad one
+    assert "None" not in block
+    assert "oops-not-a-dict" not in block            # malformed price_action skipped
+    assert "Real analyst view." in block             # a valid module still dumped
 
 
 @pytest.mark.asyncio
-async def test_ticker_report_price_action_nan_change_still_grounds_narrative(resolver, monkeypatch):
-    """A NaN change_pct must be dropped from the framing (not rendered), while the narrative + tag
-    still ground the answer."""
+async def test_ticker_report_price_action_nan_change(resolver, monkeypatch):
     async def fake_get(ticker, persona):
-        return {
-            "company_name": "X",
-            "price_action": {"narrative": "Moved on news.", "change_pct": float("nan"), "tag": "Catalyst"},
-        }
+        return {"company_name": "X",
+                "price_action": {"narrative": "Moved on news.", "change_pct": float("nan"), "tag": "Catalyst"}}
 
     import app.services.ticker_report_cache as trc
     monkeypatch.setattr(trc, "get_cached_report", fake_get)
@@ -272,204 +248,117 @@ async def test_ticker_report_price_action_nan_change_still_grounds_narrative(res
     block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
     assert "Recent price movement (Catalyst):" in block
     assert "Moved on news." in block
-    assert "nan" not in block.lower()   # NaN change never rendered
+    assert "nan" not in block.lower()
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_agent_tag_maps_to_full_persona_key(resolver, monkeypatch):
+    seen = {}
+
+    async def fake_get(ticker, persona):
+        seen["ticker"], seen["persona"] = ticker, persona
+        return {"company_name": "Microsoft", "executive_summary_text": "solid."}
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+
+    await resolver.resolve("TICKER_REPORT", "msft|buffett", None)
+    assert seen["ticker"] == "MSFT"
+    assert seen["persona"] == "warren_buffett"
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_missing_persona_defaults(resolver, monkeypatch):
+    seen = {}
+
+    async def fake_get(ticker, persona):
+        seen["persona"] = persona
+        return {"company_name": "X", "executive_summary_text": "s"}
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+
+    await resolver.resolve("TICKER_REPORT", "TSLA", None)
+    assert seen["persona"] == "warren_buffett"
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_cache_miss_returns_none(resolver, monkeypatch):
+    async def fake_get(ticker, persona):
+        return None
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+    assert await resolver.resolve("TICKER_REPORT", "AAPL|warren_buffett", None) is None
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_service_error_degrades_to_client_context(resolver, monkeypatch):
+    async def boom(ticker, persona):
+        raise RuntimeError("db down")
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", boom)
+    assert await resolver.resolve("TICKER_REPORT", "AAPL|warren_buffett", "cc") == "cc"
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_empty_ref_returns_none(resolver):
+    assert await resolver.resolve("TICKER_REPORT", "", "cc") == "cc"
+    assert await resolver.resolve("TICKER_REPORT", "", None) is None
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_block_is_bounded(resolver, monkeypatch):
+    """Even a huge report is bounded by the lead caps + _DUMP_CAP (~lead + 2800 chars)."""
+    async def fake_get(ticker, persona):
+        return {
+            "company_name": "X",
+            "executive_summary_text": "word " * 400,                       # ~2000 chars → capped in lead
+            "moat_competition": {"competitive_insight": "deep " * 400},     # big → dump-capped
+            "critical_factors": [{"title": f"f{i}", "detail": "x" * 200} for i in range(50)],
+        }
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+    block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
+    assert len(block) < 4600     # lead (~1k) + dump (2800) + framing — never the full payload
 
 
 # ── ETF ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_etf_hit_extracts_price_and_stats(resolver, monkeypatch):
-    class _Item:
-        def __init__(self, label, value):
-            self.label, self.value = label, value
-
-    class _Prof:
-        index_tracked = "S&P 500 Index"
-
-    class _Detail:
-        name = "SPDR S&P 500 ETF"
-        symbol = "SPY"
-        current_price = 500.12
-        price_change_percent = 0.53
-        key_statistics = [_Item("Expense Ratio", "0.09%"), _Item("AUM", "$500B")]
-        etf_profile = _Prof()
+async def test_etf_hit_grounds_price_and_stats(resolver, monkeypatch):
+    detail = _Obj(name="SPDR S&P 500 ETF", symbol="SPY", current_price=500.12, price_change_percent=0.53,
+                  key_statistics=[_Obj(label="Expense Ratio", value="0.09%"), _Obj(label="AUM", value="$500B")],
+                  etf_profile=_Obj(index_tracked="S&P 500 Index", website="http://spy.com"))
 
     class _Svc:
         async def get_etf_detail(self, symbol):
             assert symbol == "SPY"
-            return _Detail()
+            return detail
 
     import app.services.etf_service as es
     monkeypatch.setattr(es, "get_etf_service", lambda: _Svc())
 
     block = await resolver.resolve("ETF", "spy", None)
-    assert block is not None
-    assert "SPDR S&P 500 ETF" in block
-    assert "0.09%" in block
-    assert "S&P 500 Index" in block
+    assert "SPDR S&P 500 ETF" in block and "0.09%" in block and "S&P 500 Index" in block
+    assert "http://spy.com" not in block          # website dropped
 
 
 @pytest.mark.asyncio
-async def test_etf_empty_symbol_returns_none(resolver):
-    assert await resolver.resolve("ETF", "", None) is None
-
-
-@pytest.mark.asyncio
-async def test_resolve_times_out_on_slow_recompute_and_degrades(resolver, monkeypatch):
-    """A cold ETF/crypto/index detail recompute must NOT stall the first token:
-    the resolve timeout bounds it and degrades to the client context."""
-    import asyncio as _a
-    import app.services.chat_context_resolver as ccr
-    import app.services.etf_service as es
-
-    monkeypatch.setattr(ccr, "_RESOLVE_TIMEOUT_SECONDS", 0.05)
-
-    class _SlowSvc:
-        async def get_etf_detail(self, symbol):
-            await _a.sleep(1.0)  # far exceeds the 0.05s bound
-            raise AssertionError("should have been cancelled by the timeout")
-
-    monkeypatch.setattr(es, "get_etf_service", lambda: _SlowSvc())
-
-    block = await resolver.resolve("ETF", "SPY", "fallback ctx")
-    assert block == "fallback ctx"
-
-
-# ── CRYPTO ──────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_crypto_hit_extracts_stats_from_groups(resolver, monkeypatch):
-    class _Item:
-        def __init__(self, label, value):
-            self.label, self.value = label, value
-
-    class _Group:
-        def __init__(self, stats):
-            self.statistics = stats
-
-    class _Prof:
-        blockchain = "Bitcoin"
-
-    class _Detail:
-        name = "Bitcoin"
-        symbol = "BTC"
-        current_price = 65000.0
-        price_change_percent = -1.2
-        key_statistics_groups = [_Group([_Item("Market Cap", "$1.2T"), _Item("Volume 24h", "$30B")])]
-        crypto_profile = _Prof()
-
-    class _Svc:
-        async def get_crypto_detail(self, symbol):
-            return _Detail()
-
-    import app.services.crypto_service as cs
-    monkeypatch.setattr(cs, "get_crypto_service", lambda: _Svc())
-
-    block = await resolver.resolve("CRYPTO", "btc", None)
-    assert block is not None
-    assert "Bitcoin" in block
-    assert "$1.2T" in block
-
-
-# ── MONEY_MOVES_ARTICLE ─────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_money_move_hit_extracts_title_author_highlights(resolver, monkeypatch):
-    # keyHighlights are {icon,title,description} dicts (the real served shape) —
-    # the resolver must extract human text, NOT str() the dict.
-    class _Resp:
-        articles = [
-            {
-                "slug": "compound-interest",
-                "title": "The Power of Compounding",
-                "subtitle": "Small amounts, big results",
-                "author": {"name": "Jane Doe"},
-                "keyHighlights": [
-                    {"icon": "clock.fill", "title": "Start Early", "description": "Time is the biggest lever"},
-                    {"icon": "arrow.up", "title": "Stay Consistent", "description": "Automate contributions"},
-                ],
-            },
-            {"slug": "other", "title": "Other Article"},
-        ]
-
-    class _Svc:
-        async def get_money_moves(self):
-            return _Resp()
-
-    import app.services.money_moves_content_service as mm
-    monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
-
-    block = await resolver.resolve("MONEY_MOVES_ARTICLE", "compound-interest", None)
-    assert block is not None
-    assert "The Power of Compounding" in block
-    assert "Jane Doe" in block
-    # Human title + description extracted; NO raw dict/SF-symbol leakage.
-    assert "Start Early" in block
-    assert "Time is the biggest lever" in block
-    assert "clock.fill" not in block
-    assert "'icon'" not in block and "{" not in block
-
-
-@pytest.mark.asyncio
-async def test_money_move_highlights_tolerate_string_and_malformed(resolver, monkeypatch):
-    """Outlier: string highlights (legacy) and empty/None entries degrade cleanly."""
-    class _Resp:
-        articles = [{
-            "slug": "s", "title": "T", "author": "",
-            "keyHighlights": ["plain string", {"title": "OnlyTitle"}, {"description": "OnlyDesc"}, {}, None],
-        }]
-
-    class _Svc:
-        async def get_money_moves(self):
-            return _Resp()
-
-    import app.services.money_moves_content_service as mm
-    monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
-
-    block = await resolver.resolve("MONEY_MOVES_ARTICLE", "s", None)
-    assert block is not None
-    assert "plain string" in block and "OnlyTitle" in block and "OnlyDesc" in block
-    assert "{" not in block and "None" not in block
-
-
-@pytest.mark.asyncio
-async def test_money_move_unknown_slug_returns_none(resolver, monkeypatch):
-    class _Resp:
-        articles = [{"slug": "a", "title": "A"}]
-
-    class _Svc:
-        async def get_money_moves(self):
-            return _Resp()
-
-    import app.services.money_moves_content_service as mm
-    monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
-
-    assert await resolver.resolve("MONEY_MOVES_ARTICLE", "missing", None) is None
-
-
-# ── Enriched grounding: asset details (ETF / CRYPTO / INDEX) ────────
-
-@pytest.mark.asyncio
-async def test_etf_grounds_holdings_dividend_sectors_performance(resolver, monkeypatch):
-    detail = SimpleNamespace(
+async def test_etf_dumps_holdings_dividend_sectors(resolver, monkeypatch):
+    detail = _Obj(
         name="Vanguard S&P 500", symbol="VOO", current_price=500.0, price_change_percent=0.5,
-        key_statistics=[SimpleNamespace(label="AUM", value="$400B")],
-        etf_profile=SimpleNamespace(description="Tracks the S&P 500 index of US large caps.", index_tracked="S&P 500"),
-        net_yield=SimpleNamespace(
-            dividend_yield=1.30, expense_ratio=0.03, pay_frequency="Quarterly",
-            last_dividend_payment=SimpleNamespace(dividend_per_share="$1.77", pay_date="Jan 31, 2026"),
-        ),
-        holdings_risk=SimpleNamespace(
-            top_holdings=[SimpleNamespace(symbol="AAPL", name="Apple", weight=7.1),
-                          SimpleNamespace(symbol="MSFT", name="Microsoft", weight=6.5)],
-            top_sectors=[SimpleNamespace(name="Technology", weight=30.2)],
-            asset_allocation=SimpleNamespace(equities=99.0, bonds=0.0, commodities=0.0, cash=1.0, total_assets="$400B"),
-            concentration=SimpleNamespace(top_n=10, weight=32.0, insight="Top 10 holdings are ~a third of the fund."),
-        ),
-        performance_periods=[SimpleNamespace(label="1Y", change_percent=12.3)],
-        benchmark_summary=SimpleNamespace(avg_annual_return=13.1, sp_benchmark=13.1),
-        identity_rating=SimpleNamespace(volatility_label="Moderate Volatility"),
-        strategy=SimpleNamespace(hook="Cheap, broad, passive exposure to US large caps.", tags=["Passive", "Index"]),
+        chart_data=[{"t": 1, "p": 499.0}],   # heavy noise → dropped
+        etf_profile=_Obj(description="Tracks the S&P 500 index of US large caps.", index_tracked="S&P 500"),
+        net_yield=_Obj(dividend_yield=1.30, expense_ratio=0.03, pay_frequency="Quarterly",
+                       last_dividend_payment=_Obj(dividend_per_share="$1.77", pay_date="Jan 31 2026")),
+        holdings_risk=_Obj(top_holdings=[_Obj(symbol="AAPL", name="Apple", weight=7.1),
+                                         _Obj(symbol="MSFT", name="Microsoft", weight=6.5)],
+                           top_sectors=[_Obj(name="Technology", weight=30.2)]),
+        performance_periods=[_Obj(label="1Y", change_percent=12.3)],
+        strategy=_Obj(hook="Cheap, broad, passive exposure to US large caps."),
     )
 
     class _Svc:
@@ -480,34 +369,63 @@ async def test_etf_grounds_holdings_dividend_sectors_performance(resolver, monke
     monkeypatch.setattr(es, "get_etf_service", lambda: _Svc())
 
     block = await resolver.resolve("ETF", "voo", None)
-    assert "dividend yield 1.30% (paid quarterly)" in block
-    assert "expense ratio 0.03%" in block
-    assert "AAPL 7.1%" in block and "MSFT 6.5%" in block
-    assert "Technology 30.2%" in block
-    assert "1Y +12.3%" in block
-    assert "Tracks the S&P 500 index" in block
-    # The secondary fields fold in too.
-    assert "equities 99%" in block and "AUM $400B" in block
-    assert "Top 10 holdings are ~a third" in block
-    assert "Last dividend $1.77 paid Jan 31, 2026" in block
-    assert "avg annual return 13.1% vs S&P 13.1%" in block
-    assert "Volatility: Moderate Volatility" in block
-    assert "Strategy: Cheap, broad, passive" in block
+    assert "Vanguard S&P 500 (VOO)" in block
+    for v in ("1.3", "0.03", "Quarterly", "AAPL", "7.1", "MSFT", "Technology", "30.2",
+              "$1.77", "Jan 31 2026", "12.3", "Tracks the S&P 500 index", "Cheap, broad, passive"):
+        assert v in block, v
+    assert "chart_data" not in block             # heavy series dropped
 
 
 @pytest.mark.asyncio
-async def test_crypto_grounds_snapshots_and_description(resolver, monkeypatch):
-    detail = SimpleNamespace(
+async def test_etf_bare_detail_still_grounds(resolver, monkeypatch):
+    detail = _Obj(name="X", symbol="X", current_price=1.0, price_change_percent=0.0,
+                  key_statistics=[_Obj(label="AUM", value="$1B")], etf_profile=_Obj(index_tracked="Idx"))
+
+    class _Svc:
+        async def get_etf_detail(self, s):
+            return detail
+
+    import app.services.etf_service as es
+    monkeypatch.setattr(es, "get_etf_service", lambda: _Svc())
+
+    block = await resolver.resolve("ETF", "x", None)
+    assert "X (X)" in block and "$1B" in block and "Idx" in block
+    assert "None" not in block
+
+
+@pytest.mark.asyncio
+async def test_etf_empty_symbol_returns_none(resolver):
+    assert await resolver.resolve("ETF", "", None) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_times_out_on_slow_recompute_and_degrades(resolver, monkeypatch):
+    import asyncio as _a
+    import app.services.chat_context_resolver as ccr
+    import app.services.etf_service as es
+
+    monkeypatch.setattr(ccr, "_RESOLVE_TIMEOUT_SECONDS", 0.05)
+
+    class _SlowSvc:
+        async def get_etf_detail(self, symbol):
+            await _a.sleep(1.0)
+            raise AssertionError("should have been cancelled by the timeout")
+
+    monkeypatch.setattr(es, "get_etf_service", lambda: _SlowSvc())
+    assert await resolver.resolve("ETF", "SPY", "fallback ctx") == "fallback ctx"
+
+
+# ── CRYPTO ──────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_crypto_dumps_snapshots_and_profile(resolver, monkeypatch):
+    detail = _Obj(
         name="Ethereum", symbol="ETH", current_price=3000.0, price_change_percent=-1.2,
-        crypto_profile=SimpleNamespace(description="A programmable blockchain for smart contracts.",
-                                       blockchain="Ethereum", consensus_mechanism="Proof of Stake",
-                                       launch_date="Jul 2015"),
-        snapshots=[
-            SimpleNamespace(category="Tokenomics", paragraphs=["ETH has no fixed max supply; issuance is offset by EIP-1559 burns."]),
-            SimpleNamespace(category="Risks", paragraphs=["Regulatory classification and L2 competition are key risks."]),
-        ],
-        key_statistics_groups=[SimpleNamespace(statistics=[SimpleNamespace(label="Market Cap", value="$360B")])],
-        performance_periods=[SimpleNamespace(label="1Y", change_percent=42.0, benchmark_label="BTC")],
+        crypto_profile=_Obj(description="A programmable blockchain for smart contracts.",
+                            blockchain="Ethereum", consensus_mechanism="Proof of Stake"),
+        snapshots=[_Obj(category="Tokenomics", paragraphs=["No fixed max supply; EIP-1559 burns."]),
+                   _Obj(category="Risks", paragraphs=["Regulatory and L2 competition risks."])],
+        key_statistics_groups=[_Obj(statistics=[_Obj(label="Market Cap", value="$360B")])],
     )
 
     class _Svc:
@@ -518,31 +436,26 @@ async def test_crypto_grounds_snapshots_and_description(resolver, monkeypatch):
     monkeypatch.setattr(cs, "get_crypto_service", lambda: _Svc())
 
     block = await resolver.resolve("CRYPTO", "eth", None)
-    assert "programmable blockchain for smart contracts" in block
-    assert "Tokenomics:" in block and "EIP-1559 burns" in block
-    assert "Risks:" in block and "L2 competition" in block
-    assert "Market Cap: $360B" in block
-    assert "consensus Proof of Stake" in block
-    assert "launched Jul 2015" in block
-    assert "Performance (vs BTC) — 1Y +42.0%" in block
+    for v in ("Ethereum (ETH)", "programmable blockchain for smart contracts", "Tokenomics",
+              "EIP-1559 burns", "Risks", "L2 competition", "Market Cap", "$360B", "Proof of Stake"):
+        assert v in block, v
 
+
+# ── INDEX ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_index_grounds_name_price_sectors_macro(resolver, monkeypatch):
-    snap = SimpleNamespace(
-        valuation=SimpleNamespace(pe_ratio=21.0, forward_pe=18.5, earnings_yield=4.7,
-                                  historical_avg_pe=17.5, historical_period="10Y"),
-        sector_performance=SimpleNamespace(sectors=[SimpleNamespace(sector="Technology", change_percent=0.8),
-                                                    SimpleNamespace(sector="Energy", change_percent=-0.4)]),
-        macro_forecast=SimpleNamespace(indicators=[SimpleNamespace(title="Inflation", description="cooling", signal="neutral")]),
+async def test_index_dumps_name_price_sectors_macro(resolver, monkeypatch):
+    detail = _Obj(
+        index_name="S&P 500", current_price=5200.0, price_change_percent=0.3,
+        index_profile=_Obj(description="500 large-cap US stocks.", number_of_constituents=500,
+                           weighting_methodology="Market-cap"),
+        snapshots_data=_Obj(
+            valuation=_Obj(pe_ratio=21.0, forward_pe=18.5, earnings_yield=4.7),
+            sector_performance=_Obj(sectors=[_Obj(sector="Technology", change_percent=0.8),
+                                             _Obj(sector="Energy", change_percent=-0.4)]),
+            macro_forecast=_Obj(indicators=[_Obj(title="Inflation", description="cooling", signal="neutral")])),
+        chart_data=[{"m": "Jan", "p": 5000}],
     )
-    detail = SimpleNamespace(index_name="S&P 500", current_price=5200.0, price_change_percent=0.3,
-                             index_profile=SimpleNamespace(description="500 large-cap US stocks.",
-                                                           number_of_constituents=500,
-                                                           weighting_methodology="Market-cap",
-                                                           index_provider="S&P Dow Jones"),
-                             performance_periods=[SimpleNamespace(label="1Y", change_percent=11.0)],
-                             snapshots_data=snap)
 
     class _Svc:
         async def get_index_detail(self, s):
@@ -552,81 +465,53 @@ async def test_index_grounds_name_price_sectors_macro(resolver, monkeypatch):
     monkeypatch.setattr(ixs, "get_index_service", lambda: _Svc())
 
     block = await resolver.resolve("INDEX", "^GSPC", None)
-    assert "S&P 500" in block
-    assert "Level 5,200.00 (+0.30%)" in block
-    assert "P/E 21.0 (fwd 18.5)" in block
-    assert "10Y avg P/E 17.5" in block
-    assert "Technology +0.8%" in block and "Energy -0.4%" in block
-    assert "Inflation: neutral" in block
-    assert "500 large-cap US stocks" in block
-    assert "500 constituents" in block and "Market-cap-weighted" in block
-    assert "Performance — 1Y +11.0%" in block
+    assert "S&P 500" in block and "Level 5,200.00 (+0.30%)" in block
+    for v in ("18.5", "Technology", "Energy", "Inflation", "cooling", "neutral",
+              "500 large-cap US stocks", "Market-cap"):
+        assert v in block, v
+    assert "chart_data" not in block
 
+
+# ── COMMODITY ───────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_asset_detail_missing_enrichment_fields_no_crash(resolver, monkeypatch):
-    """A bare detail (only price/stats, none of the new fields) still grounds the basics without a crash."""
-    detail = SimpleNamespace(name="X", symbol="X", current_price=1.0, price_change_percent=0.0,
-                             key_statistics=[SimpleNamespace(label="AUM", value="$1B")],
-                             etf_profile=SimpleNamespace(index_tracked="Idx"))
-
-    class _Svc:
-        async def get_etf_detail(self, s):
-            return detail
-
-    import app.services.etf_service as es
-    monkeypatch.setattr(es, "get_etf_service", lambda: _Svc())
-
-    block = await resolver.resolve("ETF", "x", None)
-    assert block is not None and "AUM: $1B" in block and "Tracks: Idx" in block
-    assert "None" not in block
-
-
-# ── Enriched grounding: COMMODITY (bundled profile appended to iOS context) ──
-
-@pytest.mark.asyncio
-async def test_commodity_appends_bundled_profile_to_client_context(resolver, monkeypatch):
+async def test_commodity_appends_bundled_profile(resolver, monkeypatch):
     import app.services.commodity_service as cms
     monkeypatch.setattr(cms, "_get_meta", lambda s: {
         "description": "Gold is a safe-haven precious metal.",
-        "major_producers": "China, Australia, Russia",
-        "major_consumers": "China, India, USA",
-        "category": "metals", "exchange": "COMEX",
-        "trading_hours": "Sun–Fri 6PM–5PM ET", "contract_size": "100 troy ounces",
+        "major_producers": "China, Australia, Russia", "major_consumers": "China, India, USA",
+        "category": "metals", "exchange": "COMEX", "fmp_symbol": "GCUSD",
     })
     client = "COMMODITY CONTEXT: Symbol GCUSD, Price $2000."
     block = await resolver.resolve("COMMODITY", "GCUSD", client)
-    assert client in block                                  # the iOS context is preserved, not replaced
-    assert "Commodity profile —" in block
-    assert "safe-haven precious metal" in block
-    assert "Major producers: China, Australia, Russia." in block
-    assert "Major consumers: China, India, USA." in block
-    assert "trades on COMEX" in block and "contract 100 troy ounces" in block
+    assert client in block                       # iOS context preserved, not replaced
+    assert "Commodity profile" in block
+    for v in ("safe-haven precious metal", "China, Australia, Russia", "China, India, USA", "COMEX"):
+        assert v in block, v
 
 
 @pytest.mark.asyncio
 async def test_commodity_unknown_symbol_degrades_to_client_context(resolver, monkeypatch):
     import app.services.commodity_service as cms
-    monkeypatch.setattr(cms, "_get_meta", lambda s: {})     # unknown symbol → empty meta
+    monkeypatch.setattr(cms, "_get_meta", lambda s: {})
     assert await resolver.resolve("COMMODITY", "ZZUSD", "cc") == "cc"
     assert await resolver.resolve("COMMODITY", "ZZUSD", None) is None
 
 
-# ── Enriched grounding: Learn content bodies (Money Moves + Journey) ──
+# ── MONEY_MOVES_ARTICLE ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_money_move_grounds_article_body(resolver, monkeypatch):
-    resp = SimpleNamespace(articles=[{
+async def test_money_move_dumps_body_and_drops_noise(resolver, monkeypatch):
+    resp = _Obj(articles=[{
         "slug": "compounding", "title": "The Magic of Compounding", "subtitle": "Small sums, big time.",
-        "author": {"name": "Jane"}, "keyHighlights": [{"title": "Start early", "description": "time is the lever"}],
-        "statistics": [{"value": "8%", "label": "Avg annual return", "trend": "up", "trendValue": "x"}],
-        "sections": [
-            {"title": "Why it works", "content": [
-                {"type": "paragraph", "text": "Compounding reinvests returns so growth accelerates."},
-                {"type": "bulletList", "items": ["Reinvest dividends", "Avoid interrupting the curve"]},
-                {"type": "quote", "text": "Compound interest is the eighth wonder.", "attribution": "Einstein"},
-            ]},
-        ],
+        "author": {"name": "Jane Doe"},
+        "keyHighlights": [{"title": "Start early", "description": "time is the lever", "icon": "clock"}],
+        "statistics": [{"value": "8%", "label": "Avg annual return"}],
+        "viewCount": 1234, "audioUrl": "http://a.m4a", "heroGradientColors": ["#fff", "#000"],
+        "sections": [{"title": "Why it works", "content": [
+            {"type": "paragraph", "text": "Compounding reinvests returns so growth accelerates."},
+            {"type": "bulletList", "items": ["Reinvest dividends", "Avoid interrupting the curve"]},
+            {"type": "quote", "text": "Compound interest is the eighth wonder.", "attribution": "Einstein"}]}],
     }])
 
     class _Svc:
@@ -637,16 +522,17 @@ async def test_money_move_grounds_article_body(resolver, monkeypatch):
     monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
 
     block = await resolver.resolve("MONEY_MOVES_ARTICLE", "compounding", None)
-    assert "Article content:" in block
-    assert "Compounding reinvests returns" in block
-    assert "Reinvest dividends" in block                    # bulletList items
-    assert "eighth wonder" in block and "Einstein" in block  # quote + attribution
-    assert "Key figures: Avg annual return: 8%" in block     # stat callouts
+    assert "The Magic of Compounding" in block and "Jane Doe" in block
+    for v in ("Compounding reinvests returns", "Reinvest dividends", "eighth wonder", "Einstein",
+              "Start early", "time is the lever", "Avg annual return", "8%"):
+        assert v in block, v
+    # Noise dropped
+    assert "1234" not in block and "http://a.m4a" not in block and "#fff" not in block and "clock" not in block
 
 
 @pytest.mark.asyncio
 async def test_money_move_malformed_sections_no_crash(resolver, monkeypatch):
-    resp = SimpleNamespace(articles=[{"slug": "x", "title": "T", "sections": "not-a-list"}])
+    resp = _Obj(articles=[{"slug": "x", "title": "T", "sections": "not-a-list"}])
 
     class _Svc:
         async def get_money_moves(self):
@@ -656,19 +542,32 @@ async def test_money_move_malformed_sections_no_crash(resolver, monkeypatch):
     monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
 
     block = await resolver.resolve("MONEY_MOVES_ARTICLE", "x", None)
-    assert block is not None                                 # base block still returns
-    assert "Article content" not in block                   # malformed sections skipped
-    assert "None" not in block
+    assert block is not None and "None" not in block
 
 
 @pytest.mark.asyncio
-async def test_journey_grounds_lesson_body_and_strips_markup(resolver, monkeypatch):
-    lesson = SimpleNamespace(id="1", title="Risk 101", description="Intro to risk.",
-                             story_content={"cards": [
-                                 {"type": "title", "headline": "Risk 101", "text": "Risk is the chance of loss."},
-                                 {"type": "content", "headline": None, "text": "Diversification **reduces** unsystematic risk."},
-                             ]})
-    resp = SimpleNamespace(lessons=[lesson])
+async def test_money_move_unknown_slug_returns_none(resolver, monkeypatch):
+    resp = _Obj(articles=[{"slug": "a", "title": "A"}])
+
+    class _Svc:
+        async def get_money_moves(self):
+            return resp
+
+    import app.services.money_moves_content_service as mm
+    monkeypatch.setattr(mm, "get_money_moves_content_service", lambda: _Svc())
+    assert await resolver.resolve("MONEY_MOVES_ARTICLE", "missing", None) is None
+
+
+# ── JOURNEY_LESSON ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_journey_dumps_lesson_body_and_drops_timings(resolver, monkeypatch):
+    lesson = {"id": "1", "title": "Risk 101", "description": "Intro to risk.",
+              "story_content": {"cards": [
+                  {"type": "title", "headline": "Risk 101", "text": "Risk is the chance of loss."},
+                  {"type": "content", "text": "Diversification reduces unsystematic risk.",
+                   "readAlongWords": [{"w": "Diversification", "t0": 0.0, "t1": 0.4}]}]}}
+    resp = _Obj(lessons=[lesson])
 
     class _Svc:
         async def get_journey(self):
@@ -678,16 +577,16 @@ async def test_journey_grounds_lesson_body_and_strips_markup(resolver, monkeypat
     monkeypatch.setattr(jc, "get_journey_content_service", lambda: _Svc())
 
     block = await resolver.resolve("JOURNEY_LESSON", "1", None)
-    assert "Lesson content:" in block
+    assert "Risk 101" in block
     assert "Risk is the chance of loss." in block
-    assert "Diversification reduces unsystematic risk." in block   # ** markup stripped
-    assert "**" not in block
+    assert "Diversification reduces unsystematic risk." in block
+    assert "readAlongWords" not in block and "t0" not in block   # per-word timing arrays dropped
 
 
 @pytest.mark.asyncio
 async def test_journey_null_story_content_no_crash(resolver, monkeypatch):
-    lesson = SimpleNamespace(id="2", title="L2", description="d", story_content=None)  # Optional → None
-    resp = SimpleNamespace(lessons=[lesson])
+    lesson = {"id": "2", "title": "L2", "description": "d", "story_content": None}
+    resp = _Obj(lessons=[lesson])
 
     class _Svc:
         async def get_journey(self):
@@ -698,8 +597,7 @@ async def test_journey_null_story_content_no_crash(resolver, monkeypatch):
 
     block = await resolver.resolve("JOURNEY_LESSON", "2", None)
     assert block is not None
-    assert "Lesson content" not in block
-    assert "None" not in block
+    assert "Lesson content" not in block and "None" not in block
 
 
 # ── Singleton ───────────────────────────────────────────────────────

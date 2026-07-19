@@ -83,9 +83,11 @@ def _to_pct(val: Optional[float]) -> Optional[float]:
     """Convert decimal to percentage if needed. FMP ratios are decimals (0.25 = 25%)."""
     if val is None:
         return None
-    if abs(val) < 1:
-        return round(val * 100, 2)
-    return round(val, 2)
+    # FMP ratios/margins are ALWAYS decimals (0.25 = 25%), and ROE/ROA can exceed
+    # 1.0 (AAPL ROE 1.54 = 154%). The old `abs(val) < 1` heuristic treated any
+    # decimal >= 1 as an already-scaled percent, under-reporting those 100x
+    # (154% shown as 1.54%). Scale unconditionally.
+    return round(val * 100, 2)
 
 
 def _fmt_pct(val: Optional[float]) -> str:
@@ -106,7 +108,7 @@ def _profitability_score(value: Optional[float], sector_median_decimal: Optional
     if value is None:
         return 3  # neutral if no data
 
-    if sector_median_decimal is None or sector_median_decimal == 0:
+    if sector_median_decimal is None or sector_median_decimal <= 0:
         # No sector benchmark — use absolute thresholds as fallback
         if value >= 20:
             return 5

@@ -47,7 +47,7 @@ from app.services.agents.persona_config import PERSONA_KEYS
 from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
 )
-from app.services.credit_service import CreditService
+from app.services.credit_service import CreditService, CreditServiceUnavailable
 from app.services.research_reconciliation_service import claim_and_mark_failed
 from app.services.ticker_report_cache import (
     current_close_cycle_start,
@@ -155,9 +155,22 @@ async def generate_research_report(
     # credits available. NULL → INSUFFICIENT_CREDITS, no row was
     # mutated (no race window between check and decrement).
     credit_service = CreditService()
-    new_remaining = credit_service.try_charge(
-        user["id"], CreditService.DEEP_RESEARCH_COST
-    )
+    try:
+        new_remaining = credit_service.try_charge(
+            user["id"], CreditService.DEEP_RESEARCH_COST
+        )
+    except CreditServiceUnavailable:
+        # Transient Supabase/RPC failure while charging — NOT a genuine
+        # insufficient balance. Surface a retryable SYSTEM_BUSY (409, mirrors
+        # the in-flight gate above) so a DB blip never tells a paying user
+        # they're out of credits (the old behavior returned None here → the
+        # INSUFFICIENT_CREDITS branch below).
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=409,
+            message="charge_user_credits RPC unavailable (transient)",
+            details={"user_id": user["id"], "step": "credit_charge"},
+        )
     if new_remaining is None:
         return make_error_response(
             ErrorCode.INSUFFICIENT_CREDITS,

@@ -12,6 +12,7 @@ Smart Money tabs currently return placeholder data.
 
 import asyncio
 import logging
+import math
 import re
 import time
 from datetime import datetime, timezone, timedelta
@@ -89,14 +90,44 @@ def _validate_ticker(ticker: str) -> str:
 # ── Helpers ───────────────────────────────────────────────────────
 
 def _safe_float(record: Dict[str, Any], key: str, default: float = 0.0) -> float:
-    """Safely extract a float value from a dict."""
+    """Safely extract a FINITE float value from a dict.
+
+    NaN / ±Inf coerce to ``default`` — they are NOT passed through. FMP payloads
+    can carry the non-standard JSON tokens ``NaN`` / ``Infinity`` (httpx's
+    ``response.json()`` parses them into Python floats without raising), and
+    ``float("NaN")`` / ``float(float('inf'))`` also do not raise. A non-finite
+    value reaching a REQUIRED response float 500s the ENTIRE Holders tab: FastAPI
+    serializes via Starlette's ``JSONResponse``, which renders with
+    ``json.dumps(..., allow_nan=False)`` and raises ``ValueError`` on any NaN/Inf.
+    (This mirrors the isfinite guard in growth_service / profit_power_service.)
+    """
     val = record.get(key)
     if val is None:
         return default
     try:
-        return float(val)
+        result = float(val)
     except (ValueError, TypeError):
         return default
+    return result if math.isfinite(result) else default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Coerce a possibly-None/NaN/Inf/str value to a finite int.
+
+    FMP institutional position counts (``newPositions``, ``closedPositions`` …)
+    feed ``int(...)`` directly; ``int(float('nan'))`` raises ``ValueError``, so an
+    NaN token there would 500 the flow-summary build. Non-finite / unparseable →
+    ``default``.
+    """
+    if value is None:
+        return default
+    try:
+        f = float(value)
+    except (ValueError, TypeError):
+        return default
+    if not math.isfinite(f):
+        return default
+    return int(f)
 
 
 # Backward-compat alias — callers use the private name; shared impl lives in _insider_common.
@@ -224,10 +255,15 @@ class HoldersService:
     def _has_one_sided_hedge_fund_data(result: HoldersResponse) -> bool:
         """Detect stale cache where hedge fund quarters have only buy OR sell.
 
-        When both buyers and sellers exist (which is nearly always the case),
-        we expect both buy_volume > 0 and sell_volume > 0.  One-sided data
-        indicates the row was computed before the _estimate_buy_sell logic
-        was added.
+        A one-sided split is only WRONG when BOTH sides actually have
+        institutions (buyers_count > 0 AND sellers_count > 0) yet only one side
+        carries volume — that's the legacy pre-estimate row. A quarter with
+        genuinely one-sided participation (e.g. an accumulation quarter:
+        buyers > 0, sellers == 0) legitimately produces sell_volume == 0 via
+        _estimate_buy_sell and must NOT be treated as stale — otherwise the 24h
+        Supabase cache is rejected on every read for such tickers, forcing a full
+        12-call FMP rebuild each time the in-memory tier expires. Gate on both
+        counts, mirroring the sibling check in _load_existing_quarters.
         """
         try:
             hf = result.hedge_funds_data
@@ -236,8 +272,10 @@ class HoldersService:
             for pt in hf.flow_data:
                 if not pt.has_activity:
                     continue
-                # If there's activity but only one side has volume → stale
-                if (pt.buy_volume > 0) != (pt.sell_volume > 0):
+                buyers = pt.buyers_count or 0
+                sellers = pt.sellers_count or 0
+                # Both sides participated but only one has volume → legacy stale.
+                if buyers > 0 and sellers > 0 and (pt.buy_volume > 0) != (pt.sell_volume > 0):
                     return True
             return False
         except Exception:
@@ -708,22 +746,25 @@ class HoldersService:
 
         if aggregate_data is not None:
             # ── Primary path: use ALL-institution aggregate data ──
+            # _safe_int / _safe_float reject NaN/Inf tokens FMP can inject: int()
+            # on a NaN raises ValueError (→ 502) and a NaN share change flows
+            # into a required response float (→ 500 at allow_nan=False render).
             buyers = (
-                int(aggregate_data.get("newPositions") or 0)
-                + int(aggregate_data.get("increasedPositions") or 0)
+                _safe_int(aggregate_data.get("newPositions"))
+                + _safe_int(aggregate_data.get("increasedPositions"))
             )
             sellers = (
-                int(aggregate_data.get("closedPositions") or 0)
-                + int(aggregate_data.get("reducedPositions") or 0)
+                _safe_int(aggregate_data.get("closedPositions"))
+                + _safe_int(aggregate_data.get("reducedPositions"))
             )
-            shares_change = float(aggregate_data.get("numberOf13FsharesChange") or 0)
+            shares_change = _safe_float(aggregate_data, "numberOf13FsharesChange", 0.0)
 
             # Quarter-end price (same approach as _build_hedge_fund_smart_money)
             qtr_prices = self._quarter_end_prices(daily_prices)
             price = qtr_prices.get((data_year, data_quarter), 0.0)
             if price <= 0:
-                total_inv = float(aggregate_data.get("totalInvested") or 0)
-                total_shares = float(aggregate_data.get("numberOf13Fshares") or 1)
+                total_inv = _safe_float(aggregate_data, "totalInvested", 0.0)
+                total_shares = _safe_float(aggregate_data, "numberOf13Fshares", 0.0)
                 price = total_inv / total_shares if total_shares > 0 else 0
 
             net_millions = (shares_change * price) / 1_000_000
@@ -764,13 +805,17 @@ class HoldersService:
         roster: List[Dict[str, Any]],
     ) -> List[InsiderActivitySchema]:
         """Convert FMP insider trading data into InsiderActivity entries."""
-        # Build a title lookup from roster
+        # Build a title lookup from roster — keyed on the NORMALIZED name so it
+        # matches the (also-normalized) reporting name below even when the roster
+        # and insider-trading endpoints return the same person in different
+        # shapes ('Ellison, Lawrence Joseph' vs 'ELLISON LAWRENCE JOSEPH').
         title_map: Dict[str, str] = {}
         for r in roster:
-            name = (r.get("owner") or "").strip()
+            if not (r.get("owner") or "").strip():
+                continue
+            name = normalize_insider_name(r.get("owner"))
             title = r.get("title") or r.get("typeOfOwner") or "Officer"
-            if name:
-                title_map[name.lower()] = title
+            title_map[name.lower()] = title
 
         result = []
         for tx in trades:
@@ -779,7 +824,14 @@ class HoldersService:
             if security_name and "common stock" not in security_name:
                 continue
 
-            reporting_name = tx.get("reportingName", tx.get("reportingCik", "Unknown"))
+            # Normalize FMP's messy 'LAST FIRST' / comma name shapes to ONE
+            # canonical form so: (a) the list matches the roster/report display;
+            # (b) the summary's distinct-name buyer/seller counts don't
+            # double-count one insider reported under two shapes; (c) a numeric
+            # reportingCik fallback can't crash `.lower()` (str-coerce first).
+            reporting_name = normalize_insider_name(
+                tx.get("reportingName") or str(tx.get("reportingCik") or "")
+            )
             tx_type_raw = tx.get("transactionType", "")
             classified = _classify_insider_transaction(tx_type_raw)
 
@@ -803,8 +855,16 @@ class HoldersService:
             if "Sell" in classified:
                 change_millions = -change_millions
 
-            # Get date
-            date_str = tx.get("filingDate", tx.get("transactionDate", ""))
+            # Get date — TRANSACTION-date preferred, matching the insider flow
+            # chart (_build_insider_smart_money). Both consume the SAME insider
+            # list, so they must key off the same date field or they disagree at
+            # the 365-day window edge and on cross-month trades: Form 4 filingDate
+            # is always >= transactionDate, so a trade transacted just before the
+            # cutoff but filed just after it would be dropped by the chart yet
+            # kept by this summary card (and land under a different month bar).
+            # Transaction date is also the economically correct bucketing
+            # ("did insiders sell into strength or weakness?").
+            date_str = (tx.get("transactionDate") or tx.get("filingDate") or "")[:10]
             if not date_str:
                 date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -1323,35 +1383,57 @@ class HoldersService:
         transactions — so the gross buy/sell SPLIT is estimated from the net +
         buyer/seller counts via ``_estimate_buy_sell`` (the green/red bars).
         """
-        buyers = (
-            int(data.get("newPositions") or 0)
-            + int(data.get("increasedPositions") or 0)
+        # _safe_int / _safe_float reject NaN/Inf/None: int(NaN) raises, and a
+        # non-finite net share change both 500s the response (allow_nan=False)
+        # AND fails the hedge_fund_quarters numeric column + buy_volume>=0 CHECK
+        # on upsert.
+        # Clamp counts to >= 0: FMP occasionally emits a negative position count
+        # (data artifact); a negative buyers_count/sellers_count violates the
+        # hedge_fund_quarters CHECK, and _save_quarters upserts the whole 8-row
+        # batch atomically — one bad row would block ALL quarters from caching.
+        buyers = max(
+            0,
+            _safe_int(data.get("newPositions"))
+            + _safe_int(data.get("increasedPositions")),
         )
-        sellers = (
-            int(data.get("closedPositions") or 0)
-            + int(data.get("reducedPositions") or 0)
+        sellers = max(
+            0,
+            _safe_int(data.get("closedPositions"))
+            + _safe_int(data.get("reducedPositions")),
         )
-        net_shares = float(data.get("numberOf13FsharesChange") or 0)
+        net_shares = _safe_float(data, "numberOf13FsharesChange", 0.0)
         if split_ratio and split_ratio != 1.0:
-            cur = float(data.get("numberOf13Fshares") or 0)
+            cur = _safe_float(data, "numberOf13Fshares", 0.0)
             last_raw = data.get("lastNumberOf13Fshares")
-            last = float(last_raw) if last_raw is not None else (cur - net_shares)
-            # Only treat it as a real split when the reported share count
-            # actually moved by ~the split ratio (the physical signature of a
-            # split). FMP's /splits ALSO returns spinoffs, ADR-ratio changes,
-            # and reverse splits with odd ratios where the count did NOT
-            # multiply — adjusting those fabricates a huge false change
-            # (e.g. GE's 1.253 "split" is a spinoff: shares didn't grow 1.25x).
-            if last > 0 and abs(cur / last - split_ratio) <= 0.15 * split_ratio:
-                net_shares = cur - last * split_ratio
+            last = _safe_float(data, "lastNumberOf13Fshares", 0.0) if last_raw is not None else (cur - net_shares)
+            if last > 0:
+                ratio_obs = cur / last
+                # Clean split signature: the count moved by ~the split ratio, so
+                # last is pre-split and cur is post-split → restate onto the
+                # post-split basis. (NVDA 10:1 etc.)
+                if abs(ratio_obs - split_ratio) <= 0.15 * split_ratio:
+                    net_shares = cur - last * split_ratio
+                # Ambiguous zone: the count clearly jumped TOWARD the split
+                # (closer to the ratio than to 1.0) but a large concurrent real
+                # position change means the raw net is an inseparable mix of
+                # split + real flow. Showing it raw fabricates a wrong-sign bar
+                # (e.g. a 2:1 split while institutions trimmed 20% reads as a
+                # huge BUY). We can't cleanly separate the two → suppress the flow
+                # (keep the real holder counts), matching the magnitude guard's
+                # "render no bar, not garbage" philosophy.
+                elif ratio_obs >= (1.0 + split_ratio) / 2.0:
+                    return 0.0, 0.0, 0.0, buyers, sellers
+                # else: the count did NOT jump toward the split (ratio_obs ≈ 1.0)
+                # → a spinoff / ADR-ratio change / already-adjusted count that
+                # FMP's /splits mislabels as a split. Keep the raw net.
         net_shares_m = net_shares / 1_000_000
         # Magnitude safety guard: a quarterly net change can't plausibly exceed
-        # ~half the institutional shares HELD. Anything above that is a corporate
-        # action / data artifact (reverse-split micro-caps, mergers like SIRI) —
-        # not real flow. Suppress it (zero flow, but keep the real holder counts)
-        # so the chart renders NO bar for that quarter instead of garbage.
-        total_m = float(data.get("numberOf13Fshares") or 0) / 1_000_000
-        if total_m > 0 and abs(net_shares_m) > 0.5 * total_m:
+        # ~half the institutional shares HELD. Anything at/above that is a
+        # corporate action / data artifact (reverse-split micro-caps, mergers
+        # like SIRI) — not real flow. Suppress it (zero flow, keep the real
+        # holder counts) so the chart renders NO bar for that quarter.
+        total_m = _safe_float(data, "numberOf13Fshares", 0.0) / 1_000_000
+        if total_m > 0 and abs(net_shares_m) >= 0.5 * total_m:
             return 0.0, 0.0, 0.0, buyers, sellers
         buy_m, sell_m = HoldersService._estimate_buy_sell(
             net_shares_m, buyers, sellers
@@ -1379,9 +1461,13 @@ class HoldersService:
             den = s.get("denominator")
             if d and num and den:
                 try:
-                    events.append((d, float(num) / float(den)))
+                    ratio = float(num) / float(den)
                 except (ValueError, ZeroDivisionError, TypeError):
                     continue
+                # Drop non-finite ratios (NaN/Inf tokens) — a NaN split ratio
+                # would silently disable the split restatement further down.
+                if math.isfinite(ratio) and ratio > 0:
+                    events.append((d, ratio))
         _Q_END = {1: "-03-31", 2: "-06-30", 3: "-09-30", 4: "-12-31"}
         out: Dict[Tuple[int, int], float] = {}
         for (y, q) in pairs:
@@ -1718,21 +1804,32 @@ class HoldersService:
             parts = clean.split(" - ")
             try:
                 high = float(parts[1].strip())
-                return high / 1_000_000
+                if math.isfinite(high):
+                    return high / 1_000_000
             except (ValueError, IndexError):
                 pass
 
         if clean.lower().startswith("over "):
             try:
                 base = float(clean[5:].strip())
-                return base / 1_000_000
             except ValueError:
-                pass
+                base = float("nan")
+            # Open-ended "Over $X" has no upper bound. The midpoint helper models
+            # it as base*1.5 (parse_congress_amount_dollars), so the MAX must be
+            # AT LEAST that — otherwise amount_range_max_millions < change_in_millions
+            # on the same trade (an impossible "max below the representative value")
+            # and the client's sort-by-max ranks a huge open-ended disclosure BELOW
+            # a bounded one. Mirror the midpoint's 1.5x so max >= midpoint.
+            if math.isfinite(base):
+                return (base * 1.5) / 1_000_000
 
         try:
-            return float(clean) / 1_000_000
+            v = float(clean)
+            if math.isfinite(v):
+                return v / 1_000_000
         except ValueError:
-            return 0.0
+            pass
+        return 0.0
 
     def _build_congress_smart_money(
         self,

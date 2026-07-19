@@ -204,14 +204,15 @@ def _compute_growth_points(
             except ValueError:
                 continue
 
-            prev_rec = lookup.get((period, prev_year))
-            if prev_rec is None:
-                continue  # no prior year to compare
-
             current_val = _safe_float(rec, metric_key)
-            prev_val = _safe_float(prev_rec, metric_key)
             if current_val is None:
-                continue
+                continue  # no chartable value for this quarter
+
+            # A missing prior-year same quarter (FMP gap) must NOT drop the bar —
+            # it has a real, chartable value. Emit it with a null YoY, mirroring
+            # the annual branch's 'always emit the bar' invariant.
+            prev_rec = lookup.get((period, prev_year))
+            prev_val = _safe_float(prev_rec, metric_key) if prev_rec is not None else None
 
             results.append({
                 # period = fiscal label for DISPLAY; _match_period = calendar

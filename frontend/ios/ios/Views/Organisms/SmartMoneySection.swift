@@ -67,7 +67,10 @@ struct SmartMoneySection: View {
                     // Congress all show the SAME clean two-axis layout regardless
                     // of magnitude. (Report's insider chart omits both → unchanged.)
                     priceVolumeGap: AppSpacing.sm,
-                    uniformVolumeAxis: true
+                    uniformVolumeAxis: true,
+                    // Congress bars are dollars (STOCK Act ranges); Insider &
+                    // Institutions are 13F/Form-4 SHARE counts. Marks the axis "$".
+                    isDollarDenominated: selectedTab == .congress
                 )
                 .id(selectedTab.rawValue)
                 .animation(.easeInOut(duration: 0.3), value: selectedTab)

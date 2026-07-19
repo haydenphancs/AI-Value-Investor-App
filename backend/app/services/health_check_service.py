@@ -1140,8 +1140,13 @@ class HealthCheckService:
 
         # Phase 5: overall rating
         passed = sum(1 for m in metrics if m.status == "positive")
+        neutrals = sum(1 for m in metrics if m.status == "neutral")
         total = len(metrics)
-        rating = _overall_rating(passed, total)
+        # Neutral (in-line-with-sector) metrics get HALF credit in the rating, so a
+        # company that matches its sector on everything reads "mix", not "poor
+        # [0/N]". passed_count stays the strict positive count (honest "N of M beat
+        # sector" badge); only a genuine "negative" is a full miss.
+        rating = _overall_rating(passed + 0.5 * neutrals, total)
 
         response = HealthCheckResponse(
             symbol=ticker,

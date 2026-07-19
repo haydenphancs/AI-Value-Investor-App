@@ -15,6 +15,7 @@ Matches the iOS SnapshotItemDTO struct.
 """
 
 import asyncio
+import math
 import logging
 import re
 import time
@@ -117,7 +118,8 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     if val is None:
         return None
     try:
-        return float(val)
+        f = float(val)
+        return f if math.isfinite(f) else None
     except (ValueError, TypeError):
         return None
 
@@ -524,6 +526,20 @@ class HealthSnapshotService:
                     pass_rating = 2
                 else:
                     pass_rating = 1
+        else:
+            # Fallback path ran → derive pass_rating from the 4 sector-comparable
+            # ratios we computed locally. Previously pass_rating stayed the constant
+            # 3, so a leveraged/illiquid company's D/E, CR, IC, QR did not move the
+            # overall Financial Health rating at all (it was driven by Altman Z alone).
+            _fb = [
+                _fallback_sector_score(de, sector_de, lower_is_better=True),
+                _fallback_sector_score(cr, sector_cr, lower_is_better=False),
+                _fallback_sector_score(ic, sector_ic, lower_is_better=False),
+                _fallback_sector_score(qr, sector_qr, lower_is_better=False),
+            ]
+            _fb = [s for s in _fb if s is not None]
+            if _fb:
+                pass_rating = round(sum(_fb) / len(_fb))
 
         weighted = 0.4 * z_rating + 0.6 * pass_rating
         rating = max(1, min(5, round(weighted)))

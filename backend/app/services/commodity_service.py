@@ -7,7 +7,9 @@ CLUSD (Crude Oil WTI), NGUSD (Natural Gas), etc.
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional
 
 from app.integrations.fmp import FMPClient, get_fmp_client
@@ -24,6 +26,30 @@ from app.schemas.commodity import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _commodity_market_status() -> str:
+    """Honest open/closed string for commodity futures (was hardcoded "Market Open",
+    which showed a live status on weekends/holidays over a stale last close).
+
+    CME Globex commodity futures run ~Sunday 6pm ET → Friday 5pm ET (with a short
+    daily maintenance break). We conservatively report "Market Closed" only when we
+    are confident it is closed — all day Saturday, Sunday before 6pm ET, and Friday
+    after 5pm ET — and "Market Open" otherwise (the iOS decoder maps any non-open
+    string to a closed state, so this never over-claims 'open'). The ~1h daily break
+    is intentionally treated as open to avoid false 'closed' during active sessions.
+    """
+    now = datetime.now(tz=ZoneInfo("America/New_York"))
+    weekday = now.weekday()  # 0=Mon … 5=Sat, 6=Sun
+    hour = now.hour
+    if weekday == 5:  # Saturday — fully closed
+        return "Market Closed"
+    if weekday == 6 and hour < 18:  # Sunday before the 6pm ET reopen
+        return "Market Closed"
+    if weekday == 4 and hour >= 17:  # Friday after the 5pm ET close
+        return "Market Closed"
+    return "Market Open"
+
 
 # ── Commodity metadata ────────────────────────────────────────────
 
@@ -303,13 +329,19 @@ class CommodityService:
         historical.sort(key=lambda p: p.get("date") or "")
 
         # ── Step 2: Extract quote data ────────────────────────────
-        price = quote.get("price") or 0
-        change = quote.get("change") or 0
+        # FMP quote numerics can be bare NaN/Inf JSON tokens; those are truthy so
+        # `x or 0` keeps them, and they flow into the REQUIRED current_price/
+        # price_change/price_change_percent Doubles → whole commodity screen fails to
+        # decode on iOS (or 500s via Starlette allow_nan=False). Coerce to finite.
+        from app.services.chart_helper import _finite_or_none
+        price = _finite_or_none(quote.get("price")) or 0
+        change = _finite_or_none(quote.get("change")) or 0
         # FMP /quote returns the daily move under `changesPercentage` (plural) for
         # most symbols; some feeds use `changePercentage`. Read both, then fall
         # back to computing it from change/previousClose so commodity screens
         # never show a hard 0.00%.
-        change_pct = quote.get("changePercentage") or quote.get("changesPercentage") or 0
+        change_pct = (_finite_or_none(quote.get("changePercentage"))
+                      or _finite_or_none(quote.get("changesPercentage")) or 0)
         day_high = quote.get("dayHigh") or 0
         day_low = quote.get("dayLow") or 0
         year_high = quote.get("yearHigh") or 0
@@ -317,7 +349,7 @@ class CommodityService:
         volume = quote.get("volume") or 0
         avg_volume = quote.get("avgVolume") or 0
         open_price = quote.get("open") or 0
-        prev_close = quote.get("previousClose") or 0
+        prev_close = _finite_or_none(quote.get("previousClose")) or 0
         if not change_pct and change and prev_close:
             try:
                 change_pct = round((float(change) / float(prev_close)) * 100, 4)
@@ -355,7 +387,10 @@ class CommodityService:
             return f"{prefix}{v:,.{decimals}f}" if prefix else f"{v:,.{decimals}f}"
 
         def _fmt_vol(v):
-            if not v:
+            # A non-finite volume (bare NaN/Inf FMP token) is truthy and reaches
+            # `str(int(v))`, where int(NaN)→ValueError / int(inf)→OverflowError,
+            # 500-ing the whole commodity endpoint. Degrade to "—".
+            if not v or (isinstance(v, float) and not math.isfinite(v)):
                 return "—"
             if v >= 1_000_000:
                 return f"{v / 1_000_000:.1f}M"
@@ -458,8 +493,11 @@ class CommodityService:
             related_commodities.append(RelatedCommodityResponse(
                 symbol=sym,
                 name=rel_name,
-                price=round(rel_price, 2),
-                change_percent=round(rel_change, 2),
+                # Finite-guard: a NaN/Inf from a related quote survives round() into
+                # the REQUIRED price/change_percent Doubles and crashes the whole
+                # CommodityDetail decode on one bad related row.
+                price=round(_finite_or_none(rel_price) or 0.0, 2),
+                change_percent=round(_finite_or_none(rel_change) or 0.0, 2),
             ))
 
         # ── Step 9: Build benchmark summary ───────────────────────
@@ -492,7 +530,7 @@ class CommodityService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
-            market_status="Market Open",
+            market_status=_commodity_market_status(),
             chart_data=chart_data,
             key_statistics_groups=key_statistics_groups,
             performance_periods=performance_periods,

@@ -1265,7 +1265,10 @@ class StockOverviewService:
         self, km: Dict, fr: Dict, inc: Dict
     ) -> SnapshotItemResponse:
         op_margin = _safe_float(fr, "operatingProfitMargin") or _safe_float(km, "operatingProfitMargin")
-        net_margin = _safe_float(fr, "netProfitMargin") or _safe_float(km, "netIncomePerShare")
+        # Fall back to a real MARGIN field only. netIncomePerShare is EPS in dollars,
+        # NOT a margin — using it rendered per-share earnings (e.g. $6.13) as a
+        # "Net Margin" of 6.13% (or 50% for a $0.50 EPS via the <1 *100 heuristic).
+        net_margin = _safe_float(fr, "netProfitMargin") or _safe_float(km, "netProfitMargin")
         roe = _safe_float(fr, "returnOnEquity") or _safe_float(km, "roe")
         roa = _safe_float(fr, "returnOnAssets") or _safe_float(km, "returnOnTangibleAssets")
 
@@ -1678,14 +1681,20 @@ class StockOverviewService:
 
         from datetime import date as _date, datetime as _dt
 
-        stock_end = stock_hist[-1].get("close") or stock_hist[-1].get("adjClose")
+        from app.services.chart_helper import _finite_or_none as _fin
+        stock_end = _fin(stock_hist[-1].get("close") or stock_hist[-1].get("adjClose"))
         end_date_str = (stock_hist[-1].get("date") or "")[:10]
+        # `not stock_end` now also catches a non-finite latest close (a bare NaN/Inf
+        # FMP token slips past a plain `stock_end <= 0` and produces a NaN CAGR in the
+        # REQUIRED avg_annual_return/sp_benchmark, crashing the whole /overview).
         if not stock_end or stock_end <= 0:
             return None
 
         def _cagr_from(start_price, end_price, start_date_str, end_date_str_):
             """Compute CAGR between two price/date pairs."""
-            if not start_price or not end_price or start_price <= 0:
+            # isfinite guard: a NaN/Inf price is truthy and passes `not x`/`x <= 0`.
+            if (not start_price or not end_price or start_price <= 0
+                    or not math.isfinite(start_price) or not math.isfinite(end_price)):
                 return None
             try:
                 sd = _date.fromisoformat(start_date_str[:10])

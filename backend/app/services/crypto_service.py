@@ -771,6 +771,29 @@ class CryptoService:
         price = _usd("current_price")
         change = md.get("price_change_24h", 0) or 0
         change_pct = md.get("price_change_percentage_24h", 0) or 0
+
+        # CoinGecko outage / unresolved coin id → market_data is {} and every
+        # _usd()/md.get() collapses to 0, shipping a bogus "$0.00 (+0.00%)" header
+        # under a live FMP price chart (the FMP `historical` fetch succeeds
+        # independently). Degrade to the real FMP price: last finite historical
+        # close, deriving the 24h move from the prior close. A wrong $0.00 is worse
+        # than a slightly stale-but-real price.
+        if not price and historical:
+            from app.services.chart_helper import _finite_or_none
+            _fin_closes = [
+                c for c in (
+                    _finite_or_none(p.get("close") or p.get("adjClose"))
+                    for p in historical
+                ) if c and c > 0
+            ]
+            if _fin_closes:
+                price = _fin_closes[-1]
+                if not change and not change_pct and len(_fin_closes) >= 2:
+                    _prev = _fin_closes[-2]
+                    if _prev > 0:
+                        change = round(price - _prev, 6)
+                        change_pct = round(((price - _prev) / _prev) * 100, 4)
+
         day_high = _usd("high_24h")
         day_low = _usd("low_24h")
         volume = _usd("total_volume")
@@ -998,9 +1021,16 @@ class CryptoService:
             """
             if not prices or len(prices) < 2:
                 return 0.0
-            start_price = prices[0].get("close") or prices[0].get("adjClose") or 0
-            end_price = prices[-1].get("close") or prices[-1].get("adjClose") or 0
-            if start_price <= 0 or end_price <= 0:
+            # Finite-guard both ends. A NaN/Inf close (FMP can emit a bare
+            # NaN/Infinity JSON token) is truthy and slips past `x or 0` / `x <= 0`,
+            # yielding a NaN CAGR that lands in the REQUIRED avg_annual_return /
+            # sp_benchmark float and crashes the iOS decode of the whole detail
+            # screen (or 500s via Starlette allow_nan=False). Matches every sibling
+            # return helper (_compute_return / _compute_all_time_return).
+            from app.services.chart_helper import _finite_or_none
+            start_price = _finite_or_none(prices[0].get("close") or prices[0].get("adjClose"))
+            end_price = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
+            if not start_price or not end_price or start_price <= 0 or end_price <= 0:
                 return 0.0
 
             # Compute actual years from date strings

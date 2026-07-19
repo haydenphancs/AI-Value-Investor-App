@@ -229,6 +229,7 @@ class TickerDetailViewModel: ObservableObject {
                 // the await) so we can detect a selection change during the slow load.
                 let requestedRange = self.selectedChartRange
                 let requestedInterval = self.chartSettings.selectedInterval
+                let requestedExtended = useExtendedHours
                 let response = try await self.stockRepository.getStockOverview(
                     ticker: ticker, range: requestedRange.rawValue,
                     interval: requestedInterval.rawValue,
@@ -236,13 +237,16 @@ class TickerDetailViewModel: ObservableObject {
                 )
                 self.tickerData = response.toDisplayModel()
                 self.chartDataVersion += 1
-                // If the user changed the range OR the interval while the (slow)
-                // overview was loading — now possible because the fast-core chart is
-                // interactive — the overview's chart is for the OLD selection. Re-fetch
-                // so the chart matches the currently-selected pill/interval instead of
-                // silently reverting (the tickerData write above is not gen-guarded).
+                // If the user changed the range, the interval, OR the extended-hours
+                // toggle while the (slow) overview was loading — now possible because
+                // the fast-core chart is interactive — the overview's chart is for the
+                // OLD selection. Re-fetch so the chart matches the current selection
+                // instead of silently reverting (the tickerData write above is not
+                // gen-guarded).
+                let currentExtended = self.chartSettings.showExtendedHours && self.chartSettings.selectedInterval.isIntraday
                 if self.selectedChartRange != requestedRange
-                    || self.chartSettings.selectedInterval != requestedInterval {
+                    || self.chartSettings.selectedInterval != requestedInterval
+                    || currentExtended != requestedExtended {
                     await self.fetchChartData(ticker, range: self.selectedChartRange)
                 }
                 print("✅ TickerDetailVM: Overview loaded for \(ticker) — price: \(self.tickerData?.currentPrice ?? 0)")
@@ -1247,10 +1251,16 @@ class TickerDetailViewModel: ObservableObject {
             if let shares = stockQuote?.sharesOutstanding { return formatLargeNumber(shares) }
             return "--"
         }()
+        // These three ownership fields arrive ALREADY percent-scaled (0–100) from
+        // GET /stocks/{ticker}: short_percent_float = spf*100, percent_insiders =
+        // 100 − freeFloat (freeFloat is 0–100, verified live: AAPL 99.83), and
+        // percent_institutional = ownershipPercent (verified live: AAPL 63.49). The
+        // old `value < 1 ? value*100 : value` heuristic assumed a FRACTION and thus
+        // 100x-inflated every sub-1% value — AAPL's 0.17% insiders rendered as 17%,
+        // a 0.83% short float as 83%. Format the percent directly, no scaling.
         let shortFloatValue: String = {
             if let sp = stockDetail?.shortPercentFloat {
-                let pct = sp < 1 ? sp * 100 : sp
-                return String(format: "%.2f%%", pct)
+                return String(format: "%.2f%%", sp)
             }
             return "N/A"
         }()
@@ -1260,15 +1270,13 @@ class TickerDetailViewModel: ObservableObject {
         }()
         let insiderValue: String = {
             if let ins = stockDetail?.percentInsiders {
-                let pct = ins < 1 ? ins * 100 : ins
-                return String(format: "%.2f%%", pct)
+                return String(format: "%.2f%%", ins)
             }
             return "--"
         }()
         let instValue: String = {
             if let inst = stockDetail?.percentInstitutional {
-                let pct = inst < 1 ? inst * 100 : inst
-                return String(format: "%.2f%%", pct)
+                return String(format: "%.2f%%", inst)
             }
             return "--"
         }()

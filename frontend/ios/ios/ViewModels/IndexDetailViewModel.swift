@@ -308,7 +308,10 @@ class IndexDetailViewModel: ObservableObject {
             print("✅ [IndexDetailVM] Got technical analysis for \(indexSymbol) — gauge: \(dto.gaugeValue)")
         } catch {
             print("⚠️ [IndexDetailVM] Technical analysis failed: \(error)")
-            self.technicalAnalysisData = TechnicalAnalysisData.sampleData
+            // Do NOT fabricate a BUY gauge from sampleData — a hardcoded "Buy" signal
+            // on a failed fetch is financial misinformation and leaks into Cay AI
+            // context. Leave nil; the Analysis section renders its honest empty state.
+            self.technicalAnalysisData = nil
             self.isTechnicalLoaded = true
         }
     }
@@ -621,11 +624,12 @@ class IndexDetailViewModel: ObservableObject {
     // MARK: - Fallback
 
     private func loadFallbackData() {
-        if indexData == nil {
-            indexData = IndexDetailData.sampleSP500
-            print("🔄 [IndexDetailVM] Using fallback sample data for index")
-        }
-        // Technical analysis is fetched separately — fallback handled in fetchTechnicalAnalysis()
+        // Never paint S&P 500 sample figures onto a *different* index (e.g. Dow,
+        // Nasdaq): showing ^GSPC's level / P/E / sectors under ^IXIC is a wrong-index
+        // masquerade (and leaks into Cay AI context). Stay in the honest empty state —
+        // errorMessage drives the banner + pull-to-refresh. Mirrors the Crypto VM.
+        // Technical analysis is fetched separately (see fetchTechnicalAnalysis).
+        print("🔄 [IndexDetailVM] Index load failed — honest empty state (no sample seed)")
     }
 
     // MARK: - AI Context Builders

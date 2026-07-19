@@ -23,7 +23,17 @@ private enum ETFResponseFormatters {
         if let d = fmt.date(from: string) { return d }
         fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let d = fmt.date(from: string) { return d }
+        // FMP publishedDate is space-separated with no timezone ("2024-01-15 09:30:00").
+        // The ISO8601 parsers above require a 'T' + offset and fail on it, so EVERY ETF
+        // news article fell back to Date() and rendered as "just now" (and mis-sorted).
+        // Treat the naive timestamp as UTC (matches TickerDetailViewModel.parseDate).
+        let dt = DateFormatter()
+        dt.locale = Locale(identifier: "en_US_POSIX")
+        dt.timeZone = TimeZone(identifier: "UTC")
+        dt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        if let d = dt.date(from: string) { return d }
         let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
         df.dateFormat = "yyyy-MM-dd"
         return df.date(from: string)
     }

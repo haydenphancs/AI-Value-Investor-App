@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, Dict, Any
 import logging
 
-from app.api.error_response import error_response_from_exception
+from app.api.error_response import error_response_from_exception, upstream_error_response
 from app.services.crypto_service import get_crypto_service
 from app.schemas.crypto import CryptoDetailResponse
 from app.schemas.technical_analysis import (
@@ -138,6 +138,8 @@ async def get_crypto_news(
         return await service.get_ticker_news(fmp_symbol, limit, is_crypto=True)
     except Exception as e:
         logger.error(f"Crypto news failed for {symbol}: {e}", exc_info=True)
+        if (resp := upstream_error_response(e, ticker=symbol, step="crypto_news")) is not None:
+            return resp
         raise HTTPException(status_code=500, detail="Crypto news service unavailable")
 
 

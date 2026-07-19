@@ -158,6 +158,7 @@ class NewsCacheService:
 
         cache_rows = []
         response_articles = []
+        ext_ids: List[str] = []
         seen_external_ids: set = set()
 
         for i, raw in enumerate(raw_articles[:limit]):
@@ -166,6 +167,7 @@ class NewsCacheService:
             if ext_key in seen_external_ids:
                 continue
             seen_external_ids.add(ext_key)
+            ext_ids.append(ext_key)
 
             row = {
                 "ticker": symbol,  # Cache key = index symbol
@@ -211,16 +213,22 @@ class NewsCacheService:
                 .upsert(cache_rows, on_conflict="ticker,external_id")
                 .execute()
             )
-            if result.data:
-                for i, inserted in enumerate(result.data):
-                    if i < len(response_articles):
-                        response_articles[i]["id"] = inserted.get("id", "")
+            # Match ids by external_id (RETURNING order is not guaranteed to match
+            # VALUES order → a positional zip could misattribute the id/enrichment).
+            id_by_ext = {
+                r.get("external_id"): r.get("id", "")
+                for r in (result.data or [])
+                if r.get("external_id")
+            }
+            for art, ext in zip(response_articles, ext_ids):
+                art["id"] = id_by_ext.get(ext, "")
             logger.info(f"Cached {len(cache_rows)} index news articles for {symbol}")
         except Exception as e:
             logger.error(f"Index news cache insert failed for {symbol}: {e}")
-            for i, art in enumerate(response_articles):
-                if not art["id"]:
-                    art["id"] = f"temp_{i}"
+
+        for i, art in enumerate(response_articles):
+            if not art["id"]:
+                art["id"] = f"temp_{i}"
 
         return response_articles
 
@@ -380,13 +388,25 @@ class NewsCacheService:
 
         cache_rows = []
         response_articles = []
+        ext_ids: List[str] = []
+        seen_external_ids: set = set()
 
         for i, raw in enumerate(raw_articles[:limit]):
-            external_id = raw.get("url") or raw.get("title", f"unknown_{i}")
+            external_id = (raw.get("url") or raw.get("title") or f"unknown_{i}")[:500]
+            # Dedup within the batch: two FMP articles sharing a url/title yield the
+            # same (ticker, external_id), and a single ON CONFLICT upsert that touches
+            # the same row twice raises Postgres "cannot affect row a second time" →
+            # the WHOLE upsert aborts → every id degrades to temp_N → enrichment is
+            # permanently disabled for this ticker (iOS filters out temp_ ids).
+            # Mirrors _fetch_and_cache_index_news.
+            if external_id in seen_external_ids:
+                continue
+            seen_external_ids.add(external_id)
+            ext_ids.append(external_id)
 
             row = {
                 "ticker": ticker,
-                "external_id": external_id[:500],
+                "external_id": external_id,
                 "headline": raw.get("title", ""),
                 "summary": raw.get("text", ""),
                 "summary_bullets": json.dumps([]),
@@ -428,16 +448,25 @@ class NewsCacheService:
                 .upsert(cache_rows, on_conflict="ticker,external_id")
                 .execute()
             )
-            if result.data:
-                for i, inserted in enumerate(result.data):
-                    if i < len(response_articles):
-                        response_articles[i]["id"] = inserted.get("id", "")
+            # Assign the DB id by external_id match. Postgres does NOT guarantee that
+            # the RETURNING rows come back in VALUES order, so a positional zip could
+            # attach the wrong id — and thus the wrong enrichment — to an article.
+            id_by_ext = {
+                r.get("external_id"): r.get("id", "")
+                for r in (result.data or [])
+                if r.get("external_id")
+            }
+            for art, ext in zip(response_articles, ext_ids):
+                art["id"] = id_by_ext.get(ext, "")
             logger.info(f"Cached {len(cache_rows)} raw articles for {ticker}")
         except Exception as e:
             logger.error(f"Cache insert failed for {ticker}: {e}")
-            for i, art in enumerate(response_articles):
-                if not art["id"]:
-                    art["id"] = f"temp_{i}"
+
+        # Any article the upsert didn't yield an id for → temp fallback (still renders,
+        # just not enrichable until the next cache cycle).
+        for i, art in enumerate(response_articles):
+            if not art["id"]:
+                art["id"] = f"temp_{i}"
 
         return response_articles
 
@@ -477,6 +506,41 @@ class NewsCacheService:
         if s in ("negative", "bearish"):
             return "bearish"
         return "neutral"
+
+    @staticmethod
+    def _map_enrichments(parsed: Any, expected_count: int) -> Dict[int, Dict[str, Any]]:
+        """Map a Gemini enrichment array to {position: enrichment} by POSITIONAL order.
+
+        Deliberately IGNORES each item's self-reported ``index`` field: Gemini can
+        emit duplicate / missing / 1-based index values, and keying on ``item["index"]``
+        (default 0) then binds one article's bullets+sentiment to a DIFFERENT article
+        (silent wrong-data). The structured-output array is one object per article in
+        INPUT order, so position is authoritative.
+
+        Returns ``{}`` when the array shape doesn't match the input count, so the
+        caller degrades to unenriched-and-retryable instead of risking misattribution.
+        """
+        if not isinstance(parsed, list) or len(parsed) != expected_count:
+            return {}
+        result: Dict[int, Dict[str, Any]] = {}
+        for pos, item in enumerate(parsed):
+            if not isinstance(item, dict):
+                continue
+            raw_tickers = item.get("related_tickers", []) or []
+            cleaned_tickers = list(
+                dict.fromkeys(
+                    t.strip().upper()
+                    for t in raw_tickers
+                    if isinstance(t, str) and t.strip()
+                )
+            )[:8]
+            result[pos] = {
+                "bullets": (item.get("bullets", []) or [])[:5],
+                "sentiment": NewsCacheService._normalize_sentiment(item.get("sentiment", "")),
+                "confidence": item.get("confidence", 0),
+                "related_tickers": cleaned_tickers,
+            }
+        return result
 
     async def _batch_enrich_articles(
         self, articles: List[Dict[str, Any]], ticker: str = ""
@@ -544,27 +608,12 @@ Return a JSON array with one object per article in order. Each object must have:
             text = response.get("text", "")
             parsed = json.loads(text)
 
-            result = {}
-            if isinstance(parsed, list):
-                for item in parsed:
-                    idx = item.get("index", 0)
-                    raw_tickers = item.get("related_tickers", [])
-                    cleaned_tickers = list(
-                        dict.fromkeys(
-                            t.strip().upper()
-                            for t in raw_tickers
-                            if t.strip()
-                        )
-                    )[:8]
-                    result[idx] = {
-                        "bullets": item.get("bullets", [])[:5],
-                        "sentiment": self._normalize_sentiment(
-                            item.get("sentiment", "")
-                        ),
-                        "confidence": item.get("confidence", 0),
-                        "related_tickers": cleaned_tickers,
-                    }
-
+            result = self._map_enrichments(parsed, len(articles))
+            if not result:
+                logger.warning(
+                    f"Gemini enrichment shape mismatch for {ticker} "
+                    f"(expected {len(articles)}) — returning unenriched (retryable)"
+                )
             logger.info(
                 f"Gemini batch enrichment: {len(result)}/{len(articles)} articles processed"
             )
@@ -572,11 +621,14 @@ Return a JSON array with one object per article in order. Each object must have:
 
         except Exception as e:
             logger.error(f"Gemini batch enrichment failed: {e}", exc_info=True)
-            # Fallback: return Neutral for every article so the frontend doesn't crash
-            return {
-                i: {"bullets": [], "sentiment": "Neutral", "confidence": 0, "related_tickers": []}
-                for i in range(len(articles))
-            }
+            # Return EMPTY (NOT a per-article neutral dict). A non-empty fallback made
+            # the caller persist ai_processed=True with empty bullets + a forced
+            # 'neutral' sentiment, poisoning the SHARED 6h cache: every user then saw
+            # no AI summary and a wrong 'neutral' badge (even for an earnings beat /
+            # SEC probe) with no retry. Returning {} makes enrich_articles take its
+            # 'return unenriched' branch — ai_processed stays False, so the next
+            # request retries once Gemini recovers.
+            return {}
 
     # ── Private: Cache lookup ─────────────────────────────────────────
 

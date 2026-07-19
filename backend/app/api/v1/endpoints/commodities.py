@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, Dict, Any
 import logging
 
-from app.api.error_response import error_response_from_exception
+from app.api.error_response import error_response_from_exception, upstream_error_response
 from app.services.commodity_service import get_commodity_service
 from app.schemas.commodity import CommodityDetailResponse
 
@@ -69,6 +69,8 @@ async def get_commodity_news(
         return await service.get_index_news(cache_key, limit, news_tickers=news_tickers)
     except Exception as e:
         logger.error(f"Commodity news failed for {base}: {e}", exc_info=True)
+        if (resp := upstream_error_response(e, ticker=base, step="commodity_news")) is not None:
+            return resp
         raise HTTPException(status_code=500, detail="News service unavailable")
 
 

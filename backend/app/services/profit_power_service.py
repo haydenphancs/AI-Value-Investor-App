@@ -11,6 +11,7 @@ Matches the iOS ProfitPowerSectionData struct.
 """
 
 import asyncio
+import math
 import logging
 import re
 import time
@@ -72,7 +73,8 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     if val is None:
         return None
     try:
-        return float(val)
+        f = float(val)
+        return f if math.isfinite(f) else None
     except (ValueError, TypeError):
         return None
 

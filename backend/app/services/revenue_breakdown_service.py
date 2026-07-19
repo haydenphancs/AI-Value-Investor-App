@@ -8,6 +8,7 @@ Matches the iOS RevenueBreakdownData struct.
 
 import asyncio
 import logging
+import math
 import re
 import time
 from datetime import datetime, timezone, timedelta
@@ -68,7 +69,8 @@ def _safe_float(record: Dict[str, Any], key: str, default: float = 0.0) -> float
     if val is None:
         return default
     try:
-        return float(val)
+        f = float(val)
+        return f if math.isfinite(f) else default
     except (ValueError, TypeError):
         return default
 
@@ -110,6 +112,8 @@ def _extract_segments(record: Dict[str, Any]) -> List[RevenueSourceSchema]:
             amount = float(val)
         except (ValueError, TypeError):
             continue
+        if not math.isfinite(amount):
+            continue  # NaN/Inf segment -> REQUIRED RevenueSourceSchema.value -> 500
         if amount <= 0:
             continue  # skip zero/negative segments
         # Skip values that look like years (e.g. 2024, 2025) — not revenue

@@ -185,18 +185,23 @@ struct SmartMoneyFlowSummary {
         }
     }
 
-    var formattedBuy: String {
-        if totalBuy >= 1000 {
-            return "$\(String(format: "%.2f", totalBuy / 1000))B"
-        }
-        return "$\(String(format: "%.2f", totalBuy))M"
-    }
+    var formattedBuy: String { Self.formatMagnitude(totalBuy, unit: unit) }
 
-    var formattedSell: String {
-        if totalSell >= 1000 {
-            return "$\(String(format: "%.2f", totalSell / 1000))B"
+    var formattedSell: String { Self.formatMagnitude(totalSell, unit: unit) }
+
+    /// Unit-aware magnitude label — mirrors `formattedNetFlow`'s unit switch so a
+    /// share-denominated total isn't mislabeled with a "$" (37.35B shares would
+    /// otherwise read "$37.35B").
+    private static func formatMagnitude(_ value: Double, unit: SmartMoneyFlowUnit) -> String {
+        let mag = abs(value)
+        switch unit {
+        case .dollars:
+            if mag >= 1000 { return "$\(String(format: "%.2f", mag / 1000))B" }
+            return "$\(String(format: "%.2f", mag))M"
+        case .shares:
+            if mag >= 1000 { return "\(String(format: "%.2f", mag / 1000))B shares" }
+            return "\(String(format: "%.2f", mag))M shares"
         }
-        return "$\(String(format: "%.2f", totalSell))M"
     }
 
     var flowColor: Color {
@@ -1147,6 +1152,21 @@ struct CongressActivitySummary {
 struct CongressActivitiesData {
     let summary: CongressActivitySummary
     let activities: [CongressActivity]
+
+    /// Honest-empty value for degrade paths — NEVER fabricated sample trades.
+    /// (The backend always emits `congress_activities`, so this is defensive:
+    /// if the field is ever genuinely absent, show a zeroed card, not fake
+    /// Pelosi/Tuberville rows.)
+    static let empty = CongressActivitiesData(
+        summary: CongressActivitySummary(
+            periodDescription: "Last 12 Months",
+            totalBuysInMillions: 0,
+            totalSellsInMillions: 0,
+            numBuyers: 0,
+            numSellers: 0
+        ),
+        activities: []
+    )
 
     func sortedActivities(by option: RecentActivitiesSortOption) -> [CongressActivity] {
         switch option {

@@ -129,6 +129,64 @@ async def test_batch_enrich_count_mismatch_returns_empty():
     assert out == {}
 
 
+# ── Log level: expected LLM degradations are WARNING, not ERROR (no Sentry page) ─
+
+class _QuotaGemini:
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def generate_json(self, **kwargs):
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_batch_enrich_malformed_json_logs_warning_not_error(caplog):
+    # A truncated / non-JSON LLM response is an EXPECTED degradation (returns {} →
+    # retryable). It must log at WARNING so it does not page as a Sentry ERROR issue.
+    import logging
+    from app.services import news_cache_service as ncs
+
+    svc = _svc_with_gemini(_FakeGemini(text="[{"))  # json.loads raises JSONDecodeError
+    with caplog.at_level(logging.WARNING, logger=ncs.logger.name):
+        out = await svc._batch_enrich_articles([{"title": "A", "text": "x"}], ticker="X")
+    assert out == {}
+    recs = [r for r in caplog.records if "malformed JSON" in r.getMessage()]
+    assert recs and all(r.levelno == logging.WARNING for r in recs)
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_batch_enrich_quota_error_logs_warning_not_error(caplog):
+    # Quota / 429 is a known transient capacity condition (typed GeminiQuotaError in
+    # prod, or an untyped 429 message) → WARNING, never ERROR.
+    import logging
+    from app.services import news_cache_service as ncs
+    from app.integrations.gemini import GeminiQuotaError
+
+    for exc in (GeminiQuotaError("resource_exhausted"), RuntimeError("429 quota exceeded")):
+        caplog.clear()
+        svc = _svc_with_gemini(_QuotaGemini(exc))
+        with caplog.at_level(logging.WARNING, logger=ncs.logger.name):
+            out = await svc._batch_enrich_articles([{"title": "A"}], ticker="X")
+        assert out == {}
+        assert [r for r in caplog.records if "quota-limited" in r.getMessage()]
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_batch_enrich_unexpected_error_still_logs_error(caplog):
+    # A genuinely unexpected failure (not JSON / not quota) MUST still surface at ERROR
+    # so it pages — the downgrade is scoped to the known degradations only.
+    import logging
+    from app.services import news_cache_service as ncs
+
+    svc = _svc_with_gemini(_QuotaGemini(TypeError("unexpected boom in enrichment")))
+    with caplog.at_level(logging.WARNING, logger=ncs.logger.name):
+        out = await svc._batch_enrich_articles([{"title": "A"}], ticker="X")
+    assert out == {}
+    assert [r for r in caplog.records if r.levelno == logging.ERROR and "failed" in r.getMessage()]
+
+
 @pytest.mark.asyncio
 async def test_batch_enrich_happy_path_maps_positionally():
     svc = _svc_with_gemini(_FakeGemini(text=json.dumps([

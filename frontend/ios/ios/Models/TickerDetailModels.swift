@@ -1790,16 +1790,19 @@ struct EarningsQuarterData: Identifiable {
     var fiscalDate: String? = nil // "yyyy-MM-dd" for price line positioning
 
     var result: EarningsQuarterResult {
-        guard let actual = actualValue, let surprise = surprisePercent else {
+        // Pending is defined by the ABSENCE of a reported actual — NOT by a nil
+        // surprisePercent. A reported quarter whose analyst estimate is exactly 0
+        // (break-even consensus / 0-sentinel) has surprisePercent = nil (backend
+        // guards the /0), which used to mislabel a real result as a gray "pending".
+        guard let actual = actualValue else {
             return .pending
         }
-
-        if surprise == 0 {
-            return .matched
-        } else if actual > estimateValue {
+        if actual > estimateValue {
             return .beat
-        } else {
+        } else if actual < estimateValue {
             return .missed
+        } else {
+            return .matched
         }
     }
 

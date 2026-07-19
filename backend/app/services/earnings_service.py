@@ -10,6 +10,7 @@ Data sources (priority order):
 """
 
 import asyncio
+import math
 import logging
 import time
 from datetime import date, datetime, timedelta
@@ -70,7 +71,8 @@ def _safe_float(d: dict, key: str) -> Optional[float]:
     if v is None:
         return None
     try:
-        return float(v)
+        f = float(v)
+        return f if math.isfinite(f) else None
     except (ValueError, TypeError):
         return None
 
@@ -321,7 +323,9 @@ class EarningsService:
             c = p.get("close")
             if d and c is not None:
                 try:
-                    price_lookup[d] = float(c)
+                    fc = float(c)
+                    if math.isfinite(fc):  # a NaN/Inf close -> REQUIRED price float -> 500
+                        price_lookup[d] = fc
                 except (ValueError, TypeError):
                     pass
 
@@ -633,7 +637,7 @@ class EarningsService:
         shows for the same event.
         """
         # First, check earnings-calendar for future dates with timing info
-        for ec in sorted(ec_records, key=lambda r: r.get("date", "")):
+        for ec in sorted(ec_records, key=lambda r: (r.get("date") or "")):
             ec_date = (ec.get("date") or "")[:10]
             if not ec_date or ec_date <= today_str:
                 continue

@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.services.credit_service import CreditService
+from app.services.credit_service import CreditService, CreditServiceUnavailable
 
 
 @pytest.fixture
@@ -107,14 +107,28 @@ def test_concurrent_charges_only_one_succeeds_when_balance_is_5():
     assert b is None
 
 
-def test_try_charge_returns_none_when_rpc_throws(service):
-    # Network blip / RLS deny / table missing — never propagate the
-    # raw exception to the endpoint. Returning None lets the caller
-    # surface a clean INSUFFICIENT_CREDITS instead of a 500 leak of
-    # the Supabase error.
+def test_try_charge_raises_when_rpc_throws(service):
+    # Network blip / RLS deny / table missing is a TRANSIENT/system failure —
+    # distinct from a genuine insufficient balance (which the RPC signals by
+    # returning NULL, i.e. result.data is None). try_charge raises
+    # CreditServiceUnavailable so the endpoint surfaces a RETRYABLE SYSTEM_BUSY,
+    # never a dead-end INSUFFICIENT_CREDITS: a DB blip must not tell a paying
+    # user they're broke. (Previously this returned None → masqueraded as
+    # "out of credits".)
     rpc_call = MagicMock()
     rpc_call.execute.side_effect = RuntimeError("supabase down")
     service.supabase.rpc.return_value = rpc_call
+
+    with pytest.raises(CreditServiceUnavailable):
+        service.try_charge("user-123", 5)
+
+
+def test_try_charge_returns_none_only_for_genuine_insufficiency(service):
+    # The OTHER None path must stay None: when the RPC succeeds but returns
+    # NULL (balance below threshold, no row mutated), try_charge returns None
+    # and the endpoint maps it to INSUFFICIENT_CREDITS. This is the case that
+    # must NOT be conflated with the transient-failure raise above.
+    _stub_rpc(service, None)
 
     assert service.try_charge("user-123", 5) is None
 

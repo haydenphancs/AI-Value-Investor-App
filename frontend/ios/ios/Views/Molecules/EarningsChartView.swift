@@ -35,12 +35,20 @@ struct EarningsChartView: View {
         return values
     }
 
+    // Pad OUTWARD additively from the data span so the domain always CONTAINS every
+    // value regardless of sign. The old multiplicative `min*0.9 / max*1.1` moved a
+    // NEGATIVE min toward zero (e.g. -2.0*0.9 = -1.8 > -2.0), pushing a loss-maker's
+    // EPS dot below the axis and off-screen, and left the labels not bounding the data.
     private var minValue: Double {
-        (earningsValues.min() ?? 0) * 0.9
+        let lo = earningsValues.min() ?? 0
+        let hi = earningsValues.max() ?? 1
+        return lo - max((hi - lo) * 0.1, 0.01)
     }
 
     private var maxValue: Double {
-        (earningsValues.max() ?? 1) * 1.1
+        let lo = earningsValues.min() ?? 0
+        let hi = earningsValues.max() ?? 1
+        return hi + max((hi - lo) * 0.1, 0.01)
     }
 
     // Price bounds for independent normalization (quarterly fallback)

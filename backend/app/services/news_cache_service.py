@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
-from app.integrations.gemini import get_gemini_client
+from app.integrations.gemini import get_gemini_client, GeminiQuotaError
 
 logger = logging.getLogger(__name__)
 
@@ -619,8 +619,31 @@ Return a JSON array with one object per article in order. Each object must have:
             )
             return result
 
+        except json.JSONDecodeError as e:
+            # The LLM returned non-JSON / truncated output — an EXPECTED degradation,
+            # not a code bug. Returning {} makes the caller retry once Gemini recovers;
+            # WARNING keeps it OUT of Sentry (at ERROR it pages on every malformed
+            # response, which happens routinely under load / long prompts).
+            logger.warning(
+                f"Gemini batch enrichment returned malformed JSON for {ticker or '<mixed>'}: {e}"
+            )
+            return {}
         except Exception as e:
-            logger.error(f"Gemini batch enrichment failed: {e}", exc_info=True)
+            # Quota / 429 rate-limit is a known, transient capacity condition already
+            # governed by the Gemini quota circuit breaker — an EXPECTED degradation, so
+            # log at WARNING (not an ERROR-level Sentry page). `GeminiQuotaError` is the
+            # typed signal; the string check also catches a quota error that arrived
+            # wrapped/untyped. Anything else is unexpected → ERROR with a stack.
+            emsg = str(e).lower()
+            is_quota = isinstance(e, GeminiQuotaError) or any(
+                s in emsg for s in ("429", "quota", "resource_exhausted", "rate limit")
+            )
+            if is_quota:
+                logger.warning(
+                    f"Gemini batch enrichment quota-limited for {ticker or '<mixed>'}: {e}"
+                )
+                return {}
+            logger.error(f"Gemini batch enrichment failed for {ticker or '<mixed>'}: {e}", exc_info=True)
             # Return EMPTY (NOT a per-article neutral dict). A non-empty fallback made
             # the caller persist ai_processed=True with empty bullets + a forced
             # 'neutral' sentiment, poisoning the SHARED 6h cache: every user then saw

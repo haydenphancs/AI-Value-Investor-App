@@ -66,7 +66,24 @@ def _is_transient(exc: BaseException) -> bool:
     msg = str(exc).lower()
     # String fallbacks so the classification holds even if the error arrives as a raw
     # httpcore/h2 type (not wrapped as an httpx exception).
-    return "server disconnected" in msg or "connectionstate.closed" in msg
+    if "server disconnected" in msg or "connectionstate.closed" in msg:
+        return True
+    # Same stale-HTTP/2 pooled-connection reuse race, but surfacing as a BARE,
+    # low-level error from deep inside the h2 transport stack — most often a
+    # KeyError(<stream_id>) when httpcore/h2 looks up an already torn-down stream id
+    # (odd ints like 307 / 431). It carries no httpx type and no telltale message, so
+    # the checks above miss it and it lands as an ERROR-level Sentry issue. Classify by
+    # ORIGIN instead: an exception raised from within the httpcore/h2 internals is a
+    # connection-layer blip (a retry opens a fresh connection), NOT our bug. A genuine
+    # KeyError in our own code (e.g. row["metric_name"] schema drift) is raised from
+    # THIS module — its traceback carries no transport frame — so it stays ERROR.
+    tb = getattr(exc, "__traceback__", None)
+    while tb is not None:
+        top_pkg = tb.tb_frame.f_globals.get("__name__", "").split(".", 1)[0]
+        if top_pkg in ("httpcore", "h2", "hpack", "hyperframe"):
+            return True
+        tb = tb.tb_next
+    return False
 
 
 # ── Phase 3: mature-period picker (sample-size floor + hold-last-mature) ──

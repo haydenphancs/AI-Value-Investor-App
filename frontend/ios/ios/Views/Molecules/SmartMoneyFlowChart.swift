@@ -47,6 +47,12 @@ struct SmartMoneyFlowChart: View {
     /// ±100M). Defaults false → the auto-axis (and the Ticker Report) are
     /// unchanged. Only the Smart Money tab opts in.
     let uniformVolumeAxis: Bool
+    /// When true, the volume bars/axis are DOLLAR-denominated (the Congress tab:
+    /// STOCK Act discloses dollar ranges, not shares) and the y-axis magnitudes
+    /// are prefixed with "$". Defaults false → bare magnitudes for the
+    /// share-denominated Insider / Institutions (13F Form-4 share counts) tabs
+    /// and the Ticker Report — unchanged.
+    let isDollarDenominated: Bool
 
     init(
         priceData: [StockPriceDataPoint],
@@ -57,7 +63,8 @@ struct SmartMoneyFlowChart: View {
         monthlyCounts: [String: (buy: Int, sell: Int)]? = nil,
         selectedMonth: Binding<String?> = .constant(nil),
         priceVolumeGap: CGFloat = 0,
-        uniformVolumeAxis: Bool = false
+        uniformVolumeAxis: Bool = false,
+        isDollarDenominated: Bool = false
     ) {
         self.priceData = priceData
         self.dailyPrices = dailyPrices
@@ -68,6 +75,7 @@ struct SmartMoneyFlowChart: View {
         self._selectedMonth = selectedMonth
         self.priceVolumeGap = priceVolumeGap
         self.uniformVolumeAxis = uniformVolumeAxis
+        self.isDollarDenominated = isDollarDenominated
     }
 
     /// Measured size of the value popup, so it can be clamped within the chart
@@ -482,16 +490,25 @@ struct SmartMoneyFlowChart: View {
         let prices = priceData.map { $0.price }
         let minPrice = (prices.min() ?? 0)
         let maxPrice = (prices.max() ?? 1)
-        let padding = (maxPrice - minPrice) * 0.1
-        return (minPrice - padding, maxPrice + padding)
+        return Self.paddedRange(minPrice, maxPrice)
     }
 
     private var dailyPriceRange: (min: Double, max: Double) {
         let prices = dailyPrices.map { $0.price }
         let minPrice = (prices.min() ?? 0)
         let maxPrice = (prices.max() ?? 1)
-        let padding = (maxPrice - minPrice) * 0.1
-        return (minPrice - padding, maxPrice + padding)
+        return Self.paddedRange(minPrice, maxPrice)
+    }
+
+    /// 10% padded (min, max) with a guaranteed POSITIVE span. When every price is
+    /// identical (or there's a single point) the raw padding is 0, which would
+    /// hand `.chartYScale` a zero-height domain (v...v) → the price line/area
+    /// normalizes as 0/0 and renders blank. Synthesize a nonzero pad so a flat
+    /// series draws as a flat mid-height line instead of vanishing.
+    private static func paddedRange(_ minPrice: Double, _ maxPrice: Double) -> (min: Double, max: Double) {
+        let raw = (maxPrice - minPrice) * 0.1
+        let pad = raw > 0 ? raw : max(abs(maxPrice) * 0.1, 1)
+        return (minPrice - pad, maxPrice + pad)
     }
 
     // One month can dwarf the other 11 — e.g. an executive's planned
@@ -555,7 +572,13 @@ struct SmartMoneyFlowChart: View {
     /// Domain half-extent for the volume chart. Uniform mode parks the top label
     /// at 80% (consistent headroom); otherwise the legacy outlier-aware scale.
     private var volumeDomainMax: Double {
-        uniformVolumeAxis ? volumeTopLabel / 0.80 : yScaleMax
+        // The domain MUST cover the bar cap (axisMax). volumeTopLabel is a
+        // rounded-DOWN nice number, so volumeTopLabel/0.80 can land BELOW
+        // axisMax — then the tallest (most important) bar, capped at axisMax by
+        // displayVolume, overflows the plotted domain and renders clamped flush
+        // against the ceiling with no clip label (isClipped compares to axisMax,
+        // not the domain). max(..., axisMax) guarantees the top bar fits.
+        uniformVolumeAxis ? max(volumeTopLabel / 0.80, axisMax) : yScaleMax
     }
 
     /// Nice, round top label (with a clean half) ≈ the outlier-capped bar max.
@@ -610,19 +633,25 @@ struct SmartMoneyFlowChart: View {
         return String(format: "$%.0f", value)
     }
 
+    /// "$" prefix for the Congress tab (dollar-denominated bars); empty for the
+    /// share-denominated Insider / Institutions tabs. Without it a $3M congress
+    /// tick and a 3M-share tick render identically ("3M").
+    private var volumeUnitPrefix: String { isDollarDenominated ? "$" : "" }
+
     private func formatVolumeValue(_ value: Double) -> String {
         let absValue = abs(value)
+        let p = volumeUnitPrefix
         if absValue >= 1000 {
-            return String(format: "%.0fB", value / 1000)
+            return String(format: "\(p)%.0fB", value / 1000)
         } else if absValue >= 1 {
-            return String(format: "%.0fM", value)
+            return String(format: "\(p)%.0fM", value)
         } else if absValue >= 0.01 {
-            // Share count in thousands — NOT dollars (these bars are Form-4
-            // share volumes). The old "$%.0fK" mislabeled e.g. 100K shares as
-            // "$100K".
-            return String(format: "%.0fK", value * 1000)
+            // Thousands unit. For share tabs this is a share count — NOT dollars
+            // (Form-4 share volumes); for the Congress tab the "$" prefix marks
+            // it as dollars. The old unconditional "$%.0fK" mislabeled shares.
+            return String(format: "\(p)%.0fK", value * 1000)
         } else if absValue > 0 {
-            return String(format: "%.1fK", value * 1000)
+            return String(format: "\(p)%.1fK", value * 1000)
         }
         return "0"
     }
@@ -631,12 +660,13 @@ struct SmartMoneyFlowChart: View {
     /// reads "8.7M" rather than `formatVolumeValue`'s rounded "9M".
     private func formatVolumeLabel(_ value: Double) -> String {
         let absValue = abs(value)
+        let p = volumeUnitPrefix
         if absValue >= 1000 {
-            return String(format: "%.1fB", value / 1000)
+            return String(format: "\(p)%.1fB", value / 1000)
         } else if absValue >= 1 {
-            return String(format: "%.1fM", value)
+            return String(format: "\(p)%.1fM", value)
         } else if absValue >= 0.01 {
-            return String(format: "%.0fK", value * 1000)
+            return String(format: "\(p)%.0fK", value * 1000)
         }
         return formatVolumeValue(value)
     }

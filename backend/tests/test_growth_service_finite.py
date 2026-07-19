@@ -93,5 +93,10 @@ def test_compute_growth_points_skips_non_finite_value_quarterly():
     ]
     pts = _compute_growth_points(records, "revenue", is_quarterly=True)
     assert all(math.isfinite(p["value"]) for p in pts)
-    # The Inf Q1'24 is dropped; Q1'23 has no prior → no point. Result empty, no crash.
-    assert pts == []
+    # The Inf Q1'24 is dropped (non-finite value). Q1'23 has a real value but no
+    # prior-year same quarter → it STILL emits a chartable bar with a null YoY (a bar
+    # must not be dropped just because its YoY is undefined — matches the annual
+    # branch's "always emit the bar" invariant).
+    assert len(pts) == 1
+    assert pts[0]["value"] == 50.0
+    assert pts[0]["yoy_change_percent"] is None

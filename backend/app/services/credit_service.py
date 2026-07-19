@@ -18,6 +18,15 @@ from app.database import get_supabase
 logger = logging.getLogger(__name__)
 
 
+class CreditServiceUnavailable(Exception):
+    """The credit-charge RPC round-trip failed for a transient/system reason
+    (Supabase down, network blip, PostgREST/RLS error) — as opposed to the user
+    genuinely lacking credits (which the RPC signals by returning NULL, not by
+    raising). Callers MUST surface a *retryable* error (SYSTEM_BUSY), never
+    INSUFFICIENT_CREDITS: a DB blip must not tell a paying user they're broke.
+    """
+
+
 class CreditService:
     DEEP_RESEARCH_COST = 5
 
@@ -30,8 +39,15 @@ class CreditService:
         """Atomically debit `amount` credits from `user_id`.
 
         Returns the user's new `remaining` balance on success, or None
-        if the user has fewer than `amount` credits available. Callers
-        should treat None as INSUFFICIENT_CREDITS.
+        if the user has fewer than `amount` credits available (callers
+        should treat None as INSUFFICIENT_CREDITS — the RPC returns NULL
+        and no row is mutated).
+
+        Raises `CreditServiceUnavailable` if the RPC round-trip itself
+        fails (Supabase/network/PostgREST/RLS error). That is a transient
+        system condition — distinct from a genuine insufficient balance —
+        and the caller must surface it as a *retryable* error, never as
+        INSUFFICIENT_CREDITS.
         """
         try:
             result = self.supabase.rpc(
@@ -43,7 +59,9 @@ class CreditService:
                 f"charge_user_credits RPC failed for user={user_id}: "
                 f"{type(e).__name__}: {e}"
             )
-            return None
+            raise CreditServiceUnavailable(
+                f"charge_user_credits RPC failed for user={user_id}"
+            ) from e
 
         new_remaining = result.data
         if new_remaining is None:

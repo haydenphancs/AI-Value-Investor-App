@@ -56,6 +56,33 @@ def test_ordinary_errors_are_not_transient():
     assert _is_transient(KeyError("median_value")) is False
 
 
+def test_h2_stream_keyerror_from_transport_is_transient():
+    # The stale HTTP/2 reuse race can also surface as a BARE KeyError(<stream_id>)
+    # raised from deep inside httpcore/h2 (e.g. KeyError(307), the prod issue). It
+    # carries no httpx type and str(e) == "307", so only the traceback ORIGIN
+    # distinguishes it. Simulate a raise from an httpcore frame via exec globals.
+    try:
+        exec("raise KeyError(307)", {"__name__": "httpcore._async.http2"})
+    except KeyError as e:
+        assert _is_transient(e) is True
+
+
+def test_h2_error_from_h2_package_is_transient():
+    try:
+        exec("raise ValueError('stream closed')", {"__name__": "h2.connection"})
+    except ValueError as e:
+        assert _is_transient(e) is True
+
+
+def test_schema_drift_keyerror_from_our_module_stays_error():
+    # A genuine KeyError raised from OUR OWN code (a missing dict column) must NOT be
+    # misclassified as transient — it's a real schema-drift bug that should page.
+    try:
+        raise KeyError("metric_name")  # traceback tip is THIS test module, not httpcore
+    except KeyError as e:
+        assert _is_transient(e) is False
+
+
 # ── _fetch_rows retries the stale-connection blip, then succeeds ──────────────
 
 class _FakeResp:

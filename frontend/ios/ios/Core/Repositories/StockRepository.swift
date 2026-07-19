@@ -2226,7 +2226,9 @@ struct RecentActivitiesDTO: Codable {
             institutionalFlowSummary: institutionalFlowSummary.toDisplayModel(),
             institutionalActivities: institutionalActivities.map { $0.toDisplayModel() },
             insiderActivities: insiderActivities.toDisplayModel(),
-            congressActivities: congressActivities?.toDisplayModel() ?? CongressActivitiesData.sampleData
+            // Honest-empty on the (backend-prevented) absence of the field —
+            // never fabricated sample congress trades for the current ticker.
+            congressActivities: congressActivities?.toDisplayModel() ?? CongressActivitiesData.empty
         )
     }
 }

@@ -22,6 +22,7 @@ import app.api.v1.endpoints.research as research
 from app.api.error_response import ErrorCode
 from app.config import settings
 from app.schemas.research import GenerateResearchRequest
+from app.services.credit_service import CreditServiceUnavailable
 
 
 def _supabase_with_inflight_count(count: int) -> MagicMock:
@@ -106,6 +107,28 @@ async def test_under_cap_proceeds_to_charge(monkeypatch):
     credit.try_charge.assert_called_once()                     # cap gate passed through
     assert resp.status_code == 403                             # INSUFFICIENT_CREDITS
     assert json.loads(resp.body)["error_code"] == ErrorCode.INSUFFICIENT_CREDITS.value
+
+
+@pytest.mark.asyncio
+async def test_transient_charge_failure_returns_system_busy_not_insufficient(monkeypatch):
+    """A transient Supabase/RPC failure during the atomic charge raises
+    CreditServiceUnavailable → the handler must surface a RETRYABLE 409
+    SYSTEM_BUSY, NOT a dead-end 403 INSUFFICIENT_CREDITS. A DB blip must never
+    tell a paying user they're out of credits (the pre-fix bug: try_charge
+    swallowed the failure to None, which mapped to INSUFFICIENT_CREDITS)."""
+    supabase = _supabase_with_inflight_count(
+        settings.MAX_CONCURRENT_REPORTS_PER_USER - 1           # one under cap
+    )
+    credit = _patch_credit_service(monkeypatch, try_charge_return=None)
+    credit.try_charge.side_effect = CreditServiceUnavailable("supabase down")
+
+    resp = await research.generate_research_report(
+        request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
+    )
+
+    credit.try_charge.assert_called_once()                     # reached the charge
+    assert resp.status_code == 409
+    assert json.loads(resp.body)["error_code"] == ErrorCode.SYSTEM_BUSY.value
 
 
 @pytest.mark.asyncio

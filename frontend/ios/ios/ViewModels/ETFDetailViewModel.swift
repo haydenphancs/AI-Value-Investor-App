@@ -246,10 +246,13 @@ class ETFDetailViewModel: ObservableObject {
         // clobber already-loaded real data. Mirrors IndexDetailViewModel.loadFallbackData.
         // A failed pull-to-refresh must keep the real ETF on screen (just show the
         // error banner), not flip the whole card to hard-coded SPY figures.
+        // Never paint another fund's hard-coded figures (sampleSPY) onto a failed
+        // load: showing SPY's price / expense ratio / dividend yield / holdings under
+        // a *different* ETF (e.g. QQQ) is financial misinformation and leaks into the
+        // Cay AI context. Stay in the honest empty/skeleton state — errorMessage drives
+        // the banner + pull-to-refresh. Mirrors the Crypto/Commodity VMs.
         guard etfData == nil else { return }
-        print("[ETFDetailVM] Loading fallback sample data")
-        self.etfData = ETFDetailData.sampleSPY
-        self.newsArticles = TickerNewsArticle.sampleDataForTicker(etfSymbol)
+        print("[ETFDetailVM] ETF load failed — honest empty state (no sample seed)")
     }
 
     // MARK: - Live Price

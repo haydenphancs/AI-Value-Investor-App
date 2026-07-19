@@ -26,6 +26,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _normalize_crypto_symbol(symbol: str) -> str:
+    """Uppercase and strip a TRAILING 'USD' pair suffix (BTCUSD -> BTC).
+
+    A global ``.replace("USD", "")`` corrupts stablecoin tickers that merely CONTAIN
+    'USD' — USDT -> 'T', USDC -> 'C', USDP -> 'P' — then the ``{symbol}USD`` pair
+    rebuild fetches an entirely different coin (USDT -> TUSD/TrueUSD), shipping
+    wrong-asset price/stats on the Overview. Only the trailing pair suffix is a
+    quote-currency marker, so strip just that and leave 'USD'-containing bases intact.
+    """
+    s = symbol.upper()
+    if s.endswith("USD") and len(s) > 3:
+        s = s[:-3]
+    return s
+
+
 # ── Fear & Greed Index (must be before /{symbol} to avoid route conflict) ──
 
 
@@ -81,7 +96,7 @@ async def get_crypto_detail(
     - Related cryptocurrencies with prices
     - News articles
     """
-    symbol = symbol.upper().replace("USD", "")
+    symbol = _normalize_crypto_symbol(symbol)
 
     try:
         service = get_crypto_service()
@@ -115,7 +130,7 @@ async def get_crypto_news(
     """
     from app.services.news_cache_service import get_news_cache_service
 
-    symbol = symbol.upper().replace("USD", "")
+    symbol = _normalize_crypto_symbol(symbol)
     fmp_symbol = f"{symbol}USD"
 
     try:
@@ -142,7 +157,7 @@ async def enrich_crypto_news(
     if not article_ids:
         raise HTTPException(status_code=400, detail="article_ids is required")
 
-    symbol = symbol.upper().replace("USD", "")
+    symbol = _normalize_crypto_symbol(symbol)
     fmp_symbol = f"{symbol}USD"
 
     try:
@@ -172,7 +187,7 @@ async def get_crypto_sentiment(symbol: str):
     """
     from app.services.sentiment_service import get_sentiment_service
 
-    symbol = symbol.upper().replace("USD", "")
+    symbol = _normalize_crypto_symbol(symbol)
     fmp_symbol = f"{symbol}USD"
 
     try:
@@ -200,7 +215,7 @@ async def get_crypto_technical_analysis(symbol: str):
     timeframes, producing a 0-1 gauge value and overall signal.
     Uses W-SUN weekly resampling (crypto trades 24/7).
     """
-    symbol = symbol.upper().replace("USD", "")
+    symbol = _normalize_crypto_symbol(symbol)
     fmp_symbol = f"{symbol}USD"
 
     try:
@@ -226,7 +241,7 @@ async def get_crypto_technical_analysis_detail(symbol: str):
     Returns individual indicator values and signals, pivot points,
     volume analysis, Fibonacci retracement, and support/resistance levels.
     """
-    symbol = symbol.upper().replace("USD", "")
+    symbol = _normalize_crypto_symbol(symbol)
     fmp_symbol = f"{symbol}USD"
 
     try:

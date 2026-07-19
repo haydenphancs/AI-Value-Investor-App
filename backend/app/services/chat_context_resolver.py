@@ -29,6 +29,7 @@ iOS current-tab context, so the resolver defers to that path.
 
 import asyncio
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,11 @@ _DROP_KEYS = frozenset({
     "hedge_fund_price_data", "hedge_fund_flow_data", "data_points", "history",
     "dividend_history", "dividends", "growth_chart", "profit_power", "earnings_track_record",
     "news_articles", "news",
+    # report per-metric frozen history + forecast/insider series (chart data that would otherwise
+    # eat the dump budget EARLY — fundamental_metrics sits before the narrative modules — and starve
+    # the moat/revenue/Wall-Street/macro insights out of the block). The metric name+value survive.
+    "annual_history", "quarterly_history", "sector_annual_history", "sector_quarterly_history",
+    "annual_timeline", "projections", "insider_flow",
     # audio read-along timing arrays + UI cosmetics
     "readalong", "readalongwords", "itemsreadalong", "herogradientcolors",
     "audiourl", "imageurl", "videourl", "logo_url", "logourl", "icon", "heroimage",
@@ -89,31 +95,51 @@ def _cap(text: str, limit: int) -> str:
 
 def _num(v: Any) -> Optional[str]:
     """Format a number plainly (comma-grouped, no scientific notation, no trailing zeros).
-    Returns None for NaN so it never leaks into the grounding."""
+    Returns None for a non-finite float (NaN / ±inf) so it never leaks a bogus token into the
+    grounding. Sub-cent values (|v| < 1e-4, e.g. meme-coin prices) keep significant figures so they
+    don't collapse to "0" under 4-decimal formatting."""
     if isinstance(v, bool):
         return "yes" if v else "no"
     if isinstance(v, int):
         return f"{v:,}"
     if isinstance(v, float):
-        if v != v:  # NaN
+        if not math.isfinite(v):   # NaN or ±inf
             return None
         if v.is_integer():
             return f"{int(v):,}"
+        if 0 < abs(v) < 1e-4:      # sub-cent — 4 decimals would round it to "0"
+            return f"{v:.8f}".rstrip("0").rstrip(".")
         return f"{v:,.4f}".rstrip("0").rstrip(".")
     return None
 
 
+def _price(v: Any) -> Optional[str]:
+    """Format a USD price for a LEAD line: 2 decimals normally, but keep significant figures for a
+    sub-cent-but-nonzero value (meme coins) so it never reads "$0.00"/"$0.0000". Returns None for a
+    non-finite / non-numeric value so the caller can omit the price rather than assert a false one."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if 0 < abs(v) < 0.01:
+        return f"{v:.8f}".rstrip("0").rstrip(".")
+    return f"{v:,.2f}"
+
+
 def _flatten_for_grounding(
     payload: Any, max_chars: int, str_cap: int = _STR_CAP, skip_top: Tuple[str, ...] = (),
+    priority_top: Tuple[str, ...] = (),
 ) -> str:
     """Render a JSON-ish payload (a cached dict / a ``model_dump`` / an article dict) to compact
     ``key: value`` grounding lines. Drops ``_DROP_KEYS`` anywhere in the tree + ``skip_top`` at the top
     level (case-insensitive), truncates long strings to ``str_cap``, caps total output at ``max_chars``,
     and NEVER raises (a bad node is skipped). Lists are inlined (scalars) or walked per-item (dicts),
-    both capped at 12 elements so one long array can't blow the budget."""
+    both capped at 12 elements so one long array can't blow the budget. ``priority_top`` top-level keys
+    are emitted FIRST (stable), so high-value narratives aren't starved by an early bulky section."""
     lines: List[str] = []
     remaining = [max_chars]
     skip_top_l = {s.lower() for s in skip_top}
+    priority_top_l = {s.lower() for s in priority_top}
 
     def _scalar(v: Any) -> Optional[str]:
         if isinstance(v, str):
@@ -133,7 +159,10 @@ def _flatten_for_grounding(
         if remaining[0] <= 0:
             return False
         if isinstance(o, dict):
-            for k, v in o.items():
+            items = list(o.items())
+            if top and priority_top_l:   # emit high-value narratives before a bulky early section
+                items.sort(key=lambda kv: 0 if (isinstance(kv[0], str) and kv[0].lower() in priority_top_l) else 1)
+            for k, v in items:
                 if not isinstance(k, str):
                     continue
                 kl = k.lower()
@@ -152,8 +181,12 @@ def _flatten_for_grounding(
         elif isinstance(o, list):
             if all(not isinstance(x, (dict, list)) for x in o):   # pure-scalar list → inline
                 vals = [s for s in (_scalar(x) for x in o[:12]) if s is not None]
-                if vals and not _emit(prefix, ", ".join(vals)):
-                    return False
+                if vals:
+                    joined = ", ".join(vals)
+                    if len(joined) > 600:   # one list line must not dominate / overshoot the cap
+                        joined = joined[:600].rsplit(", ", 1)[0] + ", …"
+                    if not _emit(prefix, joined):
+                        return False
             else:                                                 # mixed / dict list → per item
                 for i, item in enumerate(o[:12]):
                     if not _walk(item, f"{prefix}[{i}]"):
@@ -302,6 +335,12 @@ class ChatContextResolver:
             skip_top=("symbol", "company_name", "exchange", "agent", "quality_score",
                       "live_date", "price_close_date", "price_action", "executive_summary_text",
                       "disclaimer_text"),
+            # Emit the narrative modules FIRST so a report with many fundamental_metrics can't starve
+            # the moat / revenue / Wall-Street / macro insights out of the budget (fundamental_metrics
+            # is not listed → it sorts after these and takes whatever budget is left).
+            priority_top=("core_thesis", "overall_assessment", "revenue_forecast", "revenue_engine",
+                          "moat_competition", "macro_data", "wall_street_consensus", "insider_data",
+                          "key_management", "hidden_market_signals", "critical_factors"),
         )
         parts = list(lead)
         if dump:
@@ -330,10 +369,11 @@ class ChatContextResolver:
         detail = await get_etf_service().get_etf_detail(symbol)
         if not detail:
             return None
-        lead = (
-            f"The user is viewing the ETF detail screen for {detail.name} ({detail.symbol}). "
-            f"Price ${detail.current_price:,.2f} ({detail.price_change_percent:+.2f}%)."
-        )
+        px = _price(detail.current_price)
+        chg = detail.price_change_percent
+        price_str = (f" Price ${px} ({chg:+.2f}%)."
+                     if px and isinstance(chg, (int, float)) and math.isfinite(chg) else "")
+        lead = f"The user is viewing the ETF detail screen for {detail.name} ({detail.symbol})." + price_str
         dump = _flatten_for_grounding(
             self._as_dict(detail), _DUMP_CAP,
             skip_top=("symbol", "name", "current_price", "price_change_percent"),
@@ -352,10 +392,11 @@ class ChatContextResolver:
         detail = await get_crypto_service().get_crypto_detail(symbol)
         if not detail:
             return None
-        lead = (
-            f"The user is viewing the crypto detail screen for {detail.name} ({detail.symbol}). "
-            f"Price ${detail.current_price:,.4f} ({detail.price_change_percent:+.2f}%)."
-        )
+        px = _price(detail.current_price)
+        chg = detail.price_change_percent
+        price_str = (f" Price ${px} ({chg:+.2f}%)."
+                     if px and isinstance(chg, (int, float)) and math.isfinite(chg) else "")
+        lead = f"The user is viewing the crypto detail screen for {detail.name} ({detail.symbol})." + price_str
         dump = _flatten_for_grounding(
             self._as_dict(detail), _DUMP_CAP,
             skip_top=("symbol", "name", "current_price", "price_change_percent"),
@@ -376,10 +417,10 @@ class ChatContextResolver:
             return None
         name = (getattr(detail, "index_name", "") or "").strip()
         lead = f"The user is viewing the market/index detail screen for {name or symbol}."
-        price = getattr(detail, "current_price", None)
+        px = _price(getattr(detail, "current_price", None))
         chg = getattr(detail, "price_change_percent", None)
-        if isinstance(price, (int, float)) and isinstance(chg, (int, float)):
-            lead += f" Level {price:,.2f} ({chg:+.2f}%)."
+        if px and isinstance(chg, (int, float)) and math.isfinite(chg):
+            lead += f" Level {px} ({chg:+.2f}%)."
         dump = _flatten_for_grounding(
             self._as_dict(detail), _DUMP_CAP,
             skip_top=("symbol", "index_name", "current_price", "price_change_percent"),

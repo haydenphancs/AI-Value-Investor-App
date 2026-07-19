@@ -224,6 +224,10 @@ class CryptoDetailViewModel: ObservableObject {
             await fetchCryptoAnalysis()
         } catch {
             print("❌ [CryptoDetail] Refresh failed: \(error)")
+            // Gen-guard the failure the same way the success path is (line above):
+            // a superseded refresh (user switched range mid-refresh) must not stamp a
+            // false error banner over the newer request's correct data.
+            guard gen == self.detailRequestGen else { return }
             handleLoadError(error)
         }
     }
@@ -301,9 +305,10 @@ class CryptoDetailViewModel: ObservableObject {
         // real data (a transient refresh failure shouldn't blank a good screen);
         // otherwise stay in the honest skeleton/empty state. The header still shows
         // the real symbol and pull-to-refresh retries; errorMessage drives any banner.
-        if self.cryptoData == nil {
-            self.newsArticles = []
-        }
+        //
+        // NOTE: news is fetched on a SEPARATE, independent path (fetchCryptoNews);
+        // do NOT clear newsArticles here — a detail-only failure would otherwise
+        // discard headlines the news call already loaded successfully.
     }
 
     // MARK: - User Actions

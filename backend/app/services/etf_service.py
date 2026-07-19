@@ -1005,7 +1005,14 @@ class ETFService:
         for s in sectors_list:
             name = (s.get("industry") or s.get("sector") or "").lower()
             if "cash" in name and "other" in name:
-                raw_cash = round(float(s.get("exposure") or s.get("weightPercentage") or 0), 2)
+                # Mirror _build_sectors_from_info: FMP exposure can be a '%'-suffixed
+                # string OR a non-finite token. A bare float() would ValueError on
+                # "3.5%" (→500) or pass NaN into the REQUIRED equities/cash floats
+                # (→ allow_nan=False 500). Strip '%' then coerce through _finite_num.
+                _raw_cash = s.get("exposure") or s.get("weightPercentage") or 0
+                if isinstance(_raw_cash, str):
+                    _raw_cash = _raw_cash.replace("%", "").strip()
+                raw_cash = round(_finite_num(_raw_cash), 2)
                 # If "Cash & Others" is ~100% AND FMP can't break this fund down
                 # (bond OR commodity/gold/alternative), the 100% is really the
                 # underlying asset, not cash — keep only a token operational cash so
@@ -1200,8 +1207,13 @@ class ETFService:
         etf_days = len(etf_hist) - 1
         etf_years = etf_days / 252
 
-        etf_start = etf_hist[0].get("close") or etf_hist[0].get("adjClose")
-        etf_end = etf_hist[-1].get("close") or etf_hist[-1].get("adjClose")
+        # Finite-guard: a NaN/Inf close (bare NaN/Infinity FMP JSON token) is truthy
+        # and slips past `not x` / `x <= 0`, producing a NaN CAGR in the REQUIRED
+        # avg_annual_return float → Starlette allow_nan=False 500s the ENTIRE ETF
+        # detail (and iOS falls back to sample data). _finite_num returns 0.0 for
+        # non-finite, which the existing guard rejects. Mirrors _compute_return.
+        etf_start = _finite_num(etf_hist[0].get("close") or etf_hist[0].get("adjClose"))
+        etf_end = _finite_num(etf_hist[-1].get("close") or etf_hist[-1].get("adjClose"))
         etf_start_date = etf_hist[0].get("date") or ""
 
         if not etf_start or not etf_end or etf_start <= 0 or etf_years <= 0:
@@ -1213,8 +1225,8 @@ class ETFService:
         sp_annual = 0.0
         sp_start_date = ""
         if spy_hist and len(spy_hist) >= 252:
-            sp_start_price = spy_hist[0].get("close") or spy_hist[0].get("adjClose")
-            sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
+            sp_start_price = _finite_num(spy_hist[0].get("close") or spy_hist[0].get("adjClose"))
+            sp_end_price = _finite_num(spy_hist[-1].get("close") or spy_hist[-1].get("adjClose"))
             sp_start_date = spy_hist[0].get("date") or ""
             sp_days = len(spy_hist) - 1
             sp_years = sp_days / 252

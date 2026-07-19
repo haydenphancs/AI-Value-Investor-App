@@ -142,6 +142,10 @@ class CommodityDetailViewModel: ObservableObject {
 
         } catch {
             print("❌ [CommodityDetailVM] Failed to load \(commoditySymbol): \(error)")
+            // Drop a STALE failure: if a newer range fetch/refresh already superseded
+            // this request (and may have painted correct data), don't stamp a false
+            // error banner over it. Mirrors the success-path gen guard above.
+            guard gen == self.detailRequestGen else { return }
             self.isLoading = false
 
             if let apiError = error as? APIError {
@@ -322,7 +326,10 @@ class CommodityDetailViewModel: ObservableObject {
             print("✅ [CommodityDetailVM] Got technical analysis — gauge: \(dto.gaugeValue)")
         } catch {
             print("⚠️ [CommodityDetailVM] Technical analysis failed: \(error)")
-            self.technicalAnalysisData = TechnicalAnalysisData.sampleData
+            // Do NOT fabricate a BUY gauge from sampleData — a hardcoded "Buy" signal
+            // on a failed fetch is financial misinformation and leaks into the AI
+            // context (contextForCurrentTab). Leave nil; the section stays empty.
+            self.technicalAnalysisData = nil
             self.isTechnicalLoaded = true
         }
     }

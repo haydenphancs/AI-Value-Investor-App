@@ -21,6 +21,8 @@ from app.services.chat_context_resolver import (
     ChatContextResolver,
     get_chat_context_resolver,
     _flatten_for_grounding,
+    _num,
+    _price,
 )
 
 
@@ -95,6 +97,50 @@ def test_flatten_never_leaks_none_or_nan_or_raises():
     assert "None" not in out and "nan" not in out.lower()
     # A bare scalar payload is fine; a bad structure must never raise.
     assert _flatten_for_grounding("just text", 100) == "just text"
+
+
+# ── _num / _price number formatting (adversarial-review fixes) ──────
+
+def test_num_sub_cent_keeps_significant_figures():
+    """The bug: f"{v:,.4f}" rounds sub-5e-5 floats to "0" — a SHIB-class crypto price told the LLM
+    the coin costs $0. Small values must keep significant figures."""
+    assert _num(0.00001234) == "0.00001234"        # was "0"
+    assert _num(7.5e-6) == "0.0000075"
+    assert _num(0.0000005) == "0.0000005"
+    assert _num(0.03) == "0.03"                     # normal values unchanged
+    assert _num(3012.5) == "3,012.5"
+    assert _num(1_200_000_000) == "1,200,000,000"
+    assert _num(0) == "0" and _num(0.0) == "0"
+
+
+def test_num_non_finite_returns_none():
+    """NaN AND ±inf must both be dropped (was: only NaN; inf leaked the literal 'inf')."""
+    assert _num(float("nan")) is None
+    assert _num(float("inf")) is None
+    assert _num(float("-inf")) is None
+
+
+def test_price_helper_sub_cent_and_non_finite():
+    assert _price(0.00001234) == "0.00001234"       # NOT "0.00"
+    assert _price(3000.0) == "3,000.00"
+    assert _price(500.12) == "500.12"
+    assert _price(float("nan")) is None
+    assert _price(float("inf")) is None
+    assert _price(None) is None
+    assert _price("x") is None
+
+
+def test_flatten_drops_infinite_floats():
+    out = _flatten_for_grounding({"pe": float("inf"), "peg": float("-inf"), "roe": float("nan"), "keep": "yes"}, 2000)
+    assert "keep: yes" in out
+    assert "inf" not in out.lower() and "nan" not in out.lower()
+
+
+def test_flatten_inline_scalar_list_cannot_overshoot_cap():
+    """The bug: a 12-element list of long strings was joined into ONE _emit line (~4.8k chars),
+    blowing past max_chars. The line is now bounded."""
+    out = _flatten_for_grounding({"tags": ["z" * 400] * 12}, 500, str_cap=400)
+    assert len(out) < 900                            # one bounded line, not ~4800
 
 
 # ── Pass-through / no-context branches ──────────────────────────────
@@ -598,6 +644,61 @@ async def test_journey_null_story_content_no_crash(resolver, monkeypatch):
     block = await resolver.resolve("JOURNEY_LESSON", "2", None)
     assert block is not None
     assert "Lesson content" not in block and "None" not in block
+
+
+# ── Adversarial-review regressions (sub-cent lead + report starvation) ──
+
+@pytest.mark.asyncio
+async def test_crypto_lead_sub_cent_price_not_zeroed(resolver, monkeypatch):
+    """The confirmed bug: the crypto lead f"${detail.current_price:,.4f}" rendered a SHIB-class coin
+    as 'Price $0.0000', telling the LLM it costs $0. The lead now keeps significant figures."""
+    detail = _Obj(name="Shiba Inu", symbol="SHIB", current_price=0.00001234, price_change_percent=2.5,
+                  crypto_profile=_Obj(description="A meme coin."))
+
+    class _Svc:
+        async def get_crypto_detail(self, s):
+            return detail
+
+    import app.services.crypto_service as cs
+    monkeypatch.setattr(cs, "get_crypto_service", lambda: _Svc())
+
+    block = await resolver.resolve("CRYPTO", "shib", None)
+    assert "Shiba Inu (SHIB)" in block
+    assert "0.00001234" in block               # the real sub-cent price
+    assert "$0.0000 " not in block             # NOT the rounded-to-zero bug
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_history_arrays_dropped_narratives_survive(resolver, monkeypatch):
+    """The HIGH bug: the frozen per-metric history arrays (annual/quarterly/sector history) sit early
+    (fundamental_metrics) and ate the whole dump budget, starving the moat/Wall-Street/macro insights
+    OUT of the block. They're now dropped AND the narratives are emitted first."""
+    big_history = [{"period": f"20{i:02d}", "value": i * 1.1} for i in range(40)]
+    async def fake_get(ticker, persona):
+        return {
+            "company_name": "X", "executive_summary_text": "s",
+            "fundamental_metrics": [{"title": f"Card{c}", "metrics": [
+                {"name": f"ROE{c}{m}", "value": "45%",
+                 "annual_history": big_history, "quarterly_history": big_history,
+                 "sector_annual_history": big_history, "sector_quarterly_history": big_history}
+                for m in range(6)]} for c in range(6)],
+            "moat_competition": {"competitive_insight": "MOATMARK switching costs anchor it."},
+            "wall_street_consensus": {"wall_street_insight": "WALLMARK analysts split."},
+            "macro_data": {"headline": "MACROMARK rates swing it."},
+        }
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+
+    block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
+    # The history arrays are dropped (their key-paths never appear, and a 40-point series can't dominate).
+    assert "annual_history" not in block and "sector_quarterly_history" not in block
+    # The metric name/value still survive (useful, small).
+    assert "ROE00" in block and "45%" in block
+    # The later narrative modules are NOT starved out — the whole point of the grounding.
+    assert "MOATMARK" in block
+    assert "WALLMARK" in block
+    assert "MACROMARK" in block
 
 
 # ── Singleton ───────────────────────────────────────────────────────

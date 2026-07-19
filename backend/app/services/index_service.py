@@ -9,6 +9,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
@@ -265,8 +266,14 @@ def _compute_index_pe_from_sectors() -> Optional[float]:
 
 
 def _get_market_status() -> MarketStatusResponse:
-    """Determine current market status based on time."""
-    now = datetime.now(tz=timezone(timedelta(hours=-5)))  # EST
+    """Determine current market status based on time.
+
+    Uses the America/New_York zone (NOT a fixed UTC-5), so the open/pre-market/
+    after-hours boundaries are correct during Daylight Saving Time (~8 months/yr).
+    A fixed -5 offset shifted every boundary an hour during EDT and stamped the
+    wrong "EST"/"-05:00" onto closed timestamps. Mirrors stock_overview_service.
+    """
+    now = datetime.now(tz=ZoneInfo("America/New_York"))
     hour = now.hour
     minute = now.minute
     weekday = now.weekday()  # 0=Monday, 6=Sunday
@@ -285,11 +292,15 @@ def _get_market_status() -> MarketStatusResponse:
         status = "closed"
 
     if status == "closed":
+        # Use the actual UTC offset (handles EST vs EDT correctly).
+        utc_offset = now.strftime("%z")  # e.g. "-0500" or "-0400"
+        offset_formatted = f"{utc_offset[:3]}:{utc_offset[3:]}"  # "-05:00" / "-04:00"
+        tz_abbr = "EDT" if now.dst() else "EST"
         return MarketStatusResponse(
             status="closed",
-            date=now.strftime("%Y-%m-%dT16:00:00-05:00"),
+            date=now.strftime(f"%Y-%m-%dT16:00:00{offset_formatted}"),
             time="4:00 PM",
-            timezone="EST",
+            timezone=tz_abbr,
         )
     return MarketStatusResponse(status=status)
 

@@ -8,6 +8,7 @@ in-memory caching, helper functions for derived computations.
 
 import asyncio
 import logging
+import math
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -27,6 +28,22 @@ from app.schemas.analyst import (
 from app.services._analyst_common import normalize_fmp_action
 
 logger = logging.getLogger(__name__)
+
+
+def _num(v: Any, default: float = 0.0) -> float:
+    """Coerce an FMP value to a FINITE float.
+
+    A present-but-null field makes ``float(None)`` raise TypeError — uncaught, it
+    502s the whole /analyst-analysis request. A NaN/Inf (bare FMP JSON token) would
+    land in the REQUIRED price/target floats and 500 via Starlette allow_nan=False.
+    Both degrade to ``default`` here.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
 
 # ── In-memory cache (same pattern as stock_overview_service) ─────────
 
@@ -399,10 +416,10 @@ class AnalystService:
         ]
 
         # Price targets
-        current_price = float(quote.get("price", 0))
-        target_consensus_price = float(pt_consensus.get("targetConsensus", 0))
-        target_high = float(pt_consensus.get("targetHigh", 0))
-        target_low = float(pt_consensus.get("targetLow", 0))
+        current_price = _num(quote.get("price"))
+        target_consensus_price = _num(pt_consensus.get("targetConsensus"))
+        target_high = _num(pt_consensus.get("targetHigh"))
+        target_low = _num(pt_consensus.get("targetLow"))
 
         target_upside = 0.0
         if current_price > 0 and target_consensus_price > 0:
@@ -432,7 +449,8 @@ class AnalystService:
         # Updated date (most recent grade)
         updated_date = ""
         if grades:
-            updated_date = grades[0].get("date", "")[:10]
+            # `or ""` — a present-but-null date would make None[:10] raise → 502.
+            updated_date = (grades[0].get("date") or "")[:10]
 
         # Assemble response
         response = AnalystAnalysisResponse(

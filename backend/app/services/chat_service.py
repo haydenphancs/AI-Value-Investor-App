@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -145,6 +146,7 @@ class ChatService:
         context: Optional[str] = None,
         context_type: Optional[str] = None,
         reference_id: Optional[str] = None,
+        context_is_replayed: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate AI response with RAG context retrieval and optional
@@ -200,6 +202,7 @@ class ChatService:
             company_profile_summary=company_profile_summary,
             client_context=context,
             asset_type=asset_type,
+            context_is_replayed=context_is_replayed,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
 
@@ -303,6 +306,7 @@ class ChatService:
         context: Optional[str] = None,
         context_type: Optional[str] = None,
         reference_id: Optional[str] = None,
+        context_is_replayed: bool = False,
     ) -> Dict[str, Any]:
         """Build everything a STREAMED response needs, WITHOUT calling Gemini.
 
@@ -345,9 +349,16 @@ class ChatService:
             snapshot_summary=snapshot_summary,
             company_profile_summary=company_profile_summary,
             client_context=context, asset_type=asset_type,
+            context_is_replayed=context_is_replayed,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
+        # P0-B: the streamed model renders the card but was never told its numbers.
+        # Fold the already-fetched live quote into the system instruction so its
+        # narration agrees with the card to the cent (no extra fetch; never raises).
+        quote_line = self._widget_grounding_line(widget)
+        if quote_line:
+            system_instruction += quote_line
         sources = self._build_sources(context_type, reference_id, citations)
 
         return {
@@ -574,6 +585,63 @@ class ChatService:
                 f"Deterministic widget fetch failed ({asset_type}/{stock_id}/{reference_id}): {e}"
             )
         return None
+
+    @staticmethod
+    def _widget_grounding_line(widget: Optional[Dict[str, Any]]) -> Optional[str]:
+        """P0-B: fold the live quote the inline card shows into the STREAMED system
+        instruction, so the model's prose quotes the SAME numbers as the card.
+
+        The streamed path renders the deterministic stock-chart card but never fed
+        its quote to the model (only mid-stream tool calls could), so narration
+        could drift from the card. This closes that gap for STOCK.
+
+        Only the ``stock_chart`` widget carries a single live quote; INDEX
+        (market_overview) is already grounded by the resolver's INDEX branch and
+        has no single quote, so it's intentionally skipped. Never raises; returns
+        None when there's no finite, non-zero price — ``_build_stock_widget``
+        coerces a null price to 0, and we must not assert the stock costs $0.
+        """
+        if not isinstance(widget, dict) or widget.get("widget_type") != "stock_chart":
+            return None
+
+        def _fin(v: Any) -> Optional[float]:
+            try:
+                f = float(v)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return f if math.isfinite(f) else None
+
+        def _usd(v: float, signed: bool = False) -> str:
+            # Sub-penny prices (OTC/pink-sheet, |v| < $0.01) must keep significant
+            # figures — a fixed .2f would collapse a real 0.0023 to a bogus "$0.00",
+            # the exact false zero the price guard exists to prevent.
+            if abs(v) < 0.01:
+                return f"{v:+.4g}" if signed else f"{v:.4g}"
+            return f"{v:+,.2f}" if signed else f"{v:,.2f}"
+
+        price = _fin(widget.get("current_price"))
+        if not price:  # None or 0.0 → don't assert a bogus price
+            return None
+
+        ticker = str(widget.get("ticker") or "").strip()
+        parts = [f"{ticker} ${_usd(price)}".strip()]
+        chg, chg_pct = _fin(widget.get("change")), _fin(widget.get("change_percent"))
+        if chg is not None and chg_pct is not None:
+            parts.append(f"({_usd(chg, signed=True)}, {chg_pct:+.2f}%)")
+        hi, lo = _fin(widget.get("day_high")), _fin(widget.get("day_low"))
+        if hi and lo:
+            parts.append(f"day range ${_usd(lo)}–${_usd(hi)}")
+        vol = _fin(widget.get("volume"))
+        if vol and vol > 0:
+            parts.append(f"volume {int(vol):,}")
+        live = widget.get("is_market_open")
+        status = " (live)" if live is True else (" (market closed)" if live is False else "")
+
+        return (
+            f"\n\nLIVE QUOTE shown on the card the user is looking at right now: "
+            f"{', '.join(parts)}{status}. "
+            "These are the current numbers — prefer them over any older figures above."
+        )
 
     # ── FMP data fetching for the stock widget ──────────────────────
 
@@ -1173,6 +1241,7 @@ class ChatService:
         company_profile_summary: Optional[str] = None,
         client_context: Optional[str] = None,
         asset_type: str = "STOCK",
+        context_is_replayed: bool = False,
     ) -> str:
         base = (
             "You are Cay AI, the intelligent agent powering the Caydex app. "
@@ -1221,11 +1290,24 @@ class ChatService:
                 base += f"\n{snapshot_summary}"
 
         if client_context:
-            base += (
-                f"\n\nCLIENT CONTEXT (current data visible to the user):\n"
-                f"{client_context}\n"
-                "Use this data to give precise, numbers-backed answers."
-            )
+            if context_is_replayed:
+                # A history reopen replays the snapshot captured WHEN THE CHAT WAS
+                # OPENED (migration 087) — a point-in-time copy, not live. Don't let
+                # the model present its time-sensitive figures (analyst targets,
+                # technicals) as current, and steer it to tool-verify them.
+                base += (
+                    f"\n\nCLIENT CONTEXT (captured when the user opened this chat — a point-in-time "
+                    f"snapshot that may now be out of date):\n{client_context}\n"
+                    "Use it for background, but for time-sensitive figures (prices, analyst targets, "
+                    "technical levels) rely on your live tools or the live quote above rather than "
+                    "these possibly-stale numbers."
+                )
+            else:
+                base += (
+                    f"\n\nCLIENT CONTEXT (current data visible to the user):\n"
+                    f"{client_context}\n"
+                    "Use this data to give precise, numbers-backed answers."
+                )
 
         return base
 

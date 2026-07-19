@@ -78,6 +78,46 @@ def _session_type_for(context_type: Optional[str], stock_id: Optional[str]) -> s
     return "STOCK" if stock_id else "NORMAL"
 
 
+def _effective_context(req_context: Optional[str], session_row: dict) -> Optional[str]:
+    """The on-screen grounding snapshot to feed the LLM this turn.
+
+    Prefer the per-message value iOS sends from a LIVE detail screen; on a
+    history reopen iOS sends none, so fall back to the snapshot persisted from
+    when the chat was first opened (migration 087). Returns None when neither
+    exists — pre-migration rows read no column, so behavior is identical to today.
+    """
+    if req_context:
+        return req_context
+    stored = session_row.get("context_snapshot")
+    return stored or None
+
+
+def _persist_context_snapshot(
+    supabase: Client, session_id: str, req_context: Optional[str], session_row: dict
+) -> None:
+    """Best-effort: persist the live on-screen snapshot so a later history reopen
+    can re-ground on the exact data the user saw (migration 087).
+
+    Deliberately ISOLATED + guarded: a missing column (a code deploy that raced
+    ahead of the migration) or any transient DB error must NEVER break the chat
+    turn — worst case the reopen simply isn't grounded on the snapshot, which is
+    today's behavior. Skips the write when there's nothing new to store (reopen
+    turns send no context; live turns resend the same frozen snapshot every
+    message — so this writes once, then no-ops for the rest of the session).
+    """
+    if not req_context or req_context == session_row.get("context_snapshot"):
+        return
+    try:
+        supabase.table("chat_sessions").update(
+            {"context_snapshot": req_context}
+        ).eq("id", session_id).execute()
+    except Exception as e:
+        logger.warning(
+            "Chat context_snapshot persist failed (%s: %s) — history reopen won't re-ground on it",
+            type(e).__name__, e,
+        )
+
+
 def _sse(event: str, data: dict) -> str:
     """Format a single Server-Sent Events frame."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -201,15 +241,22 @@ async def send_chat_message(
         # but let a per-message request value override (e.g. the seed message).
         ctx_type = request.context_type or session.data.get("context_type")
         ref_id = request.reference_id or session.data.get("reference_id")
+        # On a live turn iOS ships the on-screen snapshot; on a history reopen it
+        # sends none → replay the snapshot persisted at open time (migration 087).
+        effective_context = _effective_context(request.context, session.data)
+        # True only when a stored snapshot is being replayed (reopen) — so the
+        # prompt labels it as a point-in-time copy, not live data.
+        context_is_replayed = not request.context and bool(effective_context)
 
         ai_result = await chat_service.generate_response(
             session_id=session_id,
             user_message=request.message,
             session_type=session.data.get("session_type", "NORMAL"),
             stock_id=session.data.get("stock_id"),
-            context=request.context,
+            context=effective_context,
             context_type=ctx_type,
             reference_id=ref_id,
+            context_is_replayed=context_is_replayed,
         )
 
         # Build the widget payload (if Gemini triggered the stock tool)
@@ -272,6 +319,9 @@ async def send_chat_message(
             "id", session_id
         ).execute()
 
+        # Persist the on-screen snapshot (best-effort, guarded) so a later reopen re-grounds.
+        _persist_context_snapshot(supabase, session_id, request.context, session.data)
+
         return _row_to_message(assistant_row)
 
     except Exception as e:
@@ -312,6 +362,12 @@ async def stream_chat_message(
     sdata = session.data
     ctx_type = request.context_type or sdata.get("context_type")
     ref_id = request.reference_id or sdata.get("reference_id")
+    # Live turn → the iOS on-screen snapshot; history reopen (context=None) →
+    # the snapshot persisted at open time (migration 087).
+    effective_context = _effective_context(request.context, sdata)
+    # True only when a stored snapshot is being replayed (reopen) — labels it as
+    # a point-in-time copy in the prompt so stale figures aren't answered as live.
+    context_is_replayed = not request.context and bool(effective_context)
     session_type = sdata.get("session_type", "NORMAL")
     stock_id = sdata.get("stock_id")
     user_message = request.message
@@ -357,9 +413,10 @@ async def stream_chat_message(
                 user_message=user_message,
                 session_type=session_type,
                 stock_id=stock_id,
-                context=request.context,
+                context=effective_context,
                 context_type=ctx_type,
                 reference_id=ref_id,
+                context_is_replayed=context_is_replayed,
             )
             if settings.CHAT_MULTI_AGENT_ENABLED:
                 prep, route = await asyncio.gather(
@@ -452,9 +509,10 @@ async def stream_chat_message(
                     user_message=user_message,
                     session_type=session_type,
                     stock_id=stock_id,
-                    context=request.context,
+                    context=effective_context,
                     context_type=ctx_type,
                     reference_id=ref_id,
+                    context_is_replayed=context_is_replayed,
                 )
                 content = ai_result.get("content")
                 citations = ai_result.get("citations")
@@ -558,6 +616,9 @@ async def stream_chat_message(
             supabase.table("chat_sessions").update(update_payload).eq(
                 "id", session_id
             ).execute()
+
+            # Persist the on-screen snapshot (best-effort, guarded) so a later reopen re-grounds.
+            _persist_context_snapshot(supabase, session_id, request.context, sdata)
         except Exception as e:
             logger.error("Chat stream persist failed: %s", e, exc_info=True)
             yield _sse("error", {

@@ -502,7 +502,8 @@ class CryptoDetailViewModel: ObservableObject {
                 print("✅ [CryptoDetail] Got technical analysis detail for \(self.cryptoSymbol)")
             } catch {
                 print("⚠️ [CryptoDetail] Technical analysis detail failed: \(error)")
-                self.technicalAnalysisDetailData = TechnicalAnalysisDetailData.sampleData
+                // Do NOT fabricate Apple's pivots/levels for this coin (misinformation).
+                self.technicalAnalysisDetailData = nil
             }
             self.isTechnicalDetailLoading = false
         }

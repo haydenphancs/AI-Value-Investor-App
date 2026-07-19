@@ -579,11 +579,17 @@ class SentimentService:
         Classifies articles: score > 60 = bullish, < 40 = bearish, else neutral.
         """
         now = datetime.now(timezone.utc)
-        current_cutoff = (now - timedelta(hours=hours)).isoformat()
-        previous_cutoff = (now - timedelta(hours=hours * 2)).isoformat()
+        # FMP publishedDate is space-separated ("2024-01-15 09:30:00"); the ISO cutoff
+        # carries a 'T' + tz offset. A raw string compare mis-buckets articles — ' '
+        # (0x20) < 'T' (0x54), so a same-day article ALWAYS sorts before the cutoff —
+        # corrupting the current/previous window counts and the news change%.
+        # Canonicalize both sides to "yyyy-mm-ddThh:mm:ss" before comparing.
+        current_cutoff = (now - timedelta(hours=hours)).isoformat()[:19]
+        previous_cutoff = (now - timedelta(hours=hours * 2)).isoformat()[:19]
 
         def _pub_date(a: Dict) -> str:
-            return a.get("publishedDate") or a.get("published_at") or ""
+            raw = a.get("publishedDate") or a.get("published_at") or ""
+            return raw.replace(" ", "T")[:19]
 
         current = [a for a in articles if _pub_date(a) >= current_cutoff]
         previous = [

@@ -125,13 +125,12 @@ class TechnicalAnalysisService:
         df_daily = await self._fetch_daily_ohlcv(ticker)
         df_weekly = self._daily_to_weekly(df_daily, is_crypto=is_crypto)
 
-        daily_result, _, _ = self._compute_timeframe_signal(df_daily)
-        weekly_result, _, _ = self._compute_timeframe_signal(df_weekly)
+        daily_result, daily_gauge, _, _ = self._compute_timeframe_signal(df_daily)
+        weekly_result, weekly_gauge, _, _ = self._compute_timeframe_signal(df_weekly)
 
-        # Overall gauge: average of daily and weekly buy ratios
-        daily_ratio = daily_result.matching_indicators / TOTAL_INDICATORS
-        weekly_ratio = weekly_result.matching_indicators / TOTAL_INDICATORS
-        overall_gauge = (daily_ratio + weekly_ratio) / 2.0
+        # Overall gauge: average of the daily and weekly NET gauges (each already
+        # centres NEUTRAL at 0.5), so a neutral/insufficient-data ticker reads HOLD.
+        overall_gauge = (daily_gauge + weekly_gauge) / 2.0
 
         response = TechnicalAnalysisResponse(
             symbol=ticker,
@@ -159,8 +158,8 @@ class TechnicalAnalysisService:
         df_daily = await self._fetch_daily_ohlcv(ticker)
         df_weekly = self._daily_to_weekly(df_daily, is_crypto=is_crypto)
 
-        _, ma_list, osc_list = self._compute_timeframe_signal(df_daily)
-        _, weekly_ma_list, weekly_osc_list = self._compute_timeframe_signal(df_weekly)
+        _, _, ma_list, osc_list = self._compute_timeframe_signal(df_daily)
+        _, _, weekly_ma_list, weekly_osc_list = self._compute_timeframe_signal(df_weekly)
 
         response = TechnicalAnalysisDetailResponse(
             symbol=ticker,
@@ -262,6 +261,7 @@ class TechnicalAnalysisService:
         self, df: pd.DataFrame
     ) -> Tuple[
         TechnicalIndicatorResult,
+        float,
         List[MovingAverageIndicator],
         List[OscillatorIndicator],
     ]:
@@ -400,16 +400,35 @@ class TechnicalAnalysisService:
         ]
 
         # ── Gauge scoring ────────────────────────────────────
+        # NET score: BUY pulls up, SELL pulls down, NEUTRAL sits at the 0.5 midpoint.
+        # The old `buy_count / TOTAL_INDICATORS` counted ONLY buys, so an all-NEUTRAL
+        # set (e.g. a freshly-listed ticker with <15 candles → every indicator None →
+        # NEUTRAL) collapsed to gauge 0.0 → a fabricated "Strong Sell", and every
+        # NEUTRAL indicator was silently scored as bearish (systematic bearish bias).
         all_signals = [m.signal for m in ma_list] + [o.signal for o in osc_list]
         buy_count = sum(1 for s in all_signals if s == IndicatorSignal.BUY)
-        gauge_value = buy_count / TOTAL_INDICATORS
+        sell_count = sum(1 for s in all_signals if s == IndicatorSignal.SELL)
+        neutral_count = TOTAL_INDICATORS - buy_count - sell_count
+        gauge_value = min(
+            1.0, max(0.0, 0.5 + (buy_count - sell_count) / (2 * TOTAL_INDICATORS))
+        )
+        signal = _gauge_to_signal(gauge_value)
+
+        # "N of 18 indicators" should reflect the count AGREEING with the verdict,
+        # not always the buy_count.
+        if signal in (TechnicalSignal.BUY, TechnicalSignal.STRONG_BUY):
+            matching = buy_count
+        elif signal in (TechnicalSignal.SELL, TechnicalSignal.STRONG_SELL):
+            matching = sell_count
+        else:
+            matching = neutral_count
 
         result = TechnicalIndicatorResult(
-            signal=_gauge_to_signal(gauge_value),
-            matching_indicators=buy_count,
+            signal=signal,
+            matching_indicators=matching,
             total_indicators=TOTAL_INDICATORS,
         )
-        return result, ma_list, osc_list
+        return result, gauge_value, ma_list, osc_list
 
     # ── Signal classifiers ────────────────────────────────────
 
@@ -417,7 +436,9 @@ class TechnicalAnalysisService:
     def _classify_ma_signal(
         price: float, ma_val: Optional[float]
     ) -> IndicatorSignal:
-        if ma_val is None:
+        # `ma_val == 0` guard: _safe_float keeps a legitimate 0.0 (not None), and
+        # `(price - 0) / 0` would raise ZeroDivisionError → 500 the whole response.
+        if ma_val is None or ma_val == 0:
             return IndicatorSignal.NEUTRAL
         pct = (price - ma_val) / ma_val
         if pct > 0.005:
@@ -509,9 +530,16 @@ class TechnicalAnalysisService:
     def _compute_pivot_points(df: pd.DataFrame) -> PivotPointsData:
         """Classic pivot points from the prior day's H/L/C."""
         prev = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
-        h = float(prev["high"])
-        l_ = float(prev["low"])
-        c = float(prev["close"])
+        # The df is dropna'd on `close` only (see _fetch_daily_ohlcv), so a bar can
+        # carry a NaN high/low (pd.to_numeric coerced a missing/non-numeric field).
+        # A raw float(NaN) here would poison every REQUIRED PivotPointLevel.value (and
+        # the SupportResistanceLevel.value that reuses them) → allow_nan=False 500s the
+        # whole detail sheet. Degrade to no pivot levels, mirroring the volume guard.
+        h = _safe_float(prev["high"])
+        l_ = _safe_float(prev["low"])
+        c = _safe_float(prev["close"])
+        if h is None or l_ is None or c is None:
+            return PivotPointsData(method="Classic Method", levels=[])
 
         pivot = (h + l_ + c) / 3
         r1 = 2 * pivot - l_
@@ -543,18 +571,21 @@ class TechnicalAnalysisService:
         current_vol = _safe_float(df["volume"].iloc[-1]) or 0.0
         prev_vol = (_safe_float(df["volume"].iloc[-2]) or 0.0) if len(df) >= 2 else 0.0
 
+        # A volume-less history (indices/commodities often have null volume, or a
+        # brand-new listing) makes `.mean()` NaN → a raw float() lands NaN in the
+        # REQUIRED avg_volume_30d → allow_nan=False 500s the detail sheet. Guard with
+        # _safe_float like current_vol/obv/mfi already are.
         avg_30d = (
-            float(df["volume"].tail(30).mean())
-            if len(df) >= 30
-            else float(df["volume"].mean())
+            (_safe_float(df["volume"].tail(30).mean()) if len(df) >= 30
+             else _safe_float(df["volume"].mean())) or 0.0
         )
         vol_change = (
             ((current_vol - prev_vol) / prev_vol * 100) if prev_vol > 0 else 0.0
         )
 
-        # Trend: 5d avg vs 20d avg
-        avg_5d = float(df["volume"].tail(5).mean()) if len(df) >= 5 else current_vol
-        avg_20d = float(df["volume"].tail(20).mean()) if len(df) >= 20 else avg_30d
+        # Trend: 5d avg vs 20d avg (only feeds the trend comparison, but guard anyway)
+        avg_5d = (_safe_float(df["volume"].tail(5).mean()) or 0.0) if len(df) >= 5 else current_vol
+        avg_20d = (_safe_float(df["volume"].tail(20).mean()) or 0.0) if len(df) >= 20 else avg_30d
 
         if avg_5d > avg_20d * 1.1:
             trend = VolumeTrend.INCREASING
@@ -593,8 +624,14 @@ class TechnicalAnalysisService:
         lookback = min(len(df), 252)
         window = df.tail(lookback)
 
-        high = float(window["high"].max())
-        low = float(window["low"].min())
+        # high/low can be all-NaN (df is dropna'd on close only) → float(NaN) poisons
+        # the REQUIRED FibonacciLevel.value → 500. Degrade to the last close so every
+        # level stays finite (a flat, non-meaningful retracement rather than a crash).
+        high = _safe_float(window["high"].max())
+        low = _safe_float(window["low"].min())
+        if high is None or low is None:
+            fallback = _safe_float(df["close"].iloc[-1]) or 0.0
+            high = low = fallback
         diff = high - low
 
         fib_ratios = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]

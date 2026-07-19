@@ -230,10 +230,25 @@ struct TickerDetailView: View {
             if let detailData = viewModel.technicalAnalysisDetailData {
                 TechnicalAnalysisDetailView(detailData: detailData)
             } else {
-                ProgressView("Loading technical analysis...")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(AppColors.background)
-                    .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
+                Group {
+                    if viewModel.isTechnicalDetailLoading {
+                        ProgressView("Loading technical analysis...")
+                    } else {
+                        VStack(spacing: 10) {
+                            Image(systemName: "chart.bar.xaxis")
+                                .font(.system(size: 30))
+                                .foregroundColor(AppColors.textMuted)
+                            Text("Technical details are unavailable right now.\nPlease try again later.")
+                                .font(.subheadline)
+                                .foregroundColor(AppColors.textSecondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .padding()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(AppColors.background)
+                .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
             }
         }
         .sheet(isPresented: $showSearch) {

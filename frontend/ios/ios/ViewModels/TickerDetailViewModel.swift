@@ -652,8 +652,10 @@ class TickerDetailViewModel: ObservableObject {
                 print("✅ TickerDetailVM: Got technical analysis detail for \(self.tickerSymbol)")
             } catch {
                 print("⚠️ TickerDetailVM: Technical analysis detail failed for \(self.tickerSymbol): \(error)")
-                // Fall back to sample data so the sheet still shows something
-                self.technicalAnalysisDetailData = TechnicalAnalysisDetailData.sampleData
+                // Do NOT fabricate: sampleData shows Apple's pivots / support-resistance
+                // / fibonacci as THIS ticker's actionable price levels (financial
+                // misinformation). Leave nil; the sheet shows an honest unavailable state.
+                self.technicalAnalysisDetailData = nil
             }
             self.isTechnicalDetailLoading = false
         }

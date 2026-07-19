@@ -455,16 +455,22 @@ class CommodityService:
         news_articles = []
         if isinstance(news_raw, list):
             for article in news_raw[:10]:
+                # Guard every REQUIRED str with a trailing `or ""`/`"Unknown"`: FMP can
+                # return an explicit null title/publishedDate, and `.get(k, default)`
+                # only covers a MISSING key — a present-null returns None into the
+                # required published_at/headline/source_name → Pydantic 500s the whole
+                # commodity detail. Mirrors the crypto/etf/index _build_news builders.
+                # (source_name previously fell back to the publishedDate TIMESTAMP.)
                 news_articles.append(CommodityNewsArticleResponse(
-                    headline=article.get("title") or article.get("text", ""),
-                    source_name=article.get("site") or article.get("publishedDate", ""),
+                    headline=article.get("title") or article.get("text") or "",
+                    source_name=article.get("site") or article.get("publisher") or article.get("source") or "Unknown",
                     source_icon=None,
                     sentiment="neutral",
-                    published_at=article.get("publishedDate", ""),
-                    thumbnail_url=article.get("image"),
-                    related_tickers=[s for s in (article.get("symbol") or "").split(",") if s],
+                    published_at=article.get("publishedDate") or article.get("published_date") or "",
+                    thumbnail_url=article.get("image") or article.get("thumbnail_url"),
+                    related_tickers=[s.strip() for s in (article.get("symbol") or "").split(",") if s.strip()],
                     summary_bullets=[],
-                    article_url=article.get("url"),
+                    article_url=article.get("url") or article.get("article_url"),
                 ))
 
         # ── Step 7: Build commodity profile ───────────────────────

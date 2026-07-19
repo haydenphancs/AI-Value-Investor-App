@@ -698,6 +698,11 @@ async def get_stock_news(
         return await service.get_ticker_news(ticker.upper(), limit)
     except Exception as e:
         logger.error(f"Stock news failed for {ticker}: {e}", exc_info=True)
+        # Surface a known upstream failure (e.g. FMP_RATE_LIMITED) via the structured
+        # {error_code,message,user_message} contract (invariant #3); keep the generic
+        # 500 only for a truly-unexpected error.
+        if (resp := upstream_error_response(e, ticker=ticker.upper(), step="news")) is not None:
+            return resp
         raise HTTPException(status_code=500, detail="News service unavailable")
 
 

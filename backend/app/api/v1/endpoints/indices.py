@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any
 import logging
 import traceback
 
-from app.api.error_response import error_response_from_exception
+from app.api.error_response import error_response_from_exception, upstream_error_response
 from app.services.index_service import get_index_service
 from app.schemas.index import IndexDetailResponse
 
@@ -59,6 +59,8 @@ async def get_index_news(
         return await service.get_index_news(symbol, limit, news_tickers=news_tickers)
     except Exception as e:
         logger.error(f"Index news failed for {symbol}: {e}", exc_info=True)
+        if (resp := upstream_error_response(e, ticker=symbol, step="index_news")) is not None:
+            return resp
         raise HTTPException(status_code=500, detail="News service unavailable")
 
 

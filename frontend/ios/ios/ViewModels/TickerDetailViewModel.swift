@@ -295,10 +295,12 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.checkWatchlistStatus() }
             }
 
-            // If we don't have API news, load sample news
-            if self.newsArticles.isEmpty {
-                self.newsArticles = TickerNewsArticle.sampleDataForTicker(ticker)
-            }
+            // If the feed is empty/failed, stay empty (TickerNewsContent shows its
+            // honest "No News Available" state). NEVER seed sampleDataForTicker — those
+            // are hardcoded APPLE headlines attributed to THIS ticker (e.g. NVDA would
+            // show "Apple announces record Q4 earnings"), and they leak into the Cay AI
+            // news context. Matches the no-sample-fallback policy of the other 4 VMs
+            // and fetchEarnings/fetchGrowth.
         }
     }
 

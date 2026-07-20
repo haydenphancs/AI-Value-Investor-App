@@ -8,6 +8,10 @@
 import SwiftUI
 
 struct LiveNewsHeader: View {
+    /// Reflects the active filters ("All", "2 filters"). Defaulted so existing
+    /// call sites and previews keep compiling.
+    var filterLabel: String = "All"
+    var hasActiveFilters: Bool = false
     var onFilterTapped: (() -> Void)?
 
     var body: some View {
@@ -28,10 +32,10 @@ struct LiveNewsHeader: View {
                     Image(systemName: "line.3.horizontal.decrease")
                         .font(AppTypography.iconXS).fontWeight(.medium)
 
-                    Text("All")
+                    Text(filterLabel)
                         .font(AppTypography.bodySmall)
                 }
-                .foregroundColor(AppColors.textSecondary)
+                .foregroundColor(hasActiveFilters ? AppColors.primaryBlue : AppColors.textSecondary)
             }
             .buttonStyle(PlainButtonStyle())
         }

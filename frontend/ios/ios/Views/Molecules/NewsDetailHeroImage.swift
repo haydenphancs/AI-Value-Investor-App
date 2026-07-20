@@ -9,13 +9,37 @@ import SwiftUI
 
 struct NewsDetailHeroImage: View {
     let imageName: String?
+    /// Publisher's remote image. Preferred over `imageName`, which is a legacy
+    /// local-asset path — none of the historically referenced `news_*` assets
+    /// actually ship in Assets.xcassets, so that branch rendered blank.
+    var imageURL: URL? = nil
     var height: CGFloat = 220
     var cornerRadius: CGFloat = AppCornerRadius.large
 
     var body: some View {
         Group {
-            if let imageName = imageName {
-                // Try to load custom image first, fall back to placeholder
+            if let imageURL {
+                AsyncImage(url: imageURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    case .failure:
+                        placeholderView
+                    default:
+                        ZStack {
+                            AppColors.cardBackgroundLight
+                            ProgressView().tint(AppColors.textMuted)
+                        }
+                    }
+                }
+                .frame(height: height)
+                .frame(maxWidth: .infinity)
+                .clipped()
+                .cornerRadius(cornerRadius)
+            } else if let imageName = imageName {
+                // Legacy local asset path.
                 Image(imageName)
                     .resizable()
                     .aspectRatio(contentMode: .fill)

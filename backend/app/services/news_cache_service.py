@@ -27,6 +27,13 @@ CACHE_TTL_HOURS = 6
 # Gemini model for news enrichment (fast + cheap)
 NEWS_AI_MODEL = "gemini-2.5-flash"
 
+# Reserved cache key for the general (non-ticker-specific) market news feed.
+# It lives in `ticker_news_cache` alongside real tickers so the whole existing
+# spine — cache lookup, 6h TTL, enrichment, cleanup — applies unchanged. The
+# double-underscore form cannot collide with a real symbol (FMP symbols are
+# alphanumeric plus `.`/`-`/`^`).
+MARKET_SCOPE = "__MARKET__"
+
 
 class NewsCacheService:
     """Service for fetching and caching news per ticker with lazy AI enrichment."""
@@ -52,22 +59,12 @@ class NewsCacheService:
         # ── 1. Check cache ──
         cached_articles = self._get_cached(ticker, limit)
         if cached_articles:
-            oldest = min(
-                (a.get("cached_at") or datetime.now(timezone.utc).isoformat())
-                for a in cached_articles
-            )
-            try:
-                cached_time = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
-                age = int((datetime.now(timezone.utc) - cached_time).total_seconds())
-            except Exception:
-                age = 0
-
             logger.info(f"News cache HIT for {ticker}: {len(cached_articles)} articles")
             return {
                 "articles": self._format_response(cached_articles),
                 "ticker": ticker,
                 "cached": True,
-                "cache_age_seconds": age,
+                "cache_age_seconds": self._cache_age_seconds(cached_articles),
             }
 
         # ── 2. Cache miss → fetch from FMP, store raw (no Gemini) ──
@@ -103,22 +100,12 @@ class NewsCacheService:
         # 1. Check cache (keyed by index symbol)
         cached_articles = self._get_cached(symbol, limit)
         if cached_articles:
-            oldest = min(
-                (a.get("cached_at") or datetime.now(timezone.utc).isoformat())
-                for a in cached_articles
-            )
-            try:
-                cached_time = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
-                age = int((datetime.now(timezone.utc) - cached_time).total_seconds())
-            except Exception:
-                age = 0
-
             logger.info(f"Index news cache HIT for {symbol}: {len(cached_articles)} articles")
             return {
                 "articles": self._format_response(cached_articles),
                 "ticker": symbol,
                 "cached": True,
-                "cache_age_seconds": age,
+                "cache_age_seconds": self._cache_age_seconds(cached_articles),
             }
 
         # 2. Cache miss → fetch from FMP using constituent tickers
@@ -152,37 +139,132 @@ class NewsCacheService:
         if not raw_articles:
             logger.info(f"No FMP news found for index {symbol} (tickers={news_tickers})")
             return []
+        return self._build_and_cache_rows(
+            cache_key=symbol, raw_articles=raw_articles, limit=limit,
+            fallback_ticker=symbol, label=f"index {symbol}",
+        )
 
+    # ── Public: Get general market news ────────────────────────────────
+
+    async def get_market_news(self, limit: int = 50) -> Dict[str, Any]:
+        """
+        Get general (non-ticker-specific) market news.
+
+        Cached in `ticker_news_cache` under the reserved ``MARKET_SCOPE`` key so
+        the existing 6h TTL, on-demand `enrich_articles`, and `cleanup_expired_cache`
+        all apply with no changes. Mirrors :meth:`get_ticker_news`'s envelope.
+        """
+        cached_articles = self._get_cached(MARKET_SCOPE, limit)
+        if cached_articles:
+            logger.info(
+                f"Market news cache HIT: {len(cached_articles)} articles"
+            )
+            return {
+                "articles": self._format_response(cached_articles),
+                "ticker": MARKET_SCOPE,
+                "cached": True,
+                "cache_age_seconds": self._cache_age_seconds(cached_articles),
+            }
+
+        logger.info("Market news cache MISS: fetching general news from FMP")
+        try:
+            raw_articles = await self.fmp.get_stock_news(None, limit=limit)
+            if not raw_articles:
+                logger.warning("FMP returned no general market news")
+                return {
+                    "articles": [], "ticker": MARKET_SCOPE,
+                    "cached": False, "cache_age_seconds": 0,
+                }
+            articles = self._build_and_cache_rows(
+                cache_key=MARKET_SCOPE, raw_articles=raw_articles, limit=limit,
+                # No fallback ticker: a general market story with no FMP `symbol`
+                # genuinely relates to nothing in particular. Stamping it with
+                # "__MARKET__" would surface a fake ticker chip in the iOS UI.
+                fallback_ticker=None, label="market",
+            )
+            return {
+                "articles": articles, "ticker": MARKET_SCOPE,
+                "cached": False, "cache_age_seconds": 0,
+            }
+        except Exception as e:
+            # Let a typed FMP failure (rate limit / auth) propagate so the
+            # endpoint can map it to a structured error instead of an empty feed.
+            if type(e).__name__ in ("FMPRateLimitException", "FMPAuthException"):
+                raise
+            logger.error(
+                f"Market news fetch failed: {type(e).__name__}: {e}", exc_info=True
+            )
+            return {
+                "articles": [], "ticker": MARKET_SCOPE,
+                "cached": False, "cache_age_seconds": None,
+            }
+
+    # ── Private: shared row build + upsert ─────────────────────────────
+
+    def _build_and_cache_rows(
+        self,
+        cache_key: str,
+        raw_articles: List[Dict[str, Any]],
+        limit: int,
+        fallback_ticker: Optional[str],
+        label: str,
+    ) -> List[Dict[str, Any]]:
+        """Turn raw FMP articles into cache rows + API response, and upsert them.
+
+        Shared by the ticker, index, and market fetch paths — these were three
+        byte-identical copies that had already drifted (the index copy used
+        ``raw.get("title", f"unknown_{i}")``, which returns ``None`` — and then
+        crashes on ``[:500]`` — when the key exists with a null value, whereas
+        the ticker copy used a safe ``or`` chain).
+
+        ``cache_key`` is the ``ticker`` column value (a real symbol, an index
+        symbol, or ``MARKET_SCOPE``). ``fallback_ticker`` is what to record in
+        ``related_tickers`` when FMP omits ``symbol``; pass ``None`` to record
+        nothing rather than a synthetic chip.
+        """
         now = datetime.now(timezone.utc)
         expires = now + timedelta(hours=CACHE_TTL_HOURS)
 
-        cache_rows = []
-        response_articles = []
+        cache_rows: List[Dict[str, Any]] = []
+        response_articles: List[Dict[str, Any]] = []
         ext_ids: List[str] = []
         seen_external_ids: set = set()
 
         for i, raw in enumerate(raw_articles[:limit]):
-            external_id = raw.get("url") or raw.get("title", f"unknown_{i}")
-            ext_key = external_id[:500]
-            if ext_key in seen_external_ids:
+            if not isinstance(raw, dict):
+                logger.warning(
+                    "Skipping non-dict FMP news item at index %d for %s: %r",
+                    i, label, type(raw).__name__,
+                )
                 continue
-            seen_external_ids.add(ext_key)
-            ext_ids.append(ext_key)
+
+            external_id = (raw.get("url") or raw.get("title") or f"unknown_{i}")[:500]
+            # Dedup within the batch: two FMP articles sharing a url/title yield the
+            # same (ticker, external_id), and a single ON CONFLICT upsert that touches
+            # the same row twice raises Postgres "cannot affect row a second time" →
+            # the WHOLE upsert aborts → every id degrades to temp_N → enrichment is
+            # permanently disabled for this key (iOS filters out temp_ ids).
+            if external_id in seen_external_ids:
+                continue
+            seen_external_ids.add(external_id)
+            ext_ids.append(external_id)
+
+            related = self._parse_tickers(raw, fallback_ticker)
 
             row = {
-                "ticker": symbol,  # Cache key = index symbol
-                "external_id": external_id[:500],
-                "headline": raw.get("title", ""),
-                "summary": raw.get("text", ""),
+                "ticker": cache_key,
+                "external_id": external_id,
+                "headline": raw.get("title") or "",
+                "summary": raw.get("text") or "",
                 "summary_bullets": json.dumps([]),
                 "sentiment": None,
                 "sentiment_confidence": 0,
-                "source_name": raw.get("publisher") or raw.get("site", ""),
+                "source_name": raw.get("publisher") or raw.get("site") or "",
                 "source_logo_url": None,
                 "published_at": raw.get("publishedDate"),
                 "thumbnail_url": raw.get("image"),
                 "article_url": raw.get("url"),
-                "related_tickers": self._parse_tickers(raw, symbol),
+                "related_tickers": related,
                 "ai_processed": False,
                 "ai_model": None,
                 "cached_at": now.isoformat(),
@@ -202,19 +284,23 @@ class NewsCacheService:
                 "published_at": row["published_at"],
                 "thumbnail_url": row["thumbnail_url"],
                 "article_url": row["article_url"],
-                "related_tickers": self._parse_tickers(raw, symbol),
+                "related_tickers": related,
                 "ai_processed": False,
             })
 
-        # Upsert into cache
+        if not cache_rows:
+            logger.info("No usable FMP news rows for %s", label)
+            return []
+
         try:
             result = (
                 self.supabase.table("ticker_news_cache")
                 .upsert(cache_rows, on_conflict="ticker,external_id")
                 .execute()
             )
-            # Match ids by external_id (RETURNING order is not guaranteed to match
-            # VALUES order → a positional zip could misattribute the id/enrichment).
+            # Assign the DB id by external_id match. Postgres does NOT guarantee that
+            # the RETURNING rows come back in VALUES order, so a positional zip could
+            # attach the wrong id — and thus the wrong enrichment — to an article.
             id_by_ext = {
                 r.get("external_id"): r.get("id", "")
                 for r in (result.data or [])
@@ -222,15 +308,35 @@ class NewsCacheService:
             }
             for art, ext in zip(response_articles, ext_ids):
                 art["id"] = id_by_ext.get(ext, "")
-            logger.info(f"Cached {len(cache_rows)} index news articles for {symbol}")
+            logger.info("Cached %d raw articles for %s", len(cache_rows), label)
         except Exception as e:
-            logger.error(f"Index news cache insert failed for {symbol}: {e}")
+            logger.error(
+                "Cache insert failed for %s: %s: %s", label, type(e).__name__, e
+            )
 
+        # Any article the upsert didn't yield an id for → temp fallback (still renders,
+        # just not enrichable until the next cache cycle).
         for i, art in enumerate(response_articles):
             if not art["id"]:
                 art["id"] = f"temp_{i}"
 
         return response_articles
+
+    @staticmethod
+    def _cache_age_seconds(cached_articles: List[Dict[str, Any]]) -> int:
+        """Age of the OLDEST row in the cached set, in seconds (0 on any error)."""
+        try:
+            oldest = min(
+                (a.get("cached_at") or datetime.now(timezone.utc).isoformat())
+                for a in cached_articles
+            )
+            cached_time = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+            return max(0, int((datetime.now(timezone.utc) - cached_time).total_seconds()))
+        except Exception as e:
+            logger.warning(
+                "Cache-age computation failed: %s: %s", type(e).__name__, e
+            )
+            return 0
 
     # ── Public: Enrich specific articles on demand ────────────────────
 
@@ -360,14 +466,24 @@ class NewsCacheService:
     # ── Private: Ticker parsing helper ──────────────────────────────────
 
     @staticmethod
-    def _parse_tickers(raw: dict, fallback_ticker: str, max_tickers: int = 8) -> list:
-        """Split FMP's comma-separated symbol string into a clean list."""
+    def _parse_tickers(
+        raw: dict, fallback_ticker: Optional[str], max_tickers: int = 8
+    ) -> list:
+        """Split FMP's comma-separated symbol string into a clean list.
+
+        ``fallback_ticker`` is used only when FMP omits ``symbol``. Pass ``None``
+        (the general-market case) to record no related tickers at all — a
+        synthetic value would render as a real ticker chip in the iOS UI.
+        """
         symbol = raw.get("symbol")
-        if isinstance(symbol, str):
-            tickers = [t.strip() for t in symbol.split(",") if t.strip()]
+        if isinstance(symbol, str) and symbol.strip():
+            tickers = [t.strip().upper() for t in symbol.split(",") if t.strip()]
+        elif fallback_ticker:
+            tickers = [fallback_ticker.upper()]
         else:
-            tickers = [fallback_ticker]
-        return tickers[:max_tickers]
+            tickers = []
+        # De-dup while preserving order: FMP occasionally repeats a symbol.
+        return list(dict.fromkeys(tickers))[:max_tickers]
 
     # ── Private: Fetch from FMP and cache raw ─────────────────────────
 
@@ -382,93 +498,10 @@ class NewsCacheService:
         if not raw_articles:
             logger.info(f"No FMP news found for {ticker}")
             return []
-
-        now = datetime.now(timezone.utc)
-        expires = now + timedelta(hours=CACHE_TTL_HOURS)
-
-        cache_rows = []
-        response_articles = []
-        ext_ids: List[str] = []
-        seen_external_ids: set = set()
-
-        for i, raw in enumerate(raw_articles[:limit]):
-            external_id = (raw.get("url") or raw.get("title") or f"unknown_{i}")[:500]
-            # Dedup within the batch: two FMP articles sharing a url/title yield the
-            # same (ticker, external_id), and a single ON CONFLICT upsert that touches
-            # the same row twice raises Postgres "cannot affect row a second time" →
-            # the WHOLE upsert aborts → every id degrades to temp_N → enrichment is
-            # permanently disabled for this ticker (iOS filters out temp_ ids).
-            # Mirrors _fetch_and_cache_index_news.
-            if external_id in seen_external_ids:
-                continue
-            seen_external_ids.add(external_id)
-            ext_ids.append(external_id)
-
-            row = {
-                "ticker": ticker,
-                "external_id": external_id,
-                "headline": raw.get("title", ""),
-                "summary": raw.get("text", ""),
-                "summary_bullets": json.dumps([]),
-                "sentiment": None,
-                "sentiment_confidence": 0,
-                "source_name": raw.get("publisher") or raw.get("site", ""),
-                "source_logo_url": None,
-                "published_at": raw.get("publishedDate"),
-                "thumbnail_url": raw.get("image"),
-                "article_url": raw.get("url"),
-                "related_tickers": self._parse_tickers(raw, ticker),
-                "ai_processed": False,
-                "ai_model": None,
-                "cached_at": now.isoformat(),
-                "expires_at": expires.isoformat(),
-            }
-            cache_rows.append(row)
-
-            response_articles.append({
-                "id": "",
-                "headline": row["headline"],
-                "summary": row["summary"],
-                "summary_bullets": [],
-                "sentiment": None,
-                "sentiment_confidence": 0,
-                "source_name": row["source_name"],
-                "source_logo_url": None,
-                "published_at": row["published_at"],
-                "thumbnail_url": row["thumbnail_url"],
-                "article_url": row["article_url"],
-                "related_tickers": self._parse_tickers(raw, ticker),
-                "ai_processed": False,
-            })
-
-        # Upsert into cache
-        try:
-            result = (
-                self.supabase.table("ticker_news_cache")
-                .upsert(cache_rows, on_conflict="ticker,external_id")
-                .execute()
-            )
-            # Assign the DB id by external_id match. Postgres does NOT guarantee that
-            # the RETURNING rows come back in VALUES order, so a positional zip could
-            # attach the wrong id — and thus the wrong enrichment — to an article.
-            id_by_ext = {
-                r.get("external_id"): r.get("id", "")
-                for r in (result.data or [])
-                if r.get("external_id")
-            }
-            for art, ext in zip(response_articles, ext_ids):
-                art["id"] = id_by_ext.get(ext, "")
-            logger.info(f"Cached {len(cache_rows)} raw articles for {ticker}")
-        except Exception as e:
-            logger.error(f"Cache insert failed for {ticker}: {e}")
-
-        # Any article the upsert didn't yield an id for → temp fallback (still renders,
-        # just not enrichable until the next cache cycle).
-        for i, art in enumerate(response_articles):
-            if not art["id"]:
-                art["id"] = f"temp_{i}"
-
-        return response_articles
+        return self._build_and_cache_rows(
+            cache_key=ticker, raw_articles=raw_articles, limit=limit,
+            fallback_ticker=ticker, label=ticker,
+        )
 
     # ── Private: Gemini batch enrichment ──────────────────────────────
 
@@ -672,6 +705,96 @@ Return a JSON array with one object per article in order. Each object must have:
             logger.warning(f"Cache lookup failed for {ticker}: {e}")
             return []
 
+    def get_cached_bulk(
+        self, scopes: List[str], per_scope_limit: int = 25
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Fresh cached rows for MANY scopes in ONE Supabase query.
+
+        The insight sweeper evaluates every watchlisted scope on each pass; doing
+        that with one `_get_cached` call per scope would be N round-trips per
+        sweep. Rows come back newest-first and are truncated per scope in Python.
+
+        Blocking — call via ``asyncio.to_thread`` from async code.
+        """
+        scopes = [s for s in dict.fromkeys(scopes) if s]
+        if not scopes:
+            return {}
+        try:
+            result = (
+                self.supabase.table("ticker_news_cache")
+                .select(
+                    "id, ticker, external_id, headline, summary, sentiment, "
+                    "ai_processed, published_at, article_url"
+                )
+                .in_("ticker", scopes)
+                .gte("expires_at", datetime.now(timezone.utc).isoformat())
+                .order("published_at", desc=True)
+                .limit(per_scope_limit * len(scopes))
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(
+                "Bulk cache lookup failed for %d scopes: %s: %s",
+                len(scopes), type(e).__name__, e,
+            )
+            return {}
+
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for row in (result.data or []):
+            key = row.get("ticker")
+            if not key:
+                continue
+            bucket = grouped.setdefault(key, [])
+            if len(bucket) < per_scope_limit:
+                bucket.append(row)
+        return grouped
+
+    async def refresh_scope_news(
+        self, scope: str, limit: int = 50, lookback_hours: int = 6,
+    ) -> int:
+        """Force-fetch recent news for ``scope`` from FMP and write it through.
+
+        Deliberately BYPASSES the 6-hour cache read. The insight sweeper needs to
+        notice a story that broke ten minutes ago; if it went through
+        :meth:`get_ticker_news` it would just re-read the same 6-hour-old rows
+        and the fingerprint would never change — the "catch breaking news"
+        property would silently not exist.
+
+        The upsert is idempotent on ``(ticker, external_id)``, so re-fetching
+        overlapping articles refreshes ``expires_at`` instead of duplicating.
+
+        Returns the number of rows written (0 on any failure — non-fatal, the
+        next sweep retries).
+        """
+        from_date = (
+            datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+        ).strftime("%Y-%m-%d")
+        try:
+            if scope == MARKET_SCOPE:
+                raw = await self.fmp.get_stock_news(
+                    None, limit=limit, from_date=from_date
+                )
+                fallback = None
+            else:
+                raw = await self.fmp.get_stock_news(
+                    scope, limit=limit, from_date=from_date
+                )
+                fallback = scope
+        except Exception as e:
+            logger.warning(
+                "News refresh fetch failed for %s: %s: %s",
+                scope, type(e).__name__, e,
+            )
+            return 0
+
+        if not raw:
+            return 0
+        written = self._build_and_cache_rows(
+            cache_key=scope, raw_articles=raw, limit=limit,
+            fallback_ticker=fallback, label=f"{scope} (refresh)",
+        )
+        return len(written)
+
     # ── Private: Fallback ─────────────────────────────────────────────
 
     async def _fallback_raw_news(
@@ -761,6 +884,18 @@ Return a JSON array with one object per article in order. Each object must have:
         Pre-warm news cache for the most popular watchlist tickers.
         Fetches raw articles only (no Gemini) to keep cache warm.
         """
+        # The general market feed backs the Updates screen's default tab, so it is
+        # warmed FIRST and unconditionally — even when nobody has a watchlist yet.
+        try:
+            market = await self.get_market_news(limit=50)
+            logger.info(
+                "Pre-warmed %s: %d articles", MARKET_SCOPE, len(market.get("articles", []))
+            )
+        except Exception as e:
+            logger.warning(
+                "Pre-warm failed for %s: %s: %s", MARKET_SCOPE, type(e).__name__, e
+            )
+
         try:
             result = self.supabase.rpc(
                 "get_top_watchlist_tickers", {"n": top_n}

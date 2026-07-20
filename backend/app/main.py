@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 import logging
 import time
 import asyncio
-from typing import Any
+from typing import Any, Optional
 
 from app.config import settings
 from app.database import check_supabase_health, get_supabase
@@ -113,6 +113,9 @@ async def lifespan(app: FastAPI):
     # Local server is a lightweight dev mirror that reads from the same
     # Supabase caches that Railway populates.
     is_local_dev = settings.ENVIRONMENT == "development"
+    # Declared before the branch so the shutdown block below can reference it
+    # even when background tasks were skipped (local dev).
+    insight_sweeper_task: Optional[asyncio.Task] = None
     if is_local_dev:
         logger.info("Local dev mode — skipping background tasks (Railway handles them)")
     else:
@@ -160,7 +163,31 @@ async def lifespan(app: FastAPI):
         # reports get their credits back.
         asyncio.create_task(_run_research_reconciliation_job())
 
+        # Updates-screen AI Insights sweeper. Re-evaluates every watchlisted
+        # scope (plus the general market feed) on a 5-min price / 15-min news
+        # cadence during market hours and regenerates a card only when a
+        # materiality predicate trips. This is what keeps the read path free of
+        # any Gemini call — see services/updates_insight_sweeper.py.
+        #
+        # Unlike the loops above we RETAIN the handle and cancel it below: this
+        # task holds a cross-process claim row per scope, and a clean cancel lets
+        # the current sweep unwind instead of leaving claims to time out.
+        from app.services.updates_insight_sweeper import run_insight_sweeper_loop
+        insight_sweeper_task = asyncio.create_task(run_insight_sweeper_loop())
+
     yield
+
+    # Stop the insight sweeper before tearing down the HTTP clients it uses.
+    if insight_sweeper_task is not None:
+        insight_sweeper_task.cancel()
+        try:
+            await insight_sweeper_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(
+                "Insight sweeper shutdown raised: %s: %s", type(e).__name__, e
+            )
 
     # Graceful shutdown: close live price WebSocket connections
     await get_live_price_manager().shutdown()

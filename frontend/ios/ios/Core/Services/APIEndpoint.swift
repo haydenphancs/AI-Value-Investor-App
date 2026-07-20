@@ -134,6 +134,16 @@ enum APIEndpoint: Sendable {
     case getNewsFeed(page: Int, perPage: Int)
     case getNewsArticle(articleId: String)
 
+    // MARK: - Updates screen
+    /// Filter pills for the Updates tab bar: "Market" + the user's watchlist,
+    /// each with its session change %. Optional auth (guest-safe).
+    case getUpdatesTabs
+    /// One tab's content — news timeline AND the AI Insights card in a single
+    /// round trip, so switching tabs costs one request, not two.
+    case getUpdatesFeed(scope: String, limit: Int)
+    /// On-demand AI enrichment (bullets + sentiment) for specific articles.
+    case enrichUpdatesNews(scope: String, articleIds: [String])
+
     // MARK: - Chat
     case listChatSessions(limit: Int, offset: Int)
     case createChatSession(stockId: String?, contextType: String? = nil, referenceId: String? = nil)
@@ -349,6 +359,14 @@ enum APIEndpoint: Sendable {
         case .getNewsArticle(let articleId):
             return "/api/v1/news/\(articleId)"
 
+        // Updates screen
+        case .getUpdatesTabs:
+            return "/api/v1/updates/tabs"
+        case .getUpdatesFeed:
+            return "/api/v1/updates/feed"
+        case .enrichUpdatesNews:
+            return "/api/v1/updates/news/enrich"
+
         // Chat
         case .listChatSessions:
             return "/api/v1/chat/sessions"
@@ -434,6 +452,7 @@ enum APIEndpoint: Sendable {
              .createChatSession, .sendChatMessage, .streamChatMessage,
              .chatWithTickerReport, .completeLearnItem, .addBookBookmark,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
+             .enrichUpdatesNews,
              .createPortfolio, .regenerateResearchReportPDF,
              .prewarmReportCollection:
             return .POST
@@ -463,6 +482,9 @@ enum APIEndpoint: Sendable {
 
         case .getStockNews(_, let limit):
             return ["limit": String(limit)]
+
+        case .getUpdatesFeed(let scope, let limit):
+            return ["scope": scope, "limit": String(limit)]
 
         case .getCryptoNews(_, let limit):
             return ["limit": String(limit)]
@@ -595,6 +617,9 @@ enum APIEndpoint: Sendable {
         case .enrichCommodityNews(_, let articleIds):
             return EnrichStockNewsRequest(articleIds: articleIds)
 
+        case .enrichUpdatesNews(let scope, let articleIds):
+            return EnrichUpdatesNewsRequest(scope: scope, articleIds: articleIds)
+
         case .createPortfolio(let name):
             return CreatePortfolioRequestBody(name: name)
 
@@ -629,6 +654,10 @@ enum APIEndpoint: Sendable {
             return false
         // News endpoints are public
         case .getNewsFeed, .getNewsArticle:
+            return false
+        // Updates: /tabs uses OPTIONAL auth (guest watchlist when signed out);
+        // /feed and /news/enrich are fully public market data.
+        case .getUpdatesTabs, .getUpdatesFeed, .enrichUpdatesNews:
             return false
         // Whale list/profile/trade-groups use optional auth (token sent if available)
         case .getWhaleList, .getWhaleProfile, .getWhaleTradeGroups, .getWhaleTradeGroupDetail:
@@ -779,6 +808,19 @@ nonisolated struct EnrichStockNewsRequest: Encodable, Sendable {
     let articleIds: [String]
 
     enum CodingKeys: String, CodingKey {
+        case articleIds = "article_ids"
+    }
+}
+
+/// Updates-screen enrichment. Unlike the per-asset enrich endpoints the scope
+/// travels in the BODY, not the path — the Market feed's scope (`__MARKET__`)
+/// is not a URL-safe ticker.
+nonisolated struct EnrichUpdatesNewsRequest: Encodable, Sendable {
+    let scope: String
+    let articleIds: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case scope
         case articleIds = "article_ids"
     }
 }

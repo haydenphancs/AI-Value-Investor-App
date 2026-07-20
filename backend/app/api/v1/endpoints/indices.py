@@ -8,13 +8,28 @@ Frontend:
 """
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 from typing import Optional, Dict, Any
 import logging
+import re
 import traceback
 
-from app.api.error_response import error_response_from_exception, upstream_error_response
+from app.api.error_response import (
+    ErrorCode,
+    error_response_from_exception,
+    make_error_response,
+    upstream_error_response,
+)
 from app.services.index_service import get_index_service
 from app.schemas.index import IndexDetailResponse
+from app.schemas.news import (
+    MAX_ENRICH_ARTICLE_IDS,
+    EnrichNewsResponse,
+    TickerNewsFeedResponse,
+    news_articles_from_rows,
+    news_feed_from_payload,
+    sanitize_article_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +44,31 @@ _INDEX_NEWS_TICKERS: Dict[str, str] = {
 }
 
 
+# Normalization always prefixes '^', so a valid index symbol is that caret plus
+# a short alphanumeric body. Anything else is malformed input, not a lookup.
+_INDEX_SYMBOL_RE = re.compile(r"^\^[A-Z0-9.\-]{1,12}$")
+
+
 def _normalize_index_symbol(symbol: str) -> str:
     if not symbol.startswith("^") and not symbol.startswith("%5E"):
         symbol = f"^{symbol}"
     return symbol.replace("%5E", "^").upper()
 
 
+def _invalid_news_symbol(raw: str) -> JSONResponse:
+    """Structured INVALID_INPUT for a malformed index symbol (invariant #3)."""
+    return make_error_response(
+        ErrorCode.INVALID_INPUT,
+        message=f"Invalid index symbol for news: {raw[:32]!r}",
+        user_message="That symbol isn't valid.",
+        details={"symbol": raw[:32]},
+    )
+
+
 # ── News endpoints MUST come before /{symbol} to avoid route conflict ──
 
 
-@router.get("/{symbol}/news")
+@router.get("/{symbol}/news", response_model=TickerNewsFeedResponse)
 async def get_index_news(
     symbol: str,
     limit: int = Query(50, ge=1, le=50),
@@ -51,20 +81,27 @@ async def get_index_news(
     """
     from app.services.news_cache_service import get_news_cache_service
 
+    raw_symbol = symbol
     symbol = _normalize_index_symbol(symbol)
+    if not _INDEX_SYMBOL_RE.match(symbol):
+        return _invalid_news_symbol(raw_symbol)
     news_tickers = _INDEX_NEWS_TICKERS.get(symbol, "")
 
     try:
         service = get_news_cache_service()
-        return await service.get_index_news(symbol, limit, news_tickers=news_tickers)
+        feed = await service.get_index_news(symbol, limit, news_tickers=news_tickers)
     except Exception as e:
-        logger.error(f"Index news failed for {symbol}: {e}", exc_info=True)
+        logger.error(
+            f"Index news failed for {symbol}: {type(e).__name__}: {e}", exc_info=True
+        )
         if (resp := upstream_error_response(e, ticker=symbol, step="index_news")) is not None:
             return resp
         raise HTTPException(status_code=500, detail="News service unavailable")
 
+    return news_feed_from_payload(feed, ticker=symbol)
 
-@router.post("/{symbol}/news/enrich")
+
+@router.post("/{symbol}/news/enrich", response_model=EnrichNewsResponse)
 async def enrich_index_news(
     symbol: str,
     body: Dict[str, Any],
@@ -76,18 +113,44 @@ async def enrich_index_news(
     """
     from app.services.news_cache_service import get_news_cache_service
 
+    raw_symbol = symbol
     symbol = _normalize_index_symbol(symbol)
-    article_ids = body.get("article_ids", [])
-    if not article_ids:
-        raise HTTPException(status_code=400, detail="article_ids is required")
+    if not _INDEX_SYMBOL_RE.match(symbol):
+        return _invalid_news_symbol(raw_symbol)
+
+    raw_ids = body.get("article_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="article_ids is required (non-empty list)",
+            user_message="No articles were requested.",
+            details={"symbol": symbol},
+        )
+
+    ids = sanitize_article_ids(raw_ids)
+    if not ids:
+        # Every id was a client-side placeholder — nothing is enrichable yet.
+        return EnrichNewsResponse(ticker=symbol, articles=[])
+    if len(ids) > MAX_ENRICH_ARTICLE_IDS:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Too many article_ids: {len(ids)} (max {MAX_ENRICH_ARTICLE_IDS})",
+            user_message="Too many articles requested at once.",
+            details={"symbol": symbol, "count": len(ids)},
+        )
 
     try:
         service = get_news_cache_service()
-        enriched = await service.enrich_articles(symbol, article_ids)
-        return {"articles": enriched, "ticker": symbol}
+        enriched = await service.enrich_articles(symbol, ids)
     except Exception as e:
-        logger.error(f"Index news enrichment failed for {symbol}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Enrichment service unavailable")
+        logger.error(
+            f"Index news enrichment failed for {symbol} ({len(ids)} ids): "
+            f"{type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        return error_response_from_exception(e, ticker=symbol, step="index_news_enrich")
+
+    return EnrichNewsResponse(ticker=symbol, articles=news_articles_from_rows(enriched))
 
 
 # ── Main detail endpoint (catch-all /{symbol} MUST be last) ──

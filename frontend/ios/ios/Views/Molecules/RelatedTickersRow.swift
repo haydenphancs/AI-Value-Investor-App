@@ -36,7 +36,7 @@ struct RelatedTickersRow: View {
 #Preview {
     VStack(spacing: AppSpacing.lg) {
         RelatedTickersRow(
-            tickers: ["APPL", "ORCL", "TSLA"],
+            tickers: ["AAPL", "ORCL", "TSLA"],
             onTickerTapped: { ticker in
                 print("Tapped: \(ticker)")
             }

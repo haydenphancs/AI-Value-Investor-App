@@ -9,6 +9,8 @@ import SwiftUI
 
 struct NewsDetailContent: View {
     let article: NewsArticleDetail
+    /// AI enrichment in flight — show a shimmer where the takeaways will land.
+    var isEnriching: Bool = false
     var onTickerTapped: ((String) -> Void)?
 
     var body: some View {
@@ -28,7 +30,10 @@ struct NewsDetailContent: View {
             )
 
             // Hero Image
-            NewsDetailHeroImage(imageName: article.heroImageName)
+            NewsDetailHeroImage(
+                imageName: article.heroImageName,
+                imageURL: article.heroImageURL
+            )
 
             // Related Tickers
             if !article.relatedTickers.isEmpty {
@@ -38,9 +43,28 @@ struct NewsDetailContent: View {
                 )
             }
 
-            // Key Takeaways
+            // Key Takeaways — the backend's AI enrichment bullets for THIS
+            // article. When enrichment hasn't produced any, the section is
+            // omitted entirely rather than filled with generated filler.
             if !article.keyTakeaways.isEmpty {
                 KeyTakeawaysSection(takeaways: article.keyTakeaways)
+            } else if isEnriching {
+                takeawaysSkeleton
+            }
+        }
+    }
+
+    private var takeawaysSkeleton: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            Text("Key Takeaways")
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textPrimary)
+
+            ForEach(0..<3, id: \.self) { _ in
+                RoundedRectangle(cornerRadius: AppCornerRadius.small)
+                    .fill(AppColors.cardBackgroundLight)
+                    .frame(height: 34)
+                    .shimmer()
             }
         }
     }
@@ -56,7 +80,7 @@ struct NewsDetailContent: View {
                 publishedAt: Date(),
                 readTimeMinutes: 4,
                 heroImageName: nil,
-                relatedTickers: ["APPL", "ORCL", "TSLA"],
+                relatedTickers: ["AAPL", "ORCL", "TSLA"],
                 keyTakeaways: [
                     KeyTakeaway(index: 1, text: "Despite record Q4 results, missing expectations signals slowing growth and weaker-than-hoped execution."),
                     KeyTakeaway(index: 2, text: "A miss in a flagship quarter raises doubts about forward demand and near-term visibility."),

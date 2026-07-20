@@ -374,3 +374,32 @@ def test_every_decision_carries_a_reason():
     ]
     for d in cases:
         assert d.reason and isinstance(d.reason, str)
+
+
+# ── regressions found by the adversarial review ───────────────────────
+
+def test_missing_quote_does_not_fabricate_a_change_event():
+    """An absent price signal must be NEUTRAL to the gate, not a change.
+
+    The band feeds the fingerprint, so letting `flat -> unknown` through re-keys
+    the digest: a byte-identical corpus gets reported as "new_articles", and a
+    second time on the way back. A universe-wide quote hiccup would cost roughly
+    two generations per scope for nothing.
+    """
+    first = _decide()
+    state = {
+        "last_inputset_id": first.inputset_id,
+        "last_price_band": first.price_band,
+        "close_cycle": CYCLE.isoformat(),
+    }
+    # Same articles, but the quote went missing.
+    for bad in ({}, {"changePercentage": None}, {"changePercentage": float("nan")}):
+        d = _decide(state=state, quote=bad)
+        assert d.action == ACTION_SKIP, f"{bad} triggered {d.reason}"
+        assert d.reason == "fingerprint_unchanged"
+
+
+def test_unknown_band_on_a_cold_scope_still_generates():
+    # The fallback must not block a genuine first generation.
+    d = _decide(state=None, quote={})
+    assert d.action == ACTION_GENERATE

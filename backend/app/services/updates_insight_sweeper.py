@@ -134,23 +134,38 @@ class InsightSweeper:
             )
             return {}
 
-    def _record_skip(self, scope: str, decision: Decision, now: datetime) -> None:
-        """Persist why this scope was NOT regenerated.
+    def _record_skips(
+        self, skips: List[Tuple[str, Decision]], now: datetime
+    ) -> None:
+        """Persist why each scope was NOT regenerated, in ONE upsert.
 
-        Best-effort and explicitly non-fatal, but never silent: without this row
-        the only record of a skip is a log line nobody kept.
+        Batched deliberately: at ~200 scopes, a write per skip was ~200
+        sequential round-trips per 5-minute sweep, and a slow-DB day could push
+        a sweep past `_CLAIM_STALE_SECONDS`, letting another instance steal a
+        live claim.
+
+        Best-effort and explicitly non-fatal, but never silent: without these
+        rows the only record of a skip is a log line nobody kept.
         """
-        try:
-            self.supabase.table(_STATE_TABLE).upsert({
+        if not skips:
+            return
+        rows = [
+            {
                 "scope": scope,
                 "last_skip_reason": decision.reason,
                 "last_evaluated_at": now.isoformat(),
                 "updated_at": now.isoformat(),
-            }, on_conflict="scope").execute()
+            }
+            for scope, decision in skips
+        ]
+        try:
+            self.supabase.table(_STATE_TABLE).upsert(
+                rows, on_conflict="scope"
+            ).execute()
         except Exception as e:
             logger.warning(
-                "Could not persist skip reason for %s (%s): %s: %s",
-                scope, decision.reason, type(e).__name__, e,
+                "Could not persist %d skip reasons: %s: %s",
+                len(rows), type(e).__name__, e,
             )
 
     def _claim(self, scope: str, now: datetime) -> bool:
@@ -250,6 +265,23 @@ class InsightSweeper:
                 scope, type(e).__name__, e,
             )
 
+    def _mark_cycle_touched(
+        self, scopes: List[str], now: datetime
+    ) -> None:
+        """Advance close_cycle for scopes whose card was re-stamped, not regenerated."""
+        try:
+            self.supabase.table(_STATE_TABLE).update({
+                "close_cycle": current_close_cycle_start(now).isoformat(),
+                "last_skip_reason": "cycle_touch",
+                "last_evaluated_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }).in_("scope", scopes).execute()
+        except Exception as e:
+            logger.warning(
+                "Could not advance close_cycle for %d touched scopes: %s: %s",
+                len(scopes), type(e).__name__, e,
+            )
+
     def _release_claim(self, scope: str, now: datetime, reason: str) -> None:
         """Give the claim back without recording a generation.
 
@@ -347,6 +379,7 @@ class InsightSweeper:
 
         pending: List[Tuple[str, Decision]] = []
         touches: List[str] = []
+        skips: List[Tuple[str, Decision]] = []
         reasons: Counter = Counter()
 
         for scope in scopes:
@@ -369,11 +402,28 @@ class InsightSweeper:
             elif decision.action == ACTION_TOUCH:
                 touches.append(scope)
             else:
-                await asyncio.to_thread(self._record_skip, scope, decision, now)
+                skips.append((scope, decision))
+
+        await asyncio.to_thread(self._record_skips, skips, now)
+
+        # A scope we just re-verified as unchanged is NOT stale — the card is
+        # provably still correct. Extend its freshness so the UI doesn't flip to
+        # "Catching up…" on every quiet ticker. Costs one batched UPDATE, no LLM.
+        verified = [
+            scope for scope, d in skips if d.reason == "fingerprint_unchanged"
+        ]
+        await self.insights.mark_verified_current(verified, market_active)
 
         # 5. Ceiling touches — free, no LLM.
         for scope in touches:
             await self.insights.touch(scope, market_active)
+        if touches:
+            # The state row's close_cycle MUST advance too. Without it the gate
+            # re-reads the old cycle every pass and re-touches the same scopes
+            # every 5 minutes forever — the "once per trading day" ceiling would
+            # not actually exist, and the reasons histogram would be permanently
+            # `cycle_touch`. One batched write, not one per scope.
+            await asyncio.to_thread(self._mark_cycle_touched, touches, now)
 
         # 6. Admit by priority: the biggest moves first, then the market card.
         pending.sort(key=lambda p: (p[0] != MARKET_SCOPE, -p[1].score))

@@ -16,7 +16,11 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 from app.database import get_supabase
-from app.integrations.fmp import get_fmp_client
+from app.integrations.fmp import (
+    FMPAuthException,
+    FMPRateLimitException,
+    get_fmp_client,
+)
 from app.integrations.gemini import get_gemini_client, GeminiQuotaError
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,18 @@ NEWS_AI_MODEL = "gemini-2.5-flash"
 # alphanumeric plus `.`/`-`/`^`).
 MARKET_SCOPE = "__MARKET__"
 
+# Index / broad-market proxies whose news IS market news: the S&P 500, Nasdaq
+# and Dow, via both their ETF tickers and their index symbols. Blended with
+# `news/general-latest` to build the Market feed.
+#
+# WHY A BLEND: FMP's `news/stock` with no `symbols` param does NOT return
+# general news — it falls back to a single default symbol (AAPL), so the Market
+# tab used to be 100% Apple. `news/general-latest` supplies the macro narrative
+# but carries no symbols; the index basket supplies "S&P 500 hits resistance"
+# style coverage. Deliberately EXCLUDES `news/stock-latest`: it is a firehose of
+# small-cap earnings-call recaps that, sorted by recency, bury the market story.
+MARKET_INDEX_SYMBOLS = "SPY,QQQ,DIA,^GSPC,^IXIC"
+
 
 class NewsCacheService:
     """Service for fetching and caching news per ticker with lazy AI enrichment."""
@@ -42,6 +58,11 @@ class NewsCacheService:
         self.supabase = get_supabase()
         self.gemini = get_gemini_client()
         self.fmp = get_fmp_client()
+        # Thundering-herd guard (CLAUDE.md invariant #4). Matters most on a cold
+        # market cache — weekends, and the minutes after a Railway redeploy —
+        # when every concurrent /updates/feed would otherwise fire its own FMP
+        # call AND its own 50-row upsert.
+        self._inflight: Dict[str, asyncio.Future] = {}
 
     # ── Public: Get raw/cached news ───────────────────────────────────
 
@@ -77,6 +98,13 @@ class NewsCacheService:
                 "cached": False,
                 "cache_age_seconds": 0,
             }
+        except (FMPRateLimitException, FMPAuthException):
+            # Must NOT degrade to an empty feed. Doing so made an exhausted FMP
+            # quota indistinguishable from "this ticker has no news" — the user
+            # saw a blank screen, FMP_RATE_LIMITED could never reach them
+            # (invariant #3), and the retry below burned a SECOND call while
+            # already over quota. The endpoint maps this to a structured error.
+            raise
         except Exception as e:
             logger.error(f"News fetch failed for {ticker}: {e}", exc_info=True)
             return await self._fallback_raw_news(ticker, limit)
@@ -120,6 +148,8 @@ class NewsCacheService:
                 "cached": False,
                 "cache_age_seconds": 0,
             }
+        except (FMPRateLimitException, FMPAuthException):
+            raise  # see get_ticker_news — quota must not masquerade as "no news"
         except Exception as e:
             logger.error(f"Index news fetch failed for {symbol}: {e}", exc_info=True)
             return {
@@ -166,9 +196,82 @@ class NewsCacheService:
                 "cache_age_seconds": self._cache_age_seconds(cached_articles),
             }
 
-        logger.info("Market news cache MISS: fetching general news from FMP")
+        # Dedup concurrent misses: one FMP fetch, N awaiters.
+        inflight = self._inflight.get(MARKET_SCOPE)
+        if inflight is not None:
+            logger.info("Market news fetch already in flight — joining")
+            return await inflight
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._inflight[MARKET_SCOPE] = fut
         try:
-            raw_articles = await self.fmp.get_stock_news(None, limit=limit)
+            result = await self._fetch_market_news(limit)
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except BaseException as e:
+            # BaseException, not Exception: a CancelledError must still resolve
+            # the future, or every joiner hangs forever waiting on a dead fetch.
+            if not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            self._inflight.pop(MARKET_SCOPE, None)
+
+    async def _fetch_market_raw(
+        self, limit: int, from_date: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch + merge the market corpus: macro narrative plus index coverage.
+
+        Both legs run concurrently and are merged newest-first, deduped by URL.
+        A failure in either leg degrades to whatever the other returned rather
+        than emptying the feed.
+        """
+        general, index = await asyncio.gather(
+            self.fmp.get_general_news(limit=limit),
+            self.fmp.get_stock_news(
+                MARKET_INDEX_SYMBOLS, limit=limit, from_date=from_date
+            ),
+            return_exceptions=True,
+        )
+
+        merged: List[Dict[str, Any]] = []
+        seen: set = set()
+        for leg_name, leg in (("general", general), ("index", index)):
+            if isinstance(leg, BaseException):
+                # Surface a quota failure; a soft failure just loses one leg.
+                if isinstance(leg, (FMPRateLimitException, FMPAuthException)):
+                    raise leg
+                logger.warning(
+                    "Market news %s leg failed: %s: %s",
+                    leg_name, type(leg).__name__, leg,
+                )
+                continue
+            for row in leg or []:
+                if not isinstance(row, dict):
+                    continue
+                key = row.get("url") or row.get("title")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(row)
+
+        # Newest first. `publishedDate` is a sortable "YYYY-MM-DD HH:MM:SS"
+        # string; a missing date sorts last rather than crashing the sort.
+        merged.sort(key=lambda r: str(r.get("publishedDate") or ""), reverse=True)
+        logger.info(
+            "Market corpus: %d unique articles (general=%s, index=%s)",
+            len(merged),
+            "ok" if not isinstance(general, BaseException) else "failed",
+            "ok" if not isinstance(index, BaseException) else "failed",
+        )
+        return merged[:limit]
+
+    async def _fetch_market_news(self, limit: int) -> Dict[str, Any]:
+        logger.info("Market news cache MISS: fetching general + index news from FMP")
+        try:
+            raw_articles = await self._fetch_market_raw(limit)
             if not raw_articles:
                 logger.warning("FMP returned no general market news")
                 return {
@@ -186,11 +289,12 @@ class NewsCacheService:
                 "articles": articles, "ticker": MARKET_SCOPE,
                 "cached": False, "cache_age_seconds": 0,
             }
+        except (FMPRateLimitException, FMPAuthException):
+            # Propagate so the endpoint maps it to a structured error instead of
+            # an empty feed. `isinstance`, not a type-NAME compare: the latter
+            # misses subclasses.
+            raise
         except Exception as e:
-            # Let a typed FMP failure (rate limit / auth) propagate so the
-            # endpoint can map it to a structured error instead of an empty feed.
-            if type(e).__name__ in ("FMPRateLimitException", "FMPAuthException"):
-                raise
             logger.error(
                 f"Market news fetch failed: {type(e).__name__}: {e}", exc_info=True
             )
@@ -208,6 +312,7 @@ class NewsCacheService:
         limit: int,
         fallback_ticker: Optional[str],
         label: str,
+        ingest_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """Turn raw FMP articles into cache rows + API response, and upsert them.
 
@@ -221,6 +326,15 @@ class NewsCacheService:
         symbol, or ``MARKET_SCOPE``). ``fallback_ticker`` is what to record in
         ``related_tickers`` when FMP omits ``symbol``; pass ``None`` to record
         nothing rather than a synthetic chip.
+
+        ``ingest_only=True`` OMITS the AI-enrichment columns from the upserted
+        row. This is essential for any REFRESH of articles that may already be
+        cached: PostgREST's default `merge-duplicates` resolution issues
+        `DO UPDATE SET` for every column present in the payload, so including
+        the enrichment columns would reset `summary_bullets`/`sentiment`/
+        `ai_processed` back to empty on every refresh — silently destroying
+        enrichment that users already paid Gemini for, on a cache SHARED with
+        the ticker/crypto/index/commodity detail screens.
         """
         now = datetime.now(timezone.utc)
         expires = now + timedelta(hours=CACHE_TTL_HOURS)
@@ -256,20 +370,26 @@ class NewsCacheService:
                 "external_id": external_id,
                 "headline": raw.get("title") or "",
                 "summary": raw.get("text") or "",
-                "summary_bullets": json.dumps([]),
-                "sentiment": None,
-                "sentiment_confidence": 0,
                 "source_name": raw.get("publisher") or raw.get("site") or "",
                 "source_logo_url": None,
                 "published_at": raw.get("publishedDate"),
                 "thumbnail_url": raw.get("image"),
                 "article_url": raw.get("url"),
                 "related_tickers": related,
-                "ai_processed": False,
-                "ai_model": None,
                 "cached_at": now.isoformat(),
                 "expires_at": expires.isoformat(),
             }
+            if not ingest_only:
+                # Only a first-time fetch may (re-)initialise the AI columns.
+                # See the `ingest_only` note in the docstring — including these
+                # on a refresh silently wipes existing enrichment.
+                row.update({
+                    "summary_bullets": json.dumps([]),
+                    "sentiment": None,
+                    "sentiment_confidence": 0,
+                    "ai_processed": False,
+                    "ai_model": None,
+                })
             cache_rows.append(row)
 
             response_articles.append({
@@ -719,34 +839,63 @@ Return a JSON array with one object per article in order. Each object must have:
         scopes = [s for s in dict.fromkeys(scopes) if s]
         if not scopes:
             return {}
-        try:
-            result = (
-                self.supabase.table("ticker_news_cache")
-                .select(
-                    "id, ticker, external_id, headline, summary, sentiment, "
-                    "ai_processed, published_at, article_url"
-                )
-                .in_("ticker", scopes)
-                .gte("expires_at", datetime.now(timezone.utc).isoformat())
-                .order("published_at", desc=True)
-                .limit(per_scope_limit * len(scopes))
-                .execute()
-            )
-        except Exception as e:
-            logger.warning(
-                "Bulk cache lookup failed for %d scopes: %s: %s",
-                len(scopes), type(e).__name__, e,
-            )
-            return {}
 
+        now_iso = datetime.now(timezone.utc).isoformat()
+        columns = (
+            "id, ticker, external_id, headline, summary, sentiment, "
+            "ai_processed, published_at, article_url"
+        )
         grouped: Dict[str, List[Dict[str, Any]]] = {}
-        for row in (result.data or []):
-            key = row.get("ticker")
-            if not key:
-                continue
-            bucket = grouped.setdefault(key, [])
-            if len(bucket) < per_scope_limit:
-                bucket.append(row)
+
+        # PAGED, not a single `.limit(per_scope_limit * len(scopes))`.
+        # A global LIMIT over a global ORDER BY has no per-group semantics: the
+        # newest rows of a few busy scopes consume the entire budget and a quiet
+        # scope comes back with ZERO rows even though its cache is populated —
+        # which the gate then reads as `no_corpus` and never generates its card.
+        # PostgREST also clamps a large `.limit()` server-side (~1000 rows), a
+        # trap this repo has hit before (see sector_benchmark_lookup._fetch_rows).
+        page_size = 1000
+        offset = 0
+        max_rows = per_scope_limit * len(scopes) + page_size
+        while offset < max_rows:
+            try:
+                result = (
+                    self.supabase.table("ticker_news_cache")
+                    .select(columns)
+                    .in_("ticker", scopes)
+                    .gte("expires_at", now_iso)
+                    # DESC defaults to NULLS FIRST in Postgres, and published_at
+                    # is nullable — an undated row would otherwise head a
+                    # newest-first feed and consume the page budget.
+                    .order("published_at", desc=True, nullsfirst=False)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+            except Exception as e:
+                logger.warning(
+                    "Bulk cache lookup failed for %d scopes at offset %d: %s: %s",
+                    len(scopes), offset, type(e).__name__, e,
+                )
+                break
+
+            rows = result.data or []
+            for row in rows:
+                key = row.get("ticker")
+                if not key:
+                    continue
+                bucket = grouped.setdefault(key, [])
+                if len(bucket) < per_scope_limit:
+                    bucket.append(row)
+
+            if len(rows) < page_size:
+                break  # last page
+            # Every scope already full → nothing more to learn from later pages.
+            if len(grouped) == len(scopes) and all(
+                len(v) >= per_scope_limit for v in grouped.values()
+            ):
+                break
+            offset += page_size
+
         return grouped
 
     async def refresh_scope_news(
@@ -771,9 +920,9 @@ Return a JSON array with one object per article in order. Each object must have:
         ).strftime("%Y-%m-%d")
         try:
             if scope == MARKET_SCOPE:
-                raw = await self.fmp.get_stock_news(
-                    None, limit=limit, from_date=from_date
-                )
+                # Same blend as the cold path — NOT `get_stock_news(None)`,
+                # which returns an all-Apple feed.
+                raw = await self._fetch_market_raw(limit, from_date=from_date)
                 fallback = None
             else:
                 raw = await self.fmp.get_stock_news(
@@ -789,9 +938,15 @@ Return a JSON array with one object per article in order. Each object must have:
 
         if not raw:
             return 0
-        written = self._build_and_cache_rows(
-            cache_key=scope, raw_articles=raw, limit=limit,
-            fallback_ticker=fallback, label=f"{scope} (refresh)",
+        # ingest_only: this is a REFRESH of a scope whose rows are very likely
+        # already cached and already enriched. Writing the AI columns here would
+        # reset every one of them (see _build_and_cache_rows).
+        # Off-thread: the Supabase SDK is synchronous, and this upserts up to 30
+        # rows for each of ~200 scopes per news pass — on the event loop that
+        # stalls every other in-flight request on this instance.
+        written = await asyncio.to_thread(
+            self._build_and_cache_rows,
+            scope, raw, limit, fallback, f"{scope} (refresh)", True,
         )
         return len(written)
 
@@ -826,6 +981,8 @@ Return a JSON array with one object per article in order. Each object must have:
                 "cached": False,
                 "cache_age_seconds": None,
             }
+        except (FMPRateLimitException, FMPAuthException):
+            raise  # a second swallow here would burn another call over quota
         except Exception as e:
             logger.error(f"Fallback raw news also failed for {ticker}: {e}")
             return {

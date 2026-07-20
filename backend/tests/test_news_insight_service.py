@@ -353,3 +353,47 @@ def test_market_scope_prompt_describes_the_market_not_the_key(svc):
     prompt = svc._build_prompt("__MARKET__", [{"headline": "A"}], "x", None, None)
     assert "__MARKET__" not in prompt
     assert "US stock market" in prompt
+
+
+# ── regressions found by the adversarial review ───────────────────────
+
+def test_fallback_card_never_carries_the_ai_summary_badge(svc):
+    """The non-AI fallback must not be badged as an AI summary.
+
+    It previously omitted `badge`, so the Pydantic default ("24h · AI Summary")
+    filled it in and three verbatim headlines shipped under an AI label.
+    """
+    card = svc.build_fallback_card("AAPL", [{"headline": "a"}, {"headline": "b"}])
+    assert card["ai_generated"] is False
+    assert "AI" not in card["badge"]
+
+    # And the field must survive the wire model rather than being defaulted.
+    from app.schemas.updates import AIInsightCardResponse
+    assert "AI" not in AIInsightCardResponse(**card).badge
+
+
+def test_fallback_bullets_are_deduplicated(svc):
+    # Two publishers syndicating one story pass URL-based dedup but produce
+    # identical headlines, which collapse under SwiftUI's ForEach(id: \\.self).
+    rows = [
+        {"headline": "Same wire story"},
+        {"headline": "Same wire story"},
+        {"headline": "A different story"},
+    ]
+    bullets = svc.build_fallback_card("X", rows)["bullets"]
+    assert len(bullets) == len(set(bullets))
+
+
+def test_hard_ttl_spans_a_long_weekend():
+    """The sweeper only runs while the market is active.
+
+    With a 12h hard TTL, a card written Friday evening expired Saturday morning
+    and every scope served the non-AI fallback all weekend. The TTL must cover
+    the longest real gap between sweeps (Thu close → Mon open ≈ 92h).
+    """
+    from app.services.news_insight_service import (
+        _HARD_TTL_ACTIVE_SECONDS, _HARD_TTL_CLOSED_SECONDS,
+    )
+    longest_gap_hours = 92
+    assert _HARD_TTL_ACTIVE_SECONDS >= longest_gap_hours * 3600
+    assert _HARD_TTL_CLOSED_SECONDS >= longest_gap_hours * 3600

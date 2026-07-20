@@ -9,12 +9,27 @@ Frontend: GET /crypto/fear-greed
 """
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 from typing import Optional, Dict, Any
 import logging
+import re
 
-from app.api.error_response import error_response_from_exception, upstream_error_response
+from app.api.error_response import (
+    ErrorCode,
+    error_response_from_exception,
+    make_error_response,
+    upstream_error_response,
+)
 from app.services.crypto_service import get_crypto_service
 from app.schemas.crypto import CryptoDetailResponse
+from app.schemas.news import (
+    MAX_ENRICH_ARTICLE_IDS,
+    EnrichNewsResponse,
+    TickerNewsFeedResponse,
+    news_articles_from_rows,
+    news_feed_from_payload,
+    sanitize_article_ids,
+)
 from app.schemas.technical_analysis import (
     TechnicalAnalysisResponse,
     TechnicalAnalysisDetailResponse,
@@ -24,6 +39,12 @@ from app.services.technical_analysis_service import get_technical_analysis_servi
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# Crypto bases are short alphanumerics (BTC, ETH, 1INCH, USDT). Anything else
+# is malformed input — reject it here rather than building a `{symbol}USD` pair
+# out of it and asking FMP.
+_CRYPTO_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
 
 
 def _normalize_crypto_symbol(symbol: str) -> str:
@@ -117,7 +138,17 @@ async def get_crypto_detail(
 # ── Crypto News (cache-aside + lazy enrichment) ──────────────────
 
 
-@router.get("/{symbol}/news")
+def _invalid_news_symbol(raw: str) -> JSONResponse:
+    """Structured INVALID_INPUT for a malformed crypto symbol (invariant #3)."""
+    return make_error_response(
+        ErrorCode.INVALID_INPUT,
+        message=f"Invalid crypto symbol for news: {raw[:32]!r}",
+        user_message="That symbol isn't valid.",
+        details={"symbol": raw[:32]},
+    )
+
+
+@router.get("/{symbol}/news", response_model=TickerNewsFeedResponse)
 async def get_crypto_news(
     symbol: str,
     limit: int = Query(50, ge=1, le=50),
@@ -130,20 +161,27 @@ async def get_crypto_news(
     """
     from app.services.news_cache_service import get_news_cache_service
 
+    raw_symbol = symbol
     symbol = _normalize_crypto_symbol(symbol)
+    if not _CRYPTO_SYMBOL_RE.match(symbol):
+        return _invalid_news_symbol(raw_symbol)
     fmp_symbol = f"{symbol}USD"
 
     try:
         service = get_news_cache_service()
-        return await service.get_ticker_news(fmp_symbol, limit, is_crypto=True)
+        feed = await service.get_ticker_news(fmp_symbol, limit, is_crypto=True)
     except Exception as e:
-        logger.error(f"Crypto news failed for {symbol}: {e}", exc_info=True)
+        logger.error(
+            f"Crypto news failed for {symbol}: {type(e).__name__}: {e}", exc_info=True
+        )
         if (resp := upstream_error_response(e, ticker=symbol, step="crypto_news")) is not None:
             return resp
         raise HTTPException(status_code=500, detail="Crypto news service unavailable")
 
+    return news_feed_from_payload(feed, ticker=fmp_symbol)
 
-@router.post("/{symbol}/news/enrich")
+
+@router.post("/{symbol}/news/enrich", response_model=EnrichNewsResponse)
 async def enrich_crypto_news(
     symbol: str,
     body: Dict[str, Any],
@@ -155,20 +193,49 @@ async def enrich_crypto_news(
     """
     from app.services.news_cache_service import get_news_cache_service
 
-    article_ids = body.get("article_ids", [])
-    if not article_ids:
-        raise HTTPException(status_code=400, detail="article_ids is required")
-
+    raw_symbol = symbol
     symbol = _normalize_crypto_symbol(symbol)
+    if not _CRYPTO_SYMBOL_RE.match(symbol):
+        return _invalid_news_symbol(raw_symbol)
     fmp_symbol = f"{symbol}USD"
+
+    raw_ids = body.get("article_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="article_ids is required (non-empty list)",
+            user_message="No articles were requested.",
+            details={"symbol": fmp_symbol},
+        )
+
+    ids = sanitize_article_ids(raw_ids)
+    if not ids:
+        # Every id was a client-side placeholder — nothing is enrichable yet.
+        return EnrichNewsResponse(ticker=fmp_symbol, articles=[])
+    if len(ids) > MAX_ENRICH_ARTICLE_IDS:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Too many article_ids: {len(ids)} (max {MAX_ENRICH_ARTICLE_IDS})",
+            user_message="Too many articles requested at once.",
+            details={"symbol": fmp_symbol, "count": len(ids)},
+        )
 
     try:
         service = get_news_cache_service()
-        enriched = await service.enrich_articles(fmp_symbol, article_ids)
-        return {"articles": enriched, "ticker": fmp_symbol}
+        enriched = await service.enrich_articles(fmp_symbol, ids)
     except Exception as e:
-        logger.error(f"Crypto news enrichment failed for {symbol}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Enrichment service unavailable")
+        logger.error(
+            f"Crypto news enrichment failed for {fmp_symbol} ({len(ids)} ids): "
+            f"{type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        return error_response_from_exception(
+            e, ticker=fmp_symbol, step="crypto_news_enrich"
+        )
+
+    return EnrichNewsResponse(
+        ticker=fmp_symbol, articles=news_articles_from_rows(enriched)
+    )
 
 
 # ── Crypto Sentiment (reuses stock sentiment service) ────────────

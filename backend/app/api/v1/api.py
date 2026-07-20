@@ -24,6 +24,7 @@ from app.api.v1.endpoints import (
     whales,
     live_price,
     learn,
+    updates,
 )
 
 api_router = APIRouter()
@@ -37,6 +38,7 @@ api_router.include_router(indices.router, prefix="/indices", tags=["Indices"])
 api_router.include_router(etfs.router, prefix="/etfs", tags=["ETFs"])
 api_router.include_router(watchlist.router, prefix="/watchlist", tags=["Watchlist"])
 api_router.include_router(news.router, prefix="/news", tags=["News"])
+api_router.include_router(updates.router, prefix="/updates", tags=["Updates"])
 api_router.include_router(research.router, prefix="/research", tags=["Research"])
 api_router.include_router(crypto.router, prefix="/crypto", tags=["Crypto"])
 api_router.include_router(commodities.router, prefix="/commodities", tags=["Commodities"])

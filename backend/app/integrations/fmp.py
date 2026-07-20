@@ -814,8 +814,18 @@ class FMPClient:
 
         try:
             return await self._make_request("news/stock", params=params)
+        except (FMPRateLimitException, FMPAuthException):
+            # Do NOT degrade these to []. Swallowing them made a quota
+            # exhaustion indistinguishable from "this ticker has no news":
+            # the news endpoints returned an empty feed and FMP_RATE_LIMITED
+            # could never reach the user (invariant #3). The service layer
+            # catches these and maps them to a structured error response.
+            raise
         except Exception as e:
-            logger.warning(f"Stock news request failed: {e}")
+            logger.warning(
+                "Stock news request failed (symbols=%s): %s: %s",
+                params.get("symbols", "<market>"), type(e).__name__, e,
+            )
             return []
 
     async def get_crypto_news(
@@ -836,8 +846,13 @@ class FMPClient:
 
         try:
             return await self._make_request("news/crypto", params=params)
+        except (FMPRateLimitException, FMPAuthException):
+            raise  # see get_stock_news — quota must not masquerade as "no news"
         except Exception as e:
-            logger.warning(f"Crypto news request failed: {e}")
+            logger.warning(
+                "Crypto news request failed (symbols=%s): %s: %s",
+                params.get("symbols", "<all>"), type(e).__name__, e,
+            )
             return []
 
     async def get_social_sentiment(
@@ -987,23 +1002,107 @@ class FMPClient:
 
     # ── Batch / crypto helpers ───────────────────────────────────────
 
-    async def get_batch_quotes(
+    # Max symbols per `batch-quote` request. FMP accepts long lists but a
+    # very long query string risks a 414 / upstream truncation, so we chunk.
+    _BATCH_QUOTE_CHUNK = 300
+    # Bound on the legacy per-symbol fan-out. Unbounded gather over a 500-name
+    # watchlist opened 500 concurrent sockets against a 20-connection pool
+    # (`_get_client()` limits), starving every other FMP caller.
+    _QUOTE_FANOUT_LIMIT = 10
+
+    async def get_batch_quotes_bulk(
         self, symbols: List[str]
     ) -> List[Dict[str, Any]]:
-        """Get quotes for multiple symbols via parallel individual requests.
+        """Get quotes for many symbols using the stable ``batch-quote`` endpoint.
 
-        The FMP stable API does not support comma-separated symbols in a
-        single /quote call, so we fetch each symbol individually in parallel.
+        Unlike ``/quote`` (one symbol per call), ``/stable/batch-quote`` DOES
+        accept a comma-separated ``symbols`` list and returns one row per
+        symbol in a single request — verified live: 4 symbols requested,
+        4 returned. Index symbols (e.g. ``^GSPC``) ride along for free.
+
+        Each row carries: symbol, name, price, change, changePercentage, open,
+        previousClose, dayHigh, dayLow, yearHigh, yearLow, volume, marketCap,
+        priceAvg50, priceAvg200, exchange, timestamp.
+
+        Prefer this over :meth:`get_batch_quotes` for any list longer than a
+        couple of symbols — it turns N HTTP calls into ``ceil(N/300)``.
+
+        Returns whatever chunks succeeded; a failed chunk is logged and
+        skipped rather than failing the whole batch (callers treat a missing
+        symbol as "no quote", which every one of them already handles).
         """
         if not symbols:
             return []
 
-        async def _fetch_one(sym: str) -> Optional[Dict[str, Any]]:
+        # De-dup while preserving order — a repeated symbol wastes query budget
+        # and yields a duplicate row the caller would have to collapse anyway.
+        uniq = list(dict.fromkeys(s.strip().upper() for s in symbols if s and s.strip()))
+        if not uniq:
+            return []
+
+        chunks = [
+            uniq[i : i + self._BATCH_QUOTE_CHUNK]
+            for i in range(0, len(uniq), self._BATCH_QUOTE_CHUNK)
+        ]
+
+        async def _fetch_chunk(chunk: List[str]) -> List[Dict[str, Any]]:
             try:
-                return await self.get_stock_price_quote(sym)
+                data = await self._make_request(
+                    "batch-quote", params={"symbols": ",".join(chunk)}
+                )
+                return data if isinstance(data, list) else []
             except Exception as e:
-                logger.warning("Quote fetch failed for %s: %s", sym, e)
-                return None
+                logger.warning(
+                    "Batch quote chunk failed (%d symbols, first=%s): %s: %s",
+                    len(chunk), chunk[0], type(e).__name__, e,
+                )
+                return []
+
+        results = await asyncio.gather(
+            *[_fetch_chunk(c) for c in chunks], return_exceptions=True
+        )
+
+        out: List[Dict[str, Any]] = []
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.warning("Batch quote chunk raised: %s: %s", type(r).__name__, r)
+                continue
+            out.extend(r)
+
+        if len(out) < len(uniq):
+            logger.info(
+                "Batch quote returned %d/%d symbols (missing symbols are "
+                "delisted, unsupported, or came back empty)",
+                len(out), len(uniq),
+            )
+        return out
+
+    async def get_batch_quotes(
+        self, symbols: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Get quotes for multiple symbols via parallel individual ``/quote`` calls.
+
+        NOTE: ``/stable/batch-quote`` *does* support comma-separated symbols in a
+        single request — an earlier version of this docstring claimed otherwise.
+        For anything more than a handful of symbols use
+        :meth:`get_batch_quotes_bulk` instead; this method is kept for callers
+        that depend on its exact per-symbol ``/quote`` field set.
+
+        Concurrency is bounded at ``_QUOTE_FANOUT_LIMIT`` so a large symbol list
+        cannot exhaust the shared 20-connection httpx pool.
+        """
+        if not symbols:
+            return []
+
+        sem = asyncio.Semaphore(self._QUOTE_FANOUT_LIMIT)
+
+        async def _fetch_one(sym: str) -> Optional[Dict[str, Any]]:
+            async with sem:
+                try:
+                    return await self.get_stock_price_quote(sym)
+                except Exception as e:
+                    logger.warning("Quote fetch failed for %s: %s", sym, e)
+                    return None
 
         results = await asyncio.gather(*[_fetch_one(s) for s in symbols])
         return [r for r in results if r]

@@ -18,7 +18,20 @@ from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list
-from app.api.error_response import upstream_error_response
+from app.api.error_response import (
+    ErrorCode,
+    error_response_from_exception,
+    make_error_response,
+    upstream_error_response,
+)
+from app.schemas.news import (
+    MAX_ENRICH_ARTICLE_IDS,
+    EnrichNewsResponse,
+    TickerNewsFeedResponse,
+    news_articles_from_rows,
+    news_feed_from_payload,
+    sanitize_article_ids,
+)
 from app.schemas.stock import StockSearchResult
 from app.schemas.stock_overview import StockOverviewResponse, StockOverviewCoreResponse
 from app.schemas.analyst import AnalystAnalysisResponse
@@ -867,7 +880,17 @@ async def get_stock_financials_full(ticker: str):
         )
 
 
-@router.get("/{ticker}/news")
+def _invalid_news_symbol(raw: str) -> JSONResponse:
+    """Structured INVALID_INPUT for a malformed news symbol (invariant #3)."""
+    return make_error_response(
+        ErrorCode.INVALID_INPUT,
+        message=f"Invalid ticker for news: {raw[:32]!r}",
+        user_message="That symbol isn't valid.",
+        details={"ticker": raw[:32]},
+    )
+
+
+@router.get("/{ticker}/news", response_model=TickerNewsFeedResponse)
 async def get_stock_news(
     ticker: str,
     limit: int = Query(50, ge=1, le=50),
@@ -881,20 +904,28 @@ async def get_stock_news(
     """
     from app.services.news_cache_service import get_news_cache_service
 
+    symbol = ticker.strip().upper()
+    if not _TICKER_RE.match(symbol):
+        return _invalid_news_symbol(ticker)
+
     try:
         service = get_news_cache_service()
-        return await service.get_ticker_news(ticker.upper(), limit)
+        feed = await service.get_ticker_news(symbol, limit)
     except Exception as e:
-        logger.error(f"Stock news failed for {ticker}: {e}", exc_info=True)
+        logger.error(
+            f"Stock news failed for {symbol}: {type(e).__name__}: {e}", exc_info=True
+        )
         # Surface a known upstream failure (e.g. FMP_RATE_LIMITED) via the structured
         # {error_code,message,user_message} contract (invariant #3); keep the generic
         # 500 only for a truly-unexpected error.
-        if (resp := upstream_error_response(e, ticker=ticker.upper(), step="news")) is not None:
+        if (resp := upstream_error_response(e, ticker=symbol, step="news")) is not None:
             return resp
         raise HTTPException(status_code=500, detail="News service unavailable")
 
+    return news_feed_from_payload(feed, ticker=symbol)
 
-@router.post("/{ticker}/news/enrich")
+
+@router.post("/{ticker}/news/enrich", response_model=EnrichNewsResponse)
 async def enrich_stock_news(
     ticker: str,
     body: Dict[str, Any],
@@ -909,17 +940,43 @@ async def enrich_stock_news(
     """
     from app.services.news_cache_service import get_news_cache_service
 
-    article_ids = body.get("article_ids", [])
-    if not article_ids:
-        raise HTTPException(status_code=400, detail="article_ids is required")
+    symbol = ticker.strip().upper()
+    if not _TICKER_RE.match(symbol):
+        return _invalid_news_symbol(ticker)
+
+    raw_ids = body.get("article_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="article_ids is required (non-empty list)",
+            user_message="No articles were requested.",
+            details={"ticker": symbol},
+        )
+
+    ids = sanitize_article_ids(raw_ids)
+    if not ids:
+        # Every id was a client-side placeholder — nothing is enrichable yet.
+        return EnrichNewsResponse(ticker=symbol, articles=[])
+    if len(ids) > MAX_ENRICH_ARTICLE_IDS:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Too many article_ids: {len(ids)} (max {MAX_ENRICH_ARTICLE_IDS})",
+            user_message="Too many articles requested at once.",
+            details={"ticker": symbol, "count": len(ids)},
+        )
 
     try:
         service = get_news_cache_service()
-        enriched = await service.enrich_articles(ticker.upper(), article_ids)
-        return {"articles": enriched, "ticker": ticker.upper()}
+        enriched = await service.enrich_articles(symbol, ids)
     except Exception as e:
-        logger.error(f"News enrichment failed for {ticker}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Enrichment service unavailable")
+        logger.error(
+            f"News enrichment failed for {symbol} ({len(ids)} ids): "
+            f"{type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        return error_response_from_exception(e, ticker=symbol, step="stock_news_enrich")
+
+    return EnrichNewsResponse(ticker=symbol, articles=news_articles_from_rows(enriched))
 
 
 # ── Analyst analysis endpoint ─────────────────────────────────────

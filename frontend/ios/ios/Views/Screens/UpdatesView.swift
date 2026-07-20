@@ -9,6 +9,10 @@ import SwiftUI
 
 struct UpdatesView: View {
     @Environment(\.appState) private var appState
+    /// True only while the Updates tab is the visible one. `ContentView` keeps all
+    /// five tabs alive and toggles opacity, so `.onAppear` fires once at launch
+    /// for every tab — this is the only reliable "became visible" signal.
+    @Environment(\.isActiveTab) private var isActiveTab
     @StateObject private var viewModel = UpdatesViewModel()
     @Binding var selectedTab: HomeTab
     @State private var showManageAssetsSheet = false
@@ -39,7 +43,11 @@ struct UpdatesView: View {
                     )
 
                     // Static "Live News" Header (non-scrolling, stays at top)
-                    LiveNewsHeader(onFilterTapped: handleFilterTapped)
+                    LiveNewsHeader(
+                        filterLabel: viewModel.filterOptions.chipLabel,
+                        hasActiveFilters: viewModel.filterOptions.hasActiveFilters,
+                        onFilterTapped: handleFilterTapped
+                    )
 
                     // Scrollable Content with sticky section headers
                     ScrollView(showsIndicators: false) {
@@ -51,10 +59,22 @@ struct UpdatesView: View {
                                     .padding(.vertical, AppSpacing.sm)
                             }
 
-                            LiveNewsTimeline(
-                                groupedNews: viewModel.groupedNews,
-                                onArticleTapped: handleArticleTapped
-                            )
+                            if viewModel.isLoading && viewModel.groupedNews.isEmpty {
+                                // Skeleton rows, not a blocking overlay: the old
+                                // full-screen LoadingOverlay swallowed taps
+                                // (including Back) — the same problem already
+                                // fixed on the asset-detail screens.
+                                loadingSkeleton
+                            } else if let message = viewModel.error, viewModel.groupedNews.isEmpty {
+                                errorState(message)
+                            } else if viewModel.groupedNews.isEmpty {
+                                emptyState
+                            } else {
+                                LiveNewsTimeline(
+                                    groupedNews: viewModel.groupedNews,
+                                    onArticleTapped: handleArticleTapped
+                                )
+                            }
 
                             // Bottom spacing for tab bar
                             Spacer()
@@ -68,13 +88,12 @@ struct UpdatesView: View {
                     // Tab Bar
                     CustomTabBar(selectedTab: $selectedTab)
                 }
-
-                // Loading overlay
-                if viewModel.isLoading {
-                    LoadingOverlay()
-                }
             }
             .navigationBarHidden(true)
+            .task(id: isActiveTab) {
+                guard isActiveTab else { return }
+                await viewModel.loadIfNeeded()
+            }
             .navigationDestination(item: $selectedNewsArticle) { article in
                 NewsDetailView(article: article)
             }
@@ -86,6 +105,7 @@ struct UpdatesView: View {
             .sheet(isPresented: $viewModel.showFilterSheet) {
                 NewsFilterSheet(
                     filterOptions: $viewModel.filterOptions,
+                    availableSources: viewModel.availableSources,
                     onApply: {
                         viewModel.showFilterSheet = false
                     }
@@ -95,7 +115,12 @@ struct UpdatesView: View {
                 ManageAssetsSheet(
                     tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
                     onDismiss: { showManageAssetsSheet = false },
-                    onAddTicker: { ticker in viewModel.addTicker(ticker) }
+                    onAddTicker: { ticker in
+                        Task { await viewModel.addTicker(ticker) }
+                    },
+                    onRemoveTicker: { ticker in
+                        Task { await viewModel.removeTicker(ticker) }
+                    }
                 )
             }
             .fullScreenCover(isPresented: $showProfile) {
@@ -109,6 +134,69 @@ struct UpdatesView: View {
                     .preferredColorScheme(.dark)
             }
         }
+    }
+
+    // MARK: - States
+
+    private var loadingSkeleton: some View {
+        VStack(spacing: AppSpacing.md) {
+            ForEach(0..<5, id: \.self) { _ in
+                TickerNewsShimmerCard()
+            }
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.top, AppSpacing.sm)
+    }
+
+    private func errorState(_ message: String) -> some View {
+        VStack(spacing: AppSpacing.md) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(AppTypography.iconXXL)
+                .foregroundColor(AppColors.textMuted)
+
+            Text("Couldn't load the news")
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text(message)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Try Again") {
+                Task { await viewModel.refresh() }
+            }
+            .font(AppTypography.bodyEmphasis)
+            .foregroundColor(AppColors.primaryBlue)
+            .padding(.top, AppSpacing.xs)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, AppSpacing.xl)
+        .padding(.vertical, AppSpacing.xxl)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Image(systemName: "newspaper")
+                .font(AppTypography.iconXXL)
+                .foregroundColor(AppColors.textMuted)
+
+            Text(viewModel.filterOptions.hasActiveFilters
+                 ? "No stories match your filters"
+                 : "No recent stories")
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text(viewModel.filterOptions.hasActiveFilters
+                 ? "Try clearing a filter."
+                 : "Check back shortly — the feed refreshes through the day.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, AppSpacing.xxl)
     }
 
     // MARK: - Action Handlers
@@ -142,6 +230,7 @@ struct ManageAssetsSheet: View {
     let tickers: [NewsFilterTab]
     var onDismiss: (() -> Void)?
     var onAddTicker: ((String) -> Void)?
+    var onRemoveTicker: ((String) -> Void)?
 
     @State private var showTickerSearch = false
 
@@ -153,11 +242,25 @@ struct ManageAssetsSheet: View {
 
                 List {
                     Section {
+                        if tickers.isEmpty {
+                            Text("No tickers yet. Add one below to get a dedicated news feed for it.")
+                                .font(AppTypography.bodySmall)
+                                .foregroundColor(AppColors.textMuted)
+                                .listRowBackground(AppColors.cardBackground)
+                        }
                         ForEach(tickers) { ticker in
                             HStack {
-                                Text(ticker.title)
-                                    .font(AppTypography.body)
-                                    .foregroundColor(AppColors.textPrimary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(ticker.title)
+                                        .font(AppTypography.body)
+                                        .foregroundColor(AppColors.textPrimary)
+                                    if let name = ticker.companyName, !name.isEmpty {
+                                        Text(name)
+                                            .font(AppTypography.caption)
+                                            .foregroundColor(AppColors.textSecondary)
+                                            .lineLimit(1)
+                                    }
+                                }
 
                                 Spacer()
 
@@ -169,9 +272,13 @@ struct ManageAssetsSheet: View {
                             }
                             .listRowBackground(AppColors.cardBackground)
                         }
-                        .onDelete { _ in
-                            // Handle delete
-                            print("Delete ticker")
+                        .onDelete { offsets in
+                            // Actually removes from the watchlist. This used to
+                            // be a `print("Delete ticker")` — the row animated
+                            // away and came straight back on the next refresh.
+                            for index in offsets where index < tickers.count {
+                                onRemoveTicker?(tickers[index].scope)
+                            }
                         }
                     }
 
@@ -229,8 +336,13 @@ struct TickerSearchSheet: View {
 
     @State private var searchText = ""
     @State private var searchResults: [TickerSearchItem] = []
+    @State private var isSearching = false
+    @State private var searchTask: Task<Void, Never>?
     @Environment(\.dismiss) private var dismiss
 
+    /// Shown before the user types anything. These are a genuine starting
+    /// point, not search results — everything below the fold comes from the
+    /// live `/stocks/search` endpoint, so the user is not limited to 15 names.
     private let popularTickers: [TickerSearchItem] = [
         TickerSearchItem(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ"),
         TickerSearchItem(ticker: "MSFT", companyName: "Microsoft Corp.", exchange: "NASDAQ"),
@@ -239,24 +351,51 @@ struct TickerSearchSheet: View {
         TickerSearchItem(ticker: "TSLA", companyName: "Tesla Inc.", exchange: "NASDAQ"),
         TickerSearchItem(ticker: "NVDA", companyName: "NVIDIA Corp.", exchange: "NASDAQ"),
         TickerSearchItem(ticker: "META", companyName: "Meta Platforms Inc.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "JPM", companyName: "JPMorgan Chase & Co.", exchange: "NYSE"),
-        TickerSearchItem(ticker: "V", companyName: "Visa Inc.", exchange: "NYSE"),
         TickerSearchItem(ticker: "BRK.B", companyName: "Berkshire Hathaway", exchange: "NYSE"),
-        TickerSearchItem(ticker: "WMT", companyName: "Walmart Inc.", exchange: "NYSE"),
-        TickerSearchItem(ticker: "DIS", companyName: "Walt Disney Co.", exchange: "NYSE"),
-        TickerSearchItem(ticker: "NFLX", companyName: "Netflix Inc.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "AMD", companyName: "Advanced Micro Devices", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "INTC", companyName: "Intel Corp.", exchange: "NASDAQ"),
     ]
 
     private var filteredResults: [TickerSearchItem] {
-        if searchText.isEmpty {
-            return popularTickers
+        searchText.isEmpty ? popularTickers : searchResults
+    }
+
+    /// Debounced live search. The previous implementation filtered a hardcoded
+    /// list of 15 symbols, so searching for anything else returned "No results".
+    private func runSearch(_ query: String) {
+        searchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 1 else {
+            searchResults = []
+            isSearching = false
+            return
         }
-        let query = searchText.lowercased()
-        return popularTickers.filter {
-            $0.ticker.lowercased().contains(query) ||
-            $0.companyName.lowercased().contains(query)
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)   // debounce keystrokes
+            if Task.isCancelled { return }
+            isSearching = true
+            defer { isSearching = false }
+            do {
+                let results: [StockSearchResult] = try await APIClient.shared.request(
+                    endpoint: .searchStocks(query: trimmed, limit: 25),
+                    responseType: [StockSearchResult].self
+                )
+                if Task.isCancelled { return }
+                searchResults = results
+                    // Equities only. The endpoint also returns crypto pairs,
+                    // which the watchlist news feed does not cover.
+                    .filter { ($0.type ?? "stock") == "stock" }
+                    .map {
+                        TickerSearchItem(
+                            ticker: $0.ticker,
+                            companyName: $0.companyName,
+                            exchange: $0.exchange ?? ""
+                        )
+                    }
+                print("✅ TickerSearch: \(searchResults.count) results for '\(trimmed)'")
+            } catch {
+                if Task.isCancelled { return }
+                searchResults = []
+                print("⚠️ TickerSearch: search failed for '\(trimmed)': \(AppError.from(error).message)")
+            }
         }
     }
 
@@ -276,6 +415,13 @@ struct TickerSearchSheet: View {
                             .foregroundColor(AppColors.textPrimary)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.characters)
+                            .onChange(of: searchText) { _, newValue in
+                                runSearch(newValue)
+                            }
+
+                        if isSearching {
+                            ProgressView().tint(AppColors.textMuted)
+                        }
                     }
                     .padding(AppSpacing.md)
                     .background(AppColors.cardBackground)
@@ -350,18 +496,25 @@ struct TickerSearchItem: Identifiable {
 // MARK: - News Filter Sheet
 struct NewsFilterSheet: View {
     @Binding var filterOptions: NewsFilterOptions
+    /// Publishers actually present in the loaded feed. The previous hardcoded
+    /// list ("Reuters", "CNBC", …) frequently matched NOTHING, so applying a
+    /// source filter emptied the timeline for no visible reason.
+    let availableSources: [String]
     var onApply: (() -> Void)?
 
     @State private var selectedSources: Set<String> = []
     @State private var selectedSentiments: Set<NewsSentiment> = []
-
-    private let availableSources = ["Reuters", "CNBC", "Bloomberg", "WSJ", "Zacks", "MarketWatch"]
 
     var body: some View {
         NavigationView {
             List {
                 // Sources Section
                 Section("Sources") {
+                    if availableSources.isEmpty {
+                        Text("No publishers in this feed yet.")
+                            .font(AppTypography.bodySmall)
+                            .foregroundColor(AppColors.textMuted)
+                    }
                     ForEach(availableSources, id: \.self) { source in
                         HStack {
                             Text(source)

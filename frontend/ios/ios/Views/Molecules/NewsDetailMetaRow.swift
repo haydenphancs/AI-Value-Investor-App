@@ -9,8 +9,11 @@ import SwiftUI
 
 struct NewsDetailMetaRow: View {
     let date: String
-    let readTimeMinutes: Int
-    let sentiment: NewsSentiment
+    /// Nil when the article body wasn't available to measure — the chip is
+    /// hidden rather than showing an invented duration.
+    let readTimeMinutes: Int?
+    /// Nil until AI enrichment has produced a sentiment.
+    let sentiment: NewsSentiment?
 
     var body: some View {
         HStack(spacing: AppSpacing.lg) {
@@ -26,20 +29,24 @@ struct NewsDetailMetaRow: View {
             }
 
             // Read Time
-            HStack(spacing: AppSpacing.xs) {
-                Image(systemName: "clock")
-                    .font(AppTypography.iconXS).fontWeight(.medium)
-                    .foregroundColor(AppColors.textSecondary)
+            if let readTimeMinutes {
+                HStack(spacing: AppSpacing.xs) {
+                    Image(systemName: "clock")
+                        .font(AppTypography.iconXS).fontWeight(.medium)
+                        .foregroundColor(AppColors.textSecondary)
 
-                Text("\(readTimeMinutes) min read")
-                    .font(AppTypography.label)
-                    .foregroundColor(AppColors.textSecondary)
+                    Text("\(readTimeMinutes) min read")
+                        .font(AppTypography.label)
+                        .foregroundColor(AppColors.textSecondary)
+                }
             }
 
             Spacer()
 
             // Sentiment Badge
-            NewsSentimentBadge(sentiment: sentiment)
+            if let sentiment {
+                NewsSentimentBadge(sentiment: sentiment)
+            }
         }
     }
 }

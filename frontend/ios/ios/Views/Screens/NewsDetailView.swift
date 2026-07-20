@@ -12,14 +12,21 @@ struct NewsDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showShareSheet = false
     @State private var showMoreOptions = false
+    /// Ticker the user tapped in the Related Tickers row. Navigation from a news
+    /// article into ticker detail is not wired into this nav tree yet.
+    @State private var pendingTicker: String?
     /// Stable token keying this screen's audio overlay host registration.
     @State private var compactToken = UUID().uuidString
 
     let article: NewsArticle
 
-    init(article: NewsArticle) {
+    /// Backend scope this article came from, so on-demand AI enrichment targets
+    /// the right cache partition. Defaults to the market feed.
+    init(article: NewsArticle, scope: String = UpdatesScope.market) {
         self.article = article
-        self._viewModel = StateObject(wrappedValue: NewsDetailViewModel(article: article))
+        self._viewModel = StateObject(
+            wrappedValue: NewsDetailViewModel(article: article, scope: scope)
+        )
     }
 
     var body: some View {
@@ -47,6 +54,7 @@ struct NewsDetailView: View {
                     if let articleDetail = viewModel.articleDetail {
                         NewsDetailContent(
                             article: articleDetail,
+                            isEnriching: viewModel.isEnriching,
                             onTickerTapped: handleTickerTapped
                         )
                         .padding(.horizontal, AppSpacing.lg)
@@ -65,16 +73,12 @@ struct NewsDetailView: View {
                 }
             }
 
-            // Read Full Story Button (Fixed at bottom)
-            if viewModel.articleDetail != nil {
+            // "Read full story" only when there IS a story to open. It used to
+            // render unconditionally and pointed at https://example.com/article.
+            if viewModel.articleDetail?.articleURL != nil {
                 readFullStoryButton
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.xxl)
-            }
-
-            // Loading overlay
-            if viewModel.isLoading {
-                LoadingOverlay()
             }
         }
         .preferredColorScheme(.dark)
@@ -83,7 +87,7 @@ struct NewsDetailView: View {
         // inset so the fixed "Read Full Story" button isn't covered).
         .globalAudioOverlay(token: compactToken, showBottomMiniPlayer: true)
         .task {
-            viewModel.loadArticleDetail()
+            await viewModel.load()
         }
         .gesture(
             DragGesture()
@@ -94,15 +98,13 @@ struct NewsDetailView: View {
                     }
                 }
         )
+        // "Save Article" and "Report Issue" were removed: both were `print()`
+        // TODOs, so tapping them did nothing while looking like a real action.
         .confirmationDialog("Options", isPresented: $showMoreOptions) {
-            Button("Share Article") {
-                showShareSheet = true
-            }
-            Button("Save Article") {
-                handleSaveArticle()
-            }
-            Button("Report Issue") {
-                handleReportIssue()
+            if viewModel.articleDetail?.articleURL != nil {
+                Button("Share Article") {
+                    showShareSheet = true
+                }
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -174,22 +176,13 @@ struct NewsDetailView: View {
     }
 
     private func handleTickerTapped(_ ticker: String) {
-        print("Navigate to ticker: \(ticker)")
-        // TODO: Navigate to ticker detail screen
+        // Ticker navigation from a news article isn't wired into the nav tree
+        // yet; the row stays non-interactive rather than silently doing nothing.
+        pendingTicker = ticker
     }
 
     private func handleReadFullStory() {
         viewModel.openFullStory()
-    }
-
-    private func handleSaveArticle() {
-        print("Save article")
-        // TODO: Implement save functionality
-    }
-
-    private func handleReportIssue() {
-        print("Report issue")
-        // TODO: Implement report functionality
     }
 }
 
@@ -204,7 +197,7 @@ struct NewsDetailViewStandalone: View {
                 sentiment: .negative,
                 publishedAt: Date(),
                 thumbnailName: nil,
-                relatedTickers: ["APPL", "ORCL", "TSLA"]
+                relatedTickers: ["AAPL", "ORCL", "TSLA"]
             )
         )
     }

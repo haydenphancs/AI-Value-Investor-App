@@ -28,14 +28,23 @@ struct NewsTimelineItem: View {
                     HStack(spacing: AppSpacing.md) {
                         SourceLabel(source: article.source)
 
-                        NewsSentimentBadge(sentiment: article.sentiment)
+                        // Only shown once AI enrichment has actually produced a
+                        // sentiment. Rendering a "Neutral" badge for every
+                        // un-analysed article states a judgement no model made.
+                        if let sentiment = article.sentiment {
+                            NewsSentimentBadge(sentiment: sentiment)
+                        }
                     }
                 }
 
                 Spacer()
 
-                // Thumbnail
-                NewsThumbnail(imageName: article.thumbnailName)
+                // Thumbnail — prefers the publisher's remote image; falls back
+                // to the legacy local asset name, then to a placeholder.
+                NewsThumbnail(
+                    imageName: article.thumbnailName,
+                    imageURL: article.imageURL
+                )
             }
             .padding(AppSpacing.md)
             .background(AppColors.cardBackground)

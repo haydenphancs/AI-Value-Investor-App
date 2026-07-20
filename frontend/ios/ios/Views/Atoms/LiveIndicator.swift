@@ -11,6 +11,11 @@ struct LiveIndicator: View {
     @State private var beatScale: CGFloat = 1.0
     @State private var ringScale: CGFloat = 0.6
     @State private var ringOpacity: Double = 0.0
+    /// Retained so the repeating timer can be invalidated. Previously the timer
+    /// was created in `.onAppear` and never stored, so every appearance leaked
+    /// another timer that kept firing (and kept this view alive) forever — on a
+    /// screen that is instantiated at app launch and never torn down.
+    @State private var heartbeat: Timer?
 
     var body: some View {
         ZStack {
@@ -30,12 +35,21 @@ struct LiveIndicator: View {
         .fixedSize()
         .frame(width: 14, height: 14)
         .onAppear { startHeartbeat() }
+        .onDisappear { stopHeartbeat() }
+    }
+
+    private func stopHeartbeat() {
+        heartbeat?.invalidate()
+        heartbeat = nil
     }
 
     private func startHeartbeat() {
+        // Idempotent: a second .onAppear (tab switch, sheet dismissal) must not
+        // stack a second timer on top of the first.
+        stopHeartbeat()
         // Heartbeat: quick double-pump then rest
         // beat 1 → beat 2 → pause → repeat
-        Timer.scheduledTimer(withTimeInterval: 1.4, repeats: true) { _ in
+        heartbeat = Timer.scheduledTimer(withTimeInterval: 1.4, repeats: true) { _ in
             // — First beat —
             withAnimation(.easeOut(duration: 0.1)) {
                 beatScale = 1.25

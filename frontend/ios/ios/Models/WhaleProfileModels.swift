@@ -38,13 +38,23 @@ struct WhaleProfile: Identifiable, Codable {
         formatLargeNumber(portfolioValue)
     }
 
+    /// Return rounded to the DISPLAYED precision (1 dp), with -0.0 normalized to
+    /// 0.0 — otherwise a tiny negative like -0.03 renders "-0.0%" and colors RED
+    /// for an essentially flat whale. Both the label and the color derive from
+    /// this so they never disagree.
+    private var displayedYTDReturn: Double {
+        let r = (ytdReturn * 10).rounded() / 10
+        return r == 0 ? 0 : r
+    }
+
     var formattedYTDReturn: String {
-        let sign = ytdReturn >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", ytdReturn))%"
+        let r = displayedYTDReturn
+        let sign = r >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", r))%"
     }
 
     var isPositiveReturn: Bool {
-        ytdReturn >= 0
+        displayedYTDReturn >= 0
     }
 
     var isCongressional: Bool {
@@ -56,12 +66,15 @@ struct WhaleProfile: Identifiable, Codable {
     // MARK: - Helpers
 
     private func formatLargeNumber(_ number: Double) -> String {
+        // Roll up to the next unit when the lower unit's %.1f mantissa would
+        // round to >= 1000.0 (999_950_000 → "$1.0B", not "$1000.0M") — matching
+        // the backend and TrackingViewModel.formatDollars.
         let absNumber = abs(number)
-        if absNumber >= 1_000_000_000_000 {
+        if absNumber >= 999_950_000_000 {
             return String(format: "$%.1fT", number / 1_000_000_000_000)
-        } else if absNumber >= 1_000_000_000 {
+        } else if absNumber >= 999_950_000 {
             return String(format: "$%.1fB", number / 1_000_000_000)
-        } else if absNumber >= 1_000_000 {
+        } else if absNumber >= 999_950 {
             return String(format: "$%.1fM", number / 1_000_000)
         } else if absNumber >= 1_000 {
             return String(format: "$%.1fK", number / 1_000)
@@ -161,13 +174,22 @@ struct WhaleHolding: Identifiable, Codable {
         String(format: "%.1f%%", allocation)
     }
 
+    /// Change rounded to displayed precision (1 dp), -0.0 normalized to 0.0, so
+    /// a tiny negative doesn't render "-0.0%" as a red loss. The row color check
+    /// reads this too (via `displayedChangePercent`) so it never disagrees.
+    var displayedChangePercent: Double {
+        let c = (changePercent * 10).rounded() / 10
+        return c == 0 ? 0 : c
+    }
+
     var formattedChange: String {
-        let sign = changePercent >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.1f", changePercent))%"
+        let c = displayedChangePercent
+        let sign = c >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", c))%"
     }
 
     var isPositive: Bool {
-        changePercent >= 0
+        displayedChangePercent >= 0
     }
 
     init(id: String = UUID().uuidString, ticker: String, companyName: String, logoURL: String? = nil, allocation: Double, changePercent: Double, assetType: String = "stock") {
@@ -279,10 +301,13 @@ struct WhaleTradeGroup: Identifiable, Codable {
     }
 
     private func formatAmount(_ amount: Double) -> String {
+        // Roll up at unit boundaries (mirrors backend format_amount_short /
+        // TrackingViewModel.formatDollars): 999_950_000 → "$1.00B" not
+        // "$1000.0M"; 999_500 → "$1.0M" not "$1000K".
         let absAmount = abs(amount)
-        if absAmount >= 1_000_000_000 {
+        if absAmount >= 999_950_000 {
             return String(format: "$%.2fB", absAmount / 1_000_000_000)
-        } else if absAmount >= 1_000_000 {
+        } else if absAmount >= 999_500 {
             return String(format: "$%.1fM", absAmount / 1_000_000)
         } else if absAmount >= 1_000 {
             return String(format: "$%.0fK", absAmount / 1_000)
@@ -407,10 +432,13 @@ struct WhaleTrade: Identifiable, Codable {
     }
 
     private func formatTradeAmount(_ amount: Double) -> String {
+        // Roll up at unit boundaries so a value never renders a 4-digit mantissa
+        // ("$1000.00M"). Thresholds match the %.2f precision used here:
+        // 999_995_000 → "$1.00B"; 999_500 → "$1.00M" not "$1000K".
         let absAmount = abs(amount)
-        if absAmount >= 1_000_000_000 {
+        if absAmount >= 999_995_000 {
             return String(format: "$%.2fB", absAmount / 1_000_000_000)
-        } else if absAmount >= 1_000_000 {
+        } else if absAmount >= 999_500 {
             return String(format: "$%.2fM", absAmount / 1_000_000)
         } else if absAmount >= 1_000 {
             return String(format: "$%.0fK", absAmount / 1_000)

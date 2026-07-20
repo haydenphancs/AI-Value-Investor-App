@@ -18,7 +18,7 @@ import json
 import math
 import time as _time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
 import logging
 
@@ -471,6 +471,10 @@ class WhaleService:
         fut: "asyncio.Future" = asyncio.get_running_loop().create_future()
         if not force_refresh:
             _whale_profile_inflight[whale_id] = fut
+        # Consume the future's exception so a SOLO build failure (no concurrent
+        # awaiter) doesn't emit a spurious "Future exception was never retrieved"
+        # asyncio traceback. Real awaiters still get it via `await inflight`.
+        fut.add_done_callback(lambda f: f.cancelled() or f.exception())
         try:
             # Build follow-state-free (user_id=None); each caller overlays its
             # own follow state below, so the shared result is user-agnostic.
@@ -777,12 +781,17 @@ class WhaleService:
         if not whale_ids:
             return []
 
-        # Fetch trade groups for followed whales
+        # Fetch trade groups for followed whales, ordered by FILING date (not
+        # insertion time). `date` is "YYYY-MM-DD" text, so desc == chronological
+        # desc; ordering by created_at instead let a group hydrated later sort
+        # ahead of a newer-dated one, and iOS buckets sections by consecutive
+        # equal dates — so out-of-order rows produced repeated/misplaced date
+        # headers. This matches the profile path (which also orders by date).
         trade_groups = (
             sb.table("whale_trade_groups")
             .select("*")
             .in_("whale_id", whale_ids)
-            .order("created_at", desc=True)
+            .order("date", desc=True)
             .limit(20)
             .execute()
         )
@@ -927,19 +936,28 @@ class WhaleService:
     async def get_whale_alerts(
         self, user_id: Optional[str] = None
     ) -> Optional[WhaleAlertBannerResponse]:
-        """Get most recent active whale alert, optionally scoped to followed whales."""
+        """Get the most recent active, UNEXPIRED whale alert, optionally scoped
+        to followed whales.
+
+        BOTH the followed-whale and global paths apply the same expiry check.
+        Previously the followed path returned an alert with NO expiry check (so
+        an is_active row whose expires_at had passed was shown) AND, by
+        returning early, suppressed the valid global fallback. Each path now
+        scans a small window and returns the first non-expired alert.
+        """
         sb = get_supabase()
 
-        try:
-            query = (
-                sb.table("whale_alerts")
-                .select("*")
-                .eq("is_active", True)
-                .order("created_at", desc=True)
-                .limit(1)
+        def _to_banner(alert: Dict) -> WhaleAlertBannerResponse:
+            return WhaleAlertBannerResponse(
+                id=str(alert["id"]),
+                title=alert["title"],
+                description=alert["description"],
+                ticker=alert.get("ticker"),
+                action_title=alert.get("action_title", "View Full Alert"),
             )
 
-            # If user is logged in, prefer alerts from followed whales
+        try:
+            # Prefer a valid alert from a followed whale.
             if user_id:
                 follows = (
                     sb.table("whale_follows")
@@ -949,44 +967,34 @@ class WhaleService:
                 )
                 whale_ids = [f["whale_id"] for f in (follows.data or [])]
                 if whale_ids:
-                    # Try followed whales first
                     followed_result = (
                         sb.table("whale_alerts")
                         .select("*")
                         .eq("is_active", True)
                         .in_("whale_id", whale_ids)
                         .order("created_at", desc=True)
-                        .limit(1)
+                        .limit(5)
                         .execute()
                     )
-                    if followed_result.data:
-                        alert = followed_result.data[0]
-                        return WhaleAlertBannerResponse(
-                            id=str(alert["id"]),
-                            title=alert["title"],
-                            description=alert["description"],
-                            ticker=alert.get("ticker"),
-                            action_title=alert.get("action_title", "View Full Alert"),
-                        )
+                    for alert in followed_result.data or []:
+                        if not _alert_is_expired(alert):
+                            return _to_banner(alert)
+                    # All followed alerts expired → fall through to global.
 
-            # Fallback: any active alert
-            result = query.execute()
-            if result.data:
-                alert = result.data[0]
-                # Check expiry
-                expires = alert.get("expires_at")
-                if expires:
-                    from datetime import timezone
-                    exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-                    if exp_dt < datetime.now(timezone.utc):
-                        return None
-                return WhaleAlertBannerResponse(
-                    id=str(alert["id"]),
-                    title=alert["title"],
-                    description=alert["description"],
-                    ticker=alert.get("ticker"),
-                    action_title=alert.get("action_title", "View Full Alert"),
-                )
+            # Fallback: the most recent active, unexpired global alert. Scanning a
+            # small window (not limit(1)) means a stale expired latest no longer
+            # suppresses a still-valid older one.
+            result = (
+                sb.table("whale_alerts")
+                .select("*")
+                .eq("is_active", True)
+                .order("created_at", desc=True)
+                .limit(5)
+                .execute()
+            )
+            for alert in result.data or []:
+                if not _alert_is_expired(alert):
+                    return _to_banner(alert)
         except Exception as e:
             logger.warning("Failed to fetch whale alerts: %s", e)
 
@@ -1129,8 +1137,41 @@ class WhaleService:
         )
         if not sector_data and fallback_sectors:
             sector_data = fallback_sectors
+
+        # Fetch stock-split ratios ONLY for tickers whose share count jumped
+        # like a split (value ~preserved) — bounds FMP /splits calls to the rare
+        # suspicious holdings instead of every position. Without this, a
+        # held-through-split position (e.g. a 10:1) fabricates a huge BOUGHT
+        # trade in the diff below.
+        # Best-effort refinement: never let a splits lookup failure abort 13F
+        # processing (which would degrade to a stale snapshot). Any error here
+        # just leaves split_ratios empty → the raw diff, same as before.
+        split_ratios: Dict[str, float] = {}
+        try:
+            suspects = self._suspicious_split_tickers(current_raw, prev_raw)
+            if suspects:
+                prev_end = (
+                    _quarter_end_date(int(prev["year"]), int(prev["quarter"]))
+                    if prev else None
+                )
+                curr_end = _quarter_end_date(year, quarter)
+                split_lists = await asyncio.gather(
+                    *[self.fmp.get_stock_splits(t) for t in suspects],
+                    return_exceptions=True,
+                )
+                for t, sl in zip(suspects, split_lists):
+                    if isinstance(sl, BaseException):
+                        logger.warning("Split lookup failed for %s: %s", t, sl)
+                        continue
+                    r = _split_ratio_in_window(sl, prev_end, curr_end)
+                    if r and r != 1.0:
+                        split_ratios[t] = r
+        except Exception as e:
+            logger.warning("Split adjustment skipped for CIK %s: %s", cik, e)
+            split_ratios = {}
+
         trade_group = self._diff_quarters(
-            current_raw, prev_raw, filing_date, total_value
+            current_raw, prev_raw, filing_date, total_value, split_ratios
         )
         behavior = self._generate_behavior_summary(trade_group, sector_data)
         sentiment = self._generate_sentiment_summary(
@@ -1290,16 +1331,75 @@ class WhaleService:
 
     # ── Quarter Diffing (13F) ────────────────────────────────────────
 
+    @staticmethod
+    def _suspicious_split_tickers(
+        current_raw: List[Dict], previous_raw: List[Dict]
+    ) -> List[str]:
+        """Tickers whose share count jumped like a split — the only holdings
+        worth a FMP ``/splits`` lookup (keeps the calls bounded).
+
+        A split moves shares up (or down, reverse-split) by a factor while the
+        per-share price moves INVERSELY by ~the same factor, so the position
+        VALUE is roughly preserved. A genuine large buy/sell instead changes the
+        value proportionally, leaving the price ~flat — so it won't be flagged
+        (and even a flagged ticker is only *confirmed* against real split data).
+        """
+        def _map(raw: List[Dict]) -> Dict[str, Tuple[float, float]]:
+            m: Dict[str, Tuple[float, float]] = {}
+            for h in raw or []:
+                sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
+                if not sym or sym == "--":
+                    continue
+                m[sym] = (
+                    _finite_float(h.get("value")),
+                    _finite_float(h.get("sharesNumber") or h.get("shares")),
+                )
+            return m
+
+        cur = _map(current_raw)
+        prev = _map(previous_raw)
+        suspects: List[str] = []
+        for sym in set(cur) & set(prev):
+            cv, cs = cur[sym]
+            pv, ps = prev[sym]
+            if cs <= 0 or ps <= 0 or cv <= 0 or pv <= 0:
+                continue
+            share_ratio = cs / ps
+            if 0.7 < share_ratio < 1.4:
+                continue  # share count barely moved → not a split
+            cur_price = cv / cs
+            prev_price = pv / ps
+            if cur_price <= 0 or prev_price <= 0:
+                continue
+            price_ratio = prev_price / cur_price
+            # shares & price moved inversely by ~the same factor → value
+            # ~preserved → smells like a split; confirm against real /splits.
+            if abs(share_ratio - price_ratio) <= 0.35 * share_ratio:
+                suspects.append(sym)
+        return suspects
+
     def _diff_quarters(
         self,
         current_raw: List[Dict],
         previous_raw: List[Dict],
         filing_date: str,
         total_current_value: float,
+        split_ratios: Optional[Dict[str, float]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Diff two 13F snapshots to compute individual trades."""
+        """Diff two 13F snapshots to compute individual trades.
+
+        ``split_ratios`` maps ticker → product of stock-split ratios that took
+        effect between the two filings (see ``_process_13f_path``). FMP reports
+        RAW, unadjusted 13F share counts, so a 10:1 split makes a
+        held-unchanged position look like a huge BOUGHT trade
+        (``shares_change × implied_price``). We restate the previous quarter's
+        shares onto the post-split basis before diffing — mirroring
+        ``holders_service._compute_quarter_flow`` — so a split is not fabricated
+        into a trade. Non-finite FMP tokens (NaN/Inf) coerce to 0.
+        """
         if not current_raw:
             return None
+        split_ratios = split_ratios or {}
 
         # Build ticker maps
         current_map: Dict[str, Dict] = {}
@@ -1310,8 +1410,8 @@ class WhaleService:
             current_map[sym] = {
                 "symbol": sym,
                 "name": h.get("securityName") or h.get("companyName") or sym,
-                "value": float(h.get("value") or 0),
-                "shares": int(float(h.get("sharesNumber") or h.get("shares") or 0)),
+                "value": _finite_float(h.get("value")),
+                "shares": int(_finite_float(h.get("sharesNumber") or h.get("shares"))),
             }
 
         prev_map: Dict[str, Dict] = {}
@@ -1320,12 +1420,12 @@ class WhaleService:
             sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
             if not sym or sym == "--":
                 continue
-            val = float(h.get("value") or 0)
+            val = _finite_float(h.get("value"))
             prev_map[sym] = {
                 "symbol": sym,
                 "name": h.get("securityName") or h.get("companyName") or sym,
                 "value": val,
-                "shares": int(float(h.get("sharesNumber") or h.get("shares") or 0)),
+                "shares": int(_finite_float(h.get("sharesNumber") or h.get("shares"))),
             }
             prev_total += val
 
@@ -1346,6 +1446,24 @@ class WhaleService:
             prev_val = float(prev["value"]) if prev else 0.0
             curr_shares = float(curr["shares"]) if curr else 0.0
             prev_shares = float(prev["shares"]) if prev else 0.0
+
+            # Split restatement (mirrors holders_service._compute_quarter_flow):
+            # a split inflates the RAW share-count delta. Restate the previous
+            # quarter onto the post-split basis so a held-through-split position
+            # doesn't fabricate a large BOUGHT/Increased trade.
+            ratio = split_ratios.get(ticker, 1.0)
+            if ratio and ratio != 1.0 and curr and prev and prev_shares > 0:
+                ratio_obs = curr_shares / prev_shares
+                if abs(ratio_obs - ratio) <= 0.15 * ratio:
+                    # Clean split signature → restate; residual is the real flow.
+                    prev_shares = prev_shares * ratio
+                elif ratio_obs >= (1.0 + ratio) / 2.0:
+                    # Split + large concurrent real flow, inseparable → suppress
+                    # rather than fabricate a wrong-sign trade ("no bar, not
+                    # garbage"). Keeps the position out of the trade list.
+                    continue
+                # else: count didn't jump toward the split (ratio_obs ≈ 1.0) →
+                # spinoff / ADR-ratio / already-adjusted; keep the raw diff.
 
             # Shared 13F formula — shares_change × implied_price. Keeps
             # Supabase whale_trades.amount aligned with what TickerDetailView's
@@ -1469,22 +1587,31 @@ class WhaleService:
             raw_type = (t.get("type") or "").lower().strip()
             action = CONGRESSIONAL_TYPE_MAP.get(raw_type, "BOUGHT")
             amount_range = t.get("amount") or "$1,001 - $15,000"
+            # Keep the REAL parsed amount (0.0 when FMP's bucket is unparseable,
+            # e.g. "$50,000,000+") — do NOT fabricate an $8,000 midpoint. A
+            # fabricated amount gets persisted to whale_trades.amount and summed
+            # into the group net, understating a large disclosure by orders of
+            # magnitude and making net_amount contradict net_amount_range. The
+            # honest raw bucket string survives on `amount_range` for display.
             amount = parse_congress_amount_dollars(amount_range)
             amount_low, amount_high = parse_congress_amount_bounds(amount_range)
-            if amount == 0.0:
-                amount = 8_000  # safety fallback (sort key only)
-            tx_date = (
-                t.get("transactionDate")
-                or t.get("transaction_date")
-                or as_of_date
-            )
-            disclosure_date = (
+
+            # Every persisted / dedup-keyed group must carry a REAL date. A trade
+            # with neither a transaction nor a disclosure date can't be placed on
+            # a stable timeline; keying it to `as_of_date` (today) re-stamps the
+            # group "today" on every hydration run, defeating UNIQUE(whale_id,
+            # date). Drop it (mirrors the symbol filter above).
+            raw_tx = t.get("transactionDate") or t.get("transaction_date")
+            raw_disc = (
                 t.get("disclosureDate")
                 or t.get("disclosure_date")
                 or t.get("dateRecieved")
                 or t.get("dateReceived")
-                or tx_date
             )
+            if not raw_tx and not raw_disc:
+                continue
+            tx_date = raw_tx or raw_disc
+            disclosure_date = raw_disc or tx_date
             name = t.get("assetDescription") or t.get("asset_description") or symbol
 
             normalized.append({
@@ -1505,7 +1632,6 @@ class WhaleService:
 
         # ── Pass 2: chronological walk with running portfolio ──────────
         running_portfolio: Dict[str, float] = {}
-        seen_tickers: set = set()
         trades: List[Dict] = []
 
         for t in normalized:
@@ -1514,8 +1640,14 @@ class WhaleService:
             raw_type = t["raw_type"]
             amount = t["amount"]
 
-            # Trade type classification (uses running portfolio knowledge)
-            if action == "BOUGHT" and symbol not in seen_tickers:
+            # Position held BEFORE this trade. A full-sale Close zeroes it, so a
+            # later re-buy sees prev_value == 0 and is correctly re-classified
+            # "New" (the old seen_tickers set stayed populated after a Close and
+            # mislabeled the re-open as "Increased").
+            prev_value = running_portfolio.get(symbol, 0.0)
+
+            # Trade type classification from the CURRENT position state.
+            if action == "BOUGHT" and prev_value <= 0:
                 trade_type = "New"
             elif action == "SOLD" and raw_type in full_sale_types:
                 trade_type = "Closed"
@@ -1523,11 +1655,9 @@ class WhaleService:
                 trade_type = "Increased"
             else:
                 trade_type = "Decreased"
-            seen_tickers.add(symbol)
 
             # Allocation BEFORE applying this trade
             total_before = sum(running_portfolio.values())
-            prev_value = running_portfolio.get(symbol, 0.0)
             previous_allocation = (
                 round(prev_value / total_before * 100, 2)
                 if total_before > 0
@@ -1661,17 +1791,22 @@ class WhaleService:
             filing_trades, new_count, closed_count, net_action
         )
 
-        # Summed honest range for the trades in the net direction
-        direction_bounds = [
-            (t.get("amount_low", 0.0), t.get("amount_high", 0.0))
-            for t in filing_trades
-            if t["action"] == net_action
-        ]
-        net_amount_range = (
-            format_amount_range(*sum_amount_bounds(direction_bounds))
-            if direction_bounds
-            else None
-        )
+        # Summed honest range for the trades in the net direction. Emitted ONLY
+        # for a single-directional filing (net_dollar != 0): a pure wash (buys
+        # exactly offset sells) nets to 0 but would otherwise read "Net buying of
+        # $X", overstating a zero-net filing. And when every bound is (0,0) (all
+        # amounts unparseable) we emit no range rather than a fabricated "$0".
+        net_amount_range = None
+        if net_dollar != 0:
+            direction_bounds = [
+                (t.get("amount_low", 0.0), t.get("amount_high", 0.0))
+                for t in filing_trades
+                if t["action"] == net_action
+            ]
+            if direction_bounds:
+                low, high = sum_amount_bounds(direction_bounds)
+                if low > 0 or (high is not None and high > 0):
+                    net_amount_range = format_amount_range(low, high)
 
         # Congress insights use the disclosed RANGE — never a precise dollar.
         insights: List[str] = []
@@ -1714,30 +1849,53 @@ class WhaleService:
     def _build_holdings(
         self, raw_holdings: List[Dict]
     ) -> List[Dict[str, Any]]:
-        """Transform raw FMP 13F holdings into UI shape."""
-        total = sum(float(h.get("value") or 0) for h in raw_holdings)
-        if total <= 0:
-            return []
+        """Transform raw FMP 13F holdings into UI shape.
 
-        holdings = []
+        Dedups by RESOLVED ticker: FMP ``institutional-ownership/extract`` maps
+        several CUSIP rows (common + options, dual listings) onto ONE symbol.
+        Without merging, (a) the same issuer renders twice in Current Picks and
+        (b) the denormalized ``whale_holdings`` insert hits its
+        UNIQUE(whale_id, ticker) constraint and aborts the whole sync.
+
+        The denominator sums POSITIVE values only — a stray negative/zero FMP
+        value would otherwise deflate the total and push a legitimate holding's
+        allocation past 100, violating the ``numeric(7,4)`` / CHECK(0..100)
+        column. Non-finite FMP tokens (NaN/Inf) coerce to 0 via ``_finite_float``.
+        """
+        merged: Dict[str, Dict[str, Any]] = {}
         for h in raw_holdings:
-            val = float(h.get("value") or 0)
+            val = _finite_float(h.get("value"))
             if val <= 0:
                 continue
             sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
             if not sym or sym == "--":
                 continue
-            holdings.append({
-                "ticker": sym,
-                "company_name": (
-                    h.get("securityName") or h.get("companyName") or sym
-                ),
-                "logo_url": None,
-                "allocation": round(val / total * 100, 2),
-                "change_percent": 0,
-                "value": val,
-                "shares": int(float(h.get("sharesNumber") or h.get("shares") or 0)),
-            })
+            shares = _finite_float(h.get("sharesNumber") or h.get("shares"))
+            existing = merged.get(sym)
+            if existing:
+                existing["value"] += val
+                existing["shares"] += shares
+            else:
+                merged[sym] = {
+                    "ticker": sym,
+                    "company_name": (
+                        h.get("securityName") or h.get("companyName") or sym
+                    ),
+                    "logo_url": None,
+                    "allocation": 0.0,
+                    "change_percent": 0,
+                    "value": val,
+                    "shares": shares,
+                }
+
+        total = sum(h["value"] for h in merged.values())
+        if total <= 0:
+            return []
+
+        holdings = list(merged.values())
+        for h in holdings:
+            h["allocation"] = round(h["value"] / total * 100, 2)
+            h["shares"] = int(h["shares"])
 
         holdings.sort(key=lambda x: x["value"], reverse=True)
         return holdings
@@ -2013,9 +2171,9 @@ class WhaleService:
                     if t.action == net_action and t.amount_range
                 ]
                 if bounds:
-                    net_amount_range = format_amount_range(
-                        *sum_amount_bounds(bounds)
-                    )
+                    low, high = sum_amount_bounds(bounds)
+                    if low > 0 or (high is not None and high > 0):
+                        net_amount_range = format_amount_range(low, high)
 
         return WhaleTradeGroupResponse(
             id=group_id,
@@ -2324,8 +2482,16 @@ class WhaleService:
         """
         sb = get_supabase()
 
+        # Each denormalized write is isolated in its OWN try/except (mirroring
+        # scripts/hydrate_whales.py). Previously all four shared one try, so a
+        # single failing insert — e.g. a duplicate-ticker whale_holdings
+        # UNIQUE(whale_id, ticker) violation, which fires AFTER the delete —
+        # aborted the block and silently skipped the sector + trade-group syncs
+        # that the activity feed, tracking alerts, home signals, and trade-group
+        # detail all read from. Now one failure degrades only its own section.
+
+        # 1. Update whale record (portfolio value + tiered annual return)
         try:
-            # Update whale record
             whale_update: Dict[str, Any] = {
                 "portfolio_value": total_value,
                 "behavior_summary": behavior,
@@ -2350,8 +2516,11 @@ class WhaleService:
             if ret_label:
                 whale_update["return_label"] = ret_label
             sb.table("whales").update(whale_update).eq("id", whale_id).execute()
+        except Exception as e:
+            logger.error("[sync] whale record update failed for %s: %s", whale_id, e)
 
-            # Upsert holdings
+        # 2. Replace holdings
+        try:
             sb.table("whale_holdings").delete().eq(
                 "whale_id", whale_id
             ).execute()
@@ -2364,8 +2533,11 @@ class WhaleService:
                     "allocation": h.get("allocation", 0),
                     "change_percent": h.get("change_percent", 0),
                 }).execute()
+        except Exception as e:
+            logger.error("[sync] holdings sync failed for %s: %s", whale_id, e)
 
-            # Upsert sector allocations
+        # 3. Replace sector allocations
+        try:
             sb.table("whale_sector_allocations").delete().eq(
                 "whale_id", whale_id
             ).execute()
@@ -2375,16 +2547,20 @@ class WhaleService:
                     "sector": s["name"],
                     "allocation": s["allocation"],
                 }).execute()
+        except Exception as e:
+            logger.error("[sync] sector sync failed for %s: %s", whale_id, e)
 
-            # Insert trade groups + trades (one row per filing, deduped by date).
-            # The SELECT-then-INSERT is best-effort; the UNIQUE(whale_id, date)
-            # index (migration 077) is the authoritative guard. A concurrent
-            # writer that wins the race raises a unique violation here — we treat
-            # that as "already inserted" and skip its children (they belong to
-            # the other writer's group row), so no duplicate rows are created.
-            for trade_group in trade_groups or []:
-                if not trade_group or not trade_group.get("date"):
-                    continue
+        # 4. Insert trade groups + trades (one row per filing, deduped by date).
+        # The SELECT-then-INSERT is best-effort; the UNIQUE(whale_id, date)
+        # index (migration 077) is the authoritative guard. A concurrent
+        # writer that wins the race raises a unique violation here — we treat
+        # that as "already inserted" and skip its children (they belong to
+        # the other writer's group row), so no duplicate rows are created.
+        # Each group is isolated so one bad filing doesn't skip the others.
+        for trade_group in trade_groups or []:
+            if not trade_group or not trade_group.get("date"):
+                continue
+            try:
                 existing_tg = (
                     sb.table("whale_trade_groups")
                     .select("id")
@@ -2394,24 +2570,15 @@ class WhaleService:
                 )
                 if existing_tg.data:
                     continue
-                try:
-                    tg_result = sb.table("whale_trade_groups").insert({
-                        "whale_id": whale_id,
-                        "date": trade_group["date"],
-                        "trade_count": trade_group["trade_count"],
-                        "net_action": trade_group["net_action"],
-                        "net_amount": trade_group["net_amount"],
-                        "summary": trade_group.get("summary"),
-                        "insights": trade_group.get("insights", []),
-                    }).execute()
-                except Exception as tg_err:
-                    logger.warning(
-                        "whale_trade_group insert skipped (likely concurrent "
-                        "duplicate) whale_id=%s date=%s: %s: %s",
-                        whale_id, trade_group["date"],
-                        type(tg_err).__name__, tg_err,
-                    )
-                    continue
+                tg_result = sb.table("whale_trade_groups").insert({
+                    "whale_id": whale_id,
+                    "date": trade_group["date"],
+                    "trade_count": trade_group["trade_count"],
+                    "net_action": trade_group["net_action"],
+                    "net_amount": trade_group["net_amount"],
+                    "summary": trade_group.get("summary"),
+                    "insights": trade_group.get("insights", []),
+                }).execute()
 
                 if not tg_result.data:
                     continue
@@ -2438,14 +2605,86 @@ class WhaleService:
                         "new_allocation": trade.get("new_allocation"),
                         "date": trade.get("date", ""),
                     }).execute()
-
-        except Exception as e:
-            logger.error(
-                "Failed to sync whale tables for %s: %s", whale_id, e
-            )
+            except Exception as tg_err:
+                logger.warning(
+                    "whale_trade_group sync skipped (likely concurrent "
+                    "duplicate) whale_id=%s date=%s: %s: %s",
+                    whale_id, trade_group.get("date"),
+                    type(tg_err).__name__, tg_err,
+                )
+                continue
 
 
 # ── Module-Level Helpers ─────────────────────────────────────────────
+
+
+def _finite_float(value: Any, default: float = 0.0) -> float:
+    """Coerce to a FINITE float; NaN / Inf / None / garbage → ``default``.
+
+    FMP occasionally emits ``NaN`` / ``Infinity`` tokens. An unguarded
+    non-finite float propagates into a response float field and — because
+    Starlette's ``JSONResponse`` renders with ``allow_nan=False`` — raises at
+    serialization, 500-ing the WHOLE whale-profile screen. It can also violate
+    the ``numeric``/CHECK columns on the denormalized whale tables. Mirrors
+    ``holders_service._safe_float``.
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
+
+def _alert_is_expired(alert: Dict) -> bool:
+    """True if the alert's ``expires_at`` has passed. A missing or unparseable
+    ``expires_at`` is treated as non-expiring (never blocks a live alert)."""
+    expires = alert.get("expires_at")
+    if not expires:
+        return False
+    try:
+        exp_dt = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    return exp_dt < datetime.now(timezone.utc)
+
+
+_QUARTER_END = {1: "-03-31", 2: "-06-30", 3: "-09-30", 4: "-12-31"}
+
+
+def _quarter_end_date(year: int, quarter: int) -> str:
+    """Calendar quarter-end ISO date, e.g. (2024, 2) → ``"2024-06-30"``."""
+    return f"{year}{_QUARTER_END.get(quarter, '-12-31')}"
+
+
+def _split_ratio_in_window(
+    splits: Optional[List[Dict]],
+    start_excl: Optional[str],
+    end_incl: Optional[str],
+) -> float:
+    """Product of FMP stock-split ratios with ``start_excl < date <= end_incl``.
+
+    FMP ``/splits`` rows carry ``date`` + ``numerator``/``denominator`` (10/1 =
+    10:1). Quarters with no split map to ``1.0``. Non-finite / non-positive
+    ratios are dropped (a NaN would silently disable the restatement).
+    """
+    if not splits or not end_incl:
+        return 1.0
+    ratio = 1.0
+    for s in splits:
+        d = str(s.get("date") or "")[:10]
+        num = s.get("numerator")
+        den = s.get("denominator")
+        if not d or not num or not den:
+            continue
+        try:
+            r = float(num) / float(den)
+        except (ValueError, ZeroDivisionError, TypeError):
+            continue
+        if not math.isfinite(r) or r <= 0:
+            continue
+        if (start_excl is None or start_excl < d) and d <= end_incl:
+            ratio *= r
+    return ratio
 
 
 def _find_previous_quarter(

@@ -83,10 +83,14 @@ struct TradeGroupDetailView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.xxl)
                     } else {
-                        // Filter Tabs
+                        // Filter Tabs. When the trade list is truncated to the
+                        // top-N by value, a type's zero count doesn't mean the
+                        // whale made none of it (small-value ones were omitted),
+                        // so keep every tab visible instead of hiding it.
                         TradeFilterTabBar(
                             selectedFilter: viewModel.selectedFilter,
                             filterCounts: viewModel.filterCounts,
+                            isTruncated: viewModel.tradeGroup.tradeCount > viewModel.tradeGroup.trades.count,
                             onSelect: { viewModel.selectFilter($0) }
                         )
 
@@ -171,6 +175,7 @@ struct TradeGroupDetailView: View {
 struct TradeFilterTabBar: View {
     let selectedFilter: TradeFilterTab
     let filterCounts: [TradeFilterTab: Int]
+    var isTruncated: Bool = false
     var onSelect: ((TradeFilterTab) -> Void)?
 
     var body: some View {
@@ -181,6 +186,7 @@ struct TradeFilterTabBar: View {
                         tab: tab,
                         isSelected: selectedFilter == tab,
                         count: filterCounts[tab] ?? 0,
+                        isTruncated: isTruncated,
                         onTap: { onSelect?(tab) }
                     )
                 }
@@ -194,11 +200,14 @@ struct TradeFilterPill: View {
     let tab: TradeFilterTab
     let isSelected: Bool
     let count: Int
+    var isTruncated: Bool = false
     var onTap: (() -> Void)?
 
-    // Hide tabs with zero trades (except "All Trades")
+    // Hide tabs with zero trades (except "All Trades") — UNLESS the list was
+    // truncated to the top-N by value, where a zero count for a type doesn't
+    // prove the whale made none of it, so we keep the tab visible.
     private var shouldShow: Bool {
-        tab == .all || count > 0
+        tab == .all || count > 0 || isTruncated
     }
 
     var body: some View {

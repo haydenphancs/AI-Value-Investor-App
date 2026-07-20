@@ -875,6 +875,25 @@ struct TrendingWhale: Identifiable {
         self.firmName = firmName
     }
 
+    /// Returns a copy with `isFollowing` flipped, threading EVERY other field
+    /// through so nothing silently drops (id → breaks profile nav, firmName →
+    /// vanishes from the row). Centralizes the field-by-field rebuild that was
+    /// hand-copied across the follow-state call sites.
+    func withFollowing(_ following: Bool) -> TrendingWhale {
+        TrendingWhale(
+            id: id,
+            name: name,
+            category: category,
+            avatarName: avatarName,
+            followersCount: followersCount,
+            isFollowing: following,
+            title: title,
+            description: description,
+            recentTradeCount: recentTradeCount,
+            firmName: firmName
+        )
+    }
+
     var formattedFollowers: String {
         if followersCount >= 1000 {
             return "\(followersCount / 1000)K followers"
@@ -939,13 +958,11 @@ struct WhaleTradeGroupActivity: Identifiable {
         return formatter.string(from: date)
     }
 
+    /// The backend already emits a SIGNED string (`_format_amount` →
+    /// "+$4.34B" / "-$2.1M"), so we render it verbatim. Re-adding a sign here
+    /// produced "++$4.34B" for buys and "- -$2.1M" for sells.
     var formattedAmount: String {
-        switch action {
-        case .bought:
-            return "+\(totalAmount)"
-        case .sold:
-            return "- \(totalAmount)"
-        }
+        totalAmount
     }
 
     var formattedTradeCount: String {

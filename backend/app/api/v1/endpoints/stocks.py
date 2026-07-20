@@ -206,22 +206,161 @@ def _is_crypto(item: Dict[str, Any]) -> bool:
     return (short or "").upper() in _CRYPTO_EXCHANGES
 
 
+# ── Asset-type classification (name-based) ──────────────────────────────
+# "ETF"/"ETN"/"Fund" as WHOLE WORDS (singular OR plural — "ETNs", "Funds"). A
+# substring test wrongly matched company names, and a substring "trust" matched
+# real REITs/banks (see the corporate-entity override below).
+_ETF_NAME_RE = re.compile(r"\b(?:etfs?|etns?)\b", re.IGNORECASE)
+_FUND_NAME_RE = re.compile(r"\bfunds?\b", re.IGNORECASE)
+
+# Corporate-entity markers (whole word). Their presence means the row is the
+# ISSUER'S OWN OPERATING STOCK, not one of its funds — this is what rescues
+# Invesco Ltd. (IVZ), The Charles Schwab Corporation (SCHW), and Northern Trust
+# Corporation (NTRS) from being mislabeled "etf"/"fund" (via the issuer-brand /
+# "trust" keywords below) and silently dropped from the company picker, which
+# filters to type == "stock". This override runs BEFORE the issuer-brand check,
+# so a brand keyword can never hide the operating company that owns the brand.
+_CORP_ENTITY_RE = re.compile(
+    r"\b(?:inc|incorporated|corp|corporation|co|company|plc|ltd|limited|"
+    r"bancorp|bancshares|holdings?|group|ag|se|sa|nv|llc|lp)\b",
+    re.IGNORECASE,
+)
+
+# Fund-family brands. Many fund/ETP names carry NO "ETF"/"Fund" word — e.g.
+# "Invesco QQQ Trust, Series 1" (QQQ, the 3rd-largest ETF), "Sprott Physical Gold
+# Trust", "SPDR Gold Shares", "ProShares Short QQQ", "BlackRock High Yield K".
+# These would otherwise fall through to "stock" and pollute the company picker.
+# It is SAFE to list brands that DO have a listed operating company (invesco →
+# IVZ, schwab → SCHW, blackrock → BLK, sprott → SII, wisdomtree → WT), because
+# the corporate-entity override above fires first for the operating company's
+# own name ("Invesco Ltd." → stock) — the brand keyword only catches the funds.
+_ETF_ISSUER_KEYWORDS = (
+    "proshares", "ishares", "spdr", "direxion", "wisdomtree", "vaneck",
+    "invesco", "schwab", "vanguard", "blackrock", "fidelity", "pimco",
+    "nuveen", "sprott", "grayscale", "graniteshares", "roundhill", "defiance",
+    "abrdn", "global x", "first trust", "franklin templeton", "dimensional",
+    "janus henderson", "eaton vance",
+)
+
+
 def _get_asset_type(item: Dict[str, Any]) -> Optional[str]:
-    """Determine the asset type for a search result. Returns None if it should be excluded."""
+    """Determine the asset type for a search result. Returns None if it should be excluded.
+
+    Order matters: an explicit ETF/Fund word wins, THEN a corporate-entity marker
+    forces "stock" (so an asset-manager's own stock isn't hidden by its brand
+    keyword), THEN issuer-brand ETFs without an "ETF" word, THEN indices.
+    """
     if _is_crypto(item):
         return "crypto"
     if not _is_us_listed(item):
         return None  # Skip international listings
 
-    name = (item.get("name") or "").lower()
-    # Detect ETFs
-    if any(kw in name for kw in ("etf", "proshares", "ishares", "vanguard", "spdr",
-                                  "direxion", "wisdomtree", "vaneck", "invesco", "schwab")):
+    name = str(item.get("name") or "")  # coerce: FMP occasionally sends non-str
+    name_lower = name.lower()
+
+    # 1) Unambiguous fund/ETF words win outright.
+    if _ETF_NAME_RE.search(name):
         return "etf"
-    # Detect indices/funds
-    if any(kw in name for kw in ("index", "fund", "trust")):
+    if _FUND_NAME_RE.search(name):
+        return "fund"
+    # 2) A corporate entity is the operating company's stock — even if a brand
+    #    keyword ("invesco", "schwab") or "trust" (banks/REITs) appears in it.
+    if _CORP_ENTITY_RE.search(name):
+        return "stock"
+    # 3) Brand ETFs whose names omit "ETF" (ProShares Short QQQ, SPDR Gold Shares).
+    if any(kw in name_lower for kw in _ETF_ISSUER_KEYWORDS):
+        return "etf"
+    # 4) Bare index products.
+    if "index" in name_lower:
         return "fund"
     return "stock"
+
+
+# ── Secondary-listing de-duplication ────────────────────────────────────
+# FMP search returns corporate-action securities alongside the primary listing,
+# all sharing the issuer's company name — confusing identical rows, and (worse)
+# they classify as "stock" so a user could pick a warrant/unit/right and run the
+# company pipeline on it. Two encodings occur:
+#   • NASDAQ 5th-letter: when-issued "V" (SNDK→SNDKV), warrant "W" (BGRY→BGRYW),
+#     unit "U" (SVNA→SVNAU), right "R" (RFAC→RFACR).
+#   • NYSE dash form: "-WT"/"-WS" warrant, "-UN"/"-U" unit, "-RT"/"-R" right,
+#     "-WI" when-issued (APCA → APCA-WT / APCA-UN).
+# We drop such a row ONLY when its BASE symbol (the row minus the suffix) is ALSO
+# present with the SAME normalized name + exchange + type — i.e. it's a redundant
+# twin of a listing we already show. This never collapses legitimate dual-class
+# shares: GOOGL/GOOG differ by "L" (not a suffix) and BRK-A/BRK-B by "-A"/"-B"
+# (not an action suffix); Z/ZG carry distinct names. A standalone V/W/U/R ticker
+# with no same-named base (Visa "V", Veritiv "VRTV", Nu "NU", Baidu "BIDU",
+# Progressive "PGR") is untouched — its base is a DIFFERENT company.
+_SECONDARY_SUFFIXES = ("V", "W", "U", "R")
+_DASH_ACTION_SUFFIX_RE = re.compile(r"[.\-](?:wt|ws|un|u|rt|r|wi|w)$", re.IGNORECASE)
+# Security-class / corporate-action descriptors FMP appends INCONSISTENTLY across
+# a company's securities — e.g. the common is "RF Acquisition Corp II Ordinary
+# Shares" while its unit/right rows are just "RF Acquisition Corp II". Stripping
+# these so both key to the same company is SAFE: a twin only collapses when it
+# ALSO carries a V/W/U/R (or dash-action) suffix, which legitimate dual-class
+# shares (GOOGL/GOOG, Zillow "Class A"/"Class C") never do — so the name key is
+# only a confirmation, never the sole trigger.
+_NAME_DESCRIPTOR_RE = re.compile(
+    r"\b(?:units?|warrants?|rights?|when[\s-]?issued|wi"
+    r"|ordinary\s+shares?|common\s+stock|common\s+shares?"
+    r"|depositary\s+shares?|class\s+[a-z])\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_company_name(name: Optional[str]) -> str:
+    """Lowercase, drop trailing corporate-action descriptors + punctuation, and
+    collapse whitespace — so a twin ("IB Acquisition Corp. Unit") keys to the
+    same company as its base ("IB Acquisition Corp.")."""
+    n = (name or "").lower()
+    n = _NAME_DESCRIPTOR_RE.sub(" ", n)
+    n = re.sub(r"[.,]", " ", n)
+    return " ".join(n.split())
+
+
+def _secondary_base_symbol(sym: str) -> Optional[str]:
+    """The primary/base ticker a corporate-action symbol derives from, or None.
+
+    ``APCA-WT``/``APCA-UN`` → ``APCA``; ``SNDKV``/``SVNAU``/``RFACR`` → drop the
+    5th letter. Returns None for a symbol with no recognized action suffix.
+    """
+    m = _DASH_ACTION_SUFFIX_RE.search(sym)
+    if m:
+        return sym[:m.start()]
+    if len(sym) >= 2 and sym[-1] in _SECONDARY_SUFFIXES:
+        return sym[:-1]
+    return None
+
+
+def _dedupe_secondary_listings(
+    results: List[StockSearchResult],
+    keep_symbol: str = "",
+) -> List[StockSearchResult]:
+    """Remove when-issued / warrant / unit / right twins that duplicate a
+    primary listing.
+
+    ``keep_symbol`` (upper-case) is never dropped — protects a ticker the user
+    typed verbatim.
+    """
+    keep = (keep_symbol or "").upper()
+    present: Dict[tuple, set] = {}
+    for r in results:
+        key = (_normalize_company_name(r.name),
+               (r.exchange_short_name or "").upper(), r.type)
+        present.setdefault(key, set()).add((r.symbol or "").upper())
+
+    deduped: List[StockSearchResult] = []
+    for r in results:
+        sym = (r.symbol or "").upper()
+        base = _secondary_base_symbol(sym) if sym != keep else None
+        if base:
+            key = (_normalize_company_name(r.name),
+                   (r.exchange_short_name or "").upper(), r.type)
+            if base in present.get(key, ()):
+                continue  # redundant secondary twin of a primary we're showing
+        deduped.append(r)
+    return deduped
 
 
 @router.get("/search", response_model=List[StockSearchResult])
@@ -237,10 +376,23 @@ async def search_stocks(
         query_lower = q.lower().strip()
         crypto_results: List[StockSearchResult] = []
 
+        # Whitespace-only query (min_length=1 lets " " through): the empty string
+        # is a substring of every symbol/name, so the crypto loop below would
+        # match the ENTIRE map and we'd fire a blank FMP query. Return empty.
+        if not query_upper:
+            return []
+
+        # A 1-char query would substring-match a huge fraction of the crypto map
+        # (e.g. "a" hits ~60 coins), flooding the results. For a 1-char query,
+        # only an EXACT symbol match (e.g. "V") is meaningful. (The old
+        # `sym.startswith(query_upper)` clause was redundant — a strict subset of
+        # the `query_upper in sym` substring test.)
         for sym, name in _CRYPTO_NAMES.items():
-            if (query_upper in sym or
-                query_lower in name.lower() or
-                sym.startswith(query_upper)):
+            if len(query_upper) >= 2:
+                matched = query_upper in sym or query_lower in name.lower()
+            else:
+                matched = sym == query_upper
+            if matched:
                 crypto_results.append(StockSearchResult(
                     symbol=sym,
                     name=name,
@@ -259,39 +411,75 @@ async def search_stocks(
         raw = await fmp.search_stocks(q, limit=max(limit * 3, 30))
 
         stock_results: List[StockSearchResult] = []
-        seen_symbols = {r.symbol for r in crypto_results}
+        seen_stock_symbols: set = set()
 
         for item in (raw or []):
-            symbol = item.get("symbol", "")
-            if symbol in seen_symbols:
-                continue  # Skip duplicates already in crypto results
+            # Per-row resilience: a malformed FMP row (non-dict element, or a
+            # non-string name that breaks .lower()) must NOT 502 the whole
+            # search and lose every other valid result — skip it and continue.
+            try:
+                if not isinstance(item, dict):
+                    continue
+                symbol = item.get("symbol") or ""
+                if not symbol or symbol in seen_stock_symbols:
+                    continue  # empty / duplicate FMP stock symbol
 
-            asset_type = _get_asset_type(item)
-            if asset_type is None:
+                asset_type = _get_asset_type(item)
+                if asset_type is None or asset_type == "crypto":
+                    continue  # international, or prefer our own crypto results
+
+                short_name = _get_exchange_short_name(item)
+                stock_results.append(StockSearchResult(
+                    symbol=symbol,
+                    name=str(item.get("name") or ""),
+                    currency=item.get("currency"),
+                    exchange_short_name=short_name,
+                    # FMP /stable rows carry the FULL name in exchangeFullName;
+                    # "exchange" is the short code. (stockExchange is legacy.)
+                    exchange_full_name=(
+                        item.get("exchangeFullName")
+                        or item.get("stockExchange")
+                        or item.get("exchange")
+                    ),
+                    type=asset_type,
+                ))
+                seen_stock_symbols.add(symbol)
+            except Exception as row_err:
+                logger.warning(
+                    f"Skipping malformed search row for q={q!r}: "
+                    f"{type(row_err).__name__}: {row_err}"
+                )
                 continue
-            if asset_type == "crypto":
-                continue  # Prefer our crypto results over FMP's
 
-            short_name = _get_exchange_short_name(item)
-            stock_results.append(StockSearchResult(
-                symbol=symbol,
-                name=item.get("name", ""),
-                currency=item.get("currency"),
-                exchange_short_name=short_name,
-                exchange_full_name=item.get("stockExchange") or item.get("exchange"),
-                type=asset_type,
-            ))
-            seen_symbols.add(symbol)
+        # Drop when-issued / warrant / unit / right twins that duplicate a
+        # primary listing (SNDK vs SNDKV). keep_symbol protects a ticker the user
+        # typed exactly — if they asked for "SNDKV", show it, don't swap it.
+        stock_results = _dedupe_secondary_listings(
+            stock_results, keep_symbol=query_upper
+        )
 
-        # ── Merge: stocks first, crypto appended after ──
-        # Exception: exact symbol match for crypto goes to top
+        # A real company must NEVER be shadowed by a crypto sharing its ticker:
+        # "STX" is Seagate AND Stacks, "SUI" is Sun Communities AND the coin.
+        # Drop the crypto duplicate for any symbol we found as a stock so the
+        # company (which the picker filters to) is always present.
+        stock_symbols = {r.symbol.upper() for r in stock_results}
+        crypto_results = [
+            c for c in crypto_results if c.symbol.upper() not in stock_symbols
+        ]
+
+        # ── Merge: exact-symbol crypto first, then stocks, then other crypto ──
         exact_crypto = [r for r in crypto_results if r.symbol == query_upper]
         other_crypto = [r for r in crypto_results if r.symbol != query_upper]
         combined = exact_crypto + stock_results + other_crypto
         return combined[:limit]
 
     except Exception as e:
-        logger.error(f"Stock search failed for q={q!r}: {e}")
+        # Honor the iOS APIErrorResponse contract for known upstream failures
+        # (FMP rate-limit / unavailable) instead of a bare generic 502 that iOS
+        # can only render as "Server error" — mirrors the sibling detail handlers.
+        if (resp := upstream_error_response(e, step="stock_search")) is not None:
+            return resp
+        logger.error(f"Stock search failed for q={q!r}: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail="Stock search service unavailable")
 
 

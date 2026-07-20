@@ -116,6 +116,20 @@ class TrackingViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Heal displayed follow state whenever the AUTHORITATIVE set changes —
+        // a backend follow/unfollow that FAILED and reverted, a cross-device
+        // change, or an optimistic toggle. Without this the row could show
+        // "Following" while WhaleService/server disagreed, and since the request
+        // direction is derived from `followedWhaleIds`, the next tap would send
+        // the OPPOSITE request. Reconciling both display and request direction
+        // to one source of truth closes that race.
+        WhaleService.shared.$followedWhaleIds
+            .receive(on: RunLoop.main)
+            .sink { [weak self] ids in
+                self?.reconcileFollowState(with: ids)
+            }
+            .store(in: &cancellables)
+
         // Republish whenever the portfolio store changes so filteredAssets,
         // filteredAlerts, and portfolioDiversificationScore re-render.
         self.portfolioStore.objectWillChange
@@ -840,6 +854,37 @@ class TrackingViewModel: ObservableObject {
     }
 
     // MARK: - Follow State Sync
+
+    /// Align every whale list to the authoritative followed-id set (the
+    /// backend-reconciled `WhaleService.followedWhaleIds`). Runs whenever that
+    /// set changes, so a reverted or cross-device follow heals the tab and the
+    /// displayed `isFollowing` can never contradict the request direction.
+    private func reconcileFollowState(with ids: Set<String>) {
+        func synced(_ list: [TrendingWhale]) -> [TrendingWhale] {
+            list.map { whale in
+                let shouldFollow = ids.contains(whale.id)
+                return whale.isFollowing == shouldFollow
+                    ? whale
+                    : whale.withFollowing(shouldFollow)
+            }
+        }
+        popularWhales = synced(popularWhales)
+        allPopularWhales = synced(allPopularWhales)
+        heroWhales = synced(heroWhales)
+
+        // Rebuild trackedWhales = the followed whales. Keep already-tracked ones
+        // that are still followed (incl. profile-opened whales absent from the
+        // loaded lists), then add any newly-followed whale discoverable in the
+        // loaded lists so a freshly-followed row appears in the tracked section.
+        var tracked = trackedWhales
+            .filter { ids.contains($0.id) }
+            .map { $0.isFollowing ? $0 : $0.withFollowing(true) }
+        let trackedIds = Set(tracked.map(\.id))
+        for whale in allPopularWhales where ids.contains(whale.id) && !trackedIds.contains(whale.id) {
+            tracked.append(whale)
+        }
+        trackedWhales = tracked
+    }
 
     private func handleFollowStateChange(_ notification: Notification) {
         guard let userInfo = notification.userInfo,

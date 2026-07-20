@@ -34,12 +34,20 @@ for _handler in logging.getLogger().handlers:
     _handler.addFilter(SecretRedactingFilter())
 
 # ── Error monitoring (Sentry) ──────────────────────────────────────────────
-# Guarded by SENTRY_DSN so local dev (no DSN) is a COMPLETE no-op. When enabled,
-# captures unhandled exceptions AND logger.error/exception (via LoggingIntegration)
-# with full stack traces; INFO logs become breadcrumbs. before_send tags the
-# exception type / error_code so Sentry groups our known failure modes cleanly.
-# Never ships user PII (send_default_pii=False) — this is a fintech backend.
-if settings.SENTRY_DSN:
+# Init ONLY when a DSN is present AND we're running in production. The DSN belongs
+# in the Railway (prod) env, but the local backend/.env also carries it so the
+# on-demand triage digest (scripts/error_digest.py) can authenticate. WITHOUT the
+# ENVIRONMENT gate, the local dev server (env=development) — and pytest — would
+# both ship their logger.error(...) to the PROD project, which is the source of the
+# server=Hai-World / FMP-400 / permission-denied noise polluting the digest. Tests
+# are ALSO covered by conftest.py forcing an empty DSN; this gate additionally
+# silences the local dev server (ENVIRONMENT defaults to "development" in config.py;
+# Railway sets it to "production"). When enabled: captures unhandled exceptions AND
+# logger.error/exception (via LoggingIntegration) with full stacks; INFO logs become
+# breadcrumbs. before_send tags the exception type / error_code so Sentry groups our
+# known failure modes cleanly. Never ships user PII (send_default_pii=False) — this
+# is a fintech backend.
+if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
     import sentry_sdk
     from sentry_sdk.integrations.fastapi import FastApiIntegration
     from sentry_sdk.integrations.logging import LoggingIntegration

@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Caydex · Ask Cay AI — System Design</title>
+<!--
+  Caydex — "Ask Cay AI" chat feature: end-to-end system design (standalone, offline, no external assets).
+  The request pipeline from a typed question → grounding + RAG + memory → multi-agent routing →
+  Gemini agentic streaming with tools → guard/persist → line-by-line render, plus the streaming-vs-
+  fallback split and the cross-cutting guarantees. Click any stage to inspect it.
+  Source of truth: the codebase (frontend/ios/ios/ + backend/app/), traced end-to-end, and
+  SYSTEM_DESIGN_GUIDELINES.md · caydex-system-design.html · caydex-system-design-structure.html.
+  MAINTENANCE: edit the STAGES / PATHS / GUARANTEES arrays near the bottom — the diagram re-renders.
+-->
+<style>
+  :root{
+    --bg:#ffffff; --bg2:#f7f9fc; --ink:#0f172a; --muted:#55637a; --faint:#8592a6;
+    --panel:rgba(15,23,42,.025); --panel2:rgba(15,23,42,.05);
+    --border:rgba(15,23,42,.10); --border2:rgba(15,23,42,.18);
+    /* layer colors — matched to the sibling system-design docs */
+    --ios:#0284c7; --backend:#059669; --llm:#7c3aed; --data:#d97706;
+    --shadow:0 10px 34px rgba(15,23,42,.08);
+    --radius:16px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Inter","Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:var(--font); color:var(--ink); background:var(--bg);
+    background-image:
+      radial-gradient(1100px 600px at 15% -8%, rgba(2,132,199,.06), transparent 60%),
+      radial-gradient(1000px 620px at 100% 6%, rgba(124,58,237,.06), transparent 55%),
+      radial-gradient(900px 700px at 50% 122%, rgba(217,119,6,.05), transparent 55%);
+    -webkit-font-smoothing:antialiased; line-height:1.45; min-height:100vh;
+  }
+  a{color:inherit}
+  ::selection{background:rgba(56,189,248,.35)}
+
+  /* ---------- top bar ---------- */
+  header.top{
+    position:sticky; top:0; z-index:30; backdrop-filter:blur(14px);
+    background:linear-gradient(180deg, rgba(255,255,255,.94), rgba(255,255,255,.72));
+    border-bottom:1px solid var(--border);
+    padding:16px clamp(16px,3vw,34px); display:flex; align-items:center; gap:18px; flex-wrap:wrap;
+  }
+  .brand{display:flex; align-items:center; gap:13px; min-width:0}
+  .logo{
+    width:42px;height:42px;border-radius:12px;flex:none; display:grid;place-items:center;
+    font-weight:800;font-size:18px;color:#04121a;
+    background:conic-gradient(from 210deg,#38bdf8,#a78bfa,#34d399,#fbbf24,#38bdf8);
+    box-shadow:0 6px 22px rgba(56,189,248,.35);
+  }
+  .brand h1{font-size:18px;margin:0;letter-spacing:.2px;font-weight:700}
+  .brand p{margin:2px 0 0;font-size:12.5px;color:var(--muted)}
+  .top .spacer{flex:1}
+  .legend{display:flex; gap:12px; align-items:center; flex-wrap:wrap}
+  .legend .k{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);
+    padding:5px 9px;border-radius:999px;border:1px solid transparent}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .flowhint{font-size:12px;color:var(--faint);white-space:nowrap}
+
+  /* ---------- layout ---------- */
+  .wrap{display:grid;grid-template-columns:minmax(0,1fr) 410px;gap:26px;
+    padding:26px clamp(16px,3vw,34px) 20px; align-items:start; max-width:1640px;margin:0 auto}
+  @media (max-width:1080px){ .wrap{grid-template-columns:1fr} .detail-col{position:static !important;order:-1} }
+
+  /* ---------- phase band ---------- */
+  .phase{
+    position:relative; border:1px solid var(--border); border-radius:var(--radius);
+    background:linear-gradient(180deg, var(--panel), rgba(255,255,255,.012));
+    padding:16px 16px 18px; margin-bottom:6px; box-shadow:var(--shadow);
+    border-left:3px solid var(--acc);
+  }
+  .phase::before{content:"";position:absolute;inset:0;border-radius:var(--radius);pointer-events:none;
+    background:radial-gradient(560px 120px at 0% 0%, color-mix(in srgb, var(--acc) 13%, transparent), transparent 70%)}
+  .phase-head{display:flex;align-items:baseline;gap:11px;flex-wrap:wrap;margin-bottom:13px;position:relative}
+  .phase-badge{font-size:11px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;
+    color:var(--acc); padding:4px 10px;border:1px solid color-mix(in srgb,var(--acc) 40%,transparent);
+    border-radius:999px;background:color-mix(in srgb,var(--acc) 10%,transparent)}
+  .phase-head h2{font-size:16px;margin:0;font-weight:700}
+  .phase-head .sub{font-size:12.5px;color:var(--faint)}
+
+  /* stage node */
+  .stages{display:flex;flex-direction:column;gap:9px;position:relative}
+  .stage{
+    text-align:left;cursor:pointer;color:var(--ink);font-family:inherit;width:100%;
+    background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--c);
+    border-radius:12px;padding:11px 13px;transition:transform .14s,border-color .14s,box-shadow .14s,background .14s;
+    display:grid;grid-template-columns:30px 1fr;gap:11px;align-items:start;position:relative;overflow:hidden;
+  }
+  .stage:hover,.stage:focus-visible{transform:translateX(2px);background:var(--panel2);
+    border-color:color-mix(in srgb,var(--c) 45%,transparent);
+    box-shadow:0 8px 18px rgba(15,23,42,.10);outline:none}
+  .stage.active{border-color:var(--c);background:color-mix(in srgb,var(--c) 9%,#fff);
+    box-shadow:0 0 0 1px var(--c), 0 12px 22px rgba(15,23,42,.13)}
+  .stage .num{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;
+    font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--c);
+    background:color-mix(in srgb,var(--c) 12%,#fff);border:1px solid color-mix(in srgb,var(--c) 30%,transparent);
+    font-variant-numeric:tabular-nums}
+  .stage .body{min-width:0}
+  .stage .kind{font-size:9.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--c)}
+  .stage .t{font-weight:650;font-size:13.6px;letter-spacing:.1px;margin-top:1px}
+  .stage .t code{font-family:var(--mono);font-size:12px;background:transparent;padding:0;color:inherit}
+  .stage .s{font-size:11.8px;color:var(--muted);margin-top:2px;line-height:1.4}
+
+  .flow{display:flex;justify-content:center;color:var(--faint);margin:1px 0}
+  .flow .chev{font-size:11px;opacity:.5;animation:bob 2.6s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0);opacity:.35}50%{transform:translateY(3px);opacity:.8}}
+
+  /* ---------- bottom bands (paths + guarantees) ---------- */
+  .band{max-width:1640px;margin:0 auto;padding:0 clamp(16px,3vw,34px)}
+  .band-inner{border:1px solid var(--border);border-radius:var(--radius);background:linear-gradient(180deg,var(--panel),rgba(255,255,255,.012));
+    box-shadow:var(--shadow);padding:20px 20px 22px;margin-bottom:20px}
+  .band-inner > h3{margin:0 0 3px;font-size:15px;font-weight:750;letter-spacing:.2px}
+  .band-inner > .sub{margin:0 0 16px;font-size:12.8px;color:var(--muted)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media (max-width:760px){ .two{grid-template-columns:1fr} }
+  .lane{border:1px solid var(--border);border-radius:13px;background:var(--panel);padding:15px 16px 6px}
+  .lane.stream{border-top:3px solid var(--llm)}
+  .lane.fall{border-top:3px solid var(--faint)}
+  .lane .lh{font-size:11px;letter-spacing:1px;text-transform:uppercase;font-weight:800;margin:0 0 3px}
+  .lane.stream .lh{color:var(--llm)}
+  .lane.fall .lh{color:var(--muted)}
+  .lane .lt{font-size:12.4px;color:var(--faint);margin:0 0 11px}
+  .lane ul{margin:0 0 13px;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+  .lane li{font-size:12.6px;color:#334155;padding-left:16px;position:relative;line-height:1.45}
+  .lane li::before{content:"";position:absolute;left:0;top:7px;width:6px;height:6px;border-radius:50%;background:var(--llm);opacity:.6}
+  .lane.fall li::before{background:var(--faint)}
+  .lane li b{color:var(--ink)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+  .g{border:1px solid var(--border);border-radius:12px;background:var(--panel);padding:13px 15px}
+  .g h4{margin:0 0 6px;font-size:13px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .g h4 .mk{width:9px;height:9px;border-radius:3px;background:var(--acc);flex:none}
+  .g p{margin:0;font-size:12.3px;color:var(--muted);line-height:1.5}
+  .g code,.lane code{font-family:var(--mono);font-size:11.5px;color:#0369a1;background:rgba(2,132,199,.08);border-radius:5px;padding:1px 5px}
+
+  /* ---------- inspector ---------- */
+  .detail-col{position:sticky;top:96px}
+  .detail{border:1px solid var(--border);border-radius:var(--radius);
+    background:linear-gradient(180deg,var(--bg2),rgba(255,255,255,.4));
+    box-shadow:var(--shadow);overflow:hidden;min-height:440px}
+  .detail .bar{height:5px;background:var(--acc,#3a4658);transition:.2s}
+  .detail .body{padding:20px 20px 22px}
+  .detail .eyebrow{font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--acc,#8b97a7);font-weight:800}
+  .detail h2{margin:6px 0 3px;font-size:19px;font-weight:750;letter-spacing:.2px}
+  .detail .tag{font-size:12.6px;color:var(--muted);margin-bottom:15px}
+  .detail p.role{font-size:13.4px;color:#334155;margin:0 0 4px}
+  .detail .sec{margin:15px 0 0}
+  .detail .sec h4{margin:0 0 8px;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--faint);font-weight:700}
+  .detail ul{margin:0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+  .detail li{font-size:13px;color:#334155;position:relative;padding-left:18px;line-height:1.5}
+  .detail li::before{content:"";position:absolute;left:2px;top:8px;width:6px;height:6px;border-radius:50%;background:var(--acc,#4b5a6e)}
+  .detail code,.files code{font-family:var(--mono);font-size:12px;color:#0369a1;background:rgba(2,132,199,.09);
+    border:1px solid rgba(2,132,199,.20);border-radius:6px;padding:1px 6px;white-space:nowrap}
+  .files{display:flex;flex-direction:column;gap:6px}
+  .files code{color:#334155;background:var(--panel);border-color:var(--border);white-space:normal;word-break:break-word;padding:6px 9px}
+  .pathnote{margin-top:15px;border:1px dashed var(--border2);border-radius:11px;padding:11px 13px;background:var(--panel);
+    font-size:12.6px;color:#334155;line-height:1.5}
+  .pathnote b{color:var(--llm)}
+  .nav{display:flex;gap:8px;margin-top:18px}
+  .nav button{flex:1;font-family:inherit;font-size:12.5px;color:var(--ink);background:var(--panel);
+    border:1px solid var(--border2);border-radius:9px;padding:8px 10px;cursor:pointer;transition:.14s}
+  .nav button:hover{background:var(--panel2);transform:translateY(-1px)}
+  .nav button:disabled{opacity:.4;cursor:default;transform:none}
+  .detail .empty{color:var(--muted);font-size:13.4px}
+  .detail .empty b{color:var(--ink)}
+  .kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--border2);border-bottom-width:2px;border-radius:6px;padding:1px 6px;color:var(--muted)}
+
+  footer.foot{padding:20px clamp(16px,3vw,34px) 40px;color:var(--faint);font-size:12px;max-width:1640px;margin:0 auto;
+    border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
+  footer.foot code{font-family:var(--mono)}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <div class="logo">C</div>
+    <div>
+      <h1>Caydex · Ask Cay AI</h1>
+      <p>System Design — a typed question → ground · route · stream · render</p>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <div class="legend" id="legend"></div>
+  <div class="flowhint">↓ request path &nbsp;·&nbsp; ↑ SSE stream</div>
+</header>
+
+<div class="wrap">
+  <!-- LEFT: the pipeline -->
+  <main id="map"></main>
+
+  <!-- RIGHT: inspector -->
+  <aside class="detail-col">
+    <div class="detail" id="detail">
+      <div class="bar" id="dbar" style="--acc:#3a4658"></div>
+      <div class="body" id="dbody"></div>
+    </div>
+  </aside>
+</div>
+
+<!-- BOTTOM: two paths -->
+<section class="band">
+  <div class="band-inner">
+    <h3>Two engines, one stored answer</h3>
+    <p class="sub">Streaming is the default (<code>ChatViewModel.streamingEnabled = true</code>); the non-streaming path is the automatic fallback on any stream failure. Both converge on the identical persisted message.</p>
+    <div class="two" id="paths"></div>
+  </div>
+</section>
+
+<!-- BOTTOM: guarantees -->
+<section class="band">
+  <div class="band-inner">
+    <h3>What holds no matter what</h3>
+    <p class="sub">The invariants that keep a chat turn correct, durable, and safe under failure.</p>
+    <div class="grid" id="guarantees"></div>
+  </div>
+</section>
+
+<footer class="foot">
+  <span>Living document · re-renders from the <code>STAGES</code> / <code>PATHS</code> / <code>GUARANTEES</code> data in this file. Traced from <code>frontend/ios/ios/</code> + <code>backend/app/</code>.</span>
+  <span>Offline · single file · no external assets · <span class="kbd">Esc</span> resets · <span class="kbd">↑</span><span class="kbd">↓</span> step</span>
+</footer>
+
+<script>
+/* ============================================================================
+   KIND METADATA (layer colors + legend)
+   ========================================================================== */
+const KINDS = {
+  ios:     { c:"var(--ios)",     color:"#0284c7", label:"iOS client" },
+  backend: { c:"var(--backend)", color:"#059669", label:"Backend / FastAPI" },
+  llm:     { c:"var(--llm)",     color:"#7c3aed", label:"LLM / agents" },
+  data:    { c:"var(--data)",    color:"#d97706", label:"Data / persistence" },
+};
+
+const PHASES = [
+  { id:"ask",    badge:"Phase 1", name:"The user asks",        sub:"iOS · SwiftUI",         acc:"#0284c7" },
+  { id:"ground", badge:"Phase 2", name:"Build the context",    sub:"grounding · RAG · memory", acc:"#059669" },
+  { id:"reason", badge:"Phase 3", name:"Route & generate",     sub:"router · Gemini · tools", acc:"#7c3aed" },
+  { id:"stream", badge:"Phase 4", name:"Stream back & reveal", sub:"SSE frames → live bubble", acc:"#0284c7" },
+  { id:"commit", badge:"Phase 5", name:"Guard · persist · suggest", sub:"durability first",   acc:"#059669" },
+  { id:"render", badge:"Phase 6", name:"Render the answer",    sub:"finalize in place",       acc:"#0284c7" },
+];
+
+/* ============================================================================
+   STAGES — the data model. Edit here when the flow changes; the map re-renders.
+   Each stage: {id, n, phase, kind, title(html), sub, role, points[], files[], path?}
+   ========================================================================== */
+const STAGES = [
+  /* ---- Phase 1: ask ---- */
+  { id:"type", n:1, phase:"ask", kind:"ios", title:"Type &amp; send", sub:"chat bar → handleSend → sendMessage",
+    role:"The user types a question in the chat bar and taps Send.",
+    points:[
+      "Send fires only on non-empty text while <code>!isBusy</code>; a one-in-flight guard (<code>guard !isAITyping</code>) makes a double-tap impossible.",
+      "Follow-up suggestion chips route through <code>handleFollowUpTap → sendMessage</code> directly.",
+    ],
+    files:["Views/Molecules/CaydexAIChatBar.swift","Views/Screens/AIChatScreen.swift · handleSend","ViewModels/ChatViewModel.swift · sendMessage"] },
+
+  { id:"session", n:2, phase:"ask", kind:"ios", title:"Create the session (if new)", sub:"POST /chat/sessions",
+    role:"A new chat first creates a server session; existing chats skip straight to send.",
+    points:[
+      "Body <code>CreateChatSessionRequest{stock_id, context_type, reference_id}</code> → <code>ChatSessionDTO</code>.",
+      "<b>stock_id rides only here</b> — per-message turns don't carry it; the session persists context_type/reference_id (migration 085) so a reload re-grounds.",
+    ],
+    files:["ViewModels/ChatViewModel.swift · startNewConversation","Core/Services/APIEndpoint.swift · createChatSession"] },
+
+  { id:"snapshot", n:3, phase:"ask", kind:"ios", title:"Attach the on-screen snapshot", sub:"contextForCurrentTab → context",
+    role:"The screen packages what the user is looking at into a plain-text context string.",
+    points:[
+      "<code>contextForCurrentTab</code> joins symbol · price · key stats · sector · the active tab — stored in <code>currentContext</code> and <b>re-sent verbatim every turn</b>.",
+      "Its load-bearing use is STOCK &amp; BOOK grounding; ETF/CRYPTO/INDEX are re-grounded server-side from the symbol instead.",
+    ],
+    files:["ViewModels/TickerDetailViewModel.swift · contextForCurrentTab"] },
+
+  { id:"open", n:4, phase:"ask", kind:"ios", title:"Open the SSE stream", sub:"APIClient.stream → URLSession.bytes",
+    role:"The default path opens a Server-Sent-Events stream to the backend.",
+    points:[
+      "POSTs <code>{message, context, context_type, reference_id}</code> to <code>/messages/stream</code> (snake_case, 120s timeout).",
+      "Parses <code>event:</code> / <code>data:</code> frames off <code>URLSession.bytes</code>; a blank line flushes a frame.",
+    ],
+    files:["Core/Services/APIClient.swift · stream(endpoint:)","ViewModels/ChatViewModel.swift · streamMessageToSession"],
+    path:"Non-streaming path instead calls <code>APIClient.request</code> → <code>POST /messages</code> (60s), decoding one finished <code>ChatMessageDTO</code>." },
+
+  /* ---- Phase 2: ground ---- */
+  { id:"own", n:5, phase:"ground", kind:"backend", title:"Ownership + resolve context", sub:"404 gate · effective_context",
+    role:"The endpoint verifies the session and decides which grounding context to use.",
+    points:[
+      "<code>SELECT … WHERE id AND user_id</code> — a bad session is a real HTTP <b>404</b>, not an SSE error frame.",
+      "<code>effective_context = request.context or context_snapshot</code> — the live snapshot, else the persisted one on a history reopen (migration 087).",
+      "<code>context_is_replayed</code> flags a reopen so the prompt labels those figures point-in-time, not live.",
+    ],
+    files:["api/v1/endpoints/chat.py · stream_chat_message","chat.py · _effective_context"] },
+
+  { id:"meta", n:6, phase:"ground", kind:"backend", title:"Meta frame + parallel router", sub:"gather(prep, route)",
+    role:"The generator emits the first frame, then runs prep and the router concurrently.",
+    points:[
+      "Yields <code>meta {session_id, grounded_on}</code> first.",
+      "<code>asyncio.gather(prepare_stream_generation, route_question)</code> so the router's ~400ms hides behind the retrieval work.",
+      "<code>CHAT_MULTI_AGENT_ENABLED</code> (default on) gates the whole router/specialist machinery.",
+    ],
+    files:["chat.py · event_gen","services/agents/chat_router.py"] },
+
+  { id:"prep", n:7, phase:"ground", kind:"backend", title:"Ground · retrieve · remember", sub:"resolver + RAG + memory + prompt",
+    role:"Assembles the full LLM input: screen grounding, retrieval, conversation memory, and the deterministic widget.",
+    points:[
+      "<b>Grounding</b> — <code>ChatContextResolver.resolve()</code> (per-asset; STOCK → client context, ETF/CRYPTO/INDEX rebuilt from symbol, report from cache) under a 4s timeout, never raises.",
+      "<b>RAG</b> — embeds the query → pgvector cosine search over filing / book / article chunks → citations.",
+      "<b>Memory</b> — <code>_condense_history</code> rolls older turns into a summary.",
+      "Builds <code>_build_system_instruction</code> (identity + style + persona + grounding) &amp; <code>_build_prompt</code>; fetches the chart widget up-front and folds the live quote in (<code>_widget_grounding_line</code>).",
+    ],
+    files:["services/chat_service.py · prepare_stream_generation","services/chat_context_resolver.py · resolve","chat_service.py · _retrieve_context · _condense_history"],
+    path:"Non-streaming <code>generate_response</code> resolves the same context but lets Gemini pick widget tools itself (function-calling), and additionally checks the Market Deep-Dive cache." },
+
+  /* ---- Phase 3: reason ---- */
+  { id:"router", n:8, phase:"reason", kind:"llm", title:"Router picks the lens", sub:"flash-lite · ≤3 of 7 lenses",
+    role:"A cheap classifier chooses which specialist lens(es) should answer.",
+    points:[
+      "<code>gemini-2.5-flash-lite</code> picks up to 3 of 7 lenses (valuation · technicals · fundamentals · macro · sentiment · education · general).",
+      "<b>single</b> vs <b>synthesize</b> — synthesize only when the model flags cross-domain AND &gt;1 lens.",
+      "Never raises — any bad JSON / quota → general/single.",
+    ],
+    files:["services/agents/chat_router.py · route_question"],
+    path:"Only the streaming path routes; non-streaming is always a single general agent." },
+
+  { id:"tools", n:9, phase:"reason", kind:"backend", title:"Tools + base widget + specialist", sub:"declarations · seed · apply lens",
+    role:"Wires the FMP tools, seeds the deterministic card, and specializes the prompt.",
+    points:[
+      "<code>build_chat_tool_declarations</code> — stock chart · analyst · sentiment (+ market overview for INDEX); handlers map each to a cached ChatService fetch.",
+      "The deterministic base widget is seeded and deduped by <code>widget_key</code>.",
+      "<code>apply_specialist</code> appends the lens focus + an anti-meta guard; specialists keep the full tool set.",
+    ],
+    files:["services/agents/chat_tools.py","services/agents/chat_specialists.py · apply_specialist"] },
+
+  { id:"agentic", n:10, phase:"reason", kind:"llm", title:"Agentic stream (≤ 4 rounds)", sub:"thought · answer · tool",
+    role:"Gemini streams the answer, reasoning out loud and calling live market tools mid-stream.",
+    points:[
+      "Real thinking on; each round yields <b>thoughts</b> → <code>reasoning</code>, <b>answer</b> → <code>token</code>, <b>tool calls</b> → <code>tool_step</code>.",
+      "Manual function-calling (streaming can't auto-call); tool results feed the next round; only chart / market-overview results render as widgets.",
+      "If rounds exhaust while still calling tools, one final tools-ignored answer round always streams a reply.",
+    ],
+    files:["integrations/gemini.py · stream_agentic","chat.py (frame mapping)"],
+    path:"Non-streaming uses <code>generate_with_tools</code> — single-round function-calling, degrading to plain <code>generate_text</code> on failure." },
+
+  { id:"synth", n:11, phase:"reason", kind:"llm", title:"Synthesize (cross-domain)", sub:"parallel specialists → merged stream",
+    role:"For multi-lens questions, specialists run in parallel and a merged answer streams.",
+    points:[
+      "Each ≤3 specialist runs <code>stream_agentic</code> (max 2 rounds, non-streamed) in parallel; their widgets arrive as <code>widget</code> events.",
+      "A merge prompt embeds each labelled view and streams the unified answer (no tools — data already gathered).",
+      "Salvage: if the merge yields no text, it reuses the top specialist's already-computed answer — never a wasted third generation.",
+    ],
+    files:["services/chat_service.py · stream_synthesis"] },
+
+  /* ---- Phase 4: stream ---- */
+  { id:"reveal", n:12, phase:"stream", kind:"ios", title:"Live reveal into the bubble", sub:"frames → @Published state",
+    role:"iOS maps each SSE frame onto one stable bubble and reveals the answer progressively.",
+    points:[
+      "<code>sources</code>/<code>reasoning</code> fill the thinking card; the first <code>token</code> starts a ~45ms line-by-line reveal with a blinking caret.",
+      "One stable UUID per turn → in-place updates, no <code>ForEach</code> flicker; <code>reset</code> blanks the bubble when the server falls back.",
+      "Every mutation checks <code>sessionId == currentSessionId</code> + Task cancellation, so navigating away can't clobber the next chat.",
+    ],
+    files:["ViewModels/ChatViewModel.swift · streamMessageToSession · nextRevealChunk"] },
+
+  /* ---- Phase 5: commit ---- */
+  { id:"guard", n:13, phase:"commit", kind:"backend", title:"Guardrail scan", sub:"advice / identity drift — log only",
+    role:"A safety net scans the finished answer but never blocks it.",
+    points:[
+      "<code>scan_answer</code> flags advice-boundary (“you should buy/sell”) &amp; identity-leak drift with whole-token regex.",
+      "<b>Log-only</b> — a false positive dropping a good answer is worse than a flag; the system-prompt rules are the real defense.",
+      "Empty content raises instead of persisting blank → forces the fallback.",
+    ],
+    files:["services/agents/chat_guardrails.py · scan_answer"] },
+
+  { id:"persist", n:14, phase:"commit", kind:"data", title:"Persist-before-suggestions", sub:"atomic user + assistant insert",
+    role:"The turn is durably written before anything that can hang.",
+    points:[
+      "One atomic <code>insert([user, ai])</code> with a +1ms assistant offset preserving order; <code>rich_content</code> JSONB carries thinking / widgets / sources / suggestions.",
+      "Written <b>before</b> the follow-up call, because a disconnect during throttled-Gemini suggestions raises <code>CancelledError</code> that would lose the turn.",
+      "<code>message_count</code> / <code>last_message_at</code> are owned by a DB trigger; <code>_persist_context_snapshot</code> writes best-effort.",
+    ],
+    files:["chat.py (two-row insert + session update)","chat.py · _persist_context_snapshot"] },
+
+  { id:"suggest", n:15, phase:"commit", kind:"backend", title:"Follow-up chips → done", sub:"best-effort · terminal frame",
+    role:"Generates suggestion chips, then closes the stream with the authoritative message.",
+    points:[
+      "<code>generate_followup_suggestions</code> — 2 first-person chips, deduped, never raises → none.",
+      "Yields <code>suggestions</code>, then the terminal <code>done {message}</code> frame.",
+      "<code>X-Accel-Buffering: no</code> defeats Railway/nginx SSE buffering.",
+    ],
+    files:["services/chat_service.py · generate_followup_suggestions","chat.py (done frame)"],
+    path:"The non-streaming path runs no guardrail scan and generates no suggestions." },
+
+  /* ---- Phase 6: render ---- */
+  { id:"finalize", n:16, phase:"render", kind:"ios", title:"Finalize in place", sub:"decode-safe · same-id swap",
+    role:"On the done frame, iOS drains the reveal and swaps in the authoritative bubble.",
+    points:[
+      "<code>decodeDoneMessage → ChatMessageDTO.toRichChatMessage()</code>; replaces the message by the same id (no flicker).",
+      "Every DTO uses <b>never-throwing decoders</b> — one malformed row can't collapse the whole conversation into a blank screen.",
+      "A stream with no <code>done</code> / an <code>error</code> frame / a malformed done throws → the fallback runs.",
+    ],
+    files:["ViewModels/ChatViewModel.swift · decodeDoneMessage","Models/ChatConversationModels.swift · toRichChatMessage"] },
+
+  { id:"render", n:17, phase:"render", kind:"ios", title:"SwiftUI lays it out", sub:"header · thinking · body · chips",
+    role:"The final assistant bubble renders top-to-bottom.",
+    points:[
+      "Header → collapsible thinking card (“Done in Xs · N sources”) → answer body (<code>MarkdownText</code> + chart / market-overview widgets) → source pills → follow-up chips.",
+      "The scroll key follows in-place growth to the bottom; <code>MarkdownText</code> falls back to raw text on a half-streamed fragment.",
+      "<code>GroundedContextChip</code> shows when the chat is grounded on a screen.",
+    ],
+    files:["Views/Organisms/ChatMessagesList.swift","Views/Molecules/AIMessageContent.swift","Views/Molecules/ChatStockWidgetView.swift"] },
+];
+
+/* ============================================================================
+   TWO PATHS + GUARANTEES
+   ========================================================================== */
+const PATHS = {
+  stream:[
+    "<b>Generation:</b> <code>stream_agentic</code> / <code>stream_synthesis</code>, manual mid-stream tools",
+    "<b>Multi-agent:</b> router + specialists + <code>routing</code>/<code>tool_step</code>/<code>reasoning</code> frames",
+    "<b>Widgets:</b> deterministic base card up-front + tool widgets, deduped by <code>widget_key</code>",
+    "<b>Persist:</b> full <code>thinking · widgets · sources · suggestions</code> + follow-up chips",
+    "<b>Error:</b> an SSE <code>error</code> frame (quota vs internal)",
+  ],
+  fall:[
+    "<b>Generation:</b> <code>generate_response</code> → single-round function-calling",
+    "<b>Multi-agent:</b> none — a single general agent",
+    "<b>Widgets:</b> Gemini-chosen tool widget, deterministic card as fallback",
+    "<b>Deep-dive cache:</b> <b>only</b> this path checks / writes <code>market_deep_dive_cache</code>",
+    "<b>Convergence:</b> emits <code>reset</code>; iOS adopts the persisted turn instead of re-POSTing",
+  ],
+};
+
+const GUARANTEES = [
+  { acc:"#059669", t:"Never-raises grounding", d:"The resolver runs every branch under a <code>4s</code> timeout and degrades to client context; RAG returns empty on error — the chat proceeds ungrounded rather than failing." },
+  { acc:"#d97706", t:"Persist-on-complete", d:"The turn is written atomically <em>before</em> anything that can hang. Empty content raises rather than persisting blank — nothing saved until a complete answer exists." },
+  { acc:"#7c3aed", t:"Quota circuit breaker", d:"A process-wide breaker opens after 20 consecutive quota errors and fails fast for 30s. Streaming honors it manually — retrying a partial stream would replay tokens." },
+  { acc:"#0284c7", t:"Cay AI identity rule", d:"Prepended at every LLM surface — base prompt, router, specialists, suggestions — so the underlying model never leaks into user-facing text." },
+  { acc:"#0284c7", t:"iOS decode-safety", d:"Thinking, sources, and widgets use never-throwing initializers; unknown widget types degrade to nothing — one malformed row can't collapse the history." },
+  { acc:"#059669", t:"One-in-flight isolation", d:"A second send is blocked while a reply streams, and every mutation checks the session is still active — navigating away mid-stream can't clobber the next chat." },
+];
+
+/* ============================================================================
+   RENDER
+   ========================================================================== */
+const $ = (s,el=document)=>el.querySelector(s);
+const phaseMeta = Object.fromEntries(PHASES.map(p=>[p.id,p]));
+const stageMap  = Object.fromEntries(STAGES.map(s=>[s.id,s]));
+function el(tag,cls,html){ const e=document.createElement(tag); if(cls)e.className=cls; if(html!=null)e.innerHTML=html; return e; }
+
+/* legend */
+(function(){
+  const wrap = $("#legend");
+  Object.values(KINDS).forEach(k=>{
+    wrap.appendChild(el("div","k",`<span class="dot" style="background:${k.color}"></span>${k.label}`));
+  });
+})();
+
+/* pipeline */
+(function(){
+  const map = $("#map");
+  PHASES.forEach((p,pi)=>{
+    const band = el("section","phase");
+    band.style.setProperty("--acc", p.acc);
+    band.innerHTML = `<div class="phase-head">
+      <span class="phase-badge">${p.badge}</span><h2>${p.name}</h2><span class="sub">${p.sub}</span></div>`;
+    const list = el("div","stages");
+    STAGES.filter(s=>s.phase===p.id).forEach(s=>{
+      const k = KINDS[s.kind];
+      const b = el("button","stage");
+      b.id = "st-"+s.id;
+      b.style.setProperty("--c", k.color);
+      b.setAttribute("aria-label", s.n+". "+s.title.replace(/<[^>]+>/g,""));
+      b.innerHTML = `<span class="num">${s.n}</span>
+        <span class="body"><span class="kind">${k.label}</span>
+          <span class="t">${s.title}</span><span class="s">${s.sub}</span></span>`;
+      b.onclick = ()=>select(s.id);
+      list.appendChild(b);
+    });
+    band.appendChild(list);
+    map.appendChild(band);
+    if(pi < PHASES.length-1) map.appendChild(el("div","flow",`<span class="chev">▼</span>`));
+  });
+})();
+
+/* two paths */
+(function(){
+  const box = $("#paths");
+  box.appendChild(el("div","lane stream",
+    `<div class="lh">Streaming · default</div><div class="lt">Token-by-token, multi-agent, live reveal.</div>
+     <ul>${PATHS.stream.map(x=>`<li>${x}</li>`).join("")}</ul>`));
+  box.appendChild(el("div","lane fall",
+    `<div class="lh">Non-streaming · fallback</div><div class="lt">One awaited request, single-shot answer.</div>
+     <ul>${PATHS.fall.map(x=>`<li>${x}</li>`).join("")}</ul>`));
+})();
+
+/* guarantees */
+(function(){
+  const box = $("#guarantees");
+  GUARANTEES.forEach(g=>{
+    const c = el("div","g",`<h4><span class="mk" style="background:${g.acc}"></span>${g.t}</h4><p>${g.d}</p>`);
+    box.appendChild(c);
+  });
+})();
+
+/* inspector */
+let currentId = null;
+function select(id){
+  const s = stageMap[id]; if(!s) return;
+  currentId = id;
+  const k = KINDS[s.kind], p = phaseMeta[s.phase];
+  document.querySelectorAll(".stage.active").forEach(e=>e.classList.remove("active"));
+  const btn = document.getElementById("st-"+id);
+  if(btn){ btn.classList.add("active"); }
+  $("#dbar").style.setProperty("--acc", k.color);
+  const body = $("#dbody");
+  body.style.setProperty("--acc", k.color);
+
+  const idx = STAGES.findIndex(x=>x.id===id);
+  const prev = STAGES[idx-1], next = STAGES[idx+1];
+  const files = s.files.map(f=>`<code>${f}</code>`).join("");
+  const pts = s.points.map(x=>`<li>${x}</li>`).join("");
+
+  body.innerHTML = `
+    <div class="eyebrow">${p.badge} · ${p.name} · ${k.label}</div>
+    <h2>${s.n}. ${s.title}</h2>
+    <div class="tag">${s.sub}</div>
+    <p class="role">${s.role}</p>
+    <div class="sec"><h4>What happens</h4><ul>${pts}</ul></div>
+    <div class="sec"><h4>Key paths</h4><div class="files">${files}</div></div>
+    ${s.path?`<div class="pathnote"><b>Fallback path:</b> ${s.path}</div>`:""}
+    <div class="nav">
+      <button ${prev?"":"disabled"} onclick="${prev?`select('${prev.id}')`:""}">← ${prev?prev.n+". "+prev.title.replace(/<[^>]+>/g,""):""}</button>
+      <button ${next?"":"disabled"} onclick="${next?`select('${next.id}')`:""}">${next?next.n+". "+next.title.replace(/<[^>]+>/g,""):""} →</button>
+    </div>`;
+  if(window.innerWidth <= 1080){ $("#detail").scrollIntoView({behavior:"smooth",block:"start"}); }
+}
+
+/* default inspector state */
+function showOverview(){
+  currentId = null;
+  document.querySelectorAll(".stage.active").forEach(e=>e.classList.remove("active"));
+  $("#dbar").style.setProperty("--acc","#5a6b82");
+  const body = $("#dbody");
+  body.style.setProperty("--acc","#8fa0b6");
+  body.innerHTML = `
+    <div class="eyebrow" style="--acc:#8fa0b6">Overview</div>
+    <h2>🧭 How to read this</h2>
+    <div class="tag">One question, six phases, top to bottom. Requests flow down; the SSE stream flows back up.</div>
+    <p class="role">“Ask Cay AI” grounds a question on what's on screen, enriches it with retrieval + memory, routes it to specialist lenses, streams a multi-round agentic answer with live market tools, then persists and reveals it.</p>
+    <div class="sec"><h4>The six phases</h4>
+      <ul>
+        <li><b style="color:var(--ios)">Ask</b> — the iOS app creates a session, attaches the on-screen snapshot, opens an SSE stream.</li>
+        <li><b style="color:var(--backend)">Ground</b> — the backend resolves screen grounding + RAG chunks + rolling memory into one prompt.</li>
+        <li><b style="color:var(--llm)">Reason</b> — a router picks lenses; Gemini streams a multi-round agentic answer with FMP tools.</li>
+        <li><b style="color:var(--ios)">Stream</b> — SSE frames reveal the answer line-by-line into one stable bubble.</li>
+        <li><b style="color:var(--backend)">Commit</b> — a log-only guardrail, then an atomic persist before best-effort chips.</li>
+        <li><b style="color:var(--ios)">Render</b> — the finished bubble: thinking card, markdown, widgets, sources, chips.</li>
+      </ul>
+    </div>
+    <div class="sec"><h4>Try it</h4>
+      <ul>
+        <li>Click any <b>stage</b> to inspect what happens, key files, and the fallback difference.</li>
+        <li>Step through with the <span class="kbd">←</span>/<span class="kbd">→</span> buttons or <span class="kbd">↑</span>/<span class="kbd">↓</span> keys.</li>
+        <li>Scroll down for the <b>two-engine</b> split and the <b>guarantees</b>.</li>
+      </ul>
+    </div>`;
+}
+showOverview();
+
+/* keyboard: Esc resets; arrows step */
+document.addEventListener("keydown", e=>{
+  if(e.key==="Escape"){ showOverview(); return; }
+  if(e.key==="ArrowDown"||e.key==="ArrowUp"){
+    const idx = currentId ? STAGES.findIndex(x=>x.id===currentId) : -1;
+    const nxt = e.key==="ArrowDown" ? STAGES[idx+1] || STAGES[0] : STAGES[idx-1] || STAGES[STAGES.length-1];
+    if(nxt){ e.preventDefault(); select(nxt.id); document.getElementById("st-"+nxt.id)?.scrollIntoView({behavior:"smooth",block:"center"}); }
+  }
+});
+</script>
+</body>
+</html>

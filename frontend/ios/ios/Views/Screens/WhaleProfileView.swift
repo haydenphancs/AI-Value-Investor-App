@@ -777,8 +777,8 @@ struct WhaleHoldingRow: View {
                     Text(holding.formattedChange)
                         .font(AppTypography.caption)
                         .foregroundColor(
-                            holding.changePercent > 0 ? AppColors.bullish :
-                            holding.changePercent < 0 ? AppColors.bearish :
+                            holding.displayedChangePercent > 0 ? AppColors.bullish :
+                            holding.displayedChangePercent < 0 ? AppColors.bearish :
                             AppColors.textMuted
                         )
                 }

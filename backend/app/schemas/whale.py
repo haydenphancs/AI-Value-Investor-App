@@ -150,7 +150,7 @@ class WhaleTradeGroupActivityResponse(BaseModel):
     category: Optional[str] = None  # "investors" | "institutions" | "politicians" | "crypto"
     action: str  # "BOUGHT" or "SOLD"
     trade_count: int
-    total_amount: str  # Formatted: "$4.34B", "-$2.1B"
+    total_amount: str  # Signed, formatted by _format_amount: "+$4.34B" / "-$2.1M" (iOS renders verbatim)
     summary: Optional[str] = None
     date: str
 

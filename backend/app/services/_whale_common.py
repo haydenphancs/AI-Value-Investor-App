@@ -50,7 +50,10 @@ def parse_congress_amount_dollars(amount_str: str) -> float:
     if not amount_str:
         return 0.0
 
-    clean = amount_str.replace("$", "").replace(",", "").strip()
+    # Coerce defensively: FMP normally returns a string bucket, but a stray
+    # numeric would raise AttributeError on .replace() and abort the WHOLE
+    # congressional rebuild (the loop has no per-row guard).
+    clean = str(amount_str).replace("$", "").replace(",", "").strip()
 
     if " - " in clean:
         parts = clean.split(" - ")
@@ -92,7 +95,7 @@ def parse_congress_amount_bounds(
     if not amount_str:
         return (0.0, 0.0)
 
-    clean = amount_str.replace("$", "").replace(",", "").strip()
+    clean = str(amount_str).replace("$", "").replace(",", "").strip()
 
     if " - " in clean:
         parts = clean.split(" - ")

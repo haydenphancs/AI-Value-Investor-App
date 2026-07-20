@@ -26,7 +26,7 @@ from app.api.error_response import (
     make_error_response,
 )
 from app.database import get_supabase
-from app.dependencies import get_current_user_or_guest
+from app.dependencies import StandardRateLimit, get_current_user_or_guest
 from app.integrations.fmp import get_fmp_client
 from app.schemas.updates import (
     AIInsightCardResponse,
@@ -49,6 +49,17 @@ router = APIRouter()
 _MAX_SCOPE_LEN = 32
 # Watchlist pills shown in the tab bar. More than this and the strip is unusable.
 _MAX_TABS = 30
+
+
+def _is_crypto_scope(scope: str) -> bool:
+    """Whether this scope should be fetched from FMP's crypto news feed.
+
+    FMP crypto symbols are quote-suffixed pairs (BTCUSD, ETHUSD). Checked here
+    rather than trusting `watchlist_items.asset_type`, which is user-editable
+    and defaults to 'Stock'.
+    """
+    s = scope.upper()
+    return len(s) > 3 and s.endswith(("USD", "USDT")) and s not in ("GCUSD", "SIUSD")
 
 
 def _valid_scope(scope: str) -> bool:
@@ -79,7 +90,7 @@ async def get_updates_tabs(
     def _read_watchlist() -> List[Dict[str, Any]]:
         result = (
             supabase.table("watchlist_items")
-            .select("ticker, company_name, logo_url, added_at")
+            .select("ticker, company_name, logo_url, asset_type, added_at")
             .eq("user_id", user_id)
             .order("added_at", desc=True)
             .limit(_MAX_TABS)
@@ -166,6 +177,11 @@ async def get_updates_tabs(
 async def get_updates_feed(
     scope: str = Query(MARKET_SCOPE, description="'__MARKET__' or a ticker symbol"),
     limit: int = Query(50, ge=1, le=50),
+    # Public, but throttled: a cache MISS costs a live FMP call, and an
+    # unrecognised scope never caches, so an unthrottled loop over junk scopes
+    # would drain the FMP quota. The sweeper's spend ceilings do not cover this
+    # path — they govern Gemini, not FMP.
+    _rate_limit=StandardRateLimit,
 ):
     """One tab's content: the news timeline plus its AI Insights card.
 
@@ -188,7 +204,12 @@ async def get_updates_feed(
         if scope == MARKET_SCOPE:
             feed = await news.get_market_news(limit=limit)
         else:
-            feed = await news.get_ticker_news(scope, limit=limit)
+            # Crypto symbols must go to FMP's `news/crypto`; `news/stock` returns
+            # nothing for BTCUSD, so a crypto watchlist row would render a pill
+            # with a permanently empty feed.
+            feed = await news.get_ticker_news(
+                scope, limit=limit, is_crypto=_is_crypto_scope(scope)
+            )
     except Exception as e:
         logger.error(
             "Updates feed failed for scope=%s: %s: %s",
@@ -235,7 +256,11 @@ async def get_updates_feed(
 # ── Enrichment ────────────────────────────────────────────────────────
 
 @router.post("/news/enrich", response_model=EnrichUpdatesNewsResponse)
-async def enrich_updates_news(body: EnrichUpdatesNewsRequest):
+async def enrich_updates_news(
+    body: EnrichUpdatesNewsRequest,
+    # Throttled: this is the one public path that can trigger a paid Gemini call.
+    _rate_limit=StandardRateLimit,
+):
     """AI-enrich specific timeline articles (bullets + sentiment), on demand.
 
     Delegates to the existing shared enrichment path — there is deliberately no

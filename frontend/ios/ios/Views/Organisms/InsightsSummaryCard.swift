@@ -26,7 +26,17 @@ struct InsightsSummaryCard: View {
 
                 Spacer()
 
-                AIBadge(text: summary.summaryBadgeText)
+                // The AI badge is shown ONLY for text a model actually wrote.
+                // The deterministic fallback card is a list of real headlines;
+                // badging it "AI Summary" would claim authorship that doesn't
+                // exist. A plain label keeps it honest.
+                if summary.isAIGenerated {
+                    AIBadge(text: summary.summaryBadgeText)
+                } else {
+                    Text(summary.summaryBadgeText)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
             }
 
             // Headline
@@ -54,11 +64,17 @@ struct InsightsSummaryCard: View {
 
             // Footer
             HStack {
-                SentimentBadge(sentiment: summary.sentiment)
+                // Sentiment on the fallback card is a tally of already-enriched
+                // articles, not a model's judgement of the whole set — and with
+                // nothing enriched it is just "Neutral" by default. Suppress it
+                // rather than present a verdict nobody reached.
+                if summary.isAIGenerated {
+                    SentimentBadge(sentiment: summary.sentiment)
+                }
 
                 Spacer()
 
-                Text(summary.timeAgo)
+                Text(summary.isStale ? "Catching up…" : summary.timeAgo)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }

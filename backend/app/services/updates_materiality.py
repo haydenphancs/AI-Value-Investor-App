@@ -319,6 +319,13 @@ def _decide_inner(
         market_cap=quote.get("marketCap"),
         is_index=is_market_scope,
     )
+    if band == BAND_UNKNOWN:
+        # An ABSENT price signal must be neutral to the gate, not a change event.
+        # The band feeds the fingerprint, so letting `flat -> unknown` through
+        # re-keys the digest and reports a byte-identical corpus as
+        # "new_articles" — then a second time on the way back to `flat`. A
+        # universe-wide quote hiccup would cost ~2 x universe generations.
+        band = state.get("last_price_band") or BAND_UNKNOWN
 
     inputset_id = compute_inputset_id(corpus_article_ids(corpus), band, model)
 

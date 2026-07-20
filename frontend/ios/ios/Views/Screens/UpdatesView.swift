@@ -95,7 +95,14 @@ struct UpdatesView: View {
                 await viewModel.loadIfNeeded()
             }
             .navigationDestination(item: $selectedNewsArticle) { article in
-                NewsDetailView(article: article)
+                // Pass the CURRENT scope. Cache rows are partitioned by scope
+                // (`ticker = cache_key`), so enriching an AAPL article under
+                // "__MARKET__" matches zero rows and the Key Takeaways section
+                // silently never appears.
+                NewsDetailView(
+                    article: article,
+                    scope: viewModel.selectedTab?.scope ?? UpdatesScope.market
+                )
             }
             .onChange(of: viewModel.selectedTab) { oldValue, newValue in
                 if let newTab = newValue {

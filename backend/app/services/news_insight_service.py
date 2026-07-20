@@ -70,8 +70,14 @@ MAX_HEADLINE_CHARS = 160
 _MEM_TTL_SECONDS = 300               # Tier-1
 _SOFT_TTL_ACTIVE_SECONDS = 15 * 60   # flagged is_stale after this
 _SOFT_TTL_CLOSED_SECONDS = 4 * 3600
-_HARD_TTL_ACTIVE_SECONDS = 12 * 3600  # stop serving the AI card past this
-_HARD_TTL_CLOSED_SECONDS = 72 * 3600
+# Hard expiry must span the longest gap between two sweeps, and the sweeper only
+# runs while `is_market_active()`. The longest real gap is a long weekend:
+# Friday 20:00 ET → Tuesday 04:00 ET ≈ 80 hours. A 12h hard TTL meant the card
+# written on Friday evening expired Saturday morning and EVERY scope — including
+# the default Market tab — served the non-AI fallback for the rest of the
+# weekend. 96h covers a Thursday-close-to-Monday-open holiday weekend.
+_HARD_TTL_ACTIVE_SECONDS = 96 * 3600
+_HARD_TTL_CLOSED_SECONDS = 96 * 3600
 
 _SENTIMENTS = ("Bullish", "Bearish", "Neutral")
 
@@ -300,12 +306,21 @@ class NewsInsightService:
         bear = votes.count("Bearish")
         sentiment = "Bullish" if bull > bear else "Bearish" if bear > bull else "Neutral"
 
+        # De-dup: two publishers syndicating one story produce identical
+        # headlines, which render twice under SwiftUI's ForEach(id: \.self).
+        # The AI path already de-dups; this one must too.
+        bullets = list(dict.fromkeys(bullets))
+
         label = "Market" if scope.startswith("__") else scope
         return {
             "scope": scope,
             "headline": f"Latest {label} headlines",
             "bullets": bullets[:MAX_BULLETS],
             "sentiment": sentiment,
+            # NOT the "24h · AI Summary" badge. Letting the Pydantic default fill
+            # this in put an AI label on text no model wrote — the exact
+            # fabrication this screen was rebuilt to remove.
+            "badge": "Latest headlines",
             "article_count": len(usable),
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "is_stale": False,
@@ -510,6 +525,42 @@ class NewsInsightService:
         except Exception as e:
             logger.warning(
                 "Insight touch failed for %s: %s: %s", scope, type(e).__name__, e
+            )
+
+    async def mark_verified_current(
+        self, scopes: List[str], market_active: bool
+    ) -> None:
+        """Extend soft expiry for cards the sweeper just re-verified as unchanged.
+
+        ``is_stale`` means "the sweeper hasn't checked this recently", NOT "the
+        text is old". A card whose input fingerprint is unchanged is provably
+        still correct — that is the entire premise of the fingerprint. Without
+        this, every quiet scope would flip to "Catching up…" 15 minutes after
+        generation and stay there indefinitely, because the fingerprint skip
+        path never re-stamped anything.
+
+        One batched update, not one per scope.
+        """
+        if not scopes:
+            return
+        now = datetime.now(timezone.utc)
+        soft = _SOFT_TTL_ACTIVE_SECONDS if market_active else _SOFT_TTL_CLOSED_SECONDS
+        hard = _HARD_TTL_ACTIVE_SECONDS if market_active else _HARD_TTL_CLOSED_SECONDS
+
+        def _do() -> None:
+            self.supabase.table(_TABLE).update({
+                "soft_expires_at": (now + timedelta(seconds=soft)).isoformat(),
+                "hard_expires_at": (now + timedelta(seconds=hard)).isoformat(),
+            }).in_("scope", scopes).execute()
+
+        try:
+            await asyncio.to_thread(_do)
+            for s in scopes:
+                self._cache.pop(s, None)
+        except Exception as e:
+            logger.warning(
+                "Could not re-stamp %d verified-current insight cards: %s: %s",
+                len(scopes), type(e).__name__, e,
             )
 
     # ── Prompt ────────────────────────────────────────────────────────

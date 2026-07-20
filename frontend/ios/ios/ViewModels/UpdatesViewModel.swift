@@ -53,6 +53,8 @@ final class UpdatesViewModel: ObservableObject {
     private var hasLoadedOnce = false
     /// Guards against a stale in-flight response overwriting a newer tab's data.
     private var loadToken = UUID()
+    /// Scope whose feed request is currently in flight, for duplicate-request dedup.
+    private var inFlightScope: String?
     private var refreshPollTask: Task<Void, Never>?
 
     private let feedLimit = 50
@@ -199,6 +201,19 @@ final class UpdatesViewModel: ObservableObject {
 
     private func loadFeed(for tab: NewsFilterTab, force: Bool) async {
         let scope = tab.scope
+
+        // Dedup concurrent loads of the SAME scope. `loadTabs()` assigning
+        // `selectedTab` fires the view's `.onChange` → `selectTab` → `loadFeed`,
+        // which races the `loadFeed` in `loadInitialData`. The staleness token
+        // below keeps the DATA correct, but without this guard the screen still
+        // fires two identical requests on every cold open.
+        if !force, inFlightScope == scope {
+            print("⏭️ UpdatesVM: \(scope) already loading — skipping duplicate request")
+            return
+        }
+        inFlightScope = scope
+        defer { if inFlightScope == scope { inFlightScope = nil } }
+
         let token = UUID()
         loadToken = token
         refreshPollTask?.cancel()
@@ -207,6 +222,10 @@ final class UpdatesViewModel: ObservableObject {
             allNewsArticles = cached.articles
             insightSummary = cached.insight
             applyFiltersAndGroup()
+            // Must clear: returning to a tab that was cached EMPTY would
+            // otherwise leave the shimmer up forever instead of showing the
+            // empty state.
+            isLoading = false
             print("✅ UpdatesVM: Served \(cached.articles.count) articles for \(scope) from memory")
             return
         }
@@ -227,6 +246,8 @@ final class UpdatesViewModel: ObservableObject {
             )
             guard loadToken == token else {
                 print("⏭️ UpdatesVM: Discarding stale feed response for \(scope)")
+                // The newer load owns isLoading now — do NOT clear it here, or
+                // this stale completion would hide the newer load's shimmer.
                 return
             }
 

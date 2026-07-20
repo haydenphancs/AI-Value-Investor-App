@@ -791,10 +791,16 @@ class FMPClient:
         page: int = 0,
     ) -> List[Dict[str, Any]]:
         """
-        Get stock or general news from FMP (stable API: news/stock).
+        Get news for one or more SYMBOLS from FMP (stable API: news/stock).
+
+        WARNING: passing ``ticker=None`` does NOT return general market news.
+        An earlier version of this docstring claimed it did; verified against the
+        live API, omitting ``symbols`` makes FMP fall back to a single default
+        symbol (AAPL), so the caller silently gets an all-Apple feed. For genuine
+        market-wide news use :meth:`get_general_news`.
 
         Args:
-            ticker: Optional stock/index symbol. If None, returns general news.
+            ticker: Stock/index symbol, or a comma-separated list of them.
             limit: Max articles to return (FMP supports up to 1000).
             from_date: Start date in YYYY-MM-DD format.
             to_date: End date in YYYY-MM-DD format.
@@ -825,6 +831,34 @@ class FMPClient:
             logger.warning(
                 "Stock news request failed (symbols=%s): %s: %s",
                 params.get("symbols", "<market>"), type(e).__name__, e,
+            )
+            return []
+
+    async def get_general_news(
+        self, limit: int = 50, page: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Broad market / macro news, not tied to any one symbol.
+
+        FMP stable endpoint: ``news/general-latest``. Rows carry ``symbol: null``
+        and cover the market-wide narrative (Fed, macro data, sector rotation,
+        strategist commentary) rather than single-name coverage.
+
+        This is the correct source for a "Market" feed — ``news/stock`` without
+        a ``symbols`` param returns AAPL, not general news.
+
+        Returns the same row shape as :meth:`get_stock_news`
+        (symbol / publishedDate / publisher / site / title / image / url / text).
+        """
+        try:
+            data = await self._make_request(
+                "news/general-latest", params={"limit": limit, "page": page}
+            )
+            return data if isinstance(data, list) else []
+        except (FMPRateLimitException, FMPAuthException):
+            raise  # quota must not masquerade as "no news"
+        except Exception as e:
+            logger.warning(
+                "General news request failed: %s: %s", type(e).__name__, e
             )
             return []
 

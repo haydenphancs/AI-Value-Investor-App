@@ -19,6 +19,7 @@ unified table under content_type 'book_bookmark' (item_key = book title) but are
 they get their own GET/POST/DELETE /bookmarks routes (the /progress endpoint never deletes).
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends
@@ -82,14 +83,21 @@ async def get_learn_progress(
     if content_type not in LEARN_CONTENT_TYPES:
         return LearnProgressResponse(keys=[])
     user_id = user["id"]
-    try:
-        result = (
+
+    def _query():
+        return (
             supabase.table("user_learn_progress")
             .select("item_key")
             .eq("user_id", user_id)
             .eq("content_type", content_type)
             .execute()
         )
+
+    try:
+        # The Supabase SDK is SYNCHRONOUS; called directly from an `async def` it blocks the
+        # event loop for the whole round-trip, stalling every other in-flight request on this
+        # instance. Every Learn screen open hits this route.
+        result = await asyncio.to_thread(_query)
         return LearnProgressResponse(keys=[row["item_key"] for row in (result.data or [])])
     except Exception as exc:
         logger.error(
@@ -111,12 +119,15 @@ async def complete_learn_item(
     user_id = user["id"]
     key = (request.key or "").strip()
     if content_type in LEARN_CONTENT_TYPES and key:
-        try:
-            supabase.table("user_learn_progress").upsert(
+        def _upsert():
+            return supabase.table("user_learn_progress").upsert(
                 {"user_id": user_id, "content_type": content_type, "item_key": key},
                 on_conflict="user_id,content_type,item_key",
                 ignore_duplicates=True,
             ).execute()
+
+        try:
+            await asyncio.to_thread(_upsert)
         except Exception as exc:
             logger.error(
                 "[Learn] mark complete failed (user=%s type=%s key=%r): %s",
@@ -143,8 +154,8 @@ async def uncomplete_learn_item(
     user_id = user["id"]
     key = (request.key or "").strip()
     if content_type in LEARN_CONTENT_TYPES and key:
-        try:
-            (
+        def _delete():
+            return (
                 supabase.table("user_learn_progress")
                 .delete()
                 .eq("user_id", user_id)
@@ -152,6 +163,9 @@ async def uncomplete_learn_item(
                 .eq("item_key", key)
                 .execute()
             )
+
+        try:
+            await asyncio.to_thread(_delete)
         except Exception as exc:
             logger.error(
                 "[Learn] uncomplete failed (user=%s type=%s key=%r): %s",
@@ -188,8 +202,9 @@ async def get_book_bookmarks(
     Degrades to an empty list on a backend hiccup — the iOS local cache is the source of truth.
     """
     user_id = user["id"]
-    try:
-        result = (
+
+    def _query():
+        return (
             supabase.table("user_learn_progress")
             .select("item_key")
             .eq("user_id", user_id)
@@ -197,6 +212,9 @@ async def get_book_bookmarks(
             .order("completed_at", desc=True)
             .execute()
         )
+
+    try:
+        result = await asyncio.to_thread(_query)   # sync SDK — keep it off the event loop
         return BookmarkListResponse(bookmarks=[row["item_key"] for row in (result.data or [])])
     except Exception as exc:
         logger.error("[Learn] bookmarks fetch failed (user=%s): %s", user_id, exc)
@@ -213,12 +231,15 @@ async def add_book_bookmark(
     user_id = user["id"]
     key = (request.book_key or "").strip()
     if key:
-        try:
-            supabase.table("user_learn_progress").upsert(
+        def _upsert():
+            return supabase.table("user_learn_progress").upsert(
                 {"user_id": user_id, "content_type": BOOKMARK_CONTENT_TYPE, "item_key": key},
                 on_conflict="user_id,content_type,item_key",
                 ignore_duplicates=True,
             ).execute()
+
+        try:
+            await asyncio.to_thread(_upsert)
         except Exception as exc:
             logger.error("[Learn] add bookmark failed (user=%s key=%r): %s", user_id, key, exc)
     return await get_book_bookmarks(user=user, supabase=supabase)
@@ -234,8 +255,8 @@ async def remove_book_bookmark(
     user_id = user["id"]
     key = (request.book_key or "").strip()
     if key:
-        try:
-            (
+        def _delete():
+            return (
                 supabase.table("user_learn_progress")
                 .delete()
                 .eq("user_id", user_id)
@@ -243,6 +264,9 @@ async def remove_book_bookmark(
                 .eq("item_key", key)
                 .execute()
             )
+
+        try:
+            await asyncio.to_thread(_delete)
         except Exception as exc:
             logger.error("[Learn] remove bookmark failed (user=%s key=%r): %s", user_id, key, exc)
     return await get_book_bookmarks(user=user, supabase=supabase)

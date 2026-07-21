@@ -92,6 +92,7 @@ final class MoneyMovesProgressStore: ObservableObject {
                 responseType: LearnProgressResponse.self
             )
             merge(resp)
+            await pushUnsynced(remote: Set(resp.keys))
         } catch {
             // Offline or signed out: keep whatever is local — but a decode/contract or 5xx failure
             // silently hides synced progress, so surface it (stays quiet on routine offline).
@@ -102,6 +103,35 @@ final class MoneyMovesProgressStore: ObservableObject {
         }
     }
 
+    /// Re-push completions the server doesn't have, and retry un-completions whose DELETE never
+    /// confirmed.
+    ///
+    /// Without this, a completion whose POST failed was LOST FOREVER: `markCompleted` returns early
+    /// once the slug is in the local set, so it could never be re-pushed, and `hydrate` only ever
+    /// merged remote→local. Finish an article offline, reinstall, and it was gone.
+    private func pushUnsynced(remote: Set<String>) async {
+        // A tombstoned slug is pending DELETION — never re-push it as a completion, or the
+        // reconcile would undo the user's explicit un-mark.
+        let unsynced = completed.subtracting(remote).subtracting(pendingUncompleted)
+        // A tombstone the server STILL has means the DELETE never landed; retry it.
+        let staleTombstones = pendingUncompleted.intersection(remote)
+
+        if !unsynced.isEmpty {
+            print("[MoneyMovesProgressStore] re-pushing \(unsynced.count) unsynced completion(s)")
+            for slug in unsynced.sorted().prefix(Self.maxReconcilePushes) {
+                await pushCompletion(slug)
+            }
+        }
+        if !staleTombstones.isEmpty {
+            print("[MoneyMovesProgressStore] retrying \(staleTombstones.count) unconfirmed un-completion(s)")
+            for slug in staleTombstones.sorted().prefix(Self.maxReconcilePushes) {
+                await pushUncompletion(slug)
+            }
+        }
+    }
+
+    private static let maxReconcilePushes = 25
+
     private func pushCompletion(_ slug: String) async {
         do {
             let resp = try await apiClient.request(
@@ -110,7 +140,12 @@ final class MoneyMovesProgressStore: ObservableObject {
             )
             merge(resp)
         } catch {
-            // Stays in the local cache; re-pushes next time it's marked.
+            // Non-fatal: stays in the local cache and `pushUnsynced` retries on the next hydrate.
+            // Logged rather than swallowed — a persistent failure means progress is only local.
+            let appError = AppError.from(error)
+            if !appError.isExpectedOffline {
+                print("[MoneyMovesProgressStore] push failed for \(slug) [\(appError.title)]: \(appError.message)")
+            }
         }
     }
 
@@ -125,7 +160,11 @@ final class MoneyMovesProgressStore: ObservableObject {
             merge(resp)
         } catch {
             // Stays tombstoned (pendingUncompleted) so a racing/next hydrate() can't resurrect it;
-            // re-pushes the delete next time it's toggled.
+            // `pushUnsynced` retries the DELETE on the next hydrate. Logged, not swallowed.
+            let appError = AppError.from(error)
+            if !appError.isExpectedOffline {
+                print("[MoneyMovesProgressStore] delete failed for \(slug) [\(appError.title)]: \(appError.message)")
+            }
         }
     }
 

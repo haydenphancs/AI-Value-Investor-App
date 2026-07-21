@@ -111,7 +111,8 @@ final class BookProgressStore: ObservableObject {
 
     // MARK: - Backend sync (best-effort; the local cache is the source of truth)
 
-    /// Pull the server's completed set and union it in. Call when the Library opens.
+    /// Pull the server's completed set, union it in, and push back anything the server is missing.
+    /// Call when the Library opens.
     func hydrate() async {
         do {
             let resp = try await apiClient.request(
@@ -119,6 +120,7 @@ final class BookProgressStore: ObservableObject {
                 responseType: LearnProgressResponse.self
             )
             merge(resp)
+            await pushUnsynced(remote: Set(resp.keys))
         } catch {
             // Offline or signed out: keep whatever is local — but a decode/contract or 5xx failure
             // silently hides synced progress, so surface it (stays quiet on routine offline).
@@ -129,6 +131,25 @@ final class BookProgressStore: ObservableObject {
         }
     }
 
+    /// Re-push completions the server doesn't have yet.
+    ///
+    /// Without this, a completion whose POST failed was LOST FOREVER: `markCompleted` returns
+    /// early once the key is in the local set, so it could never be re-pushed, and `hydrate` only
+    /// ever merged remote→local. Finish a core offline, reinstall, and it was gone. Reconciling
+    /// here is safe because the sync model is union-only — nothing is ever deleted by a merge.
+    private func pushUnsynced(remote: Set<String>) async {
+        let unsynced = completed.subtracting(remote)
+        guard !unsynced.isEmpty else { return }
+        print("[BookProgressStore] re-pushing \(unsynced.count) unsynced completion(s)")
+        // Bounded and ordered so a large backlog can't stall the Library open; the rest go on the
+        // next hydrate.
+        for key in unsynced.sorted().prefix(Self.maxReconcilePushes) {
+            await pushCompletion(key)
+        }
+    }
+
+    private static let maxReconcilePushes = 25
+
     private func pushCompletion(_ key: String) async {
         do {
             let resp = try await apiClient.request(
@@ -137,7 +158,13 @@ final class BookProgressStore: ObservableObject {
             )
             merge(resp)
         } catch {
-            // Stays in the local cache; re-pushes next time this core is marked.
+            // Non-fatal: the completion stays in the local cache and `pushUnsynced` retries it on
+            // the next hydrate. Logged rather than swallowed — a persistent failure here means
+            // progress is only ever local (invariant: never degrade silently).
+            let appError = AppError.from(error)
+            if !appError.isExpectedOffline {
+                print("[BookProgressStore] push failed for \(key) [\(appError.title)]: \(appError.message)")
+            }
         }
     }
 

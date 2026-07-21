@@ -49,6 +49,8 @@ class IndexDetailViewModel: ObservableObject {
     @Published var hasMoreNews: Bool = false
     private var allNewsArticles: [TickerNewsArticle] = []
     private var newsDisplayCount: Int = 10
+    /// Serialises news enrichment (tab-appear vs fetch/load-more completion).
+    private var isEnrichingNews = false
     private let newsPageSize: Int = 10
 
     // MARK: - Private Properties
@@ -489,15 +491,12 @@ class IndexDetailViewModel: ObservableObject {
             self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
             self.isNewsLoading = false
 
-            // Enrich ALL articles in background (not just visible ones)
-            let unenrichedIds = self.allNewsArticles
-                .filter { !$0.aiProcessed }
-                .map { $0.apiId }
-                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
-
-            if !unenrichedIds.isEmpty {
-                await attemptEnrichment(articleIds: unenrichedIds)
-                self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            // Enrich ONLY the VISIBLE batch, and ONLY if the News tab is being
+            // viewed. This used to enrich ALL ~50 articles on every index open —
+            // the most wasteful of the detail screens. See
+            // TickerDetailViewModel.fetchStockNews.
+            if selectedTab == .news {
+                await enrichVisibleArticles()
             }
         } catch {
             print("❌ [IndexDetailVM] Failed to fetch news for \(indexSymbol): \(error)")
@@ -539,13 +538,23 @@ class IndexDetailViewModel: ObservableObject {
         }
     }
 
+    /// Called when the News tab becomes visible — defers AI enrichment to when
+    /// news is actually read. See TickerDetailViewModel.newsTabAppeared.
+    func newsTabAppeared() {
+        Task { await enrichVisibleArticles() }
+    }
+
     private func enrichVisibleArticles() async {
+        guard !isEnrichingNews else { return }
         let unenriched = newsArticles.filter { !$0.aiProcessed }
         guard !unenriched.isEmpty else { return }
 
         let ids = unenriched.map { $0.apiId }
             .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
         guard !ids.isEmpty else { return }
+
+        isEnrichingNews = true
+        defer { isEnrichingNews = false }
 
         await attemptEnrichment(articleIds: ids)
         newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))

@@ -77,6 +77,9 @@ class TickerDetailViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var allNewsArticles: [TickerNewsArticle] = []  // full set from API
     private var newsDisplayCount: Int = 10
+    /// Serialises news enrichment so the News-tab-appear trigger and a
+    /// fetch/load-more completion cannot fire the same paid batch twice.
+    private var isEnrichingNews = false
     private let newsPageSize: Int = 10
     private var chartRefreshTask: Task<Void, Never>?
     private var quotePollTask: Task<Void, Never>?
@@ -476,16 +479,13 @@ class TickerDetailViewModel: ObservableObject {
             self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
             self.isNewsLoading = false
 
-            // Enrich in background, then update displayed articles
-            let unenrichedIds = self.newsArticles
-                .filter { !$0.aiProcessed }
-                .map { $0.apiId }
-                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
-
-            if !unenrichedIds.isEmpty {
-                await attemptEnrichment(ticker: ticker, articleIds: unenrichedIds)
-                // Refresh displayed articles with enriched data
-                self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            // Enrich ONLY if the News tab is the one being viewed. Enriching on
+            // every ticker open — before the user ever taps News — spent the
+            // expensive `flash` model on the ~majority of opens that never read
+            // news. If the user is already on News when the list lands, enrich
+            // now; otherwise `newsTabAppeared()` handles it when they switch.
+            if selectedTab == .news {
+                await enrichVisibleArticles()
             }
         } catch {
             print("⚠️ TickerDetailVM: Failed to fetch news for \(ticker): \(error)")
@@ -714,13 +714,28 @@ class TickerDetailViewModel: ObservableObject {
         }
     }
 
+    /// Called when the News tab becomes visible. Enriches the visible batch if
+    /// the news list has already loaded; if it hasn't, `fetchStockNews` enriches
+    /// on completion (it checks `selectedTab == .news`). One of the two always
+    /// covers it, and the `isEnrichingNews` guard keeps them from doubling up.
+    func newsTabAppeared() {
+        Task { await enrichVisibleArticles() }
+    }
+
     private func enrichVisibleArticles() async {
+        // Re-entrancy guard: the tab-appear trigger and a just-completed fetch
+        // (or a load-more) can race; without this both would send the same ids.
+        guard !isEnrichingNews else { return }
+
         // Find un-enriched articles in the visible set
         let unenriched = newsArticles.filter { !$0.aiProcessed }
         guard !unenriched.isEmpty else { return }
 
         let ids = unenriched.map { $0.apiId }.filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
         guard !ids.isEmpty else { return }
+
+        isEnrichingNews = true
+        defer { isEnrichingNews = false }
 
         await attemptEnrichment(ticker: tickerSymbol, articleIds: ids)
         newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))

@@ -13,19 +13,32 @@ struct AIBadge: View {
     var body: some View {
         Text(text)
             .font(AppTypography.captionEmphasis)
-            .foregroundColor(AppColors.accentCyan)
+            // Same indigo→cyan ramp as the "Insights" label it sits beside, from
+            // one shared token so restyling either cannot break the pairing.
+            .foregroundStyle(AppGradients.ai)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)
-            .background(AppColors.accentCyan.opacity(0.15))
+            .background(AppGradients.aiSubtle)
             .clipShape(Capsule())
     }
 }
 
 #Preview {
-    VStack(spacing: 10) {
-        AIBadge(text: "24h - AI Summary")
+    VStack(alignment: .leading, spacing: 16) {
+        // The real pairing: label and badge on one row, which is the only way
+        // to see whether they actually read as the same colour.
+        HStack {
+            AIInsightLabel(
+                text: "Insights",
+                font: AppTypography.bodyEmphasis,
+                iconFont: AppTypography.iconSmall
+            )
+            Spacer()
+            AIBadge(text: "24h · AI Summary")
+        }
+
         AIBadge(text: "AI Generated")
     }
     .padding()
-    .background(AppColors.background)
+    .background(AppColors.cardBackground)
 }

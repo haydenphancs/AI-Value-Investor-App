@@ -26,7 +26,6 @@ final class NewsDetailViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     /// AI enrichment is in flight — the Key Takeaways section shows a shimmer.
     @Published var isEnriching: Bool = false
-    @Published var showShareSheet: Bool = false
 
     // MARK: - Private Properties
     private var article: NewsArticle
@@ -62,17 +61,11 @@ final class NewsDetailViewModel: ObservableObject {
         await load()
     }
 
-    func openFullStory() {
-        guard let url = articleDetail?.articleURL else {
-            print("⚠️ NewsDetailVM: No article URL to open")
-            return
-        }
-        UIApplication.shared.open(url)
-    }
-
-    func shareArticle() {
-        showShareSheet = true
-    }
+    // `openFullStory()` and `shareArticle()` lived here and are gone: the view
+    // now presents the article in an in-app `SafariView` and the share sheet
+    // directly off the header's share button, so neither had a caller. The
+    // former also used `UIApplication.shared.open`, which ejected the user out
+    // of the app into Safari.
 
     // MARK: - Private Methods
 

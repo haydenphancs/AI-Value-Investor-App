@@ -199,6 +199,32 @@ struct AppCornerRadius {
     static let pill: CGFloat = 20
 }
 
+// MARK: - App Gradients
+
+/// Shared multi-stop fills. Defined once so surfaces that are meant to match
+/// cannot drift apart when one of them is restyled.
+struct AppGradients {
+    /// The Cay-AI mark: indigo → cyan, top-leading to bottom-trailing.
+    ///
+    /// Worn by the "Insight"/"Insights" label and by the AI-summary badge beside
+    /// it. These two sit inches apart on the Updates card, so they read as one
+    /// element — inlining the colours in each would let a later edit to one
+    /// silently break the pairing.
+    static let ai = LinearGradient(
+        colors: [.indigo, .cyan],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+
+    /// The same ramp at badge-fill strength. Kept beside `ai` so the tint always
+    /// tracks the text it sits behind.
+    static let aiSubtle = LinearGradient(
+        colors: [Color.indigo.opacity(0.18), Color.cyan.opacity(0.18)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+}
+
 // MARK: - App Shadows
 struct AppShadows {
     static let cardShadow = Shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 4)

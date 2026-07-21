@@ -11,7 +11,8 @@ struct NewsDetailView: View {
     @StateObject private var viewModel: NewsDetailViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var showShareSheet = false
-    @State private var showMoreOptions = false
+    /// Presents the publisher's article in an in-app Safari view.
+    @State private var showArticleReader = false
     /// Ticker the user tapped in the Related Tickers row. Navigation from a news
     /// article into ticker detail is not wired into this nav tree yet.
     @State private var pendingTicker: String?
@@ -41,7 +42,8 @@ struct NewsDetailView: View {
                 NewsDetailHeader(
                     source: article.source,
                     onBackTapped: handleBackTapped,
-                    onMoreTapped: handleMoreTapped
+                    onShareTapped: handleShareTapped,
+                    canShare: viewModel.articleDetail?.articleURL != nil
                 )
 
                 // Divider
@@ -98,19 +100,18 @@ struct NewsDetailView: View {
                     }
                 }
         )
-        // "Save Article" and "Report Issue" were removed: both were `print()`
-        // TODOs, so tapping them did nothing while looking like a real action.
-        .confirmationDialog("Options", isPresented: $showMoreOptions) {
-            if viewModel.articleDetail?.articleURL != nil {
-                Button("Share Article") {
-                    showShareSheet = true
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
         .sheet(isPresented: $showShareSheet) {
             if let url = viewModel.articleDetail?.articleURL {
                 ShareSheet(items: [url])
+            }
+        }
+        // In-app reader. `UIApplication.shared.open` used to hand the article to
+        // Safari, which ejected the user out of Caydex entirely — returning was
+        // an app-switch, not a Done button.
+        .fullScreenCover(isPresented: $showArticleReader) {
+            if let url = viewModel.articleDetail?.articleURL {
+                SafariView(url: url)
+                    .ignoresSafeArea()
             }
         }
     }
@@ -171,8 +172,8 @@ struct NewsDetailView: View {
         dismiss()
     }
 
-    private func handleMoreTapped() {
-        showMoreOptions = true
+    private func handleShareTapped() {
+        showShareSheet = true
     }
 
     private func handleTickerTapped(_ ticker: String) {
@@ -182,7 +183,12 @@ struct NewsDetailView: View {
     }
 
     private func handleReadFullStory() {
-        viewModel.openFullStory()
+        // Opens in-app rather than delegating to `UIApplication.shared.open`.
+        // NOTE: many financial publishers paywall their articles, so this can
+        // legitimately land on a register/subscribe wall — that is the
+        // publisher's gate, not a failure of this button.
+        guard viewModel.articleDetail?.articleURL != nil else { return }
+        showArticleReader = true
     }
 }
 

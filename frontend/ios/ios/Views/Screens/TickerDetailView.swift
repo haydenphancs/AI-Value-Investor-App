@@ -267,6 +267,9 @@ struct TickerDetailView: View {
             AssetDetailRouter(selection: selection)
         }
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
+        // News articles, company websites and whitepapers open INSIDE the app
+        // instead of ejecting to Safari (matches Webull / Robinhood).
+        .inAppBrowser(link: $viewModel.browserLink)
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
                 chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol, context: viewModel.contextForCurrentTab, contextType: .stock, referenceId: tickerSymbol)

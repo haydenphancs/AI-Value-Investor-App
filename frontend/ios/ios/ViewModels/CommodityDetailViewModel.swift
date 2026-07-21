@@ -32,6 +32,11 @@ class CommodityDetailViewModel: ObservableObject {
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
     @Published var pendingTickerNavigation: String?
+
+    /// External link to show in the in-app browser. Set via `openExternal(_:into:)`
+    /// and presented by the Screen's `.inAppBrowser(link:)` — a ViewModel cannot
+    /// present a view itself.
+    @Published var browserLink: BrowserLink?
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
 
@@ -410,12 +415,12 @@ class CommodityDetailViewModel: ObservableObject {
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
         guard let url = article.articleURL else { return }
-        UIApplication.shared.open(url)
+        openExternal(url, into: &browserLink)
     }
 
     func handleNewsExternalLink(_ article: TickerNewsArticle) {
         guard let url = article.articleURL else { return }
-        UIApplication.shared.open(url)
+        openExternal(url, into: &browserLink)
     }
 
     func handleNewsTickerTap(_ ticker: String) {

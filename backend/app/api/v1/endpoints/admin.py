@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Emails authorised to call admin endpoints
-_ADMIN_EMAILS: set[str] = {"haiphan@caydex.com", "admin@caydex.com"}
+_ADMIN_EMAILS: set[str] = {"haiphan@caydexinvest.com", "admin@caydexinvest.com"}
 
 
 def _authorize_admin(

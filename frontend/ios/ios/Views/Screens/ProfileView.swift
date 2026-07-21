@@ -430,25 +430,25 @@ struct ProfileView: View {
     // inconsistency.
 
     private func openFeedback() {
-        if let url = URL(string: "mailto:feedback@caydex.com?subject=App%20Feedback") {
+        if let url = URL(string: "mailto:feedback@caydexinvest.com?subject=App%20Feedback") {
             UIApplication.shared.open(url)
         }
     }
 
     private func openSupport() {
-        if let url = URL(string: "mailto:support@caydex.com?subject=Support%20Request") {
+        if let url = URL(string: "mailto:support@caydexinvest.com?subject=Support%20Request") {
             UIApplication.shared.open(url)
         }
     }
 
     private func openTerms() {
-        if let url = URL(string: "https://caydex.com/terms") {
+        if let url = URL(string: "https://caydexinvest.com/terms") {
             openExternal(url, into: &browserLink)
         }
     }
 
     private func openPrivacy() {
-        if let url = URL(string: "https://caydex.com/privacy") {
+        if let url = URL(string: "https://caydexinvest.com/privacy") {
             openExternal(url, into: &browserLink)
         }
     }

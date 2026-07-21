@@ -31,7 +31,7 @@ struct SearchHeader: View {
 
                 // Search bar
                 HStack(spacing: AppSpacing.sm) {
-                    Image(systemName: "sparkles")
+                    Image(systemName: "sparkles.2")
                         .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.primaryBlue)
 

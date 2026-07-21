@@ -51,7 +51,16 @@ final class UpdatesViewModel: ObservableObject {
     /// Unfiltered articles for the selected scope.
     private var allNewsArticles: [NewsArticle] = []
     /// Per-scope cache so switching back to a tab is instant.
-    private var feedCache: [String: (articles: [NewsArticle], insight: NewsInsightSummary?)] = [:]
+    /// Pagination state travels WITH the cached articles. Restoring the rows
+    /// without the offset would make the next "load more" on a revisited tab
+    /// re-request page 0 (duplicate rows) or skip ahead (a hole in the
+    /// timeline), depending on which stale counter survived.
+    private var feedCache: [String: (
+        articles: [NewsArticle],
+        insight: NewsInsightSummary?,
+        offset: Int,
+        hasMore: Bool
+    )] = [:]
 
     private let apiClient: APIClient
     private var hasLoadedOnce = false
@@ -64,6 +73,33 @@ final class UpdatesViewModel: ObservableObject {
     private var refreshPollTask: Task<Void, Never>?
 
     private let feedLimit = 50
+
+    // MARK: - Pagination
+
+    /// Whether the backend says more retained history exists for the current
+    /// scope. Defaults false so a backend that predates pagination — or a scope
+    /// with less than one page — never triggers a fetch loop.
+    private var hasMorePages = false
+    /// Guards against the scroll trigger firing repeatedly while a page is in
+    /// flight. `onAppear` fires per row, so the last few rows would otherwise
+    /// each launch their own request for the same offset.
+    private var isLoadingMore = false
+    /// Rows already requested. Kept separate from `allNewsArticles.count`, which
+    /// shrinks when the backend drops unrenderable rows — paging off the
+    /// rendered count would then re-request the ones that were dropped forever.
+    private var loadedOffset = 0
+
+    // MARK: - Enrichment
+
+    /// Articles per enrichment batch. Small on purpose: enrichment is a paid
+    /// Gemini call, and a batch that spans more than a screenful pays for rows
+    /// the reader may never reach.
+    private let enrichBatchSize = 10
+    /// Serialises enrichment. `onAppear` fires per row, and without this the
+    /// same un-enriched ids would be sent by several overlapping batches.
+    private var isEnriching = false
+    /// Rows from the end at which scrolling triggers the next page / batch.
+    private let prefetchThreshold = 5
 
     // MARK: - Initialization
 
@@ -236,6 +272,9 @@ final class UpdatesViewModel: ObservableObject {
         if !force, let cached = feedCache[scope] {
             allNewsArticles = cached.articles
             insightSummary = cached.insight
+            loadedOffset = cached.offset
+            hasMorePages = cached.hasMore
+            isLoadingMore = false
             applyFiltersAndGroup()
             // Must clear: returning to a tab that was cached EMPTY would
             // otherwise leave the shimmer up forever instead of showing the
@@ -259,6 +298,12 @@ final class UpdatesViewModel: ObservableObject {
         insightSummary = nil
         isLoading = true
         error = nil
+        // Reset pagination with the feed. Carrying the previous tab's offset
+        // over would make the new scope's first "load more" skip its opening
+        // rows — a silent hole in the timeline.
+        loadedOffset = 0
+        hasMorePages = false
+        isLoadingMore = false
 
         do {
             let response: UpdatesFeedResponse = try await apiClient.request(
@@ -284,8 +329,13 @@ final class UpdatesViewModel: ObservableObject {
             allNewsArticles = articles
             insightSummary = response.insight.flatMap { NewsInsightSummary(dto: $0) }
             applyFiltersAndGroup()
-            feedCache[scope] = (articles, insightSummary)
+            feedCache[scope] = (articles, insightSummary, loadedOffset, hasMorePages)
             isLoading = false
+            // Page off what was REQUESTED, not what rendered: `dtos.count` may
+            // exceed `articles.count` when rows are unrenderable, and paging off
+            // the rendered count would re-request the dropped rows forever.
+            loadedOffset = dtos.count
+            hasMorePages = response.hasMore ?? false
 
             print("""
             ✅ UpdatesVM: Loaded \(articles.count) articles for \(scope) \
@@ -318,14 +368,89 @@ final class UpdatesViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Scroll-driven paging + enrichment
+
+    /// Called from each timeline row's `onAppear`.
+    ///
+    /// Both the next page of history and the next enrichment batch hang off
+    /// this: the reader approaching the end of the list is the only signal that
+    /// they actually want more, and enrichment is a paid call that should not
+    /// be spent on rows nobody scrolled to.
+    func articleDidAppear(_ article: NewsArticle) {
+        guard let index = newsArticles.firstIndex(where: { $0.id == article.id })
+        else { return }
+        guard index >= newsArticles.count - prefetchThreshold else { return }
+        guard let scope = selectedTab?.scope else { return }
+
+        Task {
+            // Enrich first: badges on rows already on screen beat history the
+            // reader has not reached yet.
+            await enrichVisibleArticles(scope: scope, token: loadToken)
+            await loadMoreIfNeeded(scope: scope, token: loadToken)
+        }
+    }
+
+    /// Fetch the next page of retained history and append it.
+    private func loadMoreIfNeeded(scope: String, token: UUID) async {
+        guard hasMorePages, !isLoadingMore, !isLoading else { return }
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+
+        do {
+            let response: UpdatesFeedResponse = try await apiClient.request(
+                endpoint: .getUpdatesFeed(
+                    scope: scope, limit: feedLimit, offset: loadedOffset
+                ),
+                responseType: UpdatesFeedResponse.self
+            )
+            // The user switched tabs (or pulled to refresh) mid-flight —
+            // appending now would splice this scope's history into another's.
+            guard loadToken == token, selectedTab?.scope == scope else { return }
+
+            let dtos = response.articles ?? []
+            let page = dtos.compactMap { NewsArticle(dto: $0) }
+
+            // De-dup by the backend id. `published_at` is not unique (FMP stamps
+            // whole batches to the same minute) and a refresh between pages can
+            // shift the window, so an id already on screen must never be
+            // appended again — SwiftUI's ForEach would crash on the duplicate.
+            let seen = Set(allNewsArticles.map { $0.apiId })
+            let fresh = page.filter { !seen.contains($0.apiId) }
+
+            allNewsArticles.append(contentsOf: fresh)
+            loadedOffset += dtos.count
+            hasMorePages = response.hasMore ?? false
+            applyFiltersAndGroup()
+            feedCache[scope] = (allNewsArticles, insightSummary, loadedOffset, hasMorePages)
+
+            print("""
+            ✅ UpdatesVM: Page at offset \(response.offset ?? loadedOffset) for \(scope) \
+            → +\(fresh.count) new (\(dtos.count - fresh.count) dupes), \
+            total \(allNewsArticles.count), more: \(hasMorePages)
+            """)
+        } catch is CancellationError {
+            return
+        } catch {
+            if (error as? URLError)?.code == .cancelled { return }
+            // Deliberately NOT surfaced as `self.error`: the timeline already on
+            // screen is valid, and replacing it with a full-screen failure
+            // because page 3 did not load would destroy what the reader has.
+            // Leave `hasMorePages` true so the next scroll retries.
+            print("⚠️ UpdatesVM: Load-more failed for \(scope) at offset \(loadedOffset): \(AppError.from(error).message)")
+        }
+    }
+
     // MARK: - AI enrichment
 
     private func enrichVisibleArticles(scope: String, token: UUID) async {
+        guard !isEnriching else { return }
         let ids = allNewsArticles
             .filter { !$0.aiProcessed && $0.isEnrichable }
-            .prefix(20)                       // one batch; the rest enrich on refresh
+            .prefix(enrichBatchSize)
             .map { $0.apiId }
         guard !ids.isEmpty else { return }
+        isEnriching = true
+        defer { isEnriching = false }
 
         do {
             let response: EnrichUpdatesNewsResponse = try await apiClient.request(
@@ -357,7 +482,7 @@ final class UpdatesViewModel: ObservableObject {
             }
             if merged > 0 {
                 applyFiltersAndGroup()
-                feedCache[scope] = (allNewsArticles, insightSummary)
+                feedCache[scope] = (allNewsArticles, insightSummary, loadedOffset, hasMorePages)
             }
             print("✅ UpdatesVM: Enriched \(merged)/\(ids.count) articles for \(scope)")
         } catch {
@@ -395,7 +520,7 @@ final class UpdatesViewModel: ObservableObject {
                   let dto = response.insight,
                   let card = NewsInsightSummary(dto: dto) else { return false }
             insightSummary = card
-            feedCache[scope] = (allNewsArticles, card)
+            feedCache[scope] = (allNewsArticles, card, loadedOffset, hasMorePages)
             if card.isAIGenerated {
                 print("✅ UpdatesVM: AI insight arrived for \(scope)")
                 return true

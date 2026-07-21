@@ -105,6 +105,16 @@ class UpdatesFeedResponse(BaseModel):
     insight: Optional[AIInsightCardResponse] = None
     cached: bool = False
     cache_age_seconds: Optional[int] = None
+    # Where this page started, echoed back so a client that fired two scroll
+    # requests can tell which response it is looking at.
+    offset: int = 0
+    # Whether another page exists. Derived from "this page came back full",
+    # NOT from a COUNT: an exact count costs a second scan of the same rows on
+    # every page, and the only decision it feeds is "try one more page". A full
+    # last page yields one extra request that returns empty — cheap and
+    # self-correcting. Defaults False so an older client that ignores the field
+    # simply never paginates.
+    has_more: bool = False
 
 
 # ── Enrichment ────────────────────────────────────────────────────────

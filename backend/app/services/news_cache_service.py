@@ -92,9 +92,13 @@ class NewsCacheService:
 
     async def get_ticker_news(
         self, ticker: str, limit: int = 50, is_crypto: bool = False,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Get news for a ticker. Cache-first, NO automatic AI enrichment.
+
+        ``offset > 0`` pages through already-cached history and never triggers
+        an FMP fetch — see :meth:`get_market_news`.
 
         Returns:
             dict with keys: articles, ticker, cached, cache_age_seconds
@@ -102,7 +106,18 @@ class NewsCacheService:
         ticker = ticker.upper()
 
         # ── 1. Check cache ──
-        cached_articles = self._get_cached(ticker, limit)
+        # The Supabase SDK is synchronous; called directly it would block the
+        # event loop for the whole round-trip on the hottest read of this tab.
+        cached_articles = await asyncio.to_thread(
+            self._get_cached, ticker, limit, offset
+        )
+        if offset > 0:
+            return {
+                "articles": self._format_response(cached_articles),
+                "ticker": ticker,
+                "cached": True,
+                "cache_age_seconds": self._cache_age_seconds(cached_articles),
+            }
         if cached_articles:
             logger.info(f"News cache HIT for {ticker}: {len(cached_articles)} articles")
             return {
@@ -200,17 +215,33 @@ class NewsCacheService:
 
     # ── Public: Get general market news ────────────────────────────────
 
-    async def get_market_news(self, limit: int = 50) -> Dict[str, Any]:
+    async def get_market_news(
+        self, limit: int = 50, offset: int = 0
+    ) -> Dict[str, Any]:
         """
         Get general (non-ticker-specific) market news.
 
         Cached in `ticker_news_cache` under the reserved ``MARKET_SCOPE`` key so
         the existing 6h TTL, on-demand `enrich_articles`, and `cleanup_expired_cache`
         all apply with no changes. Mirrors :meth:`get_ticker_news`'s envelope.
+
+        ``offset > 0`` is a PAGE-THROUGH of already-cached history and never
+        triggers an FMP fetch: a cold miss on page 3 means the history simply
+        ends there, and refetching page 1 from upstream to satisfy it would burn
+        quota to return rows the client already has.
         """
         # Sync SDK — keep it off the event loop. This is the Updates screen's
         # default tab, so it is the hottest read in the feature.
-        cached_articles = await asyncio.to_thread(self._get_cached, MARKET_SCOPE, limit)
+        cached_articles = await asyncio.to_thread(
+            self._get_cached, MARKET_SCOPE, limit, offset
+        )
+        if offset > 0:
+            return {
+                "articles": self._format_response(cached_articles),
+                "ticker": MARKET_SCOPE,
+                "cached": True,
+                "cache_age_seconds": self._cache_age_seconds(cached_articles),
+            }
         if cached_articles:
             logger.info(
                 f"Market news cache HIT: {len(cached_articles)} articles"
@@ -867,8 +898,21 @@ Return a JSON array with one object per article in order. Each object must have:
 
     # ── Private: Cache lookup ─────────────────────────────────────────
 
-    def _get_cached(self, ticker: str, limit: int) -> List[Dict[str, Any]]:
-        """Query ticker_news_cache for fresh (non-expired) rows."""
+    def _get_cached(
+        self, ticker: str, limit: int, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Query ticker_news_cache for fresh (non-expired) rows.
+
+        ``offset`` pages deeper into the retained history. The sweeper refreshes
+        on a 96h lookback, so a busy scope holds several days of rows while a
+        single page shows well under one — `.range()` is what lets the client
+        reach the rest without inflating every first paint.
+
+        Ordered by ``published_at`` DESC then ``id`` DESC: `published_at` alone
+        is NOT unique (FMP stamps whole batches to the same minute), and
+        PostgREST gives no stable tiebreak for equal keys, so page 2 could
+        repeat or skip rows that page 1 already returned.
+        """
         try:
             result = (
                 self.supabase.table("ticker_news_cache")
@@ -876,7 +920,8 @@ Return a JSON array with one object per article in order. Each object must have:
                 .eq("ticker", ticker)
                 .gte("expires_at", datetime.now(timezone.utc).isoformat())
                 .order("published_at", desc=True)
-                .limit(limit)
+                .order("id", desc=True)
+                .range(offset, offset + limit - 1)
                 .execute()
             )
             return result.data or []

@@ -23,7 +23,7 @@ struct GenerateAnalysisButton: View {
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
                 } else {
                     HStack(spacing: AppSpacing.sm) {
-                        Image(systemName: "sparkles")
+                        Image(systemName: "sparkles.2")
                             .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                         Text("Generate Analysis")

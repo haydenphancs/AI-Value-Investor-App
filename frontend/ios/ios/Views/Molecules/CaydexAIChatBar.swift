@@ -46,7 +46,7 @@ struct CaydexAIChatBar: View {
             // Input bar
             HStack(spacing: AppSpacing.md) {
                 // Sparkle icon
-                Image(systemName: "sparkles")
+                Image(systemName: "sparkles.2")
                     .font(AppTypography.iconMedium).fontWeight(.medium)
                     .foregroundColor(AppColors.primaryBlue)
 

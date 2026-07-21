@@ -24,7 +24,13 @@ WHY A BACKGROUND SWEEPER RATHER THAN A REQUEST-TIME GATE
 SPEND CEILINGS (defence in depth)
 ---------------------------------
   per-scope cooldown  (updates_materiality.COOLDOWN_*)
-  per-scope daily cap (updates_materiality.PER_SCOPE_DAILY_CAP)
+  per-scope daily cap (updates_materiality.daily_cap_for — 16 for the market
+                      scope, 6 per ticker; enforced BOTH in the pure gate and,
+                      authoritatively, by `claim_updates_insight_scope`. Feed
+                      both from `daily_cap_for` or the DB silently overrules
+                      the gate.)
+  pre-market reserve  (updates_materiality.premarket_cap_for — keeps two thirds
+                      of the allowance for 09:30-16:00 ET)
   per-cycle cap       (_PER_CYCLE_REGEN_CAP, priority-ordered by move size)
   concurrency         (_GEN_CONCURRENCY)
   durable global cap  (_GLOBAL_DAILY_CAP, enforced in Postgres)
@@ -53,9 +59,10 @@ from app.services.updates_materiality import (
     PER_SCOPE_ATTEMPT_CAP,
     PER_SCOPE_DAILY_CAP,
     Decision,
+    daily_cap_for,
     decide,
 )
-from app.utils.market_hours import is_market_active
+from app.utils.market_hours import ET, is_market_active, session_phase
 
 logger = logging.getLogger(__name__)
 
@@ -168,12 +175,23 @@ class InsightSweeper:
                 len(rows), type(e).__name__, e,
             )
 
-    def _claim(self, scope: str, now: datetime) -> bool:
+    def _claim(self, scope: str, now: datetime, is_market_scope: bool) -> bool:
         """Atomically claim the right to generate ``scope``'s card.
 
         Delegates to a single Postgres statement (`claim_updates_insight_scope`,
         migration 088) which performs the day roll, both cap checks, the
         stale-claim steal, and the attempt increment under one row lock.
+
+        ``is_market_scope`` MUST be threaded through: the daily cap is enforced
+        TWICE — once in the pure gate (`decide`) and once here, authoritatively,
+        inside the RPC. Passing a flat `PER_SCOPE_DAILY_CAP` while the gate used
+        `daily_cap_for()` made the raised market cap inert AND silent: the gate
+        admitted `__MARKET__` at 6/16, the RPC's `regen_count_today < p_daily_cap`
+        predicate matched no row, and the whole sweep returned False with nothing
+        logged and no state row written — so the scope re-tripped every 5 minutes
+        forever, burning a per-cycle admission slot each time, and the one
+        diagnostic that explained the freeze (`last_skip_reason = 'daily_cap'`)
+        disappeared. The two ceilings must be fed from the same function.
 
         This CANNOT be done client-side. Read-then-write has an ABA bug that
         silently defeats the daily cap: another instance can complete a whole
@@ -194,13 +212,26 @@ class InsightSweeper:
                     "p_now": now.isoformat(),
                     "p_stale_seconds": _CLAIM_STALE_SECONDS,
                     "p_attempt_cap": PER_SCOPE_ATTEMPT_CAP,
-                    "p_daily_cap": PER_SCOPE_DAILY_CAP,
+                    "p_daily_cap": daily_cap_for(is_market_scope),
                 },
             ).execute()
             granted = result.data
             if isinstance(granted, list):
                 granted = granted[0] if granted else False
-            return bool(granted)
+            granted = bool(granted)
+            if not granted:
+                # The gate already said GENERATE, so a denial here is the
+                # authoritative ceiling (or a live claim on another instance)
+                # overruling it. Never silent: this is the difference between
+                # "capped as designed" and "the two caps disagree", and without
+                # the line the second is invisible — no state row is written on
+                # this path either.
+                logger.info(
+                    "Insight claim denied for %s (daily_cap=%d attempt_cap=%d) — "
+                    "already at ceiling, or claimed by another instance",
+                    scope, daily_cap_for(is_market_scope), PER_SCOPE_ATTEMPT_CAP,
+                )
+            return granted
         except Exception as e:
             # Fail CLOSED: without a claim we might double-bill a Gemini call
             # across instances. Skipping costs at most one 5-minute cycle.
@@ -304,12 +335,19 @@ class InsightSweeper:
             )
 
     def _consume_global_budget(self, now: datetime) -> bool:
-        """Atomically take one unit of today's global generation budget."""
+        """Atomically take one unit of today's global generation budget.
+
+        Keyed on the ET trading date, matching the per-scope cap. A UTC key
+        rolls at 19:00 ET under EST — inside the 04:00-20:00 sweep window — so
+        the global ceiling handed itself a second full day's budget every winter
+        evening. A spend ceiling that resets mid-session is not a ceiling. The
+        day is a plain parameter here, so this needs no migration.
+        """
         try:
             result = self.supabase.rpc(
                 "increment_ai_insight_budget",
                 {
-                    "p_day": now.astimezone(timezone.utc).date().isoformat(),
+                    "p_day": now.astimezone(ET).date().isoformat(),
                     "p_limit": _GLOBAL_DAILY_CAP,
                 },
             ).execute()
@@ -345,6 +383,9 @@ class InsightSweeper:
         """One pass. ``refresh_news=True`` also force-pulls recent FMP articles."""
         now = datetime.now(timezone.utc)
         market_active = is_market_active()
+        # Read ONCE per sweep so every scope in this pass is judged against the
+        # same session, even if the pass straddles the 09:30 bell.
+        phase = session_phase(now)
         scopes = await self._universe()
         if not scopes:
             return {}
@@ -395,6 +436,7 @@ class InsightSweeper:
                 model=INSIGHT_MODEL,
                 market_active=market_active,
                 is_market_scope=is_market,
+                session_phase=phase,
             )
             reasons[decision.reason] += 1
             if decision.action == ACTION_GENERATE:
@@ -448,7 +490,10 @@ class InsightSweeper:
                 # unavailable) would still have debited a generation it never
                 # performed, so the daily ceiling would exhaust itself without
                 # producing a single card.
-                if not await asyncio.to_thread(self._claim, scope, now):
+                is_market = scope == MARKET_SCOPE
+                if not await asyncio.to_thread(
+                    self._claim, scope, now, is_market
+                ):
                     return False
                 if not await asyncio.to_thread(self._consume_global_budget, now):
                     # Budget exhausted after we took the claim: release it so the
@@ -511,11 +556,11 @@ class InsightSweeper:
 
         logger.info(
             "Insight sweep (%s) scopes=%d generated=%d touched=%d deferred=%d "
-            "market=%s active=%s reasons=%s",
+            "market=%s active=%s phase=%s reasons=%s",
             "news+price" if refresh_news else "price",
             len(scopes), generated, len(touches), dropped,
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
-            market_active, dict(reasons.most_common(8)),
+            market_active, phase, dict(reasons.most_common(8)),
         )
         return {
             "scopes": len(scopes), "generated": generated,

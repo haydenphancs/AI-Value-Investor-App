@@ -72,7 +72,8 @@ struct UpdatesView: View {
                             } else {
                                 LiveNewsTimeline(
                                     groupedNews: viewModel.groupedNews,
-                                    onArticleTapped: handleArticleTapped
+                                    onArticleTapped: handleArticleTapped,
+                                    onArticleAppear: viewModel.articleDidAppear
                                 )
                             }
 

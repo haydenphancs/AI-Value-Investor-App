@@ -27,11 +27,22 @@ from app.services.updates_materiality import (
     COOLDOWN_SESSION_SECONDS,
     PER_SCOPE_ATTEMPT_CAP,
     PER_SCOPE_DAILY_CAP,
+    PER_SCOPE_DAILY_CAP_MARKET,
+    daily_cap_for,
+    premarket_cap_for,
     compute_inputset_id,
     corpus_article_ids,
     decide,
     finite,
     price_band,
+)
+from app.utils.market_hours import (
+    ET,
+    SESSION_AFTERHOURS,
+    SESSION_CLOSED,
+    SESSION_PREMARKET,
+    SESSION_REGULAR,
+    session_phase,
 )
 
 NOW = datetime(2026, 7, 20, 18, 0, tzinfo=timezone.utc)
@@ -266,6 +277,179 @@ def test_daily_cap_blocks_further_generations():
     })
     assert d.action == ACTION_SKIP
     assert d.reason == "daily_cap"
+
+
+def test_the_market_card_gets_a_larger_daily_allowance_than_a_ticker():
+    # The market scope backs the default tab, the wire never goes quiet, and it
+    # is ONE scope — so the extra spend is ~10 calls/day total, not per ticker.
+    assert PER_SCOPE_DAILY_CAP_MARKET > PER_SCOPE_DAILY_CAP
+    assert daily_cap_for(is_market_scope=True) == PER_SCOPE_DAILY_CAP_MARKET
+    assert daily_cap_for(is_market_scope=False) == PER_SCOPE_DAILY_CAP
+
+    # A ticker's ceiling must not gate the market card.
+    d = _decide(
+        scope="__MARKET__",
+        is_market_scope=True,
+        market_change_percent=0.1,
+        state={
+            "regen_day": NOW.date().isoformat(),
+            "regen_count_today": PER_SCOPE_DAILY_CAP,
+        },
+    )
+    assert d.action == ACTION_GENERATE
+
+    d = _decide(
+        scope="__MARKET__",
+        is_market_scope=True,
+        market_change_percent=0.1,
+        state={
+            "regen_day": NOW.date().isoformat(),
+            "regen_count_today": PER_SCOPE_DAILY_CAP_MARKET,
+        },
+    )
+    assert d.action == ACTION_SKIP
+    assert d.reason == "daily_cap"
+
+
+# ── Pre-market reserve ────────────────────────────────────────────────
+# The sweeper wakes at 04:00 ET and the wire is busiest overnight-into-morning,
+# so without a reserve the whole daily allowance was spent before the opening
+# bell. Observed live: __MARKET__ generated for the 6th and last time at 05:49
+# ET, then sat frozen through the entire regular session on `daily_cap`.
+
+
+@pytest.mark.parametrize("is_market", [True, False])
+def test_premarket_reserve_leaves_most_of_the_budget_for_the_open(is_market):
+    cap = daily_cap_for(is_market)
+    reserve = premarket_cap_for(is_market)
+    assert 1 <= reserve < cap
+    # At least half the allowance must survive to 09:30.
+    assert cap - reserve >= cap / 2
+
+
+@pytest.mark.parametrize("is_market", [True, False])
+def test_premarket_blocks_once_the_morning_allowance_is_spent(is_market):
+    scope = "__MARKET__" if is_market else "AAPL"
+    d = _decide(
+        scope=scope,
+        is_market_scope=is_market,
+        session_phase=SESSION_PREMARKET,
+        state={
+            "regen_day": NOW.date().isoformat(),
+            "regen_count_today": premarket_cap_for(is_market),
+        },
+    )
+    assert d.action == ACTION_SKIP
+    assert d.reason == "premarket_reserved"
+
+
+@pytest.mark.parametrize("is_market", [True, False])
+def test_premarket_still_allows_the_first_card_of_the_day(is_market):
+    # A cold scope must be able to get its first card before the bell — the
+    # reserve floors at 1 precisely so this cannot be starved to zero.
+    d = _decide(
+        scope="__MARKET__" if is_market else "AAPL",
+        is_market_scope=is_market,
+        session_phase=SESSION_PREMARKET,
+        state={"regen_day": NOW.date().isoformat(), "regen_count_today": 0},
+    )
+    assert d.action == ACTION_GENERATE
+
+
+@pytest.mark.parametrize("phase", [SESSION_REGULAR, SESSION_AFTERHOURS])
+def test_the_reserve_does_not_apply_once_the_bell_has_rung(phase):
+    # After-hours is deliberately exempt: that window is when earnings land,
+    # the most material news a ticker has all quarter.
+    d = _decide(
+        session_phase=phase,
+        state={
+            "regen_day": NOW.date().isoformat(),
+            "regen_count_today": premarket_cap_for(False),
+        },
+    )
+    assert d.action == ACTION_GENERATE
+
+
+def test_the_reserve_never_outranks_the_hard_daily_cap():
+    # Ordering matters: a scope at its daily ceiling in pre-market must report
+    # `daily_cap`, the durable reason, not the transient `premarket_reserved`.
+    d = _decide(
+        session_phase=SESSION_PREMARKET,
+        state={
+            "regen_day": NOW.date().isoformat(),
+            "regen_count_today": PER_SCOPE_DAILY_CAP,
+        },
+    )
+    assert d.reason == "daily_cap"
+
+
+def test_est_evening_spend_does_not_pre_consume_the_next_premarket_reserve():
+    """The daily budget is keyed on the ET trading date, not the UTC date.
+
+    Under EDT the UTC day rolls at 20:00 ET — exactly when the sweeper stops —
+    so the two agreed by luck. Under EST it rolls at 19:00 ET, one hour INSIDE
+    the sweep window, so the previous evening's after-hours generations landed
+    on the same key as the next morning's pre-market and pre-spent its reserve.
+    That hour is the earnings window, so the generations most likely to fall
+    there are exactly the ones that would starve 04:00-09:30.
+    """
+    # 2026-12-01 19:30 EST == 2026-12-02T00:30Z. UTC-keyed this is "Dec 2";
+    # ET-keyed it is "Dec 1".
+    evening = datetime(2026, 12, 2, 0, 30, tzinfo=timezone.utc)
+    assert evening.astimezone(ET).date().isoformat() == "2026-12-01"
+    assert evening.astimezone(timezone.utc).date().isoformat() == "2026-12-02"
+
+    # Next morning, 2026-12-02 05:00 EST == 10:00Z — pre-market.
+    morning = datetime(2026, 12, 2, 10, 0, tzinfo=timezone.utc)
+    assert morning.astimezone(ET).date().isoformat() == "2026-12-02"
+
+    # A state row stamped by the previous evening must NOT gate the morning.
+    d = _decide(
+        now=morning,
+        close_cycle_start=morning - timedelta(hours=3),
+        session_phase=SESSION_PREMARKET,
+        state={
+            "regen_day": evening.astimezone(ET).date().isoformat(),
+            "regen_count_today": PER_SCOPE_DAILY_CAP,
+        },
+    )
+    assert d.action == ACTION_GENERATE, (
+        "yesterday-ET spend must not consume today's pre-market reserve"
+    )
+
+
+def test_the_trading_day_key_rolls_at_et_midnight_not_at_19_or_20_et():
+    """A ceiling that resets mid-session is not a ceiling: under the old UTC key
+    every scope silently received a second full allowance at 19:00 EST."""
+    # 18:59 and 19:30 EST on the same evening must share one key.
+    before = datetime(2026, 12, 1, 23, 59, tzinfo=timezone.utc)   # 18:59 EST
+    after = datetime(2026, 12, 2, 0, 30, tzinfo=timezone.utc)     # 19:30 EST
+    assert before.astimezone(ET).date() == after.astimezone(ET).date()
+    # ...which the UTC key did not.
+    assert before.astimezone(timezone.utc).date() != after.astimezone(timezone.utc).date()
+
+    d = _decide(
+        now=after,
+        close_cycle_start=after - timedelta(hours=3),
+        session_phase=SESSION_AFTERHOURS,
+        state={
+            "regen_day": before.astimezone(ET).date().isoformat(),
+            "regen_count_today": PER_SCOPE_DAILY_CAP,
+        },
+    )
+    assert d.action == ACTION_SKIP
+    assert d.reason == "daily_cap"
+
+
+def test_yesterdays_premarket_spend_does_not_gate_today():
+    d = _decide(
+        session_phase=SESSION_PREMARKET,
+        state={
+            "regen_day": (NOW - timedelta(days=1)).date().isoformat(),
+            "regen_count_today": 99,
+        },
+    )
+    assert d.action == ACTION_GENERATE
 
 
 def test_attempt_cap_blocks_a_failing_scope():

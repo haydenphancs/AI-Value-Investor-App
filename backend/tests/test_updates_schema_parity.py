@@ -44,7 +44,10 @@ IOS_ARTICLE_KEYS = {
     "sentiment_confidence", "source_name", "source_logo_url", "published_at",
     "thumbnail_url", "article_url", "related_tickers", "ai_processed",
 }
-IOS_FEED_KEYS = {"scope", "articles", "insight", "cached", "cache_age_seconds"}
+IOS_FEED_KEYS = {
+    "scope", "articles", "insight", "cached", "cache_age_seconds",
+    "offset", "has_more",
+}
 
 
 # ── key parity ────────────────────────────────────────────────────────
@@ -69,6 +72,38 @@ def test_article_exposes_exactly_the_keys_ios_decodes():
 def test_feed_exposes_exactly_the_keys_ios_decodes():
     payload = UpdatesFeedResponse(scope="AAPL").model_dump()
     assert set(payload) == IOS_FEED_KEYS
+
+
+@pytest.mark.parametrize("returned,limit,offset,expected", [
+    (50, 50, 0, True),      # full page -> maybe more
+    (49, 50, 0, False),     # short page -> provably the end
+    (0, 50, 50, False),     # empty page -> the end
+    (50, 50, 450, True),    # last offset the query param still accepts
+    (50, 50, 451, False),   # beyond the ceiling: never advertise an unreachable page
+    (50, 50, 500, False),
+])
+def test_has_more_is_derived_from_a_full_page_and_the_offset_ceiling(
+    returned, limit, offset, expected
+):
+    """Mirrors the expression in endpoints/updates.py::get_updates_feed.
+
+    `has_more` must never promise a page the `offset` Query bound (le=500) would
+    reject — the client would loop on a request that 422s.
+    """
+    has_more = returned >= limit and (offset + limit) <= 500
+    assert has_more is expected
+
+
+def test_pagination_defaults_keep_an_old_client_on_page_zero():
+    """`has_more` must default False and `offset` 0.
+
+    An app build that predates pagination decodes neither field. If `has_more`
+    defaulted True, a client that DID decode it would chase pages forever on a
+    scope with fewer rows than one page.
+    """
+    feed = UpdatesFeedResponse(scope="AAPL")
+    assert feed.offset == 0
+    assert feed.has_more is False
 
 
 def test_every_response_is_json_serializable_with_allow_nan_false():
@@ -227,6 +262,24 @@ def test_tab_change_percent_is_optional_not_zero():
     # fabricated 0.0% (which reads as "flat" — a claim we cannot make).
     tab = UpdatesTabResponse(scope="AAPL", title="AAPL", change_percent=None)
     assert tab.change_percent is None
+
+
+def test_the_market_tab_carries_no_change_percent():
+    """The Market pill is GENERAL market news — `news/general-latest` plus
+    SPY/QQQ/DIA/^GSPC/^IXIC coverage — so no single instrument's move describes
+    it. It previously showed the S&P's %, which claims a precision the tab does
+    not have while sitting inches from ticker pills where the % means exactly
+    one thing. iOS hides the label when this is null (`formattedChange`
+    returns nil), so nulling it here is the whole fix.
+    """
+    tab = UpdatesTabResponse(
+        scope="__MARKET__", title="Market", company_name="S&P 500",
+        change_percent=None, is_market_tab=True,
+    )
+    assert tab.change_percent is None
+    assert tab.is_market_tab is True
+    # The field must stay in the contract — iOS decodes it for ticker pills.
+    assert "change_percent" in tab.model_dump()
 
 
 def test_non_finite_change_percent_would_break_json_and_must_be_filtered_upstream():

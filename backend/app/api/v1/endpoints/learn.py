@@ -25,8 +25,9 @@ import logging
 from fastapi import APIRouter, Depends
 from supabase import Client
 
+from app.api.error_response import error_response_from_exception
 from app.database import get_supabase
-from app.dependencies import get_current_user_or_guest
+from app.dependencies import get_learn_identity
 from app.schemas.bookmarks import BookmarkListResponse, BookmarkRequest
 from app.schemas.journey import JourneyResponse
 from app.schemas.learn_progress import CompleteLearnItemRequest, LearnProgressResponse
@@ -70,7 +71,7 @@ async def get_money_moves():
 @router.get("/progress/{content_type}", response_model=LearnProgressResponse)
 async def get_learn_progress(
     content_type: str,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_learn_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """
@@ -103,14 +104,21 @@ async def get_learn_progress(
         logger.error(
             "[Learn] progress fetch failed (user=%s type=%s): %s", user_id, content_type, exc
         )
-        return LearnProgressResponse(keys=[])
+        # NOT 200-with-empty. An empty list is indistinguishable from "this user
+        # has completed nothing", so iOS `hydrate()` would not throw — and the
+        # reconcile pass would then re-POST every locally-known key (up to 25 per
+        # store, 3 stores per Learn open) against a backend that is already
+        # failing. A typed error lets the client keep its local cache and back off.
+        return error_response_from_exception(
+            exc, step="learn_progress_fetch", extra_details={"content_type": content_type}
+        )
 
 
 @router.post("/progress/{content_type}", response_model=LearnProgressResponse)
 async def complete_learn_item(
     content_type: str,
     request: CompleteLearnItemRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_learn_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """
@@ -143,7 +151,7 @@ async def complete_learn_item(
 async def uncomplete_learn_item(
     content_type: str,
     request: CompleteLearnItemRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_learn_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """
@@ -174,6 +182,13 @@ async def uncomplete_learn_item(
                 key,
                 exc,
             )
+            # Do NOT fall through to a 200. The follow-up select would return the
+            # key STILL PRESENT, which iOS reads as "the delete was confirmed" —
+            # it drops its tombstone and the next union-merge resurrects the item,
+            # flipping it back to Completed against the user's explicit tap.
+            return error_response_from_exception(
+                exc, step="learn_uncomplete", extra_details={"content_type": content_type}
+            )
     return await get_learn_progress(content_type=content_type, user=user, supabase=supabase)
 
 
@@ -193,7 +208,7 @@ BOOKMARK_CONTENT_TYPE = "book_bookmark"
 
 @router.get("/bookmarks", response_model=BookmarkListResponse)
 async def get_book_bookmarks(
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_learn_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """
@@ -218,13 +233,15 @@ async def get_book_bookmarks(
         return BookmarkListResponse(bookmarks=[row["item_key"] for row in (result.data or [])])
     except Exception as exc:
         logger.error("[Learn] bookmarks fetch failed (user=%s): %s", user_id, exc)
-        return BookmarkListResponse(bookmarks=[])
+        # See get_learn_progress — a 200-with-empty triggers a pointless
+        # re-push storm against an already-failing backend.
+        return error_response_from_exception(exc, step="learn_bookmarks_fetch")
 
 
 @router.post("/bookmarks", response_model=BookmarkListResponse)
 async def add_book_bookmark(
     request: BookmarkRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_learn_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Bookmark a book (idempotent). Returns the user's full bookmark list, most-recent-first."""
@@ -248,7 +265,7 @@ async def add_book_bookmark(
 @router.delete("/bookmarks", response_model=BookmarkListResponse)
 async def remove_book_bookmark(
     request: BookmarkRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_learn_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Remove a book bookmark (idempotent). Returns the user's full bookmark list."""
@@ -269,4 +286,7 @@ async def remove_book_bookmark(
             await asyncio.to_thread(_delete)
         except Exception as exc:
             logger.error("[Learn] remove bookmark failed (user=%s key=%r): %s", user_id, key, exc)
+            # See uncomplete_learn_item — a 200 here makes iOS drop its tombstone
+            # and the bookmark reappears.
+            return error_response_from_exception(exc, step="learn_remove_bookmark")
     return await get_book_bookmarks(user=user, supabase=supabase)

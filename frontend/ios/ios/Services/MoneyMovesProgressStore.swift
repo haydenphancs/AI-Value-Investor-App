@@ -29,6 +29,19 @@ final class MoneyMovesProgressStore: ObservableObject {
     /// DELETE confirms (or the user re-completes).
     private var pendingUncompleted: Set<String> = []
 
+    /// Monotonic counter of LOCAL writes (a mark/unmark/reset, or a tombstone retiring once its
+    /// DELETE confirms). Every request snapshots it before awaiting; a response carrying a stale
+    /// snapshot describes the server as it was BEFORE that write and must not be merged. Without
+    /// this, a hydrate GET issued before an un-mark can land after the DELETE confirmed and cleared
+    /// the tombstone — re-completing the article with no tombstone left to filter it — and
+    /// `pushUnsynced` would then re-POST it, making the resurrection durable server-side.
+    private var localVersion: UInt64 = 0
+
+    /// Slugs with a POST/DELETE in flight, counted (a completion and an un-completion for the same
+    /// slug can overlap). Read only by tombstone pruning: a GET that predates an in-flight write
+    /// proves nothing about that slug.
+    private var inFlightPushes: [String: Int] = [:]
+
     private static let defaultsKey = "moneyMoves.completedSlugs"
     private static let pendingKey = "moneyMoves.pendingUncompletedSlugs"
     private static let contentType = "money_move"
@@ -55,8 +68,10 @@ final class MoneyMovesProgressStore: ObservableObject {
         guard !s.isEmpty, !completed.contains(s) else { return }
         completed.insert(s)
         pendingUncompleted.remove(s)   // re-completing supersedes any pending un-completion tombstone
+        bumpLocalVersion()             // invalidates any response already in flight
         persistLocal()
-        Task { await self.pushCompletion(s) }
+        beginPush(s)
+        Task { await self.pushCompletion(s); self.endPush(s) }
     }
 
     /// Un-mark an article (the article-end toggle's "undo"). Removes it locally AND on the backend
@@ -66,9 +81,16 @@ final class MoneyMovesProgressStore: ObservableObject {
         guard completed.contains(s) else { return }
         completed.remove(s)
         pendingUncompleted.insert(s)   // tombstone until the DELETE confirms; blocks hydrate() resurrection
+        bumpLocalVersion()
         persistLocal()
-        Task { await self.pushUncompletion(s) }
+        // Counted in flight from ENQUEUE, not from when the Task starts: in that gap a hydrate
+        // would otherwise see the slug absent server-side and retire the tombstone early.
+        beginPush(s)
+        Task { await self.pushUncompletion(s); self.endPush(s) }
     }
+
+    /// Called for every local write, so an in-flight request can tell its snapshot went stale.
+    private func bumpLocalVersion() { localVersion &+= 1 }
 
     /// Flip completion — used by the article-end Complete / Completed button.
     func toggleCompleted(slug: String) {
@@ -80,19 +102,32 @@ final class MoneyMovesProgressStore: ObservableObject {
         guard !completed.isEmpty || !pendingUncompleted.isEmpty else { return }
         completed.removeAll()
         pendingUncompleted.removeAll()
+        bumpLocalVersion()   // a hydrate already in flight must not re-fill what was just cleared
         persistLocal()
     }
 
     // MARK: - Backend sync (best-effort; the local cache is the source of truth)
 
     func hydrate() async {
+        let token = localVersion
         do {
             let resp = try await apiClient.request(
                 endpoint: .getLearnProgress(contentType: Self.contentType),
                 responseType: LearnProgressResponse.self
             )
+            // A local write (un-mark, or a DELETE confirming and retiring its tombstone) landed
+            // while this GET was in flight, so the response describes a PRE-write server state.
+            // Merging it would flip the article back to "Completed" — with the tombstone already
+            // gone there is nothing left to filter it — and `pushUnsynced` would then re-POST it,
+            // making the resurrection durable. Drop it; the next hydrate is authoritative.
+            guard token == localVersion else {
+                print("[MoneyMovesProgressStore] discarded a stale hydrate — a local write raced the GET")
+                return
+            }
+            let remote = Set(resp.keys)
             merge(resp)
-            await pushUnsynced(remote: Set(resp.keys))
+            pruneConfirmedTombstones(remote: remote)
+            await pushUnsynced(remote: remote)
         } catch {
             // Offline or signed out: keep whatever is local — but a decode/contract or 5xx failure
             // silently hides synced progress, so surface it (stays quiet on routine offline).
@@ -118,6 +153,9 @@ final class MoneyMovesProgressStore: ObservableObject {
 
         if !unsynced.isEmpty {
             print("[MoneyMovesProgressStore] re-pushing \(unsynced.count) unsynced completion(s)")
+            // Bounded, and the bound can't strand anything: sorting makes the batch deterministic
+            // and each pushed slug leaves `unsynced` once the server has it, so successive hydrates
+            // drain the backlog 25 at a time.
             for slug in unsynced.sorted().prefix(Self.maxReconcilePushes) {
                 await pushCompletion(slug)
             }
@@ -132,12 +170,38 @@ final class MoneyMovesProgressStore: ObservableObject {
 
     private static let maxReconcilePushes = 25
 
+    /// Retire tombstones the server demonstrably no longer has. `pushUnsynced` only ever retries a
+    /// tombstone the server STILL holds, so a slug whose DELETE failed offline before its
+    /// completion had ever synced kept its tombstone forever — permanently filtering that slug out
+    /// of every merge, including a legitimate completion made later on another device. The server
+    /// reporting the slug absent is proof the un-completion took effect, so the tombstone has done
+    /// its job. Slugs with a write still in flight are left alone: this GET may predate that write.
+    private func pruneConfirmedTombstones(remote: Set<String>) {
+        let confirmed = pendingUncompleted.filter { !remote.contains($0) && inFlightPushes[$0] == nil }
+        guard !confirmed.isEmpty else { return }
+        pendingUncompleted.subtract(confirmed)
+        persistLocal()
+    }
+
+    private func beginPush(_ slug: String) { inFlightPushes[slug, default: 0] += 1 }
+
+    private func endPush(_ slug: String) {
+        guard let count = inFlightPushes[slug] else { return }
+        if count <= 1 { inFlightPushes.removeValue(forKey: slug) } else { inFlightPushes[slug] = count - 1 }
+    }
+
     private func pushCompletion(_ slug: String) async {
+        let token = localVersion
+        beginPush(slug)
+        defer { endPush(slug) }
         do {
             let resp = try await apiClient.request(
                 endpoint: .completeLearnItem(contentType: Self.contentType, key: slug),
                 responseType: LearnProgressResponse.self
             )
+            // Same stale-snapshot guard as hydrate: an un-mark that landed while this POST was in
+            // flight makes the echoed set a pre-write view of the server.
+            guard token == localVersion else { return }
             merge(resp)
         } catch {
             // Non-fatal: stays in the local cache and `pushUnsynced` retries on the next hydrate.
@@ -150,14 +214,22 @@ final class MoneyMovesProgressStore: ObservableObject {
     }
 
     private func pushUncompletion(_ slug: String) async {
+        let token = localVersion
+        beginPush(slug)
+        defer { endPush(slug) }
         do {
             let resp = try await apiClient.request(
                 endpoint: .uncompleteLearnItem(contentType: Self.contentType, key: slug),
                 responseType: LearnProgressResponse.self
             )
-            pendingUncompleted.remove(slug)   // DELETE confirmed → the slug is gone server-side, drop the tombstone
-            persistLocal()
-            merge(resp)
+            // Merge BEFORE retiring the tombstone: while `slug` is still tombstoned the merge cannot
+            // resurrect it, and retiring the tombstone is itself a local write that would
+            // invalidate this very token.
+            if token == localVersion { merge(resp) }
+            if pendingUncompleted.remove(slug) != nil {   // DELETE confirmed → the slug is gone server-side
+                bumpLocalVersion()                        // any GET issued earlier predates this; it must not merge
+                persistLocal()
+            }
         } catch {
             // Stays tombstoned (pendingUncompleted) so a racing/next hydrate() can't resurrect it;
             // `pushUnsynced` retries the DELETE on the next hydrate. Logged, not swallowed.

@@ -25,6 +25,12 @@ final class JourneyProgressStore: ObservableObject {
     /// Titles of lessons the learner has finished.
     @Published private(set) var completedTitles: Set<String> = []
 
+    /// Per-title count of failed pushes. Reconcile batches are ordered by it so a title the server
+    /// keeps rejecting sinks to the back: the journey catalog is far larger than
+    /// `maxReconcilePushes`, so a poison prefix would otherwise take the same slots in every batch
+    /// and strand everything behind it. Session-only — a relaunch retries everything equally.
+    private var pushFailures: [String: Int] = [:]
+
     private static let defaultsKey = "investorJourney.completedLessonTitles"
     private static let contentType = "journey_lesson"
     private let apiClient: APIClient
@@ -85,8 +91,21 @@ final class JourneyProgressStore: ObservableObject {
         let unsynced = completedTitles.subtracting(remote)
         guard !unsynced.isEmpty else { return }
         print("[JourneyProgressStore] re-pushing \(unsynced.count) unsynced completion(s)")
-        for title in unsynced.sorted().prefix(Self.maxReconcilePushes) {
+        // Bounded and deterministically ordered so a large backlog can't stall the Learn surface
+        // opening; the rest go on the next hydrate. Nothing strands: a pushed title leaves
+        // `unsynced` once the server has it, and a title that keeps failing sorts to the back
+        // rather than re-claiming a slot, so successive hydrates drain the whole backlog.
+        for title in reconcileOrder(unsynced).prefix(Self.maxReconcilePushes) {
             await pushCompletion(title)
+        }
+    }
+
+    /// Fewest failures first, then lexicographic — stable across hydrates, and it rotates titles
+    /// that keep failing out of the head of the batch.
+    private func reconcileOrder(_ titles: Set<String>) -> [String] {
+        titles.sorted {
+            let (l, r) = (pushFailures[$0] ?? 0, pushFailures[$1] ?? 0)
+            return l == r ? $0 < $1 : l < r
         }
     }
 
@@ -98,10 +117,12 @@ final class JourneyProgressStore: ObservableObject {
                 endpoint: .completeLearnItem(contentType: Self.contentType, key: title),
                 responseType: LearnProgressResponse.self
             )
+            pushFailures.removeValue(forKey: title)
             merge(resp)
         } catch {
             // Non-fatal: stays in the local cache and `pushUnsynced` retries on the next hydrate.
             // Logged rather than swallowed — a persistent failure means progress is only local.
+            pushFailures[title, default: 0] += 1
             let appError = AppError.from(error)
             if !appError.isExpectedOffline {
                 print("[JourneyProgressStore] push failed for \(title) [\(appError.title)]: \(appError.message)")

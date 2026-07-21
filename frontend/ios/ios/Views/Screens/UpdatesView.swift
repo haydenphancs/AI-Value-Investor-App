@@ -118,6 +118,19 @@ struct UpdatesView: View {
                     }
                 )
             }
+            .alert(
+                "Couldn't update your tickers",
+                isPresented: Binding(
+                    get: { viewModel.watchlistError != nil },
+                    set: { if !$0 { viewModel.watchlistError = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { viewModel.watchlistError = nil }
+            } message: {
+                // Watchlist writes previously failed silently: the sheet showed
+                // nothing and the error leaked into the FEED's empty state.
+                Text(viewModel.watchlistError ?? "")
+            }
             .sheet(isPresented: $showManageAssetsSheet) {
                 ManageAssetsSheet(
                     tickers: viewModel.filterTabs.filter { !$0.isMarketTab },

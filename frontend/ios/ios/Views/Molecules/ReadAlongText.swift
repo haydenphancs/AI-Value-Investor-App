@@ -27,9 +27,24 @@ struct ReadAlongText: View {
     }
 
     /// Index of the span currently being read, if the playhead is inside this run.
+    ///
+    /// STICKY across inter-sentence pauses. A strict `start <= t < end` containment
+    /// test leaves NOTHING highlighted whenever the playhead sits in the silence
+    /// between two spans — and the shipped alignment data is full of those: 2,448
+    /// intra-block gaps in the book table (median 0.60 s) and 290 in Money Moves.
+    /// Since the player ticks every 0.5 s, virtually every one of them is sampled,
+    /// so the highlight visibly blinked off and back on at nearly every sentence
+    /// boundary for the whole of a narration.
+    ///
+    /// Instead: the last span that has STARTED stays lit until the next one does.
+    /// Past the final span's `end` the highlight clears, so a finished (or
+    /// seeked-past) run isn't left with a stale sentence lit.
     static func activeIndex(_ spans: [ReadAlongSentence], _ activeTime: Double?) -> Int? {
-        guard let t = activeTime else { return nil }
-        return spans.firstIndex { t >= $0.start && t < $0.end }
+        guard let t = activeTime, !spans.isEmpty else { return nil }
+        guard let last = spans.last, t < last.end else { return nil }
+        // `lastIndex(where:)` rather than `firstIndex`: spans are ordered, so the
+        // last one that has started is the one being read (or just read).
+        return spans.lastIndex { t >= $0.start }
     }
 
     /// Build the run's text, lighting up the active span. Spans are joined with single spaces

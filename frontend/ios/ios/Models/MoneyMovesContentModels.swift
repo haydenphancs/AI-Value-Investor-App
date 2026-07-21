@@ -29,9 +29,45 @@ import Foundation
 // survive — mirroring the per-row hardening money_moves_content_service._load already does.
 
 /// Never-throwing wrapper: a failed element decodes to `nil` instead of failing the whole array.
+///
+/// Every drop is LOGGED. Leniency without logging is the worst of both worlds: an article that
+/// vanishes here is invisible (the outer decode still succeeds, the store silently serves the stale
+/// bundled copy), so the only symptom is "the new article never showed up" with nothing to grep.
 private struct FailableDecodable<Wrapped: Decodable>: Decodable {
     let value: Wrapped?
-    init(from decoder: Decoder) throws { value = try? Wrapped(from: decoder) }
+    init(from decoder: Decoder) throws {
+        do {
+            value = try Wrapped(from: decoder)
+        } catch {
+            value = nil
+            // Best-effort identity FIRST (slug/title if this element is an object at all), then the
+            // coding path — together they name the Supabase row a human has to go fix.
+            let id = (try? DroppedElementIdentity(from: decoder))?.label ?? "unidentifiable"
+            print("[MoneyMovesContentModels] dropped \(Wrapped.self) at "
+                  + "\(decoder.codingPath.pathDescription) [\(id)]: \(error)")
+        }
+    }
+}
+
+/// Best-effort identity peek at a dropped element. Both fields are optional, so this decodes for any
+/// JSON object and simply fails (=> nil) for a scalar element.
+private struct DroppedElementIdentity: Decodable {
+    let slug: String?
+    let title: String?
+
+    var label: String {
+        let parts = [slug.map { "slug=\($0)" }, title.map { "title=\($0)" }].compactMap { $0 }
+        return parts.isEmpty ? "no slug/title" : parts.joined(separator: " ")
+    }
+}
+
+private extension Array where Element == CodingKey {
+    /// `articles[3].sections[1].content[2]` — enough to point at the offending blob.
+    var pathDescription: String {
+        map { $0.intValue.map { i in "[\(i)]" } ?? ".\($0.stringValue)" }
+            .joined()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+    }
 }
 
 private extension KeyedDecodingContainer {
@@ -63,6 +99,35 @@ private extension KeyedDecodingContainer {
         }
         if let b = (try? decodeIfPresent(Bool.self, forKey: key)) ?? nil { return String(b) }
         return nil
+    }
+
+    /// Decode a `[String]` element-by-element, coercing each the way `flexibleString` does.
+    /// `decodeIfPresent([String].self)` is all-or-nothing: ONE non-string bullet (`["a", 5, "b"]`)
+    /// makes it nil, `toContent()` then returns nil for the block, and the ENTIRE bulletList
+    /// disappears from the article — the good bullets punished for a bad neighbour. Per-element,
+    /// only the uncoercible bullet (an object/array/null) is dropped. nil => no usable items.
+    func flexibleStringArray(forKey key: Key) -> [String]? {
+        guard let wrapped = (try? decodeIfPresent([FlexibleStringElement].self, forKey: key)) ?? nil
+        else { return nil }
+        let items = wrapped.compactMap { $0.value }
+        return items.isEmpty ? nil : items
+    }
+}
+
+/// Single-value counterpart of `flexibleString` — used per array element, and never throws, so one
+/// bad element can't fail the array decode.
+private struct FlexibleStringElement: Decodable {
+    let value: String?
+
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.singleValueContainer() else { value = nil; return }
+        if let s = try? c.decode(String.self) { value = s }
+        else if let i = try? c.decode(Int.self) { value = String(i) }
+        else if let d = try? c.decode(Double.self), d.isFinite {
+            value = d == d.rounded() ? String(Int(d)) : String(d)
+        }
+        else if let b = try? c.decode(Bool.self) { value = String(b) }
+        else { value = nil }   // object / array / null: nothing sensible to render
     }
 }
 
@@ -370,12 +435,13 @@ extension ArticleSectionContentDTO {
     /// block (returns nil) instead of throwing and dropping the whole article. `readAlong` /
     /// `itemsReadAlong` decode via `try?` so a mis-shaped timing container — most likely a FLAT
     /// `itemsReadAlong` authored where the nested `[[…]]` is expected — degrades to nil rather than
-    /// dropping the article. Leaf spans are already defensively decoded (ReadAlongModels).
+    /// dropping the article. Leaf spans are already defensively decoded (ReadAlongModels). `items`
+    /// goes through `flexibleStringArray` so one non-string bullet costs only that bullet.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         type = ((try? c.decodeIfPresent(String.self, forKey: .type)) ?? nil) ?? ""
         text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil
-        items = (try? c.decodeIfPresent([String].self, forKey: .items)) ?? nil
+        items = c.flexibleStringArray(forKey: .items)
         attribution = (try? c.decodeIfPresent(String.self, forKey: .attribution)) ?? nil
         icon = (try? c.decodeIfPresent(String.self, forKey: .icon)) ?? nil
         style = (try? c.decodeIfPresent(String.self, forKey: .style)) ?? nil

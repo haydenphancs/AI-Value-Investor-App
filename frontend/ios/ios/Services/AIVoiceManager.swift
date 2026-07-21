@@ -42,13 +42,29 @@ class AIVoiceManager: NSObject, ObservableObject {
     private var statusObserver: NSKeyValueObservation?
     private var failObserver: NSObjectProtocol?
 
+    // What was last started. The play button after a finished clip calls `resume()`, but
+    // `handleClipFinished` has already nil'd the player — so resume had nothing to resume and yet
+    // reported isPlaying = true (a permanently animating orb over silence). Kept so resume can
+    // honestly replay instead of lying.
+    private enum LastRequest {
+        case clip(name: String, text: String, readAlong: [ReadAlongWord]?)
+        case speech(text: String)
+    }
+    private var lastRequest: LastRequest?
+
+    // Whether narration was actually running when a system interruption (call / Siri) began, so
+    // `.ended` only resumes what the user was really listening to.
+    private var wasPlayingBeforeInterruption = false
+    private var isSessionActive = false
+
     // MARK: - Singleton
     static let shared = AIVoiceManager()
 
     override init() {
         super.init()
         setupSynthesizer()
-        setupAudioSession()
+        configureAudioSession()
+        setupAudioSessionObservers()
     }
 
     // MARK: - Setup
@@ -58,12 +74,99 @@ class AIVoiceManager: NSObject, ObservableObject {
         synthesizer?.delegate = self
     }
 
-    private func setupAudioSession() {
+    /// Declare the category WITHOUT taking the session — activating at init would stop the user's
+    /// other audio just for existing. Matches AudioManager's category+mode exactly: both engines
+    /// share this one session, and the previous `mode: .default` here permanently downgraded
+    /// AudioManager's `.spokenAudio` from the first Journey lesson onward.
+    private func configureAudioSession() {
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-            try AVAudioSession.sharedInstance().setActive(true)
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio,
+                                                            options: [.allowBluetoothA2DP, .allowAirPlay])
         } catch {
-            print("Failed to setup audio session: \(error)")
+            print("[AIVoiceManager] audio session category setup failed: \(error)")
+        }
+    }
+
+    /// Take the session at the moment narration actually starts (see configureAudioSession).
+    private func activateAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio,
+                                                            options: [.allowBluetoothA2DP, .allowAirPlay])
+            try AVAudioSession.sharedInstance().setActive(true)
+            isSessionActive = true
+        } catch {
+            print("[AIVoiceManager] audio session activation failed: \(error)")
+        }
+    }
+
+    /// Hand the session back so other apps' audio can resume once narration is done.
+    ///
+    /// DEFERRED on purpose: the Journey card flow calls `stop()` and immediately starts the next
+    /// card's clip, so releasing synchronously would let the user's other audio (Spotify) barge in
+    /// for a fraction of a second between every card. Dropping ownership immediately and releasing a
+    /// beat later means a resumed narration simply re-claims it and the release is skipped.
+    private func deactivateAudioSession() {
+        guard isSessionActive else { return }
+        isSessionActive = false   // we no longer claim the session, whatever happens below
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)   // longer than a card advance animation
+            guard let self, !self.isPlaying, !self.isSessionActive else { return }
+            // AudioManager drives book / Money Moves playback on this SAME session (it calls our
+            // stop() to take over). Releasing it out from under that engine would cut its audio off.
+            guard !AudioManager.shared.isPlaying else { return }
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+            } catch {
+                print("[AIVoiceManager] audio session deactivation failed: \(error)")
+            }
+        }
+    }
+
+    /// Track system interruptions (calls / Siri) and route changes, which this class previously
+    /// ignored entirely: an incoming call during a Journey lesson silenced the audio while
+    /// `isPlaying` stayed true — the orb kept animating, `handleClipFinished` never fired, and the
+    /// lesson's auto-advance died for good. Mirrors AudioManager's handling. Observers live for the
+    /// app lifetime (singleton), so they're never removed.
+    private func setupAudioSessionObservers() {
+        let nc = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            let optionRaw = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
+            let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optionRaw).contains(.shouldResume)
+            Task { @MainActor [weak self] in self?.handleInterruption(type: type, shouldResume: shouldResume) }
+        }
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+            Task { @MainActor [weak self] in self?.handleRouteChange(reason: reason) }
+        }
+    }
+
+    private func handleInterruption(type: AVAudioSession.InterruptionType, shouldResume: Bool) {
+        switch type {
+        case .began:
+            // Only narration WE own counts — AudioManager's playback interruption is its own concern.
+            wasPlayingBeforeInterruption = isPlaying && (player != nil || synthesizer?.isSpeaking == true)
+            if isPlaying { pause() }
+        case .ended:
+            // `.shouldResume` means "you MAY resume", not "you were playing" — require both, or a
+            // lesson the user had paused would start talking on its own after a call.
+            if shouldResume, wasPlayingBeforeInterruption {
+                isSessionActive = false   // the system deactivated it; resume() re-takes it
+                resume()
+            }
+            wasPlayingBeforeInterruption = false
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleRouteChange(reason: AVAudioSession.RouteChangeReason) {
+        // Headphones / Bluetooth pulled → pause rather than blast the lesson out of the speaker.
+        if reason == .oldDeviceUnavailable, isPlaying {
+            pause()
         }
     }
 
@@ -71,6 +174,7 @@ class AIVoiceManager: NSObject, ObservableObject {
 
     /// Speak the given text with word-by-word progress tracking
     func speak(_ text: String, onComplete: (() -> Void)? = nil) {
+        AudioManager.shared.pauseForExternalAudio()   // see playClip
         guard let synthesizer = synthesizer else { return }
 
         // Stop any current speech
@@ -80,9 +184,11 @@ class AIVoiceManager: NSObject, ObservableObject {
 
         currentText = text
         self.onComplete = onComplete
+        lastRequest = .speech(text: text)   // so resume() after a finish can replay honestly
         wordRanges = calculateWordRanges(for: text)
         currentWordIndex = 0
         progress = 0.0
+        activateAudioSession()
 
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
@@ -99,6 +205,14 @@ class AIVoiceManager: NSObject, ObservableObject {
     /// driving the same word-highlight + progress as the synthesizer path via estimated timing.
     /// Falls back to on-device speech if the clip is missing.
     func playClip(named name: String, text: String, readAlong: [ReadAlongWord]? = nil, onComplete: (() -> Void)? = nil) {
+        // Yield the shared audio session. AudioManager (Money Moves / book
+        // narration) and this class each drive their own AVPlayer on the same
+        // non-mixable `.playback` session and previously had no knowledge of one
+        // another — so starting a Journey lesson while a book was playing left
+        // BOTH voices audible, with both read-along highlights tracking the
+        // wrong audio and no visible control to stop the other stream.
+        AudioManager.shared.pauseForExternalAudio()
+
         // Stop anything currently playing
         synthesizer?.stopSpeaking(at: .immediate)
         currentUtterance = nil   // synth not in use for this clip → ignore any late synth callbacks
@@ -119,6 +233,7 @@ class AIVoiceManager: NSObject, ObservableObject {
 
         currentText = text
         self.onComplete = onComplete
+        lastRequest = .clip(name: name, text: text, readAlong: readAlong)   // see resume()
         wordRanges = calculateWordRanges(for: text)
         // Use the aligned timings only if they line up 1:1 with the tokenized words (they're built
         // from strip_markup(text).split(), the same tokenization as wordRanges); otherwise ignore.
@@ -156,6 +271,7 @@ class AIVoiceManager: NSObject, ObservableObject {
             Task { @MainActor in self?.handleClipLoadFailed() }
         }
 
+        activateAudioSession()
         isPlaying = true
         newPlayer.play()
     }
@@ -170,14 +286,37 @@ class AIVoiceManager: NSObject, ObservableObject {
         isPlaying = false
     }
 
-    /// Resume paused speech (synth or clip)
+    /// Resume paused speech (synth or clip).
+    ///
+    /// Only claims `isPlaying` when something will ACTUALLY produce sound. Previously this set
+    /// `isPlaying = true` unconditionally, so tapping play after a clip ended (handleClipFinished
+    /// nils the player) fell through to a no-op `continueSpeaking()` on an idle synthesizer and left
+    /// the card permanently "playing" in silence, with no way back.
     func resume() {
-        if player != nil {
-            player?.play()
-        } else {
-            synthesizer?.continueSpeaking()
+        if let player {
+            activateAudioSession()
+            player.play()
+            isPlaying = true
+            return
         }
-        isPlaying = true
+        if let synthesizer, synthesizer.isPaused {
+            activateAudioSession()
+            synthesizer.continueSpeaking()
+            isPlaying = true
+            return
+        }
+        // Nothing is loaded: the clip finished, or stop() cleared it. Replay what was last requested
+        // so the play button does something real; if there's nothing to replay, stay honestly idle.
+        guard let lastRequest else {
+            isPlaying = false
+            return
+        }
+        switch lastRequest {
+        case .clip(let name, let text, let readAlong):
+            playClip(named: name, text: text, readAlong: readAlong, onComplete: onComplete)
+        case .speech(let text):
+            speak(text, onComplete: onComplete)
+        }
     }
 
     /// Stop speaking completely (synth or clip)
@@ -190,6 +329,10 @@ class AIVoiceManager: NSObject, ObservableObject {
         currentWordRange = NSRange(location: 0, length: 0)
         progress = 0.0
         readAlongWords = nil
+        // Nothing of ours is audible any more. NOTE: AudioManager calls stop() to take the session
+        // for a book / Money Moves clip, so only release it if we still hold it — deactivating after
+        // the other engine has activated would be a no-op on our flag but is guarded there too.
+        deactivateAudioSession()
     }
 
     /// Toggle between play and pause
@@ -263,8 +406,11 @@ class AIVoiceManager: NSObject, ObservableObject {
             return
         }
 
-        // Fallback: estimate the word index from the elapsed fraction of the clip.
-        let totalChars = Double(currentText.count)
+        // Fallback: estimate the word index from the elapsed fraction of the clip. Measure in UTF-16
+        // units — `targetChar` is compared against `NSRange.location`, which is UTF-16 — because
+        // `String.count` counts GRAPHEMES and under-counts any emoji / accented / non-BMP text, which
+        // would make the estimated cursor run ahead of the real word ranges.
+        let totalChars = Double(currentText.utf16.count)
         guard clipDuration > 0, totalChars > 0 else { return }
         let targetChar = Int(min(1.0, max(0.0, elapsed / clipDuration)) * totalChars)
         var index = 0
@@ -283,6 +429,7 @@ class AIVoiceManager: NSObject, ObservableObject {
         teardownPlayer()
         isPlaying = false
         progress = 1.0
+        deactivateAudioSession()   // lesson over; let other apps' audio back in
         completion?()
     }
 
@@ -331,10 +478,13 @@ extension AIVoiceManager: AVSpeechSynthesizerDelegate {
             self.currentWordRange = characterRange
             self.currentWordIndex = self.wordIndex(forCharacterAt: characterRange.location)
 
-            // Calculate progress
-            let totalLength = self.currentText.count
+            // Calculate progress. `characterRange` is UTF-16 (NSRange), so the denominator must be
+            // too: `String.count` counts graphemes, so an emoji/accented lesson made the ratio
+            // exceed 1 (observed ~1.25) and overflowed the progress bar. Clamp as a backstop.
+            let totalLength = self.currentText.utf16.count
             if totalLength > 0 {
-                self.progress = Double(characterRange.location + characterRange.length) / Double(totalLength)
+                let consumed = Double(characterRange.location + characterRange.length)
+                self.progress = min(1.0, max(0.0, consumed / Double(totalLength)))
             }
         }
     }

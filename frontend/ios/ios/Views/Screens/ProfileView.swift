@@ -12,6 +12,10 @@ struct ProfileView: View {
     @Environment(\.appState) private var appState
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel = ProfileViewModel()
+    /// Terms / Privacy open in the in-app browser. Held locally rather than on
+    /// the ViewModel because these two links are the view's own chrome, not
+    /// profile state.
+    @State private var browserLink: BrowserLink?
 
     var body: some View {
         NavigationStack {
@@ -65,6 +69,7 @@ struct ProfileView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .inAppBrowser(link: $browserLink)
     }
 
     // MARK: - Section 1: User Identity & Tier
@@ -417,8 +422,14 @@ struct ProfileView: View {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 
+    // The two `mailto:` handlers below deliberately keep
+    // `UIApplication.shared.open`. `SFSafariViewController` accepts http/https
+    // ONLY, so routing a mailto: through the in-app browser is a runtime
+    // failure — these must hand off to Mail. `openExternal(_:into:)` enforces
+    // the same rule, but stating it here stops the next reader "fixing" the
+    // inconsistency.
+
     private func openFeedback() {
-        // Will open feedback form / email
         if let url = URL(string: "mailto:feedback@caydex.com?subject=App%20Feedback") {
             UIApplication.shared.open(url)
         }
@@ -432,13 +443,13 @@ struct ProfileView: View {
 
     private func openTerms() {
         if let url = URL(string: "https://caydex.com/terms") {
-            UIApplication.shared.open(url)
+            openExternal(url, into: &browserLink)
         }
     }
 
     private func openPrivacy() {
         if let url = URL(string: "https://caydex.com/privacy") {
-            UIApplication.shared.open(url)
+            openExternal(url, into: &browserLink)
         }
     }
 }

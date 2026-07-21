@@ -526,83 +526,118 @@ struct NewsFilterSheet: View {
     @State private var selectedSources: Set<String> = []
     @State private var selectedSentiments: Set<NewsSentiment> = []
 
+    /// Section headers, styled to match `TickerSearchSheet`'s. `Section("…")`
+    /// alone renders UIKit's default grouped header, which is a different grey
+    /// and a different weight from the rest of the app's chrome.
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textMuted)
+    }
+
     var body: some View {
         NavigationView {
-            List {
-                // Sources Section
-                Section("Sources") {
-                    if availableSources.isEmpty {
-                        Text("No publishers in this feed yet.")
-                            .font(AppTypography.bodySmall)
-                            .foregroundColor(AppColors.textMuted)
+            // Same construction as ManageAssetsSheet ("Your Tickers"): an opaque
+            // app-background layer UNDER the list, the list's own scroll
+            // background hidden, and every row painted with `cardBackground`.
+            //
+            // Without all three, `List` keeps its default grouped material,
+            // which on a sheet is translucent — so the news timeline showed
+            // through the filter sheet as a blur. `.preferredColorScheme(.dark)`
+            // and `.toolbarColorScheme(.dark, …)` complete it: the sheet is
+            // presented outside the app's own view tree, so it does not inherit
+            // the dark scheme from the screen that presented it.
+            ZStack {
+                AppColors.background
+                    .ignoresSafeArea()
+
+                List {
+                    // Sources Section
+                    Section {
+                        if availableSources.isEmpty {
+                            Text("No publishers in this feed yet.")
+                                .font(AppTypography.bodySmall)
+                                .foregroundColor(AppColors.textMuted)
+                                .listRowBackground(AppColors.cardBackground)
+                        }
+                        ForEach(availableSources, id: \.self) { source in
+                            HStack {
+                                Text(source)
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.textPrimary)
+
+                                Spacer()
+
+                                if selectedSources.contains(source) {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(AppColors.primaryBlue)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if selectedSources.contains(source) {
+                                    selectedSources.remove(source)
+                                } else {
+                                    selectedSources.insert(source)
+                                }
+                            }
+                            .listRowBackground(AppColors.cardBackground)
+                        }
+                    } header: {
+                        sectionHeader("Sources")
                     }
-                    ForEach(availableSources, id: \.self) { source in
-                        HStack {
-                            Text(source)
-                                .font(AppTypography.body)
-                                .foregroundColor(AppColors.textPrimary)
 
-                            Spacer()
+                    // Sentiment Section
+                    Section {
+                        ForEach(NewsSentiment.allCases, id: \.self) { sentiment in
+                            HStack {
+                                Text(sentiment.displayName)
+                                    .font(AppTypography.body)
+                                    .foregroundColor(AppColors.textPrimary)
 
-                            if selectedSources.contains(source) {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(AppColors.primaryBlue)
+                                Spacer()
+
+                                if selectedSentiments.contains(sentiment) {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(AppColors.primaryBlue)
+                                }
                             }
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            if selectedSources.contains(source) {
-                                selectedSources.remove(source)
-                            } else {
-                                selectedSources.insert(source)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if selectedSentiments.contains(sentiment) {
+                                    selectedSentiments.remove(sentiment)
+                                } else {
+                                    selectedSentiments.insert(sentiment)
+                                }
                             }
+                            .listRowBackground(AppColors.cardBackground)
                         }
+                    } header: {
+                        sectionHeader("Sentiment")
+                    }
+
+                    // Reset Section
+                    Section {
+                        Button("Reset Filters") {
+                            selectedSources.removeAll()
+                            selectedSentiments.removeAll()
+                        }
+                        .foregroundColor(AppColors.bearish)
+                        .listRowBackground(AppColors.cardBackground)
                     }
                 }
-
-                // Sentiment Section
-                Section("Sentiment") {
-                    ForEach(NewsSentiment.allCases, id: \.self) { sentiment in
-                        HStack {
-                            Text(sentiment.displayName)
-                                .font(AppTypography.body)
-                                .foregroundColor(AppColors.textPrimary)
-
-                            Spacer()
-
-                            if selectedSentiments.contains(sentiment) {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(AppColors.primaryBlue)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            if selectedSentiments.contains(sentiment) {
-                                selectedSentiments.remove(sentiment)
-                            } else {
-                                selectedSentiments.insert(sentiment)
-                            }
-                        }
-                    }
-                }
-
-                // Reset Section
-                Section {
-                    Button("Reset Filters") {
-                        selectedSources.removeAll()
-                        selectedSentiments.removeAll()
-                    }
-                    .foregroundColor(AppColors.bearish)
-                }
+                .listStyle(InsetGroupedListStyle())
+                .scrollContentBackground(.hidden)
             }
-            .listStyle(InsetGroupedListStyle())
             .navigationTitle("Filters")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
                         onApply?()
                     }
+                    .foregroundColor(AppColors.primaryBlue)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Apply") {
@@ -611,10 +646,12 @@ struct NewsFilterSheet: View {
                         onApply?()
                     }
                     .fontWeight(.semibold)
+                    .foregroundColor(AppColors.primaryBlue)
                 }
             }
         }
         .presentationDetents([.medium, .large])
+        .preferredColorScheme(.dark)
         .onAppear {
             selectedSources = Set(filterOptions.sources)
             selectedSentiments = Set(filterOptions.sentiments)

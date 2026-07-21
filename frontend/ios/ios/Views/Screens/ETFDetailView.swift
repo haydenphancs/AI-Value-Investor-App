@@ -183,6 +183,9 @@ struct ETFDetailView: View {
             ShareSheet(items: shareItems)
         }
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
+        // News articles, company websites and whitepapers open INSIDE the app
+        // instead of ejecting to Safari (matches Webull / Robinhood).
+        .inAppBrowser(link: $viewModel.browserLink)
         .navigationDestination(item: $selectedSearchResult) { selection in
             AssetDetailRouter(selection: selection)
         }

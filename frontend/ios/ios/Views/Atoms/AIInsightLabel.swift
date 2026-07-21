@@ -28,32 +28,21 @@ struct AIInsightLabel: View {
     var font: Font = AppTypography.bodySmallEmphasis
     var iconFont: Font = AppTypography.iconDefault
 
-    private var gradient: LinearGradient {
-        LinearGradient(
-            colors: [.indigo, .cyan],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             Image(systemName: "sparkles.2")
-                // Single-colour "gradient" on the icon is deliberate and matches
-                // the report: the two-stop gradient reads as muddy at icon size.
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.indigo],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+                // Flat indigo, NOT `AppGradients.ai` — deliberate, and it is
+                // what the report sections render. A two-stop ramp across a
+                // glyph this small reads as muddy rather than as a gradient.
+                // (The report writes this as a one-colour LinearGradient, which
+                // rasterises identically.)
+                .foregroundStyle(Color.indigo)
                 .font(iconFont)
                 .fontWeight(.semibold)
 
             Text(text)
                 .font(font)
-                .foregroundStyle(gradient)
+                .foregroundStyle(AppGradients.ai)
         }
         // One element to VoiceOver, and it reads as a label rather than
         // "sparkles two, Insight".

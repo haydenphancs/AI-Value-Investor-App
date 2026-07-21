@@ -10,7 +10,13 @@ import SwiftUI
 struct NewsDetailHeader: View {
     let source: NewsSource
     var onBackTapped: (() -> Void)?
-    var onMoreTapped: (() -> Void)?
+    /// Share the article. Replaces the old "…" overflow button, which opened a
+    /// confirmation dialog whose only surviving item was "Share Article" — a
+    /// second tap for a menu of one. ("Save Article" and "Report Issue" were
+    /// removed earlier because both were `print()` stubs.)
+    var onShareTapped: (() -> Void)?
+    /// Hidden when there is no URL to share, rather than shown-but-inert.
+    var canShare: Bool = true
 
     var body: some View {
         HStack(spacing: AppSpacing.md) {
@@ -37,17 +43,20 @@ struct NewsDetailHeader: View {
 
             Spacer()
 
-            // More Options Button
-            Button(action: {
-                onMoreTapped?()
-            }) {
-                Image(systemName: "ellipsis")
-                    .font(AppTypography.iconMedium).fontWeight(.semibold)
-                    .foregroundColor(AppColors.textPrimary)
-                    .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
+            // Share Button
+            if canShare {
+                Button(action: {
+                    onShareTapped?()
+                }) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(AppTypography.iconMedium).fontWeight(.semibold)
+                        .foregroundColor(AppColors.textPrimary)
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+                .accessibilityLabel("Share article")
             }
-            .buttonStyle(PlainButtonStyle())
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.md)
@@ -59,14 +68,16 @@ struct NewsDetailHeader: View {
         NewsDetailHeader(
             source: NewsSource(name: "CNBC", iconName: nil),
             onBackTapped: { print("Back tapped") },
-            onMoreTapped: { print("More tapped") }
+            onShareTapped: { print("Share tapped") }
         )
 
         Divider()
             .background(AppColors.cardBackgroundLight)
 
+        // No shareable URL — the share button is absent, not inert.
         NewsDetailHeader(
-            source: NewsSource(name: "Reuters", iconName: nil)
+            source: NewsSource(name: "Reuters", iconName: nil),
+            canShare: false
         )
     }
     .background(AppColors.background)

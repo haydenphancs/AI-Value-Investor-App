@@ -234,6 +234,9 @@ struct IndexDetailView: View {
             )
         }
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
+        // News articles, company websites and whitepapers open INSIDE the app
+        // instead of ejecting to Safari (matches Webull / Robinhood).
+        .inAppBrowser(link: $viewModel.browserLink)
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
                 print("🤖 IndexDetailView: Opening AI chat for \(indexSymbol) with query: \(query)")

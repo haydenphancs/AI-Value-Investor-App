@@ -121,6 +121,61 @@ async def get_current_user_or_guest(
     return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
 
 
+# Fixed namespace for deriving a per-install guest id. Random once, constant
+# forever — changing it orphans every guest's Learn progress.
+_GUEST_NAMESPACE = uuid.UUID("6f9d3c2a-1e57-4a2b-9c84-5b1d0e7a3f6c")
+
+
+def guest_user_id_for(install_id: Optional[str]) -> str:
+    """Stable pseudo-user id for one app INSTALL.
+
+    Every install currently authenticates as the same ``GUEST_USER_ID`` (the iOS
+    login UI is not built yet and no request carries a Bearer token). Because the
+    Learn stores union-merge the server's set into the local one, that meant one
+    user's completed lessons and bookmarks were merged into EVERY other user's
+    app. This derives a distinct id per install instead.
+
+    UUID5 over a fixed namespace, so:
+      * the id is deterministic — the same install always resolves to the same
+        row set, across app restarts and backend deploys;
+      * a client cannot impersonate a real account by sending someone's uuid,
+        because the value it sends is HASHED, never used directly.
+
+    Returns the shared ``GUEST_USER_ID`` when no install id is supplied, which is
+    what already-shipped app versions do — their behaviour is unchanged.
+    """
+    if not install_id:
+        return GUEST_USER_ID
+    cleaned = install_id.strip()[:200]
+    if not cleaned:
+        return GUEST_USER_ID
+    return str(uuid.uuid5(_GUEST_NAMESPACE, cleaned))
+
+
+async def get_learn_identity(
+    authorization: Optional[str] = Header(None),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    supabase: Client = Depends(get_supabase),
+) -> dict:
+    """Identity for the LEARN routes: a real account, else a PER-INSTALL guest.
+
+    Deliberately scoped to Learn rather than replacing
+    :func:`get_current_user_or_guest` everywhere: research / credits / portfolios
+    hang off a seeded ``GUEST_USER_ID`` row (with real credits), and pointing
+    those at a synthetic id would break them. Learn progress has no such
+    dependency — ``user_learn_progress.user_id`` is a bare uuid column with no
+    foreign key — so it can be partitioned safely.
+    """
+    user = await get_current_user_or_guest(authorization, supabase)
+    if user.get("id") != GUEST_USER_ID:
+        return user  # a real signed-in account always wins
+    return {
+        "id": guest_user_id_for(x_guest_id),
+        "email": "guest@local",
+        "tier": "free",
+    }
+
+
 class RateLimitChecker:
     def __init__(self, max_requests: int = 60, window_seconds: int = 60):
         self.max_requests = max_requests

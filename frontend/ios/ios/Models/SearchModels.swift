@@ -92,6 +92,57 @@ struct SearchNewsItem: Identifiable {
         self.readMoreAction = "Read More"
     }
 
+    /// Create from the Updates market feed — the source of real market news.
+    /// Carries `apiId`, `articleUrl` and `sentiment` so the detail screen can
+    /// enrich and render honestly instead of stamping a hardcoded Neutral.
+    init(from dto: UpdatesArticleDTO) {
+        self.source = dto.sourceName?.isEmpty == false ? dto.sourceName! : "News"
+        self.timeAgo = Self.formatTimeAgo(dto.publishedAt)
+        self.headline = dto.headline
+        self.summary = dto.summary ?? ""
+        self.imageName = dto.thumbnailUrl ?? ""
+        self.imageURL = URL(string: dto.thumbnailUrl ?? "")
+        self.readMoreAction = "Read More"
+        self.apiId = dto.id
+        self.articleURL = URL(string: dto.articleUrl ?? "")
+        self.sentiment = NewsSentiment(backend: dto.sentiment)
+        self.publishedAt = UpdatesDateParser.parse(dto.publishedAt)
+        self.relatedTickers = dto.relatedTickers ?? []
+        self.summaryBullets = dto.summaryBullets ?? []
+        self.aiProcessed = dto.aiProcessed ?? false
+    }
+
+    // ── Fields carried through to NewsDetailView ──
+    // Defaulted so the legacy/sample initialisers keep compiling.
+
+    var apiId: String = ""
+    var articleURL: URL? = nil
+    /// nil until AI enrichment has run — the badge is HIDDEN rather than
+    /// defaulted to a Neutral verdict no model produced.
+    var sentiment: NewsSentiment? = nil
+    var publishedAt: Date? = nil
+    var relatedTickers: [String] = []
+    var summaryBullets: [String] = []
+    var aiProcessed: Bool = false
+
+    /// Bridge to the shared article model used by NewsDetailView.
+    func toNewsArticle() -> NewsArticle {
+        NewsArticle(
+            headline: headline,
+            summary: summary.isEmpty ? nil : summary,
+            source: NewsSource(name: source, iconName: nil),
+            sentiment: sentiment,
+            publishedAt: publishedAt ?? Date(),
+            thumbnailName: nil,
+            relatedTickers: relatedTickers,
+            apiId: apiId,
+            imageURL: imageURL,
+            articleURL: articleURL,
+            summaryBullets: summaryBullets,
+            aiProcessed: aiProcessed
+        )
+    }
+
     /// Create with explicit values (sample data / legacy)
     init(source: String, timeAgo: String, headline: String, summary: String,
          imageName: String, readMoreAction: String) {

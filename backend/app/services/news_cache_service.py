@@ -50,9 +50,33 @@ MARKET_SCOPE = "__MARKET__"
 # small-cap earnings-call recaps that, sorted by recency, bury the market story.
 MARKET_INDEX_SYMBOLS = "SPY,QQQ,DIA,^GSPC,^IXIC"
 
+# How far back a sweeper REFRESH reaches. Must be >= the span a cold
+# `get_stock_news(limit=50)` returns (~3-4 days), or the refresh re-stamps only
+# the newest slice and the cache silently decays to today-only. See
+# `refresh_scope_news`.
+REFRESH_LOOKBACK_HOURS = 96
+
+
+def _has_waiters(fut: asyncio.Future) -> bool:
+    """Whether anything is awaiting `fut`.
+
+    `asyncio.Future._callbacks` is private but stable across CPython 3.8-3.13 and
+    is the only way to ask this. Guarded so a future CPython change degrades to
+    "assume waiters" (the pre-existing behaviour) rather than raising.
+    """
+    try:
+        return bool(getattr(fut, "_callbacks", None))
+    except Exception:
+        return True
+
 
 class NewsCacheService:
     """Service for fetching and caching news per ticker with lazy AI enrichment."""
+
+    # Runaway guard for the paged bulk read: 20 x 1000 rows is far beyond any
+    # real cache size (the table holds ~900 fresh rows today), so hitting it
+    # means something is wrong rather than that the data is large.
+    _MAX_BULK_PAGES = 20
 
     def __init__(self):
         self.supabase = get_supabase()
@@ -184,7 +208,9 @@ class NewsCacheService:
         the existing 6h TTL, on-demand `enrich_articles`, and `cleanup_expired_cache`
         all apply with no changes. Mirrors :meth:`get_ticker_news`'s envelope.
         """
-        cached_articles = self._get_cached(MARKET_SCOPE, limit)
+        # Sync SDK — keep it off the event loop. This is the Updates screen's
+        # default tab, so it is the hottest read in the feature.
+        cached_articles = await asyncio.to_thread(self._get_cached, MARKET_SCOPE, limit)
         if cached_articles:
             logger.info(
                 f"Market news cache HIT: {len(cached_articles)} articles"
@@ -214,7 +240,14 @@ class NewsCacheService:
             # BaseException, not Exception: a CancelledError must still resolve
             # the future, or every joiner hangs forever waiting on a dead fetch.
             if not fut.done():
-                fut.set_exception(e)
+                # Only hand the exception to the future when someone is actually
+                # waiting on it. With no joiner, an unretrieved future exception
+                # produces a "Future exception was never retrieved" traceback on
+                # GC for every single failure — pure log/Sentry noise.
+                if _has_waiters(fut):
+                    fut.set_exception(e)
+                else:
+                    fut.cancel()
             raise
         finally:
             self._inflight.pop(MARKET_SCOPE, None)
@@ -278,8 +311,9 @@ class NewsCacheService:
                     "articles": [], "ticker": MARKET_SCOPE,
                     "cached": False, "cache_age_seconds": 0,
                 }
-            articles = self._build_and_cache_rows(
-                cache_key=MARKET_SCOPE, raw_articles=raw_articles, limit=limit,
+            articles = await asyncio.to_thread(
+                self._build_and_cache_rows,
+                MARKET_SCOPE, raw_articles, limit,
                 # No fallback ticker: a general market story with no FMP `symbol`
                 # genuinely relates to nothing in particular. Stamping it with
                 # "__MARKET__" would surface a fake ticker chip in the iOS UI.
@@ -375,15 +409,26 @@ class NewsCacheService:
                 "published_at": raw.get("publishedDate"),
                 "thumbnail_url": raw.get("image"),
                 "article_url": raw.get("url"),
-                "related_tickers": related,
-                "cached_at": now.isoformat(),
+                # `expires_at` IS re-stamped on a refresh — that is what keeps an
+                # already-cached article alive instead of aging out.
                 "expires_at": expires.isoformat(),
             }
             if not ingest_only:
-                # Only a first-time fetch may (re-)initialise the AI columns.
-                # See the `ingest_only` note in the docstring — including these
-                # on a refresh silently wipes existing enrichment.
+                # Only a first-time fetch may (re-)initialise these. On a REFRESH
+                # every one of them would be clobbered back to its empty value:
+                #
+                #  * the AI columns — wiping enrichment users already paid for;
+                #  * `related_tickers` — FMP's raw `symbol` list does NOT include
+                #    the extra symbols Gemini extracts during enrichment, so
+                #    re-writing it strips the related-ticker chips permanently
+                #    (`ai_processed` stays true, so nothing ever re-enriches);
+                #  * `cached_at` — SentimentService derives its 4-hour staleness
+                #    check from max(cached_at). Re-stamping it every 15 minutes
+                #    means that check never trips and the 14-day sentiment corpus
+                #    is never rebuilt.
                 row.update({
+                    "related_tickers": related,
+                    "cached_at": now.isoformat(),
                     "summary_bullets": json.dumps([]),
                     "sentiment": None,
                     "sentiment_confidence": 0,
@@ -474,14 +519,18 @@ class NewsCacheService:
             return []
 
         # 1. Fetch the rows from cache by IDs
-        try:
-            result = (
+        def _select():
+            return (
                 self.supabase.table("ticker_news_cache")
                 .select("*")
                 .eq("ticker", ticker)
                 .in_("id", article_ids)
                 .execute()
             )
+
+        try:
+            # Off-thread: sync SDK on a request path (POST /updates/news/enrich).
+            result = await asyncio.to_thread(_select)
             rows = result.data or []
         except Exception as e:
             logger.error(f"Failed to fetch articles for enrichment: {e}")
@@ -578,10 +627,20 @@ class NewsCacheService:
         return enriched_response + newly_enriched
 
     async def _update_enrichment_row(self, row_id: str, update_data: dict):
-        """Update a single enrichment row in Supabase."""
-        self.supabase.table("ticker_news_cache").update(
-            update_data
-        ).eq("id", row_id).execute()
+        """Update a single enrichment row in Supabase.
+
+        Off-thread: the Supabase SDK is synchronous, so with the body inline this
+        coroutine had NO await point — the `asyncio.gather` fan-out above was
+        purely decorative. 25-50 enrichment writes ran strictly serially AND
+        parked the event loop for the whole batch, stalling every other request
+        on the instance each time someone opened a news feed.
+        """
+        def _do() -> None:
+            self.supabase.table("ticker_news_cache").update(
+                update_data
+            ).eq("id", row_id).execute()
+
+        await asyncio.to_thread(_do)
 
     # ── Private: Ticker parsing helper ──────────────────────────────────
 
@@ -856,8 +915,13 @@ Return a JSON array with one object per article in order. Each object must have:
         # trap this repo has hit before (see sector_benchmark_lookup._fetch_rows).
         page_size = 1000
         offset = 0
-        max_rows = per_scope_limit * len(scopes) + page_size
-        while offset < max_rows:
+        # Page until a SHORT read, not until a global row budget is spent. The
+        # budget (`per_scope_limit * len(scopes)`) assumed rows are spread evenly
+        # across scopes; they are not. A few busy scopes can consume it entirely
+        # while a sparse scope's rows sit on a later page that is never fetched —
+        # and a scope that comes back empty reads as `no_corpus`, so its Insights
+        # card is never generated. `_MAX_BULK_PAGES` is only a runaway guard.
+        while offset < page_size * self._MAX_BULK_PAGES:
             try:
                 result = (
                     self.supabase.table("ticker_news_cache")
@@ -888,7 +952,7 @@ Return a JSON array with one object per article in order. Each object must have:
                     bucket.append(row)
 
             if len(rows) < page_size:
-                break  # last page
+                break  # short read => last page, every scope has been seen
             # Every scope already full → nothing more to learn from later pages.
             if len(grouped) == len(scopes) and all(
                 len(v) >= per_scope_limit for v in grouped.values()
@@ -899,7 +963,7 @@ Return a JSON array with one object per article in order. Each object must have:
         return grouped
 
     async def refresh_scope_news(
-        self, scope: str, limit: int = 50, lookback_hours: int = 6,
+        self, scope: str, limit: int = 50, lookback_hours: int = REFRESH_LOOKBACK_HOURS,
     ) -> int:
         """Force-fetch recent news for ``scope`` from FMP and write it through.
 
@@ -911,6 +975,15 @@ Return a JSON array with one object per article in order. Each object must have:
 
         The upsert is idempotent on ``(ticker, external_id)``, so re-fetching
         overlapping articles refreshes ``expires_at`` instead of duplicating.
+
+        THE WINDOW MUST NOT BE NARROWER THAN THE COLD FETCH. This ran at 6 hours,
+        which made `from_date` today — so the refresh only ever re-stamped
+        TODAY's articles while every older cached row aged out at its 6h
+        `expires_at`. Because `_get_cached` filters on `expires_at` and
+        `get_ticker_news` short-circuits on any non-empty result, the full
+        multi-day fetch never ran again: the Ticker Detail News tab silently
+        collapsed from ~50 articles across several days to the handful published
+        today. A refresh must therefore cover the same span the cold fetch does.
 
         Returns the number of rows written (0 on any failure — non-fatal, the
         next sweep retries).
@@ -1054,9 +1127,11 @@ Return a JSON array with one object per article in order. Each object must have:
             )
 
         try:
-            result = self.supabase.rpc(
-                "get_top_watchlist_tickers", {"n": top_n}
-            ).execute()
+            result = await asyncio.to_thread(
+                lambda: self.supabase.rpc(
+                    "get_top_watchlist_tickers", {"n": top_n}
+                ).execute()
+            )
             tickers = [row["ticker"] for row in (result.data or [])]
         except Exception as e:
             logger.error(f"Failed to get top watchlist tickers: {e}")
@@ -1087,10 +1162,15 @@ Return a JSON array with one object per article in order. Each object must have:
 
     async def cleanup_expired_cache(self):
         """Delete expired cache entries. Called periodically."""
-        try:
-            self.supabase.table("ticker_news_cache").delete().lt(
+        def _delete():
+            return self.supabase.table("ticker_news_cache").delete().lt(
                 "expires_at", datetime.now(timezone.utc).isoformat()
             ).execute()
+
+        try:
+            # A table-wide DELETE is the slowest statement this service issues;
+            # on the loop it stalls every concurrent request for its duration.
+            await asyncio.to_thread(_delete)
             logger.info("Cleaned up expired news cache entries")
         except Exception as e:
             logger.error(f"Cache cleanup failed: {e}")

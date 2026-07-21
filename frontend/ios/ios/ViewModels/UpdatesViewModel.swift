@@ -36,6 +36,10 @@ final class UpdatesViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var isRefreshing: Bool = false
     @Published var error: String?
+    /// Errors from watchlist writes (Manage Assets). Kept SEPARATE from `error`:
+    /// routing an "add ticker failed" through the feed's error state flipped a
+    /// perfectly good timeline into a full-screen "Couldn't load the news".
+    @Published var watchlistError: String?
     @Published var showFilterSheet: Bool = false
 
     /// Distinct source names present in the loaded feed — drives the filter
@@ -51,6 +55,8 @@ final class UpdatesViewModel: ObservableObject {
 
     private let apiClient: APIClient
     private var hasLoadedOnce = false
+    /// Re-entrancy guard: `.task(id:)` can re-fire before the previous body ends.
+    private var isLoadingInitial = false
     /// Guards against a stale in-flight response overwriting a newer tab's data.
     private var loadToken = UUID()
     /// Scope whose feed request is currently in flight, for duplicate-request dedup.
@@ -75,9 +81,16 @@ final class UpdatesViewModel: ObservableObject {
 
     /// Called when the Updates tab becomes visible. Idempotent.
     func loadIfNeeded() async {
-        guard !hasLoadedOnce else { return }
-        hasLoadedOnce = true
+        guard !hasLoadedOnce, !isLoadingInitial else { return }
+        isLoadingInitial = true
+        defer { isLoadingInitial = false }
         await loadInitialData()
+        // Only latch on SUCCESS. `.task(id:)` cancels its body when the tab
+        // switches away, so latching up-front meant: cold launch → open Updates →
+        // switch tabs mid-flight → the request is cancelled → the screen keeps a
+        // "cancelled" error forever and never auto-retries, because loadIfNeeded
+        // now short-circuits.
+        if error == nil && !allNewsArticles.isEmpty { hasLoadedOnce = true }
     }
 
     private func loadInitialData() async {
@@ -128,7 +141,7 @@ final class UpdatesViewModel: ObservableObject {
             await loadTabs()
         } catch {
             let appError = AppError.from(error)
-            self.error = appError.message
+            self.watchlistError = appError.message
             print("⚠️ UpdatesVM: Failed to add \(ticker): \(appError.message)")
         }
     }
@@ -147,7 +160,7 @@ final class UpdatesViewModel: ObservableObject {
             if let tab = selectedTab { await loadFeed(for: tab, force: false) }
         } catch {
             let appError = AppError.from(error)
-            self.error = appError.message
+            self.watchlistError = appError.message
             print("⚠️ UpdatesVM: Failed to remove \(ticker): \(appError.message)")
         }
     }
@@ -211,11 +224,13 @@ final class UpdatesViewModel: ObservableObject {
             print("⏭️ UpdatesVM: \(scope) already loading — skipping duplicate request")
             return
         }
-        inFlightScope = scope
-        defer { if inFlightScope == scope { inFlightScope = nil } }
-
         let token = UUID()
         loadToken = token
+        inFlightScope = scope
+        // Clear only if THIS load still owns the slot. On A→B→A, a stale A#1
+        // response would otherwise clear the flag while A#2 is in flight, so the
+        // dedup guard misses and A is fetched twice.
+        defer { if loadToken == token { inFlightScope = nil } }
         refreshPollTask?.cancel()
 
         if !force, let cached = feedCache[scope] {
@@ -227,6 +242,12 @@ final class UpdatesViewModel: ObservableObject {
             // empty state.
             isLoading = false
             print("✅ UpdatesVM: Served \(cached.articles.count) articles for \(scope) from memory")
+            // Still enrich: a cached scope whose first enrich pass failed (or was
+            // cut short) would otherwise keep its sentiment badges hidden until a
+            // manual pull-to-refresh.
+            if allNewsArticles.contains(where: { !$0.aiProcessed && $0.isEnrichable }) {
+                await enrichVisibleArticles(scope: scope, token: token)
+            }
             return
         }
 
@@ -274,8 +295,20 @@ final class UpdatesViewModel: ObservableObject {
 
             await enrichVisibleArticles(scope: scope, token: token)
             scheduleInsightPollIfNeeded(scope: scope, token: token)
+        } catch is CancellationError {
+            // Tab switched away mid-flight. Not a failure — show nothing.
+            isLoading = false
+            return
         } catch {
             guard loadToken == token else { return }
+            if (error as? URLError)?.code == .cancelled {
+                // Same as above: URLSession surfaces task cancellation as
+                // URLError.cancelled, whose message is the literal "cancelled".
+                // Rendering that as "Couldn't load the news / cancelled" blamed
+                // the network for the user's own tab switch.
+                isLoading = false
+                return
+            }
             let appError = AppError.from(error)
             self.error = appError.message
             isLoading = false

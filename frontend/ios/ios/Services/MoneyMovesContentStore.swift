@@ -29,7 +29,10 @@ final class MoneyMovesContentStore {
     // offline fallback for whatever shipped in the binary.
     private var bundledCards: [MoneyMove] = []
     private var remoteCards: [MoneyMove] = []
+    /// Latched only after remote content has actually LANDED (see `prefetch()`).
     private var didPrefetch = false
+    /// The single in-flight fetch, so concurrent callers join it instead of racing past it.
+    private var prefetchTask: Task<Void, Never>?
 
     // The featured "deep dive" hero article (isFeatured == true). Remote is authoritative.
     private var remoteFeatured: MoneyMoveArticle?
@@ -70,15 +73,36 @@ final class MoneyMovesContentStore {
     /// with no app update.
     func cards() -> [MoneyMove] {
         var result = remoteCards
-        let have = Set(result.map { $0.title })
-        result += bundledCards.filter { !have.contains($0.title) }
+        // Dedup on SLUG, not title. Slug is the article's identity everywhere
+        // else in this file (and is the audio-clip key); title is editorial and
+        // changes. Keying on title meant that renaming an article server-side
+        // stopped matching its bundled copy, so BOTH rendered — the same story
+        // twice in one category row under two different names.
+        let have = Set(result.map { $0.slug })
+        result += bundledCards.filter { !have.contains($0.slug) }
         return result
     }
 
     /// Fetch article content + narration URLs from the backend once per session.
+    ///
+    /// Concurrent callers JOIN the in-flight fetch rather than returning early. Setting a
+    /// `didPrefetch` flag before the await let a second caller (LearnView pre-fetches on appear;
+    /// the user taps "See All" a moment later) sail straight through against still-empty remote
+    /// maps and render bundled/placeholder cards for the rest of the session — deterministic, not a
+    /// rare race, since both callers hop the same actor.
     func prefetch() async {
         guard !didPrefetch else { return }
-        didPrefetch = true
+        if let inFlight = prefetchTask {
+            await inFlight.value
+            return
+        }
+        let task = Task { await self.loadRemote() }
+        prefetchTask = task
+        await task.value
+        prefetchTask = nil
+    }
+
+    private func loadRemote() async {
         do {
             let response = try await APIClient.shared.request(
                 endpoint: .getMoneyMoves,
@@ -96,11 +120,18 @@ final class MoneyMovesContentStore {
                 remoteCards.append(dto.toCard())
                 if dto.isFeatured == true, remoteFeatured == nil { remoteFeatured = art }
             }
+            // Latch ONLY on content that actually landed. A successful-but-empty response (a cold
+            // backend cache that degraded to `articles: []`, every article dropped on decode) used
+            // to latch the flag anyway and freeze the whole session on bundled content with no
+            // retry — a durable outage from one unlucky request.
+            didPrefetch = !remoteCards.isEmpty
+            if remoteCards.isEmpty {
+                print("[MoneyMovesContentStore] remote returned 0 usable articles — staying on bundled content, will retry on the next prefetch.")
+            }
         } catch {
             // Stay on bundled content; never block the screen on a network hiccup. But surface the
             // failure loudly + legibly: a DECODE failure here is backend↔iOS contract drift that
             // silently hides just-published content, so it must be diagnosable — not a bare swallow.
-            didPrefetch = false
             let appError = AppError.from(error)
             print("[MoneyMovesContentStore] remote fetch failed [\(appError.title)]: \(appError.message) — raw: \(error). Falling back to bundled content.")
         }

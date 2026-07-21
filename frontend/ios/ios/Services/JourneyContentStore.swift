@@ -26,10 +26,36 @@ import Foundation
 // rest survive — the same defensive stance ReadAlongSentence already takes for its timings.
 
 /// Never-throwing wrapper: a failed element decodes to `nil` instead of failing the whole array.
+///
+/// Every drop is LOGGED. A silently dropped lesson/card is invisible — the outer decode succeeds and
+/// the store just serves the stale bundled copy — so the only symptom is "the lesson I published
+/// never appeared", with nothing to grep. The coding path plus the element's `title`/`type` is
+/// enough to find the offending `lessons` row in Supabase.
 private struct FailableDecodable<Wrapped: Decodable>: Decodable {
     let value: Wrapped?
     init(from decoder: Decoder) throws {
-        value = try? Wrapped(from: decoder)
+        do {
+            value = try Wrapped(from: decoder)
+        } catch {
+            value = nil
+            let id = (try? DroppedElementIdentity(from: decoder))?.label ?? "unidentifiable"
+            let path = decoder.codingPath
+                .map { $0.intValue.map { i in "[\(i)]" } ?? ".\($0.stringValue)" }
+                .joined()
+            print("[JourneyContentStore] dropped \(Wrapped.self) at \(path) [\(id)]: \(error)")
+        }
+    }
+}
+
+/// Best-effort identity peek at a dropped element. All fields optional, so it decodes for any JSON
+/// object and simply fails (=> nil) for a scalar.
+private struct DroppedElementIdentity: Decodable {
+    let title: String?
+    let type: String?
+
+    var label: String {
+        let parts = [title.map { "title=\($0)" }, type.map { "type=\($0)" }].compactMap { $0 }
+        return parts.isEmpty ? "no title/type" : parts.joined(separator: " ")
     }
 }
 
@@ -158,7 +184,10 @@ final class JourneyContentStore {
 
     private var bundledByTitle: [String: [LessonTopicCard]] = [:]
     private var remoteByTitle: [String: [LessonTopicCard]] = [:]
+    /// Latched only after remote content has actually LANDED (see `prefetch()`).
     private var didPrefetch = false
+    /// The single in-flight fetch, so concurrent callers join it instead of racing past it.
+    private var prefetchTask: Task<Void, Never>?
 
     private init() {
         loadBundled()
@@ -211,19 +240,38 @@ final class JourneyContentStore {
     }
 
     /// Fetch lesson content + media URLs from the backend once per session.
+    ///
+    /// Concurrent callers JOIN the in-flight fetch rather than returning early. Setting a
+    /// `didPrefetch` flag before the await let a second caller (the Learn screen pre-fetches on
+    /// appear; the user opens a lesson a moment later) sail straight through against still-empty
+    /// remote maps and get the text-only bundled lesson — no remote audio, no read-along — for the
+    /// rest of the session. Deterministic, not a rare race: both callers hop the same actor.
     func prefetch() async {
         guard !didPrefetch else { return }
-        didPrefetch = true
+        if let inFlight = prefetchTask {
+            await inFlight.value
+            return
+        }
+        let task = Task { await self.loadRemote() }
+        prefetchTask = task
+        await task.value
+        prefetchTask = nil
+    }
+
+    private func loadRemote() async {
         do {
             let response = try await APIClient.shared.request(
                 endpoint: .getJourney,
                 responseType: JourneyAPIResponse.self
             )
+            // Build into a fresh map and swap: a retry after a partial/failed attempt must not
+            // inherit stale lessons from it.
+            var loaded: [String: [LessonTopicCard]] = [:]
             for lesson in response.lessons {
                 // Skip nil OR empty card lists — an empty remote array must not shadow the
                 // bundled/generated fallback (would crash on cards[0] when the lesson opens).
                 guard let story = lesson.storyContent, !story.cards.isEmpty else { continue }
-                remoteByTitle[lesson.title] = story.cards.map {
+                loaded[lesson.title] = story.cards.map {
                     makeCard(
                         title: lesson.title,
                         type: $0.type,
@@ -236,11 +284,19 @@ final class JourneyContentStore {
                     )
                 }
             }
+            remoteByTitle = loaded
+            // Latch ONLY on content that actually landed. A successful-but-empty response (cold
+            // backend cache degraded to `lessons: []`, every lesson dropped on decode) used to latch
+            // the flag anyway and freeze the whole session on text-only bundled lessons with no
+            // retry — a durable outage from one unlucky request.
+            didPrefetch = !loaded.isEmpty
+            if loaded.isEmpty {
+                print("[JourneyContentStore] remote returned 0 usable lessons — staying on bundled content, will retry on the next prefetch.")
+            }
         } catch {
             // Stay on bundled content; never block the screen on a network hiccup. But surface the
             // failure loudly + legibly: a DECODE failure here is backend↔iOS contract drift that
             // silently hides just-published content, so it must be diagnosable — not a bare swallow.
-            didPrefetch = false
             let appError = AppError.from(error)
             print("[JourneyContentStore] remote fetch failed [\(appError.title)]: \(appError.message) — raw: \(error). Falling back to bundled content.")
         }

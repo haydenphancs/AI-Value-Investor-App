@@ -8,8 +8,10 @@ and union-merge the server's set in, so the shapes below are load-bearing:
   * `keys` / `bookmarks` must ALWAYS be a list of strings — never null, never a list containing
     null. The Swift DTOs declare `let keys: [String]` (non-Optional), so a null element is a
     decode crash that silently wipes the whole synced set.
-  * A backend hiccup must degrade to an EMPTY list, not a 500 — the iOS side keeps its local
-    progress and retries, but a 500 surfaces as an error banner on a screen that is otherwise fine.
+  * A backend FAILURE must surface as a typed error, NOT as `{"keys": []}`. An empty list is
+    indistinguishable from "this user has completed nothing", so the iOS reconcile would treat
+    every local key as unsynced and re-POST it against an already-failing backend. An unknown
+    `content_type` still degrades to an empty list — that is a stale client, not a failure.
 
 Also pins that every route runs its synchronous Supabase call off the event loop: these are hit on
 every Learn screen open, and blocking here stalls every other in-flight request on the instance.
@@ -93,15 +95,25 @@ def test_unknown_content_type_degrades_to_empty_never_errors(bad_type):
     assert _run(get_learn_progress(content_type=bad_type, user=USER, supabase=sb)).keys == []
 
 
-def test_backend_failure_degrades_to_empty_not_a_500():
-    # iOS keeps its local progress and retries; a 500 would show an error on a working screen.
+def test_backend_read_failure_returns_a_typed_error_not_200_with_empty():
+    """A failed READ must be distinguishable from "nothing completed".
+
+    Returning `{"keys": []}` on a Supabase failure made iOS `hydrate()` succeed
+    with an empty remote set — so the reconcile pass concluded that every locally
+    known key was unsynced and re-POSTed up to 25 of them per store (3 stores per
+    Learn open) against a backend that was already failing. A typed error lets the
+    client keep its local cache and back off.
+    """
     sb = _FakeSupabase(raises=RuntimeError("supabase down"))
-    assert _run(get_learn_progress(content_type="book_core", user=USER, supabase=sb)).keys == []
+    resp = _run(get_learn_progress(content_type="book_core", user=USER, supabase=sb))
+    assert not isinstance(resp, LearnProgressResponse)
+    assert getattr(resp, "status_code", 200) >= 400
 
 
-def test_bookmarks_failure_degrades_to_empty():
+def test_bookmarks_read_failure_returns_a_typed_error():
     sb = _FakeSupabase(raises=RuntimeError("supabase down"))
-    assert _run(get_book_bookmarks(user=USER, supabase=sb)).bookmarks == []
+    resp = _run(get_book_bookmarks(user=USER, supabase=sb))
+    assert getattr(resp, "status_code", 200) >= 400
 
 
 # ── writes: idempotent, validated, and never 500 ──────────────────────
@@ -148,15 +160,46 @@ def test_unknown_content_type_is_not_written():
     assert sb.upserts == []
 
 
-def test_a_failed_write_still_returns_a_valid_shape():
-    # The iOS store union-merges whatever comes back, so a degraded response must still be a
-    # well-formed list — and because the key is absent, the client's reconcile retries it.
+def test_a_failed_write_surfaces_rather_than_reporting_success():
+    """A write failure must not come back as a cheerful 200.
+
+    The follow-up read fails too here, so the endpoint surfaces a typed error and
+    the client keeps the completion locally and retries on the next hydrate.
+    """
     sb = _FakeSupabase(raises=RuntimeError("write failed"))
     resp = _run(complete_learn_item(
         content_type="book_core", request=CompleteLearnItemRequest(key="1-1"),
         user=USER, supabase=sb,
     ))
-    assert resp.keys == []
+    assert getattr(resp, "status_code", 200) >= 400
+
+
+def test_a_failed_delete_never_reports_the_key_as_still_present():
+    """The resurrection bug.
+
+    The delete raises but the follow-up select succeeds and still contains the
+    key. Returning 200 with that key made iOS read it as "delete confirmed": it
+    dropped its tombstone and the next union-merge resurrected the item, flipping
+    it back to Completed against the user's explicit tap.
+    """
+    class _DeleteFails(_FakeSupabase):
+        def table(self, _name):
+            outer = self
+
+            class _Q(_FakeQuery):
+                def delete(self, *_a, **_k):
+                    raise RuntimeError("delete failed")
+
+            return _Q(outer, outer.rows)
+
+    sb = _DeleteFails(rows=[{"item_key": "1-1"}])
+    resp = _run(uncomplete_learn_item(
+        content_type="book_core", request=CompleteLearnItemRequest(key="1-1"),
+        user=USER, supabase=sb,
+    ))
+    assert getattr(resp, "status_code", 200) >= 400, (
+        "a failed DELETE reported as 200-with-the-key resurrects the item on iOS"
+    )
 
 
 def test_uncomplete_and_bookmark_writes_are_scoped_to_the_caller():

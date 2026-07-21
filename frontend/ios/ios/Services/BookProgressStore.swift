@@ -26,6 +26,12 @@ final class BookProgressStore: ObservableObject {
     /// "order-core" keys for every core the learner has completed.
     @Published private(set) var completed: Set<String> = []
 
+    /// Per-key count of failed pushes. Reconcile batches are ordered by it so a key the server
+    /// keeps rejecting sinks to the back: with a backlog larger than `maxReconcilePushes` a
+    /// poison prefix would otherwise take the same slots in every batch and strand everything
+    /// behind it. Session-only — a relaunch retries everything on equal footing.
+    private var pushFailures: [String: Int] = [:]
+
     private static let defaultsKey = "bookLibrary.completedCores"
     private static let contentType = "book_core"
     private let apiClient: APIClient
@@ -141,10 +147,21 @@ final class BookProgressStore: ObservableObject {
         let unsynced = completed.subtracting(remote)
         guard !unsynced.isEmpty else { return }
         print("[BookProgressStore] re-pushing \(unsynced.count) unsynced completion(s)")
-        // Bounded and ordered so a large backlog can't stall the Library open; the rest go on the
-        // next hydrate.
-        for key in unsynced.sorted().prefix(Self.maxReconcilePushes) {
+        // Bounded and deterministically ordered so a large backlog can't stall the Library open;
+        // the rest go on the next hydrate. Nothing strands: a pushed key leaves `unsynced` once the
+        // server has it, and a key that keeps failing sorts to the back rather than re-claiming a
+        // slot, so successive hydrates drain the whole backlog `maxReconcilePushes` at a time.
+        for key in reconcileOrder(unsynced).prefix(Self.maxReconcilePushes) {
             await pushCompletion(key)
+        }
+    }
+
+    /// Fewest failures first, then lexicographic — stable across hydrates, and it rotates keys that
+    /// keep failing out of the head of the batch.
+    private func reconcileOrder(_ keys: Set<String>) -> [String] {
+        keys.sorted {
+            let (l, r) = (pushFailures[$0] ?? 0, pushFailures[$1] ?? 0)
+            return l == r ? $0 < $1 : l < r
         }
     }
 
@@ -156,11 +173,13 @@ final class BookProgressStore: ObservableObject {
                 endpoint: .completeLearnItem(contentType: Self.contentType, key: key),
                 responseType: LearnProgressResponse.self
             )
+            pushFailures.removeValue(forKey: key)
             merge(resp)
         } catch {
             // Non-fatal: the completion stays in the local cache and `pushUnsynced` retries it on
             // the next hydrate. Logged rather than swallowed — a persistent failure here means
             // progress is only ever local (invariant: never degrade silently).
+            pushFailures[key, default: 0] += 1
             let appError = AppError.from(error)
             if !appError.isExpectedOffline {
                 print("[BookProgressStore] push failed for \(key) [\(appError.title)]: \(appError.message)")

@@ -156,16 +156,11 @@ struct SearchView: View {
     }
 
     private func handleNewsItemTapped(_ item: SearchNewsItem) {
-        // Convert SearchNewsItem to NewsArticle and show detail
-        selectedNewsArticle = NewsArticle(
-            headline: item.headline,
-            summary: item.summary,
-            source: NewsSource(name: item.source, iconName: nil),
-            sentiment: .neutral,
-            publishedAt: Date(),
-            thumbnailName: item.imageName,
-            relatedTickers: []
-        )
+        // `toNewsArticle()` carries the REAL apiId / url / sentiment / date, so the
+        // detail screen can enrich. Building it inline stamped `sentiment: .neutral`
+        // and `publishedAt: Date()` — a verdict no model produced and a fabricated
+        // "just now" timestamp, on an article that may be days old.
+        selectedNewsArticle = item.toNewsArticle()
     }
 
     private func handleNewsReadMore(_ item: SearchNewsItem) {
@@ -237,26 +232,10 @@ struct SearchContentView: View {
                         SearchLatestNewsSection(
                             items: viewModel.latestNews,
                             onItemTapped: { item in
-                                selectedNewsArticle = NewsArticle(
-                                    headline: item.headline,
-                                    summary: item.summary,
-                                    source: NewsSource(name: item.source, iconName: nil),
-                                    sentiment: .neutral,
-                                    publishedAt: Date(),
-                                    thumbnailName: item.imageName,
-                                    relatedTickers: []
-                                )
+                                selectedNewsArticle = item.toNewsArticle()
                             },
                             onReadMore: { item in
-                                selectedNewsArticle = NewsArticle(
-                                    headline: item.headline,
-                                    summary: item.summary,
-                                    source: NewsSource(name: item.source, iconName: nil),
-                                    sentiment: .neutral,
-                                    publishedAt: Date(),
-                                    thumbnailName: item.imageName,
-                                    relatedTickers: []
-                                )
+                                selectedNewsArticle = item.toNewsArticle()
                             }
                         )
 

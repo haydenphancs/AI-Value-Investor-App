@@ -47,8 +47,11 @@ class SearchViewModel: ObservableObject {
         querySuggestions = SearchQuerySuggestion.sampleData
         books = SearchBookItem.sampleData
 
-        // Show sample news as placeholder until backend data arrives
-        latestNews = SearchNewsItem.sampleData
+        // NO placeholder news. `SearchNewsItem.sampleData` is invented content
+        // ("Apple Announces Revolutionary AI Features...", "Bitcoin Reaches New
+        // All-Time High Above $68K") that rendered as real, tappable headlines
+        // on every open — the same fabrication class removed from UpdatesViewModel.
+        // The list stays empty until real articles arrive.
 
         // Live debounced search as user types
         $searchText
@@ -81,28 +84,33 @@ class SearchViewModel: ObservableObject {
         await fetchLatestNews()
     }
 
-    /// Fetch latest news articles from GET /api/v1/news
+    /// Fetch the latest market news.
+    ///
+    /// Uses the Updates market feed, NOT `GET /api/v1/news`: that route reads the
+    /// `news_articles` table, which has no writer anywhere in the backend, so it
+    /// returned an empty list on every call — which is precisely why this screen
+    /// fell back to invented headlines 100% of the time.
     private func fetchLatestNews() async {
-        print("📰 SearchViewModel: Fetching news from /api/v1/news?page=1&per_page=5 ...")
+        print("📰 SearchViewModel: Fetching market news from /api/v1/updates/feed ...")
 
         do {
             let response = try await apiClient.request(
-                endpoint: .getNewsFeed(page: 1, perPage: 5),
-                responseType: SearchNewsFeedResponse.self
+                endpoint: .getUpdatesFeed(scope: UpdatesScope.market, limit: 5),
+                responseType: UpdatesFeedResponse.self
             )
-
-            let articles = response.articles.map { SearchNewsItem(from: $0) }
+            let articles = (response.articles ?? []).map { SearchNewsItem(from: $0) }
 
             if articles.isEmpty {
-                print("📰 SearchViewModel: Backend returned 0 news articles — keeping sample data")
+                print("📰 SearchViewModel: 0 market articles available")
             } else {
-                print("✅ SearchViewModel: Loaded \(articles.count) news articles from backend")
-                latestNews = articles
+                print("✅ SearchViewModel: Loaded \(articles.count) market news articles")
             }
-
+            // Assign either way. An empty list is the honest answer; substituting
+            // fabricated headlines is not.
+            latestNews = articles
         } catch {
-            // Keep sample data as fallback; news is non-critical
-            print("❌ SearchViewModel: News fetch failed — \(error). Keeping sample data.")
+            latestNews = []
+            print("❌ SearchViewModel: News fetch failed — \(AppError.from(error).message)")
         }
     }
 

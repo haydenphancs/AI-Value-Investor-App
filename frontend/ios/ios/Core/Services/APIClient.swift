@@ -363,6 +363,13 @@ actor APIClient {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
+        // Per-install identity. Until real login ships, every install otherwise
+        // authenticates as one shared guest on the backend — which made the Learn
+        // stores union one user's completed lessons and bookmarks into every
+        // other user's app. The backend hashes this into a UUID5 and prefers a
+        // valid Bearer token when one exists, so it is inert once auth lands.
+        request.setValue(GuestIdentity.current, forHTTPHeaderField: "X-Guest-Id")
+
         // Body
         if let body = endpoint.body {
             request.httpBody = try encoder.encode(body)

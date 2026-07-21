@@ -473,16 +473,34 @@ class InsightSweeper:
                         ),
                         market_active=market_active,
                     )
+                except asyncio.CancelledError:
+                    # A deploy/shutdown cancels the sweeper mid-generation.
+                    # CancelledError is a BaseException, so `except Exception`
+                    # missed it and the claim + one budget unit leaked until
+                    # migration 088's 120s stale-claim steal reclaimed them.
+                    # Release explicitly, then re-raise so cancellation still
+                    # propagates and the loop actually stops.
+                    error = "cancelled"
+                    logger.info("Insight generation cancelled for %s (shutdown)", scope)
+                    raise
                 except Exception as e:
                     error = f"{type(e).__name__}: {e}"
                     logger.error(
                         "Insight generation raised for %s: %s",
                         scope, error, exc_info=True,
                     )
-                await asyncio.to_thread(
-                    self._finish_claim, scope, now, decision,
-                    card is not None, error,
-                )
+                finally:
+                    # `finally`, not the happy path: the claim must be released
+                    # even when the generation is cancelled, or the scope stays
+                    # locked for the full stale window after every deploy.
+                    # Shielded so the release itself survives the cancellation
+                    # that triggered it.
+                    await asyncio.shield(
+                        asyncio.to_thread(
+                            self._finish_claim, scope, now, decision,
+                            card is not None, error,
+                        )
+                    )
                 return card is not None
 
         if admitted:
@@ -511,7 +529,10 @@ class InsightSweeper:
         async def _one(scope: str) -> int:
             async with sem:
                 try:
-                    return await self.news.refresh_scope_news(scope, limit=30)
+                    # Defaults on purpose: a narrower limit or lookback than the
+                    # cold fetch makes the cache decay to today-only (see
+                    # news_cache_service.refresh_scope_news).
+                    return await self.news.refresh_scope_news(scope)
                 except Exception as e:
                     logger.warning(
                         "News refresh failed for %s: %s: %s",

@@ -285,10 +285,15 @@ class NewsInsightService:
         if not usable:
             return None
 
-        bullets = [
+        # De-dup BEFORE the pad, not after. Corpus dedup keys on `url or title`
+        # (url first), so three syndications of one wire story survive as three
+        # rows with identical headlines — which collapsed to a SINGLE bullet
+        # after the pad had already decided no padding was needed, yielding a
+        # card below MIN_BULLETS with nothing to raise on it.
+        bullets = list(dict.fromkeys(
             _clip((r.get("headline") or "").strip(), 180)
-            for r in usable[:3]
-        ]
+            for r in usable[:6]
+        ))[:3]
         # The card contract requires >= 2 bullets. With a single article, add an
         # honest provenance line rather than padding with invented commentary.
         if len(bullets) < MIN_BULLETS:
@@ -305,11 +310,6 @@ class NewsInsightService:
         bull = votes.count("Bullish")
         bear = votes.count("Bearish")
         sentiment = "Bullish" if bull > bear else "Bearish" if bear > bull else "Neutral"
-
-        # De-dup: two publishers syndicating one story produce identical
-        # headlines, which render twice under SwiftUI's ForEach(id: \.self).
-        # The AI path already de-dups; this one must too.
-        bullets = list(dict.fromkeys(bullets))
 
         label = "Market" if scope.startswith("__") else scope
         return {

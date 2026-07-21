@@ -21,6 +21,19 @@ logger = logging.getLogger(__name__)
 _LEVEL_ORDER = {"foundation": 0, "analysis": 1, "strategies": 2, "mastery": 3}
 
 
+def _has_waiters(fut: asyncio.Future) -> bool:
+    """Whether anything is awaiting `fut`.
+
+    Mirrors `news_cache_service._has_waiters`. ``asyncio.Future._callbacks`` is private but stable
+    across CPython 3.8-3.13 and is the only way to ask this. Guarded so a future CPython change
+    degrades to "assume waiters" rather than raising.
+    """
+    try:
+        return bool(getattr(fut, "_callbacks", None))
+    except Exception:
+        return True
+
+
 class JourneyContentService:
     # In-memory cache (content is near-static; refresh hourly).
     _cache: Optional[tuple[float, JourneyResponse]] = None
@@ -32,24 +45,49 @@ class JourneyContentService:
         if cached and time.time() - cached[0] < self._TTL_SECONDS:
             return cached[1]
 
-        # Dedup concurrent refreshes (thundering-herd guard).
-        if JourneyContentService._inflight is not None:
-            return await JourneyContentService._inflight
+        # Dedup concurrent refreshes (thundering-herd guard). SHIELDED: awaiting the shared future
+        # directly propagates a WAITER's cancellation into it, so one caller giving up — chat
+        # context resolution wraps this in asyncio.wait_for(timeout=4.0) — would cancel the future
+        # the leader is about to resolve. The leader's set_result then raises InvalidStateError and
+        # 500s a public content request whose data actually loaded fine.
+        inflight = JourneyContentService._inflight
+        if inflight is not None:
+            return await asyncio.shield(inflight)
 
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
         JourneyContentService._inflight = future
         try:
             response = await self._load()
             JourneyContentService._cache = (time.time(), response)
-            future.set_result(response)
+            if not future.done():
+                future.set_result(response)
             return response
         except Exception as exc:  # noqa: BLE001 — degrade gracefully, never 500 the screen
-            logger.exception("Failed to load journey content: %s", exc)
+            logger.exception(
+                "journey: failed to load content: %s: %s", type(exc).__name__, exc
+            )
             # Serve stale cache if we have one; otherwise an empty journey.
             fallback = cached[1] if cached else JourneyResponse(lessons=[])
-            future.set_result(fallback)
+            if not future.done():
+                future.set_result(fallback)
             return fallback
+        except BaseException as exc:
+            # CancelledError is a BaseException, so `except Exception` misses it — and then the
+            # `finally` below would clear _inflight while the future stays pending FOREVER, hanging
+            # every joined waiter (nothing in this stack has a timeout). Resolve it before leaving.
+            logger.warning(
+                "journey: content load aborted (%s) — releasing %d joined waiter(s)",
+                type(exc).__name__, 1 if _has_waiters(future) else 0,
+            )
+            if not future.done():
+                # Only hand the exception over when someone is actually waiting: an unretrieved
+                # future exception logs a spurious traceback on GC for every cancellation.
+                if _has_waiters(future):
+                    future.set_exception(exc)
+                else:
+                    future.cancel()
+            raise
         finally:
             JourneyContentService._inflight = None
 
@@ -64,6 +102,19 @@ class JourneyContentService:
             # and on a cold cache empty ALL 27 lessons. Skip+log the bad row instead. Mirrors the
             # hardening already in money_moves_content_service._load.
             try:
+                # NOTE (identity): unlike money_moves — where the article's `slug` lives INSIDE the
+                # content blob and has to be overlaid from the row column — a Journey lesson's
+                # identity is the `title` COLUMN, which is already what we serve below. So there is
+                # nothing to overlay. The equivalent silent-drop hazard is a BLANK title: iOS keys
+                # its remote lessons by title, so "" matches no lesson and the row just never
+                # appears, with no client-side clue. Say so here.
+                if not str(row.get("title") or "").strip():
+                    logger.error(
+                        "journey: lesson row has a blank title — iOS keys lessons by title, so this "
+                        "row will silently never appear (id=%s level=%s)",
+                        row.get("id"), row.get("level"),
+                    )
+
                 # Guard the SHAPE of story_content, not just presence: iOS treats a lesson with no
                 # cards as "fall back to bundled content", so degrading a malformed blob to None
                 # keeps the lesson tile (title/level/duration) visible instead of dropping the row.

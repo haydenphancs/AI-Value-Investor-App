@@ -68,8 +68,21 @@ final class AudioManager: ObservableObject {
         playbackState == .playing
     }
 
+    /// Drives whether `GlobalAudioOverlay` mounts the mini/compact player at all.
+    ///
+    /// `.error` is deliberately treated as active even though `PlaybackState.isActive` excludes it:
+    /// a 404 / expired Storage URL used to unmount the whole player, so the audio appeared to simply
+    /// VANISH mid-tap and the retry affordance (the play button → `togglePlayPause` → `.error` case)
+    /// became unreachable. Keeping the episode mounted is what makes that retry reachable.
     var hasActiveEpisode: Bool {
-        currentEpisode != nil && playbackState.isActive
+        currentEpisode != nil && (playbackState.isActive || isPlaybackErrored)
+    }
+
+    /// The user-facing failure message while the current episode is in `.error`, for any surface that
+    /// wants to explain the stalled player rather than silently showing a dead play button.
+    var playbackErrorMessage: String? {
+        if case .error(let message) = playbackState { return message }
+        return nil
     }
 
     var progress: Double {
@@ -107,9 +120,16 @@ final class AudioManager: ObservableObject {
     // surfaces .error instead of sitting in a false "playing" state with silence forever.
     private var statusObserver: NSKeyValueObservation?
     private var failedToEndObserver: NSObjectProtocol?
+    // A mid-stream STALL (Airplane Mode, dead Wi-Fi) never fails the item — AVPlayer just stops
+    // advancing while the requested rate stands. Observed so the UI/Lock Screen don't keep claiming
+    // playback against a frozen playhead.
+    private var timeControlObserver: NSKeyValueObservation?
 
     // Audio session configuration
     private let audioSession = AVAudioSession.sharedInstance()
+    // Whether WE currently hold the (non-mixable) shared session. Tracked so activation is taken
+    // lazily — at first real playback — and released with `.notifyOthersOnDeactivation` afterwards.
+    private var isSessionActive = false
 
     // Rendered gradient artwork per episode, for the system Now Playing (Dynamic Island / Lock
     // Screen / Control Center). Cached so it's built once per episode.
@@ -125,19 +145,57 @@ final class AudioManager: ObservableObject {
 
     // MARK: - Initialization
     private init() {
-        setupAudioSession()
+        configureAudioSession()
         setupObservers()
         setupRemoteCommands()
         setupAudioSessionInterruptionObservers()
     }
 
     // MARK: - Audio Session Setup
-    private func setupAudioSession() {
+
+    /// Declare HOW we'd play, without taking the session. `RootContainerView` holds this singleton,
+    /// so init runs the moment the app launches — activating here stopped the user's Spotify /
+    /// Podcasts before they had tapped anything. Category is cheap and non-disruptive; the
+    /// disruptive part (`setActive(true)`) is deferred to `activateAudioSession()`.
+    private func configureAudioSession() {
+        do {
+            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.allowBluetoothA2DP, .allowAirPlay])
+        } catch {
+            print("[AudioManager] audio session category setup failed: \(error)")
+        }
+    }
+
+    /// Take the shared session — called only when REAL audio is about to start (a prepared AVPlayer).
+    /// The URL-less simulated path makes no sound, so it must never evict another app's audio.
+    /// Re-asserts category+mode because `AIVoiceManager` drives Journey narration on the same shared
+    /// session; whichever engine speaks last would otherwise leave its own mode in place.
+    private func activateAudioSession() {
         do {
             try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.allowBluetoothA2DP, .allowAirPlay])
             try audioSession.setActive(true)
+            isSessionActive = true
         } catch {
-            print("Failed to setup audio session: \(error)")
+            print("[AudioManager] audio session activation failed: \(error)")
+        }
+    }
+
+    /// Release the session so whatever was playing before us (Spotify, Podcasts) can resume.
+    /// Deliberately NOT called from `pause()`: a paused episode keeps its Lock Screen / Dynamic
+    /// Island transport, and the user is one tap away from resuming.
+    private func deactivateAudioSession() {
+        guard isSessionActive else { return }
+        // AIVoiceManager narrates Investor Journey on this SAME session. If it took over (it calls
+        // pauseForExternalAudio on us first), releasing the session here would cut ITS audio off —
+        // so treat that as a handover: we no longer own the session, but it stays active.
+        guard !AIVoiceManager.shared.isPlaying else {
+            isSessionActive = false
+            return
+        }
+        do {
+            try audioSession.setActive(false, options: [.notifyOthersOnDeactivation])
+            isSessionActive = false
+        } catch {
+            print("[AudioManager] audio session deactivation failed: \(error)")
         }
     }
 
@@ -171,7 +229,8 @@ final class AudioManager: ObservableObject {
             // alone means "you MAY resume", not "you were playing" (a user-paused or finished
             // episode would otherwise auto-start after a call).
             if shouldResume, wasPlayingBeforeInterruption, currentEpisode != nil {
-                try? audioSession.setActive(true)
+                // The interruption deactivated the session out from under us; resume() re-takes it.
+                isSessionActive = false
                 resume()
             }
             wasPlayingBeforeInterruption = false
@@ -370,6 +429,7 @@ final class AudioManager: ObservableObject {
 
         if let urlString = episode.audioUrl, let url = URL(string: urlString) {
             // Real playback via AVPlayer (the periodic time observer drives currentTime/duration).
+            activateAudioSession()
             preparePlayer(url: url)
             player?.playImmediately(atRate: Float(playbackSpeed.rawValue))
             playbackState = .playing
@@ -383,13 +443,20 @@ final class AudioManager: ObservableObject {
                       self.playbackState == .loading, self.currentEpisode?.id == episodeID else { return }
                 self.playbackState = .playing
                 self.startPlaybackTimer()
+                self.resumeSleepTimerIfNeeded()
             }
         }
+        resumeSleepTimerIfNeeded()
     }
 
     /// Play an episode starting at a time offset. Used for one-file book narration that jumps to a
     /// core's start. Seeks BEFORE playing so the listener doesn't hear a moment of audio from 0:00.
     func play(_ episode: AudioEpisode, startAt: TimeInterval) {
+        // Reverse of AIVoiceManager.pauseForExternalAudio: silence Journey
+        // narration before taking the shared session, so a book or Money Moves
+        // clip can never start on top of a lesson already speaking.
+        AIVoiceManager.shared.stop()
+
         if let current = currentEpisode {
             addToHistory(current)
         }
@@ -402,10 +469,9 @@ final class AudioManager: ObservableObject {
         playbackState = .loading
 
         if let urlString = episode.audioUrl, let url = URL(string: urlString) {
+            activateAudioSession()
             preparePlayer(url: url)
-            if startAt > 0 {
-                player?.seek(to: CMTime(seconds: startAt, preferredTimescale: 600))
-            }
+            seekPreparedPlayer(to: startAt)
             player?.playImmediately(atRate: Float(playbackSpeed.rawValue))
             playbackState = .playing
         } else {
@@ -417,8 +483,10 @@ final class AudioManager: ObservableObject {
                       self.playbackState == .loading, self.currentEpisode?.id == episodeID else { return }
                 self.playbackState = .playing
                 self.startPlaybackTimer()
+                self.resumeSleepTimerIfNeeded()
             }
         }
+        resumeSleepTimerIfNeeded()
     }
 
     /// Resume playback
@@ -428,18 +496,20 @@ final class AudioManager: ObservableObject {
         if duration > 0, currentTime >= duration - 0.5 { currentTime = 0 }
         playbackState = .playing
         if let player {
+            activateAudioSession()
             player.playImmediately(atRate: Float(playbackSpeed.rawValue))
         } else if let urlString = episode.audioUrl, let url = URL(string: urlString) {
-            // The real player was torn down (after natural completion) — rebuild it so resume
-            // produces ACTUAL audio rather than the silent simulated fallback.
+            // The real player was torn down (after natural completion, or by handlePlaybackFailure
+            // on the retry path) — rebuild it so resume produces ACTUAL audio rather than the silent
+            // simulated fallback.
+            activateAudioSession()
             preparePlayer(url: url)
-            if currentTime > 0 {
-                player?.seek(to: CMTime(seconds: currentTime, preferredTimescale: 600))
-            }
+            seekPreparedPlayer(to: currentTime)
             player?.playImmediately(atRate: Float(playbackSpeed.rawValue))
         } else {
             startPlaybackTimer()
         }
+        resumeSleepTimerIfNeeded()
     }
 
     /// Pause playback
@@ -447,6 +517,23 @@ final class AudioManager: ObservableObject {
         playbackState = .paused
         player?.pause()
         stopPlaybackTimer()
+        // Suspend (don't clear) the sleep countdown: a 15-minute timer must not burn down while the
+        // episode is paused. `resume()` re-arms it with the remaining time intact.
+        stopSleepTimer()
+    }
+
+    /// Yield the shared audio session to the OTHER engine (AIVoiceManager, which
+    /// drives Investor Journey narration).
+    ///
+    /// The two managers own separate AVPlayers on the same non-mixable
+    /// `.playback` session and had no knowledge of each other, so starting a
+    /// Journey lesson mid-book left both voices audible at once. Only pauses
+    /// when something is actually playing, so this is safe to call
+    /// unconditionally on every Journey playback entry point.
+    func pauseForExternalAudio() {
+        guard playbackState == .playing else { return }
+        print("🔇 AudioManager: yielding the audio session to Journey narration")
+        pause()
     }
 
     /// Toggle play/pause
@@ -471,7 +558,10 @@ final class AudioManager: ObservableObject {
             // `hasActiveEpisode` gating (the broader error/retry UI remains a separate follow-up).
             if currentEpisode != nil { resume() }
         case .loading:
-            break
+            // .loading is also the STALLED state (see handleTimeControlStatusChange), which can last
+            // as long as the network is down — the button must not be a dead no-op there. Pausing
+            // during the 0.5s simulated-start window is equally correct: it cancels the stale start.
+            pause()
         }
     }
 
@@ -479,6 +569,12 @@ final class AudioManager: ObservableObject {
     func stop() {
         stopPlaybackTimer()
         teardownPlayer()
+        // Clear the SELECTION, not just the Timer: invalidating alone left `sleepTimer` on e.g.
+        // "30 minutes", so the full-screen player kept showing an armed moon badge for a countdown
+        // that no longer existed — and the next episode then played straight through the night.
+        // (Assigning .off routes through configureSleepTimer, which also zeroes `sleepTimerRemaining`.)
+        sleepTimer = .off
+        sleepTimerRemaining = 0
         stopSleepTimer()
         playbackState = .idle
 
@@ -496,6 +592,9 @@ final class AudioManager: ObservableObject {
         // "collapsed to island" state. Screens re-assert compact on their next appear/focus.
         compactReasons.removeAll()
         isCompactMode = false
+
+        // Nothing left to control → hand the session back so other apps' audio can resume.
+        deactivateAudioSession()
     }
 
     /// Seek to specific time
@@ -597,6 +696,15 @@ final class AudioManager: ObservableObject {
             sleepTimerRemaining = TimeInterval(option.rawValue * 60)
         }
 
+        // Arming while paused must not burn the countdown; playback start re-arms it.
+        if playbackState == .playing { startSleepTimer() }
+    }
+
+    /// Re-arm a still-selected sleep timer whenever playback (re)starts. `pause()` suspends the
+    /// countdown rather than clearing it, so the timer measures listening time, not wall-clock time.
+    private func resumeSleepTimerIfNeeded() {
+        guard sleepTimer != .off, sleepTimerInstance == nil else { return }
+        guard sleepTimer == .endOfEpisode || sleepTimerRemaining > 0 else { return }
         startSleepTimer()
     }
 
@@ -608,11 +716,21 @@ final class AudioManager: ObservableObject {
             guard let self = self else { return }
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                if self.sleepTimerRemaining > 0 {
+                if self.sleepTimer == .endOfEpisode {
+                    // "End of episode" is a MEDIA distance, not a wall-clock one. It was seeded from
+                    // `remainingTime` (media seconds) but decremented once per real second, so at
+                    // 1.5x/2x the episode ended long before the countdown did — and the timer then
+                    // fired in the MIDDLE of the next episode. Re-read the true remaining media time
+                    // each tick so the fire point tracks the playhead at any speed.
+                    guard self.duration > 0 else { return }  // duration not settled yet — don't fire at 0
+                    self.sleepTimerRemaining = self.remainingTime
+                } else if self.sleepTimerRemaining > 0 {
                     self.sleepTimerRemaining -= 1
-                } else {
-                    self.pause()
-                    self.sleepTimer = .off
+                }
+
+                if self.sleepTimerRemaining <= 0 {
+                    self.pause()          // also suspends this timer
+                    self.sleepTimer = .off  // clears the armed moon badge (see stop())
                     self.stopSleepTimer()
                 }
             }
@@ -682,6 +800,52 @@ final class AudioManager: ObservableObject {
             let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
             Task { @MainActor [weak self] in self?.handlePlaybackFailure(err) }
         }
+
+        // Surface BUFFERING/STALLS. Nothing else observes them: on a mid-narration network drop the
+        // item neither fails nor ends, so playbackState stayed .playing forever while currentTime
+        // froze — and updateNowPlayingInfo kept publishing rate > 0, so the Lock Screen scrubber
+        // happily extrapolated past the real (stuck) playhead.
+        timeControlObserver = newPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self, weak newPlayer] _, _ in
+            Task { @MainActor [weak self, weak newPlayer] in
+                guard let self, let np = newPlayer, self.player === np else { return }
+                self.handleTimeControlStatusChange(np.timeControlStatus)
+            }
+        }
+    }
+
+    /// Reflect AVPlayer's own view of whether audio is actually flowing.
+    /// `.loading` is reused as the stalled/buffering state: it keeps the player mounted
+    /// (`PlaybackState.isActive`) while making `isPlaying` false, which drops the published Now
+    /// Playing rate to 0 so the system scrubber stops running ahead of the truth.
+    private func handleTimeControlStatusChange(_ status: AVPlayer.TimeControlStatus) {
+        switch status {
+        case .waitingToPlayAtSpecifiedRate:
+            // Only downgrade an optimistic .playing — a user-initiated pause must stay .paused.
+            if playbackState == .playing { playbackState = .loading }
+        case .playing:
+            if playbackState == .loading {
+                playbackState = .playing
+                resumeSleepTimerIfNeeded()   // the stall suspended it via pause()/arming-while-stalled
+            }
+        case .paused:
+            break   // pause() / handlePlaybackComplete already own this transition
+        @unknown default:
+            break
+        }
+    }
+
+    /// Seek a freshly-prepared player, suppressing stale pre-seek ticks exactly like `seek(to:)`.
+    /// Without the `pendingSeekTarget` handshake the periodic observer's first tick publishes
+    /// `currentTime = 0`, and a book-core jump visibly flashes the WRONG core before snapping back.
+    private func seekPreparedPlayer(to time: TimeInterval) {
+        guard let player, time > 0 else { return }
+        pendingSeekTarget = time
+        player.seek(to: CMTime(seconds: time, preferredTimescale: 600)) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                guard let self, finished, self.pendingSeekTarget == time else { return }
+                self.pendingSeekTarget = nil
+            }
+        }
     }
 
     private func teardownPlayer() {
@@ -691,6 +855,8 @@ final class AudioManager: ObservableObject {
         timeObserver = nil
         statusObserver?.invalidate()
         statusObserver = nil
+        timeControlObserver?.invalidate()
+        timeControlObserver = nil
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
         }
@@ -712,7 +878,11 @@ final class AudioManager: ObservableObject {
         case .failed:
             handlePlaybackFailure(item.error)
         case .readyToPlay:
-            if playbackState == .loading { playbackState = .playing }
+            // Don't promote out of a STALL: .loading now doubles as the buffering state, and a late
+            // readyToPlay would otherwise claim playback while the playhead is still frozen.
+            if playbackState == .loading, player?.timeControlStatus != .waitingToPlayAtSpecifiedRate {
+                playbackState = .playing
+            }
         default:
             break
         }
@@ -725,10 +895,20 @@ final class AudioManager: ObservableObject {
         // Already torn down (e.g. status + failed-to-end both fired) — nothing to do.
         guard player != nil else { return }
         let appError = error.map(AppError.from) ?? .unknown(message: "This audio couldn't be played.")
-        print("[AudioManager] playback failed: \(appError.message) — raw: \(error.map { String(describing: $0) } ?? "nil")")
+        // Identify WHICH episode/URL died — a 404 on one Storage object is otherwise indistinguishable
+        // from a general network outage in the logs.
+        print("""
+        [AudioManager] playback failed — episode: \(currentEpisode?.id ?? "nil") \
+        url: \(currentEpisode?.audioUrl ?? "nil") \
+        message: \(appError.message) raw: \(error.map { String(describing: $0) } ?? "nil")
+        """)
         teardownPlayer()
         stopPlaybackTimer()
+        stopSleepTimer()   // nothing is playing; don't burn a sleep countdown against dead audio
         playbackState = .error(appError.message)
+        // The episode stays set (hasActiveEpisode keeps the player mounted for retry), but no audio
+        // is flowing — let other apps have the session back until the user retries.
+        deactivateAudioSession()
     }
 
     // MARK: - Playback Timer (Simulation)
@@ -759,16 +939,26 @@ final class AudioManager: ObservableObject {
         stopPlaybackTimer()
         teardownPlayer()
 
+        // An armed "End of episode" timer means STOP here — advancing the queue would be exactly the
+        // "woke up three episodes later" failure the option exists to prevent.
+        let stopAtEndOfEpisode = (sleepTimer == .endOfEpisode)
+        if stopAtEndOfEpisode {
+            sleepTimer = .off
+            stopSleepTimer()
+        }
+
         // Notify listeners that the episode completed naturally
         if let episode = currentEpisode {
             playbackDidComplete.send(episode)
         }
 
-        if !queue.isEmpty {
+        if !queue.isEmpty && !stopAtEndOfEpisode {
             playNext()
         } else {
             playbackState = .paused
             currentTime = duration
+            // Nothing further will play — release the session so other apps' audio can come back.
+            deactivateAudioSession()
         }
     }
 

@@ -81,6 +81,7 @@ final class BookmarkStore: ObservableObject {
                 responseType: BookmarkListResponse.self
             )
             merge(resp.bookmarks)
+            await pushUnsynced(remote: Set(resp.bookmarks))
         } catch {
             // Offline or signed out: keep whatever is local — but a decode/contract or 5xx failure
             // silently hides synced bookmarks, so surface it (stays quiet on routine offline).
@@ -91,6 +92,36 @@ final class BookmarkStore: ObservableObject {
         }
     }
 
+    /// Re-push adds the server doesn't have, and retry removals whose DELETE never confirmed.
+    ///
+    /// Without this, a bookmark whose POST failed was LOST FOREVER: `toggle` on an
+    /// already-bookmarked title takes the REMOVE branch, so the failed add could never be
+    /// re-pushed, and `hydrate` only ever merged remote→local. Bookmark offline, reinstall, gone.
+    private func pushUnsynced(remote: Set<String>) async {
+        // Never re-add a tombstoned title — that would undo the user's explicit un-bookmark.
+        let unsyncedAdds = bookmarkedTitles.filter {
+            !remote.contains($0) && !pendingRemovals.contains($0)
+        }
+        // A tombstone the server STILL has means the DELETE never landed; retry it.
+        let staleTombstones = pendingRemovals.intersection(remote)
+
+        if !unsyncedAdds.isEmpty {
+            print("[BookmarkStore] re-pushing \(unsyncedAdds.count) unsynced bookmark(s)")
+            // Oldest first so the server's most-recent-first ordering ends up matching local order.
+            for key in unsyncedAdds.reversed().prefix(Self.maxReconcilePushes) {
+                await pushAdd(key)
+            }
+        }
+        if !staleTombstones.isEmpty {
+            print("[BookmarkStore] retrying \(staleTombstones.count) unconfirmed removal(s)")
+            for key in staleTombstones.sorted().prefix(Self.maxReconcilePushes) {
+                await pushRemove(key)
+            }
+        }
+    }
+
+    private static let maxReconcilePushes = 25
+
     private func pushAdd(_ key: String) async {
         do {
             let resp = try await apiClient.request(
@@ -99,7 +130,11 @@ final class BookmarkStore: ObservableObject {
             )
             merge(resp.bookmarks)
         } catch {
-            // Stays in the local cache; re-pushes next time this book is toggled.
+            // Non-fatal: stays in the local cache and `pushUnsynced` retries on the next hydrate.
+            let appError = AppError.from(error)
+            if !appError.isExpectedOffline {
+                print("[BookmarkStore] add failed for \(key) [\(appError.title)]: \(appError.message)")
+            }
         }
     }
 
@@ -114,7 +149,11 @@ final class BookmarkStore: ObservableObject {
             merge(resp.bookmarks)
         } catch {
             // Stays tombstoned (pendingRemovals) so a racing/next hydrate() can't resurrect it;
-            // re-pushes the delete next time this book is toggled.
+            // `pushUnsynced` retries the DELETE on the next hydrate.
+            let appError = AppError.from(error)
+            if !appError.isExpectedOffline {
+                print("[BookmarkStore] remove failed for \(key) [\(appError.title)]: \(appError.message)")
+            }
         }
     }
 

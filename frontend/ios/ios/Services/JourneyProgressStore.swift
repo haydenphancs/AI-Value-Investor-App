@@ -64,6 +64,7 @@ final class JourneyProgressStore: ObservableObject {
                 responseType: LearnProgressResponse.self
             )
             merge(resp)
+            await pushUnsynced(remote: Set(resp.keys))
         } catch {
             // Offline or signed out: keep whatever is local — but a decode/contract or 5xx failure
             // silently hides synced progress, so surface it (stays quiet on routine offline).
@@ -74,6 +75,23 @@ final class JourneyProgressStore: ObservableObject {
         }
     }
 
+    /// Re-push completions the server doesn't have yet.
+    ///
+    /// Without this, a completion whose POST failed was LOST FOREVER: `markCompleted` returns early
+    /// once the title is in the local set, so it could never be re-pushed, and `hydrate` only ever
+    /// merged remote→local. Finish a lesson offline, reinstall, and it was gone. Safe because the
+    /// sync model is union-only — nothing is ever deleted by a merge.
+    private func pushUnsynced(remote: Set<String>) async {
+        let unsynced = completedTitles.subtracting(remote)
+        guard !unsynced.isEmpty else { return }
+        print("[JourneyProgressStore] re-pushing \(unsynced.count) unsynced completion(s)")
+        for title in unsynced.sorted().prefix(Self.maxReconcilePushes) {
+            await pushCompletion(title)
+        }
+    }
+
+    private static let maxReconcilePushes = 25
+
     private func pushCompletion(_ title: String) async {
         do {
             let resp = try await apiClient.request(
@@ -82,7 +100,12 @@ final class JourneyProgressStore: ObservableObject {
             )
             merge(resp)
         } catch {
-            // Stays in the local cache; re-pushes next time a lesson is marked.
+            // Non-fatal: stays in the local cache and `pushUnsynced` retries on the next hydrate.
+            // Logged rather than swallowed — a persistent failure means progress is only local.
+            let appError = AppError.from(error)
+            if !appError.isExpectedOffline {
+                print("[JourneyProgressStore] push failed for \(title) [\(appError.title)]: \(appError.message)")
+            }
         }
     }
 

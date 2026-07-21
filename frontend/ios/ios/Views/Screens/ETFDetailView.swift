@@ -229,10 +229,15 @@ struct ETFDetailView: View {
             TickerNewsContent(
                 articles: viewModel.newsArticles,
                 currentTicker: etfSymbol,
+                isLoading: viewModel.isNewsLoading,
+                hasMoreNews: viewModel.hasMoreNews,
                 onArticleTap: viewModel.handleNewsArticleTap,
                 onExternalLinkTap: viewModel.handleNewsExternalLink,
-                onRelatedTickerTap: viewModel.handleNewsTickerTap
+                onRelatedTickerTap: viewModel.handleNewsTickerTap,
+                onLoadMore: { viewModel.loadMoreNews() }
             )
+            // Defer AI enrichment to when the News tab is actually viewed.
+            .onAppear { viewModel.newsTabAppeared() }
         }
     }
 

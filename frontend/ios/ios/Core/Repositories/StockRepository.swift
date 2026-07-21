@@ -319,6 +319,35 @@ final class StockRepository: StockRepositoryProtocol {
         return response
     }
 
+    // MARK: - ETF News
+    // ETF news comes from the SAME shared cache as stocks/crypto (backend
+    // /etfs/{symbol}/news → news_cache_service), so an ETF's News tab and its
+    // Updates tab show the same articles + AI summaries.
+
+    func getETFNews(symbol: String, limit: Int = 50) async throws -> TickerNewsFeedResponse {
+        let cacheKey = "etf_news_\(symbol)"
+
+        if let cached: TickerNewsFeedResponse = getCached(cacheKey, maxAge: CacheTTL.news) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getETFNews(symbol: symbol, limit: limit),
+            responseType: TickerNewsFeedResponse.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    func enrichETFNews(symbol: String, articleIds: [String]) async throws -> EnrichStockNewsResponse {
+        let response = try await apiClient.request(
+            endpoint: .enrichETFNews(symbol: symbol, articleIds: articleIds),
+            responseType: EnrichStockNewsResponse.self
+        )
+        return response
+    }
+
     // MARK: - Crypto Fear & Greed
 
     func getCryptoFearGreed() async throws -> CryptoFearGreedDTO {

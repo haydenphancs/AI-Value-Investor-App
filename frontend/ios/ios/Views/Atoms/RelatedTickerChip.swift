@@ -15,6 +15,11 @@ struct RelatedTickerChip: View {
         Text(symbol)
             .font(AppTypography.captionEmphasis)
             .foregroundColor(isHighlighted ? AppColors.primaryBlue : AppColors.textSecondary)
+            // A ticker symbol is atomic — never let it wrap to "SC\nHW". With the
+            // flow layout each chip gets its natural width, so this just keeps the
+            // glyphs on one line.
+            .lineLimit(1)
+            .fixedSize()
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)
             .background(

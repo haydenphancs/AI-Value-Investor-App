@@ -5,16 +5,44 @@ Frontend: GET /api/v1/etfs/{symbol}?range=3M&interval=daily
 """
 
 from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
+from fastapi.responses import JSONResponse
+from typing import Optional, Dict, Any
 import logging
+import re
 
-from app.api.error_response import error_response_from_exception
+from app.api.error_response import (
+    ErrorCode,
+    error_response_from_exception,
+    make_error_response,
+    upstream_error_response,
+)
 from app.services.etf_service import get_etf_service
 from app.schemas.etf import ETFDetailResponse, ETFDividendHistoryResponse, ETFHoldingsRiskResponse, ETFProfileResponse
+from app.schemas.news import (
+    MAX_ENRICH_ARTICLE_IDS,
+    EnrichNewsResponse,
+    TickerNewsFeedResponse,
+    news_articles_from_rows,
+    news_feed_from_payload,
+    sanitize_article_ids,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# ETF tickers are ordinary NMS symbols (SPY, QQQ, ARKK). Same shape as stocks.
+_ETF_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
+
+
+def _invalid_news_symbol(raw: str) -> JSONResponse:
+    """Structured INVALID_INPUT for a malformed news symbol (invariant #3)."""
+    return make_error_response(
+        ErrorCode.INVALID_INPUT,
+        message=f"Invalid ETF symbol for news: {raw[:32]!r}",
+        user_message="That symbol isn't valid.",
+        details={"symbol": raw[:32]},
+    )
 
 
 @router.get("/{symbol}", response_model=ETFDetailResponse)
@@ -118,3 +146,92 @@ async def get_etf_profile(symbol: str):
             status_code=502,
             detail=f"ETF profile unavailable for {symbol}",
         )
+
+
+# ── ETF News (shared cache-aside + on-demand enrichment) ──────────
+# ETFs use the SAME shared `ticker_news_cache` as stocks/indices/commodities
+# (via news_cache_service), so an ETF's News tab and its Updates tab show the
+# same articles + AI summaries, cross-user. This replaced the old path where
+# ETF news was a direct FMP fetch baked into the detail payload — uncached and
+# never AI-enriched. `news/stock` serves ETF tickers (SPY, QQQ) fine.
+
+
+@router.get("/{symbol}/news", response_model=TickerNewsFeedResponse)
+async def get_etf_news(
+    symbol: str,
+    limit: int = Query(50, ge=1, le=50),
+):
+    """
+    Get news for an ETF (raw + any previously enriched), from the shared cache.
+
+    AI enrichment is NOT automatic — use POST /{symbol}/news/enrich.
+    """
+    from app.services.news_cache_service import get_news_cache_service
+
+    symbol = symbol.strip().upper()
+    if not _ETF_SYMBOL_RE.match(symbol):
+        return _invalid_news_symbol(symbol)
+
+    try:
+        service = get_news_cache_service()
+        feed = await service.get_ticker_news(symbol, limit)
+    except Exception as e:
+        logger.error(
+            f"ETF news failed for {symbol}: {type(e).__name__}: {e}", exc_info=True
+        )
+        if (resp := upstream_error_response(e, ticker=symbol, step="etf_news")) is not None:
+            return resp
+        raise HTTPException(status_code=500, detail="News service unavailable")
+
+    return news_feed_from_payload(feed, ticker=symbol)
+
+
+@router.post("/{symbol}/news/enrich", response_model=EnrichNewsResponse)
+async def enrich_etf_news(
+    symbol: str,
+    body: Dict[str, Any],
+):
+    """
+    AI-enrich specific ETF news articles on demand.
+
+    Body: { "article_ids": ["uuid1", "uuid2", ...] }
+    """
+    from app.services.news_cache_service import get_news_cache_service
+
+    symbol = symbol.strip().upper()
+    if not _ETF_SYMBOL_RE.match(symbol):
+        return _invalid_news_symbol(symbol)
+
+    raw_ids = body.get("article_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="article_ids is required (non-empty list)",
+            user_message="No articles were requested.",
+            details={"symbol": symbol},
+        )
+
+    ids = sanitize_article_ids(raw_ids)
+    if not ids:
+        # Every id was a client-side placeholder — nothing is enrichable yet.
+        return EnrichNewsResponse(ticker=symbol, articles=[])
+    if len(ids) > MAX_ENRICH_ARTICLE_IDS:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Too many article_ids: {len(ids)} (max {MAX_ENRICH_ARTICLE_IDS})",
+            user_message="Too many articles requested at once.",
+            details={"symbol": symbol, "count": len(ids)},
+        )
+
+    try:
+        service = get_news_cache_service()
+        enriched = await service.enrich_articles(symbol, ids)
+    except Exception as e:
+        logger.error(
+            f"ETF news enrichment failed for {symbol} ({len(ids)} ids): "
+            f"{type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        return error_response_from_exception(e, ticker=symbol, step="etf_news_enrich")
+
+    return EnrichNewsResponse(ticker=symbol, articles=news_articles_from_rows(enriched))

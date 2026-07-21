@@ -17,6 +17,8 @@ class ETFDetailViewModel: ObservableObject {
 
     @Published var etfData: ETFDetailData?
     @Published var newsArticles: [TickerNewsArticle] = []
+    @Published var isNewsLoading: Bool = false
+    @Published var hasMoreNews: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: ETFDetailTab = .overview
@@ -42,6 +44,14 @@ class ETFDetailViewModel: ObservableObject {
     let etfSymbol: String
     private let repository: StockRepository = .shared
     private var cancellables = Set<AnyCancellable>()
+
+    // MARK: - News (shared cache + deferred enrichment)
+    /// Full set from the shared news cache; `newsArticles` is the paged slice.
+    private var allNewsArticles: [TickerNewsArticle] = []
+    private var newsDisplayCount: Int = 10
+    private let newsPageSize: Int = 10
+    /// Serialises enrichment (News-tab-appear vs fetch/load-more completion).
+    private var isEnrichingNews = false
     /// Monotonic token for ETF-detail fetches. fetchETFDetail and fetchChartForRange
     /// hit the same endpoint and write the whole etfData snapshot; each captures the
     /// token before awaiting and applies its result only if still current, so a slow
@@ -132,13 +142,15 @@ class ETFDetailViewModel: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             async let detailTask: () = self.fetchETFDetail()
+            async let newsTask: () = self.fetchETFNews()
             async let watchlistTask: () = self.checkWatchlistStatus()
-            _ = await (detailTask, watchlistTask)
+            _ = await (detailTask, newsTask, watchlistTask)
         }
     }
 
     func refresh() async {
         await fetchETFDetail()
+        await fetchETFNews()
     }
 
     /// Fetches ETF detail from the backend and maps to display models.
@@ -167,7 +179,10 @@ class ETFDetailViewModel: ObservableObject {
                 self.errorMessage = nil
                 self.etfData = response.toDisplayModel()
                 self.chartDataVersion += 1
-                self.newsArticles = response.toNewsArticles()
+                // News now comes from the SHARED cache via `fetchETFNews()`, not
+                // this detail payload — so ETF news matches the Updates feed and
+                // gets AI enrichment. (The payload still carries `news_articles`;
+                // we just don't use it here.)
 
                 // Start live price streaming + chart refresh if market is active.
                 self.maybeStartStreaming()
@@ -219,7 +234,8 @@ class ETFDetailViewModel: ObservableObject {
             guard token == self.chartRequestToken else { return }
             self.etfData = response.toDisplayModel()
             self.chartDataVersion += 1
-            self.newsArticles = response.toNewsArticles()
+            // News is loaded once via `fetchETFNews()` (shared cache), not
+            // re-pulled on every chart-range change.
 
             // If a range change superseded the initial fetchETFDetail before it could
             // connect, this is now the path that paints etfData — so ensure streaming
@@ -365,6 +381,152 @@ class ETFDetailViewModel: ObservableObject {
 
     func handleNewsTickerTap(_ ticker: String) {
         pendingTickerNavigation = ticker
+    }
+
+    // MARK: - News fetch + enrichment (shared cache; mirrors the other detail VMs)
+
+    private func fetchETFNews() async {
+        self.isNewsLoading = true
+        do {
+            let response = try await repository.getETFNews(symbol: etfSymbol, limit: 50)
+            let apiNews = response.articles
+            print("📰 [ETFDetail] Got \(apiNews.count) news articles for \(etfSymbol) (cached: \(response.cached ?? false))")
+
+            self.allNewsArticles = apiNews.map { mapApiToUiArticle($0) }
+            self.newsDisplayCount = newsPageSize
+            self.hasMoreNews = allNewsArticles.count > newsDisplayCount
+            self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            self.isNewsLoading = false
+
+            // Enrich ONLY if the News tab is being viewed — the expensive `flash`
+            // model must not fire on every ETF open. `newsTabAppeared()` covers
+            // the case where news lands before the user switches to the tab.
+            if selectedTab == .news {
+                await enrichVisibleArticles()
+            }
+        } catch {
+            print("⚠️ [ETFDetail] Failed to fetch news for \(etfSymbol): \(error)")
+        }
+        self.isNewsLoading = false
+    }
+
+    func loadMoreNews() {
+        guard hasMoreNews else { return }
+        newsDisplayCount += newsPageSize
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+        hasMoreNews = allNewsArticles.count > newsDisplayCount
+        Task { await enrichVisibleArticles() }
+    }
+
+    /// Called when the News tab becomes visible — defers AI enrichment to when
+    /// news is actually read. See TickerDetailViewModel.newsTabAppeared.
+    func newsTabAppeared() {
+        Task { await enrichVisibleArticles() }
+    }
+
+    private func enrichVisibleArticles() async {
+        guard !isEnrichingNews else { return }
+        let unenriched = newsArticles.filter { !$0.aiProcessed }
+        guard !unenriched.isEmpty else { return }
+        let ids = unenriched.map { $0.apiId }
+            .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+        guard !ids.isEmpty else { return }
+
+        isEnrichingNews = true
+        defer { isEnrichingNews = false }
+
+        await attemptEnrichment(articleIds: ids)
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+    }
+
+    private func attemptEnrichment(articleIds: [String], maxAttempts: Int = 2) async {
+        for attempt in 1...maxAttempts {
+            do {
+                let enrichResponse = try await repository.enrichETFNews(
+                    symbol: etfSymbol, articleIds: articleIds
+                )
+                mergeEnrichment(enrichResponse.articles)
+                let enrichedCount = allNewsArticles.prefix(newsDisplayCount)
+                    .filter { $0.aiProcessed }.count
+                if enrichedCount > 0 {
+                    print("✅ [ETFDetail] Attempt \(attempt) enriched \(enrichedCount) articles")
+                    return
+                } else if attempt < maxAttempts {
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                }
+            } catch {
+                if attempt < maxAttempts {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                } else {
+                    print("⚠️ [ETFDetail] Enrichment failed after \(maxAttempts) attempts: \(error)")
+                }
+            }
+        }
+    }
+
+    private func mergeEnrichment(_ enrichedArticles: [StockNewsArticle]) {
+        let enrichedById = Dictionary(
+            enrichedArticles.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        for i in allNewsArticles.indices {
+            guard let enriched = enrichedById[allNewsArticles[i].apiId] else { continue }
+            let wasProcessed = enriched.aiProcessed ?? false
+            let hasBullets = enriched.summaryBullets?.isEmpty == false
+            guard wasProcessed || hasBullets else { continue }
+            let bullets: [String] = {
+                if let b = enriched.summaryBullets, !b.isEmpty { return b }
+                if let s = enriched.summary, !s.isEmpty { return [s] }
+                return allNewsArticles[i].summaryBullets
+            }()
+            allNewsArticles[i].summaryBullets = bullets
+            allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
+            allNewsArticles[i].aiProcessed = true
+        }
+    }
+
+    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
+        let bullets: [String] = {
+            if let aiBullets = article.summaryBullets, !aiBullets.isEmpty { return aiBullets }
+            if let summary = article.summary, !summary.isEmpty { return [summary] }
+            return []
+        }()
+        return TickerNewsArticle(
+            apiId: article.id,
+            headline: article.title,
+            source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+            sentiment: mapSentiment(article.sentiment),
+            publishedAt: article.publishedAt.flatMap { parseNewsDate($0) } ?? Date(),
+            thumbnailName: nil,
+            imageURL: article.imageUrl.flatMap { URL(string: $0) },
+            relatedTickers: article.relatedTickers ?? [],
+            summaryBullets: bullets,
+            articleURL: article.url.flatMap { URL(string: $0) },
+            aiProcessed: article.aiProcessed ?? false
+        )
+    }
+
+    private func mapSentiment(_ sentiment: String?) -> NewsSentiment {
+        switch sentiment?.lowercased() {
+        case "positive", "bullish": return .positive
+        case "negative", "bearish": return .negative
+        default: return .neutral
+        }
+    }
+
+    private func parseNewsDate(_ dateString: String) -> Date? {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = iso.date(from: dateString) { return d }
+        iso.formatOptions = [.withInternetDateTime]
+        if let d = iso.date(from: dateString) { return d }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        if let d = f.date(from: dateString) { return d }
+        f.dateFormat = "yyyy-MM-dd"
+        return f.date(from: dateString)
     }
 
     func handleSuggestionTap(_ suggestion: ETFAISuggestion) {

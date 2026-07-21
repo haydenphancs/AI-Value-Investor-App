@@ -8,10 +8,12 @@ updates to all connected iOS clients watching that ticker.
 import asyncio
 import json
 import logging
+import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Any
 
+import certifi
 import websockets
 from fastapi import WebSocket
 
@@ -20,7 +22,37 @@ from app.integrations.fmp import get_fmp_client
 
 logger = logging.getLogger(__name__)
 
-FMP_WS_URL = "wss://websockets.financialmodelingprep.com"
+# FMP runs SEPARATE real-time sockets per asset class. Crypto pairs (e.g. BTCUSD)
+# will NOT stream on the stock socket — they must use the crypto endpoint, which
+# additionally requires an explicit `login` event and lowercase tickers.
+FMP_WS_URL_STOCK = "wss://websockets.financialmodelingprep.com"
+FMP_WS_URL_CRYPTO = "wss://crypto.financialmodelingprep.com"
+
+# Explicit TLS trust store built from certifi. Without this, websockets falls back
+# to ssl.create_default_context() which trusts the host's OpenSSL default CA path
+# — that path is unreliable across environments (e.g. a stale/absent anaconda
+# cert.pem locally, or a slim container image on Railway), producing
+# `[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate`.
+# httpx (our FMP REST client) never hit this because it bundles certifi; this makes
+# the WebSocket handshake use the same trusted bundle. Built once at import.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+
+def _fmp_ws_target(ticker: str) -> tuple[str, bool, str]:
+    """Resolve how to connect to FMP's live socket for ``ticker``.
+
+    Returns ``(connect_url, send_login_event, subscribe_ticker)``:
+
+    - Crypto pairs (``…USD`` with length >= 5, mirroring the endpoint's own
+      ``is_crypto`` heuristic) use the dedicated crypto socket, which authenticates
+      via a ``login`` event and expects a lowercase ticker.
+    - Everything else uses the stock socket, which authenticates via the ``apikey``
+      URL query parameter and uses the uppercase ticker.
+    """
+    t = ticker.upper()
+    if t.endswith("USD") and len(t) >= 5:
+        return FMP_WS_URL_CRYPTO, True, ticker.lower()
+    return f"{FMP_WS_URL_STOCK}?apikey={settings.FMP_API_KEY}", False, t
 
 # Min seconds between previous-close re-fetch attempts, so a genuinely-empty quote
 # (or repeated failures) can't hammer the FMP REST API on every trade tick.
@@ -159,6 +191,45 @@ class LivePriceManager:
             return
         await self._fetch_previous_close(room)
 
+    async def _open_fmp_ws(self, ticker: str):
+        """Open + authenticate + subscribe an FMP upstream socket for ``ticker``.
+
+        Routes crypto vs stock to the correct endpoint (``_fmp_ws_target``), pins
+        the certifi TLS trust store, and sends the login (crypto only) + subscribe
+        events. Returns the connected socket or raises — the caller decides whether
+        the failure is fatal (room creation) or triggers a backoff-retry (reader).
+        """
+        url, send_login, sub_ticker = _fmp_ws_target(ticker)
+        ws = await websockets.connect(
+            url,
+            ssl=_SSL_CONTEXT,
+            ping_interval=20,
+            ping_timeout=10,
+            close_timeout=5,
+        )
+        try:
+            # Crypto socket authenticates via an explicit login event; the stock
+            # socket authenticates via the apikey URL query param (login no-op there).
+            if send_login:
+                await ws.send(json.dumps({
+                    "event": "login",
+                    "data": {"apiKey": settings.FMP_API_KEY},
+                }))
+            await ws.send(json.dumps({
+                "event": "subscribe",
+                "data": {"ticker": sub_ticker},
+            }))
+        except Exception:
+            # Handshake connected but auth/subscribe failed — close the half-open
+            # socket before propagating so it doesn't leak past the caller's
+            # `fmp_ws = None` reset.
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            raise
+        return ws
+
     async def _create_room(self, ticker: str) -> TickerRoom:
         """Open an upstream FMP WebSocket and start the reader task."""
         room = TickerRoom(ticker=ticker)
@@ -167,26 +238,16 @@ class LivePriceManager:
         # reader loop lazily retries if this fails so change% never stays pinned at 0).
         await self._fetch_previous_close(room)
 
-        # Connect to FMP WebSocket
+        # Connect to FMP WebSocket (best-effort; the reader loop retries on failure
+        # so a transient handshake error never leaves the room permanently dead).
         try:
-            ws_url = f"{FMP_WS_URL}?apikey={settings.FMP_API_KEY}"
-            room.fmp_ws = await websockets.connect(
-                ws_url,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=5,
-            )
-
-            # Subscribe to the ticker
-            subscribe_msg = json.dumps({
-                "event": "subscribe",
-                "data": {"ticker": ticker}
-            })
-            await room.fmp_ws.send(subscribe_msg)
+            room.fmp_ws = await self._open_fmp_ws(ticker)
             logger.info(f"Room {ticker}: FMP WebSocket connected and subscribed")
-
         except Exception as e:
-            logger.error(f"Room {ticker}: failed to connect to FMP WebSocket: {e}")
+            logger.error(
+                f"Room {ticker}: failed to connect to FMP WebSocket: "
+                f"{type(e).__name__}: {e}"
+            )
             room.fmp_ws = None
 
         # Start the reader task that fans out FMP messages to clients
@@ -210,10 +271,12 @@ class LivePriceManager:
 
         if room.fmp_ws:
             try:
-                # Unsubscribe before closing
+                # Unsubscribe before closing, using the same ticker casing the
+                # subscribe used (lowercase for crypto, uppercase for stocks).
+                _, _, sub_ticker = _fmp_ws_target(ticker)
                 unsub_msg = json.dumps({
                     "event": "unsubscribe",
-                    "data": {"ticker": ticker}
+                    "data": {"ticker": sub_ticker}
                 })
                 await room.fmp_ws.send(unsub_msg)
                 await room.fmp_ws.close()
@@ -271,23 +334,13 @@ class LivePriceManager:
                     reconnect_attempts += 1
 
                     try:
-                        ws_url = f"{FMP_WS_URL}?apikey={settings.FMP_API_KEY}"
-                        room.fmp_ws = await websockets.connect(
-                            ws_url,
-                            ping_interval=20,
-                            ping_timeout=10,
-                            close_timeout=5,
-                        )
-                        subscribe_msg = json.dumps({
-                            "event": "subscribe",
-                            "data": {"ticker": room.ticker}
-                        })
-                        await room.fmp_ws.send(subscribe_msg)
+                        room.fmp_ws = await self._open_fmp_ws(room.ticker)
                         logger.info(f"Room {room.ticker}: reconnected to FMP")
                         reconnect_attempts = 0
                     except Exception as e:
                         logger.warning(
-                            f"Room {room.ticker}: reconnect failed: {e}"
+                            f"Room {room.ticker}: reconnect failed: "
+                            f"{type(e).__name__}: {e}"
                         )
                         room.fmp_ws = None
                         continue

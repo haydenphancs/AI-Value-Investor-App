@@ -9,7 +9,10 @@ import SwiftUI
 
 struct LiveNewsTimeline: View {
     let groupedNews: [GroupedNews]
-    var onArticleTapped: ((NewsArticle) -> Void)?
+    /// Open the article's publisher page in the in-app browser. Cards expand
+    /// inline for the AI summary; this fires from the expanded card's open-link
+    /// icon, and from a plain tap on a card that has no summary yet.
+    var onOpenArticle: ((NewsArticle) -> Void)?
     /// Fired as each row scrolls in. Drives paging and AI enrichment — the
     /// reader reaching the end of the list is the signal that more is wanted.
     var onArticleAppear: ((NewsArticle) -> Void)?
@@ -20,7 +23,7 @@ struct LiveNewsTimeline: View {
                 Section {
                     NewsGroupContent(
                         articles: group.articles,
-                        onArticleTapped: onArticleTapped,
+                        onOpenArticle: onOpenArticle,
                         onArticleAppear: onArticleAppear
                     )
                 } header: {
@@ -34,7 +37,7 @@ struct LiveNewsTimeline: View {
 // MARK: - News Group Content (without header)
 struct NewsGroupContent: View {
     let articles: [NewsArticle]
-    var onArticleTapped: ((NewsArticle) -> Void)?
+    var onOpenArticle: ((NewsArticle) -> Void)?
     var onArticleAppear: ((NewsArticle) -> Void)?
 
     var body: some View {
@@ -44,8 +47,8 @@ struct NewsGroupContent: View {
                     article: article,
                     isFirst: index == 0,
                     isLast: index == articles.count - 1,
-                    onTapped: {
-                        onArticleTapped?(article)
+                    onOpenLink: {
+                        onOpenArticle?(article)
                     }
                 )
                 .padding(.horizontal, AppSpacing.lg)

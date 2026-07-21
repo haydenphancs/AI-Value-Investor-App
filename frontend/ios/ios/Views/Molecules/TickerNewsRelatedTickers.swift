@@ -13,7 +13,10 @@ struct TickerNewsRelatedTickers: View {
     var onTickerTap: ((String) -> Void)?
 
     var body: some View {
-        HStack(spacing: AppSpacing.sm) {
+        // Wrap onto new lines instead of an HStack that squeezes every chip onto
+        // one row — with many related tickers the chips got so compressed the
+        // symbols wrapped mid-text ("SC\nHW") and were unreadable.
+        FlowLayout(spacing: AppSpacing.sm, lineSpacing: AppSpacing.sm) {
             ForEach(tickers, id: \.self) { ticker in
                 Button(action: {
                     onTickerTap?(ticker)
@@ -26,6 +29,7 @@ struct TickerNewsRelatedTickers: View {
                 .buttonStyle(PlainButtonStyle())
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -18,7 +18,10 @@ struct UpdatesView: View {
     @State private var showManageAssetsSheet = false
     @State private var showProfile = false
     @State private var showSearch = false
-    @State private var selectedNewsArticle: NewsArticle?
+    /// Article to open in the in-app browser. The Live News cards now expand
+    /// inline for the AI summary and open the publisher page in-app; the old
+    /// push to `NewsDetailView` was redundant once the summary lives on the card.
+    @State private var browserLink: BrowserLink?
 
     var body: some View {
         NavigationStack {
@@ -72,7 +75,7 @@ struct UpdatesView: View {
                             } else {
                                 LiveNewsTimeline(
                                     groupedNews: viewModel.groupedNews,
-                                    onArticleTapped: handleArticleTapped,
+                                    onOpenArticle: openArticle,
                                     onArticleAppear: viewModel.articleDidAppear
                                 )
                             }
@@ -94,16 +97,6 @@ struct UpdatesView: View {
             .task(id: isActiveTab) {
                 guard isActiveTab else { return }
                 await viewModel.loadIfNeeded()
-            }
-            .navigationDestination(item: $selectedNewsArticle) { article in
-                // Pass the CURRENT scope. Cache rows are partitioned by scope
-                // (`ticker = cache_key`), so enriching an AAPL article under
-                // "__MARKET__" matches zero rows and the Key Takeaways section
-                // silently never appears.
-                NewsDetailView(
-                    article: article,
-                    scope: viewModel.selectedTab?.scope ?? UpdatesScope.market
-                )
             }
             .onChange(of: viewModel.selectedTab) { oldValue, newValue in
                 if let newTab = newValue {
@@ -154,6 +147,9 @@ struct UpdatesView: View {
                 SearchView()
                     .preferredColorScheme(.dark)
             }
+            // Publisher articles open here, in-app, instead of pushing a
+            // separate detail screen.
+            .inAppBrowser(link: $browserLink)
         }
     }
 
@@ -241,8 +237,13 @@ struct UpdatesView: View {
         viewModel.openFilterOptions()
     }
 
-    private func handleArticleTapped(_ article: NewsArticle) {
-        selectedNewsArticle = article
+    private func openArticle(_ article: NewsArticle) {
+        // A card with no summary yet has nothing to expand, so a tap lands here;
+        // the expanded card's open-link icon lands here too. Both open the
+        // publisher page in the in-app browser. `openExternal` guards the
+        // scheme; a missing URL simply no-ops.
+        guard let url = article.articleURL else { return }
+        openExternal(url, into: &browserLink)
     }
 }
 

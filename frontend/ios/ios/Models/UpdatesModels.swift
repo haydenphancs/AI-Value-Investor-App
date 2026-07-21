@@ -360,10 +360,17 @@ struct UpdatesFeedResponse: Codable, Sendable {
     let insight: AIInsightCardDTO?
     let cached: Bool?
     let cacheAgeSeconds: Int?
+    /// Where this page started, echoed back by the backend.
+    let offset: Int?
+    /// Whether another page of retained history exists. Optional and defaulted
+    /// to `false` at the use site — a backend that predates pagination omits
+    /// it, and treating a missing value as "more" would loop forever.
+    let hasMore: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case scope, articles, insight, cached
+        case scope, articles, insight, cached, offset
         case cacheAgeSeconds = "cache_age_seconds"
+        case hasMore = "has_more"
     }
 }
 

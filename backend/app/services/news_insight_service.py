@@ -43,6 +43,7 @@ from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client, GeminiQuotaError
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.updates_materiality import PROMPT_VERSION, finite
+from app.utils.market_hours import is_market_active
 
 logger = logging.getLogger(__name__)
 
@@ -217,18 +218,26 @@ class NewsInsightService:
             .gt("hard_expires_at", now_iso)
             .execute()
         )
+        # Read the session state ONCE per query rather than per row: every row
+        # in a batch must agree on it, and a sweep can span a session boundary.
+        market_active = is_market_active()
         cards: Dict[str, Dict[str, Any]] = {}
         for row in (result.data or []):
-            card = self._row_to_card(row)
+            card = self._row_to_card(row, market_active=market_active)
             if card is not None:
                 cards[card["scope"]] = card
         return cards
 
-    def _row_to_card(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _row_to_card(
+        self, row: Dict[str, Any], market_active: Optional[bool] = None
+    ) -> Optional[Dict[str, Any]]:
         """Map a DB row to the API card shape, dropping anything malformed.
 
         A row that fails validation is treated as a cache MISS rather than
         surfaced — a half-written card in a finance app is worse than no card.
+
+        ``market_active`` is injectable so the staleness branch is testable
+        without depending on the wall clock of whoever runs the suite.
         """
         try:
             bullets = row.get("bullets")
@@ -245,6 +254,21 @@ class NewsInsightService:
             if not headline:
                 raise ValueError("empty headline")
 
+            # `is_stale` means "the inputs may have moved on and the sweeper
+            # has not caught up yet" — it is a statement about the SWEEPER,
+            # which only runs while `is_market_active()` (04:00–20:00 ET, see
+            # updates_insight_sweeper.run_insight_sweeper_loop).
+            #
+            # Outside that window nothing is sweeping and nothing will until the
+            # next session opens, so a soft-expired card is not behind anything:
+            # it IS the latest view of the world. Reporting stale there is what
+            # made every scope render "Catching up…" — replacing the card's
+            # timestamp with a claim that a refresh was pending — for the whole
+            # 8h overnight window and every weekend. The last active sweep
+            # stamps a 15-minute soft expiry and then the loop goes to sleep, so
+            # the flag tripped ~15 min after the 20:00 ET close, every night.
+            if market_active is None:
+                market_active = is_market_active()
             soft = _parse_ts(row.get("soft_expires_at"))
             now = datetime.now(timezone.utc)
             return {
@@ -254,7 +278,9 @@ class NewsInsightService:
                 "sentiment": sentiment,
                 "article_count": int(row.get("article_count") or 0),
                 "generated_at": _iso(row.get("generated_at")),
-                "is_stale": bool(soft is not None and soft <= now),
+                "is_stale": bool(
+                    soft is not None and soft <= now and market_active
+                ),
                 "refreshing": False,
                 "ai_generated": True,
                 "trigger_reason": row.get("trigger_reason"),
@@ -269,7 +295,10 @@ class NewsInsightService:
     # ── Public: deterministic (non-LLM) fallback ──────────────────────
 
     def build_fallback_card(
-        self, scope: str, corpus: Sequence[Dict[str, Any]]
+        self,
+        scope: str,
+        corpus: Sequence[Dict[str, Any]],
+        market_active: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
         """A truthful, LLM-free card for a scope that has never been generated.
 
@@ -324,9 +353,18 @@ class NewsInsightService:
             "article_count": len(usable),
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "is_stale": False,
-            # Tells iOS to poll shortly: the sweeper will replace this with a
-            # real AI card within one cycle.
-            "refreshing": True,
+            # Tells iOS to poll shortly, because the sweeper will replace this
+            # with a real AI card within one cycle — which is only TRUE while
+            # the sweeper is running. It is gated on `is_market_active()`
+            # (updates_insight_sweeper.run_insight_sweeper_loop), so overnight
+            # and at weekends this promise cannot be kept: no cycle is coming
+            # until the next session opens. Asserting it anyway made iOS render
+            # a bare "Catching up…" for up to ~60 hours and fire two futile
+            # re-polls on every feed load. Same reasoning as `is_stale` above:
+            # both flags are statements about the SWEEPER, not about the card.
+            "refreshing": (
+                is_market_active() if market_active is None else bool(market_active)
+            ),
             "ai_generated": False,
             "trigger_reason": None,
         }

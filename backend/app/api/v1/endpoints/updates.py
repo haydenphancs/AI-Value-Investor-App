@@ -39,7 +39,6 @@ from app.schemas.updates import (
 )
 from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
 from app.services.news_insight_service import get_news_insight_service
-from app.services.updates_insight_sweeper import MARKET_INDEX_SYMBOL
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +118,10 @@ async def get_updates_tabs(
     quotes: Dict[str, Dict[str, Any]] = {}
     try:
         fmp = get_fmp_client()
-        for q in await fmp.get_batch_quotes_bulk(tickers + [MARKET_INDEX_SYMBOL]):
+        # Watchlist tickers only — the Market pill carries no change %, so
+        # MARKET_INDEX_SYMBOL would be a quote nobody reads. `_bulk` returns []
+        # for an empty list, so a user with no watchlist skips the call entirely.
+        for q in await fmp.get_batch_quotes_bulk(tickers):
             sym = q.get("symbol")
             if sym:
                 quotes[str(sym).upper()] = q
@@ -146,7 +148,13 @@ async def get_updates_tabs(
             scope=MARKET_SCOPE,
             title="Market",
             company_name="S&P 500",
-            change_percent=_change(MARKET_INDEX_SYMBOL),
+            # No change % on the Market pill. This tab is GENERAL market news —
+            # `news/general-latest` plus coverage of SPY/QQQ/DIA/^GSPC/^IXIC —
+            # so there is no single instrument whose move it reports. Pinning
+            # the S&P's number to it claims a precision the tab does not have,
+            # and sits inches from ticker pills where the % means exactly one
+            # thing. iOS hides the label when this is null.
+            change_percent=None,
             is_market_tab=True,
         )
     ]
@@ -177,6 +185,11 @@ async def get_updates_tabs(
 async def get_updates_feed(
     scope: str = Query(MARKET_SCOPE, description="'__MARKET__' or a ticker symbol"),
     limit: int = Query(50, ge=1, le=50),
+    # Page-through of retained history. The sweeper refreshes on a 96h lookback,
+    # so a busy scope holds several days of rows while one page shows well under
+    # a day — without this the client could never reach yesterday. Bounded so a
+    # scripted deep-offset scan cannot make Postgres walk an unbounded range.
+    offset: int = Query(0, ge=0, le=500),
     # Public, but throttled: a cache MISS costs a live FMP call, and an
     # unrecognised scope never caches, so an unthrottled loop over junk scopes
     # would drain the FMP quota. The sweeper's spend ceilings do not cover this
@@ -202,13 +215,14 @@ async def get_updates_feed(
 
     try:
         if scope == MARKET_SCOPE:
-            feed = await news.get_market_news(limit=limit)
+            feed = await news.get_market_news(limit=limit, offset=offset)
         else:
             # Crypto symbols must go to FMP's `news/crypto`; `news/stock` returns
             # nothing for BTCUSD, so a crypto watchlist row would render a pill
             # with a permanently empty feed.
             feed = await news.get_ticker_news(
-                scope, limit=limit, is_crypto=_is_crypto_scope(scope)
+                scope, limit=limit, is_crypto=_is_crypto_scope(scope),
+                offset=offset,
             )
     except Exception as e:
         logger.error(
@@ -221,26 +235,40 @@ async def get_updates_feed(
     articles = [_to_article(a) for a in raw_articles]
 
     # Insight: cache read only. Never blocks on Gemini.
+    #
+    # Page 0 ONLY. The card sits above the timeline and the client already has
+    # it; re-sending it on every scroll page would cost a Supabase read per page
+    # and — worse — a page-2 fallback card would be built from page 2's
+    # articles, i.e. a summary of yesterday's news replacing today's.
     insight: Optional[AIInsightCardResponse] = None
-    try:
-        cards = await insights.get_cards([scope])
-        card = cards.get(scope)
-        if card is None and raw_articles:
-            # No AI card yet (cold scope, or the sweeper hasn't reached it).
-            # Serve the honest headline list; the sweeper fills in within a cycle.
-            card = insights.build_fallback_card(scope, raw_articles)
-        if card is not None:
-            insight = AIInsightCardResponse(**card)
-    except Exception as e:
-        # An unavailable insight must never take down the timeline.
-        logger.warning(
-            "Updates insight read failed for scope=%s: %s: %s",
-            scope, type(e).__name__, e,
-        )
+    if offset == 0:
+        try:
+            cards = await insights.get_cards([scope])
+            card = cards.get(scope)
+            if card is None and raw_articles:
+                # No AI card yet (cold scope, or the sweeper hasn't reached it).
+                # Serve the honest headline list. The card's `refreshing` flag
+                # says whether the sweeper is actually awake to replace it —
+                # outside market hours it is not, and promising otherwise is
+                # what pinned the UI on "Catching up…" all weekend.
+                card = insights.build_fallback_card(scope, raw_articles)
+            if card is not None:
+                insight = AIInsightCardResponse(**card)
+        except Exception as e:
+            # An unavailable insight must never take down the timeline.
+            logger.warning(
+                "Updates insight read failed for scope=%s: %s: %s",
+                scope, type(e).__name__, e,
+            )
+
+    # A full page implies there may be another; a short page is provably the
+    # end. Also stop at the `offset` ceiling so the client cannot chase a page
+    # the query parameter would reject.
+    has_more = len(articles) >= limit and (offset + limit) <= 500
 
     logger.info(
-        "Updates feed scope=%s articles=%d cached=%s insight=%s",
-        scope, len(articles), feed.get("cached"),
+        "Updates feed scope=%s articles=%d offset=%d has_more=%s cached=%s insight=%s",
+        scope, len(articles), offset, has_more, feed.get("cached"),
         "ai" if (insight and insight.ai_generated)
         else "fallback" if insight else "none",
     )
@@ -250,6 +278,8 @@ async def get_updates_feed(
         insight=insight,
         cached=bool(feed.get("cached")),
         cache_age_seconds=feed.get("cache_age_seconds"),
+        offset=offset,
+        has_more=has_more,
     )
 
 

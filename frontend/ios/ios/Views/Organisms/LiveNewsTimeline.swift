@@ -10,6 +10,9 @@ import SwiftUI
 struct LiveNewsTimeline: View {
     let groupedNews: [GroupedNews]
     var onArticleTapped: ((NewsArticle) -> Void)?
+    /// Fired as each row scrolls in. Drives paging and AI enrichment — the
+    /// reader reaching the end of the list is the signal that more is wanted.
+    var onArticleAppear: ((NewsArticle) -> Void)?
 
     var body: some View {
         LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
@@ -17,7 +20,8 @@ struct LiveNewsTimeline: View {
                 Section {
                     NewsGroupContent(
                         articles: group.articles,
-                        onArticleTapped: onArticleTapped
+                        onArticleTapped: onArticleTapped,
+                        onArticleAppear: onArticleAppear
                     )
                 } header: {
                     NewsSectionHeader(title: group.sectionTitle)
@@ -31,6 +35,7 @@ struct LiveNewsTimeline: View {
 struct NewsGroupContent: View {
     let articles: [NewsArticle]
     var onArticleTapped: ((NewsArticle) -> Void)?
+    var onArticleAppear: ((NewsArticle) -> Void)?
 
     var body: some View {
         LazyVStack(spacing: 0) {
@@ -44,6 +49,9 @@ struct NewsGroupContent: View {
                     }
                 )
                 .padding(.horizontal, AppSpacing.lg)
+                // LazyVStack, so this fires only when the row is actually
+                // realised — which is exactly the "reader got here" signal.
+                .onAppear { onArticleAppear?(article) }
             }
         }
     }

@@ -19,6 +19,11 @@ struct SourceLabel: View {
             Text(source.displayName)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
+                // A publisher name is a single-line label. Left unbounded, a
+                // long one ("Business Insider India") wraps and drags the row
+                // taller than the thumbnail beside it.
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
     }
 }

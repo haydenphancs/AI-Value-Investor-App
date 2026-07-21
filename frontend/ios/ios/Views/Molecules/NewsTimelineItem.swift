@@ -24,20 +24,38 @@ struct NewsTimelineItem: View {
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    // Footer: Source and Sentiment
-                    HStack(spacing: AppSpacing.md) {
+                    // Footer: Source (leading) and Sentiment (trailing).
+                    //
+                    // The badge is pinned to the TRAILING edge of the text
+                    // column, not packed after the source name. The column has
+                    // a fixed width (card − padding − thumbnail − gutter), so
+                    // the badge lands on the same x in every row instead of
+                    // sliding left and right with the length of "CNBC" vs
+                    // "MarketWatch".
+                    HStack(spacing: AppSpacing.sm) {
                         SourceLabel(source: article.source)
+
+                        Spacer(minLength: AppSpacing.sm)
 
                         // Only shown once AI enrichment has actually produced a
                         // sentiment. Rendering a "Neutral" badge for every
                         // un-analysed article states a judgement no model made.
                         if let sentiment = article.sentiment {
                             NewsSentimentBadge(sentiment: sentiment)
+                                // The badge is fixed-width content; a long
+                                // source name must truncate rather than squeeze
+                                // "Neutral" into "Neut…".
+                                .layoutPriority(1)
                         }
                     }
                 }
-
-                Spacer()
+                // Claim the column explicitly. The `Spacer()` that used to sit
+                // here competed with the headline for the row's free width, so
+                // SwiftUI handed it a slice and the gap before the thumbnail
+                // came out wider than the card's own 12pt padding. Without it
+                // the gutter is exactly the HStack spacing — 12pt, matching the
+                // inset on the left of the headline.
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 // Thumbnail — prefers the publisher's remote image; falls back
                 // to the legacy local asset name, then to a placeholder.

@@ -193,11 +193,30 @@ def test_fallback_bullets_are_the_real_headlines(svc):
         {"headline": "Second story", "sentiment": "bullish"},
         {"headline": "Third story", "sentiment": None},
     ]
-    card = svc.build_fallback_card("AAPL", rows)
+    card = svc.build_fallback_card("AAPL", rows, market_active=True)
     assert card["bullets"] == ["First story", "Second story", "Third story"]
     # It must never claim AI authorship for text no model wrote.
     assert card["ai_generated"] is False
     assert card["refreshing"] is True
+
+
+def test_fallback_does_not_promise_a_refresh_while_the_sweeper_is_asleep(svc):
+    """`refreshing` is a promise that a real AI card is on its way.
+
+    The sweeper only runs while `is_market_active()`, so overnight and at
+    weekends no cycle is coming and the promise cannot be kept. iOS renders the
+    flag as "catching up" and schedules two re-polls off the back of it, so
+    asserting it here pinned the card on that label for up to ~60 hours over a
+    weekend and burned two futile round-trips on every feed load. Mirror of
+    `test_row_to_card_is_not_stale_when_the_sweeper_is_asleep`.
+    """
+    rows = [{"headline": "First story"}, {"headline": "Second story"}]
+    card = svc.build_fallback_card("AAPL", rows, market_active=False)
+    assert card["refreshing"] is False
+    # Only the PROMISE is withdrawn — the card itself is unchanged and honest.
+    assert card["bullets"] == ["First story", "Second story"]
+    assert card["ai_generated"] is False
+    assert card["is_stale"] is False
 
 
 def test_fallback_pads_a_single_article_to_meet_the_minimum(svc):
@@ -268,7 +287,7 @@ def _row(**over):
 
 
 def test_row_to_card_happy_path(svc):
-    card = svc._row_to_card(_row())
+    card = svc._row_to_card(_row(), market_active=True)
     assert card["scope"] == "AAPL"
     assert card["ai_generated"] is True
     assert card["is_stale"] is False
@@ -297,8 +316,48 @@ def test_row_to_card_discards_malformed_rows(svc, bad):
 
 def test_row_to_card_flags_a_soft_expired_card_as_stale(svc):
     past = datetime.now(timezone.utc) - timedelta(hours=2)
-    card = svc._row_to_card(_row(soft_expires_at=past.isoformat()))
+    card = svc._row_to_card(_row(soft_expires_at=past.isoformat()), market_active=True)
     assert card["is_stale"] is True
+
+
+def test_row_to_card_is_not_stale_when_the_sweeper_is_asleep(svc):
+    """A soft-expired card outside market hours is NOT behind anything.
+
+    `is_stale` is a statement about the SWEEPER, which only runs while
+    `is_market_active()` (04:00-20:00 ET). Its last pass of the session stamps a
+    15-minute soft expiry and then the loop sleeps, so every scope tripped this
+    flag ~15 min after the 20:00 ET close and stayed tripped all night and all
+    weekend. iOS rendered that as "Catching up…" in place of the timestamp —
+    claiming a refresh was pending when nothing was running.
+    """
+    past = datetime.now(timezone.utc) - timedelta(hours=12)
+    card = svc._row_to_card(_row(soft_expires_at=past.isoformat()), market_active=False)
+    assert card["is_stale"] is False
+    # The card itself is untouched — only the freshness CLAIM changes.
+    assert card["headline"] == "Something happened"
+    assert card["ai_generated"] is True
+
+
+@pytest.mark.parametrize("market_active", [True, False])
+def test_row_to_card_never_stale_while_inside_the_soft_window(svc, market_active):
+    # Session state must not be able to INVENT staleness, only suppress it.
+    card = svc._row_to_card(_row(), market_active=market_active)
+    assert card["is_stale"] is False
+
+
+@pytest.mark.parametrize("market_active", [True, False])
+def test_row_to_card_missing_soft_expiry_is_not_stale(svc, market_active):
+    # A NULL soft_expires_at (pre-088 row, or a partial write) must degrade to
+    # "not stale" rather than to a permanent "updating" label.
+    card = svc._row_to_card(_row(soft_expires_at=None), market_active=market_active)
+    assert card["is_stale"] is False
+
+
+@pytest.mark.parametrize("market_active", [True, False])
+def test_row_to_card_unparseable_soft_expiry_is_not_stale(svc, market_active):
+    card = svc._row_to_card(_row(soft_expires_at="not a timestamp"), market_active=market_active)
+    assert card is not None
+    assert card["is_stale"] is False
 
 
 def test_row_to_card_defaults_unknown_sentiment_rather_than_dropping_the_card(svc):

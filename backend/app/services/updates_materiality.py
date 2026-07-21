@@ -49,6 +49,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Optional, Sequence
 
+# Constants only — never the clock-reading `session_phase()` helper itself. The
+# caller injects the phase, exactly as it injects `now`, so this module stays
+# pure and exhaustively testable.
+from app.utils.market_hours import ET, SESSION_PREMARKET, SESSION_REGULAR
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,7 +98,47 @@ COOLDOWN_CLOSED_SECONDS = 3600     # 60 min overnight / weekend
 # absorbs failures so a run of transient Gemini 429s cannot pin a scope for the
 # rest of the day.
 PER_SCOPE_DAILY_CAP = 6
+
+# The market card is read by every user on every visit — it backs the default
+# tab — and the general news wire never goes quiet, so it is the one scope where
+# 6/day is visibly too few. It is a single scope, so the extra spend is ~10
+# Flash-Lite calls a day in total, not per ticker.
+PER_SCOPE_DAILY_CAP_MARKET = 16
+
 PER_SCOPE_ATTEMPT_CAP = 10
+
+# Share of a scope's daily allowance that may be spent BEFORE the opening bell.
+#
+# The sweeper wakes at 04:00 ET, and the news wire is busiest overnight-into-
+# morning, so without this the whole budget was gone before 09:30: observed
+# live, `__MARKET__` generated for the 6th and last time at 05:49 ET and then
+# sat frozen through the entire regular session with
+# `last_skip_reason = "daily_cap"`. Reserving two thirds for 09:30-16:00 puts
+# the spend where people are actually reading.
+#
+# Deliberately NOT applied to after-hours (16:00-20:00 ET): that window is when
+# earnings land, which is the single most material news event a ticker has all
+# quarter.
+#
+# This ceiling only measures the right thing because `regen_count_today` is
+# keyed on the ET TRADING DATE (see `_decide_inner`), which rolls at ET midnight
+# — outside the 04:00-20:00 sweep window. Keyed on the UTC date it rolled at
+# 19:00 ET under EST, an hour INSIDE the window, so the previous evening's
+# after-hours spend was billed to the next morning and pre-consumed this
+# reserve. If you ever change the day key, change it in
+# `claim_updates_insight_scope` (migration 089) too — they must agree.
+PREMARKET_CAP_DIVISOR = 3
+
+
+def daily_cap_for(is_market_scope: bool) -> int:
+    """The per-scope success ceiling for one day."""
+    return PER_SCOPE_DAILY_CAP_MARKET if is_market_scope else PER_SCOPE_DAILY_CAP
+
+
+def premarket_cap_for(is_market_scope: bool) -> int:
+    """The success ceiling that applies before 09:30 ET. Always >= 1 so a cold
+    scope can still get its first card of the day in pre-market."""
+    return max(1, daily_cap_for(is_market_scope) // PREMARKET_CAP_DIVISOR)
 
 
 # ── Decision ──────────────────────────────────────────────────────────
@@ -269,6 +314,7 @@ def decide(
     model: str,
     market_active: bool,
     is_market_scope: bool,
+    session_phase: str = SESSION_REGULAR,
 ) -> Decision:
     """Decide whether ``scope``'s Insights card should be regenerated.
 
@@ -282,6 +328,7 @@ def decide(
             market_change_percent=market_change_percent,
             close_cycle_start=close_cycle_start, now=now, model=model,
             market_active=market_active, is_market_scope=is_market_scope,
+            session_phase=session_phase,
         )
     except Exception as e:  # pragma: no cover - defensive
         logger.exception(
@@ -303,6 +350,7 @@ def _decide_inner(
     model: str,
     market_active: bool,
     is_market_scope: bool,
+    session_phase: str = SESSION_REGULAR,
 ) -> Decision:
     state = state or {}
 
@@ -360,14 +408,33 @@ def _decide_inner(
 
     # ── 3. Per-scope daily cap (successes only) ──
     regen_day = str(state.get("regen_day") or "")
-    today = now.astimezone(timezone.utc).date().isoformat()
+    # The ET trading date, NOT the UTC date. Under EDT the UTC day rolls at
+    # 20:00 ET, exactly when the sweeper stops, so the two agreed by luck. Under
+    # EST it rolls at 19:00 ET — one hour INSIDE the sweep window — so the
+    # previous evening's after-hours generations landed on the same key as the
+    # next morning's pre-market and pre-spent its reserve, starving the window
+    # this budget exists to protect. An ET-keyed day rolls at ET midnight, far
+    # outside 04:00-20:00, and is what "trading day" means anyway.
+    # `claim_updates_insight_scope` must use the same key — migration 089.
+    today = now.astimezone(ET).date().isoformat()
     same_day = regen_day == today
     successes = int(state.get("regen_count_today") or 0) if same_day else 0
     attempts = int(state.get("attempts_today") or 0) if same_day else 0
 
-    if successes >= PER_SCOPE_DAILY_CAP:
+    if successes >= daily_cap_for(is_market_scope):
         return Decision(
             action=ACTION_SKIP, reason="daily_cap",
+            inputset_id=inputset_id, price_band=band,
+        )
+    # Reserve the bulk of the allowance for the regular session. Skipping here
+    # is not a loss: the scope re-trips the moment the bell rings, and the
+    # articles that drove it are still in the corpus.
+    if (
+        session_phase == SESSION_PREMARKET
+        and successes >= premarket_cap_for(is_market_scope)
+    ):
+        return Decision(
+            action=ACTION_SKIP, reason="premarket_reserved",
             inputset_id=inputset_id, price_band=band,
         )
     if attempts >= PER_SCOPE_ATTEMPT_CAP:

@@ -12,7 +12,7 @@ struct CayAIAvatar: View {
     var size: CGFloat = 24
 
     var body: some View {
-        Image(systemName: "sparkles")
+        Image(systemName: "sparkles.2")
             .font(.system(size: size * 0.52, weight: .bold))
             .foregroundColor(.white)
             .frame(width: size, height: size)

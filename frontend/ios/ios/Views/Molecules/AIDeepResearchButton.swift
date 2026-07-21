@@ -17,7 +17,7 @@ struct AIDeepResearchButton: View {
         }) {
             HStack(spacing: AppSpacing.sm) {
                 // Sparkle icon
-                Image(systemName: "sparkles")
+                Image(systemName: "sparkles.2")
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text(title)

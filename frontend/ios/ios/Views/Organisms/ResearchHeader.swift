@@ -28,7 +28,7 @@ struct ResearchHeader: View {
 
                 // Center: AI Research Analysis title
                 HStack(spacing: AppSpacing.sm) {
-                    Image(systemName: "sparkles")
+                    Image(systemName: "sparkles.2")
                         .font(AppTypography.iconSmall).fontWeight(.medium)
                         .foregroundColor(AppColors.primaryBlue)
 

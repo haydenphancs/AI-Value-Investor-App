@@ -70,7 +70,7 @@ struct AIMessageContent: View {
                     onFollowUpTap?(question)
                 } label: {
                     HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: "sparkles")
+                        Image(systemName: "sparkles.2")
                             .font(.system(size: 11, weight: .semibold))
                         Text(question)
                             .font(AppTypography.bodySmall)

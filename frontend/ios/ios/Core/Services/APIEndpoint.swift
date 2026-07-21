@@ -140,7 +140,7 @@ enum APIEndpoint: Sendable {
     case getUpdatesTabs
     /// One tab's content — news timeline AND the AI Insights card in a single
     /// round trip, so switching tabs costs one request, not two.
-    case getUpdatesFeed(scope: String, limit: Int)
+    case getUpdatesFeed(scope: String, limit: Int, offset: Int = 0)
     /// On-demand AI enrichment (bullets + sentiment) for specific articles.
     case enrichUpdatesNews(scope: String, articleIds: [String])
 
@@ -483,8 +483,12 @@ enum APIEndpoint: Sendable {
         case .getStockNews(_, let limit):
             return ["limit": String(limit)]
 
-        case .getUpdatesFeed(let scope, let limit):
-            return ["scope": scope, "limit": String(limit)]
+        case .getUpdatesFeed(let scope, let limit, let offset):
+            var q = ["scope": scope, "limit": String(limit)]
+            // Omit offset on page 0 so the request line stays byte-identical to
+            // the pre-pagination one — same URL, same CDN/cache key.
+            if offset > 0 { q["offset"] = String(offset) }
+            return q
 
         case .getCryptoNews(_, let limit):
             return ["limit": String(limit)]

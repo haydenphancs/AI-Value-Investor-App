@@ -312,6 +312,10 @@ struct TickerDetailView: View {
                 onRelatedTickerTap: { ticker in viewModel.handleNewsTickerTap(ticker) },
                 onLoadMore: { viewModel.loadMoreNews() }
             )
+            // Enrichment is deferred to here: this view is in the tree only when
+            // the News tab is selected, so AI spend happens when news is read,
+            // not on every ticker open.
+            .onAppear { viewModel.newsTabAppeared() }
         case .analysis:
             TickerAnalysisContent(
                 analystRatingsData: viewModel.analystRatingsData,

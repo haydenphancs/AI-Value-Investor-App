@@ -36,13 +36,27 @@ struct TimelineRow: View {
 
             // Content Column
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                // Timestamp
+                // Timestamp — the timeline's own time. The card below therefore
+                // passes `timeAgo: nil` so the time is not printed twice.
                 Text(article.formattedTime)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
 
-                // News Item
-                NewsTimelineItem(article: article, onTapped: onTapped)
+                // Same card as the detail News tabs, in TAPPABLE style: the whole
+                // card navigates to the News Detail screen (Read-full-story +
+                // share). Sentiment is optional here — no badge until enriched.
+                NewsCardView(
+                    headline: article.headline,
+                    sourceName: article.source.displayName,
+                    sentiment: article.sentiment,
+                    timeAgo: nil,
+                    thumbnailName: article.thumbnailName,
+                    imageURL: article.imageURL,
+                    relatedTickers: article.relatedTickers,
+                    bullets: article.summaryBullets,
+                    style: .tappable,
+                    onTap: onTapped
+                )
             }
         }
     }

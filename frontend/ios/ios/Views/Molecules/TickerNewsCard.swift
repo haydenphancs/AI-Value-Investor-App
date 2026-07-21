@@ -14,92 +14,26 @@ struct TickerNewsCard: View {
     var onExternalLinkTap: (() -> Void)?
     var onTickerTap: ((String) -> Void)?
 
-    @State private var isExpanded: Bool = false
-
-    private var hasExpandableContent: Bool {
-        article.hasSummary
-    }
-
     var body: some View {
-        Button(action: {
-            if hasExpandableContent {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    isExpanded.toggle()
-                }
-            } else {
-                onCardTap?()
-            }
-        }) {
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                // Header row: Sentiment + Time (left) | Source (right)
-                HStack(spacing: AppSpacing.sm) {
-                    NewsSentimentBadge(sentiment: article.sentiment)
-
-                    Text(article.timeAgo)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-
-                    Spacer()
-
-                    Text(article.source.displayName)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-
-                // Main content: Headline + Thumbnail
-                HStack(alignment: .top, spacing: AppSpacing.xs) {
-                    // Headline
-                    Text(article.headline)
-                        .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(AppColors.textPrimary)
-                        .lineLimit(nil)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Spacer(minLength: 0)
-
-                    // Thumbnail
-                    NewsThumbnail(
-                        imageName: article.thumbnailName,
-                        imageURL: article.imageURL,
-                        width: 72,
-                        height: 40
-                    )
-                }
-
-                // Related tickers
-                if !article.relatedTickers.isEmpty {
-                    TickerNewsRelatedTickers(
-                        tickers: article.relatedTickers,
-                        currentTicker: currentTicker,
-                        onTickerTap: onTickerTap
-                    )
-                }
-
-                // Expanded content (bullet points)
-                if isExpanded && hasExpandableContent {
-                    TickerNewsExpandedContent(bullets: article.summaryBullets)
-                        .padding(.top, AppSpacing.xs)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                }
-
-                // Footer: External link + Expand toggle
-                TickerNewsCardFooter(
-                    hasExpandableContent: hasExpandableContent,
-                    isExpanded: isExpanded,
-                    onExternalLinkTap: onExternalLinkTap,
-                    onExpandToggle: {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            isExpanded.toggle()
-                        }
-                    }
-                )
-            }
-            .padding(AppSpacing.md)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
-        }
-        .buttonStyle(PlainButtonStyle())
+        // Thin adapter over the shared NewsCardView. The detail News tabs use
+        // the EXPANDABLE style with the relative time shown (no timeline here).
+        // `article.sentiment` is non-optional on this model, so a badge always
+        // renders — unchanged from before.
+        NewsCardView(
+            headline: article.headline,
+            sourceName: article.source.displayName,
+            sentiment: article.sentiment,
+            timeAgo: article.timeAgo,
+            thumbnailName: article.thumbnailName,
+            imageURL: article.imageURL,
+            relatedTickers: article.relatedTickers,
+            currentTicker: currentTicker,
+            bullets: article.summaryBullets,
+            style: .expandable,
+            onTap: onCardTap,
+            onExternalLinkTap: onExternalLinkTap,
+            onTickerTap: onTickerTap
+        )
     }
 }
 

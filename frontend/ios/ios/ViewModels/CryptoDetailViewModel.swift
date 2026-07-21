@@ -67,6 +67,8 @@ class CryptoDetailViewModel: ObservableObject {
     // News pagination
     private var allNewsArticles: [TickerNewsArticle] = []
     private var newsDisplayCount: Int = 10
+    /// Serialises news enrichment (tab-appear vs fetch/load-more completion).
+    private var isEnrichingNews = false
     private let newsPageSize: Int = 10
 
     // MARK: - Initialization
@@ -562,15 +564,12 @@ class CryptoDetailViewModel: ObservableObject {
             self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
             self.isNewsLoading = false
 
-            // Enrich in background, then update displayed articles
-            let unenrichedIds = self.newsArticles
-                .filter { !$0.aiProcessed }
-                .map { $0.apiId }
-                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
-
-            if !unenrichedIds.isEmpty {
-                await attemptEnrichment(symbol: cryptoSymbol, articleIds: unenrichedIds)
-                self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            // Enrich ONLY if the News tab is what's being viewed — see
+            // TickerDetailViewModel.fetchStockNews for why (expensive `flash`
+            // spend was firing on every open). `newsTabAppeared()` covers the
+            // case where news lands before the user switches to the tab.
+            if selectedTab == .news {
+                await enrichVisibleArticles()
             }
         } catch {
             print("⚠️ [CryptoDetail] Failed to fetch news for \(cryptoSymbol): \(error)")
@@ -621,12 +620,22 @@ class CryptoDetailViewModel: ObservableObject {
         }
     }
 
+    /// Called when the News tab becomes visible — defers AI enrichment to when
+    /// news is actually read. See TickerDetailViewModel.newsTabAppeared.
+    func newsTabAppeared() {
+        Task { await enrichVisibleArticles() }
+    }
+
     private func enrichVisibleArticles() async {
+        guard !isEnrichingNews else { return }
         let unenriched = newsArticles.filter { !$0.aiProcessed }
         guard !unenriched.isEmpty else { return }
 
         let ids = unenriched.map { $0.apiId }.filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
         guard !ids.isEmpty else { return }
+
+        isEnrichingNews = true
+        defer { isEnrichingNews = false }
 
         await attemptEnrichment(symbol: cryptoSymbol, articleIds: ids)
         newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))

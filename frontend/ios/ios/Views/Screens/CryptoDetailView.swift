@@ -275,6 +275,8 @@ struct CryptoDetailView: View {
                 onRelatedTickerTap: viewModel.handleNewsTickerTap,
                 onLoadMore: { viewModel.loadMoreNews() }
             )
+            // Defer AI enrichment to when the News tab is actually viewed.
+            .onAppear { viewModel.newsTabAppeared() }
         case .analysis:
             TickerAnalysisContent(
                 analystRatingsData: nil,

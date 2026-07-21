@@ -87,6 +87,13 @@ class NewsCacheService:
         # when every concurrent /updates/feed would otherwise fire its own FMP
         # call AND its own 50-row upsert.
         self._inflight: Dict[str, asyncio.Future] = {}
+        # Second thundering-herd guard, for the PAID path. `enrich_articles`
+        # skips rows already marked `ai_processed`, but that check races: two
+        # users opening the same un-enriched ticker both read `ai_processed=false`
+        # before either writes, so both call the (expensive) `flash` model for the
+        # SAME article ids. This dedups by exact batch so the second caller awaits
+        # the first's Gemini call instead of paying for it again.
+        self._enrich_inflight: Dict[str, asyncio.Future] = {}
 
     # ── Public: Get raw/cached news ───────────────────────────────────
 
@@ -543,8 +550,57 @@ class NewsCacheService:
         AI-enrich specific articles by ID. 'First User Pays' per batch.
         Only processes articles that haven't been enriched yet.
 
+        Concurrent callers requesting the SAME batch are deduped onto one
+        Gemini call — without this the `ai_processed` skip races and both pay
+        (see `_enrich_inflight`). The key is the ticker plus the sorted ids, so
+        two users viewing the same feed (which yields ids in the same order)
+        collapse to one call; a different id set is a different, independent key.
+
         Returns list of enriched article dicts.
         """
+        ticker = ticker.upper()
+        if not article_ids:
+            return []
+
+        # Dedup key: exact batch. `dict.fromkeys` drops duplicate ids while
+        # keeping the set stable; sorted() makes the key order-independent.
+        key = f"{ticker}|" + "|".join(sorted(dict.fromkeys(article_ids)))
+        inflight = self._enrich_inflight.get(key)
+        if inflight is not None:
+            # Someone is already enriching this exact batch — await their result
+            # rather than firing a second Gemini call.
+            try:
+                return await inflight
+            except Exception:
+                # The leader failed; fall through and try once ourselves rather
+                # than propagating their error to every joiner.
+                pass
+
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._enrich_inflight[key] = fut
+        try:
+            result = await self._enrich_articles_uncached(ticker, article_ids)
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except Exception as e:
+            if not fut.done():
+                # Only hand the exception to the future when someone is waiting,
+                # else an unretrieved future exception logs noisily on GC (same
+                # rule as `get_market_news`).
+                if _has_waiters(fut):
+                    fut.set_exception(e)
+                else:
+                    fut.cancel()
+            raise
+        finally:
+            self._enrich_inflight.pop(key, None)
+
+    async def _enrich_articles_uncached(
+        self, ticker: str, article_ids: List[str]
+    ) -> List[Dict[str, Any]]:
+        """The actual enrichment. Always call via :meth:`enrich_articles`, which
+        adds the concurrent-batch dedup."""
         ticker = ticker.upper()
         if not article_ids:
             return []

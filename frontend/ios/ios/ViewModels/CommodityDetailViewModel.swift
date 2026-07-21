@@ -48,6 +48,8 @@ class CommodityDetailViewModel: ObservableObject {
     @Published var hasMoreNews: Bool = false
     private var allNewsArticles: [TickerNewsArticle] = []
     private var newsDisplayCount: Int = 10
+    /// Serialises news enrichment (tab-appear vs fetch/load-more completion).
+    private var isEnrichingNews = false
     private let newsPageSize: Int = 10
 
     // MARK: - Private Properties
@@ -226,15 +228,11 @@ class CommodityDetailViewModel: ObservableObject {
             self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
             self.isNewsLoading = false
 
-            // Enrich unenriched articles in background
-            let unenrichedIds = self.allNewsArticles
-                .filter { !$0.aiProcessed }
-                .map { $0.apiId }
-                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
-
-            if !unenrichedIds.isEmpty {
-                await attemptEnrichment(articleIds: unenrichedIds)
-                self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
+            // Enrich ONLY the visible batch, ONLY when the News tab is viewed.
+            // This used to enrich ALL articles on every commodity open. See
+            // TickerDetailViewModel.fetchStockNews.
+            if selectedTab == .news {
+                await enrichVisibleArticles()
             }
         } catch {
             print("❌ [CommodityDetailVM] Failed to fetch news: \(error)")
@@ -306,16 +304,28 @@ class CommodityDetailViewModel: ObservableObject {
         newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
         hasMoreNews = newsDisplayCount < allNewsArticles.count
 
-        // Enrich newly visible articles
-        Task {
-            let unenriched = newsArticles.filter { !$0.aiProcessed }
-            guard !unenriched.isEmpty else { return }
-            let ids = unenriched.map { $0.apiId }
-                .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
-            guard !ids.isEmpty else { return }
-            await attemptEnrichment(articleIds: ids)
-            newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
-        }
+        Task { await enrichVisibleArticles() }
+    }
+
+    /// Called when the News tab becomes visible — defers AI enrichment to when
+    /// news is actually read. See TickerDetailViewModel.newsTabAppeared.
+    func newsTabAppeared() {
+        Task { await enrichVisibleArticles() }
+    }
+
+    private func enrichVisibleArticles() async {
+        guard !isEnrichingNews else { return }
+        let unenriched = newsArticles.filter { !$0.aiProcessed }
+        guard !unenriched.isEmpty else { return }
+        let ids = unenriched.map { $0.apiId }
+            .filter { !$0.isEmpty && !$0.hasPrefix("temp_") && !$0.hasPrefix("raw_") }
+        guard !ids.isEmpty else { return }
+
+        isEnrichingNews = true
+        defer { isEnrichingNews = false }
+
+        await attemptEnrichment(articleIds: ids)
+        newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
     }
 
     // MARK: - Technical Analysis

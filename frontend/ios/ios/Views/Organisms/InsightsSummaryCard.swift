@@ -141,7 +141,7 @@ struct InsightsSummaryCard: View {
             ],
             sentiment: .bullish,
             updatedAt: Date().addingTimeInterval(-3600),
-            summaryType: "48h · AI Summary"
+            summaryType: "48h"
         )
     )
     .padding()

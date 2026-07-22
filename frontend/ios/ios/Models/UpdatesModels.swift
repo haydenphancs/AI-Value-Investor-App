@@ -489,7 +489,7 @@ extension NewsInsightSummary {
         self.bulletPoints = bullets
         self.sentiment = MarketSentiment(insight: dto.sentiment)
         self.updatedAt = UpdatesDateParser.parse(dto.generatedAt) ?? Date()
-        self.summaryType = dto.badge ?? "48h · AI Summary"
+        self.summaryType = dto.badge ?? "48h"
         self.isAIGenerated = dto.aiGenerated ?? true
         self.isStale = dto.isStale ?? false
         self.isRefreshing = dto.refreshing ?? false

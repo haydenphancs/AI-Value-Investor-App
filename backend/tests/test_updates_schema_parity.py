@@ -223,7 +223,7 @@ def test_card_defaults_are_safe_for_a_missing_field():
     assert card.ai_generated is True
     assert card.is_stale is False
     assert card.refreshing is False
-    assert "AI Summary" in card.badge
+    assert card.badge == "48h"
 
 
 def test_feed_insight_is_optional():

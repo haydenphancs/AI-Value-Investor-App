@@ -34,7 +34,7 @@ struct AIBadge: View {
                 iconFont: AppTypography.iconSmall
             )
             Spacer()
-            AIBadge(text: "24h · AI Summary")
+            AIBadge(text: "48h")
         }
 
         AIBadge(text: "AI Generated")

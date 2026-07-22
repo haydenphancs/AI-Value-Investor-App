@@ -1,4 +1,4 @@
-"""The corpus time-window that makes the "48h · AI Summary" badge honest.
+"""The corpus time-window that makes the "48h" Insights badge honest.
 
 The sweeper bounds each scope's corpus to the last ``CORPUS_WINDOW_HOURS`` before
 BOTH the materiality fingerprint and generation, and the Updates endpoint uses

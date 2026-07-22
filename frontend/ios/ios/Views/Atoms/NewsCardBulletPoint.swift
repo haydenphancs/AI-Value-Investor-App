@@ -18,22 +18,16 @@ struct NewsCardBulletPoint: View {
                 .frame(width: 5, height: 5)
                 .padding(.top, 6)
 
-            // Bullet text with bold title support
-            formattedText
+            // One uniform color for the whole bullet. The previous version
+            // bolded + brightened any text before a colon (a generic "Label:"
+            // treatment), which made the final "The takeaway:" line stand out as
+            // bold — the exact thing that should read as a plain sentence. The
+            // takeaway's colon→comma is handled by the list renderer for the last
+            // bullet (see TickerNewsExpandedContent / InsightsSummaryCard).
+            Text(text)
                 .font(AppTypography.labelSmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var formattedText: Text {
-        // Check if text has a bold prefix (text before colon)
-        if let colonIndex = text.firstIndex(of: ":") {
-            let boldPart = String(text[..<colonIndex])
-            let normalPart = String(text[text.index(after: colonIndex)...])
-            return Text("\(Text(boldPart + ":").fontWeight(.semibold).foregroundColor(AppColors.textPrimary))\(Text(normalPart))")
-        } else {
-            return Text(text)
         }
     }
 }

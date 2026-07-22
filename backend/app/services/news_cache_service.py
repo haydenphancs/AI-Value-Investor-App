@@ -926,7 +926,7 @@ For EACH article, provide:
    - Minimum 2, maximum 5 bullet points
    - Each bullet must be under 25 words — short and punchy
    - The FINAL bullet must always explain why an everyday investor should care, in plain English
-   - Transition Rule: To sound natural and human, vary how you start this final bullet. Sometimes use a short, friendly transition like "So,", "In short,", "Ultimately,", or "The takeaway:". Other times, just state the insight directly without any introductory phrase at all. NEVER use "So What?" or "So what:" as a prefix.
+   - Transition Rule: To sound natural and human, vary how you start this final bullet. Sometimes use a short, friendly transition like "So,", "In short,", "Ultimately,", or "The takeaway," — always followed by a COMMA, never a colon. Other times, just state the insight directly without any introductory phrase at all. NEVER use "So What?" or "So what:" as a prefix, and never end the transition with a colon.
    - No introductory phrases like "This article discusses..." or "The key points are..."
 2. Sentiment classification — you MUST use one of these three exact values:
    - "bullish": ONLY use if the article indicates a direct upward catalyst for the stock price (e.g., earnings beat, new product launch, analyst upgrade, winning a lawsuit, major contract win, breakthrough product approval).

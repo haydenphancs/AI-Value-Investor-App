@@ -8,6 +8,7 @@ updates to all connected iOS clients watching that ticker.
 import asyncio
 import json
 import logging
+import os
 import ssl
 import time
 from dataclasses import dataclass, field
@@ -31,11 +32,32 @@ FMP_WS_URL_CRYPTO = "wss://crypto.financialmodelingprep.com"
 # Explicit TLS trust store built from certifi. Without this, websockets falls back
 # to ssl.create_default_context() which trusts the host's OpenSSL default CA path
 # — that path is unreliable across environments (e.g. a stale/absent anaconda
-# cert.pem locally, or a slim container image on Railway), producing
-# `[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate`.
-# httpx (our FMP REST client) never hit this because it bundles certifi; this makes
-# the WebSocket handshake use the same trusted bundle. Built once at import.
+# cert.pem locally, or a slim container image on Railway). httpx (our FMP REST
+# client) never hit this because it bundles certifi; this makes the WebSocket
+# handshake use the same trusted bundle. Built once at import.
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+# ...but certifi alone is NOT enough here. FMP's WebSocket hosts are served by
+# multiple edge nodes and SOME intermittently OMIT the Sectigo intermediate CA
+# certs from the TLS handshake, sending only the leaf. certifi ships trust ROOTS,
+# not intermediates, so a client that hits one of those nodes cannot build a path
+# and fails with `[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer
+# certificate` — non-deterministically, per connection. Preloading the known
+# intermediates lets us complete the chain (leaf -> Sectigo R36 -> Sectigo R46 ->
+# USERTrust RSA, the latter already in certifi) no matter which node answers.
+# Best-effort: a missing/corrupt bundle degrades to certifi-only (the prior
+# behavior) rather than crashing import. Re-capture the bundle if FMP rotates CAs.
+_WS_INTERMEDIATE_BUNDLE = os.path.join(
+    os.path.dirname(__file__), "certs", "fmp_ws_intermediates.pem"
+)
+try:
+    _SSL_CONTEXT.load_verify_locations(cafile=_WS_INTERMEDIATE_BUNDLE)
+except Exception as e:
+    logger.warning(
+        f"Live price: could not load FMP WS intermediate CAs from "
+        f"{_WS_INTERMEDIATE_BUNDLE} ({type(e).__name__}: {e}); TLS handshakes may "
+        f"fail intermittently when FMP omits intermediates."
+    )
 
 
 def _fmp_ws_target(ticker: str) -> tuple[str, bool, str]:

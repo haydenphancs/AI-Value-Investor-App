@@ -13,6 +13,7 @@ the URL, kwargs, and every message sent.
 """
 
 import json
+import os
 import ssl
 
 import pytest
@@ -58,6 +59,30 @@ def test_ssl_context_is_certifi_backed_and_verifying():
     assert m._SSL_CONTEXT.check_hostname is True
     # Loaded a real bundle, independent of the host's default OpenSSL CA path.
     assert len(m._SSL_CONTEXT.get_ca_certs()) > 0
+
+
+def test_intermediate_bundle_is_present_and_loaded():
+    """FMP's WS nodes intermittently omit intermediates; the bundle is what lets
+    us complete the chain. If it's ever deleted/emptied, TLS silently regresses to
+    intermittent CERTIFICATE_VERIFY_FAILED — so pin its presence AND that the
+    context actually trusts the two Sectigo intermediates."""
+    import certifi
+
+    # Bundle file exists and holds at least the two intermediates.
+    assert os.path.exists(m._WS_INTERMEDIATE_BUNDLE), m._WS_INTERMEDIATE_BUNDLE
+    pem = open(m._WS_INTERMEDIATE_BUNDLE).read()
+    assert pem.count("BEGIN CERTIFICATE") >= 2
+
+    # The live context trusts strictly more CAs than plain certifi (the intermediates).
+    certifi_only = ssl.create_default_context(cafile=certifi.where())
+    assert len(m._SSL_CONTEXT.get_ca_certs()) > len(certifi_only.get_ca_certs())
+
+    # And specifically the Sectigo issuers that FMP's leaf chains through.
+    cns = {
+        dict(x[0] for x in cert["subject"]).get("commonName", "")
+        for cert in m._SSL_CONTEXT.get_ca_certs()
+    }
+    assert any("Sectigo Public Server Authentication CA DV R36" in cn for cn in cns), cns
 
 
 # ---------------------------------------------------------------------------

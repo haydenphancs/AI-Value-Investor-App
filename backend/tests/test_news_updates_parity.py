@@ -108,3 +108,42 @@ def test_shared_fields_match_across_screens():
     assert u.article_url == d.article_url
     assert u.source_logo_url == d.source_logo_url == "https://img.example/logo.png"
     assert u.sentiment_confidence == d.sentiment_confidence
+
+
+def test_both_mappers_survive_non_string_upstream_fields():
+    """One malformed upstream field must not 500 the whole feed.
+
+    On a cold FMP miss the raw row reaches ``_to_article`` before any DB
+    round-trip, and FMP occasionally returns a non-string where a string is
+    expected (e.g. ``image`` as a JSON array, a numeric ``publisher``). Handing
+    that straight to a Pydantic v2 ``Optional[str]`` raises ``ValidationError``
+    — a 500 for the WHOLE Updates feed over one degraded article — while the
+    SAME shared row still renders on the detail News tab (its mapper coerces via
+    ``_opt_str``). Both mappers must coerce, so the two screens stay in parity
+    and neither 500s. Regression guard for the Updates-side ValidationError.
+    """
+    row = _row(
+        thumbnail_url=["https://img.example/1.png"],   # list, not str
+        article_url={"u": "https://example.com/1"},     # dict
+        source_name=123,                                # int
+        summary=["some", "text"],                       # list
+        source_logo_url=42,                             # int
+    )
+    # Neither raises (before the fix, _to_article raised ValidationError here).
+    u = _to_article(row)
+    d = news_article_from_row(row)
+
+    # Every Optional[str] field is coerced to a str (or None) on BOTH screens —
+    # never a list/dict/int that Pydantic would reject.
+    for art in (u, d):
+        for field in (
+            "summary", "source_name", "source_logo_url",
+            "published_at", "thumbnail_url", "article_url",
+        ):
+            v = getattr(art, field)
+            assert v is None or isinstance(v, str), f"{field}={v!r} not coerced on {art!r}"
+
+    # A genuinely absent date coerces to None on both, not a crash.
+    none_date = _to_article(_row(published_at=None))
+    assert none_date.published_at is None
+    assert news_article_from_row(_row(published_at=None)).published_at is None

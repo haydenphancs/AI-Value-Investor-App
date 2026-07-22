@@ -124,3 +124,55 @@ def test_dst_transition_days_still_resolve_a_phase():
 
 def test_is_market_active_is_still_a_plain_bool():
     assert isinstance(is_market_active(), bool)
+
+
+# ── Half-days (early close at 13:00 ET) ───────────────────────────────────
+# The sweeper spends real Gemini budget while `is_market_active()` is True; a
+# fixed 16:00 close reported 13:00-20:00 ET as active on these shortened days,
+# so it kept generating on a shut tape.
+
+# 2026-11-27 (day after Thanksgiving) and 2025-12-24 (Christmas Eve) are
+# weekday half-days in US_MARKET_EARLY_CLOSES.
+@pytest.mark.parametrize("y,m,d", [(2026, 11, 27), (2025, 12, 24), (2027, 11, 26)])
+@pytest.mark.parametrize("hh,mm,expected", [
+    (8, 0, SESSION_PREMARKET),    # pre-market runs as usual
+    (9, 30, SESSION_REGULAR),     # opening bell as usual
+    (12, 59, SESSION_REGULAR),    # last regular minute before the early close
+    (13, 0, SESSION_CLOSED),      # 13:00 ET — the market shuts
+    (14, 30, SESSION_CLOSED),     # no 13:00-16:00 regular block
+    (16, 0, SESSION_CLOSED),      # and no after-hours on a half-day
+    (18, 0, SESSION_CLOSED),
+])
+def test_early_close_days_shut_at_1pm(y, m, d, hh, mm, expected):
+    assert session_phase(_et(y, m, d, hh, mm)) == expected
+
+
+def test_early_close_only_affects_the_afternoon_not_a_normal_day():
+    # A normal Tuesday at 13:00 is still REGULAR — the early close is date-scoped.
+    assert session_phase(_et(2026, 7, 21, 13, 0)) == SESSION_REGULAR
+    # is_market_active must agree with the phase on a half-day too.
+    assert is_market_active(_et(2026, 11, 27, 12, 59)) is True
+    assert is_market_active(_et(2026, 11, 27, 13, 0)) is False
+
+
+def test_phase_agrees_with_is_market_active_on_a_half_day():
+    """The complement relationship must hold across a half-day's full grid, or
+    the sweeper could run in a minute the budget gate believes is closed."""
+    for minute in range(24 * 60):
+        at = _et(2026, 11, 27, minute // 60, minute % 60)
+        assert is_market_active(at) is (session_phase(at) != SESSION_CLOSED)
+
+
+# ── Calendar coverage does not silently expire at the end of 2026 ─────────
+@pytest.mark.parametrize("y,m,d", [
+    (2027, 1, 1),    # New Year's Day (a Friday — passes the weekend check)
+    (2027, 3, 26),   # Good Friday
+    (2027, 7, 5),    # Independence Day (observed)
+    (2027, 11, 25),  # Thanksgiving
+    (2027, 12, 24),  # Christmas (observed)
+])
+def test_2027_holidays_are_closed_at_midday(y, m, d):
+    # Before the 2027 rows were added, these weekday holidays fell through to
+    # SESSION_REGULAR and the sweeper generated on a closed market.
+    assert session_phase(_et(y, m, d, 11, 0)) == SESSION_CLOSED
+    assert is_market_active(_et(y, m, d, 11, 0)) is False

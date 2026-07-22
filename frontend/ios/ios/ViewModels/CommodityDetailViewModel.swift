@@ -538,6 +538,11 @@ class CommodityDetailViewModel: ObservableObject {
         guard let published = article.publishedAt.flatMap({ parseDate($0) }) else {
             return nil
         }
+        // Drop a title-less row, exactly as the Updates feed does — the same
+        // shared cache row must not render as a blank card here while Updates
+        // omits it.
+        guard !article.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
 
         return TickerNewsArticle(
             apiId: article.id,
@@ -566,11 +571,21 @@ class CommodityDetailViewModel: ObservableObject {
 
     private func parseDate(_ dateString: String) -> Date? {
         let formatters: [DateFormatter] = {
+            // Fixed POSIX locale + UTC on every formatter. FMP's space-separated
+            // "yyyy-MM-dd HH:mm:ss" is UTC; without an explicit timeZone it parses
+            // in the DEVICE's zone, so the same shared cache row shows a different
+            // time (and "Xh ago") here than on Updates / the other detail tabs —
+            // a cross-screen news-parity break. Matches UpdatesDateParser.fmpSpaced.
+            let posix = Locale(identifier: "en_US_POSIX")
+            let utc = TimeZone(identifier: "UTC")
             let iso = DateFormatter()
+            iso.locale = posix; iso.timeZone = utc
             iso.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
             let simple = DateFormatter()
+            simple.locale = posix; simple.timeZone = utc
             simple.dateFormat = "yyyy-MM-dd HH:mm:ss"
             let dateOnly = DateFormatter()
+            dateOnly.locale = posix; dateOnly.timeZone = utc
             dateOnly.dateFormat = "yyyy-MM-dd"
             return [iso, simple, dateOnly]
         }()

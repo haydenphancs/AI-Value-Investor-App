@@ -1032,7 +1032,13 @@ Return a JSON array with one object per article in order. Each object must have:
                 .select("*")
                 .eq("ticker", ticker)
                 .gte("expires_at", datetime.now(timezone.utc).isoformat())
-                .order("published_at", desc=True)
+                # nullsfirst=False: Postgres defaults DESC to NULLS FIRST, and
+                # published_at is nullable (_sanitize_published_at writes NULL for
+                # a malformed FMP date). Without this an undated row heads a
+                # newest-first feed — becoming the fallback card's lead "latest"
+                # bullet and wasting the iOS page-1 slot it drops. Matches the
+                # sibling get_cached_bulk, which already guards this.
+                .order("published_at", desc=True, nullsfirst=False)
                 .order("id", desc=True)
                 .range(offset, offset + limit - 1)
                 .execute()

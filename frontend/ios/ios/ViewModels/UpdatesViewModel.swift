@@ -271,6 +271,12 @@ final class UpdatesViewModel: ObservableObject {
         refreshPollTask?.cancel()
 
         if !force, let cached = feedCache[scope] {
+            // Clear any error left by a PREVIOUSLY-failed scope. Without this a
+            // stale `error` survives onto this valid cached scope, and the view
+            // renders `errorState` (error != nil && groupedNews empty) instead of
+            // this scope's own content or empty state. The non-cached path below
+            // already clears it; the cached path must too.
+            error = nil
             allNewsArticles = cached.articles
             insightSummary = cached.insight
             loadedOffset = cached.offset

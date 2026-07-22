@@ -830,10 +830,13 @@ struct StockNewsArticle: Codable, Identifiable {
     let source: String?
     /// Publisher logo (`source_logo_url`). The Updates DTO decoded this but the
     /// detail DTO dropped the key, so the same shared row showed a logo on
-    /// Updates and none on the detail News tab. Decoded now for parity. Defaulted
-    /// so existing manual construction sites keep compiling; Codable synthesis
-    /// still decodes the key when present.
-    let sourceLogoUrl: String? = nil
+    /// Updates and none on the detail News tab. MUST be `var`, not `let`: a `let`
+    /// with an inline default (`let x: String? = nil`) is SKIPPED by Swift's
+    /// synthesized Decodable — the key is never read and the property stays nil
+    /// forever, silently defeating this parity fix. A `var` with a default IS
+    /// decoded (decodeIfPresent), and the default keeps the manual construction
+    /// site below compiling.
+    var sourceLogoUrl: String? = nil
     let publishedAt: String?
     let url: String?
     let imageUrl: String?

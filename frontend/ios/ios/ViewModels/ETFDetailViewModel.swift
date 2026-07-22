@@ -499,6 +499,11 @@ class ETFDetailViewModel: ObservableObject {
         guard let published = article.publishedAt.flatMap({ parseNewsDate($0) }) else {
             return nil
         }
+        // Drop a title-less row, exactly as the Updates feed does — the same
+        // shared cache row must not render as a blank card here while Updates
+        // omits it.
+        guard !article.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
         return TickerNewsArticle(
             apiId: article.id,
             headline: article.title,

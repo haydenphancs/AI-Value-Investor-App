@@ -32,6 +32,36 @@ US_MARKET_HOLIDAYS = {
     (2026, 9, 7),   # Labor Day
     (2026, 11, 26), # Thanksgiving
     (2026, 12, 25), # Christmas
+    # 2027 — extend forward so the calendar does not silently expire at the end
+    # of 2026 and report a CLOSED holiday as an active session (a false-active
+    # would let the insight sweeper spend Gemini budget on a shut market).
+    (2027, 1, 1),   # New Year's Day
+    (2027, 1, 18),  # MLK Day
+    (2027, 2, 15),  # Presidents' Day
+    (2027, 3, 26),  # Good Friday
+    (2027, 5, 31),  # Memorial Day
+    (2027, 6, 18),  # Juneteenth (observed — Jun 19 is a Saturday)
+    (2027, 7, 5),   # Independence Day (observed — Jul 4 is a Sunday)
+    (2027, 9, 6),   # Labor Day
+    (2027, 11, 25), # Thanksgiving
+    (2027, 12, 24), # Christmas (observed — Dec 25 is a Saturday)
+}
+
+# Half-days: NYSE/NASDAQ close at 13:00 ET (day after Thanksgiving, Christmas
+# Eve when it is a trading day, July 3 when the 4th is a weekday). Without this
+# the fixed 16:00 close reports 13:00-16:00 ET as REGULAR and 16:00-20:00 as
+# AFTERHOURS on these days, so is_market_active() is True while the tape is shut
+# — and the insight sweeper burns budget + mislabels the card's freshness.
+US_MARKET_EARLY_CLOSES = {
+    # 2025
+    (2025, 7, 3),    # Independence Day eve
+    (2025, 11, 28),  # Day after Thanksgiving
+    (2025, 12, 24),  # Christmas Eve
+    # 2026
+    (2026, 11, 27),  # Day after Thanksgiving
+    (2026, 12, 24),  # Christmas Eve
+    # 2027
+    (2027, 11, 26),  # Day after Thanksgiving
 }
 
 
@@ -44,6 +74,7 @@ SESSION_AFTERHOURS = "afterhours"
 _PREMARKET_START = 4 * 60        # 04:00
 _REGULAR_OPEN = 9 * 60 + 30      # 09:30
 _REGULAR_CLOSE = 16 * 60         # 16:00
+_EARLY_CLOSE = 13 * 60           # 13:00 (half-day close)
 _AFTERHOURS_END = 20 * 60        # 20:00
 
 
@@ -72,11 +103,17 @@ def session_phase(now: datetime | None = None) -> str:
 
     if now.weekday() >= 5:
         return SESSION_CLOSED
-    if (now.year, now.month, now.day) in US_MARKET_HOLIDAYS:
+    ymd = (now.year, now.month, now.day)
+    if ymd in US_MARKET_HOLIDAYS:
         return SESSION_CLOSED
 
     minute_of_day = now.hour * 60 + now.minute
     if minute_of_day < _PREMARKET_START or minute_of_day >= _AFTERHOURS_END:
+        return SESSION_CLOSED
+    # Half-day: pre-market and the 09:30-13:00 regular session run as normal, but
+    # the market shuts at 13:00 ET — there is no 13:00-16:00 regular block and no
+    # after-hours. Anything at/after 13:00 is CLOSED.
+    if ymd in US_MARKET_EARLY_CLOSES and minute_of_day >= _EARLY_CLOSE:
         return SESSION_CLOSED
     if minute_of_day < _REGULAR_OPEN:
         return SESSION_PREMARKET

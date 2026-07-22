@@ -596,6 +596,11 @@ class IndexDetailViewModel: ObservableObject {
         guard let published = article.publishedAt.flatMap({ parseDate($0) }) else {
             return nil
         }
+        // Drop a title-less row, exactly as the Updates feed does — the same
+        // shared cache row must not render as a blank card here while Updates
+        // omits it.
+        guard !article.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
 
         return TickerNewsArticle(
             apiId: article.id,
@@ -633,6 +638,10 @@ class IndexDetailViewModel: ObservableObject {
         let fallback = DateFormatter()
         fallback.dateFormat = "yyyy-MM-dd HH:mm:ss"
         fallback.locale = Locale(identifier: "en_US_POSIX")
+        // UTC, not device-local: FMP's space-form timestamp is UTC. Omitting this
+        // parsed it in the device zone, so the same shared row showed a time
+        // shifted by the device's offset here vs Updates / the other detail tabs.
+        fallback.timeZone = TimeZone(identifier: "UTC")
         return fallback.date(from: dateString)
     }
 

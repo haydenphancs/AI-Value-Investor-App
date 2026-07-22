@@ -330,6 +330,23 @@ async def enrich_updates_news(
 
 # ── Mapping ───────────────────────────────────────────────────────────
 
+def _opt_str(value: Any) -> Optional[str]:
+    """Coerce any non-None value to ``str``; pass None through.
+
+    Every ``Optional[str]`` field below is fed a raw cache value that, on a
+    cold FMP miss, may be a non-string (FMP occasionally returns a JSON array
+    for ``image`` or a number for a field). Handing that straight to a Pydantic
+    v2 ``Optional[str]`` raises ``ValidationError`` — a 500 for the WHOLE feed
+    because of one degraded article — and the SAME shared row still renders on
+    the ticker-detail News tab, which coerces via the identical helper in
+    ``schemas/news.py``. Coerce here so one bad row degrades to a valid string
+    instead of taking down the timeline.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
 def _to_article(row: Dict[str, Any]) -> UpdatesArticleResponse:
     """Map a cache row to the API shape, guarding every field iOS decodes.
 
@@ -360,15 +377,15 @@ def _to_article(row: Dict[str, Any]) -> UpdatesArticleResponse:
     return UpdatesArticleResponse(
         id=str(row.get("id") or ""),
         headline=str(row.get("headline") or ""),
-        summary=row.get("summary"),
+        summary=_opt_str(row.get("summary")),
         summary_bullets=[str(b) for b in bullets if isinstance(b, str)],
         sentiment=sentiment,
         sentiment_confidence=max(0, min(100, confidence)),
-        source_name=row.get("source_name"),
-        source_logo_url=row.get("source_logo_url"),
-        published_at=row.get("published_at"),
-        thumbnail_url=row.get("thumbnail_url"),
-        article_url=row.get("article_url"),
+        source_name=_opt_str(row.get("source_name")),
+        source_logo_url=_opt_str(row.get("source_logo_url")),
+        published_at=_opt_str(row.get("published_at")),
+        thumbnail_url=_opt_str(row.get("thumbnail_url")),
+        article_url=_opt_str(row.get("article_url")),
         related_tickers=[str(t) for t in related if t],
         ai_processed=ai_processed,
     )

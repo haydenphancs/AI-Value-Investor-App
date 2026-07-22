@@ -28,13 +28,20 @@ from app.services.updates_materiality import (
     PER_SCOPE_ATTEMPT_CAP,
     PER_SCOPE_DAILY_CAP,
     PER_SCOPE_DAILY_CAP_MARKET,
+    TIER_EXTREME,
+    TIER_NOTABLE,
+    TIER_TYPICAL,
+    TIER_UNUSUAL,
     daily_cap_for,
     premarket_cap_for,
+    classify_move,
     compute_inputset_id,
     corpus_article_ids,
     decide,
     finite,
+    move_score,
     price_band,
+    volatility_tier,
 )
 from app.utils.market_hours import (
     ET,
@@ -135,6 +142,78 @@ def test_price_band_index_scale_is_much_tighter():
     assert price_band(3.0, LARGE_CAP, is_index=False) == BAND_NOTABLE
 
 
+# ── volatility_tier() / classify_move() / move_score() ────────────────────
+
+def test_volatility_tier_is_relative_to_the_ticker_own_sigma():
+    # σ = 2%/day: z = |move| / 2. 2%→z1 Notable, 4%→z2 Unusual, 6%→z3 Extreme.
+    assert volatility_tier(1.99, 0.02) == TIER_TYPICAL
+    assert volatility_tier(2.0, 0.02) == TIER_NOTABLE
+    assert volatility_tier(4.0, 0.02) == TIER_UNUSUAL
+    assert volatility_tier(6.0, 0.02) == TIER_EXTREME
+    # A CALM stock (σ=1%/day): the same 3% move is far more abnormal…
+    assert volatility_tier(3.0, 0.01) == TIER_EXTREME
+    # …than on a WILD stock (σ=6%/day), where 3% is noise. THIS is the point.
+    assert volatility_tier(3.0, 0.06) == TIER_TYPICAL
+    assert volatility_tier(-6.0, 0.02) == TIER_EXTREME   # symmetric
+
+
+def test_volatility_tier_degrades():
+    assert volatility_tier(float("nan"), 0.02) == BAND_UNKNOWN   # unusable move
+    assert volatility_tier(None, 0.02) == BAND_UNKNOWN
+    for bad_sigma in (None, 0.0, -0.01, float("nan"), float("inf")):
+        assert volatility_tier(5.0, bad_sigma) == TIER_TYPICAL   # unusable σ
+
+
+def test_classify_move_uses_sigma_when_present_else_fixed_band():
+    assert classify_move(3.0, 0.01, LARGE_CAP) == TIER_EXTREME
+    assert classify_move(3.0, 0.06, LARGE_CAP) == TIER_TYPICAL
+    # σ absent/zero → identical to the fixed price band (new/low-history tickers).
+    for pct in (0.5, 2.5, 6.0, 12.0):
+        assert classify_move(pct, None, LARGE_CAP) == price_band(pct, LARGE_CAP)
+        assert classify_move(pct, 0.0, SMALL_CAP) == price_band(pct, SMALL_CAP)
+    assert classify_move(float("nan"), 0.02, LARGE_CAP) == BAND_UNKNOWN
+    assert classify_move(None, None, LARGE_CAP) == BAND_UNKNOWN
+
+
+def test_move_score_ranks_abnormality_across_both_vocabularies():
+    assert (
+        move_score(TIER_EXTREME, -12) > move_score(TIER_UNUSUAL, -6)
+        > move_score(TIER_NOTABLE, 2) > move_score(TIER_TYPICAL, 1)
+    )
+    assert move_score(TIER_EXTREME, -12) > move_score(TIER_EXTREME, -6)  # magnitude tiebreak
+    # Fixed-band vocabulary is scored too (fallback path).
+    assert move_score(BAND_EXTREME, 5) > move_score(BAND_NOTABLE, 2) > move_score(BAND_FLAT, 1)
+
+
+# ── decide(): volatility-relative trigger ─────────────────────────────────
+
+def test_decide_uses_sigma_to_judge_abnormality():
+    calm = _decide(
+        quote={"changePercentage": 3.0, "marketCap": LARGE_CAP}, sigma_daily=0.01,
+    )
+    assert calm.action == ACTION_GENERATE          # cold start
+    assert calm.price_band == TIER_EXTREME         # 3% on a σ=1% stock = z3
+    wild = _decide(
+        quote={"changePercentage": 3.0, "marketCap": LARGE_CAP}, sigma_daily=0.06,
+    )
+    assert wild.price_band == TIER_TYPICAL         # same 3% on a σ=6% stock = noise
+
+
+def test_decide_falls_back_to_the_fixed_band_without_sigma():
+    d = _decide(quote={"changePercentage": 3.0, "marketCap": LARGE_CAP})  # no σ
+    assert d.price_band == BAND_NOTABLE            # 3% large-cap → fixed 'notable'
+
+
+def test_decide_never_raises_on_hostile_sigma():
+    for bad in (float("nan"), float("inf"), -1.0, "oops", None):
+        d = _decide(
+            quote={"changePercentage": 4.0, "marketCap": LARGE_CAP}, sigma_daily=bad,
+        )
+        assert d.action in (ACTION_GENERATE, ACTION_TOUCH, ACTION_SKIP)
+        # A bad σ degrades to the fixed band, never crashes.
+        assert d.price_band in (BAND_FLAT, BAND_NOTABLE, BAND_EXTREME, BAND_UNKNOWN)
+
+
 # ── fingerprint ───────────────────────────────────────────────────────
 
 def test_fingerprint_is_order_independent():
@@ -149,7 +228,8 @@ def test_fingerprint_changes_with_band_model_prompt_and_articles():
     assert base != compute_inputset_id(["u1", "u2"], BAND_FLAT, MODEL)
     assert base != compute_inputset_id(["u1"], BAND_NOTABLE, MODEL)
     assert base != compute_inputset_id(["u1"], BAND_FLAT, "other-model")
-    assert base != compute_inputset_id(["u1"], BAND_FLAT, MODEL, prompt_version=2)
+    # A different prompt_version re-keys (99 is != the current default of 2).
+    assert base != compute_inputset_id(["u1"], BAND_FLAT, MODEL, prompt_version=99)
 
 
 def test_fingerprint_ignores_empty_and_null_ids():

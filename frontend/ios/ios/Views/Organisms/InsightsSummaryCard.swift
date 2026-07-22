@@ -30,6 +30,50 @@ struct InsightsSummaryCard: View {
         return "\(summary.timeAgo) · up to date"
     }
 
+    /// The grounded "why it moved" block: tier + session change + catalyst reason,
+    /// visually inset and separated from the AI news bullets (distinct provenance).
+    @ViewBuilder
+    private func whyItMovedRow(_ move: InsightPriceMove) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "bolt.fill")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.primaryBlue)
+                Text("Why it moved")
+                    .font(AppTypography.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(AppColors.textSecondary)
+
+                Spacer(minLength: AppSpacing.sm)
+
+                if let change = move.formattedChange {
+                    Text(change)
+                        .font(AppTypography.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(move.isPositive ? AppColors.bullish : AppColors.bearish)
+                }
+            }
+
+            Text(catalystLine(move))
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(AppSpacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppColors.background)
+        .cornerRadius(AppCornerRadius.medium)
+    }
+
+    /// "<Catalyst Tag> — <reason>", or just the reason when there is no clear
+    /// company catalyst (a broad-market / sector move).
+    private func catalystLine(_ move: InsightPriceMove) -> String {
+        if let tag = move.catalystTag, !tag.isEmpty {
+            return "\(tag) — \(move.reason)"
+        }
+        return move.reason
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Header
@@ -101,6 +145,13 @@ struct InsightsSummaryCard: View {
                 }
             }
 
+            // "Why it moved" — the grounded price-move explanation, shown only
+            // for a big move (Unusual/Extreme). A SEPARATE, cited block from the
+            // news bullets above; never on the deterministic fallback card.
+            if summary.isAIGenerated, let move = summary.priceMove {
+                whyItMovedRow(move)
+            }
+
             // Footer
             HStack {
                 // Sentiment on the fallback card is a tally of already-enriched
@@ -142,6 +193,33 @@ struct InsightsSummaryCard: View {
             sentiment: .bullish,
             updatedAt: Date().addingTimeInterval(-3600),
             summaryType: "48h"
+        )
+    )
+    .padding()
+    .background(AppColors.background)
+}
+
+/// AI card carrying a grounded "Why it moved" block — the big-move state. The
+/// row is gated on `isAIGenerated && priceMove != nil`, so this preview is the
+/// reliable visual check for it (a live Unusual/Extreme move + catalyst is not
+/// reproducible on demand).
+#Preview("AI card — why it moved") {
+    InsightsSummaryCard(
+        summary: NewsInsightSummary(
+            headline: "Shares Slide After Surprise Guidance Cut",
+            bulletPoints: [
+                "The company trimmed full-year revenue guidance below the Street's estimate, citing softer enterprise demand.",
+                "Several analysts flagged margin pressure into the next quarter. The takeaway, the reset lowers the near-term bar but the long-term thesis is intact."
+            ],
+            sentiment: .bearish,
+            updatedAt: Date().addingTimeInterval(-1800),
+            summaryType: "48h",
+            priceMove: InsightPriceMove(
+                tier: "Extreme",
+                changePercent: -8.4,
+                catalystTag: "Guidance Cut",
+                reason: "Management lowered FY revenue guidance below consensus on softer enterprise demand."
+            )
         )
     )
     .padding()

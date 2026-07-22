@@ -46,6 +46,24 @@ class UpdatesTabsResponse(BaseModel):
 
 # ── AI Insights card ──────────────────────────────────────────────────
 
+class PriceMoveResponse(BaseModel):
+    """The grounded "why did it move" block shown on the card for a big move.
+
+    Populated only for a per-ticker Unusual/Extreme session move (never the
+    market scope). ``catalyst_tag`` is None for a "no clear catalyst" outcome
+    (broad-market / sector move). Distinct from the news ``bullets`` — this is
+    the web-search-grounded, cited price explanation.
+    """
+
+    # 'Notable' | 'Unusual' | 'Extreme' (the volatility tier that triggered it).
+    tier: str
+    # Session change, PERCENT. None when unavailable — iOS hides the number.
+    change_percent: Optional[float] = None
+    # 2-4 word catalyst label ("Earnings Beat", "Analyst Downgrade"), or None.
+    catalyst_tag: Optional[str] = None
+    reason: str
+
+
 class AIInsightCardResponse(BaseModel):
     """The AI roll-up card at the top of the Updates screen."""
 
@@ -75,6 +93,9 @@ class AIInsightCardResponse(BaseModel):
     ai_generated: bool = True
     # Which materiality branch produced this card. Analytics/debugging; iOS ignores it.
     trigger_reason: Optional[str] = None
+    # Grounded "why did it move" for a big per-ticker move; None otherwise. A
+    # SEPARATE, cited field from `bullets` (the news roll-up).
+    price_move: Optional[PriceMoveResponse] = None
 
 
 # ── Articles ──────────────────────────────────────────────────────────

@@ -55,14 +55,20 @@ from app.services.news_insight_service import (
     get_news_insight_service,
 )
 from app.services.ticker_report_cache import current_close_cycle_start
+from app.services.volatility_cache_service import get_volatility_cache_service
+from app.config import settings
+from app.services.price_catalyst_service import get_price_catalyst_service
 from app.services.updates_materiality import (
     ACTION_GENERATE,
     ACTION_TOUCH,
     PER_SCOPE_ATTEMPT_CAP,
     PER_SCOPE_DAILY_CAP,
+    TIER_EXTREME,
+    TIER_UNUSUAL,
     Decision,
     daily_cap_for,
     decide,
+    finite,
 )
 from app.utils.market_hours import ET, is_market_active, session_phase
 
@@ -90,6 +96,13 @@ _GLOBAL_DAILY_CAP = 1500
 # ``processing_started_at`` in research_reconciliation_service.
 _CLAIM_STALE_SECONDS = 120
 
+# Max grounded "why did it move" web searches per ET day, across ALL scopes, so a
+# broad-volatility day cannot fan out unbounded (paid) searches. Each catalyst is
+# also 24h-cached per ticker, so this only bounds the count of DISTINCT big movers
+# explained per day. In-process v1 (bounded blast radius 2×cap across two Railway
+# instances); a durable cross-instance RPC is a documented follow-up.
+_CATALYST_DAILY_CAP = 30
+
 _STATE_TABLE = "updates_insight_state"
 
 
@@ -99,6 +112,10 @@ class InsightSweeper:
         self.fmp = get_fmp_client()
         self.news = get_news_cache_service()
         self.insights = get_news_insight_service()
+        self.vol = get_volatility_cache_service()
+        # In-process ET-day cap on grounded catalyst web searches.
+        self._catalyst_day = None
+        self._catalyst_count = 0
 
     # ── Universe ──────────────────────────────────────────────────────
 
@@ -336,6 +353,66 @@ class InsightSweeper:
                 scope, type(e).__name__, e,
             )
 
+    def _claim_catalyst_budget(self, now: datetime) -> bool:
+        """Take one unit of today's grounded-catalyst budget (in-process ET-day
+        counter). Returns False once ``_CATALYST_DAILY_CAP`` is spent."""
+        day = now.astimezone(ET).date()
+        if self._catalyst_day != day:
+            self._catalyst_day = day
+            self._catalyst_count = 0
+        if self._catalyst_count >= _CATALYST_DAILY_CAP:
+            return False
+        self._catalyst_count += 1
+        return True
+
+    async def _maybe_price_move(
+        self,
+        scope: str,
+        decision: Decision,
+        now: datetime,
+        quote: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Grounded "why did it move" for a per-ticker Unusual/Extreme session
+        move, folded onto the card as a separate ``price_move`` block.
+
+        Gated to non-market scopes at tier Unusual/Extreme; kill-switched; capped
+        per ET day; the reason itself is 24h-cached + inflight-deduped by
+        ``price_catalyst_service``. Returns None on any miss/failure — it must
+        NEVER fabricate a driver, block, or fail the news card.
+        """
+        if scope == MARKET_SCOPE:
+            return None
+        if decision.price_band not in (TIER_UNUSUAL, TIER_EXTREME):
+            return None
+        if not getattr(settings, "PRICE_CATALYST_AI_ENABLED", True):
+            return None
+        if not self._claim_catalyst_budget(now):
+            logger.info(
+                "Price-move catalyst day cap (%d) reached — skipping %s",
+                _CATALYST_DAILY_CAP, scope,
+            )
+            return None
+
+        change_pct = finite((quote or {}).get("changePercentage")) or 0.0
+        try:
+            grounded = await get_price_catalyst_service().get_catalyst(
+                scope, change_pct, "today",
+            )
+        except Exception as e:
+            logger.warning(
+                "Price-move catalyst failed for %s (%s: %s)",
+                scope, type(e).__name__, e,
+            )
+            return None
+        if grounded is None:
+            return None
+        return {
+            "tier": decision.price_band,
+            "change_pct": change_pct,
+            "catalyst_tag": grounded.get("tag"),   # None ⇒ "no clear catalyst"
+            "reason": grounded.get("reason") or "",
+        }
+
     def _consume_global_budget(self, now: datetime) -> bool:
         """Atomically take one unit of today's global generation budget.
 
@@ -408,6 +485,12 @@ class InsightSweeper:
         market_quote = quotes_by_symbol.get(MARKET_INDEX_SYMBOL, {})
         market_change = market_quote.get("changePercentage")
 
+        # 1b. σ (daily-return volatility) for the volatility-relative move tier —
+        #     read from the daily-precomputed cache (keyed on ^GSPC for the market
+        #     scope). Best-effort: a miss yields None → the gate falls back to the
+        #     fixed band for that scope. get_sigmas_bulk never raises into the sweep.
+        sigmas = await self.vol.get_sigmas_bulk(symbols)
+
         # 2. News — force-refresh so a story that broke minutes ago is visible.
         #    The 6h read TTL on ticker_news_cache would otherwise hide it.
         if refresh_news:
@@ -415,13 +498,13 @@ class InsightSweeper:
 
         # 3. Corpora — ONE Supabase query for every scope.
         corpora = await asyncio.to_thread(self.news.get_cached_bulk, scopes, 25)
-        # Bound every scope's corpus to the last CORPUS_WINDOW_HOURS so the AI
-        # card is genuinely a "24h summary" (the badge claims 24h). The window is
+        # Bound every scope's corpus to the last CORPUS_WINDOW_HOURS (48h) so the
+        # AI card is genuinely a "48h summary" (the badge claims 48h). The window is
         # applied HERE, before both the materiality fingerprint (via `decide`) and
         # generation (via `generate_and_store`), so the two stay consistent: the
         # card refreshes as stories age out of the window, and a scope with no
-        # news in 24h yields `no_corpus` — the deterministic "Latest headlines"
-        # fallback then shows, rather than an AI card over-claiming "24h".
+        # news in the window yields `no_corpus` — the deterministic "Latest
+        # headlines" fallback then shows, rather than an AI card over-claiming "48h".
         cutoff = now - timedelta(hours=CORPUS_WINDOW_HOURS)
         corpora = {
             scope: articles_within_window(rows, cutoff)
@@ -450,6 +533,10 @@ class InsightSweeper:
                 model=INSIGHT_MODEL,
                 market_active=market_active,
                 is_market_scope=is_market,
+                sigma_daily=(
+                    sigmas.get(MARKET_INDEX_SYMBOL) if is_market
+                    else sigmas.get(scope)
+                ),
                 session_phase=phase,
             )
             reasons[decision.reason] += 1
@@ -517,6 +604,13 @@ class InsightSweeper:
                         self._release_claim, scope, now, "global_budget_exhausted"
                     )
                     return False
+                # Explain-the-move: for a per-ticker Unusual/Extreme move, fetch
+                # the grounded "why" (web search) and fold it into the card. Gated
+                # + day-capped + kill-switched + 24h-cached; None on any failure,
+                # and never blocks or fails the news card.
+                price_move = await self._maybe_price_move(
+                    scope, decision, now, quotes_by_symbol.get(scope),
+                )
                 card = None
                 error = None
                 try:
@@ -531,6 +625,7 @@ class InsightSweeper:
                             else quotes_by_symbol.get(scope)
                         ),
                         market_active=market_active,
+                        price_move=price_move,
                     )
                 except asyncio.CancelledError:
                     # A deploy/shutdown cancels the sweeper mid-generation.

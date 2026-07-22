@@ -50,6 +50,12 @@ class _StubService(NewsCacheService):
 
         self.fmp = _FMP()
 
+    async def _market_trending_tickers(self):
+        # Keep the corpus tests network-free: the real method calls ApeWisdom.
+        # The quality filter's buzz rescue is exercised separately in
+        # tests/test_market_news_quality.py.
+        return frozenset()
+
 
 def _article(url, title, when="2026-07-20 18:00:00", symbol=None):
     return {

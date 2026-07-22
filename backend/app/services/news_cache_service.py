@@ -16,12 +16,14 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 from app.database import get_supabase
+from app.integrations.apewisdom import get_all_mentions
 from app.integrations.fmp import (
     FMPAuthException,
     FMPRateLimitException,
     get_fmp_client,
 )
 from app.integrations.gemini import get_gemini_client, GeminiQuotaError
+from app.services.market_news_quality import filter_market_articles
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,12 @@ MARKET_INDEX_SYMBOLS = "SPY,QQQ,DIA,^GSPC,^IXIC"
 # the newest slice and the cache silently decays to today-only. See
 # `refresh_scope_news`.
 REFRESH_LOOKBACK_HOURS = 96
+
+# The MARKET quality filter (market_news_quality.filter_market_articles) can
+# RESCUE a noisy-looking headline about a ticker currently trending on Reddit.
+# We treat the top-N ApeWisdom-ranked symbols as "trending". Best-effort only.
+_BUZZ_TOP_N = 40
+_BUZZ_TIMEOUT_SECONDS = 2.0
 
 
 def is_crypto_scope(scope: str) -> bool:
@@ -344,22 +352,54 @@ class NewsCacheService:
         finally:
             self._inflight.pop(MARKET_SCOPE, None)
 
+    async def _market_trending_tickers(self) -> frozenset:
+        """Top Reddit-mentioned symbols (best-effort) for the market news quality
+        filter's buzz rescue. NEVER raises and NEVER blocks the feed for long: a
+        timeout or any ApeWisdom failure yields an empty set, and the filter then
+        simply relies on its source + keyword signals. Overridden in tests so the
+        corpus suite stays network-free.
+        """
+        try:
+            mentions = await asyncio.wait_for(
+                get_all_mentions(), timeout=_BUZZ_TIMEOUT_SECONDS
+            )
+        except Exception as e:
+            logger.debug(
+                "Market buzz signal unavailable (%s: %s)", type(e).__name__, e
+            )
+            return frozenset()
+        out: set = set()
+        for tkr, data in (mentions or {}).items():
+            if isinstance(data, dict):
+                rank = data.get("rank")
+                if isinstance(rank, int) and 1 <= rank <= _BUZZ_TOP_N:
+                    out.add(str(tkr).strip().upper())
+        return frozenset(out)
+
     async def _fetch_market_raw(
         self, limit: int, from_date: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Fetch + merge the market corpus: macro narrative plus index coverage.
 
-        Both legs run concurrently and are merged newest-first, deduped by URL.
-        A failure in either leg degrades to whatever the other returned rather
-        than emptying the feed.
+        Both legs run concurrently and are merged newest-first, deduped by URL,
+        then passed through the deterministic quality filter
+        (``market_news_quality.filter_market_articles``) so the high-volume Market
+        tab shows fewer, higher-quality rows in the SAME newest-first order:
+        syndicated wire copies collapse, PR-wire/sponsored spam and listicle noise
+        drop, reputable wires and material stories stay. A failure in either FMP
+        leg degrades to whatever the other returned rather than emptying the feed.
         """
-        general, index = await asyncio.gather(
+        general, index, trending = await asyncio.gather(
             self.fmp.get_general_news(limit=limit),
             self.fmp.get_stock_news(
                 MARKET_INDEX_SYMBOLS, limit=limit, from_date=from_date
             ),
+            self._market_trending_tickers(),
             return_exceptions=True,
         )
+        # The buzz signal is a pure bonus; never let it affect the FMP legs.
+        if not isinstance(trending, frozenset):
+            trending = frozenset()
 
         merged: List[Dict[str, Any]] = []
         seen: set = set()
@@ -385,13 +425,28 @@ class NewsCacheService:
         # Newest first. `publishedDate` is a sortable "YYYY-MM-DD HH:MM:SS"
         # string; a missing date sorts last rather than crashing the sort.
         merged.sort(key=lambda r: str(r.get("publishedDate") or ""), reverse=True)
+
+        # Quality filter — MARKET ONLY. Best-effort: a bug here must not empty the
+        # feed, so fall back to the unfiltered corpus. Order is preserved.
+        try:
+            filtered = filter_market_articles(merged, trending_tickers=trending)
+        except Exception as e:
+            logger.warning(
+                "Market quality filter failed (%s: %s) — serving unfiltered corpus",
+                type(e).__name__, e,
+            )
+            filtered = merged
+        dropped = len(merged) - len(filtered)
+
         logger.info(
-            "Market corpus: %d unique articles (general=%s, index=%s)",
-            len(merged),
+            "Market corpus: %d unique → %d after quality filter (dropped %d) "
+            "(general=%s, index=%s, buzz=%d)",
+            len(merged), len(filtered), dropped,
             "ok" if not isinstance(general, BaseException) else "failed",
             "ok" if not isinstance(index, BaseException) else "failed",
+            len(trending),
         )
-        return merged[:limit]
+        return filtered[:limit]
 
     async def _fetch_market_news(self, limit: int) -> Dict[str, Any]:
         logger.info("Market news cache MISS: fetching general + index news from FMP")

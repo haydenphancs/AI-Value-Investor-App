@@ -42,14 +42,16 @@ import asyncio
 import logging
 import random
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
 from app.services.news_insight_service import (
+    CORPUS_WINDOW_HOURS,
     INSIGHT_MODEL,
+    articles_within_window,
     get_news_insight_service,
 )
 from app.services.ticker_report_cache import current_close_cycle_start
@@ -413,6 +415,18 @@ class InsightSweeper:
 
         # 3. Corpora — ONE Supabase query for every scope.
         corpora = await asyncio.to_thread(self.news.get_cached_bulk, scopes, 25)
+        # Bound every scope's corpus to the last CORPUS_WINDOW_HOURS so the AI
+        # card is genuinely a "24h summary" (the badge claims 24h). The window is
+        # applied HERE, before both the materiality fingerprint (via `decide`) and
+        # generation (via `generate_and_store`), so the two stay consistent: the
+        # card refreshes as stories age out of the window, and a scope with no
+        # news in 24h yields `no_corpus` — the deterministic "Latest headlines"
+        # fallback then shows, rather than an AI card over-claiming "24h".
+        cutoff = now - timedelta(hours=CORPUS_WINDOW_HOURS)
+        corpora = {
+            scope: articles_within_window(rows, cutoff)
+            for scope, rows in corpora.items()
+        }
 
         # 4. Evaluate the gate for every scope.
         states = await asyncio.to_thread(self._load_state, scopes)

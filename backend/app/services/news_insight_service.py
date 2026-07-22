@@ -61,6 +61,16 @@ INSIGHT_MODEL: str = getattr(
 # How many articles feed one roll-up. Beyond ~25 the marginal article adds
 # tokens without adding signal, and the older items dilute "what happened today".
 MAX_CORPUS_ARTICLES = 25
+
+# The card is presented as a "48h" summary in the iOS badge
+# (``AIInsightCardResponse.badge`` in schemas/updates.py). The sweeper bounds the
+# corpus to THIS window before BOTH the materiality fingerprint and generation,
+# so the badge is literally true rather than a decorative label — the summary
+# only ever covers articles published in the last 48 hours, and it refreshes as
+# older stories age out of the window. The Updates endpoint uses the SAME window
+# to decide whether to surface a card at all (no news in the window ⇒ no card).
+# Change this and the badge string together.
+CORPUS_WINDOW_HOURS = 48
 # Per-article text budget, characters. Headlines carry most of the signal.
 MAX_ARTICLE_TEXT_CHARS = 400
 
@@ -638,7 +648,7 @@ class NewsInsightService:
 Rules:
 - "headline": one sentence, under 90 characters, stating the single most important theme. No ticker-symbol soup, no clickbait, no invented numbers.
 - "bullets": {MIN_BULLETS} to {MAX_BULLETS} bullets. Each under 30 words. Cover the distinct threads across the articles rather than restating one story. Use concrete figures ONLY when they appear in the articles below.
-- The FINAL bullet must explain why an everyday investor should care, in plain English. Vary how you open it — sometimes a short transition like "In short," or "The takeaway:", sometimes just state the insight directly. NEVER use "So What?" as a prefix.
+- The FINAL bullet must explain why an everyday investor should care, in plain English. Vary how you open it — sometimes a short transition like "In short," or "The takeaway," (always followed by a COMMA, never a colon), sometimes just state the insight directly. NEVER use "So What?" as a prefix.
 - No introductory phrases like "This article discusses" or "The key points are".
 - "sentiment": exactly one of "bullish" | "bearish" | "neutral", describing the NET directional implication for {subject}.
     - "bullish": the balance of articles points to a direct upward catalyst (earnings beats, upgrades, major wins, easing conditions).
@@ -692,6 +702,29 @@ def _iso(value: Any) -> str:
     (``.iso8601`` rejects fractional seconds)."""
     dt = _parse_ts(value) or datetime.now(timezone.utc)
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def articles_within_window(
+    rows: Sequence[Dict[str, Any]], cutoff: datetime
+) -> List[Dict[str, Any]]:
+    """Keep only article rows published at/after ``cutoff``.
+
+    Bounds both the sweeper's insight corpus AND the Updates endpoint's
+    show/hide decision to a real time window (``CORPUS_WINDOW_HOURS``), so the
+    "48h" badge is honest and a scope with no recent news surfaces no card at
+    all. A row with a missing or unparseable ``published_at`` is DROPPED — an
+    undated article cannot be asserted to fall inside the window, and keeping it
+    would reintroduce the over-claim the window exists to remove. Non-dict rows
+    are skipped rather than raising.
+    """
+    kept: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        ts = _parse_ts(r.get("published_at"))
+        if ts is not None and ts >= cutoff:
+            kept.append(r)
+    return kept
 
 
 # ── Singleton ─────────────────────────────────────────────────────────

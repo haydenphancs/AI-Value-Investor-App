@@ -16,6 +16,7 @@ authorship nor waits forever.
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -42,7 +43,11 @@ from app.services.news_cache_service import (
     get_news_cache_service,
     is_crypto_scope,
 )
-from app.services.news_insight_service import get_news_insight_service
+from app.services.news_insight_service import (
+    CORPUS_WINDOW_HOURS,
+    articles_within_window,
+    get_news_insight_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -235,24 +240,34 @@ async def get_updates_feed(
     # articles, i.e. a summary of yesterday's news replacing today's.
     insight: Optional[AIInsightCardResponse] = None
     if offset == 0:
-        try:
-            cards = await insights.get_cards([scope])
-            card = cards.get(scope)
-            if card is None and raw_articles:
-                # No AI card yet (cold scope, or the sweeper hasn't reached it).
-                # Serve the honest headline list. The card's `refreshing` flag
-                # says whether the sweeper is actually awake to replace it —
-                # outside market hours it is not, and promising otherwise is
-                # what pinned the UI on "Catching up…" all weekend.
-                card = insights.build_fallback_card(scope, raw_articles)
-            if card is not None:
-                insight = AIInsightCardResponse(**card)
-        except Exception as e:
-            # An unavailable insight must never take down the timeline.
-            logger.warning(
-                "Updates insight read failed for scope=%s: %s: %s",
-                scope, type(e).__name__, e,
-            )
+        # Only surface an Insights card when the scope actually has news within
+        # the badge window (CORPUS_WINDOW_HOURS). With nothing recent, show NO
+        # card at all — neither the AI card nor the headline fallback — rather
+        # than summarising stale news under a "48h" label. The timeline below
+        # still renders whatever cached articles exist.
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=CORPUS_WINDOW_HOURS)
+        recent = articles_within_window(raw_articles, cutoff)
+        if recent:
+            try:
+                cards = await insights.get_cards([scope])
+                card = cards.get(scope)
+                if card is None:
+                    # No AI card yet (cold scope, or the sweeper hasn't reached
+                    # it). Serve the honest headline list, built ONLY from the
+                    # in-window articles so it cannot claim "48h" over old news.
+                    # The card's `refreshing` flag says whether the sweeper is
+                    # actually awake to replace it — outside market hours it is
+                    # not, and promising otherwise is what pinned the UI on
+                    # "Catching up…" all weekend.
+                    card = insights.build_fallback_card(scope, recent)
+                if card is not None:
+                    insight = AIInsightCardResponse(**card)
+            except Exception as e:
+                # An unavailable insight must never take down the timeline.
+                logger.warning(
+                    "Updates insight read failed for scope=%s: %s: %s",
+                    scope, type(e).__name__, e,
+                )
 
     # A full page implies there may be another; a short page is provably the
     # end. Also stop at the `offset` ceiling so the client cannot chase a page

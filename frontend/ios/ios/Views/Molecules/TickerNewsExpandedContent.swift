@@ -12,8 +12,15 @@ struct TickerNewsExpandedContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            ForEach(Array(bullets.enumerated()), id: \.offset) { _, bullet in
-                NewsCardBulletPoint(text: bullet)
+            ForEach(Array(bullets.enumerated()), id: \.offset) { index, bullet in
+                // The final bullet is the "why investors care" takeaway. If it
+                // opens with a lead-in transition ending in a colon
+                // ("The takeaway: …"), show it as a comma-led sentence so it
+                // reads like "Ultimately, …" rather than a bold label.
+                let isLast = index == bullets.count - 1
+                NewsCardBulletPoint(
+                    text: isLast ? bullet.normalizingLeadInColon() : bullet
+                )
             }
         }
     }

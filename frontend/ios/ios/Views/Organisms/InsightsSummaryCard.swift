@@ -15,10 +15,19 @@ struct InsightsSummaryCard: View {
     /// can produce it are statements about the BACKGROUND SWEEPER, which is
     /// asleep outside market hours. Suppressing the date on the strength of a
     /// refresh that may be 60 hours away is how the original bug read.
+    ///
+    /// The `timeAgo` is the age of the CONTENT (when the summary was last
+    /// generated). On a quiet ticker that can be many hours even though the card
+    /// is perfectly current — the sweeper regenerates only when the underlying
+    /// news actually changes and otherwise re-verifies the existing card as
+    /// still correct. So the default branch appends "up to date": the brief has
+    /// been checked and nothing has changed, which is the opposite of stale.
+    /// `isStale` (the sweeper hasn't re-checked recently) and `isRefreshing` (a
+    /// new AI card is being produced) still take precedence and say so.
     private var footerText: String {
         if summary.isRefreshing { return "\(summary.timeAgo) · catching up" }
-        if summary.isStale { return "\(summary.timeAgo) · updating" }
-        return summary.timeAgo
+        if summary.isStale { return "\(summary.timeAgo) · checking for updates" }
+        return "\(summary.timeAgo) · up to date"
     }
 
     var body: some View {
@@ -74,14 +83,17 @@ struct InsightsSummaryCard: View {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 // Index-keyed, not `id: \.self` — two identical bullet lines
                 // would collide and one would be dropped/glitched.
-                ForEach(Array(summary.bulletPoints.enumerated()), id: \.offset) { _, point in
+                ForEach(Array(summary.bulletPoints.enumerated()), id: \.offset) { index, point in
+                    // Final bullet = the takeaway; render its lead-in colon as a
+                    // comma so it reads as a sentence, matching the article cards.
+                    let isLast = index == summary.bulletPoints.count - 1
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
                         Circle()
                             .fill(AppColors.textSecondary)
                             .frame(width: 5, height: 5)
                             .padding(.top, 6)
 
-                        Text(point)
+                        Text(isLast ? point.normalizingLeadInColon() : point)
                             .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -129,7 +141,7 @@ struct InsightsSummaryCard: View {
             ],
             sentiment: .bullish,
             updatedAt: Date().addingTimeInterval(-3600),
-            summaryType: "24h · AI Summary"
+            summaryType: "48h · AI Summary"
         )
     )
     .padding()

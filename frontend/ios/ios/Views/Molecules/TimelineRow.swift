@@ -31,6 +31,13 @@ struct TimelineRow: View {
         // row's dot with no gap — expanded or not.
         contentColumn
             .padding(.leading, railWidth + AppSpacing.md)
+            // Space AFTER this card, i.e. above the next row's timestamp, so the
+            // gap above a timestamp matches the gap below it (the contentColumn's
+            // own `AppSpacing.sm`). Applied BEFORE the overlay so the rail's
+            // outgoing `maxHeight: .infinity` segment fills this gap too and the
+            // line stays continuous into the next row's dot. Not on the last row
+            // (its outgoing segment is hidden and the section spacing follows).
+            .padding(.bottom, isLast ? 0 : AppSpacing.sm)
             .overlay(alignment: .topLeading) { rail }
     }
 

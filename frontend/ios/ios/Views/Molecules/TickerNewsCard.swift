@@ -17,8 +17,8 @@ struct TickerNewsCard: View {
     var body: some View {
         // Thin adapter over the shared NewsCardView. The detail News tabs use
         // the EXPANDABLE style with the relative time shown (no timeline here).
-        // `article.sentiment` is non-optional on this model, so a badge always
-        // renders — unchanged from before.
+        // `article.sentiment` is OPTIONAL — nil hides the badge until the article
+        // is AI-enriched, matching the Updates screen for the same shared row.
         NewsCardView(
             headline: article.headline,
             sourceName: article.source.displayName,

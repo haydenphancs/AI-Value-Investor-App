@@ -57,6 +57,56 @@ MARKET_INDEX_SYMBOLS = "SPY,QQQ,DIA,^GSPC,^IXIC"
 REFRESH_LOOKBACK_HOURS = 96
 
 
+def is_crypto_scope(scope: str) -> bool:
+    """Whether ``scope`` should be fetched from FMP's crypto news feed.
+
+    FMP crypto symbols are quote-suffixed pairs (BTCUSD, ETHUSD). GCUSD / SIUSD
+    are COMMODITY pairs (gold / silver), not crypto, and are excluded. Lives in
+    the service so the endpoint AND the background sweeper share ONE definition:
+    when the sweeper refreshed a crypto scope through the stock feed it wrote
+    zero rows, so the crypto Insight card never generated and crypto news aged
+    out at the 6h TTL between views.
+    """
+    s = (scope or "").upper()
+    return len(s) > 3 and s.endswith(("USD", "USDT")) and s not in ("GCUSD", "SIUSD")
+
+
+def _sanitize_published_at(value: Any) -> Optional[str]:
+    """Return a value Postgres ``timestamptz`` will accept, or None.
+
+    A single row with an empty / garbage ``published_at`` makes the WHOLE 50-row
+    batch upsert raise (``invalid input syntax for type timestamp with time
+    zone``): nothing caches, every article degrades to a non-enrichable ``temp_``
+    id (iOS filters those out), and the scope re-misses forever. The column is
+    nullable, so an unparseable value becomes None instead of poisoning the
+    batch. FMP sends ``"YYYY-MM-DD HH:MM:SS"``; our own writes are ISO-8601 —
+    ``datetime.fromisoformat`` accepts both (space or ``T`` separator) on 3.11.
+    """
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    try:
+        datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return s
+
+
+def _clamp_confidence(value: Any) -> int:
+    """Coerce a model-emitted confidence to an int in [0, 100].
+
+    Clamped at the source (the enrichment map) so the DB write inherits a valid
+    value — the `sentiment_confidence` column is a bare integer with no CHECK,
+    and Gemini can return an out-of-range or non-integer score.
+    """
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _has_waiters(fut: asyncio.Future) -> bool:
     """Whether anything is awaiting `fut`.
 
@@ -172,7 +222,10 @@ class NewsCacheService:
         symbol = symbol.upper()
 
         # 1. Check cache (keyed by index symbol)
-        cached_articles = self._get_cached(symbol, limit)
+        # Off-thread: the Supabase SDK is synchronous, so reading it inline stalls
+        # the whole event loop for the round-trip (the ticker/market paths already
+        # offload this; the index path did not).
+        cached_articles = await asyncio.to_thread(self._get_cached, symbol, limit)
         if cached_articles:
             logger.info(f"Index news cache HIT for {symbol}: {len(cached_articles)} articles")
             return {
@@ -215,9 +268,10 @@ class NewsCacheService:
         if not raw_articles:
             logger.info(f"No FMP news found for index {symbol} (tickers={news_tickers})")
             return []
-        return self._build_and_cache_rows(
-            cache_key=symbol, raw_articles=raw_articles, limit=limit,
-            fallback_ticker=symbol, label=f"index {symbol}",
+        # Off-thread: the synchronous batch upsert would otherwise block the loop.
+        return await asyncio.to_thread(
+            self._build_and_cache_rows,
+            symbol, raw_articles, limit, symbol, f"index {symbol}",
         )
 
     # ── Public: Get general market news ────────────────────────────────
@@ -444,7 +498,8 @@ class NewsCacheService:
                 "summary": raw.get("text") or "",
                 "source_name": raw.get("publisher") or raw.get("site") or "",
                 "source_logo_url": None,
-                "published_at": raw.get("publishedDate"),
+                # Sanitized: one bad/empty date would abort the whole batch upsert.
+                "published_at": _sanitize_published_at(raw.get("publishedDate")),
                 "thumbnail_url": raw.get("image"),
                 "article_url": raw.get("url"),
                 # `expires_at` IS re-stamped on a refresh — that is what keeps an
@@ -764,9 +819,11 @@ class NewsCacheService:
         if not raw_articles:
             logger.info(f"No FMP news found for {ticker}")
             return []
-        return self._build_and_cache_rows(
-            cache_key=ticker, raw_articles=raw_articles, limit=limit,
-            fallback_ticker=ticker, label=ticker,
+        # Off-thread: the synchronous batch upsert would otherwise block the loop
+        # on this request path (the market path already offloads it).
+        return await asyncio.to_thread(
+            self._build_and_cache_rows,
+            ticker, raw_articles, limit, ticker, ticker,
         )
 
     # ── Private: Gemini batch enrichment ──────────────────────────────
@@ -836,7 +893,7 @@ class NewsCacheService:
             result[pos] = {
                 "bullets": (item.get("bullets", []) or [])[:5],
                 "sentiment": NewsCacheService._normalize_sentiment(item.get("sentiment", "")),
-                "confidence": item.get("confidence", 0),
+                "confidence": _clamp_confidence(item.get("confidence", 0)),
                 "related_tickers": cleaned_tickers,
             }
         return result
@@ -1033,6 +1090,12 @@ Return a JSON array with one object per article in order. Each object must have:
                     # is nullable — an undated row would otherwise head a
                     # newest-first feed and consume the page budget.
                     .order("published_at", desc=True, nullsfirst=False)
+                    # Stable tiebreak (matches _get_cached): published_at is NOT
+                    # unique (FMP stamps whole batches to the same minute), so
+                    # without it rows that tie ACROSS a 1000-row page boundary can
+                    # be skipped or duplicated — under-filling a busy scope's
+                    # corpus and shifting its materiality fingerprint.
+                    .order("id", desc=True)
                     .range(offset, offset + page_size - 1)
                     .execute()
                 )
@@ -1098,6 +1161,14 @@ Return a JSON array with one object per article in order. Each object must have:
                 # which returns an all-Apple feed.
                 raw = await self._fetch_market_raw(limit, from_date=from_date)
                 fallback = None
+            elif is_crypto_scope(scope):
+                # `news/stock` returns nothing for BTCUSD, so a crypto scope
+                # refreshed through the stock feed wrote zero rows — the sweeper
+                # never noticed breaking crypto news and the crypto Insight card
+                # never generated. `news/crypto` carries no from_date param; it
+                # returns the latest window, which is what the refresh needs.
+                raw = await self.fmp.get_crypto_news(scope, limit=limit)
+                fallback = scope
             else:
                 raw = await self.fmp.get_stock_news(
                     scope, limit=limit, from_date=from_date

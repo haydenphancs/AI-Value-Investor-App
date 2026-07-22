@@ -263,6 +263,23 @@ struct ETFNewsArticleDTO: Decodable {
         case summaryBullets = "summary_bullets"
         case articleUrl = "article_url"
     }
+
+    // Tolerant decode: `sentiment`, `published_at`, and the arrays are the only
+    // REQUIRED-typed fields on this embedded shape. A single null in any of them
+    // (a future `_build_news` change) would fail decoding of the ENTIRE ETF
+    // detail response, not just news. Absorb null/missing here instead.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        headline = try c.decodeIfPresent(String.self, forKey: .headline) ?? ""
+        sourceName = try c.decodeIfPresent(String.self, forKey: .sourceName) ?? ""
+        sourceIcon = try c.decodeIfPresent(String.self, forKey: .sourceIcon)
+        sentiment = try c.decodeIfPresent(String.self, forKey: .sentiment) ?? ""
+        publishedAt = try c.decodeIfPresent(String.self, forKey: .publishedAt) ?? ""
+        thumbnailUrl = try c.decodeIfPresent(String.self, forKey: .thumbnailUrl)
+        relatedTickers = try c.decodeIfPresent([String].self, forKey: .relatedTickers) ?? []
+        summaryBullets = try c.decodeIfPresent([String].self, forKey: .summaryBullets) ?? []
+        articleUrl = try c.decodeIfPresent(String.self, forKey: .articleUrl)
+    }
 }
 
 // MARK: - ETF Dividend History Response (dedicated endpoint)

@@ -14,7 +14,11 @@ struct TickerNewsArticle: Identifiable {
     let apiId: String          // Backend article ID (for enrichment requests)
     let headline: String
     let source: NewsSource
-    var sentiment: NewsSentiment
+    /// Optional: nil ⇒ NO badge until the article has been AI-enriched. Matches
+    /// the Updates `NewsArticle.sentiment` contract so the SAME shared cache row
+    /// renders identically on both screens (previously this was non-optional and
+    /// defaulted to `.neutral`, showing a confident badge no model produced).
+    var sentiment: NewsSentiment?
     let publishedAt: Date
     let thumbnailName: String?
     let imageURL: URL?

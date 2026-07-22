@@ -52,6 +52,10 @@ class ETFDetailViewModel: ObservableObject {
     private let newsPageSize: Int = 10
     /// Serialises enrichment (News-tab-appear vs fetch/load-more completion).
     private var isEnrichingNews = false
+    /// Re-entrancy guard for `loadMoreNews` — the zero-height load-more sentinel
+    /// re-fires the instant more rows render, so without this it cascades every
+    /// remaining page in one tick (TickerDetail has the same guard).
+    private var isLoadingMoreNews = false
     /// Monotonic token for ETF-detail fetches. fetchETFDetail and fetchChartForRange
     /// hit the same endpoint and write the whole etfData snapshot; each captures the
     /// token before awaiting and applies its result only if still current, so a slow
@@ -392,7 +396,9 @@ class ETFDetailViewModel: ObservableObject {
             let apiNews = response.articles
             print("📰 [ETFDetail] Got \(apiNews.count) news articles for \(etfSymbol) (cached: \(response.cached ?? false))")
 
-            self.allNewsArticles = apiNews.map { mapApiToUiArticle($0) }
+            // Drop unrenderable rows (no parseable date) instead of stamping
+            // them "now" — parity with the Updates screen for the same feed.
+            self.allNewsArticles = apiNews.compactMap { mapApiToUiArticle($0) }
             self.newsDisplayCount = newsPageSize
             self.hasMoreNews = allNewsArticles.count > newsDisplayCount
             self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
@@ -411,11 +417,17 @@ class ETFDetailViewModel: ObservableObject {
     }
 
     func loadMoreNews() {
-        guard hasMoreNews else { return }
+        guard !isLoadingMoreNews, hasMoreNews else { return }
+        isLoadingMoreNews = true
         newsDisplayCount += newsPageSize
         newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
         hasMoreNews = allNewsArticles.count > newsDisplayCount
-        Task { await enrichVisibleArticles() }
+        // Reset AFTER enrichment (not synchronously) so the load-more sentinel
+        // can't cascade every remaining page in a single tick.
+        Task {
+            await enrichVisibleArticles()
+            isLoadingMoreNews = false
+        }
     }
 
     /// Called when the News tab becomes visible — defers AI enrichment to when
@@ -474,44 +486,43 @@ class ETFDetailViewModel: ObservableObject {
             let wasProcessed = enriched.aiProcessed ?? false
             let hasBullets = enriched.summaryBullets?.isEmpty == false
             guard wasProcessed || hasBullets else { continue }
-            let bullets: [String] = {
-                if let b = enriched.summaryBullets, !b.isEmpty { return b }
-                if let s = enriched.summary, !s.isEmpty { return [s] }
-                return allNewsArticles[i].summaryBullets
-            }()
-            allNewsArticles[i].summaryBullets = bullets
+            // Only real AI bullets — no raw-summary pseudo-bullet (parity with Updates).
+            allNewsArticles[i].summaryBullets = enriched.summaryBullets ?? []
             allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
             allNewsArticles[i].aiProcessed = true
         }
     }
 
-    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
-        let bullets: [String] = {
-            if let aiBullets = article.summaryBullets, !aiBullets.isEmpty { return aiBullets }
-            if let summary = article.summary, !summary.isEmpty { return [summary] }
-            return []
-        }()
+    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle? {
+        // Drop rows with an unparseable/absent date instead of stamping "now" —
+        // parity with the Updates screen.
+        guard let published = article.publishedAt.flatMap({ parseNewsDate($0) }) else {
+            return nil
+        }
         return TickerNewsArticle(
             apiId: article.id,
             headline: article.title,
-            source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+            source: NewsSource(
+                name: article.source ?? "Unknown",
+                iconName: nil,
+                logoURL: article.sourceLogoUrl.flatMap { URL(string: $0) }
+            ),
             sentiment: mapSentiment(article.sentiment),
-            publishedAt: article.publishedAt.flatMap { parseNewsDate($0) } ?? Date(),
+            publishedAt: published,
             thumbnailName: nil,
             imageURL: article.imageUrl.flatMap { URL(string: $0) },
             relatedTickers: article.relatedTickers ?? [],
-            summaryBullets: bullets,
+            // Only real AI bullets — no raw-summary pseudo-bullet (parity with Updates).
+            summaryBullets: article.summaryBullets ?? [],
             articleURL: article.url.flatMap { URL(string: $0) },
             aiProcessed: article.aiProcessed ?? false
         )
     }
 
-    private func mapSentiment(_ sentiment: String?) -> NewsSentiment {
-        switch sentiment?.lowercased() {
-        case "positive", "bullish": return .positive
-        case "negative", "bearish": return .negative
-        default: return .neutral
-        }
+    /// nil ⇒ no badge until AI-enriched. Matches `NewsSentiment(backend:)` on the
+    /// Updates side so the same row renders identically.
+    private func mapSentiment(_ sentiment: String?) -> NewsSentiment? {
+        NewsSentiment(backend: sentiment)
     }
 
     private func parseNewsDate(_ dateString: String) -> Date? {

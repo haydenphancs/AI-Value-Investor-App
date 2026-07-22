@@ -72,7 +72,9 @@ struct InsightsSummaryCard: View {
 
             // Bullet Points
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                ForEach(summary.bulletPoints, id: \.self) { point in
+                // Index-keyed, not `id: \.self` — two identical bullet lines
+                // would collide and one would be dropped/glitched.
+                ForEach(Array(summary.bulletPoints.enumerated()), id: \.offset) { _, point in
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
                         Circle()
                             .fill(AppColors.textSecondary)

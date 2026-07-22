@@ -117,15 +117,29 @@ def test_happy_row_round_trips_unchanged():
         ("bullish", SentimentValue.POSITIVE),
         ("bearish", SentimentValue.NEGATIVE),
         ("neutral", SentimentValue.NEUTRAL),
-        # Un-enriched rows must keep rendering the Neutral badge iOS shows
-        # today — the cache normalizes them to 'neutral', not to null.
-        ("", SentimentValue.NEUTRAL),
+        # Empty / missing sentiment is HIDDEN (None) even on an enriched row — no
+        # badge without a real classification. Byte-identical to `_to_article`.
+        ("", None),
         (None, None),
+        # A non-empty but off-schema value on an enriched row still coerces to
+        # Neutral (the validator's fallback) rather than dropping the badge.
         ("wildly off-schema", SentimentValue.NEUTRAL),
     ],
 )
 def test_sentiment_coercion(stored, expected):
     assert news_article_from_row(_cache_row(sentiment=stored)).sentiment == expected
+
+
+@pytest.mark.parametrize("stored", ["neutral", "bullish", "bearish", "", None])
+def test_unenriched_sentiment_is_hidden(stored):
+    """Un-enriched rows expose sentiment=None so NO badge renders until a model
+    has actually classified the article — the same contract `_to_article`
+    enforces for Updates. Forwarding the cache's normalized 'neutral' rendered a
+    confident badge no model produced, and made the SAME shared row show a badge
+    on the detail tab but none on Updates (the cross-screen invariant break)."""
+    article = news_article_from_row(_cache_row(ai_processed=False, sentiment=stored))
+    assert article.sentiment is None
+    assert article.ai_processed is False
 
 
 # ── Degraded rows must NOT 500 the feed ───────────────────────────────

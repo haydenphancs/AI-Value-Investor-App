@@ -227,6 +227,21 @@ struct CryptoNewsArticleDTO: Codable {
         case articleUrl = "article_url"
     }
 
+    // Tolerant decode: a null in `sentiment`/`published_at`/the arrays would
+    // otherwise fail decoding of the ENTIRE crypto detail response. Absorb it.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        headline = try c.decodeIfPresent(String.self, forKey: .headline) ?? ""
+        sourceName = try c.decodeIfPresent(String.self, forKey: .sourceName) ?? ""
+        sourceIcon = try c.decodeIfPresent(String.self, forKey: .sourceIcon)
+        sentiment = try c.decodeIfPresent(String.self, forKey: .sentiment) ?? ""
+        publishedAt = try c.decodeIfPresent(String.self, forKey: .publishedAt) ?? ""
+        thumbnailUrl = try c.decodeIfPresent(String.self, forKey: .thumbnailUrl)
+        relatedTickers = try c.decodeIfPresent([String].self, forKey: .relatedTickers) ?? []
+        summaryBullets = try c.decodeIfPresent([String].self, forKey: .summaryBullets) ?? []
+        articleUrl = try c.decodeIfPresent(String.self, forKey: .articleUrl)
+    }
+
     func toModel() -> TickerNewsArticle {
         // Parse the ISO date string
         let date: Date

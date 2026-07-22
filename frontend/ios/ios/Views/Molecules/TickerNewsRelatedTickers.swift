@@ -18,15 +18,18 @@ struct TickerNewsRelatedTickers: View {
         // symbols wrapped mid-text ("SC\nHW") and were unreadable.
         FlowLayout(spacing: AppSpacing.sm, lineSpacing: AppSpacing.sm) {
             ForEach(tickers, id: \.self) { ticker in
-                Button(action: {
-                    onTickerTap?(ticker)
-                }) {
-                    RelatedTickerChip(
-                        symbol: ticker,
-                        isHighlighted: false
-                    )
+                // Interactive only where a handler exists (the detail News tabs,
+                // which navigate to that ticker). On the Updates feed there is no
+                // ticker-nav path, so the chip renders as a plain informative
+                // label rather than a Button that silently swallows the tap.
+                if let onTickerTap {
+                    Button(action: { onTickerTap(ticker) }) {
+                        RelatedTickerChip(symbol: ticker, isHighlighted: false)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                } else {
+                    RelatedTickerChip(symbol: ticker, isHighlighted: false)
                 }
-                .buttonStyle(PlainButtonStyle())
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

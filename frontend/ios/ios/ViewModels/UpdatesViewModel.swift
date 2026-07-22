@@ -121,12 +121,13 @@ final class UpdatesViewModel: ObservableObject {
         isLoadingInitial = true
         defer { isLoadingInitial = false }
         await loadInitialData()
-        // Only latch on SUCCESS. `.task(id:)` cancels its body when the tab
-        // switches away, so latching up-front meant: cold launch → open Updates →
-        // switch tabs mid-flight → the request is cancelled → the screen keeps a
-        // "cancelled" error forever and never auto-retries, because loadIfNeeded
-        // now short-circuits.
-        if error == nil && !allNewsArticles.isEmpty { hasLoadedOnce = true }
+        // Latch on genuine completion — INCLUDING a legitimately empty scope —
+        // but never on cancellation. `.task(id:)` cancels its body when the tab
+        // switches away, which leaves `error == nil` and empty articles; the old
+        // `!allNewsArticles.isEmpty` guard avoided latching there but also
+        // re-fetched tabs+feed on every reactivation of a genuinely empty scope.
+        // `Task.isCancelled` distinguishes "interrupted" from "empty result".
+        if !Task.isCancelled && error == nil { hasLoadedOnce = true }
     }
 
     private func loadInitialData() async {
@@ -329,13 +330,18 @@ final class UpdatesViewModel: ObservableObject {
             allNewsArticles = articles
             insightSummary = response.insight.flatMap { NewsInsightSummary(dto: $0) }
             applyFiltersAndGroup()
-            feedCache[scope] = (articles, insightSummary, loadedOffset, hasMorePages)
-            isLoading = false
             // Page off what was REQUESTED, not what rendered: `dtos.count` may
             // exceed `articles.count` when rows are unrenderable, and paging off
             // the rendered count would re-request the dropped rows forever.
             loadedOffset = dtos.count
             hasMorePages = response.hasMore ?? false
+            // Cache AFTER the pagination state is updated. Writing it above (with
+            // the reset offset=0 / hasMore=false) meant every tab REVISIT restored
+            // those dead values from cache → "load more" was permanently disabled
+            // on any tab returned to (incl. Market after a single tab excursion).
+            // `loadMoreIfNeeded` already writes the cache in this order.
+            feedCache[scope] = (articles, insightSummary, loadedOffset, hasMorePages)
+            isLoading = false
 
             print("""
             ✅ UpdatesVM: Loaded \(articles.count) articles for \(scope) \
@@ -457,7 +463,10 @@ final class UpdatesViewModel: ObservableObject {
                 endpoint: .enrichUpdatesNews(scope: scope, articleIds: Array(ids)),
                 responseType: EnrichUpdatesNewsResponse.self
             )
-            guard loadToken == token else { return }
+            // Same two-part staleness check `loadMoreIfNeeded` uses: the token
+            // alone can pass against a NEWER tab, applying this scope's enrichment
+            // to the wrong feed. The scope check pins it to the visible tab.
+            guard loadToken == token, selectedTab?.scope == scope else { return }
 
             let byId = Dictionary(
                 (response.articles ?? []).map { ($0.id, $0) },

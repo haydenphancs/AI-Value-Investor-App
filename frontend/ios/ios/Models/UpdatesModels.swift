@@ -232,7 +232,11 @@ struct NewsInsightSummary: Identifiable {
 
 // MARK: - Grouped News
 struct GroupedNews: Identifiable {
-    let id = UUID()
+    /// Stable identity = the section title (unique per group). A fresh `UUID()`
+    /// on every regroup made the pinned-header `LazyVStack` diff all sections as
+    /// brand new after each enrichment merge / filter change → header flicker,
+    /// scroll jumps, and re-fired row `onAppear` that re-triggered enrich/paging.
+    var id: String { sectionTitle }
     let sectionTitle: String
     let articles: [NewsArticle]
 }

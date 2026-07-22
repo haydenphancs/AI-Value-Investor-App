@@ -50,6 +50,9 @@ class CommodityDetailViewModel: ObservableObject {
     private var newsDisplayCount: Int = 10
     /// Serialises news enrichment (tab-appear vs fetch/load-more completion).
     private var isEnrichingNews = false
+    /// Re-entrancy guard for `loadMoreNews` (see TickerDetail) — the zero-height
+    /// sentinel re-fires the instant more rows render.
+    private var isLoadingMoreNews = false
     private let newsPageSize: Int = 10
 
     // MARK: - Private Properties
@@ -222,7 +225,8 @@ class CommodityDetailViewModel: ObservableObject {
             )
             print("✅ [CommodityDetailVM] Got \(response.articles.count) news articles (cached: \(response.cached ?? false))")
 
-            self.allNewsArticles = response.articles.map { mapApiToUiArticle($0) }
+            // Drop unrenderable rows (no parseable date) — parity with Updates.
+            self.allNewsArticles = response.articles.compactMap { mapApiToUiArticle($0) }
             self.newsDisplayCount = newsPageSize
             self.hasMoreNews = allNewsArticles.count > newsDisplayCount
             self.newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
@@ -284,12 +288,8 @@ class CommodityDetailViewModel: ObservableObject {
                 let hasBullets = enriched.summaryBullets?.isEmpty == false
 
                 if wasProcessed || hasBullets {
-                    let bullets: [String] = {
-                        if let b = enriched.summaryBullets, !b.isEmpty { return b }
-                        if let s = enriched.summary, !s.isEmpty { return [s] }
-                        return allNewsArticles[i].summaryBullets
-                    }()
-                    allNewsArticles[i].summaryBullets = bullets
+                    // Only real AI bullets — no raw-summary pseudo-bullet (parity with Updates).
+                    allNewsArticles[i].summaryBullets = enriched.summaryBullets ?? []
                     allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
                     allNewsArticles[i].aiProcessed = true
                     actuallyEnriched += 1
@@ -300,11 +300,17 @@ class CommodityDetailViewModel: ObservableObject {
     }
 
     func loadMoreNews() {
+        guard !isLoadingMoreNews, hasMoreNews else { return }
+        isLoadingMoreNews = true
         newsDisplayCount += newsPageSize
         newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
         hasMoreNews = newsDisplayCount < allNewsArticles.count
 
-        Task { await enrichVisibleArticles() }
+        // Reset AFTER enrichment so the sentinel can't cascade every page at once.
+        Task {
+            await enrichVisibleArticles()
+            isLoadingMoreNews = false
+        }
     }
 
     /// Called when the News tab becomes visible — defers AI enrichment to when
@@ -477,7 +483,10 @@ class CommodityDetailViewModel: ObservableObject {
         case .news:
             if !newsArticles.isEmpty {
                 let headlines = newsArticles.prefix(5)
-                    .map { "- \($0.headline) [\($0.sentiment.rawValue)]" }
+                    .map { a in
+                        // sentiment is nil until AI-enriched — omit the tag then.
+                        a.sentiment.map { "- \(a.headline) [\($0.rawValue)]" } ?? "- \(a.headline)"
+                    }
                     .joined(separator: "\n")
                 parts.append("RECENT NEWS:\n\(headlines)")
             }
@@ -523,34 +532,36 @@ class CommodityDetailViewModel: ObservableObject {
 
     // MARK: - News Helpers
 
-    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
-        let bullets: [String] = {
-            if let aiBullets = article.summaryBullets, !aiBullets.isEmpty { return aiBullets }
-            if let summary = article.summary, !summary.isEmpty { return [summary] }
-            return []
-        }()
+    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle? {
+        // Drop rows with an unparseable/absent date instead of stamping "now" —
+        // parity with the Updates screen.
+        guard let published = article.publishedAt.flatMap({ parseDate($0) }) else {
+            return nil
+        }
 
         return TickerNewsArticle(
             apiId: article.id,
             headline: article.title,
-            source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+            source: NewsSource(
+                name: article.source ?? "Unknown",
+                iconName: nil,
+                logoURL: article.sourceLogoUrl.flatMap { URL(string: $0) }
+            ),
             sentiment: mapSentiment(article.sentiment),
-            publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
+            publishedAt: published,
             thumbnailName: nil,
             imageURL: article.imageUrl.flatMap { URL(string: $0) },
             relatedTickers: article.relatedTickers ?? [],
-            summaryBullets: bullets,
+            // Only real AI bullets — no raw-summary pseudo-bullet (parity with Updates).
+            summaryBullets: article.summaryBullets ?? [],
             articleURL: article.url.flatMap { URL(string: $0) },
             aiProcessed: article.aiProcessed ?? false
         )
     }
 
-    private func mapSentiment(_ sentiment: String?) -> NewsSentiment {
-        switch sentiment?.lowercased() {
-        case "positive", "bullish": return .positive
-        case "negative", "bearish": return .negative
-        default: return .neutral
-        }
+    /// nil ⇒ no badge until AI-enriched (parity with Updates via NewsSentiment(backend:)).
+    private func mapSentiment(_ sentiment: String?) -> NewsSentiment? {
+        NewsSentiment(backend: sentiment)
     }
 
     private func parseDate(_ dateString: String) -> Date? {

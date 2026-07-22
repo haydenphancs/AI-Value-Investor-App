@@ -47,15 +47,22 @@ struct NewsCardView: View {
     private var isExpandableStyle: Bool { style == .expandable }
     private var hasExpandableContent: Bool { !bullets.isEmpty }
 
-    /// Drop tokens that are not plausible tickers before rendering chips. Gemini
-    /// occasionally emits a pseudo-ticker like "MARKET" in `related_tickers`,
-    /// which would render as a chip that navigates nowhere sensible.
+    /// Drop tokens that are not plausible tickers before rendering chips, and
+    /// DE-DUPLICATE. Gemini occasionally emits a pseudo-ticker like "MARKET" (a
+    /// chip that navigates nowhere) or repeats a symbol (`["AAPL","AAPL"]`) —
+    /// and `TickerNewsRelatedTickers` keys its `ForEach` by the string itself, so
+    /// a duplicate is a SwiftUI identity collision (dropped/glitched chip).
     private var displayTickers: [String] {
-        relatedTickers.filter { raw in
+        var seen = Set<String>()
+        var out: [String] = []
+        for raw in relatedTickers {
             let t = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-            guard (1...6).contains(t.count), t != "MARKET" else { return false }
-            return t.allSatisfy { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "^" }
+            guard (1...6).contains(t.count), t != "MARKET" else { continue }
+            guard t.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "^" })
+            else { continue }
+            if seen.insert(t).inserted { out.append(t) }
         }
+        return out
     }
 
     var body: some View {

@@ -37,7 +37,11 @@ from app.schemas.updates import (
     UpdatesTabResponse,
     UpdatesTabsResponse,
 )
-from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
+from app.services.news_cache_service import (
+    MARKET_SCOPE,
+    get_news_cache_service,
+    is_crypto_scope,
+)
 from app.services.news_insight_service import get_news_insight_service
 
 logger = logging.getLogger(__name__)
@@ -48,17 +52,6 @@ router = APIRouter()
 _MAX_SCOPE_LEN = 32
 # Watchlist pills shown in the tab bar. More than this and the strip is unusable.
 _MAX_TABS = 30
-
-
-def _is_crypto_scope(scope: str) -> bool:
-    """Whether this scope should be fetched from FMP's crypto news feed.
-
-    FMP crypto symbols are quote-suffixed pairs (BTCUSD, ETHUSD). Checked here
-    rather than trusting `watchlist_items.asset_type`, which is user-editable
-    and defaults to 'Stock'.
-    """
-    s = scope.upper()
-    return len(s) > 3 and s.endswith(("USD", "USDT")) and s not in ("GCUSD", "SIUSD")
 
 
 def _valid_scope(scope: str) -> bool:
@@ -221,7 +214,7 @@ async def get_updates_feed(
             # nothing for BTCUSD, so a crypto watchlist row would render a pill
             # with a permanently empty feed.
             feed = await news.get_ticker_news(
-                scope, limit=limit, is_crypto=_is_crypto_scope(scope),
+                scope, limit=limit, is_crypto=is_crypto_scope(scope),
                 offset=offset,
             )
     except Exception as e:

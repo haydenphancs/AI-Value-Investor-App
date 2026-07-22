@@ -828,6 +828,12 @@ struct StockNewsArticle: Codable, Identifiable {
     let summary: String?
     let summaryBullets: [String]?
     let source: String?
+    /// Publisher logo (`source_logo_url`). The Updates DTO decoded this but the
+    /// detail DTO dropped the key, so the same shared row showed a logo on
+    /// Updates and none on the detail News tab. Decoded now for parity. Defaulted
+    /// so existing manual construction sites keep compiling; Codable synthesis
+    /// still decodes the key when present.
+    let sourceLogoUrl: String? = nil
     let publishedAt: String?
     let url: String?
     let imageUrl: String?
@@ -836,14 +842,16 @@ struct StockNewsArticle: Codable, Identifiable {
     let relatedTickers: [String]?
     let aiProcessed: Bool?
 
-    // Backend returns: headline, source_name, thumbnail_url, article_url, published_at,
-    // summary_bullets, sentiment_confidence, ai_processed (from ticker_news_cache)
+    // Backend returns: headline, source_name, source_logo_url, thumbnail_url,
+    // article_url, published_at, summary_bullets, sentiment_confidence,
+    // ai_processed (from ticker_news_cache)
     enum CodingKeys: String, CodingKey {
         case id
         case title = "headline"
         case summary
         case summaryBullets = "summary_bullets"
         case source = "source_name"
+        case sourceLogoUrl = "source_logo_url"
         case publishedAt = "published_at"
         case url = "article_url"
         case imageUrl = "thumbnail_url"

@@ -51,6 +51,9 @@ class IndexDetailViewModel: ObservableObject {
     private var newsDisplayCount: Int = 10
     /// Serialises news enrichment (tab-appear vs fetch/load-more completion).
     private var isEnrichingNews = false
+    /// Re-entrancy guard for `loadMoreNews` (see TickerDetail) — the zero-height
+    /// sentinel re-fires the instant more rows render.
+    private var isLoadingMoreNews = false
     private let newsPageSize: Int = 10
 
     // MARK: - Private Properties
@@ -291,14 +294,16 @@ class IndexDetailViewModel: ObservableObject {
     // MARK: - News Pagination
 
     func loadMoreNews() {
-        guard !isNewsLoading, hasMoreNews else { return }
+        guard !isLoadingMoreNews, !isNewsLoading, hasMoreNews else { return }
+        isLoadingMoreNews = true
         newsDisplayCount += newsPageSize
         newsArticles = Array(allNewsArticles.prefix(newsDisplayCount))
         hasMoreNews = newsDisplayCount < allNewsArticles.count
 
-        // Enrich newly visible articles in the background
+        // Reset AFTER enrichment so the sentinel can't cascade every page at once.
         Task {
             await enrichVisibleArticles()
+            isLoadingMoreNews = false
         }
     }
 
@@ -482,8 +487,9 @@ class IndexDetailViewModel: ObservableObject {
             let cached = response.cached ?? false
             print("✅ [IndexDetailVM] Got \(response.articles.count) news articles for \(indexSymbol) (cached: \(cached))")
 
-            // Convert API articles to UI models
-            self.allNewsArticles = response.articles.map { mapApiToUiArticle($0) }
+            // Convert API articles to UI models, dropping unrenderable rows
+            // (no parseable date) — parity with the Updates screen.
+            self.allNewsArticles = response.articles.compactMap { mapApiToUiArticle($0) }
             self.newsDisplayCount = newsPageSize
             self.hasMoreNews = allNewsArticles.count > newsDisplayCount
 
@@ -573,12 +579,8 @@ class IndexDetailViewModel: ObservableObject {
                 let hasBullets = enriched.summaryBullets?.isEmpty == false
 
                 if wasProcessed || hasBullets {
-                    let bullets: [String] = {
-                        if let b = enriched.summaryBullets, !b.isEmpty { return b }
-                        if let s = enriched.summary, !s.isEmpty { return [s] }
-                        return allNewsArticles[i].summaryBullets
-                    }()
-                    allNewsArticles[i].summaryBullets = bullets
+                    // Only real AI bullets — no raw-summary pseudo-bullet (parity with Updates).
+                    allNewsArticles[i].summaryBullets = enriched.summaryBullets ?? []
                     allNewsArticles[i].sentiment = mapSentiment(enriched.sentiment)
                     allNewsArticles[i].aiProcessed = true
                     actuallyEnriched += 1
@@ -588,38 +590,36 @@ class IndexDetailViewModel: ObservableObject {
         print("📰 [IndexDetailVM] Merged \(actuallyEnriched)/\(enrichedArticles.count) enriched articles")
     }
 
-    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle {
-        let bullets: [String] = {
-            if let aiBullets = article.summaryBullets, !aiBullets.isEmpty {
-                return aiBullets
-            }
-            if let summary = article.summary, !summary.isEmpty {
-                return [summary]
-            }
-            return []
-        }()
+    private func mapApiToUiArticle(_ article: StockNewsArticle) -> TickerNewsArticle? {
+        // Drop rows with an unparseable/absent date instead of stamping "now" —
+        // parity with the Updates screen.
+        guard let published = article.publishedAt.flatMap({ parseDate($0) }) else {
+            return nil
+        }
 
         return TickerNewsArticle(
             apiId: article.id,
             headline: article.title,
-            source: NewsSource(name: article.source ?? "Unknown", iconName: nil),
+            source: NewsSource(
+                name: article.source ?? "Unknown",
+                iconName: nil,
+                logoURL: article.sourceLogoUrl.flatMap { URL(string: $0) }
+            ),
             sentiment: mapSentiment(article.sentiment),
-            publishedAt: article.publishedAt.flatMap { parseDate($0) } ?? Date(),
+            publishedAt: published,
             thumbnailName: nil,
             imageURL: article.imageUrl.flatMap { URL(string: $0) },
             relatedTickers: article.relatedTickers ?? [],
-            summaryBullets: bullets,
+            // Only real AI bullets — no raw-summary pseudo-bullet (parity with Updates).
+            summaryBullets: article.summaryBullets ?? [],
             articleURL: article.url.flatMap { URL(string: $0) },
             aiProcessed: article.aiProcessed ?? false
         )
     }
 
-    private func mapSentiment(_ sentiment: String?) -> NewsSentiment {
-        switch sentiment?.lowercased() {
-        case "positive", "bullish": return .positive
-        case "negative", "bearish": return .negative
-        default: return .neutral
-        }
+    /// nil ⇒ no badge until AI-enriched (parity with Updates via NewsSentiment(backend:)).
+    private func mapSentiment(_ sentiment: String?) -> NewsSentiment? {
+        NewsSentiment(backend: sentiment)
     }
 
     private func parseDate(_ dateString: String) -> Date? {
@@ -730,7 +730,10 @@ class IndexDetailViewModel: ObservableObject {
     private var newsContext: String? {
         guard !newsArticles.isEmpty else { return nil }
         let headlines = newsArticles.prefix(5)
-            .map { "- \($0.headline) [\($0.sentiment.rawValue)]" }
+            .map { a in
+                // sentiment is nil until AI-enriched — omit the tag then.
+                a.sentiment.map { "- \(a.headline) [\($0.rawValue)]" } ?? "- \(a.headline)"
+            }
             .joined(separator: "\n")
         return "RECENT NEWS:\n\(headlines)"
     }

@@ -129,6 +129,7 @@ def news_article_from_row(row: Dict[str, Any]) -> TickerNewsArticleResponse:
 
     bullets = row.get("summary_bullets")
     related = row.get("related_tickers")
+    ai_processed = bool(row.get("ai_processed"))
 
     return TickerNewsArticleResponse(
         id=_opt_str(row.get("id")) or "",
@@ -137,11 +138,19 @@ def news_article_from_row(row: Dict[str, Any]) -> TickerNewsArticleResponse:
         summary_bullets=(
             [b for b in bullets if isinstance(b, str)] if isinstance(bullets, list) else []
         ),
-        # Forwarded as stored — the field validator maps bullish/bearish/neutral
-        # (and None) onto the wire enum. Deliberately NOT blanked for
-        # un-enriched rows: the cache normalizes those to 'neutral' and iOS has
-        # rendered that Neutral badge since the feature shipped.
-        sentiment=row.get("sentiment"),
+        # Blanked when NOT enriched OR the value is missing/empty, so the badge is
+        # HIDDEN until a model has actually classified the article — byte-for-byte
+        # the same predicate `_to_article` (schemas/updates.py) applies for the
+        # Updates screen. The cache normalizes un-analysed rows to 'neutral';
+        # forwarding that rendered a confident Neutral badge no model produced,
+        # and made the SAME shared row show a badge on the detail tab but none on
+        # Updates. Enriched rows forward as stored; the field validator maps
+        # bullish/bearish/neutral onto the wire enum. Parity: test_news_updates_parity.
+        sentiment=(
+            row.get("sentiment")
+            if (ai_processed and row.get("sentiment") not in (None, ""))
+            else None
+        ),
         sentiment_confidence=max(0, min(100, confidence)),
         source_name=_opt_str(row.get("source_name")),
         source_logo_url=_opt_str(row.get("source_logo_url")),
@@ -151,7 +160,7 @@ def news_article_from_row(row: Dict[str, Any]) -> TickerNewsArticleResponse:
         related_tickers=(
             [t for t in related if isinstance(t, str) and t] if isinstance(related, list) else []
         ),
-        ai_processed=bool(row.get("ai_processed")),
+        ai_processed=ai_processed,
     )
 
 

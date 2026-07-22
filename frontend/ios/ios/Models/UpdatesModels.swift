@@ -188,6 +188,25 @@ struct NewsArticle: Identifiable, Hashable {
     }
 }
 
+// MARK: - Insight Price Move ("Why it moved")
+/// Grounded price-move explanation shown on the insight card for a big move.
+/// Distinct from the news bullets: this is the web-search-grounded, cited reason.
+struct InsightPriceMove {
+    let tier: String            // "Notable" | "Unusual" | "Extreme"
+    let changePercent: Double?
+    let catalystTag: String?    // nil ⇒ "no clear catalyst" (broad/sector move)
+    let reason: String
+
+    /// Signed, one-decimal change, or nil when unavailable (non-finite guarded).
+    var formattedChange: String? {
+        guard let c = changePercent, c.isFinite else { return nil }
+        let sign = c >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.1f", c))%"
+    }
+
+    var isPositive: Bool { (changePercent ?? 0) >= 0 }
+}
+
 // MARK: - News Insight Summary
 struct NewsInsightSummary: Identifiable {
     let id = UUID()
@@ -196,6 +215,8 @@ struct NewsInsightSummary: Identifiable {
     let sentiment: MarketSentiment
     let updatedAt: Date
     let summaryType: String
+    /// Grounded "why it moved" block; nil unless a big move triggered the card.
+    var priceMove: InsightPriceMove? = nil
 
     // ── Provenance (backend-driven) ──
     /// False for the deterministic headline-list fallback. The UI must NOT show
@@ -307,6 +328,19 @@ struct UpdatesTabsResponse: Codable, Sendable {
     let tabs: [UpdatesTabDTO]
 }
 
+struct PriceMoveDTO: Codable, Sendable {
+    let tier: String
+    let changePercent: Double?
+    let catalystTag: String?
+    let reason: String
+
+    enum CodingKeys: String, CodingKey {
+        case tier, reason
+        case changePercent = "change_percent"
+        case catalystTag = "catalyst_tag"
+    }
+}
+
 struct AIInsightCardDTO: Codable, Sendable {
     let scope: String
     let headline: String
@@ -319,6 +353,7 @@ struct AIInsightCardDTO: Codable, Sendable {
     let refreshing: Bool?
     let aiGenerated: Bool?
     let triggerReason: String?
+    let priceMove: PriceMoveDTO?
 
     enum CodingKeys: String, CodingKey {
         case scope, headline, bullets, sentiment, badge
@@ -328,6 +363,7 @@ struct AIInsightCardDTO: Codable, Sendable {
         case refreshing
         case aiGenerated = "ai_generated"
         case triggerReason = "trigger_reason"
+        case priceMove = "price_move"
     }
 }
 
@@ -494,6 +530,14 @@ extension NewsInsightSummary {
         self.isStale = dto.isStale ?? false
         self.isRefreshing = dto.refreshing ?? false
         self.articleCount = dto.articleCount ?? 0
+        if let pm = dto.priceMove {
+            self.priceMove = InsightPriceMove(
+                tier: pm.tier,
+                changePercent: pm.changePercent,
+                catalystTag: pm.catalystTag,
+                reason: pm.reason
+            )
+        }
     }
 }
 

@@ -53,6 +53,16 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 # caller injects the phase, exactly as it injects `now`, so this module stays
 # pure and exhaustively testable.
 from app.utils.market_hours import ET, SESSION_PREMARKET, SESSION_REGULAR
+# Volatility-relative tier vocabulary + the pure z→tier map, shared with the
+# report's "Recent Price Movement" section (single source of truth). This is a
+# PURE leaf module (stdlib only) so importing it keeps this gate pure/testable.
+from app.services.price_volatility import (
+    TIER_EXTREME,
+    TIER_NOTABLE,
+    TIER_TYPICAL,
+    TIER_UNUSUAL,
+    _tier_for_z,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +71,12 @@ logger = logging.getLogger(__name__)
 
 # Bump when the prompt or the output contract changes. It is part of the
 # fingerprint, so a bump invalidates every cached card exactly once.
-PROMPT_VERSION = 1
+# v2: the price signal changed from a FIXED band (flat/notable/extreme) to a
+# VOLATILITY-RELATIVE tier (Typical/Notable/Unusual/Extreme vs the ticker's own
+# σ). The vocabulary is part of the fingerprint, so the bump makes the switch a
+# single controlled regen wave (bounded by the per-cycle + global caps) instead
+# of an uncontrolled band↔tier flip.
+PROMPT_VERSION = 2
 
 
 # ── Thresholds ────────────────────────────────────────────────────────
@@ -232,18 +247,67 @@ def price_band(
     return BAND_FLAT
 
 
-def band_score(band: str, change_percent: Any) -> float:
-    """Priority score, used to order admission when the global budget binds.
+def volatility_tier(change_percent: Any, sigma_daily: Any, is_index: bool = False) -> str:
+    """Bucket a SESSION move by how abnormal it is for THIS ticker — the report's
+    method (price_volatility) applied to a 1-day move (√N = 1).
 
-    Linear in the size of the move so an escalation (−6% → −12%) always outranks
-    the move it replaces.
+    ``z = |change%| / (σ_daily·100)`` → Typical / Notable (z≥1) / Unusual (z≥2) /
+    Extreme (z≥3). Returns ``BAND_UNKNOWN`` when the move is unusable (so the gate
+    treats it as "no signal", not a calm move); returns ``TIER_TYPICAL`` when σ is
+    unusable (caller decides whether to fall back to the fixed band).
+
+    ``is_index`` is accepted for signature symmetry but does not change the z math
+    — σ already encodes how quiet the index is, so no separate index scale is
+    needed on this path.
+    """
+    pct = finite(change_percent)
+    if pct is None:
+        return BAND_UNKNOWN
+    sig = finite(sigma_daily)
+    if sig is None or sig <= 0:
+        return TIER_TYPICAL
+    z = abs(pct) / (sig * 100.0)
+    return _tier_for_z(z)
+
+
+def classify_move(
+    change_percent: Any,
+    sigma_daily: Any,
+    market_cap: Any = None,
+    is_index: bool = False,
+) -> str:
+    """The gate's price-signal classifier: volatility-relative tier when σ is
+    known, else the fixed price band (new/low-history tickers, or before the
+    daily σ precompute has run).
+
+    Returns the tier vocabulary (Typical/Notable/Unusual/Extreme) on the σ path
+    and the band vocabulary (flat/notable/extreme) on the fallback path; both are
+    opaque labels to the fingerprint and are handled by ``move_score``. An
+    unusable ``change_percent`` returns ``BAND_UNKNOWN`` on either path.
+    """
+    if finite(change_percent) is None:
+        return BAND_UNKNOWN
+    sig = finite(sigma_daily)
+    if sig is not None and sig > 0:
+        return volatility_tier(change_percent, sig, is_index)
+    return price_band(change_percent, market_cap, is_index)
+
+
+def move_score(band_or_tier: str, change_percent: Any) -> float:
+    """Priority score, used to order admission when the per-cycle/global budget
+    binds. Abnormality-ranked: an Extreme/Unusual tier outranks a Notable one,
+    and within a tier the raw magnitude breaks ties (an escalation −6% → −12%
+    always outranks the move it replaces). Handles BOTH the tier vocabulary
+    (σ path) and the fixed-band vocabulary (fallback).
     """
     pct = abs(finite(change_percent) or 0.0)
-    if band == BAND_EXTREME:
+    if band_or_tier in (TIER_EXTREME, BAND_EXTREME):
+        return 20.0 + pct
+    if band_or_tier == TIER_UNUSUAL:
+        return 15.0 + pct
+    if band_or_tier in (TIER_NOTABLE, BAND_NOTABLE):
         return 10.0 + pct
-    if band == BAND_NOTABLE:
-        return 5.0 + pct
-    return pct
+    return pct  # Typical / flat / unknown
 
 
 # ── Fingerprint ───────────────────────────────────────────────────────
@@ -314,6 +378,7 @@ def decide(
     model: str,
     market_active: bool,
     is_market_scope: bool,
+    sigma_daily: Optional[float] = None,
     session_phase: str = SESSION_REGULAR,
 ) -> Decision:
     """Decide whether ``scope``'s Insights card should be regenerated.
@@ -328,7 +393,7 @@ def decide(
             market_change_percent=market_change_percent,
             close_cycle_start=close_cycle_start, now=now, model=model,
             market_active=market_active, is_market_scope=is_market_scope,
-            session_phase=session_phase,
+            sigma_daily=sigma_daily, session_phase=session_phase,
         )
     except Exception as e:  # pragma: no cover - defensive
         logger.exception(
@@ -350,6 +415,7 @@ def _decide_inner(
     model: str,
     market_active: bool,
     is_market_scope: bool,
+    sigma_daily: Optional[float] = None,
     session_phase: str = SESSION_REGULAR,
 ) -> Decision:
     state = state or {}
@@ -362,8 +428,12 @@ def _decide_inner(
 
     quote = quote or {}
     change_pct = quote.get("changePercentage")
-    band = price_band(
+    # Volatility-relative tier vs the ticker's own σ (a 3% day is Extreme for a
+    # utility, Typical for a meme stock); falls back to the fixed band when σ is
+    # unavailable (new/low-history ticker, or before the daily precompute ran).
+    band = classify_move(
         change_pct,
+        sigma_daily,
         market_cap=quote.get("marketCap"),
         is_index=is_market_scope,
     )
@@ -474,7 +544,7 @@ def _decide_inner(
         reason=" + ".join(reasons),
         inputset_id=inputset_id,
         price_band=band,
-        score=band_score(band, change_pct),
+        score=move_score(band, change_pct),
     )
 
 
@@ -491,10 +561,16 @@ __all__ = [
     "BAND_NOTABLE",
     "BAND_EXTREME",
     "BAND_UNKNOWN",
+    "TIER_TYPICAL",
+    "TIER_NOTABLE",
+    "TIER_UNUSUAL",
+    "TIER_EXTREME",
     "Decision",
     "finite",
     "price_band",
-    "band_score",
+    "volatility_tier",
+    "classify_move",
+    "move_score",
     "compute_inputset_id",
     "corpus_article_ids",
     "decide",

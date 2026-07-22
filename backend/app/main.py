@@ -155,6 +155,12 @@ async def lifespan(app: FastAPI):
         # recompute. Upserts the period_type='ttm' rows in place (~3.5 min).
         asyncio.create_task(_run_ttm_benchmark_job())
 
+        # Daily σ (daily-return volatility) precompute. Feeds the Updates insight
+        # gate's volatility-relative move trigger: the 5-min sweeper reads each
+        # ticker's σ from ticker_volatility_cache instead of fetching 180 daily
+        # closes per ticker per sweep. ~201 light FMP calls/day (~08:00 UTC).
+        asyncio.create_task(_run_volatility_precompute_job())
+
         # Start background whale hydration jobs
         asyncio.create_task(_run_whale_hydration_job())
 
@@ -426,6 +432,76 @@ async def _run_ttm_benchmark_job():
             logger.info(f"TTM benchmark weekly job completed: {result}")
         except Exception as e:
             logger.error(f"TTM benchmark weekly job failed: {e}", exc_info=True)
+
+
+def _next_daily_run(now: "datetime", hour_utc: int = 8) -> "datetime":
+    """Next occurrence of ``hour_utc``:00 UTC strictly after ``now``.
+    Module-level so it can be unit-tested independently of the loop.
+    """
+    from datetime import timedelta
+
+    candidate = now.replace(hour=hour_utc, minute=0, second=0, microsecond=0)
+    if candidate <= now:
+        candidate = candidate + timedelta(days=1)
+    return candidate
+
+
+async def _run_volatility_precompute_job():
+    """Daily σ precompute for the Updates volatility-relative move trigger.
+
+    Populates ``ticker_volatility_cache`` once a day (~08:00 UTC, pre-open) for the
+    swept universe (top-200 watchlist + ^GSPC) so the 5-min sweeper can read σ
+    cheaply. ~201 light FMP historical calls; ``skip_if_fresh_hours`` makes a dyno
+    restart RESUME rather than refetch. A ticker with no σ (new/low history) simply
+    falls back to the fixed price band in the gate — never loses a signal.
+    """
+    from datetime import datetime, timezone
+
+    await asyncio.sleep(200)  # after the sweeper's 150s startup stagger
+
+    while True:
+        now = datetime.now(timezone.utc)
+        next_run = _next_daily_run(now, hour_utc=8)
+        sleep_seconds = (next_run - now).total_seconds()
+        logger.info(
+            "Volatility precompute job: next run at %s (sleeping %.1fh)",
+            next_run.isoformat(), sleep_seconds / 3600,
+        )
+        await asyncio.sleep(sleep_seconds)
+
+        try:
+            from app.database import get_supabase
+            from app.services.updates_insight_sweeper import MARKET_INDEX_SYMBOL
+            from app.services.volatility_cache_service import (
+                get_volatility_cache_service,
+            )
+
+            def _universe() -> list:
+                try:
+                    res = get_supabase().rpc(
+                        "get_top_watchlist_tickers", {"n": 200}
+                    ).execute()
+                    return [
+                        str(r["ticker"]).upper()
+                        for r in (res.data or []) if r.get("ticker")
+                    ]
+                except Exception as e:
+                    logger.warning(
+                        "Volatility precompute: watchlist read failed: %s: %s",
+                        type(e).__name__, e,
+                    )
+                    return []
+
+            tickers = await asyncio.to_thread(_universe)
+            symbols = list(dict.fromkeys(tickers + [MARKET_INDEX_SYMBOL]))
+            written = await get_volatility_cache_service().recompute_universe(
+                symbols, skip_if_fresh_hours=20,
+            )
+            logger.info("Volatility precompute daily job completed: %d rows", written)
+        except Exception as e:
+            logger.error(
+                "Volatility precompute daily job failed: %s", e, exc_info=True,
+            )
 
 
 def _next_quarterly_dossier_run(now: "datetime") -> "datetime":

@@ -44,6 +44,21 @@ import re
 import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+
+# Volatility-relative price-move math now lives in ONE shared leaf module
+# (also imported by the pure materiality gate + the σ precompute). Re-imported
+# here under the original names so `_build_price_action` is unchanged.
+from app.services.price_volatility import (  # noqa: E402  (import-after-import block)
+    _BASELINE_DAYS,
+    _BIG_MOVE_Z,
+    _DEFAULT_WINDOW,
+    _EVAL_WINDOWS,
+    _compute_price_volatility,
+    _daily_returns,
+    _std_dev_pop,
+    _tier_for_z,
+    _z_score_for_window,
+)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -4998,21 +5013,12 @@ def _detect_news_catalysts(
     return candidates
 
 
-_EVAL_WINDOWS: Tuple[int, ...] = (7, 15, 30, 45, 60)  # incl. 60d (2mo) so a slow build is detectable
-_BASELINE_DAYS: int = 180
-_DEFAULT_WINDOW: int = 30
 
 # Minimum sparkline span (calendar days). The chart always shows AT LEAST this
 # much history so a short-window move isn't a flat line — purely a visual-context
 # floor; change_pct/window_label/σ/tier still reflect the actual detection window.
 _MIN_CHART_DAYS: int = 30
 
-# |z| threshold that defines a "BIG move" worth explaining. The price-action
-# section decides significance FIRST and only hunts for a catalyst/reason when
-# the move clears this bar — never the other way round. 1.0σ = Notable+ (the
-# same Typical→Notable line _compute_price_volatility uses). Raise to 2.0
-# (Unusual) or 3.0 (Extreme) to only explain larger moves.
-_BIG_MOVE_Z: float = 1.0
 
 # Short-window moves (detection span ≤ this many trading days) render the chart
 # from HOURLY closes for intraday texture instead of a smooth daily line; longer
@@ -5037,180 +5043,6 @@ def _intraday_closes(rows: List[Dict[str, Any]]) -> List[float]:
         except (TypeError, ValueError):
             continue
     out.reverse()
-    return out
-
-
-def _daily_returns(prices: List[float]) -> List[float]:
-    """Daily simple returns from a price array (oldest→newest).
-    Skips pairs where the prior close is zero or missing.
-    """
-    out: List[float] = []
-    for i in range(1, len(prices)):
-        prev = prices[i - 1]
-        curr = prices[i]
-        if prev and prev > 0 and curr is not None:
-            out.append((curr - prev) / prev)
-    return out
-
-
-def _std_dev_pop(values: List[float]) -> Optional[float]:
-    """Population standard deviation. None if <2 values."""
-    if len(values) < 2:
-        return None
-    mean = sum(values) / len(values)
-    var = sum((v - mean) ** 2 for v in values) / len(values)
-    return var ** 0.5
-
-
-def _z_score_for_window(
-    move_pct: float, sigma_daily: Optional[float], days: int,
-) -> Optional[float]:
-    """Absolute z-score for an N-day move given the daily-return σ.
-    Uses the random-walk √N scaling rule: σ over N days = σ_daily × √N.
-    """
-    if sigma_daily is None or sigma_daily <= 0 or days <= 0:
-        return None
-    n_day_sigma_pct = sigma_daily * (days ** 0.5) * 100
-    if n_day_sigma_pct <= 0:
-        return None
-    return abs(move_pct) / n_day_sigma_pct
-
-
-def _tier_for_z(z: Optional[float]) -> str:
-    """Map |z| → user-facing tier label."""
-    if z is None:
-        return "Typical"
-    if z >= 3:
-        return "Extreme"
-    if z >= 2:
-        return "Unusual"
-    if z >= 1:
-        return "Notable"
-    return "Typical"
-
-
-def _compute_price_volatility(
-    prices: List[float],
-    price_dates: Optional[List[date]] = None,
-    baseline_days: int = _BASELINE_DAYS,
-    windows: Tuple[int, ...] = _EVAL_WINDOWS,
-) -> Dict[str, Any]:
-    """Compute the daily-return σ over the baseline plus per-window z-scores.
-
-    Returns a dict with sigma_daily, per-window metrics, the chosen window
-    (argmax |z|, or _DEFAULT_WINDOW when every window is within ±1σ), the
-    tier label, the chosen-window's move/z/band, and the index in `prices`
-    of the reference close used for the chosen window (so the caller can
-    compute change_pct against the same anchor instead of recomputing).
-
-    `windows` is interpreted in calendar days when `price_dates` is given
-    (production path): "30 days" means today vs the close on or before
-    today−30 calendar days. When `price_dates` is omitted (tests with
-    synthetic price arrays), the function falls back to trading-day
-    indexing so historical fixtures keep working unchanged.
-
-    When fewer than 30 daily returns are available the result still has the
-    same shape but sigma_daily is None and the chosen window stays at the
-    default — callers should treat tier as "Typical" without the σ math.
-    """
-    out: Dict[str, Any] = {
-        "sigma_daily": None,
-        "windows": [],
-        "chosen_window": _DEFAULT_WINDOW,
-        "chosen_ref_idx": None,
-        "tier": "Typical",
-        "chosen_z": None,
-        "chosen_move_pct": None,
-        "chosen_band_pct": None,
-    }
-    if len(prices) < 30:
-        return out
-    # If a date list was provided but doesn't line up, drop it and fall
-    # back to trading-day mode rather than emitting subtly wrong windows.
-    if price_dates is not None and len(price_dates) != len(prices):
-        price_dates = None
-
-    # Use the last `baseline_days + 1` closes so the returns array has
-    # at most `baseline_days` entries. The +1 covers the inter-day diff.
-    baseline_slice = prices[-(baseline_days + 1):]
-    sigma_daily = _std_dev_pop(_daily_returns(baseline_slice))
-    if sigma_daily is None or sigma_daily <= 0:
-        return out
-    out["sigma_daily"] = sigma_daily
-
-    newest = prices[-1]
-    metrics: List[Dict[str, Any]] = []
-
-    if price_dates:
-        # Calendar-day mode (production).
-        today = price_dates[-1]
-        for n in windows:
-            target = today - timedelta(days=n)
-            # Rightmost index whose date is <= target (handles
-            # weekends/holidays by stepping back to the prior trading day).
-            idx = bisect.bisect_right(price_dates, target) - 1
-            if idx < 0 or idx >= len(prices) - 1:
-                continue
-            oldest = prices[idx]
-            if not oldest or oldest <= 0:
-                continue
-            move_pct = (newest - oldest) / oldest * 100
-            # Trading-day count actually elapsed in this calendar window;
-            # feeds the √n scaling so the σ band shrinks accordingly
-            # (e.g., 30 calendar days ≈ 21 trading days → smaller band
-            # than the old code's √30).
-            trading_days = len(prices) - 1 - idx
-            n_day_sigma_pct = sigma_daily * (trading_days ** 0.5) * 100
-            z = abs(move_pct) / n_day_sigma_pct if n_day_sigma_pct > 0 else 0.0
-            metrics.append({
-                "days": n,
-                "ref_idx": idx,
-                "move_pct": round(move_pct, 2),
-                "z": round(z, 2),
-                "band_2sigma": round(n_day_sigma_pct * 2, 2),
-            })
-    else:
-        # Trading-day mode (test fixtures with synthetic price arrays).
-        for n in windows:
-            if len(prices) <= n:
-                continue
-            ref_idx = len(prices) - (n + 1)
-            oldest = prices[ref_idx]
-            if not oldest or oldest <= 0:
-                continue
-            move_pct = (newest - oldest) / oldest * 100
-            n_day_sigma_pct = sigma_daily * (n ** 0.5) * 100
-            z = abs(move_pct) / n_day_sigma_pct if n_day_sigma_pct > 0 else 0.0
-            metrics.append({
-                "days": n,
-                "ref_idx": ref_idx,
-                "move_pct": round(move_pct, 2),
-                "z": round(z, 2),
-                "band_2sigma": round(n_day_sigma_pct * 2, 2),
-            })
-
-    out["windows"] = metrics
-    if not metrics:
-        return out
-
-    # Pick the most unusual window. If every window is within ±1σ
-    # (genuinely quiet stock-week), default to 30 days so the section
-    # still has something to show — `tier` will be "Typical".
-    most_unusual = max(metrics, key=lambda w: w["z"])
-    if most_unusual["z"] < 1.0:
-        default = next(
-            (w for w in metrics if w["days"] == _DEFAULT_WINDOW), most_unusual,
-        )
-        chosen = default
-    else:
-        chosen = most_unusual
-
-    out["chosen_window"] = chosen["days"]
-    out["chosen_ref_idx"] = chosen["ref_idx"]
-    out["chosen_z"] = chosen["z"]
-    out["chosen_move_pct"] = chosen["move_pct"]
-    out["chosen_band_pct"] = chosen["band_2sigma"]
-    out["tier"] = _tier_for_z(chosen["z"])
     return out
 
 

@@ -24,6 +24,7 @@ from app.api.v1.endpoints.updates import _to_article, _valid_scope
 from app.schemas.updates import (
     AIInsightCardResponse,
     EnrichUpdatesNewsResponse,
+    PriceMoveResponse,
     UpdatesArticleResponse,
     UpdatesFeedResponse,
     UpdatesTabResponse,
@@ -38,7 +39,10 @@ IOS_TAB_KEYS = {
 IOS_INSIGHT_KEYS = {
     "scope", "headline", "bullets", "sentiment", "badge", "article_count",
     "generated_at", "is_stale", "refreshing", "ai_generated", "trigger_reason",
+    "price_move",
 }
+# The nested "why it moved" block iOS decodes (PriceMoveDTO in UpdatesModels.swift).
+IOS_PRICE_MOVE_KEYS = {"tier", "change_percent", "catalyst_tag", "reason"}
 IOS_ARTICLE_KEYS = {
     "id", "headline", "summary", "summary_bullets", "sentiment",
     "sentiment_confidence", "source_name", "source_logo_url", "published_at",
@@ -62,6 +66,27 @@ def test_insight_card_exposes_exactly_the_keys_ios_decodes():
         scope="AAPL", headline="H", bullets=["a", "b"]
     ).model_dump()
     assert set(payload) == IOS_INSIGHT_KEYS
+
+
+def test_price_move_exposes_exactly_the_keys_ios_decodes():
+    card = AIInsightCardResponse(
+        scope="AAPL", headline="H", bullets=["a", "b"],
+        price_move=PriceMoveResponse(
+            tier="Extreme", change_percent=-8.2,
+            catalyst_tag="Analyst Downgrade", reason="Cut to Underweight.",
+        ),
+    ).model_dump()
+    assert card["price_move"] is not None
+    assert set(card["price_move"]) == IOS_PRICE_MOVE_KEYS
+    # A nested block must not break allow_nan=False serialization.
+    json.dumps(card, allow_nan=False)
+
+
+def test_price_move_defaults_none_and_is_optional():
+    # A card without a big move omits the block; an old client ignoring the key
+    # still decodes the rest.
+    card = AIInsightCardResponse(scope="AAPL", headline="H").model_dump()
+    assert card["price_move"] is None
 
 
 def test_article_exposes_exactly_the_keys_ios_decodes():

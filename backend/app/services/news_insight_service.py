@@ -291,6 +291,7 @@ class NewsInsightService:
                 "is_stale": bool(
                     soft is not None and soft <= now and market_active
                 ),
+                "price_move": _sanitize_price_move(row.get("price_move")),
                 "refreshing": False,
                 "ai_generated": True,
                 "trigger_reason": row.get("trigger_reason"),
@@ -390,9 +391,15 @@ class NewsInsightService:
         trigger_reason: str,
         quote: Optional[Dict[str, Any]] = None,
         market_active: bool = True,
+        price_move: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Generate a card with Gemini and persist it. Returns ``None`` on any
         failure, **without writing anything**.
+
+        ``price_move`` (optional) is the grounded "why did it move" block for a
+        big move — a SEPARATE, cited field from the news bullets. It is persisted
+        with the card but is purely additive: a None/malformed value never blocks
+        or fails the news card.
 
         The corpus passed here MUST be the same corpus the materiality gate
         evaluated — otherwise we can regenerate because of a story the summary
@@ -449,6 +456,7 @@ class NewsInsightService:
         stored = await asyncio.to_thread(
             self._store,
             scope, card, inputset_id, trigger_reason, len(articles), market_active,
+            price_move,
         )
         if not stored:
             return None
@@ -520,6 +528,7 @@ class NewsInsightService:
         trigger_reason: str,
         article_count: int,
         market_active: bool,
+        price_move: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Blocking upsert — always called via ``asyncio.to_thread``."""
         now = datetime.now(timezone.utc)
@@ -539,6 +548,9 @@ class NewsInsightService:
             "close_cycle": current_close_cycle_start(now).isoformat(),
             "soft_expires_at": (now + timedelta(seconds=soft)).isoformat(),
             "hard_expires_at": (now + timedelta(seconds=hard)).isoformat(),
+            # Additive JSONB (migration 091). Only a well-shaped block is written;
+            # a card without a big move stores NULL. Never blocks the news card.
+            "price_move": _sanitize_price_move(price_move),
         }
         try:
             self.supabase.table(_TABLE).upsert(row, on_conflict="scope").execute()
@@ -683,6 +695,36 @@ def _clip(text: str, limit: int) -> str:
     if space > limit * 0.6:
         cut = cut[:space]
     return cut.rstrip(" ,;:-") + "…"
+
+
+def _sanitize_price_move(pm: Any) -> Optional[Dict[str, Any]]:
+    """Coerce a ``price_move`` block (from the sweeper, or a DB JSONB row) to a
+    clean, JSON-safe dict, or ``None``. NEVER raises — a malformed block must
+    never block or fail the news card, and ``change_percent`` is finite-guarded
+    so it cannot break ``allow_nan=False`` serialization.
+
+    Requires a non-empty ``tier`` and ``reason`` (an empty block is not worth
+    rendering). ``catalyst_tag`` is None for a "no clear catalyst" outcome.
+    """
+    if not isinstance(pm, dict):
+        return None
+    tier = pm.get("tier")
+    reason = pm.get("reason")
+    if not isinstance(tier, str) or not tier.strip():
+        return None
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    tag = pm.get("catalyst_tag")
+    tag = tag.strip() if isinstance(tag, str) and tag.strip() else None
+    # Accept the sweeper's `change_pct` AND the stored/wire `change_percent`, so
+    # re-sanitizing an already-stored block on read-back is idempotent.
+    cp = finite(pm.get("change_percent", pm.get("change_pct")))
+    return {
+        "tier": tier.strip(),
+        "change_percent": round(cp, 2) if cp is not None else None,
+        "catalyst_tag": _clip(tag, 60) if tag else None,
+        "reason": _clip(reason.strip(), 300),
+    }
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:

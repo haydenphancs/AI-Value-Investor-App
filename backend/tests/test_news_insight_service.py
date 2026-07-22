@@ -419,8 +419,8 @@ def test_market_scope_prompt_describes_the_market_not_the_key(svc):
 def test_fallback_card_never_carries_the_ai_summary_badge(svc):
     """The non-AI fallback must not be badged as an AI summary.
 
-    It previously omitted `badge`, so the Pydantic default ("24h · AI Summary")
-    filled it in and three verbatim headlines shipped under an AI label.
+    It previously omitted `badge`, so the Pydantic default (the AI-card window
+    label) filled it in and three verbatim headlines shipped under an AI label.
     """
     card = svc.build_fallback_card("AAPL", [{"headline": "a"}, {"headline": "b"}])
     assert card["ai_generated"] is False

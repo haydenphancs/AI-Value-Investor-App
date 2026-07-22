@@ -54,11 +54,13 @@ class AIInsightCardResponse(BaseModel):
     bullets: List[str] = Field(default_factory=list)
     # 'Bullish' | 'Bearish' | 'Neutral'
     sentiment: str = "Neutral"
-    # Provenance shown in the badge, e.g. "48h · AI Summary". The "48h" matches
-    # the real corpus window (news_insight_service.CORPUS_WINDOW_HOURS) — the
-    # card only ever summarises news from the last 48 hours, and the Updates
-    # endpoint hides the card entirely when nothing is that recent.
-    badge: str = "48h · AI Summary"
+    # Provenance shown in the badge — just the window, e.g. "48h". It matches the
+    # real corpus window (news_insight_service.CORPUS_WINDOW_HOURS): the card only
+    # ever summarises news from the last 48 hours, and the Updates endpoint hides
+    # the card entirely when nothing is that recent. The "· AI Summary" suffix was
+    # dropped — the ✨ Insights label and the AI-styled badge already signal AI, so
+    # the words were redundant.
+    badge: str = "48h"
     article_count: int = 0
     generated_at: Optional[str] = None
     # True once past the soft-expiry window — iOS labels the card as catching up

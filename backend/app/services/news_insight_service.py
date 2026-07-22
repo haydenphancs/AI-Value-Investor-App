@@ -356,9 +356,9 @@ class NewsInsightService:
             "headline": f"Latest {label} headlines",
             "bullets": bullets[:MAX_BULLETS],
             "sentiment": sentiment,
-            # NOT the "24h · AI Summary" badge. Letting the Pydantic default fill
-            # this in put an AI label on text no model wrote — the exact
-            # fabrication this screen was rebuilt to remove.
+            # NOT the AI-card badge (the plain window label, e.g. "48h"). Letting
+            # the Pydantic default fill this in put an AI-styled label on text no
+            # model wrote — the exact fabrication this screen was rebuilt to remove.
             "badge": "Latest headlines",
             "article_count": len(usable),
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

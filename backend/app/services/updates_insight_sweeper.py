@@ -61,6 +61,7 @@ from app.services.price_catalyst_service import get_price_catalyst_service
 from app.services.updates_materiality import (
     ACTION_GENERATE,
     ACTION_TOUCH,
+    BAND_EXTREME,
     PER_SCOPE_ATTEMPT_CAP,
     PER_SCOPE_DAILY_CAP,
     TIER_EXTREME,
@@ -97,11 +98,19 @@ _GLOBAL_DAILY_CAP = 1500
 _CLAIM_STALE_SECONDS = 120
 
 # Max grounded "why did it move" web searches per ET day, across ALL scopes, so a
-# broad-volatility day cannot fan out unbounded (paid) searches. Each catalyst is
-# also 24h-cached per ticker, so this only bounds the count of DISTINCT big movers
-# explained per day. In-process v1 (bounded blast radius 2×cap across two Railway
-# instances); a durable cross-instance RPC is a documented follow-up.
+# broad-volatility day cannot fan out unbounded (paid) searches. The cap bounds
+# DISTINCT big movers per day: a scope already explained today does not re-consume
+# a unit (it just re-reads its 24h-cached catalyst), so a churning or repeatedly-
+# failing single ticker cannot exhaust the budget and starve genuinely-new movers.
+# In-process v1 (bounded blast radius 2×cap across two Railway instances); a durable
+# cross-instance RPC is a documented follow-up.
 _CATALYST_DAILY_CAP = 30
+
+# The move tiers that earn a grounded "why it moved" catalyst. Includes the fixed-
+# band BAND_EXTREME so a thin-history / newly-listed name (σ unavailable → fallback
+# band) — precisely the population most prone to violent moves — is not silently
+# denied a catalyst that an established ticker with the same move would get.
+_CATALYST_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME)
 
 _STATE_TABLE = "updates_insight_state"
 
@@ -113,9 +122,11 @@ class InsightSweeper:
         self.news = get_news_cache_service()
         self.insights = get_news_insight_service()
         self.vol = get_volatility_cache_service()
-        # In-process ET-day cap on grounded catalyst web searches.
+        # In-process ET-day cap on grounded catalyst web searches. `_catalyst_scopes`
+        # dedups so the cap counts DISTINCT movers, not attempts.
         self._catalyst_day = None
         self._catalyst_count = 0
+        self._catalyst_scopes: set = set()
 
     # ── Universe ──────────────────────────────────────────────────────
 
@@ -353,16 +364,27 @@ class InsightSweeper:
                 scope, type(e).__name__, e,
             )
 
-    def _claim_catalyst_budget(self, now: datetime) -> bool:
-        """Take one unit of today's grounded-catalyst budget (in-process ET-day
-        counter). Returns False once ``_CATALYST_DAILY_CAP`` is spent."""
+    def _claim_catalyst_budget(self, now: datetime, scope: str) -> bool:
+        """Take one unit of today's grounded-catalyst budget for ``scope``
+        (in-process ET-day counter).
+
+        Bounds DISTINCT movers, not attempts: a scope already explained today
+        does not re-consume a unit — its catalyst is 24h-cached, so a churning or
+        repeatedly-failing single ticker cannot drain the budget and starve
+        genuinely-new movers. Returns False once ``_CATALYST_DAILY_CAP`` distinct
+        scopes have been admitted today (and the scope is not already among them).
+        """
         day = now.astimezone(ET).date()
         if self._catalyst_day != day:
             self._catalyst_day = day
             self._catalyst_count = 0
+            self._catalyst_scopes = set()
+        if scope in self._catalyst_scopes:
+            return True  # already counted today → re-read the cached catalyst, no new unit
         if self._catalyst_count >= _CATALYST_DAILY_CAP:
             return False
         self._catalyst_count += 1
+        self._catalyst_scopes.add(scope)
         return True
 
     async def _maybe_price_move(
@@ -375,28 +397,37 @@ class InsightSweeper:
         """Grounded "why did it move" for a per-ticker Unusual/Extreme session
         move, folded onto the card as a separate ``price_move`` block.
 
-        Gated to non-market scopes at tier Unusual/Extreme; kill-switched; capped
-        per ET day; the reason itself is 24h-cached + inflight-deduped by
-        ``price_catalyst_service``. Returns None on any miss/failure — it must
-        NEVER fabricate a driver, block, or fail the news card.
+        Gated to non-market scopes at tier Unusual/Extreme (incl. fixed-band
+        extreme); kill-switched; capped per ET day; the reason itself is 24h-cached
+        + inflight-deduped by ``price_catalyst_service``. Returns None on any
+        miss/failure — it must NEVER fabricate a driver, block, or fail the news
+        card.
         """
         if scope == MARKET_SCOPE:
             return None
-        if decision.price_band not in (TIER_UNUSUAL, TIER_EXTREME):
+        if decision.price_band not in _CATALYST_TIERS:
+            return None
+        # The move must be measurable and non-trivial IN THE CURRENT QUOTE. When
+        # the quote is unusable the gate carries a STALE σ-tier (last_price_band),
+        # and the old `finite(...) or 0.0` would then fetch a paid catalyst for a
+        # phantom "+0.0% move" and store a self-contradictory {tier:Unusual,
+        # change_percent:0.0} card. A move that rounds to 0.00% is not worth
+        # explaining.
+        cp = finite((quote or {}).get("changePercentage"))
+        if cp is None or round(cp, 2) == 0.0:
             return None
         if not getattr(settings, "PRICE_CATALYST_AI_ENABLED", True):
             return None
-        if not self._claim_catalyst_budget(now):
+        if not self._claim_catalyst_budget(now, scope):
             logger.info(
-                "Price-move catalyst day cap (%d) reached — skipping %s",
+                "Price-move catalyst day cap (%d distinct movers) reached — skipping %s",
                 _CATALYST_DAILY_CAP, scope,
             )
             return None
 
-        change_pct = finite((quote or {}).get("changePercentage")) or 0.0
         try:
             grounded = await get_price_catalyst_service().get_catalyst(
-                scope, change_pct, "today",
+                scope, cp, "today",
             )
         except Exception as e:
             logger.warning(
@@ -406,9 +437,12 @@ class InsightSweeper:
             return None
         if grounded is None:
             return None
+        # Normalise the fixed-band 'extreme' to the tier vocabulary so the stored
+        # `tier` is always one of the documented Notable/Unusual/Extreme labels.
+        tier = TIER_EXTREME if decision.price_band == BAND_EXTREME else decision.price_band
         return {
-            "tier": decision.price_band,
-            "change_pct": change_pct,
+            "tier": tier,
+            "change_pct": cp,
             "catalyst_tag": grounded.get("tag"),   # None ⇒ "no clear catalyst"
             "reason": grounded.get("reason") or "",
         }
@@ -604,16 +638,27 @@ class InsightSweeper:
                         self._release_claim, scope, now, "global_budget_exhausted"
                     )
                     return False
-                # Explain-the-move: for a per-ticker Unusual/Extreme move, fetch
-                # the grounded "why" (web search) and fold it into the card. Gated
-                # + day-capped + kill-switched + 24h-cached; None on any failure,
-                # and never blocks or fails the news card.
-                price_move = await self._maybe_price_move(
-                    scope, decision, now, quotes_by_symbol.get(scope),
-                )
                 card = None
                 error = None
                 try:
+                    # Explain-the-move: for a per-ticker Unusual/Extreme move, fetch
+                    # the grounded "why" (web search) and fold it into the card.
+                    # Gated + day-capped + kill-switched + 24h-cached; None on any
+                    # failure, and never blocks or fails the news card. Called
+                    # INSIDE the try so a shutdown-cancel during the (seconds-long)
+                    # catalyst search still reaches the finally that releases the
+                    # claim — outside it, the claim parked for the full stale window
+                    # after every deploy.
+                    price_move = await self._maybe_price_move(
+                        scope, decision, now, quotes_by_symbol.get(scope),
+                    )
+                    # When the move is STILL big but the catalyst was merely
+                    # unavailable this cycle (budget spent / transient error /
+                    # kill-switch), PRESERVE any existing "why it moved" block
+                    # rather than wiping a still-valid, still-24h-cached explanation
+                    # to NULL. Clear it only when the move is no longer big.
+                    move_still_big = decision.price_band in _CATALYST_TIERS
+                    preserve_price_move = price_move is None and move_still_big
                     card = await self.insights.generate_and_store(
                         scope=scope,
                         corpus=corpora.get(scope, []),
@@ -626,6 +671,7 @@ class InsightSweeper:
                         ),
                         market_active=market_active,
                         price_move=price_move,
+                        preserve_price_move=preserve_price_move,
                     )
                 except asyncio.CancelledError:
                     # A deploy/shutdown cancels the sweeper mid-generation.

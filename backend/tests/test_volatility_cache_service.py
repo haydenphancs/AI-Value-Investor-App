@@ -46,6 +46,32 @@ def test_sigma_none_when_all_flat_zero_variance():
     assert sigma is None
 
 
+def test_chronological_closes_drops_non_finite():
+    import math
+    hist = {"historical": [
+        {"date": "2026-07-04", "close": 104.0},
+        {"date": "2026-07-03", "close": float("nan")},   # FMP NaN token → dropped
+        {"date": "2026-07-02", "close": float("inf")},    # Infinity → dropped
+        {"date": "2026-07-01", "close": 100.0},
+    ]}
+    closes = _chronological_closes(hist)
+    assert closes == [100.0, 104.0]
+    assert all(math.isfinite(c) for c in closes)
+
+
+def test_sigma_is_none_not_nan_when_a_baseline_close_is_nan():
+    import math
+    # One NaN close inside an otherwise-fine baseline must NOT yield a nan σ that
+    # escapes the `<= 0` guard and gets written to the cache as a poisoned row.
+    prices = [100.0 + (i % 2) * 0.5 for i in range(60)]
+    prices[30] = float("nan")
+    sigma, _ = _sigma_from_closes(prices)
+    assert sigma is None or math.isfinite(sigma)
+    # With the non-finite return dropped, the remaining variance is still > 0,
+    # so σ is a real finite number rather than None-or-nan.
+    assert sigma is not None and sigma > 0
+
+
 def test_sigma_matches_the_shared_helper_over_the_baseline():
     prices = [100.0]
     for i in range(1, 200):

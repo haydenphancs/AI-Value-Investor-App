@@ -38,6 +38,43 @@ def test_daily_returns_skips_zero_and_missing_prior():
     assert _daily_returns([100.0]) == []
 
 
+def test_daily_returns_drops_non_finite_closes():
+    # FMP emits NaN/Infinity on thin/just-listed symbols; `curr is not None` does
+    # NOT reject those. A non-finite close is skipped (BOTH pairs touching it are
+    # dropped), never propagated as a nan return that would poison σ.
+    nan, inf = float("nan"), float("inf")
+    assert _daily_returns([100.0, nan, 110.0]) == []   # both adjacent pairs invalid
+    assert _daily_returns([nan, 110.0]) == []
+    assert _daily_returns([100.0, nan]) == []
+    # Finite returns on either side of a non-finite gap survive, and none is nan/inf.
+    out = _daily_returns([100.0, 110.0, nan, 100.0, 105.0, inf, 110.0])
+    assert out == [0.1, 0.05]
+    assert all(math.isfinite(r) for r in out)
+
+
+def test_std_dev_pop_rejects_non_finite_result():
+    # Defence in depth: a nan/inf sneaking into the values must yield None, never
+    # a nan σ that escapes the `<= 0` guard downstream.
+    assert _std_dev_pop([0.01, float("nan")]) is None
+    assert _std_dev_pop([0.01, float("inf")]) is None
+
+
+def test_compute_volatility_with_a_nan_close_never_yields_nan_sigma():
+    # A single NaN baseline close must NEVER produce a nan sigma_daily (which would
+    # be mislabeled Typical and, in the cache path, written as a poisoned row). The
+    # bad pair is dropped and σ is computed from the surviving returns.
+    prices = [100.0 + (i % 2) * 0.5 for i in range(199)] + [float("nan")]
+    out = _compute_price_volatility(prices)
+    sigma = out["sigma_daily"]
+    assert sigma is None or math.isfinite(sigma)
+    assert not (sigma is not None and math.isnan(sigma))
+    # The clean surrounding data still yields a positive σ (not None-by-poison).
+    assert sigma is not None and sigma > 0
+    # And a fully clean array still computes a finite σ.
+    clean = [100.0 * (1.01 if i % 2 else 0.99) for i in range(200)]
+    assert _compute_price_volatility(clean)["sigma_daily"] is not None
+
+
 def test_z_score_uses_sqrt_n_scaling():
     # σ_daily = 1%; a 3% move over 9 trading days → 9-day σ = 1%·√9 = 3% → z = 1.0
     z = _z_score_for_window(3.0, 0.01, 9)

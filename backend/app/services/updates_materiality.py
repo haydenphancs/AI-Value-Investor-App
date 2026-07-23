@@ -210,6 +210,36 @@ BAND_EXTREME = "extreme"
 BAND_UNKNOWN = "unknown"
 
 
+# ── Canonical severity bucket ─────────────────────────────────────────
+# `classify_move` speaks TWO vocabularies — the capitalized tier labels on the σ
+# path (Typical/Notable/Unusual/Extreme) and the lowercase band labels on the
+# fallback path (flat/notable/extreme) — which share ZERO string values. The
+# regeneration fingerprint folds this label in, so a ticker whose σ merely
+# APPEARS or DISAPPEARS between sweeps (a missed daily precompute, a 30-min mem-
+# cache of one Supabase read blip, or the pre-first-precompute cold start) would
+# flip e.g. `Typical`↔`flat` for an UNCHANGED move and re-key the digest — billing
+# a byte-identical card, and a second time on the way back. Collapsing both
+# vocabularies onto one canonical bucket BEFORE the fingerprint makes σ
+# availability invisible to it, while a genuine severity change (notable→unusual)
+# still re-keys. Note Unusual has no fixed-band equivalent, so a true 2–3σ move
+# that is also ≥5/10% can still legitimately differ (unusual vs extreme) across
+# the two methods — that residual is inherent, and bounded by the spend caps.
+_CANONICAL_MOVE_CLASS = {
+    TIER_TYPICAL: "flat", BAND_FLAT: "flat",
+    TIER_NOTABLE: "notable", BAND_NOTABLE: "notable",
+    TIER_UNUSUAL: "unusual",
+    TIER_EXTREME: "extreme", BAND_EXTREME: "extreme",
+    BAND_UNKNOWN: "unknown",
+}
+
+
+def canonical_band(band_or_tier: str) -> str:
+    """Collapse the tier vocab (σ path) and band vocab (fallback) onto one
+    canonical severity bucket for the regeneration fingerprint. Unknown labels
+    map to ``"unknown"`` (neutral)."""
+    return _CANONICAL_MOVE_CLASS.get(band_or_tier, "unknown")
+
+
 def price_band(
     change_percent: Any,
     market_cap: Any = None,
@@ -445,7 +475,13 @@ def _decide_inner(
         # universe-wide quote hiccup would cost ~2 x universe generations.
         band = state.get("last_price_band") or BAND_UNKNOWN
 
-    inputset_id = compute_inputset_id(corpus_article_ids(corpus), band, model)
+    # Fold the CANONICAL severity bucket (not the raw tier/band label) into the
+    # fingerprint so σ availability toggling for an unchanged move does not re-key
+    # the digest and bill a byte-identical card. `band` itself stays the raw label
+    # for the price-context prompt line, `last_price_band`, and the catalyst gate.
+    inputset_id = compute_inputset_id(
+        corpus_article_ids(corpus), canonical_band(band), model
+    )
 
     # ── 1. Fingerprint short-circuit — the money-saver ──
     # Checked BEFORE every other branch: if the inputs are identical the output
@@ -570,6 +606,7 @@ __all__ = [
     "price_band",
     "volatility_tier",
     "classify_move",
+    "canonical_band",
     "move_score",
     "compute_inputset_id",
     "corpus_article_ids",

@@ -18,6 +18,8 @@ from app.services.updates_insight_sweeper import (
 )
 from app.services.updates_materiality import (
     ACTION_GENERATE,
+    BAND_EXTREME,
+    BAND_NOTABLE,
     TIER_EXTREME,
     TIER_NOTABLE,
     TIER_TYPICAL,
@@ -106,3 +108,101 @@ async def test_day_cap_bounds_calls_and_resets_next_day(stub):
     # A new ET trading day resets the budget.
     next_day = NOW + timedelta(days=1)
     assert await s._maybe_price_move("NEWDAY", _dec(TIER_EXTREME), next_day, {"changePercentage": -8.0}) is not None
+
+
+@pytest.mark.asyncio
+async def test_day_cap_counts_distinct_movers_not_attempts(stub):
+    # A single churning ticker re-tripping many times must consume exactly ONE
+    # unit — otherwise it starves genuinely-new movers of their catalyst.
+    s = _sweeper()
+    for _ in range(5):
+        assert await s._maybe_price_move("AAPL", _dec(TIER_EXTREME), NOW, {"changePercentage": -8.0}) is not None
+    assert s._catalyst_count == 1
+    assert s._catalyst_scopes == {"AAPL"}
+
+
+@pytest.mark.asyncio
+async def test_no_catalyst_for_a_phantom_zero_move(stub):
+    # When the current quote is unusable the gate can carry a STALE σ-tier; we must
+    # NOT fetch a paid catalyst for a "+0.0%" move nor store a self-contradictory
+    # {tier:Unusual, change_percent:0.0} block.
+    s = _sweeper()
+    for bad in (None, float("nan"), float("inf"), {}, {"changePercentage": 0.004}):
+        q = bad if isinstance(bad, dict) else {"changePercentage": bad}
+        assert await s._maybe_price_move("AAPL", _dec(TIER_EXTREME), NOW, q) is None
+    assert stub.calls == 0          # no paid search fired
+    assert s._catalyst_count == 0   # no budget consumed on a phantom move
+
+
+@pytest.mark.asyncio
+async def test_fixed_band_extreme_still_gets_a_catalyst(stub):
+    # A thin-history / newly-listed name (σ unavailable → fallback band 'extreme')
+    # is the population most prone to violent moves; it must get the catalyst too,
+    # with the tier normalised to the capitalized vocabulary.
+    s = _sweeper()
+    pm = await s._maybe_price_move("NEWCO", _dec(BAND_EXTREME), NOW, {"changePercentage": -15.0})
+    assert pm is not None
+    assert pm["tier"] == "Extreme"          # normalised from fixed-band 'extreme'
+    assert pm["change_pct"] == -15.0
+    # The softer fixed-band 'notable' is NOT enough (matches the σ-path gate).
+    assert await s._maybe_price_move("NEWCO2", _dec(BAND_NOTABLE), NOW, {"changePercentage": -6.0}) is None
+
+
+# ── _store: preserve vs clear the price_move column ───────────────────────
+
+class _CaptureSupabase:
+    """Records the exact row handed to upsert so we can assert on the payload."""
+    def __init__(self):
+        self.rows = []
+
+    def table(self, _name):
+        return self
+
+    def upsert(self, row, on_conflict=None):
+        self.rows.append(row)
+        return self
+
+    def execute(self):
+        class _R:
+            data = []
+        return _R()
+
+
+def _insight_service():
+    from app.services.news_insight_service import NewsInsightService
+    svc = object.__new__(NewsInsightService)
+    svc.supabase = _CaptureSupabase()
+    svc._cache = {}
+    svc._inflight = {}
+    return svc
+
+
+_CARD = {"headline": "H", "bullets": ["a", "b"], "sentiment": "Neutral"}
+
+
+def test_store_preserves_existing_block_when_move_still_big_but_no_new_catalyst():
+    # preserve=True + no new block → OMIT the column so an existing, still-valid
+    # "why it moved" is kept on conflict rather than wiped to NULL.
+    svc = _insight_service()
+    assert svc._store("AAPL", _CARD, "iid", "reason", 3, True, None, True)
+    row = svc.supabase.rows[-1]
+    assert "price_move" not in row
+
+
+def test_store_clears_the_block_when_the_move_is_no_longer_big():
+    # preserve=False + no new block → explicitly write NULL (clear a now-stale block).
+    svc = _insight_service()
+    assert svc._store("AAPL", _CARD, "iid", "reason", 3, True, None, False)
+    row = svc.supabase.rows[-1]
+    assert "price_move" in row and row["price_move"] is None
+
+
+def test_store_writes_a_new_block_even_when_preserve_is_set():
+    svc = _insight_service()
+    pm = {"tier": "Extreme", "change_pct": -8.2, "catalyst_tag": "Guidance Cut", "reason": "Cut FY guide."}
+    assert svc._store("AAPL", _CARD, "iid", "reason", 3, True, pm, True)
+    row = svc.supabase.rows[-1]
+    assert row["price_move"] == {
+        "tier": "Extreme", "change_percent": -8.2,
+        "catalyst_tag": "Guidance Cut", "reason": "Cut FY guide.",
+    }

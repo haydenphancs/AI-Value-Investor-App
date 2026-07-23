@@ -76,7 +76,10 @@ logger = logging.getLogger(__name__)
 # σ). The vocabulary is part of the fingerprint, so the bump makes the switch a
 # single controlled regen wave (bounded by the per-cycle + global caps) instead
 # of an uncontrolled band↔tier flip.
-PROMPT_VERSION = 2
+# v3: the sentiment instruction was retuned to commit to the NET lean instead of
+# defaulting to neutral (the market roll-up read "Neutral" on genuinely-mixed but
+# net-directional days). Prompt-output contract changed → one controlled regen wave.
+PROMPT_VERSION = 3
 
 
 # ── Thresholds ────────────────────────────────────────────────────────

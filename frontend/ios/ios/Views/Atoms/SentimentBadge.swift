@@ -32,21 +32,26 @@ struct SentimentBadge: View {
         }
     }
 
-    private var icon: String {
+    /// nil for neutral: the "minus" glyph reads as a stray "—" dash next to the
+    /// label. Bullish/bearish keep their directional arrows; neutral shows the
+    /// word alone.
+    private var icon: String? {
         switch sentiment {
         case .bullish:
             return "arrow.up.right"
         case .bearish:
             return "arrow.down.right"
         case .neutral:
-            return "minus"
+            return nil
         }
     }
 
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
-            Image(systemName: icon)
-                .font(AppTypography.iconTiny).fontWeight(.bold)
+            if let icon {
+                Image(systemName: icon)
+                    .font(AppTypography.iconTiny).fontWeight(.bold)
+            }
 
             Text(sentiment.rawValue)
                 .font(AppTypography.captionEmphasis)

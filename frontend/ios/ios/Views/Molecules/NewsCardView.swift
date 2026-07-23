@@ -38,14 +38,25 @@ struct NewsCardView: View {
     var currentTicker: String? = nil
     var bullets: [String] = []
     var style: NewsCardStyle = .tappable
+    /// True while an on-demand summary for THIS card is in flight (drives the
+    /// inline spinner). Only meaningful on the Updates timeline, where tapping an
+    /// un-enriched card summarises it in-app.
+    var isSummarizing: Bool = false
     var onTap: (() -> Void)?
     var onExternalLinkTap: (() -> Void)?
+    /// When set, tapping an un-enriched expandable card summarises it in-app
+    /// (instead of `onTap`) — see the button action below.
+    var onRequestSummary: (() -> Void)?
     var onTickerTap: ((String) -> Void)?
 
     @State private var isExpanded: Bool = false
 
     private var isExpandableStyle: Bool { style == .expandable }
     private var hasExpandableContent: Bool { !bullets.isEmpty }
+    /// An un-enriched expandable card that can be summarised on tap.
+    private var canSummarizeOnTap: Bool {
+        isExpandableStyle && !hasExpandableContent && onRequestSummary != nil
+    }
 
     /// Drop tokens that are not plausible tickers before rendering chips, and
     /// DE-DUPLICATE. Gemini occasionally emits a pseudo-ticker like "MARKET" (a
@@ -69,6 +80,15 @@ struct NewsCardView: View {
         Button(action: {
             if isExpandableStyle && hasExpandableContent {
                 withAnimation(.easeInOut(duration: 0.25)) { isExpanded.toggle() }
+            } else if canSummarizeOnTap {
+                // Un-enriched card: summarise it IN-APP rather than opening the
+                // (often paywalled) publisher link. Reveal the area so the spinner
+                // shows, then request the summary; bullets replace the spinner when
+                // they arrive, and "Read full story" stays available either way.
+                if !isExpanded {
+                    withAnimation(.easeInOut(duration: 0.25)) { isExpanded = true }
+                }
+                onRequestSummary?()
             } else {
                 onTap?()
             }
@@ -127,11 +147,21 @@ struct NewsCardView: View {
                 }
 
                 if isExpandableStyle {
-                    // Inline bullets on expand
+                    // Inline AI summary on expand — bullets, or the on-demand
+                    // summarise states (spinner while in flight; an honest fallback
+                    // with a link if the summary came back empty).
                     if isExpanded && hasExpandableContent {
                         TickerNewsExpandedContent(bullets: bullets)
                             .padding(.top, AppSpacing.xs)
                             .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else if isExpanded && isSummarizing {
+                        summarizingRow
+                            .padding(.top, AppSpacing.xs)
+                            .transition(.opacity)
+                    } else if isExpanded && canSummarizeOnTap {
+                        summaryUnavailableRow
+                            .padding(.top, AppSpacing.xs)
+                            .transition(.opacity)
                     }
 
                     // Footer: external link + expand toggle
@@ -150,6 +180,38 @@ struct NewsCardView: View {
             .cornerRadius(AppCornerRadius.large)
         }
         .buttonStyle(PlainButtonStyle())
+    }
+
+    /// Shown while an on-tap summary is being generated.
+    private var summarizingRow: some View {
+        HStack(spacing: AppSpacing.sm) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Summarizing…")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Shown when the on-tap summary came back empty (Gemini degraded). Keeps the
+    /// reader's exit — the publisher link — reachable even though there are no
+    /// bullets (the footer only shows the link once there is expandable content).
+    private var summaryUnavailableRow: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            Text("Couldn't generate a summary right now.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textMuted)
+            if onExternalLinkTap != nil {
+                Button(action: { onExternalLinkTap?() }) {
+                    Text("Read the full story →")
+                        .font(AppTypography.captionEmphasis)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -30,8 +30,21 @@ logger = logging.getLogger(__name__)
 # Cache TTL in hours
 CACHE_TTL_HOURS = 6
 
-# Gemini model for news enrichment (fast + cheap)
-NEWS_AI_MODEL = "gemini-2.5-flash"
+# Gemini model for news enrichment (fast + cheap). Flash-Lite: enrichment is
+# extractive compression of a headline + snippet into bullets + a 3-way sentiment
+# — the same shape the Insights card uses on Flash-Lite — so it does not need
+# Flash. ~1/3 the cost, which matters now that the pre-warmer enriches proactively.
+# Revert to "gemini-2.5-flash" here if bullet/sentiment quality regresses.
+NEWS_AI_MODEL = "gemini-2.5-flash-lite"
+
+# How many of a scope's freshest in-window articles are AI-enriched per cycle by a
+# proactive enricher (the insight sweeper for the whole universe, the pre-warmer for
+# the off-hours Market + top-watchlist floor). Bounded + shared-cached
+# (enrich_articles skips already-enriched rows), so the incremental cost is only the
+# genuinely-new articles since the last cycle. 25 == MAX_CORPUS_ARTICLES and matches
+# the sweeper's get_cached_bulk(scopes, 25) window, so a scope is enriched over the
+# same rows the Insights card considers.
+_ENRICH_WINDOW_CAP = 25
 
 # Reserved cache key for the general (non-ticker-specific) market news feed.
 # It lives in `ticker_news_cache` alongside real tickers so the whole existing
@@ -983,10 +996,11 @@ For EACH article, provide:
    - The FINAL bullet must always explain why an everyday investor should care, in plain English
    - Transition Rule: To sound natural and human, vary how you start this final bullet. Sometimes use a short, friendly transition like "So,", "In short,", "Ultimately,", or "The takeaway," — always followed by a COMMA, never a colon. Other times, just state the insight directly without any introductory phrase at all. NEVER use "So What?" or "So what:" as a prefix, and never end the transition with a colon.
    - No introductory phrases like "This article discusses..." or "The key points are..."
-2. Sentiment classification — you MUST use one of these three exact values:
-   - "bullish": ONLY use if the article indicates a direct upward catalyst for the stock price (e.g., earnings beat, new product launch, analyst upgrade, winning a lawsuit, major contract win, breakthrough product approval).
-   - "bearish": ONLY use if the article indicates a direct downward catalyst for the stock price (e.g., missed revenue, SEC investigation, product recall, analyst downgrade, lawsuit loss, executive fraud, data breach).
-   - "neutral": Use for EVERYTHING else — macroeconomic noise, educational articles, history lessons, CEO interviews without financial guidance, mixed signals, industry commentary, or any article where the directional impact on the stock is unclear.
+2. Sentiment classification — the NET directional lean for the stock, one of these three exact values:
+   - "bullish": the article leans to an upward catalyst (earnings beat, product launch, analyst upgrade, lawsuit win, major contract, approval, raised guidance, easing conditions).
+   - "bearish": the article leans to a downward catalyst (missed revenue, investigation, recall, downgrade, lawsuit loss, fraud, breach, cut guidance, tightening conditions).
+   - "neutral": ONLY when the article is genuinely two-sided or purely backward-looking / educational with no directional read (a history lesson, a balanced explainer, or up- and down-catalysts that truly cancel out).
+   Commit to the lean — an article that tilts positive is "bullish" even if it notes caveats, and likewise "bearish". Do NOT use "neutral" as a safe default; the confidence score below is where genuine uncertainty belongs.
 3. Confidence score: 0-100 (how confident you are in the sentiment call)
 4. Related tickers: Extract ALL US-listed stock ticker symbols (e.g., AAPL, MSFT, GOOGL) explicitly mentioned or clearly referenced in the article. Only include real ticker symbols — no crypto, indices, ETFs, or made-up symbols. Maximum 8 tickers.
 
@@ -1342,17 +1356,69 @@ Return a JSON array with one object per article in order. Each object must have:
 
     # ── Background Pre-warmer ─────────────────────────────────────────
 
+    def _enrichable_ids(
+        self, articles: List[Dict[str, Any]], cap: int
+    ) -> List[str]:
+        """The freshest ``cap`` articles' ids that are worth an AI-enrichment call:
+        skip rows already enriched, skip client-side placeholders, skip empties.
+
+        Pure (no I/O). Same skip contract the enrich endpoint enforces
+        (``updates.py`` drops ``temp_``/``raw_``/``sample_`` ids), so a caller can
+        pre-filter an in-memory corpus before paying for a batch.
+        """
+        ids: List[str] = []
+        for a in articles[:cap]:
+            if a.get("ai_processed"):
+                continue
+            aid = str(a.get("id") or "")
+            if aid and not aid.startswith(("temp_", "raw_", "sample_", "unknown_")):
+                ids.append(aid)
+        return ids
+
+    async def enrich_window(
+        self, scope: str, articles: List[Dict[str, Any]], *, cap: int
+    ) -> int:
+        """AI-enrich a scope's freshest ``cap`` un-enriched articles so the feed is
+        already summarised before anyone scrolls. Returns rows newly enriched.
+
+        The ONE proactive-enrichment path, shared by the insight sweeper (whole
+        universe) and the pre-warmer (off-hours Market + top-watchlist floor).
+        Best-effort: reuses the on-demand ``enrich_articles`` path — so it skips
+        rows already enriched (``enrich_articles`` early-returns with NO Gemini call
+        when every id is done), dedups against a concurrent user, and NEVER raises
+        into the caller (a failed batch just leaves those rows for the on-demand
+        tap/scroll path).
+        """
+        ids = self._enrichable_ids(articles, cap)
+        if not ids:
+            return 0
+        try:
+            enriched = await self.enrich_articles(scope, ids)
+            return sum(1 for e in enriched if e.get("ai_processed"))
+        except Exception as e:
+            logger.warning(
+                "Window enrichment failed for %s (%d ids): %s: %s",
+                scope, len(ids), type(e).__name__, e,
+            )
+            return 0
+
     async def pre_warm_popular_tickers(self, top_n: int = 20):
         """
         Pre-warm news cache for the most popular watchlist tickers.
-        Fetches raw articles only (no Gemini) to keep cache warm.
+        Fetches raw articles AND AI-enriches the top few per scope so the common
+        feeds (Market + top watchlist) render with bullets + sentiment on first
+        scroll instead of bare rows the reader has to trigger enrichment on.
         """
         # The general market feed backs the Updates screen's default tab, so it is
         # warmed FIRST and unconditionally — even when nobody has a watchlist yet.
         try:
             market = await self.get_market_news(limit=50)
+            enriched = await self.enrich_window(
+                MARKET_SCOPE, market.get("articles", []), cap=_ENRICH_WINDOW_CAP
+            )
             logger.info(
-                "Pre-warmed %s: %d articles", MARKET_SCOPE, len(market.get("articles", []))
+                "Pre-warmed %s: %d articles (%d newly enriched)",
+                MARKET_SCOPE, len(market.get("articles", [])), enriched,
             )
         except Exception as e:
             logger.warning(
@@ -1386,7 +1452,12 @@ Return a JSON array with one object per article in order. Each object must have:
                     logger.error(f"Pre-warm failed for {t}: {r}")
                 else:
                     count = len(r.get("articles", []))
-                    logger.info(f"Pre-warmed {t}: {count} articles")
+                    enriched = await self.enrich_window(
+                        t, r.get("articles", []), cap=_ENRICH_WINDOW_CAP
+                    )
+                    logger.info(
+                        f"Pre-warmed {t}: {count} articles ({enriched} newly enriched)"
+                    )
 
             if i + batch_size < len(tickers):
                 await asyncio.sleep(2)

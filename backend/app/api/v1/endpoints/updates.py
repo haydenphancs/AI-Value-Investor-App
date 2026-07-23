@@ -44,8 +44,7 @@ from app.services.news_cache_service import (
     is_crypto_scope,
 )
 from app.services.news_insight_service import (
-    CORPUS_WINDOW_HOURS,
-    articles_within_window,
+    select_recent_corpus,
     get_news_insight_service,
 )
 
@@ -240,13 +239,14 @@ async def get_updates_feed(
     # articles, i.e. a summary of yesterday's news replacing today's.
     insight: Optional[AIInsightCardResponse] = None
     if offset == 0:
-        # Only surface an Insights card when the scope actually has news within
-        # the badge window (CORPUS_WINDOW_HOURS). With nothing recent, show NO
-        # card at all — neither the AI card nor the headline fallback — rather
-        # than summarising stale news under a "48h" label. The timeline below
-        # still renders whatever cached articles exist.
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=CORPUS_WINDOW_HOURS)
-        recent = articles_within_window(raw_articles, cutoff)
+        # Only surface an Insights card when the scope actually has news within the
+        # badge window. Prefer the last 24h and fall back to 48h only when there is
+        # nothing in 24h — the SAME selector the sweeper uses — so the badge matches
+        # the news the card summarises. With nothing in 48h, show NO card at all
+        # (neither AI nor fallback); the timeline below still renders cached rows.
+        recent, window_hours = select_recent_corpus(
+            raw_articles, datetime.now(timezone.utc)
+        )
         if recent:
             try:
                 cards = await insights.get_cards([scope])
@@ -254,13 +254,18 @@ async def get_updates_feed(
                 if card is None:
                     # No AI card yet (cold scope, or the sweeper hasn't reached
                     # it). Serve the honest headline list, built ONLY from the
-                    # in-window articles so it cannot claim "48h" over old news.
-                    # The card's `refreshing` flag says whether the sweeper is
-                    # actually awake to replace it — outside market hours it is
-                    # not, and promising otherwise is what pinned the UI on
-                    # "Catching up…" all weekend.
+                    # in-window articles so it cannot claim a longer lookback over
+                    # old news. The card's `refreshing` flag says whether the
+                    # sweeper is actually awake to replace it — outside market
+                    # hours it is not, and promising otherwise is what pinned the
+                    # UI on "Catching up…" all weekend.
                     card = insights.build_fallback_card(scope, recent)
                 if card is not None:
+                    # AI card badge reflects the ACTUAL freshness window ("24h" if
+                    # the scope has news in the last 24h, else "48h"). The
+                    # deterministic fallback keeps its own "Latest headlines" label.
+                    if card.get("ai_generated", True):
+                        card = {**card, "badge": f"{window_hours}h"}
                     insight = AIInsightCardResponse(**card)
             except Exception as e:
                 # An unavailable insight must never take down the timeline.

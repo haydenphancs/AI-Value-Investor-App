@@ -49,10 +49,9 @@ from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
 from app.services.news_insight_service import (
-    CORPUS_WINDOW_HOURS,
     INSIGHT_MODEL,
-    articles_within_window,
     get_news_insight_service,
+    select_recent_corpus,
 )
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.volatility_cache_service import get_volatility_cache_service
@@ -112,6 +111,20 @@ _CATALYST_DAILY_CAP = 30
 # denied a catalyst that an established ticker with the same move would get.
 _CATALYST_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME)
 
+# ── Proactive per-article enrichment (news pass) ──────────────────────
+# After building each scope's windowed corpus for the card, the news pass also
+# AI-enriches those individual articles (bullets + sentiment) so the whole 24h/48h
+# feed shows summaries on scroll — not just the top few. Shared cache: enriching a
+# scope's window also pre-summarises its detail News tab for every user.
+_ENRICH_CONCURRENCY = 4          # simultaneous Gemini batch calls (cf. _refresh_news' Semaphore(5))
+_ENRICH_SCOPES_PER_CYCLE = 40    # per-news-pass blast-radius bound (cf. _PER_CYCLE_REGEN_CAP)
+_ENRICH_WINDOW_CAP = 25          # per scope; == news get_cached_bulk(scopes, 25) window
+# In-process ET-day ceiling on enrichment BATCH CALLS (defense-in-depth vs a runaway
+# news day). Self-limiting already bounds this — a fully-enriched scope makes zero
+# calls — so this only bites on a broad, sustained influx. In-process v1 (2× across
+# two Railway instances); a durable RPC is a follow-up, same as _CATALYST_DAILY_CAP.
+_ENRICH_DAILY_CAP = 1200
+
 _STATE_TABLE = "updates_insight_state"
 
 
@@ -127,6 +140,9 @@ class InsightSweeper:
         self._catalyst_day = None
         self._catalyst_count = 0
         self._catalyst_scopes: set = set()
+        # In-process ET-day cap on proactive enrichment batch calls.
+        self._enrich_day = None
+        self._enrich_count = 0
 
     # ── Universe ──────────────────────────────────────────────────────
 
@@ -387,6 +403,68 @@ class InsightSweeper:
         self._catalyst_scopes.add(scope)
         return True
 
+    def _claim_enrich_budget(self, now: datetime) -> bool:
+        """Take one unit of today's proactive-enrichment BATCH-CALL budget
+        (in-process ET-day counter). Returns False once ``_ENRICH_DAILY_CAP`` batch
+        calls are spent — the remaining scopes defer to the next day/cycle."""
+        day = now.astimezone(ET).date()
+        if self._enrich_day != day:
+            self._enrich_day = day
+            self._enrich_count = 0
+        if self._enrich_count >= _ENRICH_DAILY_CAP:
+            return False
+        self._enrich_count += 1
+        return True
+
+    async def _enrich_windows(
+        self,
+        corpora: Dict[str, List[Dict[str, Any]]],
+        scopes: List[str],
+        now: datetime,
+    ) -> Tuple[int, int]:
+        """AI-enrich each scope's whole in-memory windowed corpus (bullets +
+        sentiment on the individual articles) so the feed shows summaries on scroll,
+        not just the top few. Returns ``(rows_enriched, scopes_deferred)``.
+
+        Reuses the corpus the card already fetched/windowed (no extra read). It is
+        SELF-LIMITING: a scope whose window is already fully enriched yields no ids
+        and is never admitted, so a steady-state pass makes ~0 calls. Admission is
+        bounded three ways — per-cycle scope cap, per-ET-day batch-call cap, and
+        bounded concurrency — and prioritised MARKET-first (``scopes`` arrives in
+        ``_universe`` order). Best-effort throughout: ``enrich_window`` swallows
+        every ``Exception``, so only ``CancelledError`` (shutdown) propagates.
+        """
+        admitted: List[str] = []
+        deferred = 0
+        for scope in scopes:
+            ids = self.news._enrichable_ids(
+                corpora.get(scope) or [], _ENRICH_WINDOW_CAP
+            )
+            if not ids:
+                continue
+            if len(admitted) >= _ENRICH_SCOPES_PER_CYCLE or not self._claim_enrich_budget(now):
+                deferred += 1
+                continue
+            admitted.append(scope)
+
+        if not admitted:
+            return 0, deferred
+
+        sem = asyncio.Semaphore(_ENRICH_CONCURRENCY)
+
+        async def _one(scope: str) -> int:
+            async with sem:
+                return await self.news.enrich_window(
+                    scope, corpora.get(scope) or [], cap=_ENRICH_WINDOW_CAP
+                )
+
+        # No return_exceptions: enrich_window catches every Exception, so only a
+        # shutdown CancelledError can propagate — which we WANT (it bubbles to the
+        # loop's cancel handler and stops the sweeper). Enrichment holds no claim,
+        # budget row-lock, or card-budget unit, so there is nothing to release.
+        counts = await asyncio.gather(*[_one(s) for s in admitted])
+        return sum(counts), deferred
+
     async def _maybe_price_move(
         self,
         scope: str,
@@ -532,16 +610,16 @@ class InsightSweeper:
 
         # 3. Corpora — ONE Supabase query for every scope.
         corpora = await asyncio.to_thread(self.news.get_cached_bulk, scopes, 25)
-        # Bound every scope's corpus to the last CORPUS_WINDOW_HOURS (48h) so the
-        # AI card is genuinely a "48h summary" (the badge claims 48h). The window is
-        # applied HERE, before both the materiality fingerprint (via `decide`) and
-        # generation (via `generate_and_store`), so the two stay consistent: the
-        # card refreshes as stories age out of the window, and a scope with no
-        # news in the window yields `no_corpus` — the deterministic "Latest
-        # headlines" fallback then shows, rather than an AI card over-claiming "48h".
-        cutoff = now - timedelta(hours=CORPUS_WINDOW_HOURS)
+        # Bound every scope's corpus to its DYNAMIC window (prefer 24h, fall back to
+        # 48h only when the scope has no news in 24h) via the shared selector. The
+        # window is applied HERE, before both the materiality fingerprint (via
+        # `decide`) and generation (via `generate_and_store`), so the card content
+        # matches the badge the endpoint derives from the SAME selector: a scope
+        # with fresh news summarises just the 24h corpus and is badged "24h". A
+        # scope with no news in 48h yields an empty corpus → `no_corpus` → the
+        # deterministic "Latest headlines" fallback, not an over-claiming AI card.
         corpora = {
-            scope: articles_within_window(rows, cutoff)
+            scope: select_recent_corpus(rows, now)[0]
             for scope, rows in corpora.items()
         }
 
@@ -709,17 +787,30 @@ class InsightSweeper:
             )
             generated = sum(1 for r in results if r is True)
 
+        # 7. Proactive per-article enrichment (news pass only — new rows arrive
+        #    only via _refresh_news). Enrich each scope's whole windowed corpus so
+        #    the feed shows bullets + sentiment on scroll, not just the top few.
+        #    After generation so card latency is untouched; self-limiting + bounded.
+        enriched_rows = enrich_deferred = 0
+        if refresh_news:
+            enriched_rows, enrich_deferred = await self._enrich_windows(
+                corpora, scopes, now
+            )
+
         logger.info(
             "Insight sweep (%s) scopes=%d generated=%d touched=%d deferred=%d "
+            "enriched=%d enrich_deferred=%d "
             "market=%s active=%s phase=%s reasons=%s",
             "news+price" if refresh_news else "price",
             len(scopes), generated, len(touches), dropped,
+            enriched_rows, enrich_deferred,
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
             market_active, phase, dict(reasons.most_common(8)),
         )
         return {
             "scopes": len(scopes), "generated": generated,
             "touched": len(touches), "deferred": dropped,
+            "enriched": enriched_rows, "enrich_deferred": enrich_deferred,
         }
 
     async def _refresh_news(self, scopes: List[str]) -> None:

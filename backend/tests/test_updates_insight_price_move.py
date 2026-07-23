@@ -206,3 +206,55 @@ def test_store_writes_a_new_block_even_when_preserve_is_set():
         "tier": "Extreme", "change_percent": -8.2,
         "catalyst_tag": "Guidance Cut", "reason": "Cut FY guide.",
     }
+
+
+# ── Insights "sources" (migration 092) ────────────────────────────────
+
+def test_corpus_sources_selects_title_url_dedups_and_caps():
+    from app.services.news_insight_service import _corpus_sources
+    corpus = [
+        {"headline": "Fed holds rates", "article_url": "https://x/1"},
+        {"headline": "Fed holds rates", "article_url": "https://x/1"},  # dup url → dropped
+        {"headline": "Oil climbs", "url": "https://x/2"},               # `url` fallback key
+        {"headline": ""},                                               # no title → dropped
+        {"nope": 1},                                                    # not an article → dropped
+        {"headline": "No link story"},                                  # kept, empty url
+    ]
+    out = _corpus_sources(corpus)
+    assert out == [
+        {"title": "Fed holds rates", "url": "https://x/1"},
+        {"title": "Oil climbs", "url": "https://x/2"},
+        {"title": "No link story", "url": ""},
+    ]
+    # Cap is respected.
+    many = [{"headline": f"S{i}", "article_url": f"https://x/{i}"} for i in range(20)]
+    assert len(_corpus_sources(many, cap=8)) == 8
+
+
+def test_sanitize_sources_drops_junk_and_is_idempotent():
+    from app.services.news_insight_service import _sanitize_sources
+    assert _sanitize_sources(None) is None
+    assert _sanitize_sources("nope") is None
+    assert _sanitize_sources([]) is None                    # empty → None, not []
+    assert _sanitize_sources([{"title": ""}, {"nope": 1}, 42]) is None
+    clean = _sanitize_sources([{"title": "T", "url": "u"}, {"title": "T2"}])
+    assert clean == [{"title": "T", "url": "u"}, {"title": "T2", "url": ""}]
+    # Read-back of an already-sanitized list is idempotent.
+    assert _sanitize_sources(clean) == clean
+
+
+def test_store_writes_sanitized_sources():
+    svc = _insight_service()
+    sources = [
+        {"title": "Fed holds rates", "url": "https://x/1"},
+        {"title": "", "url": "https://x/bad"},   # dropped (no title)
+    ]
+    assert svc._store("AAPL", _CARD, "iid", "reason", 3, True, None, False, sources)
+    row = svc.supabase.rows[-1]
+    assert row["sources"] == [{"title": "Fed holds rates", "url": "https://x/1"}]
+
+
+def test_store_writes_null_sources_when_none():
+    svc = _insight_service()
+    assert svc._store("AAPL", _CARD, "iid", "reason", 3, True, None, False, None)
+    assert svc.supabase.rows[-1]["sources"] is None

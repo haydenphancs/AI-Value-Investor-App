@@ -9,6 +9,11 @@ import SwiftUI
 
 struct InsightsSummaryCard: View {
     let summary: NewsInsightSummary
+    /// Tapping the card opens the sources screen. Only wired/shown when the card
+    /// actually has sources.
+    var onOpenSources: (() -> Void)? = nil
+
+    private var hasSources: Bool { !summary.sources.isEmpty }
 
     /// Every branch keeps the timestamp. A bare "Catching up…" throws away the
     /// one fact the reader needs — how old this brief is — and both flags that
@@ -175,10 +180,26 @@ struct InsightsSummaryCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }
+
+            // Tap affordance — the whole card opens the sources screen. Shown only
+            // when there are sources to open (older cards have none).
+            if hasSources {
+                HStack(spacing: AppSpacing.xs) {
+                    Spacer()
+                    Text("\(summary.sources.count) source\(summary.sources.count == 1 ? "" : "s")")
+                        .font(AppTypography.caption)
+                        .fontWeight(.semibold)
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.caption)
+                }
+                .foregroundColor(AppColors.primaryBlue)
+            }
         }
         .padding(AppSpacing.lg)
         .background(AppColors.cardBackground)
         .cornerRadius(AppCornerRadius.large)
+        .contentShape(Rectangle())
+        .onTapGesture { if hasSources { onOpenSources?() } }
     }
 }
 

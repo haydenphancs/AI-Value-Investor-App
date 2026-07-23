@@ -294,6 +294,7 @@ class NewsInsightService:
                     soft is not None and soft <= now and market_active
                 ),
                 "price_move": _sanitize_price_move(row.get("price_move")),
+                "sources": _sanitize_sources(row.get("sources")),
                 "refreshing": False,
                 "ai_generated": True,
                 "trigger_reason": row.get("trigger_reason"),
@@ -380,6 +381,9 @@ class NewsInsightService:
             ),
             "ai_generated": False,
             "trigger_reason": None,
+            # The stories these headlines come from — so the sources screen works
+            # on the deterministic fallback card too (its bullets ARE these).
+            "sources": _corpus_sources(usable),
         }
 
     # ── Public: generation (sweeper only) ─────────────────────────────
@@ -461,10 +465,14 @@ class NewsInsightService:
             return None
 
         gen_seconds = round(time.monotonic() - started, 2)
+        # The source stories this summary was built from — the LITERAL corpus
+        # (title + url), captured at generation so a possibly-older card keeps its
+        # own point-in-time sources rather than the current window.
+        sources = _corpus_sources(articles)
         stored = await asyncio.to_thread(
             self._store,
             scope, card, inputset_id, trigger_reason, len(articles), market_active,
-            price_move, preserve_price_move,
+            price_move, preserve_price_move, sources,
         )
         if not stored:
             return None
@@ -538,6 +546,7 @@ class NewsInsightService:
         market_active: bool,
         price_move: Optional[Dict[str, Any]] = None,
         preserve_price_move: bool = False,
+        sources: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """Blocking upsert — always called via ``asyncio.to_thread``."""
         now = datetime.now(timezone.utc)
@@ -557,6 +566,9 @@ class NewsInsightService:
             "close_cycle": current_close_cycle_start(now).isoformat(),
             "soft_expires_at": (now + timedelta(seconds=soft)).isoformat(),
             "hard_expires_at": (now + timedelta(seconds=hard)).isoformat(),
+            # Additive JSONB (migration 092). The corpus stories this card was built
+            # from — [{title, url}]; NULL when unknown. Never blocks the news card.
+            "sources": _sanitize_sources(sources),
         }
         sanitized_move = _sanitize_price_move(price_move)
         # Additive JSONB (migration 091). Only a well-shaped block is written; a
@@ -740,6 +752,59 @@ def _sanitize_price_move(pm: Any) -> Optional[Dict[str, Any]]:
         "catalyst_tag": _clip(tag, 60) if tag else None,
         "reason": _clip(reason.strip(), 300),
     }
+
+
+# Max source rows kept per card — a screenful of provenance, not the whole corpus.
+_MAX_SOURCES = 8
+
+
+def _corpus_sources(
+    articles: Sequence[Dict[str, Any]], cap: int = _MAX_SOURCES
+) -> List[Dict[str, Any]]:
+    """The source stories a card was built from — ``[{title, url}]`` — from the
+    corpus dicts (headline + article_url). Drops rows with no title, dedups by url
+    (falling back to title when there is no url), and caps at ``cap``. Pure; the
+    result is fed straight to ``_sanitize_sources`` on write."""
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for a in articles:
+        if not isinstance(a, dict):
+            continue
+        title = str(a.get("headline") or "").strip()
+        if not title:
+            continue
+        url = str(a.get("article_url") or a.get("url") or "").strip()
+        key = url or title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"title": title, "url": url})
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _sanitize_sources(raw: Any) -> Optional[List[Dict[str, Any]]]:
+    """Coerce a ``sources`` value (from the builder, or a DB JSONB row) to a clean
+    ``[{title, url}]`` list, or ``None``. NEVER raises — a malformed value must not
+    block or fail the news card. Drops rows without a non-empty title; empty url is
+    allowed (a source with no link is still nameable, just not tappable). Idempotent
+    on read-back, and bounded so a giant stored blob can't bloat the response."""
+    if not isinstance(raw, list):
+        return None
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        url = item.get("url")
+        url = url.strip() if isinstance(url, str) else ""
+        out.append({"title": _clip(title, 200), "url": _clip(url, 500)})
+        if len(out) >= _MAX_SOURCES:
+            break
+    return out or None
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:

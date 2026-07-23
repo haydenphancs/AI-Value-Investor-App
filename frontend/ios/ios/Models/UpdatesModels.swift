@@ -207,6 +207,22 @@ struct InsightPriceMove {
     var isPositive: Bool { (changePercent ?? 0) >= 0 }
 }
 
+// MARK: - Insight Source
+/// One source story the Insights summary was built from. These are the LITERAL
+/// corpus inputs (headline + publisher url), so they're safe to attribute.
+struct InsightSource: Identifiable {
+    let id = UUID()
+    let title: String
+    /// nil when the source has no link (still nameable, just not tappable).
+    let url: URL?
+
+    /// Publisher host for the row subtitle, e.g. "reuters.com".
+    var host: String? {
+        guard let h = url?.host else { return nil }
+        return h.hasPrefix("www.") ? String(h.dropFirst(4)) : h
+    }
+}
+
 // MARK: - News Insight Summary
 struct NewsInsightSummary: Identifiable {
     let id = UUID()
@@ -217,6 +233,9 @@ struct NewsInsightSummary: Identifiable {
     let summaryType: String
     /// Grounded "why it moved" block; nil unless a big move triggered the card.
     var priceMove: InsightPriceMove? = nil
+    /// The source stories this summary was built from; empty when unavailable
+    /// (older cards) — the UI hides the tap affordance then.
+    var sources: [InsightSource] = []
 
     // ── Provenance (backend-driven) ──
     /// False for the deterministic headline-list fallback. The UI must NOT show
@@ -341,6 +360,11 @@ struct PriceMoveDTO: Codable, Sendable {
     }
 }
 
+struct InsightSourceDTO: Codable, Sendable {
+    let title: String
+    let url: String
+}
+
 struct AIInsightCardDTO: Codable, Sendable {
     let scope: String
     let headline: String
@@ -354,9 +378,10 @@ struct AIInsightCardDTO: Codable, Sendable {
     let aiGenerated: Bool?
     let triggerReason: String?
     let priceMove: PriceMoveDTO?
+    let sources: [InsightSourceDTO]?
 
     enum CodingKeys: String, CodingKey {
-        case scope, headline, bullets, sentiment, badge
+        case scope, headline, bullets, sentiment, badge, sources
         case articleCount = "article_count"
         case generatedAt = "generated_at"
         case isStale = "is_stale"
@@ -537,6 +562,12 @@ extension NewsInsightSummary {
                 catalystTag: pm.catalystTag,
                 reason: pm.reason
             )
+        }
+        self.sources = (dto.sources ?? []).compactMap { s in
+            let title = s.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { return nil }
+            let trimmed = s.url.trimmingCharacters(in: .whitespacesAndNewlines)
+            return InsightSource(title: title, url: trimmed.isEmpty ? nil : URL(string: trimmed))
         }
     }
 }

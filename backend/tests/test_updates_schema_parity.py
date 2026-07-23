@@ -25,6 +25,7 @@ from app.schemas.updates import (
     AIInsightCardResponse,
     EnrichUpdatesNewsResponse,
     PriceMoveResponse,
+    SourceRefResponse,
     UpdatesArticleResponse,
     UpdatesFeedResponse,
     UpdatesTabResponse,
@@ -39,10 +40,12 @@ IOS_TAB_KEYS = {
 IOS_INSIGHT_KEYS = {
     "scope", "headline", "bullets", "sentiment", "badge", "article_count",
     "generated_at", "is_stale", "refreshing", "ai_generated", "trigger_reason",
-    "price_move",
+    "price_move", "sources",
 }
 # The nested "why it moved" block iOS decodes (PriceMoveDTO in UpdatesModels.swift).
 IOS_PRICE_MOVE_KEYS = {"tier", "change_percent", "catalyst_tag", "reason"}
+# The nested source rows iOS decodes (InsightSourceDTO in UpdatesModels.swift).
+IOS_SOURCE_KEYS = {"title", "url"}
 IOS_ARTICLE_KEYS = {
     "id", "headline", "summary", "summary_bullets", "sentiment",
     "sentiment_confidence", "source_name", "source_logo_url", "published_at",
@@ -87,6 +90,28 @@ def test_price_move_defaults_none_and_is_optional():
     # still decodes the rest.
     card = AIInsightCardResponse(scope="AAPL", headline="H").model_dump()
     assert card["price_move"] is None
+
+
+def test_sources_expose_exactly_the_keys_ios_decodes():
+    card = AIInsightCardResponse(
+        scope="__MARKET__", headline="H", bullets=["a", "b"],
+        sources=[
+            SourceRefResponse(title="Fed holds rates", url="https://x/1"),
+            SourceRefResponse(title="Oil climbs", url=""),   # empty url is allowed
+        ],
+    ).model_dump()
+    assert card["sources"] is not None and len(card["sources"]) == 2
+    for s in card["sources"]:
+        assert set(s) == IOS_SOURCE_KEYS
+    # Nested list must not break allow_nan=False serialization.
+    json.dumps(card, allow_nan=False)
+
+
+def test_sources_default_none_and_is_optional():
+    # A card without sources (older pre-092 row) omits it; an old client ignoring
+    # the key still decodes the rest.
+    card = AIInsightCardResponse(scope="AAPL", headline="H").model_dump()
+    assert card["sources"] is None
 
 
 def test_article_exposes_exactly_the_keys_ios_decodes():

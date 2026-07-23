@@ -48,7 +48,10 @@ struct RevenueBreakdownChartView: View {
     // Grid values for Y-axis — aligned to totalRevenue so 100% matches bar top
     private var gridValues: [Double] {
         if data.isProfit {
-            let rev = data.totalRevenue
+            // `chartTopValue` already floors at 1 when there is no revenue, so
+            // derive the ladder from it: using a zero `totalRevenue` directly
+            // stacked all five grid lines (and their labels) on one pixel.
+            let rev = data.totalRevenue > 0 ? data.totalRevenue : chartTopValue
             return [0, rev * 0.25, rev * 0.5, rev * 0.75, rev]
         } else {
             let step = chartRange / 4
@@ -62,10 +65,15 @@ struct RevenueBreakdownChartView: View {
         }
     }
 
-    // Percentage labels (relative to total revenue)
+    // Percentage labels (relative to total revenue), one per grid value.
+    //
+    // The `totalRevenue <= 0` branch used to return the fixed 0/25/50/75/100%
+    // ladder while `gridValues` took the LOSS branch, so the labels asserted
+    // percentages that had nothing to do with the lines they were placed on.
+    // With no revenue there is no meaningful percentage — show a dash.
     private var percentageLabels: [String] {
         guard data.totalRevenue > 0 else {
-            return ["0%", "25%", "50%", "75%", "100%"]
+            return gridValues.map { _ in "—" }
         }
 
         if data.isProfit {
@@ -73,7 +81,9 @@ struct RevenueBreakdownChartView: View {
         } else {
             return gridValues.map { value in
                 let pct = (value / data.totalRevenue) * 100
-                return "\(Int(pct))%"
+                // `Int()` traps on non-finite / out-of-Int-range input.
+                guard pct.isFinite else { return "—" }
+                return "\(Int(min(max(pct, -9_999), 9_999)))%"
             }
         }
     }
@@ -120,11 +130,17 @@ struct RevenueBreakdownChartView: View {
     private var rightYAxis: some View {
         GeometryReader { geometry in
             let height = geometry.size.height
-            ForEach(Array(percentageLabels.enumerated()), id: \.offset) { index, label in
-                Text(label)
+            // Zip instead of indexing gridValues by percentageLabels' offset —
+            // they are two independently computed arrays that merely happen to
+            // be the same length today, and the subscript was unchecked.
+            ForEach(
+                Array(zip(percentageLabels, gridValues).enumerated()),
+                id: \.offset
+            ) { _, pair in
+                Text(pair.0)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
-                    .position(x: rightAxisWidth / 2, y: yPosition(for: gridValues[index], height: height))
+                    .position(x: rightAxisWidth / 2, y: yPosition(for: pair.1, height: height))
             }
         }
         .frame(width: rightAxisWidth, height: chartHeight)
@@ -238,12 +254,22 @@ struct RevenueBreakdownChartView: View {
         let pixelsPerUnit = height / chartRange
 
         // Calculate heights
-        let costOfSalesHeight = CGFloat(data.costOfSales) * pixelsPerUnit
-        let opExpenseHeight = CGFloat(data.operatingExpense) * pixelsPerUnit
-        let taxHeight = CGFloat(data.tax) * pixelsPerUnit
+        // A cost can legitimately be NEGATIVE (FMP reports a negative
+        // incomeTaxExpense as a tax benefit). A negative or non-finite
+        // `.frame(height:)` is rejected by SwiftUI, so clamp to 0 here the same
+        // way the revenue segments already do.
+        func barHeight(_ value: Double) -> CGFloat {
+            let h = CGFloat(value) * pixelsPerUnit
+            return h.isFinite ? max(h, 0) : 0
+        }
+
+        let costOfSalesHeight = barHeight(data.costOfSales)
+        let opExpenseHeight = barHeight(data.operatingExpense)
+        let taxHeight = barHeight(data.tax)
 
         // Top of cost bar aligns with top of revenue bar
-        let revenueTopY = CGFloat(chartTopValue - data.totalRevenue) * pixelsPerUnit
+        let rawRevenueTopY = CGFloat(chartTopValue - data.totalRevenue) * pixelsPerUnit
+        let revenueTopY = rawRevenueTopY.isFinite ? max(rawRevenueTopY, 0) : 0
 
         return VStack(spacing: 0) {
             // Space above the cost bar (aligns with revenue top)

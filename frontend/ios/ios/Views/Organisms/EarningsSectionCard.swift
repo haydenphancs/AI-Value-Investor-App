@@ -121,15 +121,20 @@ struct EarningsSectionCard: View {
 
             Spacer()
 
-            // Detail link
-            Button {
-                onDetailTap?()
-            } label: {
-                Text("Detail")
-                    .font(AppTypography.label)
-                    .foregroundColor(AppColors.primaryBlue)
-            }
-            .buttonStyle(PlainButtonStyle())
+            // The "Detail" affordance is hidden: all six handlers in
+            // TickerDetailViewModel are `print()` stubs — no detail screen
+            // exists — so the button did nothing when tapped. The callback
+            // parameter is intentionally kept so re-enabling is a one-line
+            // change once the drill-down ships.
+            // // Detail link
+            // Button {
+            // onDetailTap?()
+            // } label: {
+            // Text("Detail")
+            // .font(AppTypography.label)
+            // .foregroundColor(AppColors.primaryBlue)
+            // }
+            // .buttonStyle(PlainButtonStyle())
         }
     }
 

@@ -54,11 +54,23 @@ struct UpdatesView: View {
                         onFilterTapped: handleFilterTapped
                     )
 
-                    // Scrollable Content with sticky section headers
+                    // Scrollable Content with sticky section headers.
+                    //
+                    // ONE LazyVStack that is the ScrollView's DIRECT child, so it
+                    // actually virtualizes (realizes only near-viewport rows). The
+                    // feed used to nest THREE LazyVStacks (this one → the timeline
+                    // organism's pinned stack → a per-group stack), which defeated
+                    // virtualization: all ~50 rows + their AsyncImages materialized
+                    // at once on the main thread and re-laid-out on every regroup →
+                    // a UI freeze on large cached feeds (e.g. CRM). Sections are now
+                    // emitted inline via `newsSections()` — a @ViewBuilder, NOT a
+                    // child View struct, so the Sections stay direct children of
+                    // THIS stack and `pinnedViews` can pin their headers.
                     ScrollView(showsIndicators: false) {
-                        LazyVStack(spacing: 0) {
-                            // Insights Summary Card (scrollable). Tapping it opens
-                            // the sources screen when the card carries sources.
+                        LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                            // Insights Summary Card (scrollable, non-section child).
+                            // Tapping it opens the sources screen when the card
+                            // carries sources.
                             if let summary = viewModel.insightSummary {
                                 InsightsSummaryCard(
                                     summary: summary,
@@ -79,13 +91,7 @@ struct UpdatesView: View {
                             } else if viewModel.groupedNews.isEmpty {
                                 emptyState
                             } else {
-                                LiveNewsTimeline(
-                                    groupedNews: viewModel.groupedNews,
-                                    onOpenArticle: openArticle,
-                                    onArticleAppear: viewModel.articleDidAppear,
-                                    onRequestSummary: viewModel.summarizeArticle,
-                                    summarizingIDs: viewModel.summarizingIDs
-                                )
+                                newsSections()
                             }
 
                             // Bottom spacing for tab bar
@@ -162,6 +168,38 @@ struct UpdatesView: View {
             // source stories).
             .sheet(item: $insightSources) { summary in
                 InsightsDetailView(summary: summary)
+            }
+        }
+    }
+
+    // MARK: - News timeline (inlined for LazyVStack virtualization)
+
+    /// The grouped news feed as sticky-header Sections, emitted DIRECTLY into
+    /// `UpdatesView`'s single `LazyVStack` (see the ScrollView above). This is a
+    /// `@ViewBuilder` function, not a child `View` struct, on purpose: a
+    /// View-struct boundary would make the outer `LazyVStack` realize the whole
+    /// timeline eagerly (re-introducing the freeze) AND would stop `pinnedViews`
+    /// from pinning these section headers. Rows stay lazy, so `.onAppear` fires
+    /// only near the viewport — preserving the "reader position" signal that
+    /// drives paging and visible-window AI enrichment.
+    @ViewBuilder
+    private func newsSections() -> some View {
+        ForEach(viewModel.groupedNews) { group in
+            Section {
+                ForEach(Array(group.articles.enumerated()), id: \.element.stableID) { index, article in
+                    TimelineRow(
+                        article: article,
+                        isFirst: index == 0,
+                        isLast: index == group.articles.count - 1,
+                        onOpenLink: { openArticle(article) },
+                        onRequestSummary: { viewModel.summarizeArticle(article) },
+                        isSummarizing: viewModel.summarizingIDs.contains(article.apiId)
+                    )
+                    .padding(.horizontal, AppSpacing.lg)
+                    .onAppear { viewModel.articleDidAppear(article) }
+                }
+            } header: {
+                NewsSectionHeader(title: group.sectionTitle)
             }
         }
     }

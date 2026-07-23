@@ -70,6 +70,10 @@ async def test_catalyst_only_for_big_per_ticker_moves(stub):
     assert pm == {
         "tier": "Extreme", "change_pct": -8.2,
         "catalyst_tag": "Analyst Downgrade", "reason": "Cut to Underweight.",
+        # The grounded web sources are carried through raw for the caller to merge
+        # into the card's `sources`; `_sanitize_price_move` strips this key before
+        # the `price_move` block is stored.
+        "web_sources": [{"uri": "x"}],
     }
     assert await s._maybe_price_move("AAPL", _dec(TIER_UNUSUAL), NOW, q) is not None
     # Not big enough → no paid search.

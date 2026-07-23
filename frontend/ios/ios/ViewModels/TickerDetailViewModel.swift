@@ -37,6 +37,9 @@ class TickerDetailViewModel: ObservableObject {
     @Published var holdersData: HoldersData?
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
     @Published var isTechnicalDetailLoading: Bool = false
+    /// False until the Financials task group settles, so the tab can show a
+    /// skeleton instead of six indistinguishable blank cards.
+    @Published var isFinancialsLoaded: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
@@ -83,6 +86,9 @@ class TickerDetailViewModel: ObservableObject {
     private let newsPageSize: Int = 10
     private var chartRefreshTask: Task<Void, Never>?
     private var quotePollTask: Task<Void, Never>?
+    /// The in-flight full load, so `refresh()` can await it and a second
+    /// concurrent load can be coalesced instead of racing.
+    private var loadTask: Task<Void, Never>?
     /// Monotonic token for chart fetches. Each fetchChartData captures the value
     /// before awaiting and only applies its result if still current — so a slow
     /// response for a no-longer-selected range can't clobber a newer one
@@ -188,11 +194,29 @@ class TickerDetailViewModel: ObservableObject {
     // MARK: - Public Methods
 
     func loadTickerData() {
+        // Coalesce concurrent loads. Without this, repeated pull-to-refresh (or
+        // a refresh landing on top of the initial .task) ran N overlapping
+        // loads that all wrote the same @Published properties with no ordering
+        // guarantee — the six Financials sections could end up sourced from
+        // DIFFERENT loads. Mirrors the guards on fetchChartData / loadMoreNews.
+        //
+        // Keyed on `loadTask` ALONE, not `isLoading`: `isLoading` flips to false
+        // as soon as Phase 1 (the overview) lands, but the six Financials
+        // fetches run in Phase 2 AFTER that, so an `isLoading` guard was inert
+        // for the entire window it was meant to protect. `loadTask` is cleared
+        // (via defer) only when the whole load — Phase 2 included — finishes.
+        if let existing = loadTask, !existing.isCancelled {
+            print("⏳ TickerDetailVM: load already in flight — joining it")
+            return
+        }
+
         isLoading = true
         errorMessage = nil
+        isFinancialsLoaded = false
 
-        Task { [weak self] in
+        loadTask = Task { [weak self] in
             guard let self = self else { return }
+            defer { self.loadTask = nil }
 
             let ticker = self.tickerSymbol
             print("📊 TickerDetailVM: Loading data for \(ticker) from API...")
@@ -302,6 +326,12 @@ class TickerDetailViewModel: ObservableObject {
                 group.addTask { await self.fetchHolders(ticker) }
                 group.addTask { await self.checkWatchlistStatus() }
             }
+
+            // Financials sections have all settled (each either has data or is
+            // honestly nil). Until this flips, the tab can't tell "still
+            // loading" from "backend returned nothing" — both render as blank
+            // cards — so the view shows a skeleton while it's false.
+            self.isFinancialsLoaded = true
 
             // If the feed is empty/failed, stay empty (TickerNewsContent shows its
             // honest "No News Available" state). NEVER seed sampleDataForTicker — those
@@ -592,7 +622,10 @@ class TickerDetailViewModel: ObservableObject {
             print("✅ TickerDetailVM: Got revenue breakdown for \(ticker)")
         } catch {
             print("⚠️ TickerDetailVM: Revenue breakdown failed for \(ticker): \(error)")
-            // No sample fallback — section just won't show if nil
+            // Clear, like the five sibling fetchers. Leaving the old value in
+            // place meant a failed pull-to-refresh kept this card rendering
+            // stale figures while every other Financials card blanked out.
+            self.revenueBreakdownData = nil
         }
     }
 
@@ -835,8 +868,14 @@ class TickerDetailViewModel: ObservableObject {
         return dateFormatter.date(from: dateString)
     }
 
+    /// Pull-to-refresh. Must AWAIT the load: `loadTickerData()` is synchronous
+    /// and fire-and-forget, so this used to return before any network work
+    /// started — the spinner vanished instantly and each extra pull stacked
+    /// another full load, with the six Financials sections racing to write the
+    /// same @Published properties in no defined order.
     func refresh() async {
         loadTickerData()
+        await loadTask?.value
     }
 
     func toggleFavorite() {
@@ -1624,10 +1663,44 @@ class TickerDetailViewModel: ObservableObject {
             }
         }
 
-        // Profit margins
+        // Profit margins — omit a margin the company doesn't report (a bank has
+        // no gross profit) rather than grounding the AI on a fabricated 0%.
         if let pp = profitPowerData, let latest = pp.annualData.last {
-            parts.append("Margins — Gross: \(String(format: "%.1f", latest.grossMargin))%, Operating: \(String(format: "%.1f", latest.operatingMargin))%, Net: \(String(format: "%.1f", latest.netMargin))%, FCF: \(String(format: "%.1f", latest.fcfMargin))%")
-            parts.append("Sector Avg Net Margin: \(String(format: "%.1f", latest.sectorAverageNetMargin))%")
+            let margins: [(String, Double?)] = [
+                ("Gross", latest.grossMargin),
+                ("Operating", latest.operatingMargin),
+                ("Net", latest.netMargin),
+                ("FCF", latest.fcfMargin),
+            ]
+            let reported = margins.compactMap { name, value -> String? in
+                guard let value else { return nil }
+                return "\(name): \(String(format: "%.1f", value))%"
+            }
+            if !reported.isEmpty {
+                parts.append("Margins — \(reported.joined(separator: ", "))")
+            }
+            if let sectorAvg = latest.sectorAverageNetMargin {
+                parts.append("\(pp.peerWord) Avg Net Margin: \(String(format: "%.1f", sectorAvg))%")
+            }
+        }
+
+        // Revenue mix — the Financials tab renders "How TICKER Makes Money" and
+        // its first AI suggestion chip is "Break down the revenue", but this
+        // context never included the data to answer that.
+        if let rb = revenueBreakdownData, rb.totalRevenue > 0 {
+            let mix = rb.revenueSources
+                .prefix(6)
+                .map { "\($0.name) \(String(format: "%.0f", $0.percentage(of: rb.totalRevenue)))%" }
+                .joined(separator: ", ")
+            if !mix.isEmpty {
+                parts.append("Revenue mix (FY\(rb.fiscalYear)): \(mix)")
+            }
+        }
+
+        // Shareholder returns — the Signal of Confidence card lives on THIS tab,
+        // but its context was only ever attached to the Overview tab.
+        if let soc = signalOfConfidenceContext {
+            parts.append(soc)
         }
 
         // Health check

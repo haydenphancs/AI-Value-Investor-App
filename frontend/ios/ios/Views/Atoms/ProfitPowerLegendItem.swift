@@ -9,12 +9,16 @@ import SwiftUI
 
 struct ProfitPowerLegendItem: View {
     let marginType: ProfitMarginType
+    /// Replaces `marginType.shortName` — used so the benchmark line can be
+    /// labelled with the peer group the backend actually used ("Industry"
+    /// vs "Sector") instead of a hardcoded word.
+    var labelOverride: String? = nil
 
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             legendIndicator
 
-            Text(marginType.shortName)
+            Text(labelOverride ?? marginType.shortName)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.leading)

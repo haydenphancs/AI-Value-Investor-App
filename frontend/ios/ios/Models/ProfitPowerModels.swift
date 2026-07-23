@@ -74,14 +74,20 @@ enum ProfitMarginType: String, CaseIterable, Identifiable {
 struct ProfitPowerDataPoint: Identifiable {
     let id = UUID()
     let period: String              // e.g., "2020", "2021" or "Q1 '24"
-    let grossMargin: Double         // Percentage (e.g., 45.5 for 45.5%)
-    let operatingMargin: Double     // Percentage
-    let fcfMargin: Double           // Percentage
-    let netMargin: Double           // Percentage
-    let sectorAverageNetMargin: Double  // Percentage
+    // All margins are OPTIONAL: the backend sends null when the input is
+    // genuinely absent — a bank/insurer reports no grossProfit, and a thin
+    // industry has no sector median. These were non-optional `Double` and the
+    // DTO mapper coalesced `?? 0.0`, which drew a real-looking 0% line (and a
+    // dashed "sector average = 0.0%") for data that does not exist. nil must
+    // render as a GAP, matching GrowthDataPoint.yoyChangePercent.
+    let grossMargin: Double?        // Percentage (e.g., 45.5 for 45.5%)
+    let operatingMargin: Double?    // Percentage
+    let fcfMargin: Double?          // Percentage
+    let netMargin: Double?          // Percentage
+    let sectorAverageNetMargin: Double?  // Percentage — nil = no benchmark
 
-    /// Returns margin value for a specific margin type
-    func margin(for type: ProfitMarginType) -> Double {
+    /// Returns margin value for a specific margin type (nil = not available)
+    func margin(for type: ProfitMarginType) -> Double? {
         switch type {
         case .grossMargin: return grossMargin
         case .operatingMargin: return operatingMargin
@@ -97,6 +103,25 @@ struct ProfitPowerDataPoint: Identifiable {
 struct ProfitPowerSectionData {
     let annualData: [ProfitPowerDataPoint]
     let quarterlyData: [ProfitPowerDataPoint]
+    /// "industry" / "sector" — which peer group the benchmark line represents.
+    /// nil = unknown, so the UI keeps neutral wording.
+    let peerGroupLevel: String?
+
+    init(
+        annualData: [ProfitPowerDataPoint],
+        quarterlyData: [ProfitPowerDataPoint],
+        peerGroupLevel: String? = nil
+    ) {
+        self.annualData = annualData
+        self.quarterlyData = quarterlyData
+        self.peerGroupLevel = peerGroupLevel
+    }
+
+    /// Display word for the benchmark peer group — "Industry" when the backend
+    /// says the medians came from the company's industry peers, else "Sector".
+    var peerWord: String {
+        peerGroupLevel == "industry" ? "Industry" : "Sector"
+    }
 
     func dataPoints(for period: ProfitPowerPeriodType) -> [ProfitPowerDataPoint] {
         switch period {
@@ -105,25 +130,40 @@ struct ProfitPowerSectionData {
         }
     }
 
-    /// Get all margin values for chart scaling
+    /// Margin values for chart scaling, for ONE period type. Scaling the Annual
+    /// axis by the Quarterly extremes (and vice-versa) made each tab's axis
+    /// depend on the other tab's data.
+    func marginValues(for period: ProfitPowerPeriodType) -> [Double] {
+        dataPoints(for: period).flatMap {
+            [$0.grossMargin, $0.operatingMargin, $0.fcfMargin,
+             $0.netMargin, $0.sectorAverageNetMargin].compactMap { $0 }
+        }
+    }
+
+    /// All margin values across both period types (kept for callers that want
+    /// a stable axis across the toggle).
     var allMarginValues: [Double] {
-        let annual = annualData.flatMap { [
-            $0.grossMargin, $0.operatingMargin, $0.fcfMargin,
-            $0.netMargin, $0.sectorAverageNetMargin
-        ] }
-        let quarterly = quarterlyData.flatMap { [
-            $0.grossMargin, $0.operatingMargin, $0.fcfMargin,
-            $0.netMargin, $0.sectorAverageNetMargin
-        ] }
-        return annual + quarterly
+        marginValues(for: .annual) + marginValues(for: .quarterly)
     }
 
     var maxMargin: Double {
-        (allMarginValues.max() ?? 50) * 1.1
+        Self.safeMax(allMarginValues)
     }
 
     var minMargin: Double {
-        min(allMarginValues.min() ?? 0, 0)
+        Self.safeMin(allMarginValues)
+    }
+
+    /// Upper bound that is ALWAYS strictly greater than `safeMin` — a negative
+    /// max multiplied by 1.1 moves *down*, which inverted the chart domain for
+    /// an all-negative-margin company (e.g. -5 * 1.1 = -5.5 < min of -5).
+    static func safeMax(_ values: [Double]) -> Double {
+        guard let raw = values.max() else { return 50 }
+        return raw > 0 ? raw * 1.1 : max(raw + 5, 5)
+    }
+
+    static func safeMin(_ values: [Double]) -> Double {
+        min(values.min() ?? 0, 0)
     }
 }
 

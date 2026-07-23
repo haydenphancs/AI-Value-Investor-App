@@ -14,6 +14,10 @@ struct TickerFinancialsContent: View {
     let signalOfConfidenceData: SignalOfConfidenceSectionData?
     let revenueBreakdownData: RevenueBreakdownData?
     let healthCheckData: HealthCheckSectionData?
+    /// False while the Financials fetches are still in flight. Without it, a
+    /// loading tab and a tab whose backend returned nothing render identically
+    /// (six missing cards), so the user can't tell which they're looking at.
+    var isLoaded: Bool = true
     var onEarningsDetailTap: (() -> Void)?
     var onGrowthDetailTap: (() -> Void)?
     var onProfitPowerDetailTap: (() -> Void)?
@@ -83,12 +87,41 @@ struct TickerFinancialsContent: View {
                 )
             }
 
+            // Still loading, or everything failed — say which.
+            if !isLoaded && !hasAnySection {
+                loadingPlaceholder
+            } else if isLoaded && !hasAnySection {
+                ChartUnavailableView(
+                    message: "Financial data isn't available for this company right now.",
+                    systemImage: "doc.text.magnifyingglass"
+                )
+                .padding(.vertical, AppSpacing.xl)
+            }
+
             // Bottom spacing for AI bar
             Spacer()
                 .frame(height: 120)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.lg)
+    }
+
+    private var hasAnySection: Bool {
+        earningsData != nil || growthData != nil || revenueBreakdownData != nil
+            || profitPowerData != nil || healthCheckData != nil
+            || signalOfConfidenceData != nil
+    }
+
+    private var loadingPlaceholder: some View {
+        VStack(spacing: AppSpacing.lg) {
+            ForEach(0..<3, id: \.self) { _ in
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .fill(AppColors.cardBackground)
+                    .frame(height: 180)
+                    .shimmer()
+            }
+        }
+        .accessibilityLabel("Loading financials")
     }
 }
 

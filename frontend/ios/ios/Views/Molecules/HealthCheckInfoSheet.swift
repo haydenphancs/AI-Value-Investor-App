@@ -59,7 +59,7 @@ struct HealthCheckInfoSheet: View {
                     .foregroundColor(AppColors.textPrimary)
             }
 
-            Text("A quick assessment of a company's financial strength across four key dimensions that matter most to value investors.")
+            Text("A quick assessment of a company's financial strength across the key dimensions that matter most to value investors. Metrics without reliable data for this company are left out, so the number shown varies by company.")
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -204,7 +204,7 @@ struct HealthCheckInfoSheet: View {
                 tipCard(
                     number: "1",
                     title: "Screen for Quality",
-                    description: "Use Health Check as a first filter. Companies with 3+ passing metrics often have \"margin of safety\" - a core value investing principle."
+                    description: "Use Health Check as a first filter. Companies rated Good or Excellent often have a \"margin of safety\" - a core value investing principle."
                 )
 
                 tipCard(
@@ -268,11 +268,11 @@ struct HealthCheckInfoSheet: View {
                 .foregroundColor(AppColors.textPrimary)
 
             VStack(spacing: AppSpacing.md) {
-                ratingRow(rating: .excellent, description: "All 4 metrics pass - exceptional financial health")
-                ratingRow(rating: .good, description: "3 of 4 metrics pass - solid fundamentals")
-                ratingRow(rating: .mix, description: "2 of 4 metrics pass - mixed signals, investigate further")
-                ratingRow(rating: .caution, description: "1 of 4 metrics pass - proceed with caution")
-                ratingRow(rating: .poor, description: "0 of 4 metrics pass - significant concerns")
+                ratingRow(rating: .excellent, description: "Every metric beats its peer group - exceptional financial health")
+                ratingRow(rating: .good, description: "About three quarters score well - solid fundamentals")
+                ratingRow(rating: .mix, description: "About half score well - mixed signals, investigate further")
+                ratingRow(rating: .caution, description: "About a quarter score well - proceed with caution")
+                ratingRow(rating: .poor, description: "Few or none score well - significant concerns")
             }
             .padding(AppSpacing.lg)
             .background(

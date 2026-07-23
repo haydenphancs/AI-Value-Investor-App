@@ -65,7 +65,8 @@ struct HealthCheckMetricCard: View {
         VStack(spacing: AppSpacing.xs) {
             HealthCheckGaugeBar(
                 position: metric.gaugePosition,
-                metricType: metric.type
+                metricType: metric.type,
+                hasBenchmark: metric.comparisonValue != nil
             )
 
             if metric.type == .altmanZScore {

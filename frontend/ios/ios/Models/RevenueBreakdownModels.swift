@@ -151,10 +151,16 @@ struct RevenueBreakdownData {
         return prefix + formatLargeNumber(abs(netProfit))
     }
 
+    /// Net margin as a percentage of revenue, **signed**.
+    ///
+    /// This used to return `abs(netProfit) / totalRevenue`, so a company losing
+    /// more than its revenue rendered as a bare "103%" in the legend next to
+    /// the "Net Loss" label — a reader scanning the percentage column saw a
+    /// positive-looking figure for a loss. The sign is the whole point here.
     func netProfitPercentage() -> Double {
         guard totalRevenue > 0 else { return 0 }
-        let pct = (abs(netProfit) / totalRevenue) * 100
-        return min(pct, 999) // Cap to prevent display overflow
+        let pct = (netProfit / totalRevenue) * 100
+        return min(max(pct, -999), 999) // Cap to prevent display overflow
     }
 
     // MARK: - Chart Calculations

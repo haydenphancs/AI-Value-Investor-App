@@ -24,28 +24,49 @@ struct SignalOfConfidenceChartView: View {
 
     // MARK: - Computed Properties
 
-    private var maxBarValue: Double {
+    /// Stacked bar total per quarter, for the selected view type.
+    private var barTotals: [Double] {
         switch viewType {
         case .yield:
-            let maxTotal = dataPoints.map { $0.dividendYield + $0.buybackYield }.max() ?? 1
-            return maxTotal * 1.15
+            return dataPoints.map { $0.dividendYield + $0.buybackYield }
         case .capital:
-            let maxTotal = dataPoints.map { $0.dividendAmount + $0.buybackAmount }.max() ?? 1
-            return maxTotal * 1.15
+            return dataPoints.map { $0.dividendAmount + $0.buybackAmount }
         }
     }
 
-    private var sharesRange: (min: Double, max: Double) {
-        let shares = dataPoints.map { $0.sharesOutstanding }
-        let minShares = (shares.min() ?? 0) * 0.9
-        let maxShares = (shares.max() ?? 1) * 1.1
-        return (minShares, maxShares)
+    /// True when at least one quarter returned capital. A company that pays no
+    /// dividend AND buys back no stock (very common) has all-zero totals — the
+    /// old `.max() ?? 1` never fired, giving `maxBarValue == 0`, a
+    /// `0...0` chart scale, three identical grid values under
+    /// `ForEach(id: \.self)`, and a zero denominator in the shares normaliser.
+    private var hasCapitalReturn: Bool { barTotals.contains { $0 > 0 } }
+
+    /// Y domain for the stacked bars — always starts at 0 (bars grow from the
+    /// baseline) and is never zero-width.
+    private var barDomain: ClosedRange<Double> {
+        let safe = ChartDomain.make(
+            barTotals, includeZero: true, headroomFraction: 0.15, fallback: 0...1
+        )
+        return 0...Swift.max(safe.upperBound, ChartDomain.minimumSpan)
     }
 
-    // Grid line values (4 horizontal lines)
+    private var maxBarValue: Double { barDomain.upperBound }
+
+    private var sharesRange: (min: Double, max: Double) {
+        let shares = dataPoints.map { $0.sharesOutstanding }.filter { $0.isFinite }
+        guard let lo = shares.min(), let hi = shares.max(), hi > 0 else {
+            return (0, 1)
+        }
+        // Additive padding: a share count is always positive here, but keep the
+        // range strictly non-degenerate when every quarter has identical shares.
+        let pad = max((hi - lo) * 0.1, hi * 0.01)
+        return (max(lo - pad, 0), hi + pad)
+    }
+
+    // Grid line values (3 interior lines). Distinct by construction, so they
+    // stay valid `ForEach(id: \.self)` identities.
     private var gridValues: [Double] {
-        let step = maxBarValue / 4
-        return [step, step * 2, step * 3]
+        ChartDomain.gridValues(in: barDomain, count: 3)
     }
 
     /// Total height of x-axis + data label rows below the chart
@@ -54,7 +75,26 @@ struct SignalOfConfidenceChartView: View {
         labelRowHeight + AppSpacing.sm + (labelRowHeight + AppSpacing.sm) * labelRowCount
     }
 
+    /// Bar width. Was `count > 6 ? .fixed(18) : .fixed(18)` — both branches
+    /// identical, so with 12+ quarters the two 18pt bars overflowed a column
+    /// narrower than 36pt and bled into the neighbouring period.
+    private var barWidth: CGFloat {
+        dataPoints.count > Int(visibleColumnCount) ? 12 : 18
+    }
+
     var body: some View {
+        if dataPoints.isEmpty {
+            ChartUnavailableView(
+                message: "Dividend and buyback history isn't available for this company.",
+                systemImage: "chart.bar.xaxis"
+            )
+            .frame(height: chartHeight)
+        } else {
+            chartBody
+        }
+    }
+
+    private var chartBody: some View {
         HStack(alignment: .top, spacing: 0) {
             // Left Y-axis labels (fixed, never scrolls)
             VStack(spacing: 0) {
@@ -127,7 +167,7 @@ struct SignalOfConfidenceChartView: View {
                 BarMark(
                     x: .value("Period", dataPoint.period),
                     y: .value("Dividends", viewType == .yield ? dataPoint.dividendYield : dataPoint.dividendAmount),
-                    width: dataPoints.count > 6 ? .fixed(18) : .fixed(18)
+                    width: .fixed(barWidth)
                 )
                 .foregroundStyle(AppColors.confidenceDividends)
                 .cornerRadius(3)
@@ -139,7 +179,7 @@ struct SignalOfConfidenceChartView: View {
                 BarMark(
                     x: .value("Period", dataPoint.period),
                     y: .value("Buybacks", viewType == .yield ? dataPoint.buybackYield : dataPoint.buybackAmount),
-                    width: dataPoints.count > 6 ? .fixed(18) : .fixed(18)
+                    width: .fixed(barWidth)
                 )
                 .foregroundStyle(AppColors.confidenceBuybacks)
                 .cornerRadius(3)
@@ -176,7 +216,7 @@ struct SignalOfConfidenceChartView: View {
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
-        .chartYScale(domain: 0...maxBarValue)
+        .chartYScale(domain: barDomain)
         .chartPlotStyle { plotArea in
             plotArea
                 .background(Color.clear)
@@ -186,20 +226,25 @@ struct SignalOfConfidenceChartView: View {
     // MARK: - Y-Axis Labels
 
     private var leftYAxisLabels: some View {
+        // The bar axis measures dividends + buybacks. When the company returned
+        // NO capital in any quarter the domain is a synthetic 0...1 (needed to
+        // keep the scale non-degenerate), so printing "0.9% / 0.6% / 0.3%" off
+        // it would invent gradations that describe nothing. Show only the
+        // baseline in that case — the shares-outstanding line is still real.
         VStack {
-            Text(formatLeftAxisValue(maxBarValue * 0.9))
+            Text(hasCapitalReturn ? formatLeftAxisValue(maxBarValue * 0.9) : "")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
 
             Spacer()
 
-            Text(formatLeftAxisValue(maxBarValue * 0.6))
+            Text(hasCapitalReturn ? formatLeftAxisValue(maxBarValue * 0.6) : "")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
 
             Spacer()
 
-            Text(formatLeftAxisValue(maxBarValue * 0.3))
+            Text(hasCapitalReturn ? formatLeftAxisValue(maxBarValue * 0.3) : "")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
 
@@ -220,46 +265,55 @@ struct SignalOfConfidenceChartView: View {
 
     /// Vertical position (0 = top, 1 = bottom) of the newest shares on the right Y-axis
     private var newestSharesYPosition: CGFloat {
-        let range = sharesRange.max - sharesRange.min
-        guard range > 0 else { return 0.5 }
-        // Invert because VStack top = max, bottom = min
-        return CGFloat(1.0 - (newestShares - sharesRange.min) / range)
+        sharesYFractionFromTop(newestShares)
     }
 
     private var rightYAxisLabels: some View {
-        ZStack(alignment: .leading) {
-            // Static axis labels
-            VStack {
-                Text(formatSharesValue(sharesRange.max))
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-
-                Spacer()
-
-                let midValue = (sharesRange.max + sharesRange.min) / 2
-                Text(formatSharesValue(midValue))
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-
-                Spacer()
-
-                Text(formatSharesValue(sharesRange.min))
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
-
-            // Highlighted newest shares value positioned at the dashed line
-            GeometryReader { geometry in
-                let yPos = newestSharesYPosition * geometry.size.height
-                Text(formatSharesValue(newestShares))
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(AppColors.confidenceSharesOutstanding)
-                    .fixedSize()
-                    .position(x: geometry.size.width / 2, y: yPos)
+        // Every label — the static max/mid/min AND the highlighted newest — is
+        // positioned with `sharesYFractionFromTop`, the exact inverse of the
+        // mapping the shares LINE is drawn with. Previously the static labels
+        // were laid out flush over the full height (implying a full-height
+        // linear axis) while the line was compressed into the 15–85% band, so
+        // reading the line against this axis gave the wrong share count for
+        // every point except the midpoint.
+        GeometryReader { geometry in
+            let midValue = (sharesRange.max + sharesRange.min) / 2
+            ZStack(alignment: .leading) {
+                axisLabel(
+                    formatSharesValue(sharesRange.max), value: sharesRange.max,
+                    in: geometry, color: AppColors.textMuted, bold: false
+                )
+                axisLabel(
+                    formatSharesValue(midValue), value: midValue,
+                    in: geometry, color: AppColors.textMuted, bold: false
+                )
+                axisLabel(
+                    formatSharesValue(sharesRange.min), value: sharesRange.min,
+                    in: geometry, color: AppColors.textMuted, bold: false
+                )
+                // Highlighted newest shares value, sitting on the dashed connector
+                axisLabel(
+                    formatSharesValue(newestShares), value: newestShares,
+                    in: geometry, color: AppColors.confidenceSharesOutstanding, bold: true
+                )
             }
         }
         .frame(height: chartHeight)
         .padding(.leading, AppSpacing.xs)
+    }
+
+    private func axisLabel(
+        _ text: String, value: Double, in geometry: GeometryProxy,
+        color: Color, bold: Bool
+    ) -> some View {
+        Text(text)
+            .font(bold ? .system(size: 11, weight: .bold) : AppTypography.caption)
+            .foregroundColor(color)
+            .fixedSize()
+            .position(
+                x: geometry.size.width / 2,
+                y: sharesYFractionFromTop(value) * geometry.size.height
+            )
     }
 
     // MARK: - X-Axis Labels (scrollable, positioned via GeometryReader)
@@ -352,15 +406,35 @@ struct SignalOfConfidenceChartView: View {
 
     // MARK: - Helper Functions
 
-    /// Normalize shares outstanding to fit within the bar chart's value range
-    private func normalizeShares(_ shares: Double) -> Double {
-        let range = sharesRange.max - sharesRange.min
-        guard range > 0 else { return maxBarValue * 0.5 }
+    /// Fraction of the plot band (0…1) the shares line is drawn in. The line is
+    /// inset so it can't collide with the bars; the right-hand axis labels use
+    /// the SAME inset (see `sharesYFractionFromTop`) so a value read off the
+    /// axis matches the point plotted on the line.
+    private static let sharesBandLow: Double = 0.15
+    private static let sharesBandHigh: Double = 0.85
 
-        let normalizedShares = (shares - sharesRange.min) / range // 0 to 1
-        let targetMin = maxBarValue * 0.15
-        let targetMax = maxBarValue * 0.85
-        return targetMin + normalizedShares * (targetMax - targetMin)
+    /// Where `shares` sits within `sharesRange`, 0…1. 0.5 when the range is
+    /// degenerate (every quarter identical) so the line is flat and centred.
+    private func sharesFraction(_ shares: Double) -> Double {
+        let range = sharesRange.max - sharesRange.min
+        guard shares.isFinite, range > 0 else { return 0.5 }
+        return Swift.min(Swift.max((shares - sharesRange.min) / range, 0), 1)
+    }
+
+    /// Normalize shares outstanding into the bar chart's value range.
+    private func normalizeShares(_ shares: Double) -> Double {
+        let band = Self.sharesBandLow
+            + sharesFraction(shares) * (Self.sharesBandHigh - Self.sharesBandLow)
+        return maxBarValue * band
+    }
+
+    /// Vertical position of `shares` as a fraction from the TOP of the plot —
+    /// the inverse of `normalizeShares`, used to place the right-axis labels on
+    /// the same scale the line is drawn against.
+    private func sharesYFractionFromTop(_ shares: Double) -> CGFloat {
+        let band = Self.sharesBandLow
+            + sharesFraction(shares) * (Self.sharesBandHigh - Self.sharesBandLow)
+        return CGFloat(1.0 - band)
     }
 
     private func formatLeftAxisValue(_ value: Double) -> String {

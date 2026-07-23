@@ -63,6 +63,38 @@ def _validate_ticker(ticker: str) -> str:
 
 # ── Helpers ───────────────────────────────────────────────────────
 
+def _as_list(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize an FMP payload to a list of record dicts.
+
+    ``FMPClient._make_request`` is typed ``-> Any`` ("list or dict"). A bare dict
+    (an FMP error shape returned with a 200) would make ``income_raw[0]`` raise
+    ``KeyError`` and iteration yield string keys → a bare 502 for the section.
+    """
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if payload:
+        logger.warning(
+            "revenue_breakdown: expected a list from FMP, got %s — degrading to empty",
+            type(payload).__name__,
+        )
+    return []
+
+
+def _record_year(record: Dict[str, Any]) -> str:
+    """Fiscal/calendar year of an FMP record as a string, or "" when unknown.
+
+    Used to PAIR a product-segmentation record with the income statement for the
+    same fiscal year. Prefers ``fiscalYear`` (present on the stable segmentation
+    payload), then ``calendarYear``, then the period-end date. Null-safe.
+    """
+    for key in ("fiscalYear", "calendarYear"):
+        val = record.get(key)
+        if val:
+            return str(val)
+    date_str = record.get("date") or ""
+    return date_str[:4] if len(date_str) >= 4 else ""
+
+
 def _safe_float(record: Dict[str, Any], key: str, default: float = 0.0) -> float:
     """Safely extract a float value, returning *default* on None/error."""
     val = record.get(key)
@@ -153,7 +185,7 @@ def _find_next_earnings_date_simple(
 ) -> Optional[str]:
     """Return the first future earnings date as yyyy-MM-dd, or None."""
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for ec in sorted(ec_records, key=lambda r: r.get("date", "")):
+    for ec in sorted(ec_records, key=lambda r: r.get("date") or ""):
         ec_date = (ec.get("date") or "")[:10]
         if not ec_date or ec_date <= today_str:
             continue
@@ -302,7 +334,10 @@ class RevenueBreakdownService:
         # Parallel FMP calls
         seg_raw, income_raw, ec_raw = await asyncio.gather(
             self.fmp.get_revenue_product_segmentation(ticker, period="annual"),
-            self.fmp.get_income_statement(ticker, period="annual", limit=1),
+            # limit=5 (was 1): the segmentation feed often lags the income
+            # statement by a fiscal year, so we need several years available to
+            # pair the segments with the SAME year's costs (see below).
+            self.fmp.get_income_statement(ticker, period="annual", limit=5),
             self.fmp.get_earning_calendar_full(ticker),
             return_exceptions=True,
         )
@@ -318,28 +353,63 @@ class RevenueBreakdownService:
             logger.warning(f"Earnings calendar fetch failed for {ticker}: {ec_raw}")
             ec_raw = []
 
-        # ── Income statement fields ──
-        income = income_raw[0] if income_raw else {}
+        # A non-list FMP payload (error dict returned with a 200) would make
+        # income_raw[0] raise KeyError and the segment sort iterate string keys.
+        seg_raw = _as_list(seg_raw)
+        income_raw = _as_list(income_raw)
+        ec_raw = _as_list(ec_raw)
+
+        # ── Pair the segmentation year with the SAME fiscal year's income ──
+        # The segments (revenue) and the cost/tax figures must come from ONE
+        # fiscal year: FMP's product segmentation commonly lags the income
+        # statement by a year, so blindly pairing "latest segmentation" with
+        # "latest income" reported one year's revenue mix against another
+        # year's costs — and labelled the card with the income year. Walk the
+        # segmentation records newest→oldest and take the first year that also
+        # has an income statement; degrade to the income-only Total Revenue
+        # fallback rather than mixing years.
+        income_by_year: Dict[str, Dict[str, Any]] = {}
+        for rec in income_raw:
+            yr = _record_year(rec)
+            if yr and yr not in income_by_year:
+                income_by_year[yr] = rec
+
+        sorted_seg = sorted(seg_raw, key=lambda r: r.get("date") or "", reverse=True)
+
+        revenue_sources: List[RevenueSourceSchema] = []
+        income: Dict[str, Any] = {}
+        for seg_rec in sorted_seg:
+            seg_year = _record_year(seg_rec)
+            matched_income = income_by_year.get(seg_year) if seg_year else None
+            if matched_income is None:
+                continue
+            sources = _extract_segments(seg_rec)
+            if not sources:
+                continue
+            revenue_sources = sources
+            income = matched_income
+            break
+
+        if not revenue_sources and sorted_seg:
+            logger.warning(
+                "revenue_breakdown %s: segmentation years %s have no matching income "
+                "statement (income years %s) — falling back to income-only Total Revenue "
+                "rather than pairing mismatched fiscal years",
+                ticker,
+                [_record_year(r) for r in sorted_seg[:3]],
+                sorted(income_by_year.keys(), reverse=True),
+            )
+
+        # Costs/tax/label come from the SAME record the segments were paired
+        # with; only the no-segment path falls back to the latest income year.
+        if not income:
+            income = income_raw[0] if income_raw else {}
+
         cost_of_sales = _safe_float(income, "costOfRevenue")
         operating_expense = _safe_float(income, "operatingExpenses")
         tax = _safe_float(income, "incomeTaxExpense")
         total_revenue_income = _safe_float(income, "revenue")
-        fiscal_year = str(
-            income.get("calendarYear")
-            or (income.get("date", "")[:4] if income.get("date") else "")
-        )
-
-        # ── Segments ──
-        # FMP returns list of dicts, one per period. Take the most recent.
-        revenue_sources: List[RevenueSourceSchema] = []
-        if seg_raw and isinstance(seg_raw, list) and len(seg_raw) > 0:
-            # Sort by date descending to get most recent
-            sorted_seg = sorted(
-                seg_raw,
-                key=lambda r: r.get("date", ""),
-                reverse=True,
-            )
-            revenue_sources = _extract_segments(sorted_seg[0])
+        fiscal_year = _record_year(income)
 
         # Fallback: if no segments, use total revenue from income statement
         if not revenue_sources and total_revenue_income > 0:

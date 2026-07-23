@@ -347,12 +347,16 @@ final class UpdatesViewModel: ObservableObject {
             }
 
             let dtos = response.articles ?? []
-            let articles = dtos.compactMap { NewsArticle(dto: $0) }
+            // Dedup by non-empty `apiId` so `stableID` is unique across the feed
+            // (the timeline keys `ForEach` on it). Empty-`apiId` rows are all
+            // kept — each has a unique UUID fallback.
+            let articles = dedupedByApiID(dtos.compactMap { NewsArticle(dto: $0) })
             let dropped = dtos.count - articles.count
             if dropped > 0 {
                 // Not silent: a spike here means the backend started emitting
-                // rows iOS cannot render (missing headline / unparseable date).
-                print("⚠️ UpdatesVM: Dropped \(dropped)/\(dtos.count) unrenderable articles for \(scope)")
+                // rows iOS cannot render (missing headline / unparseable date)
+                // or duplicate ids in one page.
+                print("⚠️ UpdatesVM: Dropped \(dropped)/\(dtos.count) unrenderable/duplicate articles for \(scope)")
             }
 
             allNewsArticles = articles
@@ -459,10 +463,14 @@ final class UpdatesViewModel: ObservableObject {
 
             // De-dup by the backend id. `published_at` is not unique (FMP stamps
             // whole batches to the same minute) and a refresh between pages can
-            // shift the window, so an id already on screen must never be
-            // appended again — SwiftUI's ForEach would crash on the duplicate.
-            let seen = Set(allNewsArticles.map { $0.apiId })
-            let fresh = page.filter { !seen.contains($0.apiId) }
+            // shift the window, so a non-empty id already on screen must never be
+            // appended again — the timeline's `ForEach(id: \.stableID)` renders
+            // garbled rows on a duplicate. Seed only NON-EMPTY ids: empty-`apiId`
+            // rows carry a unique UUID and must all survive (the old
+            // `Set(map { apiId })` lumped them under "" and dropped every
+            // empty-id page row after the first).
+            let seen = Set(allNewsArticles.map { $0.apiId }.filter { !$0.isEmpty })
+            let fresh = dedupedByApiID(page, alreadySeen: seen)
 
             allNewsArticles.append(contentsOf: fresh)
             loadedOffset += dtos.count
@@ -618,6 +626,32 @@ final class UpdatesViewModel: ObservableObject {
             print("⚠️ UpdatesVM: Insight re-poll failed for \(scope): \(AppError.from(error).message)")
             return true   // stop polling on error rather than hammering
         }
+    }
+
+    // MARK: - Identity dedup
+
+    /// Drop rows whose NON-EMPTY `apiId` already appeared, preserving order and
+    /// keeping EVERY empty-`apiId` row (each carries a unique `UUID` fallback for
+    /// identity). This guarantees `NewsArticle.stableID` is unique across the
+    /// feed, so the timeline's `ForEach(id: \.stableID)` can never hit a
+    /// duplicate key — a duplicate renders garbled rows and risks a crash. Seed
+    /// `alreadySeen` with the non-empty ids already on screen (pagination); pass
+    /// empty for a fresh load.
+    private func dedupedByApiID(
+        _ articles: [NewsArticle],
+        alreadySeen: Set<String> = []
+    ) -> [NewsArticle] {
+        var seen = alreadySeen
+        var result: [NewsArticle] = []
+        result.reserveCapacity(articles.count)
+        for article in articles {
+            if article.apiId.isEmpty {
+                result.append(article)                 // no server id → unique UUID identity
+            } else if seen.insert(article.apiId).inserted {
+                result.append(article)                 // first sighting of this server id
+            }
+        }
+        return result
     }
 
     // MARK: - Filtering + grouping

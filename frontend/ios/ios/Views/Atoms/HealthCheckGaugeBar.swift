@@ -10,10 +10,16 @@ import SwiftUI
 struct HealthCheckGaugeBar: View {
     let position: Double  // 0.0 to 1.0
     let metricType: HealthCheckMetricType
+    /// Whether a peer benchmark backs the 50% anchor tick.
+    var hasBenchmark: Bool = true
     var height: CGFloat = 8
 
     private var clampedPosition: Double {
-        min(max(position, 0.02), 0.98)  // Keep indicator visible
+        // NaN survives `min(max(...))` — with a NaN both comparisons are false,
+        // so the result is NaN and the `.offset` below becomes invalid (the
+        // indicator vanishes). Check finiteness first.
+        guard position.isFinite else { return 0.5 }
+        return min(max(position, 0.02), 0.98)  // Keep indicator visible
     }
 
     /// Returns gradient colors based on metric type
@@ -107,11 +113,18 @@ struct HealthCheckGaugeBar: View {
                     )
                     .frame(height: height)
 
-                // Sector average marker (white vertical line at 50% — matches backend gauge anchor)
-                Rectangle()
-                    .fill(Color.white.opacity(0.6))
-                    .frame(width: 2, height: height + 4)
-                    .offset(x: geometry.size.width * 0.5 - 1)
+                // Peer-average marker (white vertical line at 50% — matches the
+                // backend gauge anchor). Drawn ONLY when a benchmark actually
+                // exists: it used to render for every metric, so a metric with
+                // `comparison_value: null` (thin industry, or Altman Z, which
+                // has no peer benchmark at all) showed a tick for a benchmark
+                // that isn't there — while its "vs X" caption was hidden.
+                if hasBenchmark {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.6))
+                        .frame(width: 2, height: height + 4)
+                        .offset(x: geometry.size.width * 0.5 - 1)
+                }
 
                 // Position indicator (white circle)
                 Circle()

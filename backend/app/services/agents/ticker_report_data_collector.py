@@ -4358,7 +4358,7 @@ def _build_annual_timeline(
     # distinct from a real 0.0.
     Row = Tuple[int, Optional[float], Optional[float], bool, Optional[int], Optional[int]]
     actuals: List[Row] = []
-    for rec in sorted((income or []), key=lambda r: r.get("date", "")):
+    for rec in sorted((income or []), key=lambda r: r.get("date") or ""):
         y = _year(rec)
         if y is not None:
             # Reported actuals have no analyst coverage.
@@ -4369,7 +4369,7 @@ def _build_annual_timeline(
     last_actual = max((y for y, *_ in actuals), default=None)
 
     forecasts: List[Row] = []
-    for est in sorted((estimates or []), key=lambda r: r.get("date", "")):
+    for est in sorted((estimates or []), key=lambda r: r.get("date") or ""):
         y = _year(est)
         if y is None:
             continue

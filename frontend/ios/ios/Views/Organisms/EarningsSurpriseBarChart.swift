@@ -19,15 +19,21 @@ struct EarningsSurpriseBarChart: View {
             return (min: -10, max: 10)
         }
         
-        let minSurprise = surprises.min() ?? -10
-        let maxSurprise = surprises.max() ?? 10
-        
+        let finite = surprises.filter { $0.isFinite }
+        guard !finite.isEmpty else { return (min: -10, max: 10) }
+
+        let minSurprise = finite.min() ?? -10
+        let maxSurprise = finite.max() ?? 10
+
         // Find the maximum absolute value to make range symmetric
         let absMax = max(abs(minSurprise), abs(maxSurprise))
-        
-        // Round up to closest clean value (1, 5, 10, 20, 50, etc.)
-        let roundedMax = ceil(absMax)
-        
+
+        // Round up to a clean value, but never to 0: a company that met
+        // consensus exactly every quarter (all surprises 0, or all |x| < 1)
+        // collapsed the range to (-0, 0), which stacked all three axis labels
+        // at the same y reading "0%".
+        let roundedMax = max(ceil(absMax), 1)
+
         return (min: -roundedMax, max: roundedMax)
     }
     
@@ -134,7 +140,12 @@ struct EarningsSurpriseBarChart: View {
     }
     
     private func formatYValue(_ value: Double) -> String {
-        return "\(Int(value))%"
+        // `Int(value)` TRAPS on a non-finite or out-of-Int-range Double. A
+        // surprise percent is unbounded off the wire (a near-zero consensus
+        // estimate produces an astronomically large one), so clamp first.
+        guard value.isFinite else { return "—" }
+        let clamped = min(max(value, -9_999), 9_999)
+        return "\(Int(clamped))%"
     }
 }
 

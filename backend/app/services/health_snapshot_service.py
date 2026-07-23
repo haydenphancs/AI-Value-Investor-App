@@ -134,7 +134,7 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
     """
     if not quarterly:
         return {}
-    sorted_q = sorted(quarterly, key=lambda r: r.get("date", ""), reverse=True)[:4]
+    sorted_q = sorted(quarterly, key=lambda r: r.get("date") or "", reverse=True)[:4]
     if len(sorted_q) < 4:
         # Fall back to whatever quarters we have, weighted by sum count.
         # Better to expose partial data than render "—" for new tickers.

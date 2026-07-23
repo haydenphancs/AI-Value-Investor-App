@@ -13,9 +13,10 @@ import asyncio
 import math
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.database import get_supabase
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.utils.period_labels import quarterly_period_label
 from app.schemas.earnings import (
@@ -53,6 +54,12 @@ def _cache_set(key: str, value: Any) -> None:
     _cache[key] = (time.time(), value)
 
 
+# ── In-flight deduplication ────────────────────────────────────────
+# A miss downloads 6 years of daily closes; concurrent misses for the same
+# ticker must share one fetch.
+_inflight: Dict[str, asyncio.Future] = {}
+
+
 # ── Helpers ────────────────────────────────────────────────────────
 
 def _fiscal_year_for_quarter(cal_year: int, end_month: int, quarter: int) -> int:
@@ -75,6 +82,36 @@ def _safe_float(d: dict, key: str) -> Optional[float]:
         return f if math.isfinite(f) else None
     except (ValueError, TypeError):
         return None
+
+
+def _first_not_none(*vals: Optional[float]) -> Optional[float]:
+    """First value that is not None — unlike ``a or b``, this preserves 0.0.
+
+    ``_safe_float(rec,"epsDiluted") or _safe_float(rec,"eps")`` silently discarded
+    a genuine BREAK-EVEN quarter (EPS 0.00 is falsy → falls through → None → the
+    quarter's bar vanished from the chart). 0.0 is a real reported value.
+    """
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+def _as_list(payload: Any) -> List[dict]:
+    """Normalize an FMP payload to a list of record dicts.
+
+    ``FMPClient._make_request`` is typed ``-> Any`` ("list or dict"); a bare
+    error dict returned with a 200 iterates as string KEYS → ``AttributeError``
+    → a bare 502 for the Earnings section. Degrade loudly instead.
+    """
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if payload:
+        logger.warning(
+            "earnings: expected a list from FMP, got %s — degrading to empty series",
+            type(payload).__name__,
+        )
+    return []
 
 
 def _compute_surprise(actual: float, estimate: float) -> Optional[float]:
@@ -116,8 +153,10 @@ def _build_fiscal_quarter_map(income_sorted: List[dict]) -> Dict[int, str]:
     """
     freq: Dict[Tuple[int, str], int] = {}
     for rec in income_sorted:
-        period = rec.get("period", "")
-        date_str = rec.get("date", "")
+        # Null-safe: `.get(k, "")` returns None for a present-but-null key, and
+        # None.startswith(...) raises AttributeError -> 502 for the section.
+        period = rec.get("period") or ""
+        date_str = rec.get("date") or ""
         if not period.startswith("Q") or not date_str:
             continue
         try:
@@ -230,20 +269,135 @@ def _match_announcement(
 class EarningsService:
     def __init__(self) -> None:
         self.fmp: FMPClient = get_fmp_client()
+        self.supabase = get_supabase()
 
     async def get_earnings(self, ticker: str) -> EarningsResponse:
+        """Two-tier cache-aside with in-flight dedup.
+
+        Tier 1: in-memory (5 min) · Tier 2: Supabase ``earnings_cache`` (24h,
+        invalidated early by the next earnings date). This is the heaviest
+        payload on the Financials tab — a miss downloads SIX YEARS of daily
+        closes — so deduping concurrent misses matters more here than anywhere.
+        """
         ticker = ticker.upper()
         cache_key = f"earnings:{ticker}"
+
+        # ── Tier 1: in-memory ──
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
 
-        result = await self._build_earnings(ticker)
-        _cache_set(cache_key, result)
-        return result
+        # ── Tier 2: Supabase ──
+        db_cached = await asyncio.to_thread(self._check_supabase_cache, ticker)
+        if db_cached is not None:
+            logger.info(f"Earnings Supabase HIT for {ticker}")
+            _cache_set(cache_key, db_cached)
+            return db_cached
+
+        # ── In-flight dedup ──
+        if cache_key in _inflight:
+            logger.info(f"Earnings in-flight JOIN for {ticker}")
+            return await _inflight[cache_key]
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _inflight[cache_key] = future
+
+        try:
+            logger.info(f"Earnings cache MISS for {ticker} — fetching from FMP")
+            result = await self._build_earnings(ticker)
+
+            # This service already knows the next earnings date — reuse it as
+            # the cache-invalidation key instead of an extra lookup.
+            next_earnings = (
+                result.next_earnings_date.date if result.next_earnings_date else None
+            )
+            loop.run_in_executor(
+                None, self._upsert_supabase_cache_safe, ticker, result, next_earnings
+            )
+
+            _cache_set(cache_key, result)
+            future.set_result(result)
+            return result
+        except Exception as e:
+            future.set_exception(e)
+            raise
+        finally:
+            # CancelledError is a BaseException, not caught above — cancel the
+            # future on a mid-fetch cancellation so joiners don't hang forever.
+            if not future.done():
+                future.cancel()
+            _inflight.pop(cache_key, None)
+
+    # ── Supabase helpers ───────────────────────────────────────────
+
+    def _check_supabase_cache(self, ticker: str) -> Optional[EarningsResponse]:
+        """Return the cached response if fresh (<24h and before next earnings).
+        Synchronous — call via asyncio.to_thread()."""
+        try:
+            row = (
+                self.supabase.table("earnings_cache")
+                .select("response_json, cached_at, next_earnings_date")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+
+            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
+            if cached_at.tzinfo is None:  # defensive: column is timestamptz
+                cached_at = cached_at.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=24):
+                logger.info(f"Earnings Supabase cache STALE (age={age}) for {ticker}")
+                return None
+
+            next_earnings = entry.get("next_earnings_date")
+            if next_earnings:
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if today_str >= next_earnings:
+                    logger.info(
+                        f"Earnings Supabase cache STALE (past earnings "
+                        f"{next_earnings}) for {ticker}"
+                    )
+                    return None
+
+            return EarningsResponse(**entry["response_json"])
+        except Exception as e:
+            logger.warning(f"Earnings Supabase cache check failed for {ticker}: {e}")
+            return None
+
+    def _upsert_supabase_cache_safe(
+        self,
+        ticker: str,
+        result: EarningsResponse,
+        next_earnings: Optional[str],
+    ) -> None:
+        """Write-through to the Supabase tier. Best-effort: logged, never fatal."""
+        try:
+            self.supabase.table("earnings_cache").upsert(
+                {
+                    "ticker": ticker,
+                    "response_json": result.model_dump(),
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                    "next_earnings_date": next_earnings,
+                },
+                on_conflict="ticker",
+            ).execute()
+        except Exception as e:
+            logger.warning(f"Earnings Supabase upsert failed for {ticker}: {e}")
 
     async def _build_earnings(self, ticker: str) -> EarningsResponse:
-        today = date.today()
+        # UTC, matching the cache freshness check in _check_supabase_cache (which
+        # compares next_earnings_date against a UTC "today"). Identical on
+        # Railway, but keeps the write path and read path on one clock.
+        today = datetime.now(timezone.utc).date()
         # 6 years (was 4) so the Earnings Timeline's oldest actual year (annual
         # income reaches back ~5 yrs) gets price coverage. The daily series is
         # still clipped to the oldest income date below, and the TickerDetail
@@ -271,9 +425,18 @@ class EarningsService:
             logger.error(f"historical_prices failed for {ticker}: {prices_raw}")
             prices_raw = []
 
-        # Sort income statements chronologically (oldest first)
+        # Normalize non-list FMP payloads (error dict returned with a 200).
+        income_raw = _as_list(income_raw)
+        estimates_raw = _as_list(estimates_raw)
+
+        # Sort income statements chronologically (oldest first).
+        # `(r.get("period") or "")` — a present-but-null period would otherwise
+        # raise AttributeError on .startswith.
         income_sorted = sorted(
-            [r for r in income_raw if isinstance(r, dict) and r.get("date") and r.get("period", "").startswith("Q")],
+            [
+                r for r in income_raw
+                if r.get("date") and (r.get("period") or "").startswith("Q")
+            ],
             key=lambda r: r["date"],
         )
 
@@ -404,7 +567,7 @@ class EarningsService:
                     # (revenue already falls back to the income statement below). Without
                     # this, a matched-but-null-actual record consumed the quarter and its
                     # EPS bar vanished.
-                    gaap_eps = _safe_float(rec, "epsDiluted") or _safe_float(rec, "eps")
+                    gaap_eps = _first_not_none(_safe_float(rec, "epsDiluted"), _safe_float(rec, "eps"))
                     if gaap_eps is not None:
                         matched_est = self._find_matching_estimate(fiscal_key, est_by_date)
                         est_eps = _safe_float(matched_est, "epsAvg") if matched_est else None
@@ -434,7 +597,7 @@ class EarningsService:
                     ))
                 else:
                     # Fall back to income-statement revenue
-                    actual_rev = ec_rev_actual or _safe_float(rec, "revenue")
+                    actual_rev = _first_not_none(ec_rev_actual, _safe_float(rec, "revenue"))
                     est_rev = ec_rev_estimate
                     if actual_rev is not None:
                         revenue_quarters.append(EarningsQuarterSchema(
@@ -446,7 +609,7 @@ class EarningsService:
                         ))
             else:
                 # No earnings-calendar match — fall back to income-statement + analyst-estimates
-                actual_eps = _safe_float(rec, "epsDiluted") or _safe_float(rec, "eps")
+                actual_eps = _first_not_none(_safe_float(rec, "epsDiluted"), _safe_float(rec, "eps"))
                 actual_rev = _safe_float(rec, "revenue")
 
                 # Try to find matching analyst estimate
@@ -507,13 +670,23 @@ class EarningsService:
 
             used_fiscal_dates.add(fiscal_key)
 
-            # Price — always emit an entry to keep 1:1 alignment with quarters
+            # Price — OMIT the quarter when no close is within +-5 days rather
+            # than emitting a fabricated 0. A 0 is a real price on the wire: it
+            # entered the chart's Y domain and dragged the whole price line to
+            # the floor. iOS matches price points to quarters by LABEL (not by
+            # position), so a missing entry is handled; a fake 0 was not.
             close_price = _find_close_price(fiscal_date, price_lookup)
-            price_history.append(EarningsPricePointSchema(
-                quarter=label,
-                price=close_price if close_price is not None else 0,
-                fiscal_date=fiscal_key,
-            ))
+            if close_price is None:
+                logger.warning(
+                    "earnings %s: no close price within +-5d of %s — omitting price point",
+                    ticker, fiscal_key,
+                )
+            else:
+                price_history.append(EarningsPricePointSchema(
+                    quarter=label,
+                    price=close_price,
+                    fiscal_date=fiscal_key,
+                ))
 
         # ── Phase B: Future quarters from analyst-estimates ──
         for est in estimates_sorted:
@@ -578,11 +751,22 @@ class EarningsService:
                 c = p.get("close")
                 if d and c is not None and range_start <= d <= range_end:
                     try:
-                        daily_price_history.append(
-                            EarningsDailyPriceSchema(date=d, price=float(c))
-                        )
+                        fc = float(c)
                     except (ValueError, TypeError):
-                        pass
+                        continue
+                    # A NaN/Inf close reaches the REQUIRED `price: float` and
+                    # Starlette serializes with allow_nan=False -> ValueError ->
+                    # 500 for the whole Earnings section. The price_lookup loop
+                    # above already guards this; this loop did not.
+                    if not math.isfinite(fc):
+                        logger.warning(
+                            "earnings %s: non-finite close %r on %s — skipping daily point",
+                            ticker, c, d,
+                        )
+                        continue
+                    daily_price_history.append(
+                        EarningsDailyPriceSchema(date=d, price=fc)
+                    )
             daily_price_history.sort(key=lambda x: x.date)
 
         # ── Next Earnings Date ──

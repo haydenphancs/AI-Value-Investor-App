@@ -126,7 +126,7 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
         case .returnOnEquity:
             return "Measures profitability relative to shareholder equity. Higher ROE indicates efficient use of capital, but compare to sector average for context."
         case .currentRatio:
-            return "Measures ability to pay short-term obligations. A ratio above 1.0 indicates good liquidity. Value investors look for financial stability."
+            return "Measures ability to pay short-term obligations. Above 1.5 is comfortable; 0.8-1.5 is adequate but tight. Value investors look for financial stability."
         case .altmanZScore:
             return "Predicts bankruptcy probability using five financial ratios. Z > 3.0 is safe, 1.8–3.0 is a grey zone, and below 1.8 signals distress. A key metric for value investors assessing downside risk."
         case .interestCoverage:

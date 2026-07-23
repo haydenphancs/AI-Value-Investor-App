@@ -106,6 +106,14 @@ final class UpdatesViewModel: ObservableObject {
     private var isEnriching = false
     /// Rows from the end at which scrolling triggers the next page.
     private let prefetchThreshold = 5
+    /// Debounce for scroll-driven work. `onAppear` fires in bursts — fast scroll,
+    /// and again on every re-layout after an enrichment merge or a paginated
+    /// append. Firing enrichment + pagination on EVERY callback spawned a storm of
+    /// main-actor tasks, each running an O(n) regroup, which pegged the main thread
+    /// (a UI FREEZE, worst on a cached feed whose pages return instantly). We
+    /// coalesce a burst into ONE deferred pass keyed on the latest visible row.
+    private var appearWorkTask: Task<Void, Never>?
+    private var lastAppearedIndex = 0
 
     /// Articles the reader tapped that are being summarised on demand. Drives the
     /// per-card spinner. Per-article dedup so a double-tap fires one call.
@@ -121,7 +129,7 @@ final class UpdatesViewModel: ObservableObject {
         // calls `loadIfNeeded()` when the tab first becomes active.
     }
 
-    deinit { refreshPollTask?.cancel() }
+    deinit { refreshPollTask?.cancel(); appearWorkTask?.cancel() }
 
     // MARK: - Lifecycle
 
@@ -279,6 +287,10 @@ final class UpdatesViewModel: ObservableObject {
         // dedup guard misses and A is fetched twice.
         defer { if loadToken == token { inFlightScope = nil } }
         refreshPollTask?.cancel()
+        // Drop any pending scroll-driven work from the OUTGOING tab — its index
+        // refers to the previous feed, and the token check would discard it anyway.
+        appearWorkTask?.cancel()
+        appearWorkTask = nil
 
         if !force, let cached = feedCache[scope] {
             // Clear any error left by a PREVIOUSLY-failed scope. Without this a
@@ -399,18 +411,28 @@ final class UpdatesViewModel: ObservableObject {
     /// they actually want more, and enrichment is a paid call that should not
     /// be spent on rows nobody scrolled to.
     func articleDidAppear(_ article: NewsArticle) {
-        guard let scope = selectedTab?.scope else { return }
         guard let index = newsArticles.firstIndex(where: { $0.id == article.id })
         else { return }
-        let token = loadToken
-        Task {
+        lastAppearedIndex = index
+        // DEBOUNCE: a burst of onAppear callbacks (fast scroll, or the reflow after
+        // an enrichment merge / paginated append) collapses into ONE pass. Without
+        // this, every callback spawned a task that ran a full regroup + maybe a
+        // fetch, saturating the main actor → freeze. While a pass is scheduled,
+        // later appears only update `lastAppearedIndex`.
+        guard appearWorkTask == nil else { return }
+        appearWorkTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)  // ~settle window
+            guard let self, !Task.isCancelled else { return }
+            self.appearWorkTask = nil               // allow the next burst to schedule
+            guard let scope = self.selectedTab?.scope else { return }
+            let idx = self.lastAppearedIndex
+            let token = self.loadToken
             // Enrich the window the reader is ACTUALLY looking at (this row + a
-            // lookahead), not the first N rows from the top — that was why
-            // scrolled-to cards stayed bare while the top kept re-enriching.
-            await enrichVisibleWindow(around: index, scope: scope, token: token)
+            // lookahead), not the first N rows from the top.
+            await self.enrichVisibleWindow(around: idx, scope: scope, token: token)
             // Paginate only near the end of the list.
-            if index >= newsArticles.count - prefetchThreshold {
-                await loadMoreIfNeeded(scope: scope, token: token)
+            if idx >= self.newsArticles.count - self.prefetchThreshold {
+                await self.loadMoreIfNeeded(scope: scope, token: token)
             }
         }
     }

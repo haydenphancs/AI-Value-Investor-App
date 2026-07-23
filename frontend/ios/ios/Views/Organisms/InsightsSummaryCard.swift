@@ -109,6 +109,14 @@ struct InsightsSummaryCard: View {
 
                 Spacer()
 
+                // Sentiment sits top-right next to the window badge (Neutral · 24h).
+                // Gated on isAIGenerated for the same reason the badge is: the
+                // fallback card's sentiment is a tally of enriched articles, not a
+                // model verdict, so we don't present it as one.
+                if summary.isAIGenerated {
+                    SentimentBadge(sentiment: summary.sentiment)
+                }
+
                 // The AI badge is shown ONLY for text a model actually wrote.
                 // The deterministic fallback card is a list of real headlines;
                 // badging it "AI Summary" would claim authorship that doesn't
@@ -157,42 +165,29 @@ struct InsightsSummaryCard: View {
                 whyItMovedRow(move)
             }
 
-            // Footer
+            // Footer: the timestamp on the LEFT, the sources affordance on the
+            // SAME row to the right. Never swallow the timestamp — "checking for
+            // updates"/"catching up" are claims about the SWEEPER, and "up to date"
+            // means checked-and-unchanged; all three keep the content age.
             HStack {
-                // Sentiment on the fallback card is a tally of already-enriched
-                // articles, not a model's judgement of the whole set — and with
-                // nothing enriched it is just "Neutral" by default. Suppress it
-                // rather than present a verdict nobody reached.
-                if summary.isAIGenerated {
-                    SentimentBadge(sentiment: summary.sentiment)
-                }
-
-                Spacer()
-
-                // Never swallow the timestamp. "Catching up…" on its own hides
-                // the one fact the reader needs — how old this brief is — and
-                // it belongs ONLY to `isRefreshing`, which means a real AI card
-                // is genuinely being produced right now (the deterministic
-                // headline-list fallback is showing in the meantime).
-                // `isStale` is weaker: the card is real and dated, the sweeper
-                // just hasn't re-verified it. Say both, don't trade one away.
                 Text(footerText)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
-            }
 
-            // Tap affordance — the whole card opens the sources screen. Shown only
-            // when there are sources to open (older cards have none).
-            if hasSources {
-                HStack(spacing: AppSpacing.xs) {
-                    Spacer()
-                    Text("\(summary.sources.count) source\(summary.sources.count == 1 ? "" : "s")")
-                        .font(AppTypography.caption)
-                        .fontWeight(.semibold)
-                    Image(systemName: "chevron.right")
-                        .font(AppTypography.caption)
+                Spacer()
+
+                // Tap affordance — the whole card opens the sources screen. Shown
+                // only when there are sources to open (older cards have none).
+                if hasSources {
+                    HStack(spacing: AppSpacing.xs) {
+                        Text("\(summary.sources.count) source\(summary.sources.count == 1 ? "" : "s")")
+                            .font(AppTypography.caption)
+                            .fontWeight(.semibold)
+                        Image(systemName: "chevron.right")
+                            .font(AppTypography.caption)
+                    }
+                    .foregroundColor(AppColors.primaryBlue)
                 }
-                .foregroundColor(AppColors.primaryBlue)
             }
         }
         .padding(AppSpacing.lg)

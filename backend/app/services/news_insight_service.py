@@ -399,6 +399,7 @@ class NewsInsightService:
         market_active: bool = True,
         price_move: Optional[Dict[str, Any]] = None,
         preserve_price_move: bool = False,
+        catalyst_sources: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Generate a card with Gemini and persist it. Returns ``None`` on any
         failure, **without writing anything**.
@@ -407,6 +408,12 @@ class NewsInsightService:
         big move — a SEPARATE, cited field from the news bullets. It is persisted
         with the card but is purely additive: a None/malformed value never blocks
         or fails the news card.
+
+        ``catalyst_sources`` (optional) are the raw grounding sources
+        (``[{title, uri, publisher}]``) the "why it moved" web search consulted.
+        They are MERGED into the card's ``sources`` list alongside the FMP-news
+        corpus sources (see ``_merge_sources``), so a reader can open the outside
+        stories behind the price-move explanation. None/malformed → corpus-only.
 
         ``preserve_price_move`` — when True and ``price_move`` is None, the stored
         ``price_move`` column is left untouched instead of being overwritten to
@@ -464,8 +471,13 @@ class NewsInsightService:
         gen_seconds = round(time.monotonic() - started, 2)
         # The source stories this summary was built from — the LITERAL corpus
         # (title + url), captured at generation so a possibly-older card keeps its
-        # own point-in-time sources rather than the current window.
-        sources = _corpus_sources(articles)
+        # own point-in-time sources rather than the current window. The "why it
+        # moved" catalyst's web sources (if any) are merged in, reserved slots so
+        # they always surface next to the FMP headlines.
+        sources = _merge_sources(
+            _corpus_sources(articles),
+            _catalyst_web_sources(catalyst_sources),
+        )
         stored = await asyncio.to_thread(
             self._store,
             scope, card, inputset_id, trigger_reason, len(articles), market_active,
@@ -779,6 +791,93 @@ def _corpus_sources(
         if len(out) >= cap:
             break
     return out
+
+
+# Max WEB (catalyst) sources folded into a card's source list. Grounded search
+# can return many; keep only the most relevant few. Grounding chunks arrive
+# roughly in relevance order, so a head-slice is "highest quality first".
+_MAX_CATALYST_SOURCES = 3
+
+# A bare host like "reuters.com" / "www.sub.domain.co.uk" — NOT a headline.
+_BARE_DOMAIN_RE = re.compile(r"^[\w-]+(\.[\w-]+)+$")
+
+
+def _catalyst_web_sources(
+    raw: Any, cap: int = _MAX_CATALYST_SOURCES
+) -> List[Dict[str, Any]]:
+    """Map the "why it moved" catalyst's grounding sources
+    (``[{title, uri, publisher}]``) into the card source shape ``[{title, url}]``.
+
+    Grounded search returns Vertex AI redirect ``uri``s (they open and redirect to
+    the publisher) and a ``title`` that is frequently a bare host like
+    ``reuters.com``. Keep ``title`` when it reads like a headline; otherwise fall
+    back to a capitalized publisher name so the row stays human-nameable. Dedups
+    by publisher (avoid several links from one site) and by url, and caps at
+    ``cap`` (grounding order ≈ relevance, so a head-slice keeps the best few).
+    NEVER raises — a malformed value yields ``[]`` and never blocks the card."""
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    seen_pub: set = set()
+    seen_url: set = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("uri") or item.get("url") or "").strip()
+        if not url or url in seen_url:
+            continue
+        title = str(item.get("title") or "").strip()
+        publisher = str(item.get("publisher") or "").strip()
+        if title and not _BARE_DOMAIN_RE.match(title.lower()):
+            label = title                       # a real headline
+        elif publisher:
+            label = publisher.capitalize()      # "reuters" -> "Reuters"
+        elif title:
+            # bare-domain title, no publisher — strip TLD for a name
+            label = title.lower().replace("www.", "").split(".")[0].capitalize()
+        else:
+            continue                            # nothing nameable
+        pub_key = (publisher or label).lower()
+        if pub_key in seen_pub:
+            continue
+        seen_pub.add(pub_key)
+        seen_url.add(url)
+        out.append({"title": label, "url": url})
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _merge_sources(
+    corpus: List[Dict[str, Any]],
+    web: List[Dict[str, Any]],
+    cap: int = _MAX_SOURCES,
+) -> List[Dict[str, Any]]:
+    """Merge the FMP-news corpus sources with the catalyst web sources into one
+    ``[{title, url}]`` list. Web sources get RESERVED slots so they always appear
+    when present: corpus (real headlines / literal inputs) first, then up to
+    ``_MAX_CATALYST_SOURCES`` web rows, total capped at ``cap``. Deduped by url
+    (falling back to lowercased title). When ``web`` is empty this returns exactly
+    ``corpus[:cap]`` — i.e. behavior is unchanged for cards with no catalyst."""
+    web = (web or [])[:_MAX_CATALYST_SOURCES]
+    keep = max(cap - len(web), 0)
+    merged: List[Dict[str, Any]] = []
+    seen: set = set()
+    for src in list(corpus or [])[:keep] + web:
+        if not isinstance(src, dict):
+            continue
+        title = str(src.get("title") or "").strip()
+        if not title:
+            continue
+        url = str(src.get("url") or "").strip()
+        key = url or title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append({"title": title, "url": url})
+        if len(merged) >= cap:
+            break
+    return merged
 
 
 def _sanitize_sources(raw: Any) -> Optional[List[Dict[str, Any]]]:

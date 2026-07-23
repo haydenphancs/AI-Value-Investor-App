@@ -1053,6 +1053,10 @@ async def get_profit_power(ticker: str):
     try:
         service = get_profit_power_service()
         return await service.get_profit_power(ticker)
+    except ValueError as e:
+        # Invalid ticker symbol — a 400, matching /revenue-breakdown and
+        # /signal-of-confidence rather than masquerading as a 502 outage.
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -1072,6 +1076,10 @@ async def get_health_check(ticker: str):
     try:
         service = get_health_check_service()
         return await service.get_health_check(ticker)
+    except ValueError as e:
+        # Invalid ticker symbol — a 400, matching /revenue-breakdown and
+        # /signal-of-confidence rather than masquerading as a 502 outage.
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

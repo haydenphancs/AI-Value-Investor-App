@@ -78,12 +78,17 @@ struct SignalOfConfidenceSectionCard: View {
 
             Spacer()
 
-            Button(action: onDetailTapped) {
-                Text("Detail")
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.primaryBlue)
-            }
-            .buttonStyle(.plain)
+            // The "Detail" affordance is hidden: all six handlers in
+            // TickerDetailViewModel are `print()` stubs — no detail screen
+            // exists — so the button did nothing when tapped. The callback
+            // parameter is intentionally kept so re-enabling is a one-line
+            // change once the drill-down ships.
+            // Button(action: onDetailTapped) {
+            // Text("Detail")
+            // .font(AppTypography.bodySmallEmphasis)
+            // .foregroundColor(AppColors.primaryBlue)
+            // }
+            // .buttonStyle(.plain)
         }
     }
 }

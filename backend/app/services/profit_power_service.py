@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
-from app.utils.period_labels import quarterly_period_label
+from app.utils.period_labels import extract_year as _extract_year, quarterly_period_label
 from app.schemas.profit_power import ProfitPowerDataPointSchema, ProfitPowerResponse
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
@@ -79,19 +79,32 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
         return None
 
 
-def _extract_year(record: Dict[str, Any]) -> str:
-    """Extract calendar year from the record.
+def _as_list(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize an FMP payload to a list of record dicts.
 
-    Prefers FMP's ``calendarYear`` field which correctly maps fiscal quarters
-    to their reporting calendar year.
+    ``FMPClient._make_request`` is typed ``-> Any`` ("list or dict"): an error
+    shape returned with a 200 iterates as string KEYS, and the first
+    ``rec.get(...)`` raises ``AttributeError`` → a bare 502. Degrade loudly.
     """
-    cal_year = record.get("calendarYear")
-    if cal_year:
-        return str(cal_year)
-    date_str = record.get("date", "")
-    if len(date_str) >= 4:
-        return date_str[:4]
-    return ""
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if payload:
+        logger.warning(
+            "profit_power: expected a list from FMP, got %s — degrading to empty series",
+            type(payload).__name__,
+        )
+    return []
+
+
+def _sort_key_date(record: Dict[str, Any]) -> str:
+    """Null-safe period-end sort key — ``.get("date", "")`` yields None for a
+    present-but-null key, and ``None < str`` raises TypeError."""
+    return record.get("date") or ""
+
+
+# ``_extract_year`` is imported from app.utils.period_labels (null-safe); the
+# local copy this replaces did ``len(record.get("date", ""))`` → TypeError on a
+# null date.
 
 
 def _annual_period_label(record: Dict[str, Any]) -> str:
@@ -103,7 +116,7 @@ def _quarterly_period_label(
     record: Dict[str, Any], use_fiscal_year: bool = False
 ) -> str:
     """Quarterly period label like \"Q1'24\"."""
-    period = record.get("period", "")  # "Q1", "Q2", etc.
+    period = record.get("period") or ""  # "Q1", "Q2", etc. (null-safe)
     # Off-calendar fiscal years (e.g. Oracle, FY ends May 31) get non-monotonic
     # quarter LABELS when the fiscal quarter is paired with the calendar year
     # (fiscal Q1/Aug shares a calendar year with the prior fiscal Q4/May).
@@ -136,16 +149,18 @@ def _build_margin_points(
     For each income statement period, computes gross/operating/net margins
     from income data and FCF margin from cash flow data (matched by date).
     """
+    income_records = _as_list(income_records)
+    cashflow_records = _as_list(cashflow_records)
     if not income_records:
         return []
 
     # Sort by date ascending
-    sorted_income = sorted(income_records, key=lambda r: r.get("date", ""))
+    sorted_income = sorted(income_records, key=_sort_key_date)
 
     # Build cash flow lookup by date for FCF matching
     cf_by_date: Dict[str, Dict[str, Any]] = {}
     for rec in cashflow_records:
-        date = rec.get("date", "")
+        date = rec.get("date") or ""
         if date:
             cf_by_date[date] = rec
 
@@ -169,7 +184,7 @@ def _build_margin_points(
         net_income = _safe_float(rec, "netIncome")
 
         # Match cash flow by date for FCF
-        cf_rec = cf_by_date.get(rec.get("date", ""), {})
+        cf_rec = cf_by_date.get(rec.get("date") or "", {})
         free_cash_flow = _safe_float(cf_rec, "freeCashFlow")
 
         results.append({
@@ -189,7 +204,7 @@ def _find_next_earnings_date_simple(
 ) -> Optional[str]:
     """Return the first future earnings date as yyyy-MM-dd, or None."""
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for ec in sorted(ec_records, key=lambda r: r.get("date", "")):
+    for ec in sorted(ec_records, key=lambda r: r.get("date") or ""):
         ec_date = (ec.get("date") or "")[:10]
         if not ec_date or ec_date <= today_str:
             continue
@@ -410,10 +425,16 @@ class ProfitPowerService:
             rich = lookup.get_benchmarks(
                 industry, sector, _MARGIN_BENCHMARK_METRICS, "annual"
             )
+            # Only cells that actually declare a level get a vote. A set of
+            # all-None levels used to win the `0 >= 0` tie for "industry",
+            # labelling the drill-down "Industry Avg" when no industry benchmark
+            # was involved at all. No votes -> leave the level unknown (None) so
+            # the UI keeps its neutral wording.
             levels = [
-                c.get("level")
+                lvl
                 for periods in rich.values()
                 for c in periods.values()
+                if (lvl := c.get("level")) in ("industry", "sector")
             ]
             if levels:
                 peer_group_level = (

@@ -61,16 +61,22 @@ struct GrowthDataPoint: Identifiable, Equatable, Hashable {
         hasher.combine(period)
     }
 
-    var isPositiveYoY: Bool {
-        (yoyChangePercent ?? 0) >= 0
+    /// nil when the YoY is "not meaningful" — callers must not treat an absent
+    /// value as growth. `(yoy ?? 0) >= 0` used to report a nil as POSITIVE,
+    /// undoing the nil-preservation the DTO mapper deliberately does.
+    var isPositiveYoY: Bool? {
+        yoyChangePercent.map { $0 >= 0 }
     }
 
     var formattedYoY: String {
         yoyChangePercent.map { String(format: "%.2f%%", $0) } ?? "—"
     }
 
+    /// Muted (neither bullish nor bearish) when the YoY is not meaningful —
+    /// this used to paint a nil bullish green.
     var yoyColor: Color {
-        (yoyChangePercent ?? 0) >= 0 ? AppColors.bullish : AppColors.bearish
+        guard let yoy = yoyChangePercent else { return AppColors.textMuted }
+        return yoy >= 0 ? AppColors.bullish : AppColors.bearish
     }
 
     var formattedValue: String {

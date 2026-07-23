@@ -12,6 +12,11 @@ import Charts
 struct ProfitPowerChartView: View {
     let dataPoints: [ProfitPowerDataPoint]
     @Binding var selectedDataPoint: ProfitPowerDataPoint?
+    /// "Industry" / "Sector" for the benchmark line's tooltip label, matching
+    /// the legend. Defaults to "Sector" for callers that don't plumb it.
+    var peerWord: String = "Sector"
+    /// Pending tooltip auto-dismiss, so a new tap replaces the old timer.
+    @State private var tooltipDismissTask: DispatchWorkItem?
 
     // Chart configuration
     private let chartHeight: CGFloat = 240
@@ -19,31 +24,37 @@ struct ProfitPowerChartView: View {
     private let visibleColumnCount: CGFloat = 6  // columns visible before scrolling kicks in
     private let xAxisHeight: CGFloat = 20
 
-    // Computed properties for chart bounds
-    private var maxMargin: Double {
-        let allValues = dataPoints.flatMap { [
-            $0.grossMargin, $0.operatingMargin, $0.fcfMargin,
-            $0.netMargin, $0.sectorAverageNetMargin
-        ] }
-        // Round up to nearest 10 for cleaner axis
-        let maxValue = allValues.max() ?? 50
-        return ceil(maxValue / 10) * 10
+    /// Every non-nil margin on screen. `compactMap` — a nil margin is absent
+    /// data (a bank has no gross profit), not a 0.
+    private var allValues: [Double] {
+        dataPoints.flatMap {
+            [$0.grossMargin, $0.operatingMargin, $0.fcfMargin,
+             $0.netMargin, $0.sectorAverageNetMargin].compactMap { $0 }
+        }
     }
 
-    private var minMargin: Double {
-        let allValues = dataPoints.flatMap { [
-            $0.grossMargin, $0.operatingMargin, $0.fcfMargin,
-            $0.netMargin, $0.sectorAverageNetMargin
-        ] }
-        let minValue = allValues.min() ?? 0
-        return minValue < 0 ? floor(minValue / 10) * 10 : 0
+    /// True when there is nothing to plot — the caller shows an empty state
+    /// instead of a fabricated axis.
+    private var hasData: Bool { !allValues.isEmpty }
+
+    /// Chart bounds. Rounded to a multiple of 10 for a clean axis, then run
+    /// through ChartDomain so an all-zero or all-negative series can't produce
+    /// a zero-width (crash) or inverted domain.
+    private var marginDomain: ClosedRange<Double> {
+        let rounded = allValues.map { ceil($0 / 10) * 10 } + allValues.map { floor($0 / 10) * 10 }
+        return ChartDomain.make(
+            rounded, includeZero: true, headroomFraction: 0.0, fallback: 0...50
+        )
     }
 
-    // Grid line values (5 horizontal lines)
+    private var maxMargin: Double { marginDomain.upperBound }
+    private var minMargin: Double { marginDomain.lowerBound }
+
+    // Grid line values (5 horizontal lines). Was
+    // `stride(from:to:by: (max-min)/5)`, which is a HARD CRASH when every
+    // margin is 0 (`stride` traps on a zero step).
     private var gridValues: [Double] {
-        let range = maxMargin - minMargin
-        let step = range / 5
-        return stride(from: minMargin + step, to: maxMargin, by: step).map { $0 }
+        ChartDomain.gridValues(in: marginDomain, count: 4)
     }
 
     // Consistent sizes for both Annual and Quarterly
@@ -55,6 +66,18 @@ struct ProfitPowerChartView: View {
     }
 
     var body: some View {
+        if hasData {
+            chartBody
+        } else {
+            // No plottable margin anywhere in the series. Drawing the chart
+            // here rendered an invented 0–50% axis with no lines on it, which
+            // reads as "margins are zero" rather than "we have no data".
+            ChartUnavailableView(message: "Margin data isn't available for this company.")
+                .frame(height: chartHeight + xAxisHeight + AppSpacing.sm)
+        }
+    }
+
+    private var chartBody: some View {
         HStack(alignment: .top, spacing: 0) {
             // Left column: fixed Y-axis labels (never scrolls)
             VStack(spacing: 0) {
@@ -91,7 +114,7 @@ struct ProfitPowerChartView: View {
         // Overlay tooltip when a data point is selected
         .overlay(alignment: .top) {
             if let selectedDataPoint {
-                ProfitPowerTooltipView(dataPoint: selectedDataPoint)
+                ProfitPowerTooltipView(dataPoint: selectedDataPoint, peerWord: peerWord)
                     .padding(.horizontal, AppSpacing.md)
                     .padding(.top, AppSpacing.xs)
                     .transition(.scale.combined(with: .opacity))
@@ -133,7 +156,12 @@ struct ProfitPowerChartView: View {
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
-        .chartYScale(domain: minMargin...maxMargin)
+        .chartYScale(domain: marginDomain)
+        // The categorical band scale carries Swift Charts' default plot inset,
+        // while the manual xAxisLabels row below divides the same width flush —
+        // without this the edge labels sat beside their marks. Matches
+        // GrowthChartView / ProfitabilityChartView.
+        .chartXScale(range: .plotDimension(padding: edgeLabelPad(for: contentWidth)))
         .chartPlotStyle { plotArea in
             plotArea
                 .background(Color.clear)
@@ -141,61 +169,83 @@ struct ProfitPowerChartView: View {
         .contentShape(Rectangle())
         .onTapGesture { location in
             updateSelection(at: location, chartWidth: contentWidth)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                selectedDataPoint = nil
-            }
+            // Cancel any previously scheduled dismissal: every tap used to
+            // schedule an unconditional clear, so tapping B shortly after A
+            // dismissed B early (and rapid taps left N pending closures).
+            tooltipDismissTask?.cancel()
+            let task = DispatchWorkItem { selectedDataPoint = nil }
+            tooltipDismissTask = task
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: task)
         }
+    }
+
+    /// Half a column — the inset that lines the categorical band centres up
+    /// with the flush-divided label row.
+    private func edgeLabelPad(for contentWidth: CGFloat) -> CGFloat {
+        guard dataPoints.count > 0, contentWidth.isFinite, contentWidth > 0 else { return 0 }
+        return contentWidth / CGFloat(dataPoints.count) / 2
     }
 
     // MARK: - Line Marks
 
+    // Each mark builder skips points whose margin is nil, so an absent value
+    // renders as a GAP in the line instead of a fabricated 0% reading.
+
     @ChartContentBuilder
     private func marginLineMark(for type: ProfitMarginType) -> some ChartContent {
         ForEach(dataPoints) { dataPoint in
-            LineMark(
-                x: .value("Period", dataPoint.period),
-                y: .value("Margin", dataPoint.margin(for: type)),
-                series: .value("Series", type.rawValue)
-            )
-            .foregroundStyle(type.color)
-            .lineStyle(StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+            if let value = dataPoint.margin(for: type) {
+                LineMark(
+                    x: .value("Period", dataPoint.period),
+                    y: .value("Margin", value),
+                    series: .value("Series", type.rawValue)
+                )
+                .foregroundStyle(type.color)
+                .lineStyle(StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+            }
         }
     }
 
     @ChartContentBuilder
     private func marginPointMark(for type: ProfitMarginType) -> some ChartContent {
         ForEach(dataPoints) { dataPoint in
-            PointMark(
-                x: .value("Period", dataPoint.period),
-                y: .value("Margin", dataPoint.margin(for: type))
-            )
-            .foregroundStyle(type.color)
-            .symbolSize(symbolSize)
+            if let value = dataPoint.margin(for: type) {
+                PointMark(
+                    x: .value("Period", dataPoint.period),
+                    y: .value("Margin", value)
+                )
+                .foregroundStyle(type.color)
+                .symbolSize(symbolSize)
+            }
         }
     }
 
     @ChartContentBuilder
     private var sectorAverageLineMark: some ChartContent {
         ForEach(dataPoints) { dataPoint in
-            LineMark(
-                x: .value("Period", dataPoint.period),
-                y: .value("Sector", dataPoint.sectorAverageNetMargin),
-                series: .value("Series", "SectorAverage")
-            )
-            .foregroundStyle(AppColors.profitSectorAverage)
-            .lineStyle(StrokeStyle(lineWidth: lineWidth - 0.5, lineCap: .round, lineJoin: .round, dash: [6, 4]))
+            if let value = dataPoint.sectorAverageNetMargin {
+                LineMark(
+                    x: .value("Period", dataPoint.period),
+                    y: .value("Sector", value),
+                    series: .value("Series", "SectorAverage")
+                )
+                .foregroundStyle(AppColors.profitSectorAverage)
+                .lineStyle(StrokeStyle(lineWidth: lineWidth - 0.5, lineCap: .round, lineJoin: .round, dash: [6, 4]))
+            }
         }
     }
 
     @ChartContentBuilder
     private var sectorAveragePointMark: some ChartContent {
         ForEach(dataPoints) { dataPoint in
-            PointMark(
-                x: .value("Period", dataPoint.period),
-                y: .value("Sector", dataPoint.sectorAverageNetMargin)
-            )
-            .foregroundStyle(AppColors.profitSectorAverage)
-            .symbolSize(symbolSize * 0.75)
+            if let value = dataPoint.sectorAverageNetMargin {
+                PointMark(
+                    x: .value("Period", dataPoint.period),
+                    y: .value("Sector", value)
+                )
+                .foregroundStyle(AppColors.profitSectorAverage)
+                .symbolSize(symbolSize * 0.75)
+            }
         }
     }
 
@@ -260,11 +310,14 @@ struct ProfitPowerChartView: View {
     // MARK: - Selection Helper
 
     private func updateSelection(at location: CGPoint, chartWidth: CGFloat) {
-        let pointWidth = chartWidth / CGFloat(dataPoints.count)
-        let index = Int(location.x / pointWidth)
-        if index >= 0 && index < dataPoints.count {
-            selectedDataPoint = dataPoints[index]
-        }
+        // The bounds check used to happen AFTER `Int(location.x / pointWidth)`.
+        // A GeometryReader reporting width 0 mid-transition makes that quotient
+        // infinite (or NaN with an empty series), and `Int(.infinity)` TRAPS.
+        // ChartDomain.columnIndex validates before converting.
+        guard let index = ChartDomain.columnIndex(
+            atX: location.x, width: chartWidth, count: dataPoints.count
+        ) else { return }
+        selectedDataPoint = dataPoints[index]
     }
 }
 
@@ -272,6 +325,7 @@ struct ProfitPowerChartView: View {
 
 struct ProfitPowerTooltipView: View {
     let dataPoint: ProfitPowerDataPoint
+    var peerWord: String = "Sector"
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
@@ -307,7 +361,7 @@ struct ProfitPowerTooltipView: View {
             )
 
             tooltipRow(
-                title: "Sector Avg",
+                title: "\(peerWord) Avg",
                 value: dataPoint.sectorAverageNetMargin,
                 color: AppColors.profitSectorAverage
             )
@@ -325,7 +379,10 @@ struct ProfitPowerTooltipView: View {
         )
     }
 
-    private func tooltipRow(title: String, value: Double, color: Color) -> some View {
+    /// `value == nil` means the margin genuinely isn't reported for this period
+    /// (a bank has no gross profit; a thin industry has no sector median). Show
+    /// an em dash rather than "0.0%", which reads as a real measurement.
+    private func tooltipRow(title: String, value: Double?, color: Color) -> some View {
         HStack(spacing: AppSpacing.sm) {
             // Color indicator
             Circle()
@@ -340,9 +397,9 @@ struct ProfitPowerTooltipView: View {
             Spacer()
 
             // Value
-            Text(String(format: "%.1f%%", value))
+            Text(value.map { String(format: "%.1f%%", $0) } ?? "—")
                 .font(AppTypography.captionEmphasis)
-                .foregroundColor(AppColors.textPrimary)
+                .foregroundColor(value == nil ? AppColors.textMuted : AppColors.textPrimary)
         }
     }
 }

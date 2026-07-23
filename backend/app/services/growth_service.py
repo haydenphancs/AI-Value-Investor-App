@@ -10,10 +10,12 @@ import asyncio
 import logging
 import math
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
-from app.utils.period_labels import quarterly_period_label
+from app.utils.period_labels import extract_year as _extract_year, quarterly_period_label
 from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
 from app.services.sector_benchmark_lookup import (
     MATURE_SAMPLE_FLOOR,
@@ -87,6 +89,12 @@ def _cache_set(key: str, value: Any) -> None:
     _cache[key] = (time.time(), value)
 
 
+# ── In-flight deduplication ───────────────────────────────────────
+# One growth MISS costs TEN FMP calls. Without this, N concurrent viewers of the
+# same cold ticker each fired the whole fan-out.
+_inflight: Dict[str, asyncio.Future] = {}
+
+
 # ── Helpers ───────────────────────────────────────────────────────
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
@@ -126,20 +134,38 @@ def _compute_yoy(current: Optional[float], previous: Optional[float]) -> Optiona
     return round((current - previous) / abs(previous) * 100, 2)
 
 
-def _extract_year(record: Dict[str, Any]) -> str:
-    """Extract calendar year from the record.
+def _as_list(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize an FMP payload to a list of record dicts.
 
-    Prefers FMP's ``calendarYear`` field which correctly maps fiscal quarters
-    to their reporting calendar year (e.g., Apple's fiscal Q1 ending Dec 2020
-    is reported as calendar year 2021).  Falls back to the date field.
+    ``FMPClient._make_request`` is typed ``-> Any`` and documented "list or dict":
+    on some error shapes FMP answers 200 with a bare object. Iterating that dict
+    yields its string KEYS, and the first ``rec.get(...)`` raises
+    ``AttributeError: 'str' object has no attribute 'get'`` → a bare 502 for the
+    whole section. Degrade to an empty series instead, loudly.
     """
-    cal_year = record.get("calendarYear")
-    if cal_year:
-        return str(cal_year)
-    date_str = record.get("date", "")
-    if len(date_str) >= 4:
-        return date_str[:4]
-    return ""
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if payload:
+        logger.warning(
+            "growth: expected a list from FMP, got %s — degrading to empty series",
+            type(payload).__name__,
+        )
+    return []
+
+
+def _sort_key_date(record: Dict[str, Any]) -> str:
+    """Sort key for an FMP record's period-end date.
+
+    ``record.get("date", "")`` returns **None** when the key is present and null
+    (the default only applies to a MISSING key), and ``None < str`` raises
+    ``TypeError`` — 502-ing the section on one malformed upstream row. Coerce.
+    """
+    return record.get("date") or ""
+
+
+# ``_extract_year`` is imported from app.utils.period_labels — the shared version
+# is null-safe (``record.get("date") or ""``); the local copy this replaces did
+# ``len(record.get("date", ""))`` and raised TypeError on a null date.
 
 
 def _annual_period_label(record: Dict[str, Any]) -> str:
@@ -151,7 +177,7 @@ def _quarterly_period_label(
     record: Dict[str, Any], use_fiscal_year: bool = False
 ) -> str:
     """Build quarterly period label like \"Q1'21\" from FMP income statement."""
-    period = record.get("period", "")  # "Q1", "Q2", etc.
+    period = record.get("period") or ""  # "Q1", "Q2", etc. (null-safe)
     # Off-calendar fiscal years (e.g. Oracle, FY ends May 31) get non-monotonic
     # quarter LABELS when the fiscal quarter is paired with the calendar year
     # (fiscal Q1/Aug shares a calendar year with the prior fiscal Q4/May).
@@ -180,11 +206,12 @@ def _compute_growth_points(
     Returns list of dicts with period, value, yoy_change_percent.
     The oldest record(s) used only as baseline are excluded from output.
     """
+    records = _as_list(records)
     if not records:
         return []
 
     # Sort by date ascending (oldest first)
-    sorted_recs = sorted(records, key=lambda r: r.get("date", ""))
+    sorted_recs = sorted(records, key=_sort_key_date)
 
     results = []
 
@@ -192,12 +219,12 @@ def _compute_growth_points(
         # Build lookup: (period, year) -> record
         lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for rec in sorted_recs:
-            p = rec.get("period", "")
+            p = rec.get("period") or ""
             cy = _extract_year(rec)
             lookup[(p, cy)] = rec
 
         for rec in sorted_recs:
-            period = rec.get("period", "")
+            period = rec.get("period") or ""
             cal_year = _extract_year(rec)
             try:
                 prev_year = str(int(cal_year) - 1)
@@ -272,17 +299,172 @@ def _compute_growth_points(
 class GrowthService:
     def __init__(self):
         self.fmp = get_fmp_client()
+        self.supabase = get_supabase()
 
     async def get_growth(self, ticker: str) -> GrowthResponse:
-        """Main entry point — returns cached or freshly built growth data."""
+        """Main entry point — two-tier cache-aside with in-flight dedup.
+
+        Tier 1: in-memory dict (5 min) · Tier 2: Supabase ``growth_cache``
+        (24h, invalidated early by the next earnings date). Mirrors
+        profit_power_service, the reference template.
+        """
+        # UNIQUE(ticker) in growth_cache is case-SENSITIVE, so "aapl" and "AAPL"
+        # would occupy two rows and cost two FMP fan-outs (and the
+        # profit_power_cache lookup below would miss). Every current caller
+        # already uppercases; normalise here so that stays true.
+        ticker = ticker.upper().strip()
         cache_key = f"growth:{ticker}"
+
+        # ── Tier 1: in-memory ──
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
 
-        result = await self._build_growth(ticker)
-        _cache_set(cache_key, result)
-        return result
+        # ── Tier 2: Supabase (in a thread — the SDK is sync) ──
+        db_cached = await asyncio.to_thread(self._check_supabase_cache, ticker)
+        if db_cached is not None:
+            logger.info(f"Growth Supabase HIT for {ticker}")
+            _cache_set(cache_key, db_cached)
+            return db_cached
+
+        # ── In-flight dedup ──
+        if cache_key in _inflight:
+            logger.info(f"Growth in-flight JOIN for {ticker}")
+            return await _inflight[cache_key]
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _inflight[cache_key] = future
+
+        try:
+            logger.info(f"Growth cache MISS for {ticker} — fetching from FMP")
+            result = await self._build_growth(ticker)
+            next_earnings = await asyncio.to_thread(
+                self._next_earnings_date_safe, ticker
+            )
+
+            # Best-effort write-through (never blocks the response).
+            loop.run_in_executor(
+                None, self._upsert_supabase_cache_safe, ticker, result, next_earnings
+            )
+
+            _cache_set(cache_key, result)
+            future.set_result(result)
+            return result
+        except Exception as e:
+            future.set_exception(e)
+            raise
+        finally:
+            # CancelledError is a BaseException, so the `except Exception` above
+            # does NOT resolve the future when this coroutine is cancelled (a
+            # client disconnect mid-fetch). Any joiner awaiting this future would
+            # then hang forever. Cancel it so joiners get a CancelledError.
+            if not future.done():
+                future.cancel()
+            _inflight.pop(cache_key, None)
+
+    # ── Supabase helpers ──────────────────────────────────────────
+
+    def _check_supabase_cache(self, ticker: str) -> Optional[GrowthResponse]:
+        """Return the cached response if fresh (<24h and before next earnings).
+        Synchronous — call via asyncio.to_thread()."""
+        try:
+            row = (
+                self.supabase.table("growth_cache")
+                .select("response_json, cached_at, next_earnings_date")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+
+            entry = row.data[0]
+            cached_at_str = entry.get("cached_at")
+            if not cached_at_str:
+                return None
+
+            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
+            if cached_at.tzinfo is None:  # defensive: column is timestamptz
+                cached_at = cached_at.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=24):
+                logger.info(f"Growth Supabase cache STALE (age={age}) for {ticker}")
+                return None
+
+            next_earnings = entry.get("next_earnings_date")
+            if next_earnings:
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if today_str >= next_earnings:
+                    logger.info(
+                        f"Growth Supabase cache STALE (past earnings {next_earnings}) "
+                        f"for {ticker}"
+                    )
+                    return None
+
+            return GrowthResponse(**entry["response_json"])
+        except Exception as e:
+            logger.warning(f"Growth Supabase cache check failed for {ticker}: {e}")
+            return None
+
+    def _next_earnings_date_safe(self, ticker: str) -> Optional[str]:
+        """Reuse the profit-power cache's next-earnings date when present.
+
+        Growth doesn't fetch the earnings calendar itself (it would be an 11th
+        FMP call); the sibling cache for the same ticker already stores it, so
+        read it opportunistically. None just means "expire on the 24h TTL".
+
+        The date MUST still be in the future. profit_power writes a strictly
+        future date, but that date decays as its row ages and only refreshes
+        when someone hits the profit-power path — so on any day after a company
+        reports but before profit_power is re-fetched, copying it verbatim would
+        write a row that our own freshness check (``today >= next_earnings``)
+        rejects on the very next read. That row is born stale: the Supabase tier
+        would never hit for that ticker and every 5-minute window would re-run
+        the 10-call FMP fan-out this cache exists to prevent.
+        """
+        try:
+            row = (
+                self.supabase.table("profit_power_cache")
+                .select("next_earnings_date")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+            if row.data:
+                candidate = row.data[0].get("next_earnings_date")
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if candidate and candidate > today_str:
+                    return candidate
+                if candidate:
+                    logger.info(
+                        "Growth %s: ignoring stale next_earnings_date %s from "
+                        "profit_power_cache (<= today) — using the 24h TTL",
+                        ticker, candidate,
+                    )
+        except Exception as e:
+            logger.warning(f"Growth next-earnings lookup failed for {ticker}: {e}")
+        return None
+
+    def _upsert_supabase_cache_safe(
+        self,
+        ticker: str,
+        result: GrowthResponse,
+        next_earnings: Optional[str],
+    ) -> None:
+        """Write-through to the Supabase tier. Best-effort: logged, never fatal."""
+        try:
+            self.supabase.table("growth_cache").upsert(
+                {
+                    "ticker": ticker,
+                    "response_json": result.model_dump(),
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                    "next_earnings_date": next_earnings,
+                },
+                on_conflict="ticker",
+            ).execute()
+        except Exception as e:
+            logger.warning(f"Growth Supabase upsert failed for {ticker}: {e}")
 
     async def _build_growth(self, ticker: str) -> GrowthResponse:
         """Fetch income + cash flow statements, compute YoY growth, look up sector benchmarks."""

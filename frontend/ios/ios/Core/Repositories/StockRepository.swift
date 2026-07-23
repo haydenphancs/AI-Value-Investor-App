@@ -1539,6 +1539,12 @@ struct EarningsDTO: Codable {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        // Deliberately NO explicit timeZone: the Date parsed here is used only to
+        // feed `NextEarningsDate.formattedDate`, whose display formatter
+        // (TickerDetailFormatters.longDateFormatter) is also device-local, so the
+        // parse/format round-trip renders the same calendar day everywhere.
+        // Forcing UTC on only THIS side broke that round-trip (rendered a day
+        // early west of UTC).
 
         let eps = epsQuarters.map { q in
             EarningsQuarterData(
@@ -1565,12 +1571,19 @@ struct EarningsDTO: Codable {
             EarningsDailyPricePoint(date: dp.date, price: dp.price)
         }
         var nextDate: NextEarningsDate? = nil
-        if let nd = nextEarningsDate, let d = dateFormatter.date(from: nd.date) {
-            nextDate = NextEarningsDate(
-                date: d,
-                isConfirmed: nd.isConfirmed,
-                timing: EarningsReportTiming(rawValue: nd.timing) ?? .unknown
-            )
+        if let nd = nextEarningsDate {
+            if let d = dateFormatter.date(from: nd.date) {
+                nextDate = NextEarningsDate(
+                    date: d,
+                    isConfirmed: nd.isConfirmed,
+                    timing: EarningsReportTiming(rawValue: nd.timing) ?? .unknown
+                )
+            } else {
+                // Log rather than silently dropping the whole next-earnings
+                // block (including isConfirmed/timing) on a date-format change —
+                // an unparseable date here is backend<->iOS contract drift.
+                print("⚠️ EarningsDTO: unparseable next_earnings_date \(nd.date)")
+            }
         }
         return EarningsData(
             epsQuarters: eps,
@@ -1698,19 +1711,28 @@ struct ProfitPowerResponseDTO: Codable {
     func toDisplayModel() -> ProfitPowerSectionData {
         func convert(_ dtos: [ProfitPowerDataPointDTO]) -> [ProfitPowerDataPoint] {
             dtos.map {
+                // Preserve nil — do NOT coalesce to 0.0. A null margin means the
+                // input doesn't exist (a bank reports no grossProfit; a thin
+                // industry has no sector median), and `?? 0.0` drew a real-looking
+                // 0% line plus a dashed "Sector Avg 0.0%" for data we don't have.
+                // Same policy as the Growth mapping below.
                 ProfitPowerDataPoint(
                     period: $0.period,
-                    grossMargin: $0.grossMargin ?? 0.0,
-                    operatingMargin: $0.operatingMargin ?? 0.0,
-                    fcfMargin: $0.fcfMargin ?? 0.0,
-                    netMargin: $0.netMargin ?? 0.0,
-                    sectorAverageNetMargin: $0.sectorAverageNetMargin ?? 0.0
+                    grossMargin: $0.grossMargin,
+                    operatingMargin: $0.operatingMargin,
+                    fcfMargin: $0.fcfMargin,
+                    netMargin: $0.netMargin,
+                    sectorAverageNetMargin: $0.sectorAverageNetMargin
                 )
             }
         }
         return ProfitPowerSectionData(
             annualData: convert(annual),
-            quarterlyData: convert(quarterly)
+            quarterlyData: convert(quarterly),
+            // Was decoded and then dropped — the legend could never say
+            // "Industry Avg" even when the backend said the medians were
+            // industry-level.
+            peerGroupLevel: peerGroupLevel
         )
     }
 }
@@ -1782,6 +1804,10 @@ struct HealthCheckResponseDTO: Codable {
         let displayMetrics = metrics.compactMap { dto -> HealthCheckMetric? in
             guard let metricType = typeMap[dto.type],
                   let metricStatus = statusMap[dto.status] else {
+                // A metric the app doesn't know how to render (backend added or
+                // renamed one). Log it — this is contract drift, and silently
+                // dropping it also desynced the [N/M] badge from the rows.
+                print("⚠️ HealthCheckDTO: unmapped metric type=\(dto.type) status=\(dto.status)")
                 return nil
             }
 
@@ -1798,10 +1824,14 @@ struct HealthCheckResponseDTO: Codable {
             )
         }
 
+        // Recount over the metrics we can actually SHOW. Passing the server's
+        // counts through while compactMap dropped rows let the badge read
+        // "[3/7]" above 5 visible cards.
+        let shownPassed = displayMetrics.filter { $0.status == .positive }.count
         return HealthCheckSectionData(
             overallRating: ratingMap[overallRating] ?? .mix,
-            passedCount: passedCount,
-            totalCount: totalCount,
+            passedCount: displayMetrics.count == totalCount ? passedCount : shownPassed,
+            totalCount: displayMetrics.count,
             metrics: displayMetrics
         )
     }
@@ -1839,8 +1869,12 @@ struct RevenueBreakdownDTO: Codable {
             Color(hex: "F97316"),  // Orange
             Color(hex: "06B6D4"),  // Cyan
             Color(hex: "FBBF24"),  // Amber (avoid green — reserved for profit)
-            Color(hex: "9CA3AF"),  // Gray (always last — used for "Other")
+            Color(hex: "EC4899"),  // Pink
+            Color(hex: "14B8A6"),  // Teal
         ]
+        // NB: gray 9CA3AF is deliberately NOT in the rotation — it is reserved
+        // for the "Other" bucket. It used to be the 6th entry, so a 6th real
+        // segment was coloured identically to "Other".
 
         let sources = revenueSources.enumerated().map { index, source in
             // If segment is "Other", always use gray; otherwise use palette
@@ -1951,6 +1985,9 @@ struct SignalOfConfidenceResponseDTO: Codable {
             let dateFormatter = DateFormatter()
             dateFormatter.dateFormat = "yyyy-MM-dd"
             dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+            // No explicit timeZone — matches the device-local DISPLAY formatters
+            // in DividendInfo (formattedExDividendDate / formattedPaymentDate) so
+            // the round-trip renders the same day everywhere (see EarningsDTO).
 
             let exDate = dto.exDividendDate.flatMap { dateFormatter.date(from: $0) }
             let payDate = dto.paymentDate.flatMap { dateFormatter.date(from: $0) }

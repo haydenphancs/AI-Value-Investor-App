@@ -217,7 +217,7 @@ def _compute_yoy_for_records(
     if not records:
         return {}
 
-    sorted_recs = sorted(records, key=lambda r: r.get("date", ""))
+    sorted_recs = sorted(records, key=lambda r: r.get("date") or "")
     result: Dict[str, float] = {}
 
     if is_quarterly:
@@ -283,7 +283,7 @@ def _compute_qoq_for_records(
     if not records:
         return {}
 
-    sorted_recs = sorted(records, key=lambda r: r.get("date", ""))
+    sorted_recs = sorted(records, key=lambda r: r.get("date") or "")
     result: Dict[str, float] = {}
 
     for i in range(1, len(sorted_recs)):

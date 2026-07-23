@@ -86,10 +86,60 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
 # that intentionally counts calendar quarters instead.
 
 
+def _as_list(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize an FMP payload to a list of record dicts (see the sibling
+    services): ``_make_request`` is typed ``-> Any`` and a bare error dict
+    iterates as string keys → AttributeError → 502."""
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if payload:
+        logger.warning(
+            "signal_of_confidence: expected a list from FMP, got %s — degrading to empty",
+            type(payload).__name__,
+        )
+    return []
+
+
+def _build_market_cap_lookup(records: List[Dict[str, Any]]) -> Dict[str, float]:
+    """``{yyyy-MM-dd: marketCap}`` from FMP's historical-market-capitalization."""
+    lookup: Dict[str, float] = {}
+    for rec in records:
+        d = (rec.get("date") or "")[:10]
+        mc = _safe_float(rec, "marketCap")
+        if d and mc is not None and mc > 0:
+            lookup[d] = mc
+    return lookup
+
+
+def _market_cap_on(date_str: str, lookup: Dict[str, float]) -> Optional[float]:
+    """Market cap on ``date_str``, scanning back then forward up to 5 days.
+
+    A fiscal period-end often falls on a weekend/holiday, so an exact match is
+    not guaranteed. Mirrors ``earnings_service._find_close_price``.
+    """
+    if not date_str:
+        return None
+    if date_str in lookup:
+        return lookup[date_str]
+    try:
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+    for delta in range(1, 6):
+        key = (dt - timedelta(days=delta)).strftime("%Y-%m-%d")
+        if key in lookup:
+            return lookup[key]
+    for delta in range(1, 6):
+        key = (dt + timedelta(days=delta)).strftime("%Y-%m-%d")
+        if key in lookup:
+            return lookup[key]
+    return None
+
+
 def _find_next_earnings_date(ec_records: List[Dict[str, Any]]) -> Optional[str]:
     """Return the first future earnings date as yyyy-MM-dd, or None."""
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for ec in sorted(ec_records, key=lambda r: r.get("date", "")):
+    for ec in sorted(ec_records, key=lambda r: r.get("date") or ""):
         ec_date = (ec.get("date") or "")[:10]
         if not ec_date or ec_date <= today_str:
             continue
@@ -222,19 +272,28 @@ class SignalOfConfidenceService:
     ) -> Tuple[SignalOfConfidenceResponse, Optional[str]]:
         """Fetch FMP data, compute per-quarter shareholder yield, build response."""
 
-        # Phase 1: parallel FMP fetch (5 calls)
+        # Phase 1: parallel FMP fetch (6 calls). historical-market-cap covers
+        # ~6y so every displayed quarter can be valued at ITS OWN period end.
+        today = datetime.now(timezone.utc).date()
+        mcap_from = (today - timedelta(days=6 * 365)).strftime("%Y-%m-%d")
+        mcap_to = today.strftime("%Y-%m-%d")
+
         (
             quarterly_cashflow,
             quarterly_income,
             quote_data,
             dividend_history,
             ec_raw,
+            hist_mcap_raw,
         ) = await asyncio.gather(
             self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=20),
             self.fmp.get_income_statement(ticker, period="quarter", limit=20),
             self.fmp.get_stock_price_quote(ticker),
             self.fmp.get_dividend_history(ticker, limit=40),
             self.fmp.get_earning_calendar_full(ticker),
+            self.fmp.get_historical_market_cap(
+                ticker, from_date=mcap_from, to_date=mcap_to, limit=2000
+            ),
             return_exceptions=True,
         )
 
@@ -254,24 +313,36 @@ class SignalOfConfidenceService:
         if isinstance(ec_raw, Exception):
             logger.warning(f"Earnings calendar fetch failed for {ticker}: {ec_raw}")
             ec_raw = []
+        if isinstance(hist_mcap_raw, Exception):
+            logger.warning(
+                f"Historical market cap fetch failed for {ticker}: {hist_mcap_raw} "
+                f"— per-quarter yields fall back to the current market cap"
+            )
+            hist_mcap_raw = []
 
         # Normalize quote_data — FMP returns list for quote endpoint
         if isinstance(quote_data, list):
             quote_data = quote_data[0] if quote_data else {}
+        if not isinstance(quote_data, dict):
+            quote_data = {}
 
         # Ensure all are lists
-        quarterly_cashflow = quarterly_cashflow if isinstance(quarterly_cashflow, list) else []
-        quarterly_income = quarterly_income if isinstance(quarterly_income, list) else []
-        dividend_history = dividend_history if isinstance(dividend_history, list) else []
-        ec_raw = ec_raw if isinstance(ec_raw, list) else []
+        quarterly_cashflow = _as_list(quarterly_cashflow)
+        quarterly_income = _as_list(quarterly_income)
+        dividend_history = _as_list(dividend_history)
+        ec_raw = _as_list(ec_raw)
+        hist_mcap_raw = _as_list(hist_mcap_raw)
 
         # Phase 2: build per-quarter data points
         current_market_cap = _safe_float(quote_data, "marketCap")
+        mcap_by_date = _build_market_cap_lookup(hist_mcap_raw)
 
         data_points = self._build_data_points(
             quarterly_cashflow,
             quarterly_income,
             current_market_cap,
+            mcap_by_date,
+            ticker,
         )
 
         # Phase 3: build trailing-12-month summary
@@ -305,24 +376,35 @@ class SignalOfConfidenceService:
         cashflow_records: List[Dict[str, Any]],
         income_records: List[Dict[str, Any]],
         current_market_cap: Optional[float],
+        mcap_by_date: Optional[Dict[str, float]] = None,
+        ticker: str = "",
     ) -> List[SignalOfConfidenceDataPointSchema]:
-        """Build per-quarter data points from FMP data."""
+        """Build per-quarter data points from FMP data.
+
+        Each quarter's yields are computed against the market cap at THAT
+        quarter's period end (point-in-time), not today's — scaling a two-year-old
+        quarter by the current cap understated the yields of any stock that has
+        since re-rated. Falls back to the current cap (with a warning) only when
+        the historical series has no value near the period end.
+        """
+        mcap_by_date = mcap_by_date or {}
 
         # Build lookup dict by date
         cf_by_date: Dict[str, Dict[str, Any]] = {}
         for rec in cashflow_records:
-            date = rec.get("date", "")
+            date = rec.get("date") or ""
             if date:
                 cf_by_date[date] = rec
 
         # Sort income records ascending by date, take last 8
-        sorted_income = sorted(income_records, key=lambda r: r.get("date", ""))
+        sorted_income = sorted(income_records, key=lambda r: r.get("date") or "")
         # Take the most recent 8 quarters
         recent_income = sorted_income[-8:] if len(sorted_income) > 8 else sorted_income
 
         results = []
+        fell_back_to_current = 0
         for rec in recent_income:
-            date = rec.get("date", "")
+            date = rec.get("date") or ""
             if not date:
                 continue
 
@@ -360,16 +442,25 @@ class SignalOfConfidenceService:
                 # Positive or zero = stock issuance or none
                 buyback_amount = 0.0
 
-            # Yields: compute annualised yields from quarterly cash flow / market cap
-            # FMP stable key_metrics may not include dividendYield / buybackYield,
-            # so we compute from raw cash flow data for reliability.
-            if current_market_cap and current_market_cap > 0 and dividends_paid_raw:
-                dividend_yield = round(abs(dividends_paid_raw) / current_market_cap * 100 * 4, 2)
+            # Market cap AT THIS QUARTER'S PERIOD END (point-in-time). Using
+            # today's cap for a two-year-old quarter mis-states that quarter's
+            # yield by the whole re-rating since. Fall back to the current cap
+            # only when the historical series doesn't reach this period.
+            period_mcap = _market_cap_on(date, mcap_by_date)
+            if period_mcap is None:
+                period_mcap = current_market_cap
+                fell_back_to_current += 1
+
+            # Yields: annualised (x4) from the quarter's cash flow / that
+            # quarter's market cap. FMP stable key_metrics may not include
+            # dividendYield / buybackYield, so we compute from raw cash flow.
+            if period_mcap and period_mcap > 0 and dividends_paid_raw:
+                dividend_yield = round(abs(dividends_paid_raw) / period_mcap * 100 * 4, 2)
             else:
                 dividend_yield = 0.0
 
-            if current_market_cap and current_market_cap > 0 and repurchased_raw and repurchased_raw < 0:
-                buyback_yield = round(abs(repurchased_raw) / current_market_cap * 100 * 4, 2)
+            if period_mcap and period_mcap > 0 and repurchased_raw and repurchased_raw < 0:
+                buyback_yield = round(abs(repurchased_raw) / period_mcap * 100 * 4, 2)
             else:
                 buyback_yield = 0.0
 
@@ -381,6 +472,14 @@ class SignalOfConfidenceService:
                 buyback_amount=buyback_amount,
                 shares_outstanding=shares_outstanding,
             ))
+
+        if fell_back_to_current:
+            logger.warning(
+                "signal_of_confidence %s: %d/%d quarters had no historical market "
+                "cap within +-5d of the period end — those yields use the CURRENT "
+                "cap and are not point-in-time",
+                ticker or "?", fell_back_to_current, len(results),
+            )
 
         return results
 
@@ -458,7 +557,7 @@ class SignalOfConfidenceService:
         # Sort descending by date to find most recent
         sorted_divs = sorted(
             dividend_history,
-            key=lambda d: d.get("date", ""),
+            key=lambda d: d.get("date") or "",
             reverse=True,
         )
 
@@ -467,18 +566,25 @@ class SignalOfConfidenceService:
         ex_date = (latest.get("date") or "")[:10] or None
         payment_date = (latest.get("paymentDate") or latest.get("payment_date") or "")[:10] or None
 
-        # 5-year average total yield (Div + Buyback) from quarterly data points.
-        # Each data point has dividend_yield and buyback_yield (annualized %).
-        # We average across all available quarters to get a comparable figure
-        # to Current Yield which also includes Div + Buyback.
+        # Historical average DIVIDEND yield from the quarterly data points.
+        #
+        # This value is compared against the T12M DIVIDEND yield below, so it
+        # must be dividend-only. It previously summed `dividend_yield +
+        # buyback_yield` and was then divided into a dividend-only numerator —
+        # any large repurchaser got a systematically depressed ratio and was
+        # mislabelled "Low". (Verified: 0.5% dividends + 3.5% buybacks every
+        # quarter -> avg 4.0 -> ratio 0.125 -> "Low", for a company yielding
+        # exactly its own average.)
+        #
+        # NOTE the window is the available data points (<= 8 quarters, see
+        # _build_data_points), NOT five years — the schema field is named
+        # `five_year_avg_yield` for backward compatibility with the shipped iOS
+        # DTO, but it is a trailing average over whatever history we hold.
         five_year_avg_yield = 0.0
         if data_points and len(data_points) >= 4:
-            # Average the per-quarter total yields (div + buyback)
-            total_yields = [
-                dp.dividend_yield + dp.buyback_yield for dp in data_points
-            ]
+            dividend_yields = [dp.dividend_yield for dp in data_points]
             five_year_avg_yield = round(
-                sum(total_yields) / len(total_yields), 2
+                sum(dividend_yields) / len(dividend_yields), 2
             )
         else:
             # Fallback: use dividend history only

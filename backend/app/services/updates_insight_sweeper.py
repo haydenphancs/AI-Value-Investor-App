@@ -523,6 +523,12 @@ class InsightSweeper:
             "change_pct": cp,
             "catalyst_tag": grounded.get("tag"),   # None ⇒ "no clear catalyst"
             "reason": grounded.get("reason") or "",
+            # The OUTSIDE web sources the grounded search consulted
+            # (``[{title, uri, publisher}]``). Carried alongside the block so the
+            # caller can MERGE them into the card's `sources` list; stripped by
+            # `_sanitize_price_move` (whitelist) so it never lands in the stored
+            # `price_move` column.
+            "web_sources": grounded.get("sources") or [],
         }
 
     def _consume_global_budget(self, now: datetime) -> bool:
@@ -750,6 +756,9 @@ class InsightSweeper:
                         market_active=market_active,
                         price_move=price_move,
                         preserve_price_move=preserve_price_move,
+                        # Merge the catalyst's outside web sources into the card's
+                        # `sources` list (None when no big-move catalyst ran).
+                        catalyst_sources=(price_move or {}).get("web_sources"),
                     )
                 except asyncio.CancelledError:
                     # A deploy/shutdown cancels the sweeper mid-generation.

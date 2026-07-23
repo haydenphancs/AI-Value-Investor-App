@@ -9,6 +9,11 @@
 import SwiftUI
 
 struct ProfitPowerLegendView: View {
+    /// "Industry" / "Sector" — the peer group the dashed benchmark line actually
+    /// represents. The backend has always sent `peer_group_level`, but the label
+    /// was hardcoded to "Sector", so an industry-level benchmark was mislabelled.
+    var peerWord: String = "Sector"
+
     var body: some View {
         VStack(spacing: AppSpacing.md) {
             // First row: Gross Margin, Operating Margin, FCF Margin
@@ -18,10 +23,13 @@ struct ProfitPowerLegendView: View {
                 ProfitPowerLegendItem(marginType: .fcfMargin)
             }
 
-            // Second row: Net Margin, Sector Average
+            // Second row: Net Margin, peer-group Average
             HStack(spacing: AppSpacing.xl) {
                 ProfitPowerLegendItem(marginType: .netMargin)
-                ProfitPowerLegendItem(marginType: .sectorAverage)
+                ProfitPowerLegendItem(
+                    marginType: .sectorAverage,
+                    labelOverride: "\(peerWord) Average\nNet Margin"
+                )
             }
         }
     }
@@ -32,7 +40,10 @@ struct ProfitPowerLegendView: View {
         AppColors.background
             .ignoresSafeArea()
 
-        ProfitPowerLegendView()
-            .padding()
+        VStack(spacing: AppSpacing.xl) {
+            ProfitPowerLegendView()
+            ProfitPowerLegendView(peerWord: "Industry")
+        }
+        .padding()
     }
 }

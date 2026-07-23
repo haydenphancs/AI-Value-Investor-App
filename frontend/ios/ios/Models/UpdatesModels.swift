@@ -156,6 +156,17 @@ struct NewsArticle: Identifiable, Hashable {
             && !apiId.hasPrefix("sample_")
     }
 
+    /// Stable `ForEach` identity. `id` is a fresh `UUID()` minted on every
+    /// DTO→model build, so keying rows on it made pull-to-refresh / cache-miss
+    /// reload / paging tear down and rebuild EVERY row (re-firing all `onAppear`
+    /// and reloading all images — part of the Updates freeze). The backend
+    /// `apiId` is stable across rebuilds, so prefer it; fall back to the unique
+    /// UUID for local/mock rows that have no server id. The VM dedupes non-empty
+    /// `apiId`s at build time, so this key can never collide.
+    var stableID: String {
+        apiId.isEmpty ? id.uuidString : apiId
+    }
+
     var formattedTime: String {
         UpdatesFormatters.timeFormatter.string(from: publishedAt)
     }

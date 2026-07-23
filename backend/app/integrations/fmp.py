@@ -363,6 +363,31 @@ class FMPClient:
 
         return await self._make_request("historical-price-eod/full", params=params)
 
+    async def get_historical_market_cap(
+        self,
+        ticker: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """Daily historical market capitalization.
+
+        Returns ``[{"symbol", "date", "marketCap"}, ...]``. Used to compute
+        POINT-IN-TIME shareholder yields (a quarter's dividends/buybacks against
+        the market cap at THAT quarter's end) instead of scaling every historical
+        quarter by today's cap.
+        """
+        params: Dict[str, Any] = {"symbol": ticker.upper(), "limit": limit}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+
+        data = await self._make_request(
+            "historical-market-capitalization", params=params
+        )
+        return data if isinstance(data, list) else []
+
     async def get_intraday_prices(
         self,
         ticker: str,

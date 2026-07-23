@@ -61,13 +61,18 @@ struct HealthCheckSectionCard: View {
 
             Spacer()
 
-            // Detail link
-            Button(action: onDetailTapped) {
-                Text("Detail")
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.primaryBlue)
-            }
-            .buttonStyle(.plain)
+            // The "Detail" affordance is hidden: all six handlers in
+            // TickerDetailViewModel are `print()` stubs — no detail screen
+            // exists — so the button did nothing when tapped. The callback
+            // parameter is intentionally kept so re-enabling is a one-line
+            // change once the drill-down ships.
+            // // Detail link
+            // Button(action: onDetailTapped) {
+            // Text("Detail")
+            // .font(AppTypography.bodySmallEmphasis)
+            // .foregroundColor(AppColors.primaryBlue)
+            // }
+            // .buttonStyle(.plain)
         }
         .padding(.horizontal, AppSpacing.lg)
     }

@@ -78,7 +78,7 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
 def _find_next_earnings_date(ec_records: List[Dict[str, Any]]) -> Optional[str]:
     """Return the first future earnings date as yyyy-MM-dd, or None."""
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for ec in sorted(ec_records, key=lambda r: r.get("date", "")):
+    for ec in sorted(ec_records, key=lambda r: r.get("date") or ""):
         ec_date = (ec.get("date") or "")[:10]
         if not ec_date or ec_date <= today_str:
             continue
@@ -585,9 +585,16 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
     trailing four quarters gives the correct denominator vs. the latest
     annual fiscal year (which can be 12+ months stale).
     """
+    if not isinstance(quarterly, list):
+        logger.warning(
+            "health_check TTM: expected a list of income statements, got %s",
+            type(quarterly).__name__,
+        )
+        return {}
+    quarterly = [r for r in quarterly if isinstance(r, dict)]
     if not quarterly:
         return {}
-    sorted_q = sorted(quarterly, key=lambda r: r.get("date", ""), reverse=True)[:4]
+    sorted_q = sorted(quarterly, key=lambda r: r.get("date") or "", reverse=True)[:4]
     summed: Dict[str, float] = {}
     for field in ("operatingIncome", "interestExpense", "revenue", "netIncome", "ebitda"):
         vals: List[float] = []
@@ -599,29 +606,68 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
             vals.append(v)
         if vals:
             summed[field] = sum(vals)
+        else:
+            # A partial sum would understate a TTM flow figure, so the field is
+            # dropped — but SILENTLY dropping it let `(ebit or 0)` downstream
+            # fabricate a 0 EBIT. Log it so the degradation is diagnosable.
+            logger.warning(
+                "health_check TTM: %r missing in at least one of the last %d "
+                "quarters — field omitted from the TTM sum",
+                field, len(sorted_q),
+            )
     return summed
 
 
 def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[float]:
-    """Compute Altman Z-Score from balance sheet, income, and market cap."""
+    """Compute Altman Z-Score from balance sheet, income, and market cap.
+
+    Returns None — so the caller OMITS the metric — whenever a term that
+    materially moves the score is unavailable, rather than substituting 0.
+
+    This used to do ``0.6 * ((mcap or 0) / tl)``: a failed company-profile fetch
+    (only a logger.warning upstream) silently valued the equity at ZERO. On
+    Apple-shaped inputs that is Z=8.9 ("positive", fortress) vs Z=2.1
+    ("neutral", "Grey zone. Moderate financial stress signals") — a wrong,
+    confident verdict that also moved overall_rating and was cached for 24h.
+    The same reasoning applies to EBIT and revenue, which ``_sum_ttm_income``
+    drops entirely when any one quarter lacks the field.
+    """
     ta = _safe_float(bs, "totalAssets")
     tl = _safe_float(bs, "totalLiabilities")
     ca = _safe_float(bs, "totalCurrentAssets")
     cl = _safe_float(bs, "totalCurrentLiabilities")
-    re = _safe_float(bs, "retainedEarnings")
+    ret_earnings = _safe_float(bs, "retainedEarnings")
     ebit = _safe_float(inc, "operatingIncome")
     rev = _safe_float(inc, "revenue")
 
     if not ta or ta <= 0 or not tl or tl <= 0:
         return None
 
+    # Market value of equity (0.6 weight) and the two income terms are not
+    # optional inputs — a missing one changes the ZONE, not just the precision.
+    missing = [
+        name for name, val in (
+            ("market_cap", mcap), ("ebit", ebit), ("revenue", rev),
+        ) if val is None
+    ]
+    if missing:
+        logger.warning(
+            "altman_z_score: omitting metric — missing required input(s) %s "
+            "(substituting 0 would fabricate a distress verdict)",
+            ", ".join(missing),
+        )
+        return None
+
+    # Working capital and retained earnings legitimately default to 0 when the
+    # filing omits them (small/foreign issuers); they carry lower weights and a
+    # 0 is the neutral value, not a distorting one.
     wc = (ca or 0) - (cl or 0)
     z = (
         1.2 * (wc / ta)
-        + 1.4 * ((re or 0) / ta)
-        + 3.3 * ((ebit or 0) / ta)
-        + 0.6 * ((mcap or 0) / tl)
-        + 1.0 * ((rev or 0) / ta)
+        + 1.4 * ((ret_earnings or 0) / ta)
+        + 3.3 * (ebit / ta)
+        + 0.6 * (mcap / tl)
+        + 1.0 * (rev / ta)
     )
     return round(z, 1)
 

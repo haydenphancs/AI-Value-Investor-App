@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -55,16 +56,25 @@ def _hist_list(historical: Any) -> List[Dict[str, Any]]:
 
 
 def _chronological_closes(historical: Any) -> List[float]:
-    """Oldest→newest close prices (FMP returns newest-first)."""
+    """Oldest→newest close prices (FMP returns newest-first).
+
+    Drops non-finite closes: FMP returns ``NaN``/``Infinity`` JSON tokens on thin
+    / just-listed symbols, and ``float("nan")`` succeeds — so without an
+    ``isfinite`` gate one bad row would flow into the σ math and poison the whole
+    baseline (CLAUDE.md hardening rule).
+    """
     closes: List[float] = []
     for p in _hist_list(historical):
         c = p.get("close")
         if c is None:
             continue
         try:
-            closes.append(float(c))
+            v = float(c)
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(v):
+            continue
+        closes.append(v)
     closes.reverse()
     return closes
 
@@ -81,7 +91,10 @@ def _sigma_from_closes(closes: List[float]) -> Tuple[Optional[float], int]:
     baseline = closes[-(_BASELINE_DAYS + 1):]
     returns = _daily_returns(baseline)
     sigma = _std_dev_pop(returns)
-    if sigma is None or sigma <= 0:
+    # `not isfinite` in addition to `<= 0`: a nan escapes `<= 0` (nan<=0 is False)
+    # and must NEVER be written to the cache — a NaN in the row serializes to an
+    # invalid JSON body (rejected upsert) or a poisoned DOUBLE PRECISION NaN.
+    if sigma is None or not math.isfinite(sigma) or sigma <= 0:
         return None, len(returns)
     return sigma, len(returns)
 
@@ -144,10 +157,16 @@ class VolatilityCacheService:
             if not t:
                 continue
             sig = r.get("sigma_daily")
-            try:
-                out[str(t).upper()] = float(sig) if sig is not None else None
-            except (TypeError, ValueError):
-                out[str(t).upper()] = None
+            val: Optional[float] = None
+            if sig is not None:
+                try:
+                    f = float(sig)
+                    # A legacy/poisoned NaN row must read back as None (→ fixed
+                    # band), never as a nan that could reach the tier math.
+                    val = f if math.isfinite(f) else None
+                except (TypeError, ValueError):
+                    val = None
+            out[str(t).upper()] = val
         return out
 
     # ── Daily precompute ──────────────────────────────────────────────

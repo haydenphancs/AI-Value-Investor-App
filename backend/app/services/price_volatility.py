@@ -20,6 +20,7 @@ tunable constant.
 from __future__ import annotations
 
 import bisect
+import math
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,24 +44,36 @@ TIER_EXTREME = "Extreme"
 
 def _daily_returns(prices: List[float]) -> List[float]:
     """Daily simple returns from a price array (oldest→newest).
-    Skips pairs where the prior close is zero or missing.
+
+    Skips pairs where the prior close is zero/missing, and — critically — where
+    EITHER close is non-finite. FMP emits ``NaN``/``Infinity`` JSON tokens on
+    thin / just-listed symbols (Python's ``json`` parses them into float
+    nan/inf); ``curr is not None`` does NOT reject those, and a single nan close
+    propagates through the mean/variance and poisons the whole σ. Finite-guard
+    both sides so one bad row cannot NaN the baseline (CLAUDE.md hardening rule).
     """
     out: List[float] = []
     for i in range(1, len(prices)):
         prev = prices[i - 1]
         curr = prices[i]
-        if prev and prev > 0 and curr is not None:
+        if (
+            prev is not None and curr is not None
+            and math.isfinite(prev) and math.isfinite(curr)
+            and prev > 0
+        ):
             out.append((curr - prev) / prev)
     return out
 
 
 def _std_dev_pop(values: List[float]) -> Optional[float]:
-    """Population standard deviation. None if <2 values."""
+    """Population standard deviation. None if <2 values or the result is
+    non-finite (defence in depth against a nan/inf sneaking into ``values``)."""
     if len(values) < 2:
         return None
     mean = sum(values) / len(values)
     var = sum((v - mean) ** 2 for v in values) / len(values)
-    return var ** 0.5
+    sigma = var ** 0.5
+    return sigma if math.isfinite(sigma) else None
 
 
 def _z_score_for_window(
@@ -135,7 +148,7 @@ def _compute_price_volatility(
     # at most `baseline_days` entries. The +1 covers the inter-day diff.
     baseline_slice = prices[-(baseline_days + 1):]
     sigma_daily = _std_dev_pop(_daily_returns(baseline_slice))
-    if sigma_daily is None or sigma_daily <= 0:
+    if sigma_daily is None or not math.isfinite(sigma_daily) or sigma_daily <= 0:
         return out
     out["sigma_daily"] = sigma_daily
 

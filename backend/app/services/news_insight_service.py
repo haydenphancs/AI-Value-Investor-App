@@ -392,6 +392,7 @@ class NewsInsightService:
         quote: Optional[Dict[str, Any]] = None,
         market_active: bool = True,
         price_move: Optional[Dict[str, Any]] = None,
+        preserve_price_move: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Generate a card with Gemini and persist it. Returns ``None`` on any
         failure, **without writing anything**.
@@ -400,6 +401,11 @@ class NewsInsightService:
         big move — a SEPARATE, cited field from the news bullets. It is persisted
         with the card but is purely additive: a None/malformed value never blocks
         or fails the news card.
+
+        ``preserve_price_move`` — when True and ``price_move`` is None, the stored
+        ``price_move`` column is left untouched instead of being overwritten to
+        NULL, so a still-valid "why it moved" block is not wiped by a regen where
+        the catalyst was merely unavailable this cycle (see the sweeper).
 
         The corpus passed here MUST be the same corpus the materiality gate
         evaluated — otherwise we can regenerate because of a story the summary
@@ -456,7 +462,7 @@ class NewsInsightService:
         stored = await asyncio.to_thread(
             self._store,
             scope, card, inputset_id, trigger_reason, len(articles), market_active,
-            price_move,
+            price_move, preserve_price_move,
         )
         if not stored:
             return None
@@ -529,6 +535,7 @@ class NewsInsightService:
         article_count: int,
         market_active: bool,
         price_move: Optional[Dict[str, Any]] = None,
+        preserve_price_move: bool = False,
     ) -> bool:
         """Blocking upsert — always called via ``asyncio.to_thread``."""
         now = datetime.now(timezone.utc)
@@ -548,10 +555,15 @@ class NewsInsightService:
             "close_cycle": current_close_cycle_start(now).isoformat(),
             "soft_expires_at": (now + timedelta(seconds=soft)).isoformat(),
             "hard_expires_at": (now + timedelta(seconds=hard)).isoformat(),
-            # Additive JSONB (migration 091). Only a well-shaped block is written;
-            # a card without a big move stores NULL. Never blocks the news card.
-            "price_move": _sanitize_price_move(price_move),
         }
+        sanitized_move = _sanitize_price_move(price_move)
+        # Additive JSONB (migration 091). Only a well-shaped block is written; a
+        # card without a big move stores NULL. When `preserve_price_move` is set
+        # and there is no new block, OMIT the column from the upsert so an
+        # existing, still-valid block is kept on conflict instead of wiped to NULL
+        # (a PostgREST upsert only SETs the columns present in the payload).
+        if not (preserve_price_move and sanitized_move is None):
+            row["price_move"] = sanitized_move
         try:
             self.supabase.table(_TABLE).upsert(row, on_conflict="scope").execute()
             return True

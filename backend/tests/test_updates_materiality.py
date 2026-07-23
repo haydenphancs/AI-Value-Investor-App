@@ -34,6 +34,7 @@ from app.services.updates_materiality import (
     TIER_UNUSUAL,
     daily_cap_for,
     premarket_cap_for,
+    canonical_band,
     classify_move,
     compute_inputset_id,
     corpus_article_ids,
@@ -215,6 +216,50 @@ def test_decide_never_raises_on_hostile_sigma():
 
 
 # ── fingerprint ───────────────────────────────────────────────────────
+
+def test_canonical_band_unifies_tier_and_fixed_band_vocab():
+    # σ-path tier labels and fallback band labels collapse onto one bucket, so σ
+    # availability toggling for an unchanged move is invisible to the fingerprint.
+    assert canonical_band(TIER_TYPICAL) == canonical_band(BAND_FLAT)
+    assert canonical_band(TIER_NOTABLE) == canonical_band(BAND_NOTABLE)
+    assert canonical_band(TIER_EXTREME) == canonical_band(BAND_EXTREME)
+    # Unusual has no fixed-band equivalent and stays distinct; a genuine
+    # escalation (notable→unusual) still re-keys.
+    assert canonical_band(TIER_UNUSUAL) != canonical_band(TIER_NOTABLE)
+    assert canonical_band(TIER_UNUSUAL) != canonical_band(BAND_EXTREME)
+    assert canonical_band("garbage") == "unknown"
+
+
+def test_sigma_toggle_does_not_rekey_the_fingerprint_for_the_same_move():
+    # The exact spend leak this fix targets: same articles, same +3% move, but σ
+    # present one sweep and absent the next (missed precompute / read blip / cold
+    # start). The raw label flips Notable↔notable, but the fingerprint must NOT —
+    # else a byte-identical card is billed, and again on the way back.
+    q = {"changePercentage": 3.0, "marketCap": LARGE_CAP}
+    with_sigma = _decide(quote=q, sigma_daily=0.02)   # z=1.5 → tier Notable
+    without_sigma = _decide(quote=q)                   # 3% large-cap → band notable
+    assert with_sigma.price_band == TIER_NOTABLE
+    assert without_sigma.price_band == BAND_NOTABLE
+    assert with_sigma.price_band != without_sigma.price_band
+    assert with_sigma.inputset_id == without_sigma.inputset_id
+
+
+def test_sigma_toggle_on_a_quiet_day_does_not_rekey():
+    # The most common case: a quiet 0.5% day is Typical (σ) vs flat (band).
+    q = {"changePercentage": 0.5, "marketCap": LARGE_CAP}
+    a = _decide(quote=q, sigma_daily=0.02)   # z=0.25 → Typical
+    b = _decide(quote=q)                       # 0.5% < 2% → flat
+    assert a.price_band == TIER_TYPICAL and b.price_band == BAND_FLAT
+    assert a.inputset_id == b.inputset_id
+
+
+def test_a_genuine_severity_escalation_still_rekeys_the_fingerprint():
+    # Canonicalization must not over-collapse: a real notable→extreme move re-keys.
+    small = _decide(quote={"changePercentage": 3.0, "marketCap": LARGE_CAP}, sigma_daily=0.02)
+    big = _decide(quote={"changePercentage": 9.0, "marketCap": LARGE_CAP}, sigma_daily=0.02)
+    assert small.price_band == TIER_NOTABLE and big.price_band == TIER_EXTREME
+    assert small.inputset_id != big.inputset_id
+
 
 def test_fingerprint_is_order_independent():
     # FMP reordering the same articles is not new news.

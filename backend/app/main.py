@@ -457,9 +457,48 @@ async def _run_volatility_precompute_job():
     """
     from datetime import datetime, timezone
 
+    from app.database import get_supabase
+    from app.services.updates_insight_sweeper import MARKET_INDEX_SYMBOL
+    from app.services.volatility_cache_service import get_volatility_cache_service
+
+    def _universe() -> list:
+        try:
+            res = get_supabase().rpc(
+                "get_top_watchlist_tickers", {"n": 200}
+            ).execute()
+            return [
+                str(r["ticker"]).upper()
+                for r in (res.data or []) if r.get("ticker")
+            ]
+        except Exception as e:
+            logger.warning(
+                "Volatility precompute: watchlist read failed: %s: %s",
+                type(e).__name__, e,
+            )
+            return []
+
     await asyncio.sleep(200)  # after the sweeper's 150s startup stagger
 
     while True:
+        # Compute FIRST, then sleep to the next 08:00 UTC. On a cold start (empty
+        # or >36h-stale ticker_volatility_cache) the volatility trigger would
+        # otherwise sit on the fixed-band fallback for the whole universe until the
+        # next 08:00 — the just-shipped feature dark for up to ~24h. skip_if_fresh_
+        # hours=20 makes this loop-head run a cheap no-op when rows are already
+        # fresh (a steady-state redeploy skips everything), so it is safe to run
+        # every iteration and it is what actually makes the "resume" path reachable.
+        try:
+            tickers = await asyncio.to_thread(_universe)
+            symbols = list(dict.fromkeys(tickers + [MARKET_INDEX_SYMBOL]))
+            written = await get_volatility_cache_service().recompute_universe(
+                symbols, skip_if_fresh_hours=20,
+            )
+            logger.info("Volatility precompute job completed: %d rows", written)
+        except Exception as e:
+            logger.error(
+                "Volatility precompute job failed: %s", e, exc_info=True,
+            )
+
         now = datetime.now(timezone.utc)
         next_run = _next_daily_run(now, hour_utc=8)
         sleep_seconds = (next_run - now).total_seconds()
@@ -468,40 +507,6 @@ async def _run_volatility_precompute_job():
             next_run.isoformat(), sleep_seconds / 3600,
         )
         await asyncio.sleep(sleep_seconds)
-
-        try:
-            from app.database import get_supabase
-            from app.services.updates_insight_sweeper import MARKET_INDEX_SYMBOL
-            from app.services.volatility_cache_service import (
-                get_volatility_cache_service,
-            )
-
-            def _universe() -> list:
-                try:
-                    res = get_supabase().rpc(
-                        "get_top_watchlist_tickers", {"n": 200}
-                    ).execute()
-                    return [
-                        str(r["ticker"]).upper()
-                        for r in (res.data or []) if r.get("ticker")
-                    ]
-                except Exception as e:
-                    logger.warning(
-                        "Volatility precompute: watchlist read failed: %s: %s",
-                        type(e).__name__, e,
-                    )
-                    return []
-
-            tickers = await asyncio.to_thread(_universe)
-            symbols = list(dict.fromkeys(tickers + [MARKET_INDEX_SYMBOL]))
-            written = await get_volatility_cache_service().recompute_universe(
-                symbols, skip_if_fresh_hours=20,
-            )
-            logger.info("Volatility precompute daily job completed: %d rows", written)
-        except Exception as e:
-            logger.error(
-                "Volatility precompute daily job failed: %s", e, exc_info=True,
-            )
 
 
 def _next_quarterly_dossier_run(now: "datetime") -> "datetime":

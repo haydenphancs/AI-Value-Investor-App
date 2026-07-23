@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.config import settings
 from app.database import get_supabase
-from app.integrations.gemini import get_gemini_client, GeminiQuotaError
+from app.integrations.gemini import get_gemini_client, is_transient_gemini_error
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.updates_materiality import PROMPT_VERSION, finite
 from app.utils.market_hours import is_market_active
@@ -445,14 +445,11 @@ class NewsInsightService:
             )
             return None
         except Exception as e:
-            emsg = str(e).lower()
-            is_quota = isinstance(e, GeminiQuotaError) or any(
-                s in emsg for s in ("429", "quota", "resource_exhausted", "rate limit")
-            )
-            if is_quota:
-                # Already governed by the Gemini quota circuit breaker — a known
-                # transient capacity condition, not an incident.
-                logger.warning("Insight generation quota-limited for %s: %s", scope, e)
+            if is_transient_gemini_error(e):
+                # A known transient Gemini capacity condition (quota OR server
+                # overload / "high demand") — already retried + circuit-governed,
+                # and the card just isn't regenerated this cycle. Not an incident.
+                logger.warning("Insight generation degraded (transient) for %s: %s", scope, e)
             else:
                 logger.error(
                     "Insight generation failed for %s: %s: %s",

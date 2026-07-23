@@ -19,19 +19,36 @@ from functools import wraps
 
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── Quota-error detection ──────────────────────────────────────────
+# ── Transient-error detection ──────────────────────────────────────
+# Two flavours of transient upstream condition, both retry-later + sentinel-
+# fallback (NOT a code bug worth an ERROR-level Sentry page):
+#   * QUOTA / rate-limit (429) — governed by the circuit breaker below.
+#   * SERVER OVERLOAD / 5xx ("This model is currently experiencing high demand")
+#     — the SDK's ServerError; retry with backoff (Google's own guidance).
 _QUOTA_ERROR_STRINGS = ("429", "resource_exhausted", "quota", "rate limit")
+_OVERLOAD_ERROR_STRINGS = ("high demand", "overloaded", "try again later", "unavailable", "503")
 
 
 def _is_quota_error(exc: Exception) -> bool:
     """Return True if the exception looks like a quota/rate-limit error."""
     msg = str(exc).lower()
     return any(s in msg for s in _QUOTA_ERROR_STRINGS)
+
+
+def _is_overload_error(exc: Exception) -> bool:
+    """Gemini server-side overload / 5xx — transient and retryable, NOT a code
+    bug. Matches the SDK's ``ServerError`` type (any 5xx) plus the "high demand"
+    503 message so a wrapped/stringified error is still caught."""
+    if isinstance(exc, genai_errors.ServerError):
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in _OVERLOAD_ERROR_STRINGS)
 
 
 class GeminiQuotaError(Exception):
@@ -43,6 +60,18 @@ class GeminiQuotaError(Exception):
     GEMINI_QUOTA_EXCEEDED contract — and so the caller's existing sentinel
     fallback (e.g. narrative jobs) fires instead of propagating a raw error.
     """
+
+
+def is_transient_gemini_error(exc: Exception) -> bool:
+    """Quota/rate-limit OR server-overload — an upstream capacity condition the
+    caller should treat as retry-later + sentinel fallback and log at WARNING,
+    never an ERROR-level Sentry page. The single classifier every caller should
+    use (so the two failure modes stay in sync)."""
+    return (
+        isinstance(exc, GeminiQuotaError)
+        or _is_quota_error(exc)
+        or _is_overload_error(exc)
+    )
 
 
 class _QuotaCircuitBreaker:
@@ -136,8 +165,9 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            attempt = 0          # generic failures
-            quota_attempt = 0    # quota/429 failures
+            attempt = 0            # generic failures
+            quota_attempt = 0      # quota/429 failures
+            overload_attempt = 0   # server-overload / 5xx failures
             while True:
                 # Fail fast while the breaker is open — don't add load to an
                 # already-exhausted quota; the caller's sentinel fallback fires.
@@ -171,6 +201,30 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
                             f"Quota/rate-limit (attempt {quota_attempt}/"
                             f"{settings.GEMINI_QUOTA_MAX_RETRIES}) — backing "
                             f"off {backoff:.1f}s: {e}"
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+                    # Server overload / 5xx ("high demand"): transient upstream
+                    # capacity, NOT a code bug. Retry with backoff (Google's own
+                    # guidance) on its OWN budget, log at WARNING (the caller's
+                    # sentinel fallback covers the user), and DON'T touch the quota
+                    # circuit — an overload is not a quota exhaustion.
+                    if _is_overload_error(e):
+                        overload_attempt += 1
+                        if overload_attempt > settings.GEMINI_QUOTA_MAX_RETRIES:
+                            logger.warning(
+                                f"Gemini overloaded — giving up after "
+                                f"{overload_attempt} attempt(s): {e}"
+                            )
+                            raise
+                        backoff = (
+                            settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS
+                            * overload_attempt
+                        )
+                        logger.warning(
+                            f"Gemini overloaded (attempt {overload_attempt}/"
+                            f"{settings.GEMINI_QUOTA_MAX_RETRIES}) — backing off "
+                            f"{backoff:.1f}s: {e}"
                         )
                         await asyncio.sleep(backoff)
                         continue
@@ -361,7 +415,11 @@ class GeminiClient:
             self._response_cache.set(key, result)
             return result
         except Exception as e:
-            logger.error(f"Gemini text generation failed: {e}", exc_info=True)
+            # A transient overload/quota is retried + WARNING-logged by
+            # @async_retry and covered by the caller's sentinel — only a genuine
+            # failure warrants an ERROR-level Sentry page.
+            if not is_transient_gemini_error(e):
+                logger.error(f"Gemini text generation failed: {e}", exc_info=True)
             raise
 
     # ── Streaming text (SSE chat) ─────────────────────────────────────
@@ -547,7 +605,8 @@ class GeminiClient:
             self._response_cache.set(key, result)
             return result
         except Exception as e:
-            logger.error(f"Gemini JSON generation failed: {e}", exc_info=True)
+            if not is_transient_gemini_error(e):
+                logger.error(f"Gemini JSON generation failed: {e}", exc_info=True)
             raise
 
     @async_retry(max_attempts=2, delay=2.0)
@@ -585,7 +644,8 @@ class GeminiClient:
             self._embedding_cache.set(key, embedding)
             return embedding
         except Exception as e:
-            logger.error(f"Embedding generation failed: {e}", exc_info=True)
+            if not is_transient_gemini_error(e):
+                logger.error(f"Embedding generation failed: {e}", exc_info=True)
             raise
 
     @async_retry(max_attempts=2, delay=2.0)
@@ -621,7 +681,8 @@ class GeminiClient:
                 )
             )
         except Exception as exc:
-            logger.error("Gemini grounded research failed: %s", exc, exc_info=True)
+            if not is_transient_gemini_error(exc):
+                logger.error("Gemini grounded research failed: %s", exc, exc_info=True)
             raise
 
         candidates = getattr(response, "candidates", None) or []

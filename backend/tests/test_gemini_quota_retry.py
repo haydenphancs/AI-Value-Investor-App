@@ -24,13 +24,28 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from google.genai import errors as genai_errors
+
 from app.integrations import gemini
 from app.integrations.gemini import (
     GeminiQuotaError,
     async_retry,
     _is_quota_error,
+    _is_overload_error,
+    is_transient_gemini_error,
 )
 from app.api.error_response import classify_exception, ErrorCode
+
+# The exact production message behind the Sentry "ServerError" issue.
+_HIGH_DEMAND_MSG = (
+    "This model is currently experiencing high demand. Spikes in demand are "
+    "usually temporary. Please try again later."
+)
+
+
+def _server_error() -> genai_errors.ServerError:
+    """A real SDK ServerError (503, high-demand) — the isinstance path."""
+    return genai_errors.ServerError(503, {"error": {"message": _HIGH_DEMAND_MSG}})
 
 
 # ── shared helpers ─────────────────────────────────────────────────────────
@@ -273,3 +288,94 @@ async def test_breaker_open_raises_quota_error_that_classifies(monkeypatch):
     assert calls["n"] == 0
     code, _status = classify_exception(ei.value)
     assert code == ErrorCode.GEMINI_QUOTA_EXCEEDED
+
+
+# ── 6. server OVERLOAD ("high demand" 5xx) — the Sentry issue ───────────────
+
+
+def test_overload_classification():
+    class Fake(Exception):
+        pass
+    # The exact production message (string path) is transient.
+    assert _is_overload_error(Fake(_HIGH_DEMAND_MSG)) is True
+    assert is_transient_gemini_error(Fake(_HIGH_DEMAND_MSG)) is True
+    # The SDK ServerError type (isinstance path) is transient too.
+    assert _is_overload_error(_server_error()) is True
+    assert is_transient_gemini_error(_server_error()) is True
+    # A genuine bug is NOT transient → still an ERROR-level Sentry page.
+    assert _is_overload_error(ValueError("bad dict key 'metric'")) is False
+    assert is_transient_gemini_error(ValueError("bad dict key 'metric'")) is False
+
+
+def test_servererror_routes_to_gemini_unavailable_contract():
+    # A propagated overload maps to the retry-later GEMINI_UNAVAILABLE contract,
+    # NOT a generic 500 — so the user sees an actionable message.
+    code, status = classify_exception(_server_error())
+    assert code == ErrorCode.GEMINI_UNAVAILABLE
+    assert isinstance(status, int)
+
+
+@pytest.mark.asyncio
+async def test_overload_error_twice_then_success(monkeypatch):
+    _reset_circuit()
+    _no_sleep(monkeypatch)
+    _set_quota_settings(monkeypatch, max_retries=2, circuit_threshold=1)
+
+    calls = {"n": 0}
+
+    @async_retry(max_attempts=2, delay=1.0)
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise _server_error()
+        return "ok"
+
+    result = await flaky()
+    assert result == "ok"
+    # Overload has its OWN budget = GEMINI_QUOTA_MAX_RETRIES (+1 original) = 3,
+    # independent of the tiny generic max_attempts=2 — so a 5xx blip recovers.
+    assert calls["n"] == 3
+    # And it did NOT touch the quota circuit (an overload is not a quota outage).
+    assert gemini._quota_circuit._consecutive == 0
+    assert gemini._quota_circuit.is_open() is False
+
+
+@pytest.mark.asyncio
+async def test_overload_error_always_reraises_bounded(monkeypatch):
+    _reset_circuit()
+    _no_sleep(monkeypatch)
+    _set_quota_settings(monkeypatch, max_retries=2, circuit_threshold=1)
+
+    calls = {"n": 0}
+
+    @async_retry(max_attempts=2, delay=1.0)
+    async def always_overloaded():
+        calls["n"] += 1
+        raise _server_error()
+
+    with pytest.raises(genai_errors.ServerError):
+        await always_overloaded()
+    # Bounded: original + GEMINI_QUOTA_MAX_RETRIES, then give up. Never loops.
+    assert calls["n"] == gemini.settings.GEMINI_QUOTA_MAX_RETRIES + 1
+    # Circuit is untouched — a sustained overload must not masquerade as quota.
+    assert gemini._quota_circuit.is_open() is False
+
+
+@pytest.mark.asyncio
+async def test_overload_give_up_logs_warning_not_error(monkeypatch, caplog):
+    """The whole point of the fix: a give-up on an overload must NOT emit an
+    ERROR record (that was the Sentry `ServerError: high demand` issue)."""
+    _reset_circuit()
+    _no_sleep(monkeypatch)
+    _set_quota_settings(monkeypatch, max_retries=1, circuit_threshold=1)
+
+    @async_retry(max_attempts=2, delay=1.0)
+    async def always_overloaded():
+        raise _server_error()
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="app.integrations.gemini"):
+        with pytest.raises(genai_errors.ServerError):
+            await always_overloaded()
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+    assert any(r.levelno == logging.WARNING for r in caplog.records)

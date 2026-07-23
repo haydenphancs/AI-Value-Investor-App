@@ -22,7 +22,7 @@ from app.integrations.fmp import (
     FMPRateLimitException,
     get_fmp_client,
 )
-from app.integrations.gemini import get_gemini_client, GeminiQuotaError
+from app.integrations.gemini import get_gemini_client, is_transient_gemini_error
 from app.services.market_news_quality import filter_market_articles
 
 logger = logging.getLogger(__name__)
@@ -1054,18 +1054,14 @@ Return a JSON array with one object per article in order. Each object must have:
             )
             return {}
         except Exception as e:
-            # Quota / 429 rate-limit is a known, transient capacity condition already
-            # governed by the Gemini quota circuit breaker — an EXPECTED degradation, so
-            # log at WARNING (not an ERROR-level Sentry page). `GeminiQuotaError` is the
-            # typed signal; the string check also catches a quota error that arrived
-            # wrapped/untyped. Anything else is unexpected → ERROR with a stack.
-            emsg = str(e).lower()
-            is_quota = isinstance(e, GeminiQuotaError) or any(
-                s in emsg for s in ("429", "quota", "resource_exhausted", "rate limit")
-            )
-            if is_quota:
+            # A transient Gemini capacity condition — quota/429 OR server overload
+            # ("high demand" 5xx) — is EXPECTED degradation, already retried +
+            # circuit-governed, so log at WARNING (not an ERROR-level Sentry page);
+            # the batch just isn't enriched this pass. Anything else is unexpected
+            # → ERROR with a stack.
+            if is_transient_gemini_error(e):
                 logger.warning(
-                    f"Gemini batch enrichment quota-limited for {ticker or '<mixed>'}: {e}"
+                    f"Gemini batch enrichment degraded (transient) for {ticker or '<mixed>'}: {e}"
                 )
                 return {}
             logger.error(f"Gemini batch enrichment failed for {ticker or '<mixed>'}: {e}", exc_info=True)

@@ -156,20 +156,28 @@ async def test_batch_enrich_malformed_json_logs_warning_not_error(caplog):
 
 
 @pytest.mark.asyncio
-async def test_batch_enrich_quota_error_logs_warning_not_error(caplog):
-    # Quota / 429 is a known transient capacity condition (typed GeminiQuotaError in
-    # prod, or an untyped 429 message) → WARNING, never ERROR.
+async def test_batch_enrich_transient_error_logs_warning_not_error(caplog):
+    # A transient Gemini capacity condition — quota/429 (typed GeminiQuotaError or
+    # an untyped 429 message) OR server overload ("high demand" 5xx) — degrades to
+    # {} at WARNING, never an ERROR-level Sentry page.
     import logging
     from app.services import news_cache_service as ncs
     from app.integrations.gemini import GeminiQuotaError
+    from google.genai import errors as genai_errors
 
-    for exc in (GeminiQuotaError("resource_exhausted"), RuntimeError("429 quota exceeded")):
+    transient = (
+        GeminiQuotaError("resource_exhausted"),
+        RuntimeError("429 quota exceeded"),
+        genai_errors.ServerError(503, {"error": {"message": "high demand"}}),
+        RuntimeError("This model is currently experiencing high demand."),
+    )
+    for exc in transient:
         caplog.clear()
         svc = _svc_with_gemini(_QuotaGemini(exc))
         with caplog.at_level(logging.WARNING, logger=ncs.logger.name):
             out = await svc._batch_enrich_articles([{"title": "A"}], ticker="X")
         assert out == {}
-        assert [r for r in caplog.records if "quota-limited" in r.getMessage()]
+        assert [r for r in caplog.records if "degraded (transient)" in r.getMessage()]
         assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 

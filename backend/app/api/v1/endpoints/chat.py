@@ -375,7 +375,10 @@ async def stream_chat_message(
     async def event_gen():
         import time as _time
         from app.services.chat_service import ChatService
-        from app.integrations.gemini import _is_quota_error
+        from app.integrations.gemini import (
+            _is_quota_error,
+            is_transient_gemini_error,
+        )
 
         chat_service = ChatService()
         started = _time.monotonic()
@@ -526,8 +529,14 @@ async def stream_chat_message(
                     # Discard any partial tokens before the full answer replaces them.
                     yield _sse("reset", {})
             except Exception as e2:
-                logger.error("Chat stream fallback failed: %s", e2, exc_info=True)
-                code = "GEMINI_QUOTA_EXCEEDED" if _is_quota_error(e2) else "INTERNAL_ERROR"
+                # A transient Gemini condition (quota or "high demand" overload) is
+                # a retry-later, not a code bug — WARNING, not an ERROR Sentry page.
+                if is_transient_gemini_error(e2):
+                    logger.warning("Chat stream fallback degraded (transient): %s", e2)
+                    code = "GEMINI_QUOTA_EXCEEDED" if _is_quota_error(e2) else "GEMINI_UNAVAILABLE"
+                else:
+                    logger.error("Chat stream fallback failed: %s", e2, exc_info=True)
+                    code = "INTERNAL_ERROR"
                 yield _sse("error", {
                     "error_code": code,
                     "user_message": "Cay AI couldn't respond right now. Please try again.",

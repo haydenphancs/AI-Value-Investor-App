@@ -64,6 +64,16 @@ class PriceMoveResponse(BaseModel):
     reason: str
 
 
+class SourceRefResponse(BaseModel):
+    """One source story an Insights card was built from. These are the LITERAL
+    corpus inputs (article headline + publisher url), not a model claim."""
+
+    title: str
+    # Publisher link; may be empty when the source has no url (still nameable,
+    # just not tappable). iOS builds a URL only when non-empty.
+    url: str
+
+
 class AIInsightCardResponse(BaseModel):
     """The AI roll-up card at the top of the Updates screen."""
 
@@ -96,6 +106,10 @@ class AIInsightCardResponse(BaseModel):
     # Grounded "why did it move" for a big per-ticker move; None otherwise. A
     # SEPARATE, cited field from `bullets` (the news roll-up).
     price_move: Optional[PriceMoveResponse] = None
+    # The source stories this summary was built from — tapping the card opens a
+    # screen listing them, each tappable to the publisher. None/absent on older
+    # cards (pre-migration-092) until their next regeneration.
+    sources: Optional[List[SourceRefResponse]] = None
 
 
 # ── Articles ──────────────────────────────────────────────────────────

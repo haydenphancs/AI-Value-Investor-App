@@ -112,6 +112,15 @@ _MWCB_L1_PCT = 0.07
 COOLDOWN_SESSION_SECONDS = 900     # 15 min while the market is active
 COOLDOWN_CLOSED_SECONDS = 3600     # 60 min overnight / weekend
 
+# Max-staleness floor for the MARKET card: even when the fingerprint is unchanged,
+# regenerate once the card is older than this so the default tab is never stale-
+# looking during a session. Evidence-based regen (a fingerprint change) still fires
+# sooner; this is only the ceiling on how old a quiet-market card may get. MARKET
+# ONLY (see `_decide_inner`) — a universe-wide forced regen would fight the anti-
+# stampede design and the per-ticker daily cap. Inert overnight (the sweeper sleeps),
+# which is intended. Comfortably under PER_SCOPE_DAILY_CAP_MARKET (~5 forced/16h day).
+MAX_STALENESS_SECONDS = 3 * 3600   # 3h
+
 # Per-scope caps. `regen_count_today` counts SUCCESSES only; `attempts_today`
 # absorbs failures so a run of transient Gemini 429s cannot pin a scope for the
 # rest of the day.
@@ -489,19 +498,31 @@ def _decide_inner(
     # ── 1. Fingerprint short-circuit — the money-saver ──
     # Checked BEFORE every other branch: if the inputs are identical the output
     # is provably identical, so there is nothing to buy at any price.
+    stale_refresh = False
     if inputset_id == state.get("last_inputset_id"):
-        prev_cycle = _parse_ts(state.get("close_cycle"))
-        if prev_cycle is None or prev_cycle < close_cycle_start:
-            # A new trading day settled. Re-stamp freshness so the card cannot
-            # be flagged stale forever — costs $0, no LLM call.
+        # Max-staleness floor for the MARKET default tab: if the card is older
+        # than MAX_STALENESS_SECONDS, DON'T short-circuit — fall through to the
+        # cap/cooldown checks and regenerate so the tab is never stale-looking
+        # during a session. Everything else keeps the $0 touch/skip. MARKET only.
+        last_gen = _parse_ts(state.get("last_generated_at"))
+        stale_refresh = (
+            is_market_scope
+            and last_gen is not None
+            and (now - last_gen).total_seconds() > MAX_STALENESS_SECONDS
+        )
+        if not stale_refresh:
+            prev_cycle = _parse_ts(state.get("close_cycle"))
+            if prev_cycle is None or prev_cycle < close_cycle_start:
+                # A new trading day settled. Re-stamp freshness so the card cannot
+                # be flagged stale forever — costs $0, no LLM call.
+                return Decision(
+                    action=ACTION_TOUCH, reason="cycle_touch",
+                    inputset_id=inputset_id, price_band=band,
+                )
             return Decision(
-                action=ACTION_TOUCH, reason="cycle_touch",
+                action=ACTION_SKIP, reason="fingerprint_unchanged",
                 inputset_id=inputset_id, price_band=band,
             )
-        return Decision(
-            action=ACTION_SKIP, reason="fingerprint_unchanged",
-            inputset_id=inputset_id, price_band=band,
-        )
 
     # ── 2. Market-wide dislocation: one macro card, not N restatements ──
     mkt = finite(market_change_percent)
@@ -575,6 +596,9 @@ def _decide_inner(
             f"band {prev_band}->{band}"
             + (f" ({pct:+.2f}%)" if pct is not None else "")
         )
+    if stale_refresh:
+        # Unchanged inputs, but the MARKET card aged past the staleness floor.
+        reasons.append("stale_refresh")
     if not reasons:
         reasons.append(f"new_articles ({len(corpus)})")
 
@@ -593,6 +617,7 @@ __all__ = [
     "PER_SCOPE_ATTEMPT_CAP",
     "COOLDOWN_SESSION_SECONDS",
     "COOLDOWN_CLOSED_SECONDS",
+    "MAX_STALENESS_SECONDS",
     "ACTION_GENERATE",
     "ACTION_TOUCH",
     "ACTION_SKIP",

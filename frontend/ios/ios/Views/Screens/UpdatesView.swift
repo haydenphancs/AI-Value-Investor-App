@@ -22,6 +22,8 @@ struct UpdatesView: View {
     /// inline for the AI summary and open the publisher page in-app; the old
     /// push to `NewsDetailView` was redundant once the summary lives on the card.
     @State private var browserLink: BrowserLink?
+    /// Set when the Insights card is tapped → presents the sources screen.
+    @State private var insightSources: NewsInsightSummary?
 
     var body: some View {
         NavigationStack {
@@ -55,11 +57,15 @@ struct UpdatesView: View {
                     // Scrollable Content with sticky section headers
                     ScrollView(showsIndicators: false) {
                         LazyVStack(spacing: 0) {
-                            // Insights Summary Card (scrollable)
+                            // Insights Summary Card (scrollable). Tapping it opens
+                            // the sources screen when the card carries sources.
                             if let summary = viewModel.insightSummary {
-                                InsightsSummaryCard(summary: summary)
-                                    .padding(.horizontal, AppSpacing.lg)
-                                    .padding(.vertical, AppSpacing.sm)
+                                InsightsSummaryCard(
+                                    summary: summary,
+                                    onOpenSources: { insightSources = summary }
+                                )
+                                .padding(.horizontal, AppSpacing.lg)
+                                .padding(.vertical, AppSpacing.sm)
                             }
 
                             if viewModel.isLoading && viewModel.groupedNews.isEmpty {
@@ -152,6 +158,11 @@ struct UpdatesView: View {
             // Publisher articles open here, in-app, instead of pushing a
             // separate detail screen.
             .inAppBrowser(link: $browserLink)
+            // Tapping the Insights card opens its sources (summary + tappable
+            // source stories).
+            .sheet(item: $insightSources) { summary in
+                InsightsDetailView(summary: summary)
+            }
         }
     }
 

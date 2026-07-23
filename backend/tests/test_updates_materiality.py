@@ -354,6 +354,55 @@ def test_new_articles_regenerate():
     assert "new_articles" in d.reason
 
 
+# ── Max-staleness floor (MARKET card, ~3h) ────────────────────────────
+
+def _unchanged_state(dec, *, last_generated_at):
+    return {
+        "last_inputset_id": dec.inputset_id,
+        "last_price_band": dec.price_band,
+        "close_cycle": CYCLE.isoformat(),
+        "last_generated_at": last_generated_at,
+    }
+
+
+def test_market_card_regenerates_when_stale_beyond_the_floor():
+    from app.services.updates_materiality import MAX_STALENESS_SECONDS
+    first = _decide(is_market_scope=True)
+    old_gen = (NOW - timedelta(seconds=MAX_STALENESS_SECONDS + 60)).isoformat()
+    d = _decide(is_market_scope=True, state=_unchanged_state(first, last_generated_at=old_gen))
+    # Unchanged inputs, but the market card aged past ~3h → forced refresh.
+    assert d.action == ACTION_GENERATE
+    assert "stale_refresh" in d.reason
+
+
+def test_market_card_does_not_regenerate_when_fresh():
+    first = _decide(is_market_scope=True)
+    fresh_gen = (NOW - timedelta(minutes=30)).isoformat()   # < 3h, > cooldown
+    d = _decide(is_market_scope=True, state=_unchanged_state(first, last_generated_at=fresh_gen))
+    assert d.action == ACTION_SKIP
+    assert d.reason == "fingerprint_unchanged"
+
+
+def test_staleness_floor_is_market_only():
+    from app.services.updates_materiality import MAX_STALENESS_SECONDS
+    # A 12h-old NON-market card with unchanged inputs must still SKIP — the floor
+    # is MARKET-only, to avoid forcing near-identical regens across 200 tickers.
+    first = _decide(is_market_scope=False)
+    old_gen = (NOW - timedelta(seconds=MAX_STALENESS_SECONDS * 4)).isoformat()
+    d = _decide(is_market_scope=False, state=_unchanged_state(first, last_generated_at=old_gen))
+    assert d.action == ACTION_SKIP
+    assert d.reason == "fingerprint_unchanged"
+
+
+def test_stale_market_card_still_respects_cooldown():
+    # Even past the staleness floor, a card generated seconds ago must not regen
+    # in a tight loop — the cooldown still guards it.
+    first = _decide(is_market_scope=True)
+    just_now = (NOW - timedelta(seconds=30)).isoformat()
+    d = _decide(is_market_scope=True, state=_unchanged_state(first, last_generated_at=just_now))
+    assert d.action == ACTION_SKIP  # fresh → fingerprint_unchanged, not a regen
+
+
 def test_close_cycle_ceiling_touches_instead_of_regenerating():
     # Nothing changed, but a new trading day settled: re-stamp freshness for
     # free rather than paying for an identical card.

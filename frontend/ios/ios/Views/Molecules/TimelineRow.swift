@@ -12,8 +12,14 @@ struct TimelineRow: View {
     let isFirst: Bool
     let isLast: Bool
     /// Open the article in the in-app browser. Fires from the expanded card's
-    /// open-link icon, and from a tap on a card that has no summary to expand.
+    /// open-link icon (and the fallback "Read the full story" when a summary
+    /// can't be generated).
     var onOpenLink: (() -> Void)?
+    /// Summarise this un-enriched article in-app on tap, instead of opening the
+    /// link. When nil, a tap on an un-enriched card falls back to `onOpenLink`.
+    var onRequestSummary: (() -> Void)?
+    /// True while this article's on-tap summary is in flight (drives the spinner).
+    var isSummarizing: Bool = false
 
     private let railWidth: CGFloat = 20
     private let dotSize: CGFloat = 8
@@ -64,8 +70,10 @@ struct TimelineRow: View {
                 relatedTickers: article.relatedTickers,
                 bullets: article.summaryBullets,
                 style: .expandable,
+                isSummarizing: isSummarizing,
                 onTap: onOpenLink,
-                onExternalLinkTap: onOpenLink
+                onExternalLinkTap: onOpenLink,
+                onRequestSummary: onRequestSummary
             )
         }
     }

@@ -9,13 +9,16 @@ import SwiftUI
 
 struct LiveNewsTimeline: View {
     let groupedNews: [GroupedNews]
-    /// Open the article's publisher page in the in-app browser. Cards expand
-    /// inline for the AI summary; this fires from the expanded card's open-link
-    /// icon, and from a plain tap on a card that has no summary yet.
+    /// Open the article's publisher page in the in-app browser. Fires from the
+    /// expanded card's open-link icon and the "Read the full story" fallback.
     var onOpenArticle: ((NewsArticle) -> Void)?
-    /// Fired as each row scrolls in. Drives paging and AI enrichment — the
-    /// reader reaching the end of the list is the signal that more is wanted.
+    /// Fired as each row scrolls in. Drives paging and visible-window AI
+    /// enrichment — the reader's position is the signal for what to summarise.
     var onArticleAppear: ((NewsArticle) -> Void)?
+    /// Summarise an un-enriched article in-app on tap (instead of opening the link).
+    var onRequestSummary: ((NewsArticle) -> Void)?
+    /// Article ids whose on-tap summary is in flight (drives the per-card spinner).
+    var summarizingIDs: Set<String> = []
 
     var body: some View {
         LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
@@ -24,7 +27,9 @@ struct LiveNewsTimeline: View {
                     NewsGroupContent(
                         articles: group.articles,
                         onOpenArticle: onOpenArticle,
-                        onArticleAppear: onArticleAppear
+                        onArticleAppear: onArticleAppear,
+                        onRequestSummary: onRequestSummary,
+                        summarizingIDs: summarizingIDs
                     )
                 } header: {
                     NewsSectionHeader(title: group.sectionTitle)
@@ -39,6 +44,8 @@ struct NewsGroupContent: View {
     let articles: [NewsArticle]
     var onOpenArticle: ((NewsArticle) -> Void)?
     var onArticleAppear: ((NewsArticle) -> Void)?
+    var onRequestSummary: ((NewsArticle) -> Void)?
+    var summarizingIDs: Set<String> = []
 
     var body: some View {
         LazyVStack(spacing: 0) {
@@ -49,7 +56,11 @@ struct NewsGroupContent: View {
                     isLast: index == articles.count - 1,
                     onOpenLink: {
                         onOpenArticle?(article)
-                    }
+                    },
+                    onRequestSummary: {
+                        onRequestSummary?(article)
+                    },
+                    isSummarizing: summarizingIDs.contains(article.apiId)
                 )
                 .padding(.horizontal, AppSpacing.lg)
                 // LazyVStack, so this fires only when the row is actually

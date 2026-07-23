@@ -62,14 +62,16 @@ INSIGHT_MODEL: str = getattr(
 # tokens without adding signal, and the older items dilute "what happened today".
 MAX_CORPUS_ARTICLES = 25
 
-# The card is presented as a "48h" summary in the iOS badge
-# (``AIInsightCardResponse.badge`` in schemas/updates.py). The sweeper bounds the
-# corpus to THIS window before BOTH the materiality fingerprint and generation,
-# so the badge is literally true rather than a decorative label — the summary
-# only ever covers articles published in the last 48 hours, and it refreshes as
-# older stories age out of the window. The Updates endpoint uses the SAME window
-# to decide whether to surface a card at all (no news in the window ⇒ no card).
-# Change this and the badge string together.
+# The corpus window is DYNAMIC: prefer the last PRIMARY_WINDOW_HOURS (24h) and
+# fall back to CORPUS_WINDOW_HOURS (48h) only when the scope has no news in the
+# last 24h. The chosen window drives the iOS badge ("24h"/"48h"), so a scope with
+# fresh news is honestly labelled "24h" rather than over-claiming a 48h lookback.
+# The sweeper bounds each scope's corpus to the SAME window before BOTH the
+# materiality fingerprint and generation (so the badge is literally true), and the
+# Updates endpoint uses it to decide whether to surface a card at all (no news in
+# 48h ⇒ no card). ``select_recent_corpus`` is the single source of that decision —
+# change these constants there, not by hand.
+PRIMARY_WINDOW_HOURS = 24
 CORPUS_WINDOW_HOURS = 48
 # Per-article text budget, characters. Headlines carry most of the signal.
 MAX_ARTICLE_TEXT_CHARS = 400
@@ -674,10 +676,11 @@ Rules:
 - "bullets": {MIN_BULLETS} to {MAX_BULLETS} bullets. Each under 30 words. Cover the distinct threads across the articles rather than restating one story. Use concrete figures ONLY when they appear in the articles below.
 - The FINAL bullet must explain why an everyday investor should care, in plain English. Vary how you open it — sometimes a short transition like "In short," or "The takeaway," (always followed by a COMMA, never a colon), sometimes just state the insight directly. NEVER use "So What?" as a prefix.
 - No introductory phrases like "This article discusses" or "The key points are".
-- "sentiment": exactly one of "bullish" | "bearish" | "neutral", describing the NET directional implication for {subject}.
-    - "bullish": the balance of articles points to a direct upward catalyst (earnings beats, upgrades, major wins, easing conditions).
-    - "bearish": the balance points to a direct downward catalyst (misses, downgrades, investigations, recalls, tightening conditions).
-    - "neutral": everything else — mixed signals, macro commentary, educational or backward-looking pieces, or unclear direction. When in doubt, choose neutral.
+- "sentiment": exactly one of "bullish" | "bearish" | "neutral" — the NET directional lean for {subject}, judged by weighing the articles together, not by counting headlines.
+    - "bullish": the balance tilts to upward catalysts (earnings beats, upgrades, wins, easing conditions, raised guidance, constructive positioning).
+    - "bearish": the balance tilts to downward catalysts (misses, downgrades, investigations, recalls, tightening conditions, cut guidance).
+    - "neutral": the upward and downward forces are genuinely balanced, or the articles are purely backward-looking / educational with no directional read.
+  Commit to the net lean: a set that leans positive is "bullish" even if it carries caveats, and likewise "bearish" for a set that leans negative. Reserve "neutral" for a true balance — do NOT use it as a safe default.
 - Never state a fact, number, company or event that is not in the articles below.
 {price_line}
 
@@ -779,6 +782,30 @@ def articles_within_window(
         if ts is not None and ts >= cutoff:
             kept.append(r)
     return kept
+
+
+def select_recent_corpus(
+    rows: Sequence[Dict[str, Any]], now: datetime
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Pick the corpus window for a scope: prefer the last 24h, fall back to 48h.
+
+    Returns ``(windowed_rows, window_hours)``. A scope WITH news in the last 24h
+    is summarised over just that window and badged "24h"; a scope whose freshest
+    news is 24–48h old uses the 48h window and is badged "48h". The two callers —
+    the sweeper (corpus for the fingerprint + generation) and the Updates endpoint
+    (show/hide + fallback + badge) — MUST both go through here so the badge always
+    matches the news the card actually summarises. An empty return (no news in
+    48h) means "no card".
+    """
+    primary = articles_within_window(
+        rows, now - timedelta(hours=PRIMARY_WINDOW_HOURS)
+    )
+    if primary:
+        return primary, PRIMARY_WINDOW_HOURS
+    fallback = articles_within_window(
+        rows, now - timedelta(hours=CORPUS_WINDOW_HOURS)
+    )
+    return fallback, CORPUS_WINDOW_HOURS
 
 
 # ── Singleton ─────────────────────────────────────────────────────────

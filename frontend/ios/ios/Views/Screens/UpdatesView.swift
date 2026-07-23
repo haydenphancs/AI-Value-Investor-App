@@ -76,7 +76,9 @@ struct UpdatesView: View {
                                 LiveNewsTimeline(
                                     groupedNews: viewModel.groupedNews,
                                     onOpenArticle: openArticle,
-                                    onArticleAppear: viewModel.articleDidAppear
+                                    onArticleAppear: viewModel.articleDidAppear,
+                                    onRequestSummary: viewModel.summarizeArticle,
+                                    summarizingIDs: viewModel.summarizingIDs
                                 )
                             }
 
@@ -238,10 +240,11 @@ struct UpdatesView: View {
     }
 
     private func openArticle(_ article: NewsArticle) {
-        // A card with no summary yet has nothing to expand, so a tap lands here;
-        // the expanded card's open-link icon lands here too. Both open the
-        // publisher page in the in-app browser. `openExternal` guards the
-        // scheme; a missing URL simply no-ops.
+        // Opens the publisher page in the in-app browser. Reached from the
+        // expanded card's open-link icon and the "Read the full story" fallback.
+        // (A plain tap on an un-enriched card now SUMMARISES it in-app via
+        // `viewModel.summarizeArticle` rather than landing here.) `openExternal`
+        // guards the scheme; a missing URL simply no-ops.
         guard let url = article.articleURL else { return }
         openExternal(url, into: &browserLink)
     }

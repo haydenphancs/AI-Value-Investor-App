@@ -205,3 +205,77 @@ def test_map_enrichments_clamps_confidence():
     mapped = NewsCacheService._map_enrichments(parsed, 2)
     assert mapped[0]["confidence"] == 100
     assert mapped[1]["confidence"] == 0
+
+
+# ── Proactive window enrichment (shared by the sweeper + pre-warmer) ───
+
+
+def test_enrichable_ids_selects_only_fresh_real_ids():
+    """The pure filter keeps only un-enriched rows with a real DB id — skipping
+    already-enriched rows, client-side placeholders, and empty ids."""
+    svc = object.__new__(NewsCacheService)
+    articles = [
+        {"id": "a1", "ai_processed": False},
+        {"id": "a2", "ai_processed": True},          # already enriched → skip
+        {"id": "temp_x", "ai_processed": False},      # placeholder → skip
+        {"id": "raw_y", "ai_processed": False},       # placeholder → skip
+        {"id": "sample_z", "ai_processed": False},    # placeholder → skip
+        {"id": "unknown_1", "ai_processed": False},   # placeholder → skip
+        {"id": "", "ai_processed": False},            # empty id → skip
+        {"id": "a3", "ai_processed": False},
+    ]
+    assert svc._enrichable_ids(articles, cap=25) == ["a1", "a3"]
+
+
+def test_enrichable_ids_respects_cap():
+    svc = object.__new__(NewsCacheService)
+    articles = [{"id": f"a{i}", "ai_processed": False} for i in range(30)]
+    # Only the freshest `cap` articles are considered.
+    assert svc._enrichable_ids(articles, cap=25) == [f"a{i}" for i in range(25)]
+    assert svc._enrichable_ids(articles, cap=5) == [f"a{i}" for i in range(5)]
+
+
+@pytest.mark.asyncio
+async def test_enrich_window_calls_enrich_articles_with_filtered_ids():
+    svc = object.__new__(NewsCacheService)
+    captured = {}
+
+    async def _fake_enrich(scope, ids):
+        captured["scope"] = scope
+        captured["ids"] = ids
+        return [{"id": i, "ai_processed": True} for i in ids]
+
+    svc.enrich_articles = _fake_enrich
+    articles = [
+        {"id": "a1", "ai_processed": False},
+        {"id": "a2", "ai_processed": True},          # skip
+        {"id": "temp_x", "ai_processed": False},      # skip
+        {"id": "a3", "ai_processed": False},
+    ]
+    n = await svc.enrich_window("AAPL", articles, cap=25)
+    assert captured["scope"] == "AAPL"
+    assert captured["ids"] == ["a1", "a3"]
+    assert n == 2
+
+
+@pytest.mark.asyncio
+async def test_enrich_window_never_raises_and_no_ops_when_nothing_fresh():
+    svc = object.__new__(NewsCacheService)
+
+    async def _boom(scope, ids):
+        raise RuntimeError("gemini down")
+
+    svc.enrich_articles = _boom
+    # A failing enrichment must degrade to 0, never raise into the caller.
+    assert await svc.enrich_window("AAPL", [{"id": "a1", "ai_processed": False}], cap=25) == 0
+
+    called = {"n": 0}
+
+    async def _count(scope, ids):
+        called["n"] += 1
+        return []
+
+    svc.enrich_articles = _count
+    # All rows already enriched → no ids → NO enrich_articles call at all.
+    assert await svc.enrich_window("AAPL", [{"id": "a1", "ai_processed": True}], cap=25) == 0
+    assert called["n"] == 0

@@ -91,15 +91,25 @@ final class UpdatesViewModel: ObservableObject {
 
     // MARK: - Enrichment
 
-    /// Articles per enrichment batch. Small on purpose: enrichment is a paid
-    /// Gemini call, and a batch that spans more than a screenful pays for rows
-    /// the reader may never reach.
-    private let enrichBatchSize = 10
-    /// Serialises enrichment. `onAppear` fires per row, and without this the
-    /// same un-enriched ids would be sent by several overlapping batches.
+    /// Max un-enriched rows sent per background batch. Targets the reader's
+    /// VISIBLE window (see `enrichVisibleWindow`), not the top of the list, so it
+    /// is safe to be larger than before — every id is a row on/near the screen.
+    /// The backend caps a request at 50.
+    private let enrichBatchSize = 20
+    /// How far AHEAD of the row that just appeared to reach for un-enriched rows,
+    /// so summaries are ready a little before the reader scrolls onto them.
+    private let enrichLookahead = 25
+    /// Serialises the BACKGROUND window enrichment. `onAppear` fires per row, and
+    /// without this the same un-enriched ids would be sent by overlapping batches.
+    /// The on-TAP path (`summarizeArticle`) is intentionally NOT gated by this —
+    /// a tap is high-intent and must respond immediately.
     private var isEnriching = false
-    /// Rows from the end at which scrolling triggers the next page / batch.
+    /// Rows from the end at which scrolling triggers the next page.
     private let prefetchThreshold = 5
+
+    /// Articles the reader tapped that are being summarised on demand. Drives the
+    /// per-card spinner. Per-article dedup so a double-tap fires one call.
+    @Published var summarizingIDs: Set<String> = []
 
     // MARK: - Initialization
 
@@ -292,7 +302,7 @@ final class UpdatesViewModel: ObservableObject {
             // cut short) would otherwise keep its sentiment badges hidden until a
             // manual pull-to-refresh.
             if allNewsArticles.contains(where: { !$0.aiProcessed && $0.isEnrichable }) {
-                await enrichVisibleArticles(scope: scope, token: token)
+                await enrichVisibleWindow(around: 0, scope: scope, token: token)
             }
             return
         }
@@ -355,7 +365,7 @@ final class UpdatesViewModel: ObservableObject {
             insight: \(insightSummary.map { $0.isAIGenerated ? "ai" : "fallback" } ?? "none"))
             """)
 
-            await enrichVisibleArticles(scope: scope, token: token)
+            await enrichVisibleWindow(around: 0, scope: scope, token: token)
             scheduleInsightPollIfNeeded(scope: scope, token: token)
         } catch is CancellationError {
             // Tab switched away mid-flight. Not a failure — show nothing.
@@ -389,16 +399,19 @@ final class UpdatesViewModel: ObservableObject {
     /// they actually want more, and enrichment is a paid call that should not
     /// be spent on rows nobody scrolled to.
     func articleDidAppear(_ article: NewsArticle) {
+        guard let scope = selectedTab?.scope else { return }
         guard let index = newsArticles.firstIndex(where: { $0.id == article.id })
         else { return }
-        guard index >= newsArticles.count - prefetchThreshold else { return }
-        guard let scope = selectedTab?.scope else { return }
-
+        let token = loadToken
         Task {
-            // Enrich first: badges on rows already on screen beat history the
-            // reader has not reached yet.
-            await enrichVisibleArticles(scope: scope, token: loadToken)
-            await loadMoreIfNeeded(scope: scope, token: loadToken)
+            // Enrich the window the reader is ACTUALLY looking at (this row + a
+            // lookahead), not the first N rows from the top — that was why
+            // scrolled-to cards stayed bare while the top kept re-enriching.
+            await enrichVisibleWindow(around: index, scope: scope, token: token)
+            // Paginate only near the end of the list.
+            if index >= newsArticles.count - prefetchThreshold {
+                await loadMoreIfNeeded(scope: scope, token: token)
+            }
         }
     }
 
@@ -454,56 +467,94 @@ final class UpdatesViewModel: ObservableObject {
 
     // MARK: - AI enrichment
 
-    private func enrichVisibleArticles(scope: String, token: UUID) async {
+    /// Enrich the un-enriched rows in the reader's current window (the row that
+    /// just appeared, a couple behind it, and a lookahead ahead of it). This is
+    /// the fix for "scrolled-to cards have no sentiment/summary": enrichment now
+    /// follows the scroll position instead of always draining the top of the list.
+    private func enrichVisibleWindow(around index: Int, scope: String, token: UUID) async {
         guard !isEnriching else { return }
-        let ids = allNewsArticles
+        let list = newsArticles
+        guard !list.isEmpty, index >= 0, index < list.count else { return }
+        let lower = max(0, index - 2)
+        let upper = min(list.count, index + enrichLookahead)
+        let ids = list[lower..<upper]
             .filter { !$0.aiProcessed && $0.isEnrichable }
             .prefix(enrichBatchSize)
             .map { $0.apiId }
         guard !ids.isEmpty else { return }
         isEnriching = true
         defer { isEnriching = false }
+        await requestEnrichment(ids: Array(ids), scope: scope, token: token, source: "window")
+    }
 
+    /// On-demand summary for a single tapped card. High-intent, so it bypasses the
+    /// background `isEnriching` serialisation and shows a per-card spinner via
+    /// `summarizingIDs`. This is what makes tapping an un-enriched card summarise
+    /// it in-app instead of dumping the reader onto a (often paywalled) link.
+    func summarizeArticle(_ article: NewsArticle) {
+        guard article.isEnrichable, !article.aiProcessed else { return }
+        guard !summarizingIDs.contains(article.apiId) else { return }
+        guard let scope = selectedTab?.scope else { return }
+        let token = loadToken
+        summarizingIDs.insert(article.apiId)
+        Task {
+            defer { summarizingIDs.remove(article.apiId) }
+            await requestEnrichment(
+                ids: [article.apiId], scope: scope, token: token, source: "tap"
+            )
+        }
+    }
+
+    /// Shared POST /enrich + merge. Never surfaced as `self.error`: the timeline
+    /// already on screen is valid, it just lacks AI bullets on some rows.
+    private func requestEnrichment(
+        ids: [String], scope: String, token: UUID, source: String
+    ) async {
+        guard !ids.isEmpty else { return }
         do {
             let response: EnrichUpdatesNewsResponse = try await apiClient.request(
-                endpoint: .enrichUpdatesNews(scope: scope, articleIds: Array(ids)),
+                endpoint: .enrichUpdatesNews(scope: scope, articleIds: ids),
                 responseType: EnrichUpdatesNewsResponse.self
             )
-            // Same two-part staleness check `loadMoreIfNeeded` uses: the token
-            // alone can pass against a NEWER tab, applying this scope's enrichment
-            // to the wrong feed. The scope check pins it to the visible tab.
+            // Two-part staleness check: the token alone can pass against a NEWER
+            // tab, applying this scope's enrichment to the wrong feed. The scope
+            // check pins it to the visible tab.
             guard loadToken == token, selectedTab?.scope == scope else { return }
-
-            let byId = Dictionary(
-                (response.articles ?? []).map { ($0.id, $0) },
-                uniquingKeysWith: { first, _ in first }
-            )
-            var merged = 0
-            for i in allNewsArticles.indices {
-                guard let dto = byId[allNewsArticles[i].apiId] else { continue }
-                let bullets = dto.summaryBullets ?? []
-                let processed = dto.aiProcessed ?? false
-                // Only accept an enrichment that actually produced something.
-                // The backend returns rows unchanged when Gemini degraded, and
-                // marking those `aiProcessed` would permanently hide the real
-                // summary that a later retry would have supplied.
-                guard processed || !bullets.isEmpty else { continue }
-                allNewsArticles[i].summaryBullets = bullets
-                allNewsArticles[i].aiProcessed = true
-                if let s = NewsSentiment(backend: dto.sentiment) {
-                    allNewsArticles[i].sentiment = s
-                }
-                merged += 1
-            }
-            if merged > 0 {
-                applyFiltersAndGroup()
-                feedCache[scope] = (allNewsArticles, insightSummary, loadedOffset, hasMorePages)
-            }
-            print("✅ UpdatesVM: Enriched \(merged)/\(ids.count) articles for \(scope)")
+            let merged = mergeEnrichment(response, scope: scope)
+            print("✅ UpdatesVM: Enriched \(merged)/\(ids.count) articles for \(scope) (\(source))")
         } catch {
-            // Non-fatal: the timeline still renders, just without AI bullets.
-            print("⚠️ UpdatesVM: Enrichment failed for \(scope): \(AppError.from(error).message)")
+            print("⚠️ UpdatesVM: Enrichment (\(source)) failed for \(scope): \(AppError.from(error).message)")
         }
+    }
+
+    /// Merge enrichment DTOs into `allNewsArticles` by id. Returns how many rows
+    /// changed. Only accepts an enrichment that actually produced something — the
+    /// backend returns rows unchanged when Gemini degraded, and marking those
+    /// `aiProcessed` would permanently hide the summary a later retry would supply.
+    @discardableResult
+    private func mergeEnrichment(_ response: EnrichUpdatesNewsResponse, scope: String) -> Int {
+        let byId = Dictionary(
+            (response.articles ?? []).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var merged = 0
+        for i in allNewsArticles.indices {
+            guard let dto = byId[allNewsArticles[i].apiId] else { continue }
+            let bullets = dto.summaryBullets ?? []
+            let processed = dto.aiProcessed ?? false
+            guard processed || !bullets.isEmpty else { continue }
+            allNewsArticles[i].summaryBullets = bullets
+            allNewsArticles[i].aiProcessed = true
+            if let s = NewsSentiment(backend: dto.sentiment) {
+                allNewsArticles[i].sentiment = s
+            }
+            merged += 1
+        }
+        if merged > 0 {
+            applyFiltersAndGroup()
+            feedCache[scope] = (allNewsArticles, insightSummary, loadedOffset, hasMorePages)
+        }
+        return merged
     }
 
     /// When the backend served the deterministic fallback card it also flags

@@ -273,7 +273,7 @@ def test_fingerprint_changes_with_band_model_prompt_and_articles():
     assert base != compute_inputset_id(["u1", "u2"], BAND_FLAT, MODEL)
     assert base != compute_inputset_id(["u1"], BAND_NOTABLE, MODEL)
     assert base != compute_inputset_id(["u1"], BAND_FLAT, "other-model")
-    # A different prompt_version re-keys (99 is != the current default of 2).
+    # A different prompt_version re-keys (99 is != the current default of 3).
     assert base != compute_inputset_id(["u1"], BAND_FLAT, MODEL, prompt_version=99)
 
 

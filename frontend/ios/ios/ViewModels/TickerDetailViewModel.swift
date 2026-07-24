@@ -40,6 +40,15 @@ class TickerDetailViewModel: ObservableObject {
     /// False until the Financials task group settles, so the tab can show a
     /// skeleton instead of six indistinguishable blank cards.
     @Published var isFinancialsLoaded: Bool = false
+    /// Same contract for the Holders tab. Without it, `holdersData == nil` was
+    /// indistinguishable from "still loading", so a failed fetch (e.g. the cold
+    /// 12-call FMP build exceeding the 30s URLSession timeout — `.networkError`
+    /// is NOT retried by APIClient) left the tab on "Loading holders data..."
+    /// forever, with no spinner, no message and no way to retry.
+    @Published var isHoldersLoaded: Bool = false
+    /// User-facing message when the holders fetch failed. Routed through
+    /// `AppError.from(_:)` — never a raw backend string.
+    @Published var holdersError: String?
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
@@ -213,6 +222,8 @@ class TickerDetailViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         isFinancialsLoaded = false
+        isHoldersLoaded = false
+        holdersError = nil
 
         loadTask = Task { [weak self] in
             guard let self = self else { return }
@@ -604,15 +615,31 @@ class TickerDetailViewModel: ObservableObject {
         }
     }
 
-    private func fetchHolders(_ ticker: String) async {
+    /// Re-fetch the Holders tab, bypassing the repository's 24h in-memory entry.
+    /// Wired to the "Try Again" button on the tab's unavailable state.
+    func reloadHolders() async {
+        isHoldersLoaded = false
+        holdersError = nil
+        await fetchHolders(tickerSymbol, forceRefresh: true)
+    }
+
+    private func fetchHolders(_ ticker: String, forceRefresh: Bool = false) async {
         do {
-            let dto = try await stockRepository.getHolders(ticker: ticker)
+            let dto = try await stockRepository.getHolders(
+                ticker: ticker, forceRefresh: forceRefresh
+            )
             self.holdersData = dto.toDisplayModel()
-            print("✅ TickerDetailVM: Got holders for \(ticker)")
+            self.holdersError = nil
         } catch {
-            print("⚠️ TickerDetailVM: Holders failed for \(ticker): \(error)")
+            let appError = AppError.from(error)
+            print("⚠️ TickerDetailVM: Holders failed for \(ticker): \(appError.message)")
             self.holdersData = nil
+            // No sample-data fallback — see fetchEarnings.
+            self.holdersError = appError.message
         }
+        // Always flip, success or failure: this is what lets the tab tell
+        // "still loading" from "loaded and empty / failed".
+        self.isHoldersLoaded = true
     }
 
     private func fetchRevenueBreakdown(_ ticker: String) async {
@@ -1772,16 +1799,27 @@ class TickerDetailViewModel: ObservableObject {
             parts.append("Insider activity (\(summary.periodDescription)): \(summary.buyersLabel), \(summary.sellersLabel)")
         }
 
-        // Smart money flow summaries
-        let insiderFlow = data.insiderData.summary
-        parts.append("Insider 12M Net Flow: \(insiderFlow.formattedNetFlow) (\(insiderFlow.isPositive ? "Bullish" : "Bearish"))")
+        // Smart money flow summaries.
+        //
+        // The window label MUST come from `periodDescription`, not a hardcoded
+        // "12M": the Institutions series spans 8 quarters ("2-Year"), so telling
+        // Cay AI it was a 12-month flow made the model state a 2-year figure as
+        // a one-year one. `formattedNetFlow` is already unit-aware (shares for
+        // Insider/Institutions, dollars for Congress).
+        //
+        // A ZERO net flow is genuinely neutral — not "Bullish". `isPositive` is
+        // `net >= 0`, so a flat/no-activity series was being asserted as bullish.
+        func flowLine(_ label: String, _ s: SmartMoneyFlowSummary) -> String {
+            let tone = s.totalNetFlow == 0
+                ? "Neutral"
+                : (s.isPositive ? "Bullish" : "Bearish")
+            return "\(label) \(s.periodDescription) Net Flow: \(s.formattedNetFlow) (\(tone))"
+        }
 
+        parts.append(flowLine("Insider", data.insiderData.summary))
         // `hedgeFundsData` = FMP 13F institutional ownership; UI label "Institutions".
-        let hfFlow = data.hedgeFundsData.summary
-        parts.append("Institutional 12M Net Flow: \(hfFlow.formattedNetFlow) (\(hfFlow.isPositive ? "Bullish" : "Bearish"))")
-
-        let congressFlow = data.congressData.summary
-        parts.append("Congress 12M Net Flow: \(congressFlow.formattedNetFlow) (\(congressFlow.isPositive ? "Bullish" : "Bearish"))")
+        parts.append(flowLine("Institutional", data.hedgeFundsData.summary))
+        parts.append(flowLine("Congress", data.congressData.summary))
 
         return parts.joined(separator: ". ")
     }

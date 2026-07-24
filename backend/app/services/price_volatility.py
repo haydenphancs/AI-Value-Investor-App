@@ -153,6 +153,12 @@ def _compute_price_volatility(
     out["sigma_daily"] = sigma_daily
 
     newest = prices[-1]
+    if newest is None or not math.isfinite(newest):
+        # A non-finite latest close makes every window's move_pct/z NaN. The tier
+        # ladder (`nan >= k` is always False) would then mislabel a genuinely
+        # large move as Typical and lose its catalyst, and `"{:+.1f}".format(nan)`
+        # leaks "nan%" into the prompt. Bail with sigma only — no bogus windows.
+        return out
     metrics: List[Dict[str, Any]] = []
 
     if price_dates:
@@ -166,7 +172,7 @@ def _compute_price_volatility(
             if idx < 0 or idx >= len(prices) - 1:
                 continue
             oldest = prices[idx]
-            if not oldest or oldest <= 0:
+            if not oldest or not math.isfinite(oldest) or oldest <= 0:
                 continue
             move_pct = (newest - oldest) / oldest * 100
             # Trading-day count actually elapsed in this calendar window;
@@ -190,7 +196,7 @@ def _compute_price_volatility(
                 continue
             ref_idx = len(prices) - (n + 1)
             oldest = prices[ref_idx]
-            if not oldest or oldest <= 0:
+            if not oldest or not math.isfinite(oldest) or oldest <= 0:
                 continue
             move_pct = (newest - oldest) / oldest * 100
             n_day_sigma_pct = sigma_daily * (n ** 0.5) * 100

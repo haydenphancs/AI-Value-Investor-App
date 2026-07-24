@@ -205,3 +205,28 @@ async def test_batch_enrich_happy_path_maps_positionally():
     assert set(out.keys()) == {0, 1}                 # positional, ignores index=5
     assert out[0]["sentiment"] == "bullish"
     assert out[1]["sentiment"] == "bearish"
+
+
+# ── Empty-bullets enrichment must NOT be persisted as ai_processed ───────────
+
+def test_enrichment_is_usable_requires_non_empty_bullets():
+    u = NewsCacheService._enrichment_is_usable
+    assert u({"bullets": ["a"]}) is True
+    assert u({}) is False                             # empty dict (no mapping)
+    # Well-formed but EMPTY bullets = the poison case: a blank-content article
+    # Gemini couldn't summarize. Persisting ai_processed=True with [] would blank
+    # the shared-cache row FOREVER (enrichable_ids/enrich skip ai_processed).
+    assert u({"bullets": [], "sentiment": "neutral", "confidence": 0}) is False
+    assert u(None) is False                           # defensive: non-dict
+    assert u([]) is False
+
+
+def test_map_enrichments_preserves_empty_bullets_so_consumer_must_guard():
+    # _map_enrichments does NOT drop an empty-bullets item (it's a valid shape),
+    # which is exactly why _enrich_articles_uncached must check _enrichment_is_usable
+    # before writing ai_processed=True.
+    parsed = [{"index": 0, "bullets": [], "sentiment": "neutral",
+               "confidence": 0, "related_tickers": []}]
+    mapped = NewsCacheService._map_enrichments(parsed, 1)
+    assert mapped[0]["bullets"] == []
+    assert NewsCacheService._enrichment_is_usable(mapped[0]) is False

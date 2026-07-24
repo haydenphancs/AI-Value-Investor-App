@@ -130,3 +130,55 @@ def test_select_recent_boundary_at_24h_counts_as_fresh():
     kept, hours = select_recent_corpus(rows, NOW)
     assert hours == PRIMARY_WINDOW_HOURS
     assert {r["id"] for r in kept} == {"edge_24h"}
+
+
+# ── Future-dated rows must not fake a fresh card (upper bound) ─────────────
+
+def test_future_dated_row_beyond_skew_does_not_fake_a_24h_card():
+    # A parseable but FUTURE published_at (embargoed PR / FMP TZ glitch) would
+    # otherwise satisfy `ts >= cutoff` and return ([future], "24h") for a scope
+    # whose only real news is >48h old. With the upper bound it's excluded, so the
+    # result is empty → the endpoint shows NO card (honest).
+    rows = [
+        _row((NOW + timedelta(hours=5)).isoformat(), "future"),
+        _row(_hours_before_now(60), "ancient"),
+    ]
+    kept, hours = select_recent_corpus(rows, NOW)
+    assert kept == []
+    assert hours == CORPUS_WINDOW_HOURS
+
+
+def test_future_row_does_not_flip_a_48h_scope_to_a_24h_badge():
+    # Real news at 30h (→ "48h" window) plus a stray future row. Without the upper
+    # bound the future row would pull the result into the 24h window and mis-badge
+    # a 30h-old card as "24h". With it, the badge stays honest.
+    rows = [
+        _row(_hours_before_now(30), "real_30h"),
+        _row((NOW + timedelta(hours=6)).isoformat(), "future"),
+    ]
+    kept, hours = select_recent_corpus(rows, NOW)
+    assert {r["id"] for r in kept} == {"real_30h"}
+    assert hours == CORPUS_WINDOW_HOURS
+
+
+def test_just_published_within_skew_is_kept():
+    # A tiny clock skew / same-minute stamp just past `now` is tolerated so a
+    # legitimately just-published article isn't dropped as "future".
+    rows = [_row((NOW + timedelta(minutes=30)).isoformat(), "just_now")]
+    kept, hours = select_recent_corpus(rows, NOW)
+    assert {r["id"] for r in kept} == {"just_now"}
+    assert hours == PRIMARY_WINDOW_HOURS
+
+
+def test_articles_within_window_upper_bound_drops_future_rows_directly():
+    upper = NOW + timedelta(hours=2)
+    rows = [
+        _row(_hours_before_now(1), "recent"),
+        _row((NOW + timedelta(hours=5)).isoformat(), "future"),
+    ]
+    kept = {r["id"] for r in articles_within_window(rows, CUTOFF, upper)}
+    assert kept == {"recent"}
+    # With no upper bound (legacy call), the future row is kept — the default is
+    # backward-compatible; the future filter only applies via select_recent_corpus.
+    kept_no_upper = {r["id"] for r in articles_within_window(rows, CUTOFF)}
+    assert kept_no_upper == {"recent", "future"}

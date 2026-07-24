@@ -131,3 +131,35 @@ def test_a_big_recent_move_lands_in_an_elevated_tier():
     out = _compute_price_volatility(prices)
     assert out["sigma_daily"] is not None
     assert out["tier"] in (TIER_NOTABLE, TIER_UNUSUAL, TIER_EXTREME)
+
+
+def test_nan_latest_close_degrades_to_typical_not_a_nan_tier():
+    # A non-finite LATEST close makes every window's move_pct/z NaN. Unguarded,
+    # `max(key=z)` picks the first window and `nan < 1.0` (False) mislabels a real
+    # move; "{:+.1f}".format(nan) also leaks "nan%" into the catalyst prompt. The
+    # guard bails with sigma only → Typical, no bogus windows, nothing NaN.
+    prices = [100.0 * (1.01 if i % 2 else 0.99) for i in range(199)] + [float("nan")]
+    out = _compute_price_volatility(prices)
+    assert out["tier"] == TIER_TYPICAL
+    assert not out.get("windows")                       # no windows emitted
+    # No NaN escaped into the chosen-move fields (the "nothing to show" defaults).
+    assert out.get("chosen_move_pct") is None
+    assert out.get("chosen_ref_idx") is None
+    # Inf behaves the same.
+    inf_prices = prices[:-1] + [float("inf")]
+    assert _compute_price_volatility(inf_prices)["tier"] == TIER_TYPICAL
+
+
+def test_nan_intermediate_close_skips_only_that_window():
+    # Trading-day mode. A NaN at a window's `oldest` (ref_idx) slips past the old
+    # `not oldest or oldest <= 0` guard (`not nan` is False, `nan <= 0` is False)
+    # and yields a NaN-z window that can win the max. It must be SKIPPED instead,
+    # while the surviving windows compute a finite tier.
+    prices = [100.0 + (i % 2) * 0.05 for i in range(199)]   # ~flat, tiny σ
+    prices.append(prices[-1] * 1.10)                         # +10% shock on the last day
+    prices[len(prices) - 8] = float("nan")                   # the 7-day window's `oldest`
+    out = _compute_price_volatility(prices)
+    assert out["tier"] in (TIER_TYPICAL, TIER_NOTABLE, TIER_UNUSUAL, TIER_EXTREME)
+    for w in out.get("windows", []):
+        assert math.isfinite(w["z"]) and math.isfinite(w["move_pct"])
+    assert all(w["days"] != 7 for w in out.get("windows", []))   # poisoned window absent

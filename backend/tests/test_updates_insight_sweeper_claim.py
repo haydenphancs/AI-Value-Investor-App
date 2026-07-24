@@ -97,14 +97,21 @@ def test_the_claim_cap_is_exactly_what_the_gate_used(rpc, is_market):
     assert rpc.last_params["p_daily_cap"] == daily_cap_for(is_market)
 
 
-def test_claim_sends_the_attempt_cap_and_a_real_timestamp(rpc):
+def test_claim_sends_the_attempt_cap_and_a_fresh_aware_timestamp(rpc):
     sweeper = _StubSweeper(rpc)
+    before = datetime.now(timezone.utc)
     sweeper._claim("AAPL", NOW, is_market_scope=False)
+    after = datetime.now(timezone.utc)
     assert rpc.last_params["p_attempt_cap"] == PER_SCOPE_ATTEMPT_CAP
-    # The RPC keys the ET trading day off this instant; an offset-naive string
-    # would be read as UTC by Postgres and shift the day boundary.
-    assert rpc.last_params["p_now"] == NOW.isoformat()
-    assert rpc.last_params["p_now"].endswith("+00:00")
+    # p_now is stamped + stale-evaluated with a FRESH real-time UTC instant, NOT
+    # the passed sweep-start `now`: reusing the stale start time made a just-taken
+    # claim look already-stale to a second instance → duplicate paid generation.
+    # Still tz-aware so Postgres keys the ET trading day off a real UTC instant.
+    p_now = rpc.last_params["p_now"]
+    assert p_now.endswith("+00:00")
+    parsed = datetime.fromisoformat(p_now)
+    assert before <= parsed <= after        # fresh, NOT the fixed sweep-start NOW
+    assert parsed != NOW                     # explicitly not the passed timestamp
 
 
 @pytest.mark.parametrize("payload,expected", [

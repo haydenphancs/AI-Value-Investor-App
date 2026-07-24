@@ -74,19 +74,52 @@ If there is NO clear company-specific catalyst (the move is broad-market or sect
 # ── In-memory tier ─────────────────────────────────────────────────────
 
 
-def _mem_get(ticker: str) -> Optional[Dict[str, Any]]:
-    entry = _mem_cache.get(ticker)
+def _ctx_key(ticker: str, window_label: str, change_pct: Optional[float]) -> str:
+    """Cache identity for a catalyst. A move's reason is specific to its WINDOW
+    and DIRECTION, so the key must be too. Two callers share this service —
+    the Updates sweeper (intraday session move, window "today") and the report
+    collector (multi-day window move) — and keying on ticker ALONE let one
+    caller's cached reason be served for the other's move, even in the opposite
+    direction, for up to the 24h TTL. Used for BOTH the in-memory tier and the
+    `_inflight` dedup so a concurrent cross-context request can't share a future.
+    """
+    wl = (window_label or "").strip().lower()
+    direction = "u" if (change_pct is None or change_pct >= 0) else "d"
+    return f"{ticker}|{wl}|{direction}"
+
+
+def _ctx_matches(
+    stored_wl: Any, stored_cp: Any, req_wl: str, req_cp: Optional[float]
+) -> bool:
+    """Whether a stored cache row's (window, direction) matches the request.
+    A legacy row written before migration 095 (NULL window_label/change_pct) is
+    treated as a NON-match so it is regenerated — correctness is immediate on
+    deploy (a stale mismatched reason is never served), self-healing within 24h."""
+    if stored_wl is None or stored_cp is None:
+        return False
+    if str(stored_wl).strip().lower() != (req_wl or "").strip().lower():
+        return False
+    try:
+        stored_dir = float(stored_cp) >= 0
+    except (TypeError, ValueError):
+        return False
+    req_dir = req_cp is None or req_cp >= 0
+    return stored_dir == req_dir
+
+
+def _mem_get(key: str) -> Optional[Dict[str, Any]]:
+    entry = _mem_cache.get(key)
     if entry is None:
         return None
     ts, value = entry
     if time.time() - ts > _MEM_TTL_SECONDS:
-        _mem_cache.pop(ticker, None)
+        _mem_cache.pop(key, None)
         return None
     return value
 
 
-def _mem_set(ticker: str, value: Dict[str, Any]) -> None:
-    _mem_cache[ticker] = (time.time(), value)
+def _mem_set(key: str, value: Dict[str, Any]) -> None:
+    _mem_cache[key] = (time.time(), value)
 
 
 class PriceCatalystService:
@@ -121,25 +154,30 @@ class PriceCatalystService:
         focal = (ticker or "").strip().upper()
         if not focal:
             return None
+        # Cache identity is (ticker, window, direction) — NOT ticker alone — so a
+        # different move's reason is never served (migration 095 / _ctx_key).
+        ctx_key = _ctx_key(focal, window_label, change_pct)
 
         if not force_refresh:
-            cached = _mem_get(focal)
+            cached = _mem_get(ctx_key)
             if cached is not None:
                 return cached
-            db_cached = await asyncio.to_thread(self._read_cache, focal)
+            db_cached = await asyncio.to_thread(
+                self._read_cache, focal, window_label, change_pct
+            )
             if db_cached is not None:
-                _mem_set(focal, db_cached)
+                _mem_set(ctx_key, db_cached)
                 return db_cached
 
-        if focal in _inflight:
+        if ctx_key in _inflight:
             try:
-                return await _inflight[focal]
+                return await _inflight[ctx_key]
             except Exception:
                 return None
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        _inflight[focal] = future
+        _inflight[ctx_key] = future
         this_run_id = run_id or str(uuid.uuid4())
 
         try:
@@ -175,8 +213,9 @@ class PriceCatalystService:
             }
             await asyncio.to_thread(
                 self._write_cache, focal, served, result.get("model_version"),
+                window_label, change_pct,
             )
-            _mem_set(focal, served)
+            _mem_set(ctx_key, served)
             future.set_result(served)
             return served
         except Exception as exc:
@@ -187,7 +226,7 @@ class PriceCatalystService:
                 future.set_exception(exc)
             return None
         finally:
-            _inflight.pop(focal, None)
+            _inflight.pop(ctx_key, None)
             if not future.done():
                 future.set_result(None)
 
@@ -269,12 +308,16 @@ class PriceCatalystService:
 
     # ── Supabase I/O ───────────────────────────────────────────────────
 
-    def _read_cache(self, ticker: str) -> Optional[Dict[str, Any]]:
+    def _read_cache(
+        self, ticker: str, window_label: str, change_pct: Optional[float],
+    ) -> Optional[Dict[str, Any]]:
         try:
             sb = get_supabase()
             res = (
                 sb.table("price_catalyst_cache")
-                .select("tag,reason,sources,computed_at,expires_at")
+                .select(
+                    "tag,reason,sources,computed_at,expires_at,window_label,change_pct"
+                )
                 .eq("ticker", ticker)
                 .limit(1)
                 .execute()
@@ -297,6 +340,12 @@ class PriceCatalystService:
             return None
         if exp <= datetime.now(timezone.utc) or comp < PRICE_CATALYST_SCHEMA_FLOOR:
             return None
+        # The one row per ticker is specific to ONE (window, direction). Serving
+        # it for a different move would attach the wrong reason (migration 095).
+        if not _ctx_matches(
+            row.get("window_label"), row.get("change_pct"), window_label, change_pct
+        ):
+            return None
         return {
             "tag": row.get("tag"),
             "reason": row.get("reason") or "",
@@ -305,6 +354,7 @@ class PriceCatalystService:
 
     def _write_cache(
         self, ticker: str, served: Dict[str, Any], model_version: Optional[str],
+        window_label: str, change_pct: Optional[float],
     ) -> None:
         now = datetime.now(timezone.utc)
         ttl_hours = getattr(settings, "PRICE_CATALYST_CACHE_TTL_HOURS", 24)
@@ -314,6 +364,10 @@ class PriceCatalystService:
             "reason": served.get("reason"),
             "sources": served.get("sources") or [],
             "model_version": model_version,
+            # (window, direction) the reason explains — read-validated so a later
+            # different move for this ticker regenerates instead of mis-serving.
+            "window_label": window_label,
+            "change_pct": change_pct,
             "computed_at": now.isoformat(),
             "expires_at": (now + timedelta(hours=ttl_hours)).isoformat(),
         }

@@ -28,6 +28,7 @@ from app.services._whale_common import (
     parse_congress_amount_dollars,
     calc_13f_trade_dollars,
 )
+from app.utils.period_labels import latest_filed_13f_quarter
 from app.schemas.holders import (
     CongressActivitiesDataSchema,
     CongressActivitySchema,
@@ -69,12 +70,35 @@ def _cache_get(key: str) -> Optional[Any]:
     return value
 
 
+# Hard cap on the in-memory tier. A HoldersResponse is one of the largest
+# payloads in the codebase (8 quarters + 13 months + ~500 daily price points +
+# every institutional/insider/congress activity row — hundreds of KB for an
+# active ticker) and the dict had NO eviction: every ticker ever requested was
+# pinned for its full TTL, and expired entries were only reclaimed if that exact
+# key was read again. A crawl over a few thousand symbols grew it without bound.
+_CACHE_MAX_ENTRIES = 256
+
+
 def _cache_set(key: str, value: Any) -> None:
     _cache[key] = (time.time(), value)
+    if len(_cache) <= _CACHE_MAX_ENTRIES:
+        return
+    # Sweep expired entries first; only if that isn't enough, drop the oldest.
+    now = time.time()
+    for k in [k for k, (ts, _) in _cache.items() if now - ts > _CACHE_TTL]:
+        _cache.pop(k, None)
+    while len(_cache) > _CACHE_MAX_ENTRIES:
+        oldest = min(_cache, key=lambda k: _cache[k][0])
+        _cache.pop(oldest, None)
 
 
 # ── In-flight deduplication ───────────────────────────────────────
 _inflight: Dict[str, asyncio.Future] = {}
+
+# Strong refs for fire-and-forget persistence writes. asyncio only holds a WEAK
+# reference to a task, so a bare `ensure_future(...)` can be collected before it
+# runs — the write silently never happens.
+_background_tasks: set = set()
 
 # ── Ticker validation ────────────────────────────────────────────
 _TICKER_RE = re.compile(r"^[A-Z]{1,5}(-[A-Z]{1,2})?$")
@@ -109,6 +133,28 @@ def _safe_float(record: Dict[str, Any], key: str, default: float = 0.0) -> float
     except (ValueError, TypeError):
         return default
     return result if math.isfinite(result) else default
+
+
+def _holder_name(record: Dict[str, Any], default: str = "Unknown") -> str:
+    """Resolve an institutional holder's display name, never returning None.
+
+    ``record.get("investorName", record.get("holder", "Unknown"))`` looks safe but
+    is NOT: ``dict.get(key, default)`` only falls back when the key is ABSENT. FMP
+    13F rows routinely carry ``"investorName": null`` (unattributed filings), so
+    the expression yields ``None`` → ``InstitutionalHolderSchema(name=None)`` raises
+    a Pydantic ValidationError → the endpoint's ``except Exception`` turns the
+    ENTIRE Holders tab into a 502 because of one bad row. ``or``-chaining also
+    collapses blank strings, which read as an anonymous row in the UI.
+    """
+    for key in ("investorName", "holder"):
+        val = record.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if val is not None and not isinstance(val, str):
+            text = str(val).strip()
+            if text:
+                return text
+    return default
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -191,14 +237,32 @@ class HoldersService:
 
             # Cache miss — build from FMP
             logger.info(f"Holders cache MISS for {ticker} — fetching from FMP")
-            result = await self._build_holders(ticker)
+            result, degraded = await self._build_holders(ticker)
             _cache_set(cache_key, result)
             future.set_result(result)
 
-            # Upsert to Supabase in background (non-blocking)
-            asyncio.ensure_future(
-                asyncio.to_thread(self._upsert_supabase_cache_safe, ticker, result)
-            )
+            # Upsert to Supabase in background (non-blocking) — but ONLY when the
+            # build was complete. A degraded build (an FMP call failed and
+            # _unwrap substituted an empty default) still renders, yet persisting
+            # it pinned the hole for a FULL 24 HOURS: a one-second blip on the
+            # ownership-summary call froze "Institutions 0.0%" for the rest of
+            # the day, and the report/snapshot services read the same poisoned
+            # row. The 5-minute in-memory tier still absorbs the retry storm.
+            if degraded:
+                logger.warning(
+                    f"Holders NOT persisted for {ticker} (degraded: "
+                    f"{', '.join(degraded)}) — will rebuild after the 5-min "
+                    f"in-memory TTL"
+                )
+            else:
+                # Keep a strong reference until the write completes: a bare
+                # ensure_future task is only weakly held by the event loop and
+                # can be garbage-collected mid-flight.
+                task = asyncio.ensure_future(
+                    asyncio.to_thread(self._upsert_supabase_cache_safe, ticker, result)
+                )
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
 
             return result
         except Exception as e:
@@ -206,6 +270,22 @@ class HoldersService:
             raise
         finally:
             _inflight.pop(cache_key, None)
+            # CancelledError is a BaseException (3.8+), so the `except Exception`
+            # above never fires when the originating client disconnects mid-build.
+            # Popping the key stops NEW joiners, but every request that already
+            # awaited this future would hang forever. Resolve it here so joined
+            # waiters fail fast and retry instead of blocking a worker until the
+            # client times out. (Same class of bug as the CancelledError hang
+            # documented for the report pipeline.)
+            if not future.done():
+                future.set_exception(
+                    RuntimeError(
+                        f"Holders build for {ticker} was cancelled before completion"
+                    )
+                )
+                # Mark retrieved so a future with no joiner doesn't emit
+                # "Future exception was never retrieved" on GC.
+                future.exception()
 
     # ── Supabase cache helpers ────────────────────────────────────
 
@@ -297,8 +377,18 @@ class HoldersService:
 
     # ── Build holders data from FMP ───────────────────────────────
 
-    async def _build_holders(self, ticker: str) -> HoldersResponse:
-        """Fetch all FMP data in parallel and assemble the response."""
+    async def _build_holders(
+        self, ticker: str
+    ) -> Tuple[HoldersResponse, List[str]]:
+        """Fetch all FMP data in parallel and assemble the response.
+
+        Returns ``(response, degraded_sources)``. ``degraded_sources`` names the
+        CRITICAL upstream calls that failed and were substituted with an empty
+        default; ``get_holders`` uses it to decide whether the result is fit to
+        pin in the 24h Supabase cache. Returned rather than stashed on ``self``
+        because the service is a process-wide singleton serving concurrent
+        requests.
+        """
 
         # Phase 1: Core data (all in parallel)
         now = datetime.now(timezone.utc)
@@ -309,16 +399,9 @@ class HoldersService:
         # in fmp.py.
         insider_since = (now - timedelta(days=365)).strftime("%Y-%m-%d")
 
-        # Determine data quarter for aggregate institutional fetch
-        month = now.month
-        if month <= 3:
-            data_year, data_quarter = now.year - 1, 4
-        elif month <= 6:
-            data_year, data_quarter = now.year, 1
-        elif month <= 9:
-            data_year, data_quarter = now.year, 2
-        else:
-            data_year, data_quarter = now.year, 3
+        # Determine data quarter for aggregate institutional fetch — the newest
+        # quarter whose 13F deadline has PASSED (see latest_filed_13f_quarter).
+        data_year, data_quarter = latest_filed_13f_quarter(now)
 
         (
             shares_float,
@@ -349,19 +432,31 @@ class HoldersService:
             return_exceptions=True,
         )
 
-        # Handle failures gracefully
-        def _unwrap(val, name, default):
+        # Handle failures gracefully. Track WHICH sources degraded: the caller
+        # uses this to decide whether the result is fit to pin in the 24h
+        # Supabase cache (see get_holders).
+        degraded: List[str] = []
+
+        def _unwrap(val, name, default, critical: bool = False):
             if isinstance(val, Exception):
-                logger.warning(f"{name} fetch failed for {ticker}: {val}")
+                logger.warning(
+                    f"{name} fetch failed for {ticker}: {type(val).__name__}: {val}"
+                )
+                if critical:
+                    degraded.append(name)
                 return default
             return val
 
-        shares_float = _unwrap(shares_float, "Shares float", {})
-        quote_data = _unwrap(quote_data, "Quote", {})
-        institutional_holders = _unwrap(institutional_holders, "Institutional holders", [])
-        inst_ownership_summary = _unwrap(inst_ownership_summary, "Inst ownership summary", {})
+        shares_float = _unwrap(shares_float, "Shares float", {}, critical=True)
+        quote_data = _unwrap(quote_data, "Quote", {}, critical=True)
+        institutional_holders = _unwrap(
+            institutional_holders, "Institutional holders", [], critical=True
+        )
+        inst_ownership_summary = _unwrap(
+            inst_ownership_summary, "Inst ownership summary", {}, critical=True
+        )
         inst_quarter_aggregate = _unwrap(inst_quarter_aggregate, "Inst quarter aggregate", None)
-        insider_trading = _unwrap(insider_trading, "Insider trading", [])
+        insider_trading = _unwrap(insider_trading, "Insider trading", [], critical=True)
         insider_roster = _unwrap(insider_roster, "Insider roster", [])
         historical_prices = _unwrap(historical_prices, "Historical prices", [])
         senate_latest = _unwrap(senate_latest, "Senate latest", [])
@@ -402,6 +497,13 @@ class HoldersService:
             senate_for_ticker, house_for_ticker, monthly_prices, daily_prices
         )
 
+        if degraded:
+            logger.warning(
+                f"Holders build DEGRADED for {ticker} — sources unavailable: "
+                f"{', '.join(degraded)}. Serving best-effort; will NOT persist to "
+                f"holders_cache."
+            )
+
         return HoldersResponse(
             symbol=ticker,
             shareholder_breakdown=breakdown,
@@ -409,7 +511,7 @@ class HoldersService:
             hedge_funds_data=hedge_sm,
             congress_data=congress_sm,
             recent_activities=recent,
-        )
+        ), degraded
 
     # ── Shareholder Breakdown ─────────────────────────────────────
 
@@ -448,16 +550,41 @@ class HoldersService:
         else:
             institutions_pct = 0.0
 
-        # Clamp and compute public/other
+        # Clamp and compute public/other.
+        #
+        # Do NOT clamp institutions to `100 - insiders`. Insider % (derived from
+        # shares-float `freeFloat`) and institutional % (13F
+        # `ownershipPercent`) come from DIFFERENT filings and legitimately
+        # OVERLAP: at a controlled company the >10% insider block is itself a
+        # 13F filer, so the same shares are counted by both. The old clamp
+        # silently rewrote the real figure — PLCE Q1'26 (freeFloat 34.96,
+        # ownershipPercent 78.35) rendered "Institutions 35.0%" here while the
+        # Overview tab of the SAME screen showed "% Held Inst. 78.35%", a 43pp
+        # contradiction one tab apart, plus a fabricated "Public/Other 0.0%".
+        # Report both source figures honestly; the iOS stacked bar normalizes by
+        # their sum (ShareholderBreakdownBar.segmentWidth), so an overlapping
+        # total > 100 still renders correctly.
         insiders_pct = max(0.0, min(100.0, insiders_pct))
-        institutions_pct = max(0.0, min(100.0 - insiders_pct, institutions_pct))
+        institutions_pct = max(0.0, min(100.0, institutions_pct))
+        if insiders_pct + institutions_pct > 100.0:
+            logger.info(
+                "Shareholder breakdown overlap: insiders=%.2f%% + institutions=%.2f%% "
+                "> 100%% (insider block is also a 13F filer); public/other floored at 0",
+                insiders_pct, institutions_pct,
+            )
         public_other_pct = max(0.0, 100.0 - insiders_pct - institutions_pct)
 
         # Build top holders (legacy list)
         top_holders = self._build_top_holders(inst_holders[:10])
 
-        # Build top 10 owners
-        top_10_institutions = self._build_top_institutions(inst_holders[:10])
+        # Build top 10 owners.
+        # Pass the FULL fetched list (20 rows): FMP returns them sorted by
+        # OWNERSHIP %, while _build_top_institutions ranks by MARKET VALUE and
+        # slices to 10 itself. Pre-truncating to [:10] discarded rows that ranked
+        # outside the top 10 by percent but inside it by value — e.g. LUV Q1'26,
+        # where Ameriprise ($375.1M) was dropped at index 10 while FMR LLC
+        # ($366.8M) was shown at rank #10.
+        top_10_institutions = self._build_top_institutions(inst_holders)
         outstanding_shares = _safe_float(profile, "outstandingShares", 0.0)
         top_10_insiders = self._build_top_insiders(
             insider_roster, current_price, outstanding_shares
@@ -487,7 +614,7 @@ class HoldersService:
                         _safe_float(h, "changeInSharesPercentage", 0.0))
 
             result.append(InstitutionalHolderSchema(
-                name=h.get("investorName", h.get("holder", "Unknown")),
+                name=_holder_name(h),
                 shares_held=_safe_float(h, "sharesNumber", 0.0),
                 percent_ownership=round(pct, 2),
                 change_percent=round(change, 1) if change != 0.0 else None,
@@ -513,14 +640,25 @@ class HoldersService:
             pct = _safe_float(h, "ownership",
                     _safe_float(h, "percentOfSharesHeld", 0.0))
 
+            name = _holder_name(h)
             result.append(TopInstitutionSchema(
                 rank=rank,
-                name=h.get("investorName", h.get("holder", "Unknown")),
-                category=self._categorize_institution(
-                    h.get("investorName", "")
-                ),
-                value_in_billions=round(value / 1_000_000_000, 1) if value > 0 else 0.0,
-                percent_ownership=round(pct, 1),
+                name=name,
+                # Was `h.get("investorName", "")` — a null investorName made this
+                # `None.lower()` inside _categorize_institution (AttributeError →
+                # 502 for the whole tab). Reuse the already-resolved name.
+                category=self._categorize_institution(name),
+                # 4 dp, NOT 1. iOS renders sub-$1B values as
+                # `String(format: "$%.0fM", valueInBillions * 1000)`, so rounding
+                # to 1 dp quantized every holding to the nearest $100M: a $40M
+                # stake became 0.0 → "$0M" and a $460M stake became 0.5 → "$500M".
+                # Only mega-caps have $1B+ top holders, so on most tickers the
+                # entire Top-10 sheet read "$0M".
+                value_in_billions=round(value / 1_000_000_000, 4) if value > 0 else 0.0,
+                # 4 dp matches _build_top_insiders and feeds the iOS adaptive
+                # `formatOwnershipPercent` (which prints down to 4 dp). Rounding
+                # to 1 dp collapsed every sub-0.05% stake to 0.0 → "0.00%".
+                percent_ownership=round(pct, 4),
             ))
         return result
 
@@ -548,13 +686,23 @@ class HoldersService:
 
             insiders.append({
                 "name": normalize_insider_name(r.get("owner")),
-                "title": r.get("title", r.get("typeOfOwner", "Officer")),
+                # `.get(k, default)` does NOT fall back on a present-but-null
+                # value, and TopInsiderSchema.title is a required str.
+                "title": (r.get("title") or r.get("typeOfOwner") or "Officer"),
                 "valueInMillions": value_millions,
+                "shares": shares,
                 "percentOwnership": ownership_pct,
             })
 
-        # Sort by value descending, take top 10
-        insiders.sort(key=lambda x: x["valueInMillions"], reverse=True)
+        # Sort by value descending, take top 10. When the quote call failed
+        # (current_price == 0) every valueInMillions is 0.0, so this sort was a
+        # no-op and the "Top 10 Insiders" ranking degenerated to raw FMP roster
+        # order — a junior officer could be ranked #1 above the founder, and the
+        # ranks contradicted the share counts displayed in the same rows. Shares
+        # are the price-free ordering that survives a missing quote.
+        insiders.sort(
+            key=lambda x: (x["valueInMillions"], x["shares"]), reverse=True
+        )
 
         result = []
         for rank, ins in enumerate(insiders[:10], 1):
@@ -710,7 +858,12 @@ class HoldersService:
                 date=date_str[:10],
                 change_in_millions=round(change_value_millions, 2),
                 change_percent=round(change_pct, 2),
-                total_held_in_billions=round(total_value / 1_000_000_000, 1) if total_value > 0 else 0.0,
+                # 4 dp ($100K resolution), NOT 1. iOS renders sub-$1B values as
+                # `totalHeldInBillions * 1000` millions, so 1 dp snapped every
+                # position to a $100M grid: a real $45.3M holding decoded as 0.0
+                # and rendered "Held: $0M". Wire-compatible — the field is still
+                # billions, so the iOS `>= 1` branch is unchanged for mega-caps.
+                total_held_in_billions=round(total_value / 1_000_000_000, 4) if total_value > 0 else 0.0,
                 is_new_position=is_new,
             ))
 
@@ -732,17 +885,22 @@ class HoldersService:
         Falls back to summing the (now price-appreciation-stripped)
         per-holder activities when aggregate data is unavailable.
         """
-        # Use PREVIOUS quarter to match FMP fetch logic in get_institutional_holder.
-        now = datetime.now(timezone.utc)
-        month = now.month
-        if month <= 3:
-            data_year, data_quarter = now.year - 1, 4
-        elif month <= 6:
-            data_year, data_quarter = now.year, 1
-        elif month <= 9:
-            data_year, data_quarter = now.year, 2
-        else:
-            data_year, data_quarter = now.year, 3
+        # Newest FULLY-FILED 13F quarter — must match the quarter `_build_holders`
+        # actually fetched `aggregate_data` for, and the one
+        # `get_institutional_holder` pulls the per-holder rows for.
+        data_year, data_quarter = latest_filed_13f_quarter()
+
+        def _sum_activities() -> Tuple[float, float]:
+            """Fallback: sum per-holder activities (already price-stripped)."""
+            inflow_m = 0.0
+            outflow_m = 0.0
+            for act in activities:
+                val = act.change_in_millions
+                if val >= 0:
+                    inflow_m += val
+                else:
+                    outflow_m += abs(val)
+            return inflow_m / 1000, outflow_m / 1000
 
         if aggregate_data is not None:
             # ── Primary path: use ALL-institution aggregate data ──
@@ -759,30 +917,36 @@ class HoldersService:
             )
             shares_change = _safe_float(aggregate_data, "numberOf13FsharesChange", 0.0)
 
-            # Quarter-end price (same approach as _build_hedge_fund_smart_money)
+            # Quarter-end price (same approach as _build_hedge_fund_smart_money).
+            #
+            # There is deliberately NO totalInvested/numberOf13Fshares fallback
+            # here. That ratio is only a valid price when the two fields describe
+            # the same population, and on the (still-amending) quarter this
+            # function selects they routinely do not — the implied price came out
+            # ~20x the real close and turned a $12B/$18B quarter into
+            # "$244.0B in / $365.9B out". A missing quarter-end close means the
+            # historical-prices call failed or the ticker has no EOD rows in the
+            # window; in both cases the per-holder sum below is the honest
+            # (if top-15-bounded) answer.
             qtr_prices = self._quarter_end_prices(daily_prices)
             price = qtr_prices.get((data_year, data_quarter), 0.0)
             if price <= 0:
-                total_inv = _safe_float(aggregate_data, "totalInvested", 0.0)
-                total_shares = _safe_float(aggregate_data, "numberOf13Fshares", 0.0)
-                price = total_inv / total_shares if total_shares > 0 else 0
-
-            net_millions = (shares_change * price) / 1_000_000
-            buy_vol, sell_vol = self._estimate_buy_sell(net_millions, buyers, sellers)
-            inflow = buy_vol / 1000   # millions → billions
-            outflow = sell_vol / 1000
+                logger.warning(
+                    "Institutional flow summary: no quarter-end close for "
+                    "%sQ%s — falling back to the per-holder activity sum "
+                    "(top-15 bounded, understates) instead of an implied price",
+                    data_year, data_quarter,
+                )
+                inflow, outflow = _sum_activities()
+            else:
+                net_millions = (shares_change * price) / 1_000_000
+                buy_vol, sell_vol = self._estimate_buy_sell(
+                    net_millions, buyers, sellers
+                )
+                inflow = buy_vol / 1000   # millions → billions
+                outflow = sell_vol / 1000
         else:
-            # ── Fallback: sum per-holder activities (already price-stripped) ──
-            inflow_m = 0.0
-            outflow_m = 0.0
-            for act in activities:
-                val = act.change_in_millions
-                if val >= 0:
-                    inflow_m += val
-                else:
-                    outflow_m += abs(val)
-            inflow = inflow_m / 1000
-            outflow = outflow_m / 1000
+            inflow, outflow = _sum_activities()
 
         quarter_start_month = (data_quarter - 1) * 3 + 1
         month_names = [
@@ -795,8 +959,14 @@ class HoldersService:
         return RecentActivitiesFlowSummarySchema(
             period_description=f"{period_start} - {period_end} {data_year}",
             quarter_description=f"Q{data_quarter}",
-            in_flow_in_billions=round(inflow, 1),
-            out_flow_in_billions=round(outflow, 1),
+            # 4 dp ($100K resolution), NOT 1. These are BILLIONS, and iOS derives
+            # BOTH the "Net Flow" headline (`(in - out) * 1000` millions) and the
+            # green/red bar split from them. At 1 dp a small-cap quarter with
+            # $40M in / $10M out serialized as 0.0 / 0.0 → the badge read
+            # "Net Flow: +$0M" and the bar fell into its `total == 0` guard,
+            # drawing a fabricated even 50/50 green/red split.
+            in_flow_in_billions=round(inflow, 4),
+            out_flow_in_billions=round(outflow, 4),
         )
 
     def _build_insider_activities(
@@ -840,10 +1010,21 @@ class HoldersService:
             price = _safe_float(tx, "price", 0.0)
             value_millions = (shares * price) / 1_000_000 if price > 0 else 0.0
 
-            # Skip zero-value entries (RSU conversions at price $0). We keep this
-            # price-based filter to exclude the same non-open-market trades as
-            # before, even though the stored figure below is now in SHARES.
-            if value_millions == 0.0:
+            # Drop rows carrying no share count — nothing to show or sum.
+            if shares <= 0:
+                continue
+            # Historically this dropped every row with price == 0, to hide RSU
+            # conversions. That filter is now WRONG for informative trades: this
+            # list is denominated in SHARES, and FMP leaves `price` blank on plenty
+            # of real open-market Form 4 rows. The chart
+            # (_build_insider_smart_money) and the report's Buys/Sells table
+            # (_build_insider_sections) both key off the informative/uninformative
+            # classification and ignore price, so a price-less informative buy was
+            # counted by them and dropped here — the Holders summary card read
+            # "1 buyer" directly beneath a bar that had summed TWO buyers' shares,
+            # while TickerReportView reported "Buys 2". Keep the RSU suppression,
+            # but only where it was actually aimed: uninformative rows.
+            if price <= 0 and "Uninformative" in classified:
                 continue
 
             # Insider activity is now denominated in SHARES (millions of shares)
@@ -985,8 +1166,17 @@ class HoldersService:
                 if amount_millions <= 0:
                     continue
 
-                # Determine buy/sell
-                is_buy = "purchase" in tx_type_raw or "buy" in tx_type_raw or "exchange" in tx_type_raw
+                # Determine buy/sell.
+                #
+                # "Exchange" is NOT a purchase. STOCK Act exchanges are share
+                # swaps — spinoff distributions, fund conversions — where no
+                # money moved and no conviction was expressed. Counting them as
+                # buys fabricated congressional accumulation: HONA's only real
+                # 2026 disclosure was a SALE, yet three "Exchange" rows from the
+                # Honeywell Aerospace spinoff made the report's Hidden Market
+                # Signals assert net_direction="buy". Unmatched types fall
+                # through to the skip below.
+                is_buy = "purchase" in tx_type_raw or "buy" in tx_type_raw
                 is_sell = "sale" in tx_type_raw or "sell" in tx_type_raw
 
                 if not is_buy and not is_sell:
@@ -1118,7 +1308,20 @@ class HoldersService:
 
         Forward-fills missing months with the last known price instead
         of defaulting to 0.0 (which would create a misleading chart dip).
+
+        LEADING months — those before the first real close — have nothing to
+        forward-fill FROM, so they were emitted at price 0.0. When
+        ``get_historical_prices`` failed entirely (degraded to ``[]`` by
+        ``_unwrap``) that meant all 12/13 points were 0.0, and the iOS chart drew
+        a flat blue price line at $0 across the whole window above otherwise
+        correct buy/sell bars — a price the stock never had. Emit nothing until
+        the first real close instead, mirroring ``_build_quarterly_price_data``'s
+        ``if not daily_prices: return []`` honest-empty behavior. iOS renders the
+        bars with no price overlay rather than a fabricated one.
         """
+        if not monthly_prices:
+            return []
+
         result = []
         last_known_price = 0.0
         for m in month_keys:
@@ -1127,6 +1330,9 @@ class HoldersService:
                 last_known_price = price
             else:
                 price = last_known_price
+            if price <= 0:
+                # No real close yet — skip rather than plot $0.
+                continue
             result.append(StockPriceDataPointSchema(
                 month=m, price=round(price, 2)
             ))
@@ -1278,20 +1484,13 @@ class HoldersService:
     def _generate_quarter_keys(count: int = 8) -> List[Tuple[int, int]]:
         """Return the last *count* (year, quarter) pairs, oldest-first.
 
-        Starts from the most recently *completed* quarter and works
-        backwards.  E.g. in March 2026 the latest completed quarter is
-        Q4 2025, so 8 quarters → Q1'24 … Q4'25.
+        Starts from the most recently *fully-filed* quarter — 13F reports are due
+        45 days after quarter-end, so the quarter that merely ENDED most recently
+        is still half-empty and its aggregate reads as a mass exodus (see
+        ``latest_filed_13f_quarter``). E.g. on 2026-07-23 the newest settled
+        quarter is Q1'26, so 8 quarters → Q2'24 … Q1'26.
         """
-        now = datetime.now(timezone.utc)
-        month = now.month
-        if month <= 3:
-            cur_year, cur_q = now.year - 1, 4
-        elif month <= 6:
-            cur_year, cur_q = now.year, 1
-        elif month <= 9:
-            cur_year, cur_q = now.year, 2
-        else:
-            cur_year, cur_q = now.year, 3
+        cur_year, cur_q = latest_filed_13f_quarter()
 
         pairs: List[Tuple[int, int]] = []
         y, q = cur_year, cur_q
@@ -1421,7 +1620,19 @@ class HoldersService:
                 # huge BUY). We can't cleanly separate the two → suppress the flow
                 # (keep the real holder counts), matching the magnitude guard's
                 # "render no bar, not garbage" philosophy.
-                elif ratio_obs >= (1.0 + split_ratio) / 2.0:
+                #
+                # DIRECTION MATTERS. The midpoint (1+ratio)/2 only separates
+                # "jumped toward the split" from "did not move" when the split
+                # INFLATES the count (forward split, ratio > 1). For a REVERSE
+                # split (1:10 → ratio 0.1) the count SHRINKS, so the test flips:
+                # a normal quarter sitting at ratio_obs ≈ 1.0 is >= the 0.55
+                # midpoint and was being suppressed, silently zeroing real 13F
+                # flow for every quarter containing a reverse split.
+                elif (
+                    ratio_obs >= (1.0 + split_ratio) / 2.0
+                    if split_ratio > 1.0
+                    else ratio_obs <= (1.0 + split_ratio) / 2.0
+                ):
                     return 0.0, 0.0, 0.0, buyers, sellers
                 # else: the count did NOT jump toward the split (ratio_obs ≈ 1.0)
                 # → a spinoff / ADR-ratio change / already-adjusted count that
@@ -1614,6 +1825,14 @@ class HoldersService:
         # at a bad value (e.g. an inflated price fallback) that dominates the
         # chart's shared y-axis and flattens every other quarter to ~0.
         volatile = set(target_pairs[-_REFRESH_RECENT_QUARTERS:])
+        # Keep the persisted rows aside as a FALLBACK. Dropping them outright
+        # meant a transient FMP failure on a volatile quarter (429 burst, 5xx)
+        # left `existing` with no row at all → the loop below emitted 0.0/0.0
+        # for that quarter. That is not just an understatement: the 2-year
+        # `total_buy - total_sell` and therefore `is_positive` can FLIP SIGN,
+        # inverting the "Institutional Activity" reading on the Overview
+        # snapshot — which then pins the wrong value in its own 24h cache.
+        stale_volatile = {k: v for k, v in existing.items() if k in volatile}
         existing = {k: v for k, v in existing.items() if k not in volatile}
 
         logger.info(
@@ -1644,6 +1863,18 @@ class HoldersService:
             )
             for (y, q), data in zip(missing, fmp_results):
                 if data is None:
+                    # FMP gave us nothing for this quarter. If we deliberately
+                    # dropped a persisted row to force-refresh it, restore that
+                    # row rather than rendering a fabricated zero-flow quarter.
+                    fallback = stale_volatile.get((y, q))
+                    if fallback is not None:
+                        logger.warning(
+                            "hedge_fund_quarters: FMP refresh returned nothing for "
+                            "%s %sQ%s — reusing the persisted row (computed_at=%s) "
+                            "instead of emitting a zero quarter",
+                            ticker, y, q, fallback.get("computed_at"),
+                        )
+                        existing[(y, q)] = fallback
                     continue
 
                 buy_m, sell_m, net_m, buyers, sellers = (
@@ -1665,9 +1896,12 @@ class HoldersService:
 
         # 4. Persist new rows in background
         if new_rows:
-            asyncio.ensure_future(
+            # Strong ref — see _background_tasks.
+            task = asyncio.ensure_future(
                 asyncio.to_thread(self._save_quarters, ticker, new_rows)
             )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
         # 5. Build flow_data from all quarters (oldest-first)
         flow_data: List[SmartMoneyFlowDataPointSchema] = []
@@ -1760,20 +1994,40 @@ class HoldersService:
         primary: List[Dict[str, Any]],
         secondary: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Merge two trade lists, deduplicating by key fields."""
+        """Merge two trade lists, deduplicating by key fields.
+
+        The key must be narrow enough to collapse the SAME disclosure arriving
+        from both the symbol-filtered ``*-disclosure`` feed and the global
+        ``*-latest`` feed, but wide enough not to swallow genuinely DISTINCT
+        disclosures. ``owner`` and ``assetDescription`` are load-bearing for the
+        latter: one member routinely files several same-day, same-bucket rows —
+        e.g. NVDA 2026-06-26 Cleo Fields "Purchase / $1,001 - $15,000" appears as
+        "NVIDIA Corporation", "NVIDIA Corporation (1)" and "NVIDIA Corporation (2)"
+        — and separate Self / Spouse accounts file identical rows. Without those
+        two fields all of them collapsed to one, halving-or-worse the congress
+        buy/sell totals, the monthly bar heights, AND the report's Hidden Market
+        Signals summary (which reuses this data verbatim).
+
+        Both feeds originate from the same FMP dataset, so the added fields are
+        spelled identically across them and cross-feed dedup still works.
+        """
+        def _norm(value: Any) -> str:
+            return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
         seen: set = set()
         result: List[Dict[str, Any]] = []
         for trade in primary + secondary:
             # Normalize type to base form: "Sale (Full)" / "Sale (Partial)" → "sale"
             # FMP returns each trade twice with different type variants.
-            raw_type = (trade.get("type") or "").lower()
-            base_type = raw_type.split("(")[0].strip()
+            base_type = _norm(trade.get("type")).split("(")[0].strip()
             key = (
-                trade.get("transactionDate", ""),
-                (trade.get("firstName") or trade.get("first_name", "")).lower(),
-                (trade.get("lastName") or trade.get("last_name", "")).lower(),
+                _norm(trade.get("transactionDate")),
+                _norm(trade.get("firstName") or trade.get("first_name")),
+                _norm(trade.get("lastName") or trade.get("last_name")),
                 base_type,
-                trade.get("amount", ""),
+                _norm(trade.get("amount")),
+                _norm(trade.get("owner")),
+                _norm(trade.get("assetDescription")),
             )
             if key not in seen:
                 seen.add(key)
@@ -1798,7 +2052,12 @@ class HoldersService:
         if not amount_str:
             return 0.0
 
-        clean = amount_str.replace("$", "").replace(",", "").strip()
+        # str-coerce first: FMP occasionally returns `amount` as a NUMBER rather
+        # than a range string, and `int.replace` raises AttributeError → the
+        # endpoint's bare `except Exception` 502s the whole Holders tab. The
+        # midpoint twin (parse_congress_amount_dollars in _whale_common) already
+        # coerces; this one did not.
+        clean = str(amount_str).replace("$", "").replace(",", "").strip()
 
         if " - " in clean:
             parts = clean.split(" - ")
@@ -1862,7 +2121,10 @@ class HoldersService:
             if m_key not in monthly_flows:
                 continue
 
-            if "purchase" in tx_type or "buy" in tx_type or "exchange" in tx_type:
+            # "exchange" deliberately excluded — see _build_congress_activities.
+            # The two predicates MUST stay in lockstep or the chart bars and the
+            # summary card describe different trade sets.
+            if "purchase" in tx_type or "buy" in tx_type:
                 monthly_flows[m_key]["buy"] += amount_millions
             elif "sale" in tx_type or "sell" in tx_type:
                 monthly_flows[m_key]["sell"] += amount_millions

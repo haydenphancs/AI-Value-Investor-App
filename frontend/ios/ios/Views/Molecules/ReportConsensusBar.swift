@@ -572,10 +572,7 @@ struct ReportConsensusBar: View {
             let bar = bars[idx]
             let net = bar.netFlow
             let isBuy = net >= 0
-            let mag = abs(net)
-            let netStr = mag >= 1000
-                ? String(format: "%@%.2fB shares", isBuy ? "+" : "−", mag / 1000)
-                : String(format: "%@%.0fM shares", isBuy ? "+" : "−", mag)
+            let netStr = Self.formatNetShares(net)
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 HStack(spacing: 6) {
                     Text(formatMonthLabel(bar.month).replacingOccurrences(of: "\n", with: " "))
@@ -633,7 +630,11 @@ struct ReportConsensusBar: View {
             let maxBarHeight = max(zeroY - 10, 1)
 
             let dataMax = bars.map { abs($0.netFlow) }.max() ?? 0
-            let axisMax = max(niceAxisMax(dataMax), 1)
+            // The `1` floor is only a guard against an all-zero series. Applying
+            // it unconditionally squashed every sub-1M-share ticker's bars to
+            // <=30% of the plot while the Holders tab drew the same data
+            // full-height. Floor only when there is genuinely nothing to scale to.
+            let axisMax = dataMax > 0 ? niceAxisMax(dataMax) : 1
             let gutterCenterX = leadingPadding + chartWidth + 25   // == targetBadges center
 
             ZStack(alignment: .topLeading) {
@@ -695,6 +696,20 @@ struct ReportConsensusBar: View {
     }
 
     /// Round a positive value up to a "nice" axis maximum (1/2/2.5/5 × 10ⁿ).
+    /// Signed net-share label for the quarter popup.
+    ///
+    /// `%.0fM` printed "−0M shares" for a real 420,000-share quarter — the popup
+    /// asserted zero net flow beside a prominent red bar and a "31 added /
+    /// 48 trimmed" caption. Steps down to K like `formatVolumeAxis` does.
+    private static func formatNetShares(_ millions: Double) -> String {
+        let mag = abs(millions)
+        guard mag > 0 else { return "Flat" }
+        let sign = millions >= 0 ? "+" : "−"
+        if mag >= 1000 { return String(format: "%@%.2fB shares", sign, mag / 1000) }
+        if mag >= 1 { return String(format: "%@%.2fM shares", sign, mag) }
+        return String(format: "%@%.0fK shares", sign, mag * 1000)
+    }
+
     private func niceAxisMax(_ value: Double) -> Double {
         guard value > 0 else { return 0 }
         let exponent = floor(log10(value))
@@ -710,10 +725,19 @@ struct ReportConsensusBar: View {
     }
 
     /// Format a volume (in millions) for the y-axis: "200B" / "50M" / "0".
+    /// Share-count axis label. Mirrors `SmartMoneyFlowChart.formatVolumeValue`
+    /// so the report's Institutions chart and the Holders tab's label the same
+    /// magnitudes identically.
+    ///
+    /// The sub-million branches are load-bearing: without them a mid-cap whose
+    /// quarters are all under 1M shares rendered its ±0.5 gridlines (±500,000
+    /// shares) as "0", producing three stacked "0" labels on one axis.
     private func formatVolumeAxis(_ millions: Double) -> String {
         let magnitude = abs(millions)
         if magnitude >= 1000 { return String(format: "%.0fB", millions / 1000) }
         if magnitude >= 1 { return String(format: "%.0fM", millions) }
+        if magnitude >= 0.01 { return String(format: "%.0fK", millions * 1000) }
+        if magnitude > 0 { return String(format: "%.1fK", millions * 1000) }
         return "0"
     }
 }

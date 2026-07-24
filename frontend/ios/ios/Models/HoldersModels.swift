@@ -172,17 +172,25 @@ struct SmartMoneyFlowSummary {
     let periodDescription: String  // e.g., "12-Month"
     var unit: SmartMoneyFlowUnit = .dollars
 
+    /// SINGLE source of truth for the badge's sign, arrow and colour.
+    ///
+    /// Previously the printed sign came from `totalNetFlow >= 0` while the arrow
+    /// and colour came from the separate wire field `isPositive`, which the
+    /// backend computes from the UNROUNDED net. Python's `round(-0.002, 2)` is
+    /// `-0.0`, and `-0.0 >= 0` is `true` in IEEE-754, so the two halves of one
+    /// badge disagreed: a red `arrow.down` immediately followed by red text
+    /// reading "+0.00M shares". Deriving everything from the value we actually
+    /// PRINT makes that impossible. Exactly-flat is its own state — `isPositive`
+    /// is `net >= 0`, so a genuinely flat series was being painted bullish green.
+    private var direction: Int {
+        if totalNetFlow > 0 { return 1 }
+        if totalNetFlow < 0 { return -1 }
+        return 0
+    }
+
     var formattedNetFlow: String {
-        let sign = totalNetFlow >= 0 ? "+" : "-"
-        let mag = abs(totalNetFlow)
-        switch unit {
-        case .dollars:
-            if mag >= 1000 { return "\(sign)$\(String(format: "%.2f", mag / 1000))B" }
-            return "\(sign)$\(String(format: "%.2f", mag))M"
-        case .shares:
-            if mag >= 1000 { return "\(sign)\(String(format: "%.2f", mag / 1000))B shares" }
-            return "\(sign)\(String(format: "%.2f", mag))M shares"
-        }
+        let sign = direction < 0 ? "-" : (direction > 0 ? "+" : "")
+        return sign + Self.formatMagnitude(totalNetFlow, unit: unit)
     }
 
     var formattedBuy: String { Self.formatMagnitude(totalBuy, unit: unit) }
@@ -192,24 +200,46 @@ struct SmartMoneyFlowSummary {
     /// Unit-aware magnitude label — mirrors `formattedNetFlow`'s unit switch so a
     /// share-denominated total isn't mislabeled with a "$" (37.35B shares would
     /// otherwise read "$37.35B").
+    ///
+    /// Values are in MILLIONS. The sub-1M branches are load-bearing: a 12-month
+    /// insider total of 2,000 shares arrives as 0.002 and a small congressional
+    /// disclosure as 0.008 ($8K) — with only a `>= 1000` (B) branch both
+    /// collapsed to "0.00M shares" / "$0.00M" in the headline badge while the
+    /// chart below drew a visible bar and Recent Activities printed the same
+    /// trade as "2K shares" / "$8K". Mirrors the sibling formatters
+    /// `InsiderActivitySummary.formatShares` and
+    /// `CongressActivitySummary.formattedNetFlow`, which already branch this way.
     private static func formatMagnitude(_ value: Double, unit: SmartMoneyFlowUnit) -> String {
         let mag = abs(value)
         switch unit {
         case .dollars:
             if mag >= 1000 { return "$\(String(format: "%.2f", mag / 1000))B" }
-            return "$\(String(format: "%.2f", mag))M"
+            if mag >= 1 { return "$\(String(format: "%.2f", mag))M" }
+            if mag >= 0.001 { return "$\(String(format: "%.0f", mag * 1000))K" }
+            return "$\(String(format: "%.0f", mag * 1_000_000))"
         case .shares:
-            if mag >= 1000 { return "\(String(format: "%.2f", mag / 1000))B shares" }
-            return "\(String(format: "%.2f", mag))M shares"
+            let shares = (mag * 1_000_000).rounded()
+            if shares >= 1e9 { return String(format: "%.2fB shares", shares / 1e9) }
+            if shares >= 1e6 { return String(format: "%.2fM shares", shares / 1e6) }
+            if shares >= 1e3 { return String(format: "%.0fK shares", shares / 1e3) }
+            return String(format: "%.0f shares", shares)
         }
     }
 
     var flowColor: Color {
-        isPositive ? AppColors.bullish : AppColors.bearish
+        switch direction {
+        case 1: return AppColors.bullish
+        case -1: return AppColors.bearish
+        default: return AppColors.textSecondary
+        }
     }
 
     var flowIcon: String {
-        isPositive ? "arrow.up" : "arrow.down"
+        switch direction {
+        case 1: return "arrow.up"
+        case -1: return "arrow.down"
+        default: return "minus"
+        }
     }
 }
 
@@ -660,20 +690,28 @@ struct RecentActivitiesFlowSummary {
         netFlowInMillions >= 0
     }
 
-    var formattedInFlow: String {
-        String(format: "$%.1fB", inFlowInBillions)
+    /// Billions-denominated flow, but most tickers' quarterly institutional flow
+    /// is far under $1B. Hard-printing `$%.1fB` made both sides read "$0.0B" on
+    /// every non-mega-cap — next to a bar whose split was derived from the same
+    /// two numbers. Step down to M/K like the sibling summaries do.
+    private static func formatFlow(_ billions: Double) -> String {
+        let mag = abs(billions)
+        if mag >= 1 { return String(format: "$%.2fB", mag) }
+        if mag >= 0.001 { return String(format: "$%.0fM", mag * 1000) }
+        return String(format: "$%.0fK", mag * 1_000_000)
     }
 
-    var formattedOutFlow: String {
-        String(format: "$%.1fB", outFlowInBillions)
-    }
+    var formattedInFlow: String { Self.formatFlow(inFlowInBillions) }
+
+    var formattedOutFlow: String { Self.formatFlow(outFlowInBillions) }
 
     var formattedNetFlow: String {
         let sign = netFlowInMillions >= 0 ? "+ " : "- "
-        if abs(netFlowInMillions) >= 1000 {
-            return "\(sign)$\(String(format: "%.2f", abs(netFlowInMillions) / 1000))B"
-        }
-        return "\(sign)$\(String(format: "%.0f", abs(netFlowInMillions)))M"
+        let mag = abs(netFlowInMillions)
+        if mag >= 1000 { return "\(sign)$\(String(format: "%.2f", mag / 1000))B" }
+        // `%.0fM` floored every sub-$1M net to "$0M"; step down to K.
+        if mag >= 1 { return "\(sign)$\(String(format: "%.0f", mag))M" }
+        return "\(sign)$\(String(format: "%.0f", mag * 1000))K"
     }
 
     var netFlowColor: Color {

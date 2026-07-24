@@ -73,6 +73,9 @@ MAX_CORPUS_ARTICLES = 25
 # change these constants there, not by hand.
 PRIMARY_WINDOW_HOURS = 24
 CORPUS_WINDOW_HOURS = 48
+# Small tolerance for clock skew / same-minute stamping so a legitimately
+# just-published article isn't dropped, while genuinely future-dated rows are.
+_FUTURE_SKEW_HOURS = 2
 # Per-article text budget, characters. Headlines carry most of the signal.
 MAX_ARTICLE_TEXT_CHARS = 400
 
@@ -923,9 +926,9 @@ def _iso(value: Any) -> str:
 
 
 def articles_within_window(
-    rows: Sequence[Dict[str, Any]], cutoff: datetime
+    rows: Sequence[Dict[str, Any]], cutoff: datetime, upper: Optional[datetime] = None
 ) -> List[Dict[str, Any]]:
-    """Keep only article rows published at/after ``cutoff``.
+    """Keep only article rows published in ``[cutoff, upper]``.
 
     Bounds both the sweeper's insight corpus AND the Updates endpoint's
     show/hide decision to a real time window (``CORPUS_WINDOW_HOURS``), so the
@@ -934,14 +937,22 @@ def articles_within_window(
     undated article cannot be asserted to fall inside the window, and keeping it
     would reintroduce the over-claim the window exists to remove. Non-dict rows
     are skipped rather than raising.
+
+    ``upper`` (usually ``now`` + a small skew) drops FUTURE-dated rows: a
+    parseable-but-future ``published_at`` (embargoed PR, FMP TZ glitch) would
+    otherwise satisfy ``ts >= cutoff`` and fake a "24h" card for a scope whose
+    only real news is >48h old — the exact over-claim this window prevents.
     """
     kept: List[Dict[str, Any]] = []
     for r in rows:
         if not isinstance(r, dict):
             continue
         ts = _parse_ts(r.get("published_at"))
-        if ts is not None and ts >= cutoff:
-            kept.append(r)
+        if ts is None or ts < cutoff:
+            continue
+        if upper is not None and ts > upper:
+            continue
+        kept.append(r)
     return kept
 
 
@@ -958,13 +969,14 @@ def select_recent_corpus(
     matches the news the card actually summarises. An empty return (no news in
     48h) means "no card".
     """
+    upper = now + timedelta(hours=_FUTURE_SKEW_HOURS)
     primary = articles_within_window(
-        rows, now - timedelta(hours=PRIMARY_WINDOW_HOURS)
+        rows, now - timedelta(hours=PRIMARY_WINDOW_HOURS), upper
     )
     if primary:
         return primary, PRIMARY_WINDOW_HOURS
     fallback = articles_within_window(
-        rows, now - timedelta(hours=CORPUS_WINDOW_HOURS)
+        rows, now - timedelta(hours=CORPUS_WINDOW_HOURS), upper
     )
     return fallback, CORPUS_WINDOW_HOURS
 

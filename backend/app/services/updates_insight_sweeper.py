@@ -250,12 +250,20 @@ class InsightSweeper:
         cycle (≤5 min); winning it twice costs a duplicate paid call — so we
         fail toward the cheaper error.
         """
+        # Stamp claim_at + evaluate stale-steal with a FRESH timestamp, NOT the
+        # sweep-start `now`. A slow pre-claim phase (news refresh of ~200 scopes,
+        # gate eval) can exceed _CLAIM_STALE_SECONDS; reusing the stale sweep-start
+        # time would stamp claim_at in the past, so a second instance sees this
+        # just-taken claim as already-stale and steals it → duplicate paid
+        # generation + an under-counted daily cap. (The sweep-start `now` is still
+        # used for gate consistency elsewhere; the claim clock must be real-time.)
+        claim_now = datetime.now(timezone.utc)
         try:
             result = self.supabase.rpc(
                 "claim_updates_insight_scope",
                 {
                     "p_scope": scope,
-                    "p_now": now.isoformat(),
+                    "p_now": claim_now.isoformat(),
                     "p_stale_seconds": _CLAIM_STALE_SECONDS,
                     "p_attempt_cap": PER_SCOPE_ATTEMPT_CAP,
                     "p_daily_cap": daily_cap_for(is_market_scope),

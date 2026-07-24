@@ -356,10 +356,55 @@ struct TickerDetailView: View {
                 TickerHoldersContent(
                     holdersData: holdersData
                 )
-            } else {
+            } else if !viewModel.isHoldersLoaded {
                 placeholderContent(title: "Holders", description: "Loading holders data...")
+            } else {
+                // Settled with no data. Distinguishing this from "still loading"
+                // is the whole point of `isHoldersLoaded`: a failed fetch used to
+                // sit on "Loading holders data..." forever with no way to retry.
+                holdersUnavailableContent(
+                    message: viewModel.holdersError
+                        ?? "Ownership data isn't available for this symbol."
+                )
             }
         }
+    }
+
+    private func holdersUnavailableContent(message: String) -> some View {
+        VStack(spacing: AppSpacing.lg) {
+            Image(systemName: "chart.bar.doc.horizontal")
+                .font(AppTypography.iconHero)
+                .foregroundColor(AppColors.textMuted)
+
+            Text("Holders")
+                .font(AppTypography.titleCompact)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text(message)
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+
+            Button {
+                Task { await viewModel.reloadHolders() }
+            } label: {
+                Text("Try Again")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.primaryBlue)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.sm)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(AppColors.primaryBlue.opacity(0.5), lineWidth: 1)
+                    )
+            }
+
+            Spacer()
+                .frame(height: 150)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, AppSpacing.xxxl)
+        .padding(.horizontal, AppSpacing.lg)
     }
 
     private func placeholderContent(title: String, description: String) -> some View {

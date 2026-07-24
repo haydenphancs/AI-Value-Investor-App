@@ -129,3 +129,55 @@ async def test_model_fallback_on_503():
     res = await _svc(fake).get_catalyst("MSFT", 7.0, "Since May 1")
     assert res is not None and res["tag"] == "Raised Guidance"
     assert fake.calls == pcs._RETRIES_PER_MODEL + 1  # N fails, then success
+
+
+# ── B2: cache identity is (ticker, window, direction), NOT ticker alone ──────
+
+def test_ctx_matches_requires_window_and_direction():
+    m = pcs._ctx_matches
+    assert m("today", -7.0, "today", -5.0) is True    # same window + same (down) dir
+    assert m("30d", 22.0, "30d", 3.0) is True          # same window + same (up) dir
+    assert m("today", 22.0, "today", -7.0) is False    # OPPOSITE direction → no match
+    assert m("30d", -7.0, "today", -7.0) is False      # different window → no match
+    assert m("Today", -1.0, "today", -2.0) is True     # window is case/space-insensitive
+    # Legacy row (pre-migration NULLs) → no match → regenerate (immediate correctness).
+    assert m(None, None, "today", -7.0) is False
+    assert m("today", None, "today", -7.0) is False
+    assert m("today", "not-a-number", "today", -7.0) is False   # defensive
+
+
+def test_ctx_key_separates_window_and_direction():
+    k = pcs._ctx_key
+    assert k("TSLA", "today", -7.0) != k("TSLA", "today", 7.0)   # direction splits
+    assert k("TSLA", "today", -7.0) != k("TSLA", "30d", -7.0)    # window splits
+    assert k("TSLA", "TODAY", -7.0) == k("TSLA", "today", -3.0)  # same bucket (down)
+
+
+@pytest.mark.asyncio
+async def test_opposite_direction_move_does_not_reuse_cached_reason():
+    # The core bug: a +22% rally reason cached for TSLA must NOT be served for a
+    # -7% drop. With ticker-only keying the second call returned the rally reason;
+    # with (window,direction) keying it misses the mem tier and re-grounds.
+    fake = _FakeGemini(
+        text=_fence("Rally", "Multi-day rally on a delivery beat."),
+        sources=[{"title": "R", "uri": "http://r", "publisher": "reuters.com"}],
+    )
+    svc = _svc(fake)
+    up = await svc.get_catalyst("TSLA", 22.0, "30d")
+    assert up is not None and fake.calls == 1
+    down = await svc.get_catalyst("TSLA", -7.0, "today")
+    assert fake.calls == 2   # a fresh grounded call, NOT the cached rally reason
+
+
+@pytest.mark.asyncio
+async def test_same_context_still_served_from_mem_without_a_second_call():
+    # Same window + same direction is the SAME move context → cache hit (no churn).
+    fake = _FakeGemini(
+        text=_fence("Beat", "Earnings beat."),
+        sources=[{"title": "R", "uri": "http://r", "publisher": "reuters.com"}],
+    )
+    svc = _svc(fake)
+    a = await svc.get_catalyst("AAPL", 8.0, "today")
+    b = await svc.get_catalyst("AAPL", 5.0, "today")   # same ctx bucket (today, up)
+    assert fake.calls == 1     # second served from mem
+    assert a == b

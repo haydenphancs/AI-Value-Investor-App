@@ -21,6 +21,7 @@ Matches the iOS SnapshotItemDTO struct.
 
 import asyncio
 import logging
+import math
 import re
 import time
 from datetime import datetime, timezone, timedelta
@@ -74,19 +75,34 @@ def _fmt_pct(val: Optional[float]) -> str:
     return f"{val:.1f}%"
 
 
-def _fmt_flow(net_flow: float, is_positive: bool) -> str:
-    """Format net flow as 'Net Buy $X.XM' or 'Net Sell $X.XM'."""
-    abs_val = abs(net_flow)
-    if abs_val == 0:
+def _fmt_share_flow(net_flow_millions: float, is_positive: bool) -> str:
+    """Format a smart-money net flow that is denominated in MILLIONS OF SHARES.
+
+    Both ``insider_data.summary`` and ``hedge_funds_data.summary`` on the Holders
+    response carry share counts, not dollars: ``_build_insider_smart_money`` and
+    ``_build_hedge_fund_smart_money`` sum ``securitiesTransacted`` /
+    ``numberOf13FsharesChange`` divided by 1e6 (see ``_HFQ_SHARES_FLOOR``).
+
+    The previous implementation treated the value as raw DOLLARS, which was wrong
+    twice over: the unit ("$" on a share count) and the scale (a 2.5-million-share
+    net buy arrives as ``2.5`` and fell into the ``else`` branch as "Net Buy $2").
+    Every real ticker rendered "$0"–"$900" on the Overview card while the Holders
+    tab showed "+2.50M shares" for the same quantity.
+
+    Mirrors the iOS ``SmartMoneyFlowSummary.formattedNetFlow`` ``.shares`` branch
+    so the Overview snapshot and the Holders tab read identically.
+    """
+    if not math.isfinite(net_flow_millions):
+        return "—"
+    mag = abs(net_flow_millions)
+    if mag == 0:
         return "Neutral"
-    if abs_val >= 1_000_000_000:
-        formatted = f"${abs_val / 1_000_000_000:.1f}B"
-    elif abs_val >= 1_000_000:
-        formatted = f"${abs_val / 1_000_000:.1f}M"
-    elif abs_val >= 1_000:
-        formatted = f"${abs_val / 1_000:.1f}K"
+    if mag >= 1_000:
+        formatted = f"{mag / 1_000:.2f}B shares"
+    elif mag >= 1:
+        formatted = f"{mag:.2f}M shares"
     else:
-        formatted = f"${abs_val:.0f}"
+        formatted = f"{mag * 1_000:.0f}K shares"
     label = "Net Buy" if is_positive else "Net Sell"
     return f"{label} {formatted}"
 
@@ -225,11 +241,15 @@ class OwnershipSnapshotService:
             ),
             SnapshotMetricResponse(
                 name="Insider Activity (12M)",
-                value=_fmt_flow(insider_flow, insider_positive),
+                value=_fmt_share_flow(insider_flow, insider_positive),
             ),
             SnapshotMetricResponse(
-                name="Institutional Activity",
-                value=_fmt_flow(inst_flow, inst_positive),
+                # Label the REAL window. `hedge_funds_data.summary` spans 8
+                # quarters (period_description == "2-Year"); the bare
+                # "Institutional Activity" read as if it matched the 12M insider
+                # row above it.
+                name="Institutional Activity (2Y)",
+                value=_fmt_share_flow(inst_flow, inst_positive),
             ),
             SnapshotMetricResponse(
                 name="Public & Other",
@@ -298,35 +318,42 @@ class OwnershipSnapshotService:
             s_inst_own = 2  # crowded
 
         # 3. Insider Activity score (40%) — strongest signal
-        #    Net buying = very bullish, net selling = could be routine or bearish
+        #    Net buying = very bullish, net selling = could be routine or bearish.
+        #
+        #    UNITS: `insider_flow` is MILLIONS OF SHARES (Form 4
+        #    `securitiesTransacted` / 1e6), not dollars. The old thresholds
+        #    (10_000_000 / 50_000_000) were dollar-scale, so a real 2.5M-share
+        #    net sale arrived as 2.5 and could never clear them — the whole
+        #    40%-weight factor was pinned to 4 (any buying) or 3 (any selling)
+        #    on every ticker in the app. Tiers below are share counts.
         abs_insider = abs(insider_flow)
         if abs_insider == 0:
             s_insider_act = 3  # no activity = neutral
         elif insider_positive:
             # Buying — scale by magnitude
-            if abs_insider >= 10_000_000:
-                s_insider_act = 5  # heavy buying ($10M+)
-            elif abs_insider >= 1_000_000:
-                s_insider_act = 5  # significant buying ($1M+)
+            if abs_insider >= 0.1:
+                s_insider_act = 5  # meaningful buying (100K+ shares)
             else:
-                s_insider_act = 4  # some buying
+                s_insider_act = 4  # token buying
         else:
             # Selling — scale by magnitude
-            if abs_insider >= 50_000_000:
-                s_insider_act = 1  # heavy selling ($50M+)
-            elif abs_insider >= 10_000_000:
-                s_insider_act = 2  # notable selling
+            if abs_insider >= 5.0:
+                s_insider_act = 1  # heavy selling (5M+ shares)
+            elif abs_insider >= 0.5:
+                s_insider_act = 2  # notable selling (500K+ shares)
             else:
                 s_insider_act = 3  # minor selling (likely routine)
 
-        # 4. Institutional Activity score (20%)
+        # 4. Institutional Activity score (20%) — also MILLIONS OF SHARES, over
+        #    8 quarters. Same dead-threshold bug as above (1_000_000_000 could
+        #    never be reached by a share count in millions).
         abs_inst = abs(inst_flow)
         if abs_inst == 0:
             s_inst_act = 3  # neutral
         elif inst_positive:
-            s_inst_act = 5 if abs_inst >= 1_000_000_000 else 4
+            s_inst_act = 5 if abs_inst >= 10.0 else 4  # 10M+ net shares added
         else:
-            s_inst_act = 1 if abs_inst >= 1_000_000_000 else 2
+            s_inst_act = 1 if abs_inst >= 10.0 else 2
 
         # Weighted average
         weighted = (

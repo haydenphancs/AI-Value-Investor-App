@@ -590,10 +590,24 @@ final class StockRepository: StockRepositoryProtocol {
 
     // MARK: - Holders
 
+    /// Protocol-conforming entry point (exact signature required by
+    /// `StockRepositoryProtocol` — a defaulted extra parameter does NOT satisfy
+    /// a protocol requirement in Swift).
     func getHolders(ticker: String) async throws -> HoldersResponseDTO {
+        try await getHolders(ticker: ticker, forceRefresh: false)
+    }
+
+    /// - Parameter forceRefresh: skip the 24h in-memory entry. Without this an
+    ///   explicit user gesture (pull-to-refresh, "Try Again") was a no-op for the
+    ///   whole app process: `CacheTTL.fundamental` is 86400s and the repository
+    ///   is a process-lifetime singleton, so a DTO cached at 08:00 was still
+    ///   being returned at 16:00 even after the backend had rebuilt it with
+    ///   overnight Form 4s and congressional disclosures.
+    func getHolders(ticker: String, forceRefresh: Bool) async throws -> HoldersResponseDTO {
         let cacheKey = "holders_\(ticker)"
 
-        if let cached: HoldersResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
+        if !forceRefresh,
+           let cached: HoldersResponseDTO = getCached(cacheKey, maxAge: CacheTTL.fundamental) {
             return cached
         }
 

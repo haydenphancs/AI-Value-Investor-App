@@ -291,6 +291,17 @@ final class UpdatesViewModel: ObservableObject {
         // refers to the previous feed, and the token check would discard it anyway.
         appearWorkTask?.cancel()
         appearWorkTask = nil
+        // Reset the enrichment throttle for the incoming tab. `isEnriching` is a
+        // shared Bool; if the OUTGOING tab's enrich POST (seconds long) is still
+        // in flight, the new tab's initial + debounced enrichment would both
+        // early-return on `guard !isEnriching`, leaving its visible rows with no
+        // sentiment/summary until a manual scroll. Any stale in-flight enrich is
+        // still pinned to its own scope+token, so it can't mis-merge here.
+        isEnriching = false
+        // Clear per-card summarise spinners: `summarizingIDs` is keyed on bare
+        // apiId, so a same-apiId card in the new scope would otherwise show a
+        // phantom spinner.
+        summarizingIDs.removeAll()
 
         if !force, let cached = feedCache[scope] {
             // Clear any error left by a PREVIOUSLY-failed scope. Without this a

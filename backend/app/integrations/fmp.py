@@ -15,6 +15,7 @@ import logging
 
 from app.config import settings
 from app.log_redaction import redact_secrets
+from app.utils.period_labels import latest_filed_13f_quarter
 
 logger = logging.getLogger(__name__)
 
@@ -1483,18 +1484,11 @@ class FMPClient:
 
         Returns holders sorted by market value with ownership %, change data, etc.
         """
-        # Determine most recent quarter
-        now = datetime.now(timezone.utc)
-        # Use previous quarter (current quarter filings aren't available yet)
-        month = now.month
-        if month <= 3:
-            year, quarter = now.year - 1, 4
-        elif month <= 6:
-            year, quarter = now.year, 1
-        elif month <= 9:
-            year, quarter = now.year, 2
-        else:
-            year, quarter = now.year, 3
+        # Newest quarter whose 13F filing deadline (quarter-end + 45 days) has
+        # passed. Taking the merely-most-recently-ENDED quarter returned a
+        # partially-filed roster, so the per-holder rows disagreed with the
+        # positions-summary aggregate the service pairs them with.
+        year, quarter = latest_filed_13f_quarter()
 
         try:
             data = await self._make_request(

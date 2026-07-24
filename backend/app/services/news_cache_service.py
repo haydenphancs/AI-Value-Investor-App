@@ -788,7 +788,10 @@ class NewsCacheService:
 
         for i, row in enumerate(needs_enrichment):
             enrichment = enrichments.get(i, {})
-            if not enrichment:
+            # Empty bullets = unenriched/retryable, NOT enriched. See
+            # _enrichment_is_usable: persisting ai_processed=True with empty
+            # bullets permanently blanks the shared-cache row for every user.
+            if not self._enrichment_is_usable(enrichment):
                 newly_enriched.append(self._format_single_row(row))
                 continue
 
@@ -930,6 +933,19 @@ class NewsCacheService:
         if s in ("negative", "bearish"):
             return "bearish"
         return "neutral"
+
+    @staticmethod
+    def _enrichment_is_usable(enrichment: Any) -> bool:
+        """A Gemini enrichment is usable only if it actually produced bullets.
+
+        `_map_enrichments` preserves an empty-`bullets` item (Gemini returned a
+        well-formed object it just couldn't summarize — e.g. a blank-content
+        article), and the caller must NOT persist that as ``ai_processed=True``:
+        doing so writes ``summary_bullets="[]"`` and permanently blanks the row
+        (``_enrichable_ids``/``enrich`` skip ``ai_processed``) for every user on
+        the shared cache. Empty ⇒ unenriched/retryable, so the next pass retries.
+        """
+        return isinstance(enrichment, dict) and bool(enrichment.get("bullets"))
 
     @staticmethod
     def _map_enrichments(parsed: Any, expected_count: int) -> Dict[int, Dict[str, Any]]:

@@ -1449,7 +1449,15 @@ class TickerReportDataCollector:
                 d = date.fromisoformat(date_str[:10])
             except ValueError:
                 continue
-            recent_pairs.append((d, float(close)))
+            try:
+                px = float(close)
+            except (TypeError, ValueError):
+                continue
+            # Drop NaN/Inf closes: `float("nan")` parses fine but corrupts the
+            # volatility move/z math downstream (see price_volatility guards).
+            if not math.isfinite(px):
+                continue
+            recent_pairs.append((d, px))
         recent_pairs.reverse()  # FMP returns newest-first; we want chronological.
         c["recent_prices"] = [px for _, px in recent_pairs]
         c["recent_price_dates"] = [d for d, _ in recent_pairs]
@@ -3064,13 +3072,26 @@ def _build_hidden_market_signals(
                 summ.total_sells_in_millions or 0.0
             )
             # Per-trade detail (WHO traded). The `.activities` list is all-time;
-            # filter to the trailing 12 months (matches the summary window) and
-            # sort most-recent-first. Same objects the Holders → Congress tab
+            # filter it to the SAME window the summary above was computed over
+            # and sort most-recent-first. Same objects the Holders → Congress tab
             # renders, so iOS reuses its CongressActivity row.
+            #
+            # The window must be the calendar-month one holders_service uses for
+            # `congress_activities.summary` (_build_recent_activities →
+            # _generate_month_keys(12)), NOT a rolling 365 days. They differ by up
+            # to 30 days at the left edge, so the rolling cutoff admitted trades
+            # the summary never counted: the module rendered e.g. "1 Buyer" as a
+            # pill directly above TWO purchase rows from two different members.
+            # Reusing the source's own helper makes the two impossible to drift.
+            from app.services.holders_service import HoldersService
+
             acts = holders.recent_activities.congress_activities.activities or []
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%d")
+            month_keys = set(HoldersService._generate_month_keys(12))
             recent = sorted(
-                [a for a in acts if (a.date or "")[:10] >= cutoff],
+                [
+                    a for a in acts
+                    if a.date and f"{a.date[5:7]}/{a.date[:4]}" in month_keys
+                ],
                 key=lambda a: a.date or "",
                 reverse=True,
             )

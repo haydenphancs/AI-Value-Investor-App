@@ -11,14 +11,24 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from fastapi.responses import StreamingResponse
 from supabase import Client
 import logging
 
 from app.config import settings
 from app.database import get_supabase
-from app.dependencies import get_current_user_or_guest
+from app.dependencies import get_current_user_or_guest, ChatRateLimit, chat_identity_key
+from app.api.error_response import make_error_response, ErrorCode
+from app.services.chat_security import (
+    validate_message,
+    sanitize_context,
+    scan_input,
+    ensure_disclaimer,
+    disclaimer_suffix,
+)
+from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
+from app.services.agents.chat_guardrails import scan_answer, enforce_answer
 from app.schemas.chat import (
     CreateChatSessionRequest,
     SendChatMessageRequest,
@@ -30,8 +40,42 @@ from app.schemas.chat import (
 )
 
 logger = logging.getLogger(__name__)
+# Dedicated logger so input-injection attempts + guardrail redactions are greppable
+# (and scrubbed by the root SecretRedactingFilter, per app/log_redaction.py).
+sec_logger = logging.getLogger("chat.security")
 
 router = APIRouter()
+
+
+def _claim_chat_turn_or_error(user: dict, x_guest_id):
+    """Claim one daily chat turn for this caller's abuse/cost bucket.
+
+    Returns a `JSONResponse` (409 CHAT_DAILY_LIMIT_REACHED) when the daily cap is
+    reached, else None (proceed). FAILS OPEN on a budget-service transport error —
+    a DB blip must never wall a user out of chat.
+    """
+    bucket = chat_identity_key(user, x_guest_id)
+    try:
+        count = get_chat_budget_service().try_claim_turn(bucket)
+    except ChatBudgetUnavailable as e:
+        logger.warning("Chat budget unavailable for bucket=%s — failing open: %s", bucket, e)
+        return None
+    if count == -1:
+        return make_error_response(
+            ErrorCode.CHAT_DAILY_LIMIT_REACHED,
+            message="daily chat turn budget exhausted",
+        )
+    return None
+
+
+def _record_chat_tokens(user: dict, x_guest_id, tokens) -> None:
+    """Best-effort daily token accounting for this caller's bucket."""
+    try:
+        get_chat_budget_service().record_tokens(
+            chat_identity_key(user, x_guest_id), int(tokens or 0)
+        )
+    except Exception as e:  # never let accounting affect the answered turn
+        logger.warning("Chat token record failed (%s: %s)", type(e).__name__, e)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -210,8 +254,22 @@ async def send_chat_message(
     request: SendChatMessageRequest,
     user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    _rate: None = ChatRateLimit,
 ):
     """Send a message and get AI response with RAG."""
+    # Input hygiene (OWASP LLM01/LLM10): normalize away invisible/bidi injection
+    # characters + enforce the friendly length ceiling BEFORE any DB or model work.
+    msg, msg_err = validate_message(request.message)
+    if msg_err is not None:
+        return make_error_response(msg_err, message="chat message rejected by input validation")
+    inj = scan_input(msg)
+    if inj:
+        sec_logger.warning(
+            "Chat input injection markers %s (session=%s user=%s): %r",
+            inj, session_id, user.get("id"), msg[:200],
+        )
+
     # Verify session ownership
     try:
         session = (
@@ -228,6 +286,11 @@ async def send_chat_message(
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
+    # Claim one daily turn (durable per-user budget) BEFORE spending Gemini tokens.
+    budget_err = _claim_chat_turn_or_error(user, x_guest_id)
+    if budget_err is not None:
+        return budget_err
+
     # Generate the AI response FIRST, then persist the user + assistant rows TOGETHER in one insert.
     # A generation failure therefore leaves NOTHING persisted (no orphaned user row for the client's
     # stream-failure reconcile to later duplicate), and the two rows commit atomically — matching the
@@ -243,14 +306,16 @@ async def send_chat_message(
         ref_id = request.reference_id or session.data.get("reference_id")
         # On a live turn iOS ships the on-screen snapshot; on a history reopen it
         # sends none → replay the snapshot persisted at open time (migration 087).
-        effective_context = _effective_context(request.context, session.data)
+        # Sanitize + bound the client grounding blob (it lands in the SYSTEM
+        # instruction — an injection surface).
+        effective_context = sanitize_context(_effective_context(request.context, session.data))
         # True only when a stored snapshot is being replayed (reopen) — so the
         # prompt labels it as a point-in-time copy, not live data.
         context_is_replayed = not request.context and bool(effective_context)
 
         ai_result = await chat_service.generate_response(
             session_id=session_id,
-            user_message=request.message,
+            user_message=msg,
             session_type=session.data.get("session_type", "NORMAL"),
             stock_id=session.data.get("stock_id"),
             context=effective_context,
@@ -258,6 +323,18 @@ async def send_chat_message(
             reference_id=ref_id,
             context_is_replayed=context_is_replayed,
         )
+
+        # Output enforcement (OWASP LLM02/LLM07): redact high-confidence provider /
+        # secret / internal-schema leaks, log any advice-boundary drift, then GUARANTEE
+        # the 'educational, not financial advice' line in code (not prompt-hope).
+        clean_answer, enforced = enforce_answer(ai_result.get("content") or "")
+        advice_flags = scan_answer(clean_answer)
+        if enforced or advice_flags:
+            sec_logger.warning(
+                "Chat guardrail (send) session=%s enforced=%r flags=%r: %r",
+                session_id, enforced, advice_flags, clean_answer[:200],
+            )
+        ai_result["content"] = ensure_disclaimer(clean_answer)
 
         # Build the widget payload (if Gemini triggered the stock tool)
         widget_payload = ai_result.get("widget")
@@ -269,7 +346,7 @@ async def send_chat_message(
         user_msg: dict = {
             "session_id": session_id,
             "role": "user",
-            "content": request.message,
+            "content": msg,
             "created_at": now.isoformat(),
         }
         ai_msg: dict = {
@@ -311,7 +388,7 @@ async def send_chat_message(
             existing_title in ("New Chat", None)
             or (isinstance(existing_title, str) and existing_title.startswith("Chat about "))
         )
-        first_question = request.message.strip()
+        first_question = msg
         if current_count == 0 and is_generic_title and first_question:
             update_payload["title"] = first_question[:80]
 
@@ -321,6 +398,9 @@ async def send_chat_message(
 
         # Persist the on-screen snapshot (best-effort, guarded) so a later reopen re-grounds.
         _persist_context_snapshot(supabase, session_id, request.context, session.data)
+
+        # Best-effort daily token accounting for spend observability.
+        _record_chat_tokens(user, x_guest_id, ai_result.get("tokens_used"))
 
         return _row_to_message(assistant_row)
 
@@ -335,6 +415,8 @@ async def stream_chat_message(
     request: SendChatMessageRequest,
     user: dict = Depends(get_current_user_or_guest),
     supabase: Client = Depends(get_supabase),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    _rate: None = ChatRateLimit,
 ):
     """Stream an AI response over SSE (``text/event-stream``).
 
@@ -344,6 +426,18 @@ async def stream_chat_message(
     fallback), so a dropped stream leaves no half-message and the iOS client can
     safely retry via the non-streaming endpoint without duplicating the turn.
     """
+    # Input hygiene BEFORE constructing the stream, so an oversize/empty message is a
+    # normal JSON error (like the 404s below), not a mid-stream SSE frame.
+    msg, msg_err = validate_message(request.message)
+    if msg_err is not None:
+        return make_error_response(msg_err, message="chat message rejected by input validation")
+    inj = scan_input(msg)
+    if inj:
+        sec_logger.warning(
+            "Chat input injection markers %s (session=%s user=%s): %r",
+            inj, session_id, user.get("id"), msg[:200],
+        )
+
     # Verify ownership up front so a bad session is a real 404 (not an SSE frame).
     try:
         session = (
@@ -359,18 +453,24 @@ async def stream_chat_message(
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
+    # Claim one daily turn (durable per-user budget) BEFORE the stream starts.
+    budget_err = _claim_chat_turn_or_error(user, x_guest_id)
+    if budget_err is not None:
+        return budget_err
+
     sdata = session.data
     ctx_type = request.context_type or sdata.get("context_type")
     ref_id = request.reference_id or sdata.get("reference_id")
     # Live turn → the iOS on-screen snapshot; history reopen (context=None) →
-    # the snapshot persisted at open time (migration 087).
-    effective_context = _effective_context(request.context, sdata)
+    # the snapshot persisted at open time (migration 087). Sanitized + bounded
+    # since it lands in the SYSTEM instruction (injection surface).
+    effective_context = sanitize_context(_effective_context(request.context, sdata))
     # True only when a stored snapshot is being replayed (reopen) — labels it as
     # a point-in-time copy in the prompt so stale figures aren't answered as live.
     context_is_replayed = not request.context and bool(effective_context)
     session_type = sdata.get("session_type", "NORMAL")
     stock_id = sdata.get("stock_id")
-    user_message = request.message
+    user_message = msg
 
     async def event_gen():
         import time as _time
@@ -397,6 +497,7 @@ async def stream_chat_message(
         sources = None
         suggestions = None
         streamed_any = False
+        used_fallback = False   # set when the full-generation fallback replaces the stream
 
         # The model streams REAL reasoning: stream_text tags each chunk as ("thought"|"answer", text).
         # Thoughts → the thinking card (`reasoning` frames), answer → the bubble (`token` frames).
@@ -506,6 +607,7 @@ async def stream_chat_message(
                 "Chat stream failed (%s: %s) — falling back to full generation",
                 type(e).__name__, e,
             )
+            used_fallback = True
             try:
                 ai_result = await chat_service.generate_response(
                     session_id=session_id,
@@ -550,12 +652,27 @@ async def stream_chat_message(
             })
             return
 
-        # Guardrail monitoring (non-blocking): surface advice-boundary / identity-leak drift for
-        # review. We log, not block — a false positive dropping a good answer is worse than a flag.
-        from app.services.agents.chat_guardrails import scan_answer
-        _issues = scan_answer(content)
-        if _issues:
-            logger.warning("Chat guardrail flags %s (session=%s): %r", _issues, session_id, content[:200])
+        # Output enforcement (OWASP LLM02/LLM07): redact high-confidence provider /
+        # secret / internal-schema leaks from the finished answer, then log any
+        # advice-boundary drift (monitor-only — a false positive dropping a good
+        # answer is worse than a flag). The redacted `content` is what gets persisted
+        # and carried in the authoritative `done` frame.
+        content, enforced = enforce_answer(content)
+        advice_flags = scan_answer(content)
+        if enforced or advice_flags:
+            sec_logger.warning(
+                "Chat guardrail (stream) session=%s enforced=%r flags=%r: %r",
+                session_id, enforced, advice_flags, content[:200],
+            )
+
+        # GUARANTEE the advice disclaimer in code. Append to the durable content so the
+        # `done` frame + persisted row carry it; also stream it live on the pure-streamed
+        # path (a fallback answer arrives whole via `done`, so no live token there).
+        _suffix = disclaimer_suffix(content)
+        if _suffix:
+            content += _suffix
+            if streamed_any and not used_fallback:
+                yield _sse("token", {"delta": _suffix})
 
         elapsed_ms = int((_time.monotonic() - started) * 1000)
         thinking_payload = {
@@ -635,6 +752,9 @@ async def stream_chat_message(
                 "user_message": "Your answer was generated but couldn't be saved. Please try again.",
             })
             return
+
+        # Best-effort daily token accounting (streaming rarely reports usage → char estimate).
+        _record_chat_tokens(user, x_guest_id, tokens_used or (len(content) // 4))
 
         # Follow-up suggestions — best-effort, AFTER the durable write. Being slow or cancelled here
         # can no longer drop the saved turn (worst case: no chips, which degrade gracefully).

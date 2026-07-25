@@ -28,6 +28,9 @@ from __future__ import annotations
 
 import pytest
 
+from pydantic import ValidationError
+
+from app.config import settings
 from app.schemas.chat import (
     ChatHistoryResponse,
     ChatMessageResponse,
@@ -37,6 +40,7 @@ from app.schemas.chat import (
     MarketOverviewMacroItem,
     MarketOverviewSector,
     MarketOverviewWidget,
+    SendChatMessageRequest,
     StockChartWidget,
     UpdateChatSessionRequest,
 )
@@ -443,6 +447,45 @@ def test_rename_request_omits_is_saved_so_pin_state_is_kept():
     if req.is_saved is not None:
         update_data["is_saved"] = req.is_saved
     assert update_data == {"title": "Renamed chat"}, "rename must not touch is_saved"
+
+
+# ── Request-side input caps (denial-of-wallet structural ceiling) ─────────────
+#
+# SendChatMessageRequest carries a Pydantic hard-max validator (a cheap 422 for absurd
+# payloads before any work). The friendly CHAT_MESSAGE_TOO_LONG 400 is enforced later in
+# the endpoint via chat_security.validate_message. These pin that a normal message still
+# round-trips and an over-hard-max body is rejected at parse time.
+
+def test_send_request_roundtrips_normal_message():
+    req = SendChatMessageRequest(message="What is Apple's P/E ratio?")
+    assert req.message == "What is Apple's P/E ratio?"
+    assert req.context is None and req.context_type is None and req.reference_id is None
+
+
+def test_send_request_accepts_message_at_hard_max():
+    req = SendChatMessageRequest(message="a" * settings.CHAT_MESSAGE_HARD_MAX)
+    assert len(req.message) == settings.CHAT_MESSAGE_HARD_MAX
+
+
+def test_send_request_rejects_message_over_hard_max():
+    with pytest.raises(ValidationError):
+        SendChatMessageRequest(message="a" * (settings.CHAT_MESSAGE_HARD_MAX + 1))
+
+
+def test_send_request_rejects_context_over_hard_max():
+    with pytest.raises(ValidationError):
+        SendChatMessageRequest(message="hi", context="x" * (settings.CHAT_MESSAGE_HARD_MAX + 1))
+
+
+def test_send_request_optional_fields_still_accepted():
+    req = SendChatMessageRequest(
+        message="explain this",
+        context="Some grounding text",
+        context_type="STOCK",
+        reference_id="AAPL",
+    )
+    assert req.context == "Some grounding text"
+    assert req.context_type == "STOCK" and req.reference_id == "AAPL"
 
 
 def test_update_response_row_decodes_like_a_list_row():

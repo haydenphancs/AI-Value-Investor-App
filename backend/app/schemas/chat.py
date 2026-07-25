@@ -1,8 +1,10 @@
 """Chat schemas matching DB chat_sessions + chat_messages tables."""
 
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List, Any, Dict
+
+from app.config import settings
 
 
 # ── Context types ───────────────────────────────────────────────────
@@ -41,6 +43,28 @@ class SendChatMessageRequest(BaseModel):
     context: Optional[str] = None  # legacy/BOOK client context string (title/author/core)
     context_type: Optional[str] = None  # per-message override of the session's context type
     reference_id: Optional[str] = None  # per-message override of the session's reference id
+
+    # Structural hard ceilings (a cheap Pydantic 422 for absurd payloads BEFORE any
+    # work). The friendly, contract-shaped 400 (CHAT_MESSAGE_TOO_LONG) is enforced in
+    # the endpoint via chat_security.validate_message — a Pydantic 422 emits FastAPI's
+    # default body, NOT the {error_code,...} shape iOS decodes, so both layers exist.
+    @field_validator("message")
+    @classmethod
+    def _message_within_hard_max(cls, v: str) -> str:
+        if v is not None and len(v) > settings.CHAT_MESSAGE_HARD_MAX:
+            raise ValueError(
+                f"message exceeds the {settings.CHAT_MESSAGE_HARD_MAX}-character hard limit"
+            )
+        return v
+
+    @field_validator("context")
+    @classmethod
+    def _context_within_hard_max(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and len(v) > settings.CHAT_MESSAGE_HARD_MAX:
+            raise ValueError(
+                f"context exceeds the {settings.CHAT_MESSAGE_HARD_MAX}-character hard limit"
+            )
+        return v
 
 
 class UpdateChatSessionRequest(BaseModel):

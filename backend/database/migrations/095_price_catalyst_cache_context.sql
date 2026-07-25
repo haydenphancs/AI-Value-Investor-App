@@ -14,7 +14,7 @@
 -- mismatch — or a legacy NULL row written before this migration — as a cache
 -- miss (regenerate). One row per ticker is kept (the two callers evict each other
 -- only on same-ticker overlap, which is rare and bounded).
---
+-- 
 -- Additive + nullable + idempotent. Safe to apply before OR after the code:
 -- the read degrades to a cache miss until the columns exist.
 

@@ -66,6 +66,14 @@ class ErrorCode(str, Enum):
     # surfaces the user_message instead of a generic "wait 60s".
     SYSTEM_BUSY = "SYSTEM_BUSY"
 
+    # ── Chat abuse / cost controls (OWASP LLM10 — denial-of-wallet) ──────────
+    # The user message exceeded the friendly length ceiling (400).
+    CHAT_MESSAGE_TOO_LONG = "CHAT_MESSAGE_TOO_LONG"
+    # The per-user daily chat turn budget is exhausted. 409 (NOT 429) for the same
+    # reason as TOO_MANY_CONCURRENT_REPORTS: iOS swallows 429 bodies before decode,
+    # so 409 lets the structured user_message surface.
+    CHAT_DAILY_LIMIT_REACHED = "CHAT_DAILY_LIMIT_REACHED"
+
 
 # Default user-facing copy per code. Endpoints can override per-call.
 _USER_MESSAGES: Dict[ErrorCode, str] = {
@@ -118,6 +126,12 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
         "Our analysis engine is at capacity right now. "
         "Please try again in a moment."
     ),
+    ErrorCode.CHAT_MESSAGE_TOO_LONG: (
+        "Your message is too long. Please shorten it and try again."
+    ),
+    ErrorCode.CHAT_DAILY_LIMIT_REACHED: (
+        "You've reached today's chat limit. Please try again tomorrow."
+    ),
 }
 
 
@@ -132,6 +146,8 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
     ErrorCode.TOO_MANY_CONCURRENT_REPORTS: "retry_later",
     ErrorCode.SYSTEM_BUSY: "retry_later",
+    ErrorCode.CHAT_MESSAGE_TOO_LONG: "fix_input",
+    ErrorCode.CHAT_DAILY_LIMIT_REACHED: "retry_later",
 }
 
 
@@ -157,6 +173,9 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # Same 409 rationale — surface the SYSTEM_BUSY user_message, not a 429
     # generic. Semantically "Too Many Requests" but 429 would be swallowed.
     ErrorCode.SYSTEM_BUSY: 409,
+    ErrorCode.CHAT_MESSAGE_TOO_LONG: 400,
+    # 409 (NOT 429): iOS swallows 429 bodies before decode; 409 surfaces the copy.
+    ErrorCode.CHAT_DAILY_LIMIT_REACHED: 409,
 }
 
 

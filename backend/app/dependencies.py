@@ -12,6 +12,7 @@ import logging
 
 from app.database import get_supabase
 from app.core.security import decode_token, verify_supabase_token, rate_limiter
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -199,3 +200,50 @@ class RateLimitChecker:
 
 
 StandardRateLimit = Depends(RateLimitChecker(60, 60))
+
+
+# ── Chat abuse / cost bucketing (OWASP LLM10 — denial-of-wallet) ─────────────
+
+def chat_identity_key(user: dict, x_guest_id: Optional[str]) -> str:
+    """The rate-limit + daily-budget bucket key for a chat caller.
+
+    A real signed-in account keys off its own user id. An unauthenticated caller
+    (the shared ``GUEST_USER_ID``) keys off a PER-INSTALL id derived from the
+    ``X-Guest-Id`` header (:func:`guest_user_id_for`), so one guest install can't
+    exhaust another's rate limit or daily budget.
+
+    IMPORTANT: this is ONLY an abuse/cost bucket — it is NEVER written as
+    ``chat_sessions.user_id`` (that column is FK-bound to ``public.users`` and stays
+    ``GUEST_USER_ID`` for guests). Chat-history isolation between guests is a separate
+    concern that resolves when real login ships.
+    """
+    uid = user.get("id")
+    if uid and uid != GUEST_USER_ID:
+        return uid
+    return guest_user_id_for(x_guest_id)
+
+
+class ChatRateLimitChecker:
+    """Per-user (per-install for guests) sliding-window rate limit for the chat
+    send + stream endpoints. Both endpoints share the ``chat:<key>`` bucket so a
+    caller can't dodge the limit by alternating endpoints."""
+
+    def __init__(self, max_requests: int, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+
+    async def __call__(
+        self,
+        user: dict = Depends(get_current_user_or_guest),
+        x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    ) -> None:
+        key = f"chat:{chat_identity_key(user, x_guest_id)}"
+        if not rate_limiter.is_allowed(key, self.max_requests, self.window_seconds):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded. Please slow down and try again shortly.",
+                headers={"Retry-After": str(self.window_seconds)},
+            )
+
+
+ChatRateLimit = Depends(ChatRateLimitChecker(settings.CHAT_RATE_LIMIT_PER_MINUTE, 60))

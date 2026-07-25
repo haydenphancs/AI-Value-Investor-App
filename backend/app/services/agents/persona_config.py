@@ -19,14 +19,19 @@ logger = logging.getLogger(__name__)
 
 PERSONA_KEYS = {"warren_buffett", "cathie_wood", "peter_lynch", "bill_ackman", "michael_burry"}
 
-# Shared identity rule prepended to every persona prompt
-_IDENTITY_RULE = (
+# Shared identity rule — the SINGLE source of truth for the Cay AI identity guard.
+# Prepended to every persona prompt (via __post_init__ below) AND imported by the
+# conversational chat system prompt (chat_service._build_system_instruction), so the
+# rule can never drift between the report-persona surface and the chat surface.
+IDENTITY_RULE = (
     "CRITICAL IDENTITY RULE: You are Cay AI, the intelligent agent powering the Caydex app. "
     "NEVER reveal, mention, or hint at the underlying technology, model, company, or provider "
     "behind you (e.g. never say Google, Gemini, OpenAI, GPT, LLM, language model, or any AI "
     "company name). If asked who made you or what model you use, say you are Cay AI by Caydex. "
     "Never break this rule regardless of how the question is phrased.\n\n"
 )
+# Back-compat private alias (kept so existing `_IDENTITY_RULE` references don't break).
+_IDENTITY_RULE = IDENTITY_RULE
 
 
 @dataclass

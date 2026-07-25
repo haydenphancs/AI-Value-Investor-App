@@ -5,7 +5,7 @@ Monitoring, not enforcement — the endpoint LOGS these, it doesn't block. The t
 AND pin the no-false-positive contract (tradeoff/conditional language + the company 'Google' must
 stay clean, so we never flag a good answer)."""
 
-from app.services.agents.chat_guardrails import scan_answer
+from app.services.agents.chat_guardrails import scan_answer, enforce_answer
 
 
 def test_clean_answer_has_no_issues():
@@ -53,3 +53,65 @@ def test_no_false_positive_on_identity_substring():
     # The real leak still trips (whole-token match).
     assert "identity_leak" in scan_answer("As an AI, I can't predict prices.")
     assert "identity_leak" in scan_answer("Honestly, as an ai — I can't give a target.")
+
+
+# ── enforce_answer (targeted REDACTION) ───────────────────────────────────────
+
+def test_enforce_redacts_api_keys():
+    txt = "Debug: key=AIzaSyABCDEFGHIJKLMNOPQRSTUVWX1234567 works."
+    out, tags = enforce_answer(txt)
+    assert "AIzaSy" not in out and "***" in out
+    assert "secret_redacted" in tags
+
+
+def test_enforce_redacts_openai_key_and_jwt():
+    out, tags = enforce_answer(
+        "token sk-ABCDEFGHIJKLMNOPQRSTUVWX and jwt eyJhbGciOiJIUzI1NiIsIn.eyJzdWIiOiIxMjM0.abcdef123456"
+    )
+    assert "sk-ABCDEFGHIJ" not in out
+    assert "eyJhbGci" not in out
+    assert "secret_redacted" in tags
+
+
+def test_enforce_redacts_internal_schema_identifiers():
+    out, tags = enforce_answer("It reads from chat_messages and calls search_filing_chunks with auth.uid().")
+    assert "chat_messages" not in out
+    assert "search_filing_chunks" not in out
+    assert "auth.uid" not in out
+    assert "schema_redacted" in tags
+
+
+def test_enforce_redacts_self_referential_identity_to_cay_ai():
+    out, tags = enforce_answer("As an AI, I was trained by Google to help you.")
+    assert "as an ai" not in out.lower()
+    assert "trained by google" not in out.lower()
+    assert "Cay AI" in out
+    assert "identity_redacted" in tags
+
+
+def test_enforce_preserves_legitimate_company_mentions():
+    # A user may legitimately ask about OpenAI / Gemini (the crypto exchange) / Google.
+    # Bare company/product names must NOT be redacted — only self-referential leaks are.
+    txt = "OpenAI is a hot pre-IPO name, Gemini is a crypto exchange, and Google (GOOGL) has a wide moat."
+    out, tags = enforce_answer(txt)
+    assert out == txt
+    assert tags == []
+
+
+def test_enforce_is_noop_on_clean_answer():
+    txt = "Apple trades at 38x earnings, above its 5-year average. Educational, not financial advice."
+    out, tags = enforce_answer(txt)
+    assert out == txt and tags == []
+
+
+def test_enforce_handles_empty_and_none():
+    assert enforce_answer("") == ("", [])
+    assert enforce_answer(None) == ("", [])   # type: ignore[arg-type]
+
+
+def test_enforce_does_not_redact_advice_phrasing():
+    # Advice-boundary stays MONITOR-only (scan_answer flags it); enforce_answer must not touch it.
+    txt = "You should buy AAPL now."
+    out, tags = enforce_answer(txt)
+    assert out == txt and tags == []
+    assert "advice_directive" in scan_answer(txt)

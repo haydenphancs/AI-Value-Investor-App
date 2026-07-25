@@ -188,6 +188,27 @@ class Settings(BaseSettings):
     CHAT_RERANK_ENABLED: bool = True
     RAG_RERANK_CANDIDATES: int = 20  # wider vector search before reranking down to RAG_TOP_K_RESULTS
 
+    # ── Chat security / abuse & cost controls (denial-of-wallet, OWASP LLM10) ──
+    # Input hygiene: a normalized+stripped user message over CHAT_MESSAGE_MAX_CHARS
+    # is rejected with a friendly CHAT_MESSAGE_TOO_LONG (the Pydantic HARD_MAX is a
+    # cheaper structural 422 for absurd payloads before any work). Client `context`
+    # (grounding text injected into the SYSTEM instruction) is normalized + truncated
+    # to CHAT_CONTEXT_MAX_CHARS. CHAT_PROMPT_MAX_CHARS is the final assembled-input
+    # ceiling (defense-in-depth so a fat context can't blow up token spend).
+    CHAT_MESSAGE_MAX_CHARS: int = 4000       # friendly limit (~1k tokens) enforced in-endpoint
+    CHAT_MESSAGE_HARD_MAX: int = 8000        # structural Pydantic 422 ceiling
+    CHAT_CONTEXT_MAX_CHARS: int = 8000       # client-supplied grounding, truncated not rejected
+    CHAT_PROMPT_MAX_CHARS: int = 24000       # assembled-prompt input cap (~6k tokens)
+    # Per-user (per-install for guests) request rate limit on the send + stream
+    # endpoints, sharing one bucket so switching endpoints can't dodge it.
+    CHAT_RATE_LIMIT_PER_MINUTE: int = 15
+    # Durable per-user daily budget (Supabase chat_usage_budget, migration 096).
+    # A turn is claimed atomically BEFORE the Gemini call; over the cap → 409
+    # CHAT_DAILY_LIMIT_REACHED. Token count is best-effort observability + a soft
+    # secondary ceiling. Set the turn limit to 0 to disable chat generation entirely.
+    CHAT_DAILY_TURN_LIMIT: int = 60
+    CHAT_DAILY_TOKEN_LIMIT: int = 200000
+
     # Report pre-warming. After each market close the persona-neutral
     # ticker_data_cache goes stale; warming the top watchlist tickers means the
     # first report (and any same-session burst) skips re-collecting it. This runs

@@ -218,6 +218,17 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "THEME_NOT_FOUND" {
                 return .notFound(resource: "theme")
             }
+            // Chat message over the length ceiling (HTTP 400) → a typed validation
+            // error (title "Invalid Input", .fixInput action) surfacing the backend's
+            // specific message, per the "don't fall through to a generic" rule.
+            if code == "CHAT_MESSAGE_TOO_LONG" {
+                return .validationFailed(message: message)
+            }
+            // Per-user daily chat budget exhausted (HTTP 409). Surface the backend
+            // user_message verbatim (matches the SYSTEM_BUSY capacity handling above).
+            if code == "CHAT_DAILY_LIMIT_REACHED" {
+                return .apiError(code: code, message: message)
+            }
             return .apiError(code: code, message: message)
         case .decodingError:
             return .unknown(message: "Failed to process server response")

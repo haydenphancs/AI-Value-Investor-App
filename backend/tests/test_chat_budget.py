@@ -89,3 +89,20 @@ def test_record_tokens_calls_add_chat_tokens(service):
     name, args = service.supabase.rpc.call_args[0]
     assert name == "add_chat_tokens"
     assert args["p_user_id"] == "bucket-1" and args["p_tokens"] == 500
+
+
+def test_refund_turn_calls_release_rpc(service):
+    _stub_rpc(service, 0)
+    service.refund_turn("bucket-1")
+    name, args = service.supabase.rpc.call_args[0]
+    assert name == "release_chat_turn"
+    assert args["p_user_id"] == "bucket-1"
+    assert set(args.keys()) == {"p_user_id", "p_day"}
+
+
+def test_refund_turn_swallows_failure(service):
+    rpc_call = MagicMock()
+    rpc_call.execute.side_effect = RuntimeError("supabase down")
+    service.supabase.rpc.return_value = rpc_call
+    # Must not raise — refund is best-effort and must not affect the (already-failed) turn.
+    service.refund_turn("bucket-1")

@@ -71,6 +71,29 @@ def normalize_text(s: Optional[str]) -> str:
     return s
 
 
+# Runs of 2+ angle brackets — the building block of every prompt fence delimiter
+# (`<<<USER_MESSAGE>>>`, `<<<CONTEXT>>>`, `<<<CLIENT_CONTEXT>>>` + their END forms).
+_ANGLE_RUN_RE = re.compile(r"<{2,}|>{2,}")
+
+
+def neutralize_fences(text: Optional[str]) -> str:
+    """Stop untrusted text from reproducing a prompt-fence delimiter (delimiter injection).
+
+    A user (or a poisoned RAG chunk) that embeds the literal ``<<<END_USER_MESSAGE>>>`` — or the
+    full-width homoglyph ``＜＜＜…＞＞＞`` that NFKC folds into it — could otherwise CLOSE the
+    spotlighting fence early and make trailing text land OUTSIDE the untrusted span, defeating the
+    fence. This normalizes (folding full-width `<`/`>`) then collapses any run of 2+ angle brackets
+    to a single one, so no `<<<`/`>>>` boundary can form. Single `<`/`>`/`<=`/`>=` (math) survive.
+    Applied to EVERY text bound for a fenced slot (user message, client context, RAG chunk,
+    conversation history). Never raises.
+    """
+    t = normalize_text(text)
+    if not t:
+        return ""
+    t = _ANGLE_RUN_RE.sub(lambda m: m.group(0)[0], t)
+    return t
+
+
 # ── Message validation (friendly length ceiling) ─────────────────────────────
 
 def validate_message(raw: Optional[str]) -> Tuple[str, Optional[ErrorCode]]:
@@ -153,16 +176,18 @@ def cap_prompt(prompt: str, max_chars: Optional[int] = None) -> str:
 
 # ── Disclaimer guarantee ─────────────────────────────────────────────────────
 
-# Markers that indicate the model already included an advice disclaimer, so we don't
-# double-append. Kept broad on purpose (matches the LEGAL_DISCLAIMER phrasing + common
-# variants the prompt elicits).
+# Markers that indicate the model already emitted an advice disclaimer, so we don't
+# double-append. DELIBERATELY NARROW: only the negated-advice signature of a real disclaimer.
+# Broad incidental phrases ("do your own research", "educational purposes", "consult a qualified
+# financial advisor") occur constantly in normal finance prose — matching them would make
+# `ensure_disclaimer` SUPPRESS the legally-required line on ordinary answers (a false "already
+# has one"). The forms below essentially only appear AS a disclaimer.
 _DISCLAIMER_MARKERS = (
     "not financial advice",
     "not investment advice",
-    "educational purposes",
+    "not a financial advisor",
+    "not investment recommendations",
     "educational, not financial",
-    "do your own research",
-    "consult a qualified financial",
 )
 
 

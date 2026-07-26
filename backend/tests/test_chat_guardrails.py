@@ -115,3 +115,55 @@ def test_enforce_does_not_redact_advice_phrasing():
     out, tags = enforce_answer(txt)
     assert out == txt and tags == []
     assert "advice_directive" in scan_answer(txt)
+
+
+# ── enforce_answer FALSE-POSITIVE preservation (AI-sector finance prose) ───────
+# Regression for the review findings: the identity/secret redactors previously corrupted
+# legitimate answers about AI-sector companies and long hyphenated finance compounds.
+
+def test_enforce_preserves_as_an_ai_noun_phrases():
+    # "as an AI <noun>" is everyday phrasing in an AI-investing product — NOT a self-reveal.
+    for txt in (
+        "NVIDIA, as an AI chip maker, dominates the accelerator market.",
+        "Palantir markets itself as an AI platform for enterprises.",
+        "Investors treat AI as a secular growth theme.",
+    ):
+        out, tags = enforce_answer(txt)
+        assert out == txt and tags == [], (txt, out, tags)
+
+
+def test_enforce_preserves_language_model_as_topic():
+    for txt in (
+        "As a language model grows in parameters, training costs rise, which benefits NVDA.",
+        "A large language model like GPT needs many GPUs, a tailwind for NVDA.",
+    ):
+        out, tags = enforce_answer(txt)
+        assert out == txt and tags == [], (txt, out, tags)
+
+
+def test_enforce_preserves_created_by_provider_product_statements():
+    # "created/made/developed by Google/OpenAI" describes a PRODUCT — legit, not self-reveal.
+    for txt in (
+        "The model was created by Google DeepMind researchers.",
+        "Products made by OpenAI are popular with developers.",
+        "Revenue created by Google's ad business is enormous.",
+    ):
+        out, tags = enforce_answer(txt)
+        assert out == txt and tags == [], (txt, out, tags)
+
+
+def test_enforce_still_catches_trained_by_provider_even_after_self_ref_match():
+    # The chained case: "As an AI, I" is redacted WITHOUT orphaning "…trained by Google".
+    out, tags = enforce_answer("As an AI, I was trained by Google to help you.")
+    low = out.lower()
+    assert "trained by google" not in low and "as an ai" not in low
+    assert "identity_redacted" in tags
+
+
+def test_enforce_secret_regex_preserves_hyphenated_finance_compounds():
+    for txt in (
+        "A risk-averse-diversified-portfolio-strategy suits retirees.",
+        "Consider a basket-of-stocks-and-bonds-allocation approach.",
+    ):
+        out, tags = enforce_answer(txt)
+        assert out == txt and tags == [], (txt, out, tags)

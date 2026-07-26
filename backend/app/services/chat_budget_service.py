@@ -89,6 +89,22 @@ class ChatBudgetService:
             )
         return count
 
+    def refund_turn(self, bucket_key: str) -> None:
+        """Best-effort: release a previously-claimed turn (migration 097) when generation FAILED,
+        so a Gemini outage doesn't drain a user's daily cap. Never raises — a refund failure must
+        not affect the (already-failed) turn's error response. The RPC floors at 0, so a stray
+        double-release can't grant extra turns."""
+        try:
+            self.supabase.rpc(
+                "release_chat_turn",
+                {"p_user_id": bucket_key, "p_day": _budget_day()},
+            ).execute()
+        except Exception as e:
+            logger.warning(
+                "release_chat_turn failed for bucket=%s (%s: %s) — turn not refunded",
+                bucket_key, type(e).__name__, e,
+            )
+
     def record_tokens(self, bucket_key: str, tokens: int) -> None:
         """Best-effort: accumulate approximate token spend for today. Never raises —
         a failure here must not affect the answered turn."""

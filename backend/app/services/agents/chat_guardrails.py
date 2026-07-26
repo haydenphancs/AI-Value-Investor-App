@@ -72,13 +72,15 @@ def scan_answer(answer: str) -> List[str]:
 
 # ── Enforcement (redaction) — high-confidence, near-zero-false-positive classes ──
 
-# Secret / API-key shapes. Case-sensitive: real key prefixes are case-specific, and this
-# avoids redacting ordinary prose. These essentially never appear in a finance answer.
+# Secret / API-key shapes. Case-sensitive: real key prefixes are case-specific. Each is
+# anchored with `(?<![A-Za-z0-9])` so the prefix can't match MID-WORD (e.g. "sk-" inside
+# "risk-averse-..."), and the sk-/sbp- bodies exclude hyphens so a long hyphenated finance
+# compound ("basket-of-stocks-strategy") can't masquerade as a key.
 _SECRET_PATTERNS = (
-    r"AIza[0-9A-Za-z_\-]{20,}",                                   # Google API key
-    r"sk-[A-Za-z0-9_\-]{20,}",                                    # OpenAI-style secret key
-    r"sbp_[A-Za-z0-9]{20,}",                                      # Supabase access token
-    r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{6,}",  # JWT (header.payload.sig)
+    r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_\-]{20,}",                       # Google API key
+    r"(?<![A-Za-z0-9])sk-(?:proj-)?[A-Za-z0-9]{20,}",                 # OpenAI-style secret key
+    r"(?<![A-Za-z0-9])sbp_[A-Za-z0-9]{20,}",                          # Supabase access token
+    r"(?<![A-Za-z0-9])eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{6,}",  # JWT
 )
 _SECRET_RE = re.compile("|".join(_SECRET_PATTERNS))
 
@@ -93,20 +95,31 @@ _SCHEMA_PATTERNS = (
 )
 _SCHEMA_RE = re.compile("|".join(_SCHEMA_PATTERNS), re.IGNORECASE)
 
-# SELF-REFERENTIAL identity leaks only (the model describing ITS OWN nature/provider).
-# A bare "OpenAI"/"Gemini" is NOT here — a user may legitimately ask about those. These
-# phrasings essentially only occur when the assistant reveals itself, so redacting them
-# to "Cay AI" is safe.
+# SELF-REFERENTIAL identity leaks only — every pattern is FIRST-PERSON-anchored so the
+# model describing ITS OWN nature/provider is redacted, while legitimate finance prose about
+# the AI SECTOR is preserved. Critical: bare "as an AI <noun>" ("NVIDIA, as an AI chip maker")
+# and "as a language model <verb>" ("as a language model grows in parameters") are NOT here —
+# they are everyday phrasing in an AI-investing product; only the self-referential ", I ..."
+# forms are. Likewise "created by Google" (a legit product statement) is NOT redacted; only
+# "I was created by Google" is. Validated against a leak/legit corpus.
 _IDENTITY_ENFORCE_PATTERNS = (
-    r"as an? ai\b",
-    r"i(?:'m| am) an? ai\b",
-    r"as a language model",
-    r"i(?:'m| am) a (?:large )?language model",
-    r"(?:trained|developed|built|created|powered|made) by (?:google|openai|gemini)",
-    r"(?:google|openai)'s (?:model|language model)",
-    r"i(?:'m| am) (?:gemini|chatgpt|gpt-?[345])\b",
-    r"the (?:language )?model behind me",
-    r"my underlying (?:language )?model",
+    r"\bi(?:'m| am) an? ai\b",                                  # "I am an AI"
+    # LOOKAHEAD (?=,? i) so ", I" is NOT consumed — else a following "…was trained by Google"
+    # would be orphaned and leak. Requires the self-ref ", I" so "as an AI chip maker" is safe.
+    r"\bas an ai(?=,? i\b)",                                    # "As an AI, I …"
+    r"\bi(?:'m| am) a (?:large )?language model\b",             # "I'm a large language model"
+    r"\bas a language model(?=,? i\b)",                         # "As a language model, I …"
+    # "trained/fine-tuned by <provider>" needs NO first-person: a COMPANY is not "trained", a
+    # model is — so this is a self-reveal even after an earlier match consumed the ", I".
+    r"\b(?:trained|fine-?tuned)(?:\s+\w+){0,3}\s+by (?:google|openai|gemini)\b",
+    # "created/built/made/…by <provider>" IS ambiguous (a product can be "made by Google"), so
+    # require first-person here to avoid redacting a legit "created by Google DeepMind".
+    r"\bi(?:'m| am| was)?\s+(?:developed|built|created|made|powered)"
+    r"(?:\s+\w+){0,3}\s+by (?:google|openai|gemini)\b",
+    r"\bi(?:'m| am) (?:gemini|chatgpt|gpt-?[345])\b",           # "I am Gemini / ChatGPT / GPT-4"
+    r"\bi(?:'m| am) a model (?:trained|made|built|created|developed|powered)\b",
+    r"\bthe (?:language |ai )?model behind me\b",
+    r"\bmy underlying (?:language |ai )?model\b",
 )
 _IDENTITY_ENFORCE_RE = re.compile("|".join(_IDENTITY_ENFORCE_PATTERNS), re.IGNORECASE)
 

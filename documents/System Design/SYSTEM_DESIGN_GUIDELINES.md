@@ -1469,6 +1469,16 @@ isolated per install now; guest **chat-history** isolation resolves when real lo
 (`chat_sessions.user_id` is FK-bound to `users`, so guests share `GUEST_USER_ID` today).
 Budget service fails **open** (a DB blip never walls a user out of chat).
 
+**Hardening (adversarial review, migration 097):** the spotlight fences are
+**delimiter-neutralized** (`chat_security.neutralize_fences` collapses `<<<`/`>>>` post-NFKC so a
+user or poisoned chunk can't close a fence early — incl. full-width homoglyphs). Output redaction
+is **first-person-anchored** so legit AI-sector prose ("as an AI chip maker", "created by Google
+DeepMind") is preserved while self-reveals are redacted. A claimed daily turn is **refunded on
+generation failure** (`release_chat_turn`, migration 097) so a Gemini outage can't drain the cap.
+The shared in-memory `RateLimiter` is **bounded** (eviction) against attacker-controlled
+`X-Guest-Id` memory exhaustion. iOS surfaces the specific backend `user_message` by routing the
+chat send-error through `AppError.from(_:)`.
+
 ---
 
 ## 10. Recommendations & Critique

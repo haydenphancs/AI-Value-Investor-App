@@ -177,3 +177,106 @@ class CreditService:
                 "ledger row dropped",
                 user_id, reason, type(e).__name__, e,
             )
+
+    # ── Unified credit gate (enforcement) ──────────────────────────────────
+    # precharge / refund_ledgered are the single gate every metered AI action
+    # goes through (chat + reports). They wrap the migration-101 combined RPCs
+    # (spend_credits / refund_credits) so a charge or refund is ONE round-trip
+    # with the ledger row written in the SAME transaction. Costs come from
+    # settings (CHAT_CREDIT_COST / REPORT_CREDIT_COST) — configurable per action.
+
+    def precharge(
+        self,
+        user_id: str,
+        amount: int,
+        *,
+        reason: str,
+        ref_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """Atomic pre-flight charge for a metered AI action (the unified gate).
+
+        Calls the `spend_credits` RPC (migration 101): reset-if-due + atomic
+        check-and-debit + ledger, one transaction. Returns the new `remaining`
+        on success, or None when the balance is insufficient — callers map None
+        to HTTP 402 and must NOT start the Gemini/report work. Raises
+        `CreditServiceUnavailable` on a transient RPC failure (callers → 409
+        SYSTEM_BUSY): a DB blip must never masquerade as INSUFFICIENT_CREDITS.
+
+        PRECONDITION: call only for AUTHENTICATED users. Guests are not metered
+        (the shared GUEST_USER_ID pool would deplete for everyone) — endpoints
+        branch on the guest sentinel before reaching here; `spend_credits` also
+        guest-guards as defense-in-depth.
+        """
+        try:
+            result = self.supabase.rpc(
+                "spend_credits",
+                {
+                    "p_user_id": user_id,
+                    "p_amount": amount,
+                    "p_reason": reason,
+                    "p_ref_id": ref_id,
+                },
+            ).execute()
+        except Exception as e:
+            logger.error(
+                f"spend_credits RPC failed for user={user_id} amount={amount}: "
+                f"{type(e).__name__}: {e}"
+            )
+            raise CreditServiceUnavailable(
+                f"spend_credits RPC failed for user={user_id}"
+            ) from e
+        remaining = result.data
+        if remaining is None:
+            logger.info(
+                f"Credit precharge rejected for user={user_id} "
+                f"(insufficient for {amount}, reason={reason})"
+            )
+            return None
+        logger.info(
+            f"Precharged {amount} credits to user={user_id} (reason={reason}), "
+            f"remaining={remaining}"
+        )
+        return int(remaining)
+
+    def refund_ledgered(
+        self,
+        user_id: str,
+        amount: int,
+        *,
+        reason: str,
+        ref_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """Best-effort refund + ledger for a non-delivered metered action.
+
+        Calls `refund_credits` (migration 101). Never raises — a refund failure
+        must not affect the (already-failed) action's response — but logs a
+        greppable "REFUND LEAK" marker so a stranded charge is diagnosable.
+        NOT idempotent: callers guarantee at-most-once (chat: a once-only
+        settlement flag; reports: the research_reports.is_refunded CAS).
+
+        PRECONDITION: authenticated users only (guest is a no-op both here via
+        the RPC guard and at the endpoint branch).
+        """
+        try:
+            result = self.supabase.rpc(
+                "refund_credits",
+                {
+                    "p_user_id": user_id,
+                    "p_amount": amount,
+                    "p_reason": reason,
+                    "p_ref_id": ref_id,
+                },
+            ).execute()
+        except Exception as e:
+            logger.error(
+                "REFUND LEAK: refund_credits RPC failed for user=%s amount=%s "
+                "reason=%s (%s: %s) — manual credit correction may be needed",
+                user_id, amount, reason, type(e).__name__, e,
+            )
+            return None
+        remaining = result.data
+        logger.info(
+            f"Refunded {amount} credits to user={user_id} (reason={reason}), "
+            f"remaining={remaining}"
+        )
+        return int(remaining) if remaining is not None else None

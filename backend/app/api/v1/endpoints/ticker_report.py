@@ -25,7 +25,8 @@ Endpoints:
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends, Query
+from typing import Optional
+from fastapi import APIRouter, Depends, Header, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
@@ -34,8 +35,13 @@ from app.api.error_response import (
     error_response_from_exception,
     make_error_response,
 )
+from app.config import settings
 from app.database import get_supabase
-from app.dependencies import get_current_user_or_guest  # for the fresh-generation charge
+from app.dependencies import (
+    get_current_user_or_guest,
+    GUEST_USER_ID,
+    ChatRateLimit,
+)
 from app.schemas.ticker_report import TickerReportResponse
 from app.services.credit_service import CreditService, CreditServiceUnavailable
 from app.services.agents.persona_config import PERSONA_KEYS
@@ -129,38 +135,41 @@ async def get_ticker_report(
         result, err = _validate_report(cached, ticker, persona)
         return err if err is not None else result
 
-    # ── BILLABLE PATH: cache miss = a fresh AI generation. Charge upfront, then
-    #    refund on ANY non-delivery via the finally below. This endpoint is
-    #    synchronous, so the refund fires at most once per request — the
-    #    non-idempotent refund RPC is safe here without the is_refunded
-    #    compare-and-set the async /research/generate path needs.
+    # ── BILLABLE PATH: cache miss = a fresh AI generation. Authenticated users are
+    #    charged upfront via the unified gate (reset-if-due + atomic debit + ledger,
+    #    one round-trip); guests are a credit no-op (the shared pool would deplete for
+    #    everyone — migration 101) and are governed by rate limits. Refund on ANY
+    #    non-delivery via the finally below. Synchronous endpoint → the refund fires at
+    #    most once, so the non-idempotent refund RPC is safe without the is_refunded CAS.
+    is_guest = user["id"] == GUEST_USER_ID
     credit_service = CreditService()
-    try:
-        new_remaining = credit_service.try_charge(
-            user["id"], CreditService.DEEP_RESEARCH_COST
-        )
-    except CreditServiceUnavailable:
-        # Transient Supabase/RPC failure while charging — surface a retryable
-        # SYSTEM_BUSY (never INSUFFICIENT_CREDITS: a DB blip must not tell a
-        # paying user they're broke).
-        return make_error_response(
-            ErrorCode.SYSTEM_BUSY,
-            status_code=409,
-            message="charge_user_credits RPC unavailable (transient)",
-            details={"user_id": user["id"], "ticker": ticker, "step": "credit_charge"},
-        )
-    if new_remaining is None:
-        return make_error_response(
-            ErrorCode.INSUFFICIENT_CREDITS,
-            message=(
-                f"User has fewer than {CreditService.DEEP_RESEARCH_COST} "
-                f"credits remaining"
-            ),
-            details={
-                "user_id": user["id"],
-                "required": CreditService.DEEP_RESEARCH_COST,
-            },
-        )
+    if not is_guest:
+        try:
+            new_remaining = credit_service.precharge(
+                user["id"], CreditService.DEEP_RESEARCH_COST,
+                reason="report_charge", ref_id=f"{ticker}:{persona}",
+            )
+        except CreditServiceUnavailable:
+            # Transient Supabase/RPC failure — retryable SYSTEM_BUSY (never
+            # INSUFFICIENT_CREDITS: a DB blip must not tell a paying user they're broke).
+            return make_error_response(
+                ErrorCode.SYSTEM_BUSY,
+                status_code=409,
+                message="spend_credits RPC unavailable (transient)",
+                details={"user_id": user["id"], "ticker": ticker, "step": "credit_charge"},
+            )
+        if new_remaining is None:
+            return make_error_response(
+                ErrorCode.INSUFFICIENT_CREDITS,
+                message=(
+                    f"User has fewer than {CreditService.DEEP_RESEARCH_COST} "
+                    f"credits remaining"
+                ),
+                details={
+                    "user_id": user["id"],
+                    "required": CreditService.DEEP_RESEARCH_COST,
+                },
+            )
 
     delivered = False
     try:
@@ -193,23 +202,17 @@ async def get_ticker_report(
             e, ticker=ticker, persona=persona, step="report_generation",
         )
     finally:
-        if not delivered:
+        if not is_guest and not delivered:
             # Non-delivery: generation error, schema drift, or a client disconnect
             # / CancelledError (a BaseException that `except` misses, but `finally`
             # always runs). Refund the charge. This is the ONLY backstop — unlike
             # /research/generate there is no research_reports row for the
             # reconciliation sweep — so a failed refund gets a greppable REFUND
-            # LEAK marker for manual correction.
-            refunded = credit_service.refund(
-                user["id"], CreditService.DEEP_RESEARCH_COST
+            # LEAK marker (logged inside refund_ledgered) for manual correction.
+            credit_service.refund_ledgered(
+                user["id"], CreditService.DEEP_RESEARCH_COST,
+                reason="report_refund", ref_id=f"{ticker}:{persona}",
             )
-            if refunded is None:
-                logger.error(
-                    "REFUND LEAK: charged %s credits to user=%s for a %s ticker "
-                    "report that was not delivered, and the refund ALSO failed — "
-                    "manual credit correction needed",
-                    CreditService.DEEP_RESEARCH_COST, user["id"], ticker,
-                )
 
 
 def _validate_report(report: dict, ticker: str, persona: str):
@@ -298,6 +301,9 @@ class TickerReportChatResponseModel(BaseModel):
 async def chat_with_ticker_report(
     ticker: str,
     body: TickerReportChatRequest,
+    user: dict = Depends(get_current_user_or_guest),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    _rate: None = ChatRateLimit,
 ):
     """
     Ask a follow-up question about a stock using the same persona.
@@ -342,10 +348,39 @@ async def chat_with_ticker_report(
             details={"length": len(message), "limit": 2000},
         )
 
+    # Meter this Q&A like the main chat: authenticated users are charged CHAT_CREDIT_COST
+    # (this is a full Gemini answer — otherwise a free denial-of-wallet bypass); guests are a
+    # credit no-op governed by the per-minute ChatRateLimit above. Refund on any non-delivery
+    # via the finally. (A per-install daily-turn budget for this auxiliary surface — as the
+    # main /chat endpoints have for guests — is a possible follow-up.)
+    is_guest = user["id"] == GUEST_USER_ID
+    credit_service = CreditService()
+    if not is_guest:
+        try:
+            remaining = credit_service.precharge(
+                user["id"], settings.CHAT_CREDIT_COST,
+                reason="chat_charge", ref_id=f"report_chat:{ticker}",
+            )
+        except CreditServiceUnavailable:
+            return make_error_response(
+                ErrorCode.SYSTEM_BUSY, status_code=409,
+                message="spend_credits RPC unavailable (transient)",
+                details={"user_id": user["id"], "ticker": ticker, "step": "chat_credit_charge"},
+            )
+        if remaining is None:
+            return make_error_response(
+                ErrorCode.INSUFFICIENT_CREDITS,
+                message="insufficient credits for report chat",
+                details={"user_id": user["id"], "required": settings.CHAT_CREDIT_COST},
+            )
+
+    delivered = False
     try:
         service = TickerReportService()
         reply = await service.chat_about_ticker(ticker, message, persona)
-        return TickerReportChatResponseModel(reply=reply, ticker=ticker).model_dump()
+        result = TickerReportChatResponseModel(reply=reply, ticker=ticker).model_dump()
+        delivered = True
+        return result
     except ValueError as e:
         return error_response_from_exception(
             e, ticker=ticker, persona=persona, step="chat_collector",
@@ -359,3 +394,10 @@ async def chat_with_ticker_report(
         return error_response_from_exception(
             e, ticker=ticker, persona=persona, step="chat_generation",
         )
+    finally:
+        # Non-delivery (error or client-disconnect CancelledError) → refund the charge once.
+        if not is_guest and not delivered:
+            credit_service.refund_ledgered(
+                user["id"], settings.CHAT_CREDIT_COST,
+                reason="chat_refund", ref_id=f"report_chat:{ticker}",
+            )

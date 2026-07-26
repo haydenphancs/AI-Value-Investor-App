@@ -575,7 +575,7 @@ Deep Research reports take ~30 seconds to generate. HTTP requests shouldn't bloc
 │  │                        BACKEND                                         │   │
 │  │                                                                        │   │
 │  │  POST /research/generate:                                              │   │
-│  │    1. Validate credits                                                 │   │
+│  │    1. Pre-charge (402)                                                 │   │
 │  │    2. Create report record (status: "pending")                         │   │
 │  │    3. Enqueue background task                                          │   │
 │  │    4. Return { report_id, status: "pending" } ← IMMEDIATE              │   │
@@ -585,7 +585,7 @@ Deep Research reports take ~30 seconds to generate. HTTP requests shouldn't bloc
 │  │    2. Gather financial data (parallel FMP calls)                       │   │
 │  │    3. Generate AI analysis (Gemini)                                    │   │
 │  │    4. Update status: "completed" + store results                       │   │
-│  │    5. Decrement credits (only on success)                              │   │
+│  │    5. Refund on failure (charged upfront)                              │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -865,11 +865,21 @@ final class ResearchViewModel {
 
 ### 6.2 Backend Error Response Standard
 
-> **Current Implementation Note (March 2026):** The backend currently uses basic
-> FastAPI `HTTPException` and `RequestValidationError` handlers (see `main.py`
-> lines 112-126). The structured `ErrorCode`/`APIError` pattern below is the
-> **recommended target** but has not yet been fully implemented. The iOS client
-> already handles errors robustly via `AppError` (see Section 6.3).
+> **Implementation status (updated 2026-07):** The structured error contract IS
+> implemented in `backend/app/api/error_response.py` — a flat
+> `{error_code, message, user_message, action, details}` body plus a central
+> `ErrorCode → HTTP status` map, consumed by the iOS `AppError` layer. NOTE the
+> shipped codes are flat strings (e.g. `INSUFFICIENT_CREDITS`, `SYSTEM_BUSY`,
+> `INVALID_PERSONA`), **not** the `BIZ_2001`-style codes sketched below (which are
+> illustrative only). **Credits:** `INSUFFICIENT_CREDITS` returns **HTTP 402
+> (Payment Required)** with `action="upgrade"`; a transient charge-RPC failure
+> returns `SYSTEM_BUSY` (409, retryable), never 402. **Credit lifecycle** is
+> charge-**UPFRONT** (atomic, pre-flight) + refund on any non-delivery + an
+> append-only `credit_transactions` ledger (migrations 100/101; the unified
+> `CreditService.precharge` / `refund_ledgered` gate) — not "decrement only on
+> success". Chat = 1 credit, report = 20; guests (shared sentinel) are a credit
+> no-op governed by the daily-turn budget + rate limits. The `BIZ_*` enum below is
+> retained only as an illustrative sketch.
 
 ```python
 # schemas/common.py — RECOMMENDED (not yet implemented)

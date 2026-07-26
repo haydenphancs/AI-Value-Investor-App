@@ -31,6 +31,7 @@ from app.database import get_supabase
 from app.dependencies import (
     get_current_user,
     get_current_user_or_guest,  # TEMP: guest fallback while login UI not built
+    GUEST_USER_ID,
     StandardRateLimit,
 )
 from app.schemas.research import (
@@ -150,40 +151,40 @@ async def generate_research_report(
                 details={"in_flight": global_count, "max": global_cap},
             )
 
-    # Atomic credit charge (report cost = CreditService.DEEP_RESEARCH_COST).
-    # The Postgres function returns the new `remaining` balance, or NULL when
-    # the user has fewer than that many credits available. NULL →
-    # INSUFFICIENT_CREDITS, no row was mutated (no race window between check
-    # and decrement).
+    # Atomic credit charge via the unified gate (report cost =
+    # CreditService.DEEP_RESEARCH_COST): reset-if-due + atomic check-and-debit + ledger,
+    # one round-trip (migration 101). NULL → INSUFFICIENT_CREDITS (no row mutated, no
+    # race window) → 402. Authenticated users only; guests are a credit no-op (the shared
+    # pool would deplete for everyone) and are governed by the concurrency caps above.
+    is_guest = user["id"] == GUEST_USER_ID
     credit_service = CreditService()
-    try:
-        new_remaining = credit_service.try_charge(
-            user["id"], CreditService.DEEP_RESEARCH_COST
-        )
-    except CreditServiceUnavailable:
-        # Transient Supabase/RPC failure while charging — NOT a genuine
-        # insufficient balance. Surface a retryable SYSTEM_BUSY (409, mirrors
-        # the in-flight gate above) so a DB blip never tells a paying user
-        # they're out of credits (the old behavior returned None here → the
-        # INSUFFICIENT_CREDITS branch below).
-        return make_error_response(
-            ErrorCode.SYSTEM_BUSY,
-            status_code=409,
-            message="charge_user_credits RPC unavailable (transient)",
-            details={"user_id": user["id"], "step": "credit_charge"},
-        )
-    if new_remaining is None:
-        return make_error_response(
-            ErrorCode.INSUFFICIENT_CREDITS,
-            message=(
-                f"User has fewer than {CreditService.DEEP_RESEARCH_COST} "
-                f"credits remaining"
-            ),
-            details={
-                "user_id": user["id"],
-                "required": CreditService.DEEP_RESEARCH_COST,
-            },
-        )
+    if not is_guest:
+        try:
+            new_remaining = credit_service.precharge(
+                user["id"], CreditService.DEEP_RESEARCH_COST,
+                reason="report_charge", ref_id=request.stock_id.upper(),
+            )
+        except CreditServiceUnavailable:
+            # Transient Supabase/RPC failure — retryable SYSTEM_BUSY (409), never
+            # INSUFFICIENT_CREDITS: a DB blip must not tell a paying user they're broke.
+            return make_error_response(
+                ErrorCode.SYSTEM_BUSY,
+                status_code=409,
+                message="spend_credits RPC unavailable (transient)",
+                details={"user_id": user["id"], "step": "credit_charge"},
+            )
+        if new_remaining is None:
+            return make_error_response(
+                ErrorCode.INSUFFICIENT_CREDITS,
+                message=(
+                    f"User has fewer than {CreditService.DEEP_RESEARCH_COST} "
+                    f"credits remaining"
+                ),
+                details={
+                    "user_id": user["id"],
+                    "required": CreditService.DEEP_RESEARCH_COST,
+                },
+            )
 
     ticker = request.stock_id.upper()
 
@@ -214,7 +215,9 @@ async def generate_research_report(
         "status": "pending",
         "progress": 0,
         "current_step": "Initializing research...",
-        "credits_charged": CreditService.DEEP_RESEARCH_COST,
+        # Guests aren't charged (credit no-op) → stamp 0 so the reconciliation sweep's
+        # `credits_charged > 0` guard never tries to refund an unbilled guest report.
+        "credits_charged": 0 if is_guest else CreditService.DEEP_RESEARCH_COST,
         "is_refunded": False,
     }
 
@@ -226,16 +229,18 @@ async def generate_research_report(
         # so this is the only backstop: if the best-effort refund ALSO fails we
         # log a greppable REFUND LEAK marker with everything a human needs to
         # correct it manually (mirrors claim_and_mark_failed's leak path).
-        refunded = credit_service.refund(
-            user["id"], CreditService.DEEP_RESEARCH_COST
-        )
-        if refunded is None:
-            logger.error(
-                "REFUND LEAK: charged %s credits to user=%s for %s but the "
-                "research_reports insert AND the refund both failed — no row for "
-                "the reconciliation sweep to catch; manual credit correction needed",
-                CreditService.DEEP_RESEARCH_COST, user["id"], ticker,
+        if not is_guest:
+            refunded = credit_service.refund_ledgered(
+                user["id"], CreditService.DEEP_RESEARCH_COST,
+                reason="report_refund", ref_id=ticker,
             )
+            if refunded is None:
+                logger.error(
+                    "REFUND LEAK: charged %s credits to user=%s for %s but the "
+                    "research_reports insert AND the refund both failed — no row for "
+                    "the reconciliation sweep to catch; manual credit correction needed",
+                    CreditService.DEEP_RESEARCH_COST, user["id"], ticker,
+                )
         return make_error_response(
             ErrorCode.REPORT_GENERATION_FAILED,
             message="Failed to insert research_reports row",

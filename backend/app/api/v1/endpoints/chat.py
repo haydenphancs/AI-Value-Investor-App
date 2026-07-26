@@ -18,7 +18,12 @@ import logging
 
 from app.config import settings
 from app.database import get_supabase
-from app.dependencies import get_current_user_or_guest, ChatRateLimit, chat_identity_key
+from app.dependencies import (
+    get_current_user_or_guest,
+    ChatRateLimit,
+    chat_identity_key,
+    GUEST_USER_ID,
+)
 from app.api.error_response import make_error_response, ErrorCode
 from app.services.chat_security import (
     validate_message,
@@ -28,6 +33,7 @@ from app.services.chat_security import (
     disclaimer_suffix,
 )
 from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
+from app.services.credit_service import CreditService, CreditServiceUnavailable
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
 from app.schemas.chat import (
     CreateChatSessionRequest,
@@ -85,6 +91,76 @@ def _refund_chat_turn(user: dict, x_guest_id) -> None:
         get_chat_budget_service().refund_turn(chat_identity_key(user, x_guest_id))
     except Exception as e:  # never let a refund failure change the error response
         logger.warning("Chat turn refund failed (%s: %s)", type(e).__name__, e)
+
+
+class _ChatQuota:
+    """One chat turn's metering, resolved per identity.
+
+    - Authenticated user → CHAT_CREDIT_COST credits (the monthly wallet is the cap).
+    - Guest → the durable per-install daily-turn budget (guests are never credit-metered:
+      the shared GUEST_USER_ID pool would deplete for ALL guests — see migration 101).
+
+    `refund_once` hands the quota back on non-delivery and is safe to call from every
+    failure site + the finally backstop: a single-coroutine `_settled` flag fires the
+    (non-idempotent) refund AT MOST ONCE.
+    """
+
+    def __init__(self, user: dict, x_guest_id, *, is_guest: bool, ref_id: Optional[str]):
+        self._user = user
+        self._x_guest_id = x_guest_id
+        self._is_guest = is_guest
+        self._ref_id = ref_id
+        self._settled = False
+
+    def refund_once(self, reason: str) -> None:
+        if self._settled:
+            return
+        self._settled = True
+        if self._is_guest:
+            _refund_chat_turn(self._user, self._x_guest_id)
+        else:
+            CreditService().refund_ledgered(
+                self._user["id"],
+                settings.CHAT_CREDIT_COST,
+                reason=reason,
+                ref_id=self._ref_id,
+            )
+
+
+def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str]):
+    """Reserve one chat turn's quota BEFORE any Gemini spend (pre-flight).
+
+    Guests → daily-turn budget (fails open on DB blip). Authenticated users →
+    an atomic CHAT_CREDIT_COST precharge: insufficient → 402 INSUFFICIENT_CREDITS
+    (no generation), transient RPC failure → retryable 409 SYSTEM_BUSY (never 402 —
+    a DB blip must not tell a paying user they're broke).
+
+    Returns `(quota, None)` to proceed, or `(None, JSONResponse)` to short-circuit.
+    """
+    if user["id"] == GUEST_USER_ID:
+        err = _claim_chat_turn_or_error(user, x_guest_id)
+        if err is not None:
+            return None, err
+        return _ChatQuota(user, x_guest_id, is_guest=True, ref_id=ref_id), None
+
+    try:
+        remaining = CreditService().precharge(
+            user["id"], settings.CHAT_CREDIT_COST, reason="chat_charge", ref_id=ref_id
+        )
+    except CreditServiceUnavailable:
+        return None, make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=409,
+            message="spend_credits RPC unavailable (transient)",
+            details={"user_id": user["id"], "step": "chat_credit_charge"},
+        )
+    if remaining is None:
+        return None, make_error_response(
+            ErrorCode.INSUFFICIENT_CREDITS,
+            message="insufficient credits for chat turn",
+            details={"user_id": user["id"], "required": settings.CHAT_CREDIT_COST},
+        )
+    return _ChatQuota(user, x_guest_id, is_guest=False, ref_id=ref_id), None
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -295,15 +371,18 @@ async def send_chat_message(
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
-    # Claim one daily turn (durable per-user budget) BEFORE spending Gemini tokens.
-    budget_err = _claim_chat_turn_or_error(user, x_guest_id)
-    if budget_err is not None:
-        return budget_err
+    # Reserve this turn's quota BEFORE spending Gemini tokens: authenticated users are
+    # charged CHAT_CREDIT_COST credits (pre-flight + atomic deduction → 402 if broke);
+    # guests use the durable per-install daily-turn budget.
+    quota, quota_err = _claim_chat_quota(user, x_guest_id, ref_id=session_id)
+    if quota_err is not None:
+        return quota_err
 
     # Generate the AI response FIRST, then persist the user + assistant rows TOGETHER in one insert.
     # A generation failure therefore leaves NOTHING persisted (no orphaned user row for the client's
     # stream-failure reconcile to later duplicate), and the two rows commit atomically — matching the
     # streaming endpoint's persist contract.
+    delivered = False  # True once the answer is durably persisted → gates the finally refund
     try:
         from app.services.chat_service import ChatService
 
@@ -377,6 +456,16 @@ async def send_chat_message(
         if assistant_row is None:
             raise RuntimeError("assistant row missing from chat_messages insert result")
 
+        # The answer is durably persisted → the turn was delivered. Past this point the
+        # finally must NOT refund (a disconnect during the best-effort session/token steps
+        # below is not a failed turn).
+        delivered = True
+        # Zero Gemini cost (deep-dive cache HIT) → refund the charge: the user still got the
+        # answer, but we don't bill a turn that incurred no AI cost. `== 0` (not falsy) so a
+        # real generation reporting None/unknown usage is never wrongly refunded.
+        if ai_result.get("tokens_used") == 0:
+            quota.refund_once("chat_cache_hit")
+
         # Update session metadata. message_count + last_message_at are maintained atomically by the
         # trg_chat_message_count AFTER-INSERT trigger (one +1 per inserted row), so we do NOT set them
         # here — an absolute `current_count + 2` from a request-start snapshot both double-counts the
@@ -415,10 +504,14 @@ async def send_chat_message(
 
     except Exception as e:
         logger.error(f"Chat response failed: {e}", exc_info=True)
-        # Generation/persist failed after the turn was claimed → hand the turn back so a
-        # Gemini outage doesn't burn the user's daily allowance on answers they never got.
-        _refund_chat_turn(user, x_guest_id)
         raise HTTPException(status_code=500, detail="Failed to generate response")
+    finally:
+        # Any non-delivery — generation/persist error, or a client-disconnect
+        # CancelledError (a BaseException the except above misses) — hands the turn's
+        # quota back exactly once (credit for authed, daily turn for guest) so an outage
+        # never burns a paid turn.
+        if not delivered:
+            quota.refund_once("chat_undelivered")
 
 
 @router.post("/sessions/{session_id}/messages/stream")
@@ -465,10 +558,13 @@ async def stream_chat_message(
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
-    # Claim one daily turn (durable per-user budget) BEFORE the stream starts.
-    budget_err = _claim_chat_turn_or_error(user, x_guest_id)
-    if budget_err is not None:
-        return budget_err
+    # Reserve this turn's quota BEFORE the stream starts (pre-flight): authenticated users
+    # are charged CHAT_CREDIT_COST credits (→ 402 if broke), guests use the daily-turn
+    # budget. Returning a clean JSON error here (not an SSE frame) mirrors the 404s above;
+    # iOS surfaces INSUFFICIENT_CREDITS via its non-stream fallback decode.
+    quota, quota_err = _claim_chat_quota(user, x_guest_id, ref_id=session_id)
+    if quota_err is not None:
+        return quota_err
 
     sdata = session.data
     ctx_type = request.context_type or sdata.get("context_type")
@@ -484,7 +580,14 @@ async def stream_chat_message(
     stock_id = sdata.get("stock_id")
     user_message = msg
 
+    # Non-delivery backstop for the stream: `_metered_stream`'s finally refunds this turn
+    # exactly once if the generator exits without a durably-persisted answer (incl. a
+    # client-disconnect CancelledError the inner except-Exception guards miss). event_gen
+    # flips it True right after the persist.
+    delivered = False
+
     async def event_gen():
+        nonlocal delivered
         import time as _time
         from app.services.chat_service import ChatService
         from app.integrations.gemini import (
@@ -651,7 +754,7 @@ async def stream_chat_message(
                 else:
                     logger.error("Chat stream fallback failed: %s", e2, exc_info=True)
                     code = "INTERNAL_ERROR"
-                _refund_chat_turn(user, x_guest_id)  # no answer produced → hand the turn back
+                quota.refund_once("chat_stream_fallback_failed")  # no answer → hand the turn back
                 yield _sse("error", {
                     "error_code": code,
                     "user_message": "Cay AI couldn't respond right now. Please try again.",
@@ -659,7 +762,7 @@ async def stream_chat_message(
                 return
 
         if not content:
-            _refund_chat_turn(user, x_guest_id)  # no answer produced → hand the turn back
+            quota.refund_once("chat_stream_empty")  # no answer produced → hand the turn back
             yield _sse("error", {
                 "error_code": "INTERNAL_ERROR",
                 "user_message": "Cay AI couldn't respond right now. Please try again.",
@@ -738,6 +841,14 @@ async def stream_chat_message(
             if assistant_row is None:
                 raise RuntimeError("assistant row missing from chat_messages insert result")
 
+            # Durably persisted → delivered. The finally backstop must not refund past this
+            # point (a disconnect during the best-effort suggestions step is not a failed turn).
+            delivered = True
+            # Zero Gemini cost (deep-dive cache HIT via the fallback) → refund the charge.
+            # `== 0` (not falsy) so a normal stream (tokens_used=None) is never refunded.
+            if tokens_used == 0:
+                quota.refund_once("chat_cache_hit")
+
             # Session metadata + first-question auto-title (mirrors send_chat_message). message_count
             # and last_message_at are maintained by the trg_chat_message_count AFTER-INSERT trigger, so
             # we don't set them here (avoids double-counting the trigger + the concurrent-send race).
@@ -761,7 +872,7 @@ async def stream_chat_message(
             _persist_context_snapshot(supabase, session_id, request.context, sdata)
         except Exception as e:
             logger.error("Chat stream persist failed: %s", e, exc_info=True)
-            _refund_chat_turn(user, x_guest_id)  # turn not durably recorded → hand it back
+            quota.refund_once("chat_stream_persist_failed")  # not durably recorded → hand it back
             yield _sse("error", {
                 "error_code": "INTERNAL_ERROR",
                 "user_message": "Your answer was generated but couldn't be saved. Please try again.",
@@ -800,8 +911,19 @@ async def stream_chat_message(
 
         yield _sse("done", {"message": _row_to_message(assistant_row).model_dump()})
 
+    async def _metered_stream():
+        # Wrap event_gen so a client disconnect (CancelledError/GeneratorExit) — which the
+        # inner except-Exception guards miss — still refunds the turn exactly once. No-op if
+        # an error site already settled, or if the turn was delivered.
+        try:
+            async for frame in event_gen():
+                yield frame
+        finally:
+            if not delivered:
+                quota.refund_once("chat_stream_cancelled")
+
     return StreamingResponse(
-        event_gen(),
+        _metered_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

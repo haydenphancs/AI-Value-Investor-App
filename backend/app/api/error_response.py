@@ -165,7 +165,13 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.REPORT_GENERATION_FAILED: 502,
     ErrorCode.REPORT_NOT_FOUND: 404,
     ErrorCode.REPORT_NOT_READY: 409,
-    ErrorCode.INSUFFICIENT_CREDITS: 403,
+    # 402 Payment Required — the standard "you're out of credits, pay/upgrade" status.
+    # Not 401/429: iOS APIClient intercepts those before decoding the body (→ generic
+    # "sign in" / "wait 60s"); 402 falls through to the structured-body decode so the
+    # credits user_message + action="upgrade" reach the client. Transient charge-RPC
+    # failures are SYSTEM_BUSY (409, retryable), NEVER this — a DB blip must not tell a
+    # paying user they're broke.
+    ErrorCode.INSUFFICIENT_CREDITS: 402,
     # 409 (NOT 429): iOS APIClient intercepts 429 before decoding the body and
     # shows a generic "wait 60s", discarding our user_message. 409 falls
     # through to the structured-body decode so the cap copy is surfaced.

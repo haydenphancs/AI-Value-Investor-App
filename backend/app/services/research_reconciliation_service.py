@@ -158,7 +158,9 @@ async def claim_and_mark_failed(
         return True
 
     try:
-        CreditService().refund(user_id, amount)
+        CreditService().refund_ledgered(
+            user_id, amount, reason="report_refund_reconciled", ref_id=report_id
+        )
         logger.info(
             "Refunded %s credits for failed report %s (user %s)",
             amount, report_id, user_id,

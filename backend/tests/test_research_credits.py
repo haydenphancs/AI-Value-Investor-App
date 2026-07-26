@@ -125,6 +125,54 @@ def test_try_charge_raises_when_rpc_throws(service):
         service.try_charge("user-123", 5)
 
 
+# ── precharge / refund_ledgered — the unified gate (migration 101 RPCs) ─────
+
+def test_precharge_calls_spend_credits_and_returns_remaining(service):
+    _stub_rpc(service, 40)
+    result = service.precharge("user-1", 20, reason="report_charge", ref_id="AAPL")
+    assert result == 40
+    service.supabase.rpc.assert_called_once_with(
+        "spend_credits",
+        {"p_user_id": "user-1", "p_amount": 20,
+         "p_reason": "report_charge", "p_ref_id": "AAPL"},
+    )
+
+
+def test_precharge_returns_none_on_insufficient(service):
+    # spend_credits returns NULL when the balance is short → caller maps to 402.
+    _stub_rpc(service, None)
+    assert service.precharge("u", 20, reason="report_charge", ref_id="AAPL") is None
+
+
+def test_precharge_raises_unavailable_on_rpc_error(service):
+    # Transient failure must raise (→ retryable SYSTEM_BUSY), never look like 0/None.
+    rpc_call = MagicMock()
+    rpc_call.execute.side_effect = RuntimeError("supabase down")
+    service.supabase.rpc.return_value = rpc_call
+    with pytest.raises(CreditServiceUnavailable):
+        service.precharge("u", 20, reason="report_charge", ref_id="AAPL")
+
+
+def test_refund_ledgered_calls_refund_credits(service):
+    _stub_rpc(service, 60)
+    result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    assert result == 60
+    service.supabase.rpc.assert_called_once_with(
+        "refund_credits",
+        {"p_user_id": "u", "p_amount": 20,
+         "p_reason": "report_refund", "p_ref_id": "AAPL"},
+    )
+
+
+def test_refund_ledgered_never_raises_on_rpc_error(service):
+    # Best-effort: a refund RPC failure logs a REFUND LEAK marker but must NOT raise
+    # (it must not affect the already-failed action's response).
+    rpc_call = MagicMock()
+    rpc_call.execute.side_effect = RuntimeError("supabase down")
+    service.supabase.rpc.return_value = rpc_call
+    assert service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL") is None
+
+
 def test_try_charge_returns_none_only_for_genuine_insufficiency(service):
     # The OTHER None path must stay None: when the RPC succeeds but returns
     # NULL (balance below threshold, no row mutated), try_charge returns None

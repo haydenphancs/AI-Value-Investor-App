@@ -111,11 +111,11 @@ class FakeSupabase:
 
 
 class FakeCreditService:
-    DEEP_RESEARCH_COST = 5
+    DEEP_RESEARCH_COST = 20
     calls = []  # class-level so every instance records to the same log
     raise_on_refund = False
 
-    def refund(self, user_id, amount):
+    def refund_ledgered(self, user_id, amount, *, reason=None, ref_id=None):
         if FakeCreditService.raise_on_refund:
             raise RuntimeError("refund RPC down")
         FakeCreditService.calls.append((user_id, amount))

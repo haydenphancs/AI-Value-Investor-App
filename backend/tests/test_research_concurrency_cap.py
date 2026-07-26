@@ -8,7 +8,7 @@ slot free, the request proceeds to the atomic credit charge.
 
 We call the endpoint handler directly with a mocked Supabase client + a patched
 `CreditService`, so we can assert (a) the HTTP status / error_code and (b)
-whether `try_charge` was invoked — with no network, no DB, no FMP, no Gemini.
+whether `precharge` was invoked — with no network, no DB, no FMP, no Gemini.
 """
 
 from __future__ import annotations
@@ -56,13 +56,13 @@ def _supabase_with_counts(per_user: int, global_inflight: int) -> MagicMock:
     return sb
 
 
-def _patch_credit_service(monkeypatch, try_charge_return):
+def _patch_credit_service(monkeypatch, precharge_return):
     """Replace research.CreditService with a mock class; return the singleton
-    instance so the test can assert on `try_charge`."""
+    instance so the test can assert on `precharge`."""
     instance = MagicMock()
-    instance.try_charge.return_value = try_charge_return
+    instance.precharge.return_value = precharge_return
     cls = MagicMock(return_value=instance)
-    cls.DEEP_RESEARCH_COST = 5
+    cls.DEEP_RESEARCH_COST = 20
     monkeypatch.setattr(research, "CreditService", cls)
     return instance
 
@@ -74,11 +74,11 @@ def _req() -> GenerateResearchRequest:
 @pytest.mark.asyncio
 async def test_at_cap_rejects_before_charging(monkeypatch):
     """User already at the cap → 409 TOO_MANY_CONCURRENT_REPORTS, and
-    `try_charge` is NEVER called (no credits burned). This pre-charge
+    `precharge` is NEVER called (no credits burned). This pre-charge
     invariant is the whole point of placing the cap check before the charge."""
     cap = settings.MAX_CONCURRENT_REPORTS_PER_USER
     supabase = _supabase_with_inflight_count(cap)               # exactly at cap
-    credit = _patch_credit_service(monkeypatch, try_charge_return=99)
+    credit = _patch_credit_service(monkeypatch, precharge_return=99)
 
     resp = await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
@@ -86,26 +86,26 @@ async def test_at_cap_rejects_before_charging(monkeypatch):
 
     assert resp.status_code == 409
     assert json.loads(resp.body)["error_code"] == ErrorCode.TOO_MANY_CONCURRENT_REPORTS.value
-    credit.try_charge.assert_not_called()
+    credit.precharge.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_under_cap_proceeds_to_charge(monkeypatch):
     """One slot free → the cap gate lets the request through to the atomic
-    charge. We make `try_charge` return None (insufficient) so the handler
+    charge. We make `precharge` return None (insufficient) so the handler
     short-circuits right after the charge — proving the charge WAS reached,
     without mocking the full FMP / insert / create_task happy path."""
     supabase = _supabase_with_inflight_count(
         settings.MAX_CONCURRENT_REPORTS_PER_USER - 1           # one under cap
     )
-    credit = _patch_credit_service(monkeypatch, try_charge_return=None)
+    credit = _patch_credit_service(monkeypatch, precharge_return=None)
 
     resp = await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
     )
 
-    credit.try_charge.assert_called_once()                     # cap gate passed through
-    assert resp.status_code == 403                             # INSUFFICIENT_CREDITS
+    credit.precharge.assert_called_once()                     # cap gate passed through
+    assert resp.status_code == 402                             # INSUFFICIENT_CREDITS
     assert json.loads(resp.body)["error_code"] == ErrorCode.INSUFFICIENT_CREDITS.value
 
 
@@ -114,19 +114,19 @@ async def test_transient_charge_failure_returns_system_busy_not_insufficient(mon
     """A transient Supabase/RPC failure during the atomic charge raises
     CreditServiceUnavailable → the handler must surface a RETRYABLE 409
     SYSTEM_BUSY, NOT a dead-end 403 INSUFFICIENT_CREDITS. A DB blip must never
-    tell a paying user they're out of credits (the pre-fix bug: try_charge
+    tell a paying user they're out of credits (the pre-fix bug: precharge
     swallowed the failure to None, which mapped to INSUFFICIENT_CREDITS)."""
     supabase = _supabase_with_inflight_count(
         settings.MAX_CONCURRENT_REPORTS_PER_USER - 1           # one under cap
     )
-    credit = _patch_credit_service(monkeypatch, try_charge_return=None)
-    credit.try_charge.side_effect = CreditServiceUnavailable("supabase down")
+    credit = _patch_credit_service(monkeypatch, precharge_return=None)
+    credit.precharge.side_effect = CreditServiceUnavailable("supabase down")
 
     resp = await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
     )
 
-    credit.try_charge.assert_called_once()                     # reached the charge
+    credit.precharge.assert_called_once()                     # reached the charge
     assert resp.status_code == 409
     assert json.loads(resp.body)["error_code"] == ErrorCode.SYSTEM_BUSY.value
 
@@ -151,7 +151,7 @@ async def test_cap_query_scopes_to_inflight_statuses(monkeypatch):
     query_holder["q"] = q
     sb = MagicMock()
     sb.table.return_value = q
-    _patch_credit_service(monkeypatch, try_charge_return=None)
+    _patch_credit_service(monkeypatch, precharge_return=None)
 
     await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=sb, _rate_limit=None,
@@ -183,7 +183,7 @@ async def test_inflight_queries_scoped_to_current_close_cycle(monkeypatch):
     q.execute.return_value = MagicMock(count=0, data=[])
     sb = MagicMock()
     sb.table.return_value = q
-    _patch_credit_service(monkeypatch, try_charge_return=None)  # short-circuit after charge
+    _patch_credit_service(monkeypatch, precharge_return=None)  # short-circuit after charge
 
     await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=sb, _rate_limit=None,
@@ -198,12 +198,12 @@ async def test_inflight_queries_scoped_to_current_close_cycle(monkeypatch):
 @pytest.mark.asyncio
 async def test_global_admission_rejects_before_charging(monkeypatch):
     """User is UNDER their per-user cap, but the GLOBAL in-flight count is at the
-    backstop → 409 SYSTEM_BUSY, and `try_charge` is NEVER called. This is the
+    backstop → 409 SYSTEM_BUSY, and `precharge` is NEVER called. This is the
     fast-fail-under-overload path: shed load instead of accepting unbounded
     concurrent agent runs onto the single event loop."""
     monkeypatch.setattr(settings, "MAX_GLOBAL_INFLIGHT_REPORTS", 150)
     supabase = _supabase_with_counts(per_user=0, global_inflight=150)  # at global cap
-    credit = _patch_credit_service(monkeypatch, try_charge_return=99)
+    credit = _patch_credit_service(monkeypatch, precharge_return=99)
 
     resp = await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
@@ -211,7 +211,7 @@ async def test_global_admission_rejects_before_charging(monkeypatch):
 
     assert resp.status_code == 409
     assert json.loads(resp.body)["error_code"] == ErrorCode.SYSTEM_BUSY.value
-    credit.try_charge.assert_not_called()
+    credit.precharge.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -221,7 +221,7 @@ async def test_global_cap_exactly_at_rejects(monkeypatch):
     already taken)."""
     monkeypatch.setattr(settings, "MAX_GLOBAL_INFLIGHT_REPORTS", 7)
     supabase = _supabase_with_counts(per_user=0, global_inflight=7)  # exactly at cap
-    credit = _patch_credit_service(monkeypatch, try_charge_return=99)
+    credit = _patch_credit_service(monkeypatch, precharge_return=99)
 
     resp = await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
@@ -229,25 +229,25 @@ async def test_global_cap_exactly_at_rejects(monkeypatch):
 
     assert resp.status_code == 409
     assert json.loads(resp.body)["error_code"] == ErrorCode.SYSTEM_BUSY.value
-    credit.try_charge.assert_not_called()
+    credit.precharge.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_global_cap_under_by_one_passes_gate(monkeypatch):
     """Boundary: global in-flight count one UNDER the cap → the global gate
-    lets the request through to the atomic charge. `try_charge` returns None
+    lets the request through to the atomic charge. `precharge` returns None
     (insufficient) so the handler short-circuits right after the charge,
     proving the global gate was passed (not the rejection path)."""
     monkeypatch.setattr(settings, "MAX_GLOBAL_INFLIGHT_REPORTS", 7)
     supabase = _supabase_with_counts(per_user=0, global_inflight=6)  # cap - 1
-    credit = _patch_credit_service(monkeypatch, try_charge_return=None)
+    credit = _patch_credit_service(monkeypatch, precharge_return=None)
 
     resp = await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
     )
 
-    credit.try_charge.assert_called_once()                     # global gate passed
-    assert resp.status_code == 403                             # INSUFFICIENT_CREDITS
+    credit.precharge.assert_called_once()                     # global gate passed
+    assert resp.status_code == 402                             # INSUFFICIENT_CREDITS
     assert json.loads(resp.body)["error_code"] == ErrorCode.INSUFFICIENT_CREDITS.value
 
 
@@ -255,21 +255,21 @@ async def test_global_cap_under_by_one_passes_gate(monkeypatch):
 async def test_global_gate_disabled_skips_query(monkeypatch):
     """`MAX_GLOBAL_INFLIGHT_REPORTS = 0` disables the global backstop entirely
     (`if global_cap > 0`). The global in-flight query must be SKIPPED, so even a
-    huge backlog can't reject — the request reaches `try_charge`. We make the
+    huge backlog can't reject — the request reaches `precharge`. We make the
     SECOND count enormous; if the gate ran it would 409, but with the gate off
     the handler never consumes it and proceeds straight to the charge."""
     monkeypatch.setattr(settings, "MAX_GLOBAL_INFLIGHT_REPORTS", 0)
     # per_user=0 passes the per-user cap; the huge second count would trip a
     # live global gate — but the gate is disabled so it's never queried.
     supabase = _supabase_with_counts(per_user=0, global_inflight=10_000)
-    credit = _patch_credit_service(monkeypatch, try_charge_return=None)
+    credit = _patch_credit_service(monkeypatch, precharge_return=None)
 
     resp = await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
     )
 
-    credit.try_charge.assert_called_once()                     # reached the charge
-    assert resp.status_code == 403                             # INSUFFICIENT_CREDITS
+    credit.precharge.assert_called_once()                     # reached the charge
+    assert resp.status_code == 402                             # INSUFFICIENT_CREDITS
     assert json.loads(resp.body)["error_code"] == ErrorCode.INSUFFICIENT_CREDITS.value
 
 
@@ -314,7 +314,7 @@ async def test_global_query_has_no_user_filter(monkeypatch):
 
     sb = MagicMock()
     sb.table.return_value = q
-    _patch_credit_service(monkeypatch, try_charge_return=None)
+    _patch_credit_service(monkeypatch, precharge_return=None)
 
     await research.generate_research_report(
         request=_req(), user={"id": "user-1"}, supabase=sb, _rate_limit=None,

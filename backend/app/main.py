@@ -335,7 +335,7 @@ async def _run_scanner_pre_warmer():
 async def _run_research_reconciliation_job():
     """Background task: refund research reports orphaned charged-but-undelivered.
 
-    Generate Analysis charges 5 credits upfront then runs in a fire-and-forget
+    Generate Analysis charges credits upfront then runs in a fire-and-forget
     task. If the worker is killed mid-run (deploy / OOM / crash) the row is
     stranded in pending/processing and never refunded. This sweep reconciles
     such rows on a fixed interval. Idempotent (claim-then-refund on

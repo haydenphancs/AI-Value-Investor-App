@@ -141,7 +141,7 @@ class ResearchReportDetail(BaseModel):
     # Credit lifecycle (migration 041): drives the iOS "[Refunded]"
     # chip on failed cards. Always False on completed reports.
     is_refunded: bool = False
-    credits_charged: int = 5
+    credits_charged: int = 20  # unified report cost (was 5); see config.REPORT_CREDIT_COST
 
     # Detailed-analysis PDF (migration 064). pdf_status: pending|ready|failed.
     # Null on reports created before the PDF feature until backfilled.

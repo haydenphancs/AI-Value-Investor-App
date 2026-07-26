@@ -371,7 +371,7 @@ struct TrendingAnalysis: Identifiable, Hashable {
 struct AnalysisCost {
     let credits: Int
 
-    static let standard = AnalysisCost(credits: 5)
+    static let standard = AnalysisCost(credits: 20)
 }
 
 // MARK: - Report Status

@@ -323,8 +323,8 @@ class ResearchService:
             # but never raised, so a Supabase blip can't fail the report.
             await upsert_cached_report(ticker, persona_key, ticker_report_data)
 
-            # Credits were charged upfront in /research/generate (5 credits
-            # via CreditService.try_charge). No deduction here. Refunds on
+            # Credits were charged upfront in /research/generate
+            # (CreditService.try_charge). No deduction here. Refunds on
             # failure are handled by _run_research_task in research.py —
             # this function only ever signals success.
 

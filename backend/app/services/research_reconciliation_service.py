@@ -1,7 +1,7 @@
 """
 Research-report refund safety net.
 
-Generate Analysis charges 5 credits UPFRONT (CreditService.try_charge in
+Generate Analysis charges credits UPFRONT (CreditService.try_charge in
 `POST /research/generate`), then runs the pipeline in a fire-and-forget
 background task. Two failure modes can otherwise strand a row in
 `pending`/`processing` forever — charged but never refunded:

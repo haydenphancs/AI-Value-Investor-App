@@ -153,6 +153,15 @@ class Settings(BaseSettings):
     # safe backlog. Set 0 to disable the gate.
     MAX_GLOBAL_INFLIGHT_REPORTS: int = 150
 
+    # Unified credit pricing (approved 2026-07-26; see migration 100 + the pricing
+    # plan). One credit == one "Ask Cay AI" chat turn. A full report is ~20x a chat
+    # turn by token/$ weight, so it costs 20 credits. Tier monthly allocations live
+    # in the plan_credits DB table (free 50 / pro 1200 / premium="Max" 4000). These
+    # constants are the per-ACTION debit amounts; the enforcement phase charges them
+    # against the monthly pool (chat is not yet wired to the pool).
+    CHAT_CREDIT_COST: int = 1
+    REPORT_CREDIT_COST: int = 20
+
     # Gemini quota (429) handling. Instead of skipping retries on a rate-limit
     # error, back off and retry a bounded number of times — paired with the
     # agent-run semaphore this recovers transient 429s rather than degrading a

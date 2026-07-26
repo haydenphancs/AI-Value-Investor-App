@@ -13,6 +13,7 @@ so all mutations target `used` and read `remaining` afterward.
 import logging
 from typing import Optional
 
+from app.config import settings
 from app.database import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,10 @@ class CreditServiceUnavailable(Exception):
 
 
 class CreditService:
-    DEEP_RESEARCH_COST = 5
+    # Report cost in credits on the unified pricing scale (1 chat = 1 credit; a
+    # report is ~20x a chat turn by token/$ weight). Sourced from settings so the
+    # scale has a single home shared with the chat cost. See migration 100.
+    DEEP_RESEARCH_COST = settings.REPORT_CREDIT_COST
 
     def __init__(self):
         self.supabase = get_supabase()
@@ -109,3 +113,67 @@ class CreditService:
             f"new remaining={new_remaining}"
         )
         return int(new_remaining) if new_remaining is not None else None
+
+    def ensure_period(self, user_id: str) -> Optional[int]:
+        """Lazily roll `user_id` into the current month's tier allocation.
+
+        Calls the `ensure_credit_period` RPC (migration 100): the first call in a
+        new calendar month HARD-RESETS `user_credits` to the tier's monthly
+        allocation (from `plan_credits`) — use-it-or-lose-it, unused credits do not
+        roll over; within a month it is a no-op and just returns the live
+        `remaining`. The shared guest sentinel is skipped by the RPC, so its fixed
+        balance is untouched.
+
+        NOT wired into any endpoint yet — the enforcement phase calls this right
+        before `try_charge` so a paying user always sees a fresh monthly balance.
+        Returns the current `remaining`, or raises `CreditServiceUnavailable` on a
+        transient RPC failure (mirrors `try_charge`: a DB blip must surface as a
+        retryable error, never as an empty/zero balance).
+        """
+        try:
+            result = self.supabase.rpc(
+                "ensure_credit_period",
+                {"p_user_id": user_id},
+            ).execute()
+        except Exception as e:
+            logger.error(
+                f"ensure_credit_period RPC failed for user={user_id}: "
+                f"{type(e).__name__}: {e}"
+            )
+            raise CreditServiceUnavailable(
+                f"ensure_credit_period RPC failed for user={user_id}"
+            ) from e
+        remaining = result.data
+        return int(remaining) if remaining is not None else None
+
+    def log_transaction(
+        self,
+        user_id: str,
+        delta: int,
+        reason: str,
+        ref_id: Optional[str] = None,
+        balance_after: Optional[int] = None,
+    ) -> None:
+        """Best-effort append to the `credit_transactions` audit ledger (migration 100).
+
+        Never raises — a ledger write must not break the (already-decided) credit
+        action. Failures are logged with context so the drop is diagnosable. Wired in
+        during the enforcement phase alongside charge/refund and the monthly reset.
+        """
+        try:
+            self.supabase.rpc(
+                "add_credit_transaction",
+                {
+                    "p_user_id": user_id,
+                    "p_delta": delta,
+                    "p_reason": reason,
+                    "p_ref_id": ref_id,
+                    "p_balance_after": balance_after,
+                },
+            ).execute()
+        except Exception as e:
+            logger.warning(
+                "add_credit_transaction failed for user=%s reason=%s (%s: %s) — "
+                "ledger row dropped",
+                user_id, reason, type(e).__name__, e,
+            )

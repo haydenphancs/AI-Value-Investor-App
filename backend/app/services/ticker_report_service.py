@@ -151,6 +151,21 @@ LENGTH: 2-4 sentences, total under 90 words."""
             )
             return cached
 
+        return await self.generate_fresh_report(ticker, persona_key)
+
+    async def generate_fresh_report(
+        self, ticker: str, persona_key: str = "warren_buffett"
+    ) -> Dict[str, Any]:
+        """Generate a FRESH report (no cache read) and cache it on success.
+
+        Split out from `generate_ticker_report` so the endpoint can gate a PAID
+        generation on a cache MISS it already detected: the cache lookup is the
+        free path, this method is the billable "real AI work" path. Callers that
+        don't care about billing should use `generate_ticker_report`, which
+        checks the cache first and only falls through to this.
+        """
+        ticker = ticker.upper().strip()
+
         # 2. Collect real data
         out = await self.collector.collect(ticker, persona_key)
         persona = get_persona_config(persona_key)

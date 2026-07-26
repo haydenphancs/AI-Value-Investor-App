@@ -150,10 +150,11 @@ async def generate_research_report(
                 details={"in_flight": global_count, "max": global_cap},
             )
 
-    # Atomic 5-credit charge. The Postgres function returns the new
-    # `remaining` balance, or NULL when the user has fewer than 5
-    # credits available. NULL → INSUFFICIENT_CREDITS, no row was
-    # mutated (no race window between check and decrement).
+    # Atomic credit charge (report cost = CreditService.DEEP_RESEARCH_COST).
+    # The Postgres function returns the new `remaining` balance, or NULL when
+    # the user has fewer than that many credits available. NULL →
+    # INSUFFICIENT_CREDITS, no row was mutated (no race window between check
+    # and decrement).
     credit_service = CreditService()
     try:
         new_remaining = credit_service.try_charge(
@@ -219,9 +220,22 @@ async def generate_research_report(
 
     result = supabase.table("research_reports").insert(report_data).execute()
     if not result.data:
-        # DB insert failed AFTER we charged credits — refund immediately
-        # so the user isn't out 5 credits for a row that never existed.
-        credit_service.refund(user["id"], CreditService.DEEP_RESEARCH_COST)
+        # DB insert failed AFTER we charged credits — refund immediately so the
+        # user isn't out the charged credits for a row that never existed. There
+        # is NO research_reports row here for the reconciliation sweep to catch,
+        # so this is the only backstop: if the best-effort refund ALSO fails we
+        # log a greppable REFUND LEAK marker with everything a human needs to
+        # correct it manually (mirrors claim_and_mark_failed's leak path).
+        refunded = credit_service.refund(
+            user["id"], CreditService.DEEP_RESEARCH_COST
+        )
+        if refunded is None:
+            logger.error(
+                "REFUND LEAK: charged %s credits to user=%s for %s but the "
+                "research_reports insert AND the refund both failed — no row for "
+                "the reconciliation sweep to catch; manual credit correction needed",
+                CreditService.DEEP_RESEARCH_COST, user["id"], ticker,
+            )
         return make_error_response(
             ErrorCode.REPORT_GENERATION_FAILED,
             message="Failed to insert research_reports row",
@@ -777,7 +791,7 @@ async def _run_research_task(
     Async background task: runs the full multi-agent research pipeline.
 
     On failure: marks the report 'failed', persists a structured error
-    blob, refunds the 5 credits charged in /generate, and flips
+    blob, refunds the credits charged in /generate, and flips
     `is_refunded` so iOS renders the "[Refunded]" chip. This is the
     single refund site — every failure path lands here.
     """

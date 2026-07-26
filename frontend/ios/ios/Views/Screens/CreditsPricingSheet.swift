@@ -90,7 +90,7 @@ struct CreditsPricingSheet: View {
                 .font(AppTypography.title)
                 .foregroundColor(AppColors.textPrimary)
                 .multilineTextAlignment(.center)
-            Text("Each AI report costs 5 credits. Pick a pack to unlock more deep dives.")
+            Text("Each AI report costs 20 credits. Pick a pack to unlock more deep dives.")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)

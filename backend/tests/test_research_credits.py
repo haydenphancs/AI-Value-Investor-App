@@ -60,7 +60,7 @@ def test_try_charge_fails_atomically_when_below_threshold(service):
     service.supabase.rpc.assert_called_once()
 
 
-def test_try_charge_uses_default_cost_of_5():
+def test_try_charge_uses_default_report_cost():
     svc = CreditService.__new__(CreditService)
     svc.supabase = MagicMock()
     _stub_rpc(svc, 10)
@@ -69,7 +69,9 @@ def test_try_charge_uses_default_cost_of_5():
 
     args, _ = svc.supabase.rpc.call_args
     assert args[0] == "charge_user_credits"
-    assert args[1]["p_amount"] == CreditService.DEEP_RESEARCH_COST == 5
+    # Default amount tracks the config-driven report cost (unified scale = 20),
+    # asserted against the constant so a future re-price updates in one place.
+    assert args[1]["p_amount"] == CreditService.DEEP_RESEARCH_COST
 
 
 def test_refund_increments_back_5(service):

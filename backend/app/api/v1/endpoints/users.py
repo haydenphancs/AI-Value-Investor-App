@@ -44,13 +44,15 @@ async def get_user_credits(
         ).eq("user_id", user["id"]).single().execute()
 
         if not result.data:
-            # Return defaults if no credit row yet
-            return UserCreditsResponse(total=3, used=0, remaining=3)
+            # No credit row yet → optimistic Free-tier allocation (mirrors
+            # plan_credits.free = 50; migration 100). The signup trigger normally
+            # seeds a row, so this is a rare safety net.
+            return UserCreditsResponse(total=50, used=0, remaining=50)
 
         return UserCreditsResponse(**result.data)
     except Exception as e:
         logger.error(f"Failed to fetch credits: {e}")
-        return UserCreditsResponse(total=3, used=0, remaining=3)
+        return UserCreditsResponse(total=50, used=0, remaining=50)
 
 
 @router.patch("/me", response_model=UserResponse)

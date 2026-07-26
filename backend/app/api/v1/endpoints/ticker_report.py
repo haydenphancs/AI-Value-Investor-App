@@ -25,7 +25,7 @@ Endpoints:
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
@@ -35,7 +35,9 @@ from app.api.error_response import (
     make_error_response,
 )
 from app.database import get_supabase
+from app.dependencies import get_current_user_or_guest  # for the fresh-generation charge
 from app.schemas.ticker_report import TickerReportResponse
+from app.services.credit_service import CreditService, CreditServiceUnavailable
 from app.services.agents.persona_config import PERSONA_KEYS
 from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
@@ -43,6 +45,7 @@ from app.services.agents.ticker_report_data_collector import (
 from app.services.ticker_report_cache import (
     CACHE_SCHEMA_FLOOR,
     _short_interest_payload_stale,
+    get_cached_report,
     patch_legacy_price_action,
 )
 from app.services.ticker_report_service import TickerReportService
@@ -66,16 +69,20 @@ LEGACY_CACHE_TTL_HOURS = 24
 async def get_ticker_report(
     ticker: str,
     persona: str = Query("warren_buffett", description="Investor persona key"),
+    user: dict = Depends(get_current_user_or_guest),  # for the fresh-generation charge
 ):
     """
     Generate a comprehensive ticker report.
 
-    Cache strategy: `TickerReportService` consults `ticker_report_cache`
-    (24h TTL) internally. This endpoint additionally falls back to a
-    recent completed `research_reports` row so legacy reports surface
-    during the migration window.
+    Billing: a cache HIT is free; a cache MISS runs the full AI pipeline and costs
+    `CreditService.DEEP_RESEARCH_COST` credits, charged upfront and refunded on ANY
+    non-delivery (generation error, schema drift, or client disconnect). Guests
+    resolve to the shared guest balance, so this has no real billing effect until
+    real accounts are enabled.
 
-    No auth required — allows quick access from any screen.
+    Cache strategy: a recent completed `research_reports` row (legacy) AND the
+    dedicated `ticker_report_cache` (24h close-aligned) are both checked here — so
+    the charge fires strictly on a genuine generation, never on a cache hit.
     """
     ticker = ticker.upper().strip()
 
@@ -93,7 +100,7 @@ async def get_ticker_report(
             details={"persona": persona, "valid": sorted(VALID_PERSONAS)},
         )
 
-    # ── Legacy back-compat cache: recent completed research_reports row
+    # ── FREE PATH 1: legacy back-compat cache (recent completed research_reports).
     try:
         cached = await _check_legacy_report_cache(ticker, persona)
         if cached:
@@ -106,21 +113,70 @@ async def get_ticker_report(
             cached = await patch_wall_street_consensus_live(cached, ticker)
             return patch_legacy_price_action(cached)
     except Exception as e:
-        # Cache lookup failures must never break the request — log and
-        # fall through to fresh generation.
+        # Cache lookup failures must never break the request — log and fall through.
         logger.warning(
             f"Legacy cache check failed for {ticker}: "
             f"{type(e).__name__}: {e}"
         )
 
-    # ── Cache miss: generate fresh report (TickerReportService also
-    # checks ticker_report_cache itself before any FMP/Gemini calls).
+    # ── FREE PATH 2: the dedicated 24h ticker_report_cache. Checking it HERE (not
+    #    only inside the service) is what lets us charge strictly on a real
+    #    generation: a hit returns free, a miss is billable. get_cached_report
+    #    never raises (returns None on any error).
+    cached = await get_cached_report(ticker, persona)
+    if cached is not None:
+        logger.info(f"ticker_report_cache HIT for {ticker}/{persona} — free serve")
+        result, err = _validate_report(cached, ticker, persona)
+        return err if err is not None else result
+
+    # ── BILLABLE PATH: cache miss = a fresh AI generation. Charge upfront, then
+    #    refund on ANY non-delivery via the finally below. This endpoint is
+    #    synchronous, so the refund fires at most once per request — the
+    #    non-idempotent refund RPC is safe here without the is_refunded
+    #    compare-and-set the async /research/generate path needs.
+    credit_service = CreditService()
+    try:
+        new_remaining = credit_service.try_charge(
+            user["id"], CreditService.DEEP_RESEARCH_COST
+        )
+    except CreditServiceUnavailable:
+        # Transient Supabase/RPC failure while charging — surface a retryable
+        # SYSTEM_BUSY (never INSUFFICIENT_CREDITS: a DB blip must not tell a
+        # paying user they're broke).
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=409,
+            message="charge_user_credits RPC unavailable (transient)",
+            details={"user_id": user["id"], "ticker": ticker, "step": "credit_charge"},
+        )
+    if new_remaining is None:
+        return make_error_response(
+            ErrorCode.INSUFFICIENT_CREDITS,
+            message=(
+                f"User has fewer than {CreditService.DEEP_RESEARCH_COST} "
+                f"credits remaining"
+            ),
+            details={
+                "user_id": user["id"],
+                "required": CreditService.DEEP_RESEARCH_COST,
+            },
+        )
+
+    delivered = False
     try:
         service = TickerReportService()
-        report = await service.generate_ticker_report(ticker, persona)
+        report = await service.generate_fresh_report(ticker, persona)
+
+        # A malformed report is a non-delivery → the finally refunds (the user
+        # must not pay for a report they can't use).
+        result, err = _validate_report(report, ticker, persona)
+        if err is not None:
+            return err
+        delivered = True
+        return result
     except ValueError as e:
-        # Collector raises ValueError when FMP profile lookup is empty —
-        # that's a "ticker not found" condition, not a server error.
+        # Collector raises ValueError when the FMP profile lookup is empty —
+        # a "ticker not found" condition, not a server error. Refunded in finally.
         logger.info(
             f"Ticker {ticker} rejected at collector (profile lookup empty): {e}"
         )
@@ -136,17 +192,40 @@ async def get_ticker_report(
         return error_response_from_exception(
             e, ticker=ticker, persona=persona, step="report_generation",
         )
+    finally:
+        if not delivered:
+            # Non-delivery: generation error, schema drift, or a client disconnect
+            # / CancelledError (a BaseException that `except` misses, but `finally`
+            # always runs). Refund the charge. This is the ONLY backstop — unlike
+            # /research/generate there is no research_reports row for the
+            # reconciliation sweep — so a failed refund gets a greppable REFUND
+            # LEAK marker for manual correction.
+            refunded = credit_service.refund(
+                user["id"], CreditService.DEEP_RESEARCH_COST
+            )
+            if refunded is None:
+                logger.error(
+                    "REFUND LEAK: charged %s credits to user=%s for a %s ticker "
+                    "report that was not delivered, and the refund ALSO failed — "
+                    "manual credit correction needed",
+                    CreditService.DEEP_RESEARCH_COST, user["id"], ticker,
+                )
 
-    # Validate the dict the service returned. If schema drift sneaks in
-    # we return a structured 502 instead of a Pydantic 500 stack trace.
+
+def _validate_report(report: dict, ticker: str, persona: str):
+    """Validate a report dict against TickerReportResponse.
+
+    Returns (dumped_dict, None) on success, or (None, error_response) on schema
+    drift — so callers return a structured DATA_INCOMPLETE instead of a Pydantic
+    500. model_dump() also strips internal-only fields (e.g. _scoring_inputs).
+    """
     try:
         validated = TickerReportResponse(**report)
-        return validated.model_dump()
     except ValidationError as ve:
         logger.error(
             f"Report schema validation failed for {ticker}/{persona}: {ve}"
         )
-        return make_error_response(
+        return None, make_error_response(
             ErrorCode.DATA_INCOMPLETE,
             message=f"Report shape failed validation: {ve.error_count()} issues",
             details={
@@ -156,6 +235,7 @@ async def get_ticker_report(
                 "issues": ve.error_count(),
             },
         )
+    return validated.model_dump(), None
 
 
 async def _check_legacy_report_cache(ticker: str, persona: str):

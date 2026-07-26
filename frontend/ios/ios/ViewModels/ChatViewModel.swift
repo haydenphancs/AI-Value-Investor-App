@@ -454,7 +454,12 @@ class ChatViewModel: ObservableObject {
             // Only surface the error on the conversation that is still active.
             guard sessionId == currentSessionId else { return }
             isAITyping = false
-            errorMessage = "Failed to get AI response. Please try again."
+            // Route through AppError so backend business codes (CHAT_MESSAGE_TOO_LONG,
+            // CHAT_DAILY_LIMIT_REACHED, rate limits, …) surface their SPECIFIC user_message
+            // instead of a generic string. Without this the typed AppError branches added for
+            // chat are dead — this catch is also the terminus of the stream→non-stream fallback,
+            // so it's where those backend messages actually reach the user.
+            errorMessage = AppError.from(error).message
         }
     }
 

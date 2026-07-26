@@ -221,6 +221,15 @@ class RateLimiter:
     For production, use Redis-based rate limiting.
     """
 
+    # Memory bound. The identifier can be attacker-CONTROLLED (chat buckets off the
+    # per-install X-Guest-Id header → a distinct key per arbitrary header value). Without a
+    # cap, a flood of distinct ids would grow `_requests` unboundedly (memory-exhaustion DoS),
+    # because a key's list is trimmed to the window but the KEY itself is never evicted. When the
+    # map exceeds _MAX_TRACKED we (1) drop idle keys, then (2) FIFO-evict the oldest if still over.
+    # Evicting a key only resets that identifier's window (best-effort limiter, not a hard wall).
+    _MAX_TRACKED = 20_000
+    _STALE_SECONDS = 3600  # a key idle this long is definitely stale for any window we use (<=60s)
+
     def __init__(self):
         self._requests: dict[str, list[datetime]] = {}
 
@@ -260,7 +269,24 @@ class RateLimiter:
 
         # Add current request
         self._requests[identifier].append(now)
+
+        # Keep memory bounded against attacker-controlled identifiers (see class docstring).
+        if len(self._requests) > self._MAX_TRACKED:
+            self._evict(now)
+
         return True
+
+    def _evict(self, now: datetime) -> None:
+        """Bound `_requests`: drop idle keys, then FIFO-evict the oldest if still over cap."""
+        cutoff = now - timedelta(seconds=self._STALE_SECONDS)
+        self._requests = {
+            k: v for k, v in self._requests.items() if v and v[-1] > cutoff
+        }
+        # A burst of DISTINCT fresh ids won't be stale — hard-cap via insertion-order FIFO.
+        overflow = len(self._requests) - self._MAX_TRACKED
+        if overflow > 0:
+            for k in list(self._requests.keys())[:overflow]:
+                del self._requests[k]
 
 
 # Global rate limiter instance

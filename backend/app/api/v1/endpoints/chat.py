@@ -78,6 +78,15 @@ def _record_chat_tokens(user: dict, x_guest_id, tokens) -> None:
         logger.warning("Chat token record failed (%s: %s)", type(e).__name__, e)
 
 
+def _refund_chat_turn(user: dict, x_guest_id) -> None:
+    """Best-effort: release the daily turn claimed for this caller when generation FAILED to
+    produce a persisted answer, so a Gemini outage doesn't drain the daily cap (migration 097)."""
+    try:
+        get_chat_budget_service().refund_turn(chat_identity_key(user, x_guest_id))
+    except Exception as e:  # never let a refund failure change the error response
+        logger.warning("Chat turn refund failed (%s: %s)", type(e).__name__, e)
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 def _row_to_session(row: dict) -> ChatSessionResponse:
@@ -406,6 +415,9 @@ async def send_chat_message(
 
     except Exception as e:
         logger.error(f"Chat response failed: {e}", exc_info=True)
+        # Generation/persist failed after the turn was claimed → hand the turn back so a
+        # Gemini outage doesn't burn the user's daily allowance on answers they never got.
+        _refund_chat_turn(user, x_guest_id)
         raise HTTPException(status_code=500, detail="Failed to generate response")
 
 
@@ -639,6 +651,7 @@ async def stream_chat_message(
                 else:
                     logger.error("Chat stream fallback failed: %s", e2, exc_info=True)
                     code = "INTERNAL_ERROR"
+                _refund_chat_turn(user, x_guest_id)  # no answer produced → hand the turn back
                 yield _sse("error", {
                     "error_code": code,
                     "user_message": "Cay AI couldn't respond right now. Please try again.",
@@ -646,6 +659,7 @@ async def stream_chat_message(
                 return
 
         if not content:
+            _refund_chat_turn(user, x_guest_id)  # no answer produced → hand the turn back
             yield _sse("error", {
                 "error_code": "INTERNAL_ERROR",
                 "user_message": "Cay AI couldn't respond right now. Please try again.",
@@ -747,6 +761,7 @@ async def stream_chat_message(
             _persist_context_snapshot(supabase, session_id, request.context, sdata)
         except Exception as e:
             logger.error("Chat stream persist failed: %s", e, exc_info=True)
+            _refund_chat_turn(user, x_guest_id)  # turn not durably recorded → hand it back
             yield _sse("error", {
                 "error_code": "INTERNAL_ERROR",
                 "user_message": "Your answer was generated but couldn't be saved. Please try again.",

@@ -115,69 +115,154 @@ struct LearnContentView: View {
 
     // MARK: - Learn Tab Content
     private var learnTabContent: some View {
-        ScrollView(showsIndicators: false) {
-            LazyVStack(spacing: AppSpacing.xxl) {
-                // Investor Journey Section (includes journey progress)
-                InvestorJourneySection(
-                    currentLevel: viewModel.currentLevel,
-                    journeyTrack: viewModel.journeyTrack,
-                    onSeeAll: handleSeeAllJourney,
-                    onContinue: handleContinueJourney,
-                    onItemTap: handleJourneyItemTap
+        VStack(spacing: 0) {
+            // Keyword filter over the Money Moves + Books on this dashboard.
+            // Client-side only — distinct from the top "Search or ask Cay AI" bar,
+            // which is global entity/AI search. Shown once there's content to
+            // filter, or while a keyword is active (so it can be cleared).
+            if showContentFilterBar {
+                SearchBar(
+                    text: $viewModel.contentFilter,
+                    placeholder: "Filter Money Moves & books…"
                 )
-                .padding(.top, AppSpacing.md)
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.sm)
+                .padding(.bottom, AppSpacing.sm)
+            }
 
-                // Money Moves Section
-                if !viewModel.moneyMoves.isEmpty {
-                    MoneyMovesSection(
-                        concepts: viewModel.moneyMoves,
-                        onSeeAll: handleSeeAllMoneyMoves,
-                        onConceptTap: handleMoneyMoveTap
-                    )
+            ScrollView(showsIndicators: false) {
+                LazyVStack(spacing: AppSpacing.xxl) {
+                    if viewModel.isFilteringContent {
+                        filteredLearnContent
+                    } else {
+                        fullLearnDashboard
+                    }
+
+                    // Bottom padding for tab bar
+                    Color.clear.frame(height: AppSpacing.xxxl)
                 }
-
-                // AI-Enabled Books Section
-                if !viewModel.books.isEmpty {
-                    AIBooksSection(
-                        books: viewModel.books,
-                        onSeeAll: handleSeeAllBooks,
-                        onBookTap: handleBookTap,
-                        onChatWithBook: handleChatWithBook,
-                        isBookmarked: { bookmarks.isBookmarked($0.title) },
-                        onToggleBookmark: { bookmarks.toggle($0.title) }
-                    )
-                }
-
-                // Community Discussions Section — HIDDEN for now.
-                // The app doesn't have enough active users yet to make a social/community
-                // feed worthwhile, and moderating discussions adds complexity we don't want
-                // to take on at this stage. Intentionally hidden (not removed) so it can be
-                // re-enabled later once there's a real user base — flip the flag below.
-                // All supporting code is intact: viewModel.discussions, the section/row views
-                // (CommunityDiscussionsSection, CommunityDiscussionRow), and the tap handlers.
-                if showCommunityDiscussions, !viewModel.discussions.isEmpty {
-                    CommunityDiscussionsSection(
-                        discussions: viewModel.discussions,
-                        onSeeAll: handleSeeAllDiscussions,
-                        onDiscussionTap: handleDiscussionTap
-                    )
-                }
-
-                // Credits Balance Section
-                if let balance = viewModel.creditBalance {
-                    LearnCreditsSection(
-                        balance: balance,
-                        onAddCredits: handleAddCredits
-                    )
-                }
-
-                // Bottom padding for tab bar
-                Color.clear.frame(height: AppSpacing.xxxl)
+            }
+            .refreshable {
+                await viewModel.refresh()
             }
         }
-        .refreshable {
-            await viewModel.refresh()
+    }
+
+    /// Show the filter field once the dashboard has content, or while a filter is
+    /// active (so an empty result set can still be cleared).
+    private var showContentFilterBar: Bool {
+        !viewModel.moneyMoves.isEmpty || !viewModel.books.isEmpty || viewModel.isFilteringContent
+    }
+
+    // MARK: - Full dashboard (no filter active)
+    @ViewBuilder
+    private var fullLearnDashboard: some View {
+        // Investor Journey Section (includes journey progress)
+        InvestorJourneySection(
+            currentLevel: viewModel.currentLevel,
+            journeyTrack: viewModel.journeyTrack,
+            onSeeAll: handleSeeAllJourney,
+            onContinue: handleContinueJourney,
+            onItemTap: handleJourneyItemTap
+        )
+        .padding(.top, AppSpacing.md)
+
+        // Money Moves Section
+        if !viewModel.moneyMoves.isEmpty {
+            MoneyMovesSection(
+                concepts: viewModel.moneyMoves,
+                onSeeAll: handleSeeAllMoneyMoves,
+                onConceptTap: handleMoneyMoveTap
+            )
         }
+
+        // AI-Enabled Books Section
+        if !viewModel.books.isEmpty {
+            AIBooksSection(
+                books: viewModel.books,
+                onSeeAll: handleSeeAllBooks,
+                onBookTap: handleBookTap,
+                onChatWithBook: handleChatWithBook,
+                isBookmarked: { bookmarks.isBookmarked($0.title) },
+                onToggleBookmark: { bookmarks.toggle($0.title) }
+            )
+        }
+
+        // Community Discussions Section — HIDDEN for now.
+        // The app doesn't have enough active users yet to make a social/community
+        // feed worthwhile, and moderating discussions adds complexity we don't want
+        // to take on at this stage. Intentionally hidden (not removed) so it can be
+        // re-enabled later once there's a real user base — flip the flag below.
+        // All supporting code is intact: viewModel.discussions, the section/row views
+        // (CommunityDiscussionsSection, CommunityDiscussionRow), and the tap handlers.
+        if showCommunityDiscussions, !viewModel.discussions.isEmpty {
+            CommunityDiscussionsSection(
+                discussions: viewModel.discussions,
+                onSeeAll: handleSeeAllDiscussions,
+                onDiscussionTap: handleDiscussionTap
+            )
+        }
+
+        // Credits Balance Section
+        if let balance = viewModel.creditBalance {
+            LearnCreditsSection(
+                balance: balance,
+                onAddCredits: handleAddCredits
+            )
+        }
+    }
+
+    // MARK: - Filtered content (keyword active)
+    //
+    // Only the two list-like sections are filterable. The Journey section is a
+    // progress track (current level only), not a content browser, and Credits
+    // isn't content — both are hidden while filtering.
+    @ViewBuilder
+    private var filteredLearnContent: some View {
+        if viewModel.filteredMoneyMoves.isEmpty && viewModel.filteredBooks.isEmpty {
+            learnFilterEmptyState
+        } else {
+            if !viewModel.filteredMoneyMoves.isEmpty {
+                MoneyMovesSection(
+                    concepts: viewModel.filteredMoneyMoves,
+                    onSeeAll: handleSeeAllMoneyMoves,
+                    onConceptTap: handleMoneyMoveTap
+                )
+                .padding(.top, AppSpacing.md)
+            }
+
+            if !viewModel.filteredBooks.isEmpty {
+                AIBooksSection(
+                    books: viewModel.filteredBooks,
+                    onSeeAll: handleSeeAllBooks,
+                    onBookTap: handleBookTap,
+                    onChatWithBook: handleChatWithBook,
+                    isBookmarked: { bookmarks.isBookmarked($0.title) },
+                    onToggleBookmark: { bookmarks.toggle($0.title) }
+                )
+            }
+        }
+    }
+
+    private var learnFilterEmptyState: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Image(systemName: "magnifyingglass")
+                .font(AppTypography.iconXXL)
+                .foregroundColor(AppColors.textMuted)
+
+            Text("No content matches “\(viewModel.contentFilter)”")
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+                .multilineTextAlignment(.center)
+
+            Text("Try a different word, or clear the filter.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, AppSpacing.xxl)
+        .padding(.horizontal, AppSpacing.xl)
     }
 
     // MARK: - Action Handlers

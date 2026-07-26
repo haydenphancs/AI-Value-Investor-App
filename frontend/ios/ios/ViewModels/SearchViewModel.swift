@@ -15,7 +15,6 @@ class SearchViewModel: ObservableObject {
     @Published var querySuggestions: [SearchQuerySuggestion] = []
     @Published var recentSearches: [SearchResultItem] = []
     @Published var latestNews: [SearchNewsItem] = []
-    @Published var books: [SearchBookItem] = []
     @Published var isLoading: Bool = false
     @Published var error: String?
 
@@ -43,9 +42,10 @@ class SearchViewModel: ObservableObject {
         self.stockRepository = stockRepository ?? .shared
         self.apiClient = apiClient ?? .shared
 
-        // Load static data immediately (suggestions, books stay local for MVP)
+        // Starter questions shown as chips in the empty state → tapped, they seed a
+        // Cay AI conversation (handled in SearchView), turning the empty search into a
+        // lightweight AI discovery hub.
         querySuggestions = SearchQuerySuggestion.sampleData
-        books = SearchBookItem.sampleData
 
         // NO placeholder news. `SearchNewsItem.sampleData` is invented content
         // ("Apple Announces Revolutionary AI Features...", "Bitcoin Reaches New
@@ -247,18 +247,6 @@ class SearchViewModel: ObservableObject {
         searchResults.removeAll()
         searchText = ""
         print("🗑️ SearchViewModel: Cleared all search results")
-    }
-
-    func openNewsItem(_ item: SearchNewsItem) {
-        print("📰 SearchViewModel: Opening news — \(item.headline)")
-    }
-
-    func openBook(_ book: SearchBookItem) {
-        print("📚 SearchViewModel: Opening book — \(book.title)")
-    }
-
-    func chatWithBook(_ book: SearchBookItem) {
-        print("💬 SearchViewModel: Chat with book — \(book.title)")
     }
 
     /// Dismiss error after user acknowledges

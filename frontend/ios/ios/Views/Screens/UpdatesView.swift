@@ -54,6 +54,20 @@ struct UpdatesView: View {
                         onFilterTapped: handleFilterTapped
                     )
 
+                    // Keyword filter over the loaded feed. Distinct from the top
+                    // "Search or ask Cay AI" bar: this only narrows the timeline
+                    // that's already on screen (client-side, composes with the
+                    // source/sentiment filter). Shown once there's something to
+                    // filter, or while a keyword is active (so it can be cleared).
+                    if !viewModel.groupedNews.isEmpty || !viewModel.newsSearchText.isEmpty {
+                        SearchBar(
+                            text: $viewModel.newsSearchText,
+                            placeholder: "Filter news…"
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.bottom, AppSpacing.sm)
+                    }
+
                     // Scrollable Content with sticky section headers.
                     //
                     // ONE LazyVStack that is the ScrollView's DIRECT child, so it
@@ -250,13 +264,13 @@ struct UpdatesView: View {
                 .font(AppTypography.iconXXL)
                 .foregroundColor(AppColors.textMuted)
 
-            Text(viewModel.filterOptions.hasActiveFilters
+            Text(viewModel.hasActiveFeedFilter
                  ? "No stories match your filters"
                  : "No recent stories")
                 .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
 
-            Text(viewModel.filterOptions.hasActiveFilters
+            Text(viewModel.hasActiveFeedFilter
                  ? "Try clearing a filter."
                  : "Check back shortly — the feed refreshes through the day.")
                 .font(AppTypography.bodySmall)

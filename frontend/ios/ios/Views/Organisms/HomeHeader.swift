@@ -13,7 +13,7 @@ struct HomeHeader: View {
 
     var body: some View {
         GlobalHeaderView(
-            searchPlaceholder: "Search ticker or ask AI...",
+            searchPlaceholder: "Search or ask Cay AI...",
             onSearchTapped: onSearchTapped,
             onProfileTapped: onProfileTapped
         )

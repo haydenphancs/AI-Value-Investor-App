@@ -2,7 +2,8 @@
 //  SearchView.swift
 //  ios
 //
-//  Search screen combining all search-related organisms
+//  Universal search screen: ticker/company lookup + "Ask Cay AI".
+//  Opened from the Home, Updates, and Wiser top search bars.
 //
 
 import SwiftUI
@@ -10,8 +11,17 @@ import SwiftUI
 struct SearchView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel = SearchViewModel()
-    @ObservedObject private var bookmarks = BookmarkStore.shared
+    /// Caller-owned chat VM (the established pattern — see TickerDetailView). A fresh
+    /// SearchView is created per present, so a fresh conversation per open is correct.
+    @StateObject private var chatViewModel = ChatViewModel()
+    @State private var showAIChat = false
     @State private var selectedNewsArticle: NewsArticle?
+
+    /// The current query with surrounding whitespace stripped. Drives the "Ask Cay AI"
+    /// row's visibility so an empty / spaces-only field never seeds a chat.
+    private var trimmedQuery: String {
+        viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         ZStack {
@@ -38,7 +48,13 @@ struct SearchView: View {
                             errorBanner(message: error)
                         }
 
-                        // Recent Searches Section
+                        // Ask Cay AI — the primary action whenever the user has typed
+                        // something. Routes the query to the real chat (not ticker search).
+                        if !trimmedQuery.isEmpty {
+                            askCayAIRow(query: trimmedQuery)
+                        }
+
+                        // Recent Searches Section (live ticker/company results)
                         RecentSearchesSection(
                             items: viewModel.recentSearches,
                             onClearAll: handleClearAll,
@@ -51,14 +67,6 @@ struct SearchView: View {
                             items: viewModel.latestNews,
                             onItemTapped: handleNewsItemTapped,
                             onReadMore: handleNewsReadMore
-                        )
-
-                        // AI-Enabled Books Section
-                        SearchBooksSection(
-                            books: viewModel.books,
-                            onChatWithBook: handleChatWithBook,
-                            isBookmarked: { bookmarks.isBookmarked($0.title) },
-                            onToggleBookmark: { bookmarks.toggle($0.title) }
                         )
 
                         // Bottom spacing for safe area
@@ -80,7 +88,6 @@ struct SearchView: View {
         .navigationBarHidden(true)
         .task {
             await viewModel.loadInitialData()
-            await bookmarks.hydrate()
         }
         .gesture(
             DragGesture()
@@ -102,6 +109,46 @@ struct SearchView: View {
             }
             .preferredColorScheme(.dark)
         }
+        // Item-based cover (via .aiChatCover) presents reliably even though SearchView is
+        // itself presented as a sheet/cover from the tabs.
+        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
+    }
+
+    // MARK: - Ask Cay AI Row
+    private func askCayAIRow(query: String) -> some View {
+        Button {
+            handleAskCayAI(query)
+        } label: {
+            HStack(spacing: AppSpacing.md) {
+                Image(systemName: "sparkles")
+                    .font(AppTypography.iconMedium)
+                    .foregroundColor(AppColors.primaryBlue)
+                    .frame(width: 40, height: 40)
+                    .background(AppColors.primaryBlue.opacity(0.12))
+                    .clipShape(Circle())
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Ask Cay AI")
+                        .font(AppTypography.body).fontWeight(.semibold)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text("“\(query)”")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textMuted)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Image(systemName: "arrow.up.right")
+                    .font(AppTypography.caption).fontWeight(.semibold)
+                    .foregroundColor(AppColors.textMuted)
+            }
+            .padding(AppSpacing.md)
+            .background(AppColors.cardBackground)
+            .cornerRadius(AppCornerRadius.medium)
+            .padding(.horizontal, AppSpacing.lg)
+        }
+        .buttonStyle(PlainButtonStyle())
     }
 
     // MARK: - Error Banner
@@ -139,8 +186,20 @@ struct SearchView: View {
         viewModel.performSearch()
     }
 
+    /// Seed a fresh Cay AI conversation with the query and present the chat cover.
+    /// `ChatViewModel.startNewConversation` has its own one-seed-in-flight guard, so a
+    /// rapid double-tap can't create two sessions.
+    private func handleAskCayAI(_ query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        chatViewModel.startNewConversation(firstMessage: trimmed, contextType: .none)
+        showAIChat = true
+    }
+
+    /// Suggestion chips are starter questions ("What is P/E ratio?", "Why did AAPL move
+    /// today?") — route them straight to Cay AI, not to ticker search.
     private func handleSuggestionTapped(_ suggestion: SearchQuerySuggestion) {
-        viewModel.selectSuggestion(suggestion)
+        handleAskCayAI(suggestion.text)
     }
 
     private func handleClearAll() {
@@ -165,127 +224,6 @@ struct SearchView: View {
 
     private func handleNewsReadMore(_ item: SearchNewsItem) {
         handleNewsItemTapped(item)
-    }
-
-    private func handleChatWithBook(_ book: SearchBookItem) {
-        viewModel.chatWithBook(book)
-    }
-}
-
-// MARK: - SearchContentView (For use in NavigationStack)
-struct SearchContentView: View {
-    @StateObject private var viewModel = SearchViewModel()
-    @ObservedObject private var bookmarks = BookmarkStore.shared
-    @State private var selectedNewsArticle: NewsArticle?
-    var onDismiss: (() -> Void)?
-
-    var body: some View {
-        ZStack {
-            // Background
-            AppColors.background
-                .ignoresSafeArea()
-
-            // Main Content
-            VStack(spacing: 0) {
-                // Header with search bar
-                SearchHeader(
-                    searchText: $viewModel.searchText,
-                    suggestions: viewModel.querySuggestions,
-                    onBackTapped: { onDismiss?() },
-                    onSearchSubmit: { viewModel.performSearch() },
-                    onSuggestionTapped: { viewModel.selectSuggestion($0) }
-                )
-
-                // Scrollable Content
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.xxl) {
-                        // Error banner (if any)
-                        if let error = viewModel.error {
-                            HStack(spacing: AppSpacing.sm) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundColor(.yellow)
-                                Text(error)
-                                    .font(AppTypography.bodySmall)
-                                    .foregroundColor(AppColors.textPrimary)
-                                Spacer()
-                                Button { viewModel.dismissError() } label: {
-                                    Image(systemName: "xmark")
-                                        .font(AppTypography.caption)
-                                        .foregroundColor(AppColors.textMuted)
-                                }
-                            }
-                            .padding(AppSpacing.md)
-                            .background(AppColors.cardBackground)
-                            .cornerRadius(AppCornerRadius.medium)
-                            .padding(.horizontal, AppSpacing.lg)
-                        }
-
-                        // Recent Searches Section
-                        RecentSearchesSection(
-                            items: viewModel.recentSearches,
-                            onClearAll: { viewModel.clearAllRecentSearches() },
-                            onItemTapped: { viewModel.selectSearchResult($0) },
-                            onFollowTapped: { viewModel.toggleFollow(for: $0) }
-                        )
-
-                        // Latest News Section
-                        SearchLatestNewsSection(
-                            items: viewModel.latestNews,
-                            onItemTapped: { item in
-                                selectedNewsArticle = item.toNewsArticle()
-                            },
-                            onReadMore: { item in
-                                selectedNewsArticle = item.toNewsArticle()
-                            }
-                        )
-
-                        // AI-Enabled Books Section
-                        SearchBooksSection(
-                            books: viewModel.books,
-                            onChatWithBook: { viewModel.chatWithBook($0) },
-                            isBookmarked: { bookmarks.isBookmarked($0.title) },
-                            onToggleBookmark: { bookmarks.toggle($0.title) }
-                        )
-
-                        // Bottom spacing
-                        Spacer()
-                            .frame(height: AppSpacing.xxxl)
-                    }
-                    .padding(.top, AppSpacing.md)
-                }
-                .refreshable {
-                    await viewModel.refresh()
-                }
-            }
-
-            // Loading overlay
-            if viewModel.isLoading {
-                LoadingOverlay()
-            }
-        }
-        .task {
-            await viewModel.loadInitialData()
-            await bookmarks.hydrate()
-        }
-        .gesture(
-            DragGesture()
-                .onEnded { gesture in
-                    if gesture.translation.width > 100 {
-                        onDismiss?()
-                    }
-                }
-        )
-        .fullScreenCover(item: $selectedNewsArticle) { article in
-            NewsDetailView(article: article)
-                .preferredColorScheme(.dark)
-        }
-        .fullScreenCover(item: $viewModel.selectedSearchSelection) { selection in
-            NavigationStack {
-                AssetDetailRouter(selection: selection)
-                    .navigationBarHidden(true)
-            }
-            .preferredColorScheme(.dark)
-        }
     }
 }
 

@@ -20,7 +20,7 @@ struct LearnHeader: View {
         VStack(spacing: AppSpacing.lg) {
             // Standardized global header row
             GlobalHeaderView(
-                searchPlaceholder: "Search topics or ask AI...",
+                searchPlaceholder: "Search or ask Cay AI...",
                 onSearchTapped: onSearchTapped,
                 onProfileTapped: onProfileTapped
             )

@@ -173,9 +173,21 @@ struct PerformanceBenchmarkRow: View {
 
                     Spacer()
 
-                    Text(summary.formattedAlltimeBenchmark)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(summary.formattedAlltimeBenchmark)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                        // The benchmark's all-time CAGR is aligned to the ASSET's start
+                        // date (see stock/crypto services: "benchmark aligned to the
+                        // start date"), i.e. measured over the same window — so mirror
+                        // the asset's "Since" here rather than the benchmark's own
+                        // inception (which would mislabel this number).
+                        if let since = summary.alltimeSinceDate {
+                            Text("Since \(since)")
+                                .font(.system(size: 10))
+                                .foregroundColor(AppColors.textMuted.opacity(0.7))
+                        }
+                    }
                 }
             }
 

@@ -173,9 +173,11 @@ class ResearchReportListItem(BaseModel):
     created_at: str
     completed_at: Optional[str] = None
     user_rating: Optional[int] = None
-    # Credit lifecycle (migration 041): drives the iOS "[Refunded]"
-    # chip on failed cards.
+    # Credit lifecycle (migration 041): drives the iOS "[Refunded]" chip on failed cards.
+    # credits_charged is the amount ACTUALLY debited for THIS row (5 pre-migration, 20 now),
+    # so the refund chip shows the real number instead of a hardcoded constant.
     is_refunded: bool = False
+    credits_charged: int = 20
     # Detailed-analysis PDF readiness (migration 064): pending|ready|failed.
     pdf_status: Optional[str] = None
 

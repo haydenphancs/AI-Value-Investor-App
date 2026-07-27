@@ -141,7 +141,7 @@ struct CreditsPricingSheet: View {
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.bullish)
                     } else {
-                        Text("\(pack.credits / 5) reports")
+                        Text("\(pack.credits / AnalysisCost.standard.credits) reports")
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textSecondary)
                     }

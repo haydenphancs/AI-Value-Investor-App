@@ -8,8 +8,13 @@ from supabase import Client
 import logging
 
 from app.database import get_supabase
-from app.dependencies import get_current_user, get_current_user_or_guest  # TEMP: guest fallback
+from app.dependencies import (
+    get_current_user,
+    get_current_user_or_guest,  # TEMP: guest fallback
+    GUEST_USER_ID,
+)
 from app.schemas.user import UserResponse, UserCreditsResponse, UpdateProfileRequest
+from app.services.credit_service import CreditService, CreditServiceUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,18 @@ async def get_user_credits(
     supabase: Client = Depends(get_supabase),
 ):
     """Get current user's credit balance from user_credits table."""
+    # Roll the monthly allocation BEFORE reading so a returning user in a NEW month sees their
+    # fresh balance. The lazy reset otherwise only fires on a spend (chat/report), so a user who
+    # depleted last month and doesn't chat would see a stale remaining=0 here AND the report
+    # Generate button would stay disabled. Authenticated non-guest only (ensure_credit_period
+    # skips the guest sentinel). Best-effort: a transient RPC blip falls through to the raw read.
+    if user["id"] != GUEST_USER_ID:
+        try:
+            CreditService().ensure_period(user["id"])
+        except CreditServiceUnavailable:
+            logger.warning(
+                "ensure_period unavailable for user=%s — serving raw balance", user["id"]
+            )
     try:
         result = supabase.table("user_credits").select(
             "total, used, remaining, resets_at"

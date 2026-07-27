@@ -221,8 +221,21 @@ async def generate_research_report(
         "is_refunded": False,
     }
 
-    result = supabase.table("research_reports").insert(report_data).execute()
-    if not result.data:
+    try:
+        result = supabase.table("research_reports").insert(report_data).execute()
+        insert_ok = bool(result.data)
+    except Exception as e:
+        # supabase-py raises APIError on a non-2xx insert (RLS / constraint / PostgREST blip)
+        # instead of returning empty .data — treat "insert raised" IDENTICALLY to "no rows" so
+        # the refund backstop below fires (otherwise the precharge leaks with no research_reports
+        # row for the reconciliation sweep to recover, and the raw exception breaks the contract).
+        logger.error(
+            "research_reports insert raised for %s: %s: %s",
+            ticker, type(e).__name__, e, exc_info=True,
+        )
+        result = None
+        insert_ok = False
+    if not insert_ok:
         # DB insert failed AFTER we charged credits — refund immediately so the
         # user isn't out the charged credits for a row that never existed. There
         # is NO research_reports row here for the reconciliation sweep to catch,
@@ -533,7 +546,7 @@ async def get_my_reports(
         "id, ticker, company_name, industry, investor_persona, status, title, "
         "executive_summary, overall_score, fair_value_estimate, progress, "
         "current_step, created_at, completed_at, user_rating, is_refunded, "
-        "pdf_status"
+        "credits_charged, pdf_status"
     ).eq("user_id", user["id"]).neq(
         "status", "deleted"
     ).order(

@@ -416,6 +416,17 @@ async def send_chat_message(
         # secret / internal-schema leaks, log any advice-boundary drift, then GUARANTEE
         # the 'educational, not financial advice' line in code (not prompt-hope).
         clean_answer, enforced = enforce_answer(ai_result.get("content") or "")
+        if not clean_answer.strip():
+            # Empty generation → non-delivery. Don't persist a disclaimer-only row or bill
+            # it; the finally refunds the turn (mirrors the stream path's empty-content guard).
+            logger.warning(
+                "Chat (send) empty generation for session=%s — refunding turn", session_id
+            )
+            return make_error_response(
+                ErrorCode.GEMINI_UNAVAILABLE,
+                message="empty chat generation",
+                user_message="Cay AI couldn't respond right now. Please try again.",
+            )
         advice_flags = scan_answer(clean_answer)
         if enforced or advice_flags:
             sec_logger.warning(
@@ -490,9 +501,18 @@ async def send_chat_message(
         if current_count == 0 and is_generic_title and first_question:
             update_payload["title"] = first_question[:80]
 
-        supabase.table("chat_sessions").update(update_payload).eq(
-            "id", session_id
-        ).execute()
+        # Best-effort post-delivery write: the turn is already persisted + charged, so a
+        # failure here must NOT surface as a retryable 500 (a client retry would re-charge +
+        # duplicate the turn). Guard it like the snapshot / token writes below.
+        try:
+            supabase.table("chat_sessions").update(update_payload).eq(
+                "id", session_id
+            ).execute()
+        except Exception as e:
+            logger.warning(
+                "Chat (send) session-metadata update failed for %s (%s: %s) — ignoring",
+                session_id, type(e).__name__, e,
+            )
 
         # Persist the on-screen snapshot (best-effort, guarded) so a later reopen re-grounds.
         _persist_context_snapshot(supabase, session_id, request.context, session.data)
@@ -842,16 +862,29 @@ async def stream_chat_message(
                 raise RuntimeError("assistant row missing from chat_messages insert result")
 
             # Durably persisted → delivered. The finally backstop must not refund past this
-            # point (a disconnect during the best-effort suggestions step is not a failed turn).
+            # point (a disconnect during the best-effort steps below is not a failed turn).
             delivered = True
             # Zero Gemini cost (deep-dive cache HIT via the fallback) → refund the charge.
             # `== 0` (not falsy) so a normal stream (tokens_used=None) is never refunded.
             if tokens_used == 0:
                 quota.refund_once("chat_cache_hit")
+        except Exception as e:
+            logger.error("Chat stream persist failed: %s", e, exc_info=True)
+            # ONLY the delivery-critical insert is in this try, so a failure here means the turn
+            # was NOT durably recorded. Guard on `delivered` anyway so this can never hand back a
+            # charge for an already-persisted turn.
+            if not delivered:
+                quota.refund_once("chat_stream_persist_failed")  # not recorded → hand it back
+            yield _sse("error", {
+                "error_code": "INTERNAL_ERROR",
+                "user_message": "Your answer was generated but couldn't be saved. Please try again.",
+            })
+            return
 
-            # Session metadata + first-question auto-title (mirrors send_chat_message). message_count
-            # and last_message_at are maintained by the trg_chat_message_count AFTER-INSERT trigger, so
-            # we don't set them here (avoids double-counting the trigger + the concurrent-send race).
+        # Best-effort post-delivery writes (turn already persisted + charged): session metadata +
+        # first-question auto-title + the on-screen snapshot. A failure here must NEVER refund or
+        # error the stream — the user already has the answer (mirrors send_chat_message).
+        try:
             current_count = sdata.get("message_count", 0)
             update_payload: dict = {
                 "preview_message": content[:100],
@@ -867,17 +900,12 @@ async def stream_chat_message(
             supabase.table("chat_sessions").update(update_payload).eq(
                 "id", session_id
             ).execute()
-
-            # Persist the on-screen snapshot (best-effort, guarded) so a later reopen re-grounds.
             _persist_context_snapshot(supabase, session_id, request.context, sdata)
         except Exception as e:
-            logger.error("Chat stream persist failed: %s", e, exc_info=True)
-            quota.refund_once("chat_stream_persist_failed")  # not durably recorded → hand it back
-            yield _sse("error", {
-                "error_code": "INTERNAL_ERROR",
-                "user_message": "Your answer was generated but couldn't be saved. Please try again.",
-            })
-            return
+            logger.warning(
+                "Chat stream post-delivery metadata write failed for %s (%s: %s) — ignoring",
+                session_id, type(e).__name__, e,
+            )
 
         # Best-effort daily token accounting (streaming rarely reports usage → char estimate).
         _record_chat_tokens(user, x_guest_id, tokens_used or (len(content) // 4))

@@ -42,11 +42,11 @@ struct ReportCard: View {
                         if report.status == .failed && report.isRefunded {
                             // Mirror the "ORCL • Software - Infrastructure"
                             // subtitle styling so the refund note reads as
-                            // metadata, not a second status pill. Amount is
-                            // sourced from the same constant the charger
-                            // reads (AnalysisCost.standard), so retry will
-                            // re-debit the matching number.
-                            Text("Refunded \(AnalysisCost.standard.credits) credits")
+                            // metadata, not a second status pill. Show the amount
+                            // ACTUALLY charged for this row (credits_charged) — a
+                            // pre-migration row charged 5 must not read "20". Fall
+                            // back to the current cost only if the field is absent.
+                            Text("Refunded \(report.creditsCharged ?? AnalysisCost.standard.credits) credits")
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textSecondary)
                         }

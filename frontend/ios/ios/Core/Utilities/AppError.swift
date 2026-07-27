@@ -96,6 +96,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .forbidden:
             return "You don't have permission to perform this action."
         case .insufficientCredits(let required, let available):
+            // required <= 0 → the amount/balance wasn't plumbed (the backend
+            // INSUFFICIENT_CREDITS path carries no required/available on businessError):
+            // show a generic upgrade message instead of a nonsensical "requires 0 credits".
+            if required <= 0 {
+                return "You don't have enough credits. Upgrade your tier or wait for the monthly reset."
+            }
             return "This action requires \(required) credits, but you only have \(available). Upgrade your plan to get more."
         case .notFound(let resource):
             return "The requested \(resource) could not be found."
@@ -201,9 +207,15 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .rateLimited(let retryAfter):
             return .rateLimited(retryAfter: retryAfter)
         case .businessError(let code, let message):
-            // Map backend error codes
-            if code.starts(with: "BIZ_2001") || code.starts(with: "BIZ_2002") {
-                return .insufficientCredits(required: 1, available: 0)
+            // Map backend error codes. The backend emits the flat code INSUFFICIENT_CREDITS
+            // (HTTP 402); the legacy BIZ_2001/2002 prefixes are never emitted (kept for
+            // back-compat only). required/available aren't carried on businessError, so this
+            // uses the generic-upgrade branch of .insufficientCredits (required==0 → no
+            // "requires 0 credits" copy) while still giving the "Insufficient Credits" title
+            // + "Upgrade" action instead of a generic .apiError.
+            if code == "INSUFFICIENT_CREDITS"
+                || code.starts(with: "BIZ_2001") || code.starts(with: "BIZ_2002") {
+                return .insufficientCredits(required: 0, available: 0)
             }
             // Capacity / back-pressure codes (HTTP 409). SYSTEM_BUSY = the whole
             // service is at capacity; TOO_MANY_CONCURRENT_REPORTS = this user's

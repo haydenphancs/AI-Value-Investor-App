@@ -127,13 +127,19 @@ LENGTH: 2-4 sentences, total under 90 words."""
                 prompt=prompt,
                 system_instruction=persona.system_prompt,
             )
-            return (result.get("text") or "").strip()
         except Exception as e:
+            # RAISE (don't swallow into a polite sentinel): the /report/chat endpoint charges
+            # CHAT_CREDIT_COST upfront and refunds on any raised exception. Returning a sentinel
+            # string would set delivered=True and BILL the user for a non-answer.
             logger.error(
-                f"Chat generation failed for {ticker}: "
-                f"{type(e).__name__}: {e}"
+                f"Chat generation failed for {ticker}: {type(e).__name__}: {e}"
             )
-            return f"I'm unable to analyze {ticker} right now. Please try again."
+            raise
+        reply = (result.get("text") or "").strip()
+        if not reply:
+            # An empty generation is also a non-delivery → raise so the endpoint refunds.
+            raise RuntimeError(f"empty chat generation for {ticker}")
+        return reply
 
     # ── Main entry point ──────────────────────────────────────────────
 

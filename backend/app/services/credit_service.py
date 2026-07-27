@@ -218,9 +218,17 @@ class CreditService:
                 },
             ).execute()
         except Exception as e:
+            # We cannot distinguish "never committed" from "committed then the HTTP response was
+            # lost" — spend_credits is not idempotent and there is no client idempotency key, so a
+            # committed-but-lost charge cannot be auto-reversed here. Log it DISTINCTLY (POSSIBLE
+            # LOST CHARGE) so the rare case is greppable + manually correctable via the
+            # credit_transactions ledger; the caller surfaces a retryable 409 (never 402). A true
+            # exactly-once fix requires a client-supplied idempotency key (tracked follow-up).
             logger.error(
-                f"spend_credits RPC failed for user={user_id} amount={amount}: "
-                f"{type(e).__name__}: {e}"
+                "POSSIBLE LOST CHARGE: spend_credits RPC failed for user=%s amount=%s "
+                "reason=%s ref_id=%s (%s: %s) — if it committed pre-failure the debit shows in "
+                "credit_transactions with no delivered action; reconcile manually",
+                user_id, amount, reason, ref_id, type(e).__name__, e,
             )
             raise CreditServiceUnavailable(
                 f"spend_credits RPC failed for user={user_id}"

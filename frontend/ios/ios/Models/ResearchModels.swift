@@ -420,6 +420,10 @@ struct AnalysisReport: Identifiable, Hashable {
     let ratingLabel: String? // e.g. "Strong Quality Business", only for ready
     let date: Date
     let isRefunded: Bool
+    /// Credits ACTUALLY charged for THIS row (5 pre-migration, 20 now). Drives the refund
+    /// chip's amount so an old row shows its real refund, not a hardcoded constant. Optional
+    /// for decode resilience + mock/UI-only reports (the view falls back to the current cost).
+    var creditsCharged: Int? = nil
 
     var formattedDate: String {
         ResearchFormatters.mediumDateFormatter.string(from: date)
@@ -449,7 +453,8 @@ struct AnalysisReport: Identifiable, Hashable {
             rating: rating,
             ratingLabel: ratingLabel,
             date: date,
-            isRefunded: isRefunded
+            isRefunded: isRefunded,
+            creditsCharged: creditsCharged
         )
     }
 
@@ -677,7 +682,8 @@ extension AnalysisReport {
             rating: item.overallScore,
             ratingLabel: ratingLabel,
             date: date,
-            isRefunded: item.isRefunded ?? false
+            isRefunded: item.isRefunded ?? false,
+            creditsCharged: item.creditsCharged
         )
     }
 }

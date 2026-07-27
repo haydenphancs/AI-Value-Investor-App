@@ -498,6 +498,7 @@ struct BackendReportListItem: Sendable {
     let completedAt: String?
     let userRating: Int?
     let isRefunded: Bool?
+    let creditsCharged: Int?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -516,6 +517,7 @@ struct BackendReportListItem: Sendable {
         case completedAt = "completed_at"
         case userRating = "user_rating"
         case isRefunded = "is_refunded"
+        case creditsCharged = "credits_charged"
     }
 }
 
@@ -539,6 +541,7 @@ extension BackendReportListItem: Decodable {
         self.completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
         self.userRating = try container.decodeIfPresent(Int.self, forKey: .userRating)
         self.isRefunded = try container.decodeIfPresent(Bool.self, forKey: .isRefunded)
+        self.creditsCharged = try container.decodeIfPresent(Int.self, forKey: .creditsCharged)
     }
 }
 

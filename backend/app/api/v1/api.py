@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     admin,
     auth,
     users,
+    billing,
     stocks,
     watchlist,
     news,
@@ -32,6 +33,7 @@ api_router = APIRouter()
 api_router.include_router(home.router, prefix="/home", tags=["Home"])
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
+api_router.include_router(billing.router, prefix="/billing", tags=["Billing"])
 api_router.include_router(stocks.router, prefix="/stocks", tags=["Stocks"])
 api_router.include_router(ticker_report.router, prefix="/stocks", tags=["Ticker Report"])
 api_router.include_router(indices.router, prefix="/indices", tags=["Indices"])

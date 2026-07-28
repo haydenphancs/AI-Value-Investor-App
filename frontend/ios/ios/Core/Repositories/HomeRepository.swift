@@ -64,13 +64,18 @@ final class HomeRepository: HomeRepositoryProtocol {
 
     private static func mapPulse(_ dto: MarketPulseItemDTO) -> MarketPulseItem {
         let type = MarketTickerType(rawValue: dto.type) ?? .stock
+        // Collapse signed zero before BOTH the colour test and the format: `-0.0`
+        // satisfies `>= 0` (so the tile paints green) while "%+.2f" preserves the
+        // sign bit and prints "-0.00%". The backend now normalises too; this keeps
+        // the client correct against any older/other producer.
+        let change = dto.changePercent == 0 ? 0 : dto.changePercent
         return MarketPulseItem(
             name: dto.name,
             symbol: dto.symbol,
             type: type,
             priceText: formatPrice(dto.price, type: type),
-            changeText: formatPercent(dto.changePercent),
-            isPositive: dto.changePercent >= 0,
+            changeText: formatPercent(change),
+            isPositive: change >= 0,
             // Backend sends the latest-session intraday closes oldest-first, and
             // `previousClose` is the dashed reference line — so the card colours
             // green ABOVE / red BELOW it, exactly like the Holdings cards.

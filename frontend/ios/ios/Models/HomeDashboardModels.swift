@@ -21,7 +21,12 @@ import SwiftUI
 /// One tile in the horizontally-scrolling "Markets Open" pulse strip
 /// (S&P 500, Nasdaq, Bitcoin, …).
 struct MarketPulseItem: Identifiable, Hashable {
-    let id = UUID()
+    /// Stable identity = the symbol (unique within the strip). A per-instance
+    /// `UUID()` was re-minted every time the DTO was mapped, so the horizontal
+    /// `ForEach` saw an all-new id set on each refresh and tore down/rebuilt all
+    /// six cards — harmless when the screen loaded once, visible churn now that
+    /// it auto-refreshes. Mirrors `TrackedAsset.id`, which was fixed the same way.
+    var id: String { symbol }
     let name: String
     let symbol: String
     let type: MarketTickerType

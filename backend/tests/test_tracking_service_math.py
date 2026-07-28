@@ -11,8 +11,12 @@ Run: cd backend && ./venv/bin/pytest tests/test_tracking_service_math.py -x
 
 from __future__ import annotations
 
+import json
+import math
+
 import pytest
 
+from app.schemas.tracking import TrackingFeedResponse
 from app.services import tracking_service as tsvc
 from app.services.tracking_service import (
     TrackingService,
@@ -262,3 +266,307 @@ async def test_change_percent_reads_singular_key_for_stock(monkeypatch):
     feed = await svc.get_tracking_feed("u-stock")
 
     assert feed.assets[0].change_percent == pytest.approx(-2.45)
+
+
+# ═══════════ watchlist read failure must NOT look like an empty feed ══════
+# Regression: a Supabase read error was caught and turned into
+# `TrackingFeedResponse()` — HTTP 200 with zero assets, byte-identical to a
+# genuinely empty watchlist. iOS treats that as a successful load and purges
+# every portfolio ticker missing from the feed, so the client permanently
+# deleted every ticker AND every hand-entered shares/market_value from every
+# portfolio, on all devices, on one transient blip.
+
+
+class _ExplodingTable:
+    def select(self, *a, **k): return self
+    def eq(self, *a, **k): return self
+    def order(self, *a, **k): return self
+    def in_(self, *a, **k): return self
+    def gte(self, *a, **k): return self
+    def limit(self, *a, **k): return self
+
+    def execute(self):
+        raise RuntimeError("PostgREST 503: connection reset by peer")
+
+
+class _ExplodingSupabase:
+    def table(self, name):
+        return _ExplodingTable()
+
+
+@pytest.mark.asyncio
+async def test_watchlist_read_failure_raises_instead_of_empty_feed(monkeypatch):
+    tsvc._feed_cache.clear()
+    monkeypatch.setattr(tsvc, "get_supabase", lambda: _ExplodingSupabase())
+
+    svc = TrackingService()
+    with pytest.raises(tsvc.WatchlistUnavailableError):
+        await svc.get_tracking_feed("u-boom")
+
+    # And the failure must not be cached — the next request has to retry.
+    assert "u-boom" not in tsvc._feed_cache
+
+
+def test_watchlist_unavailable_maps_to_a_dedicated_error_code():
+    """The endpoint must answer 503 WATCHLIST_UNAVAILABLE, not a generic 502.
+
+    Pinned because `classify_exception` falls through to FMP_UNAVAILABLE for
+    anything whose message contains "timeout" — which a PostgREST read timeout
+    does — and that would point the user (and the logs) at the wrong system.
+    """
+    from app.api.error_response import ErrorCode, classify_exception
+
+    code, status = classify_exception(
+        tsvc.WatchlistUnavailableError("read timeout talking to postgrest")
+    )
+    assert code is ErrorCode.WATCHLIST_UNAVAILABLE
+    assert status == 503
+
+
+def test_invalidate_feed_cache_drops_only_that_user():
+    tsvc._feed_cache.clear()
+    tsvc._feed_cache_set("u-a", TrackingFeedResponse())
+    tsvc._feed_cache_set("u-b", TrackingFeedResponse())
+
+    tsvc.invalidate_feed_cache("u-a")
+
+    # Without this, a star-add followed by the immediate refresh read the
+    # PRE-ADD cached feed, so the new ticker looked like an orphan and the
+    # client's purge deleted it again — the add silently undid itself.
+    assert tsvc._feed_cache_get("u-a") is None
+    assert tsvc._feed_cache_get("u-b") is not None
+    tsvc.invalidate_feed_cache("u-never-cached")  # no-op, must not raise
+
+
+# ═══════════════ non-finite quote cells must not 500 the feed ═════════════
+# FastAPI renders via Starlette's JSONResponse → json.dumps(..., allow_nan=False),
+# so ONE NaN on ONE ticker used to raise ValueError and blank the entire Assets
+# tab. A bare float() could not catch it: float("nan") is truthy (survives the
+# `or` fallbacks) and round(nan, 2) never raises (so the per-row except is dead).
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.asyncio
+async def test_non_finite_quote_field_never_reaches_the_wire(monkeypatch, bad):
+    tsvc._feed_cache.clear()
+    tsvc._sparkline_cache.clear()
+
+    watchlist = [
+        {"ticker": "BAD", "company_name": "Bad Co"},
+        {"ticker": "ORCL", "company_name": "Oracle"},
+    ]
+    quotes = {
+        "BAD": {
+            "symbol": "BAD", "price": bad, "changePercentage": bad,
+            "previousClose": bad, "marketCap": bad,
+        },
+        "ORCL": {
+            "symbol": "ORCL", "price": 144.27, "changePercentage": -2.45,
+            "previousClose": 147.9, "marketCap": 4.1e11,
+        },
+    }
+    monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return []
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+
+    svc = TrackingService()
+    svc.fmp = _QuoteOnlyFMP(quotes)
+    feed = await svc.get_tracking_feed("u-nan")
+
+    # This is the exact mechanism that 500s in production.
+    json.dumps(feed.model_dump(), allow_nan=False)
+
+    assert len(feed.assets) == 2                      # bad row degrades, not drops
+    healthy = next(a for a in feed.assets if a.ticker == "ORCL")
+    assert healthy.price == pytest.approx(144.27)     # untouched by its neighbour
+    assert healthy.change_percent == pytest.approx(-2.45)
+    bad_row = next(a for a in feed.assets if a.ticker == "BAD")
+    assert math.isfinite(bad_row.price) and math.isfinite(bad_row.change_percent)
+    assert bad_row.previous_close is None             # honest null, not a fake number
+    assert bad_row.market_cap is None
+
+
+@pytest.mark.asyncio
+async def test_non_finite_stored_holding_fields_are_dropped(monkeypatch):
+    """`shares` / `market_value` come from Supabase, not FMP — same allow_nan risk."""
+    tsvc._feed_cache.clear()
+    tsvc._sparkline_cache.clear()
+
+    watchlist = [{
+        "ticker": "ORCL", "company_name": "Oracle",
+        "shares": float("nan"), "market_value": float("inf"),
+    }]
+    quotes = {"ORCL": {"symbol": "ORCL", "price": 144.27, "changePercentage": 1.0}}
+    monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return []
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+
+    svc = TrackingService()
+    svc.fmp = _QuoteOnlyFMP(quotes)
+    feed = await svc.get_tracking_feed("u-holding-nan")
+
+    json.dumps(feed.model_dump(), allow_nan=False)
+    assert feed.assets[0].shares is None
+    assert feed.assets[0].market_value is None
+
+
+# ══════════════════════════ signed zero ═══════════════════════════════════
+
+
+@pytest.mark.parametrize("raw", [-0.001, -0.004, -0.0])
+@pytest.mark.asyncio
+async def test_barely_negative_change_never_serializes_as_signed_zero(monkeypatch, raw):
+    """round(-0.001, 2) is -0.0, and iOS reads `-0.0 >= 0` as TRUE (green up
+    arrow) while formatting it as "-0.00" — the row rendered "+-0.00%"."""
+    tsvc._feed_cache.clear()
+    tsvc._sparkline_cache.clear()
+
+    watchlist = [{"ticker": "ORCL", "company_name": "Oracle"}]
+    quotes = {"ORCL": {"symbol": "ORCL", "price": 144.27, "changePercentage": raw}}
+    monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return []
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+
+    svc = TrackingService()
+    svc.fmp = _QuoteOnlyFMP(quotes)
+    feed = await svc.get_tracking_feed(f"u-signed-{raw}")
+
+    change = feed.assets[0].change_percent
+    assert change == 0.0
+    # `copysign` is the only way to see the sign bit on a zero.
+    assert math.copysign(1.0, change) == 1.0, "signed zero leaked to the wire"
+
+
+# ═════════════ extended-hours resolution + cache-key separation ════════════
+
+
+@pytest.mark.asyncio
+async def test_extended_hours_resolved_from_symbol_when_asset_type_is_useless(monkeypatch):
+    """`watchlist_items.asset_type` defaults to 'Stock' and POST /watchlist never
+    writes it, so the old `asset_type == "crypto"` test was ALWAYS false — the
+    documented crypto fix never fired in production. Resolution must fall back to
+    the symbol, and must cover commodities (which the literal test excluded)."""
+    tsvc._sparkline_cache.clear()
+    seen: dict[str, bool] = {}
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        seen[ticker] = extended_hours
+        return [_bar("2026-07-09 09:30:00", 1.0), _bar("2026-07-09 12:00:00", 2.0)]
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    svc = TrackingService()
+    await svc._get_all_sparklines(
+        ["BTCUSD", "GCUSD", "CLUSD", "AAPL", "^GSPC"],
+        # Exactly what the DB actually holds for rows added via the iOS flow.
+        {"BTCUSD": "stock", "GCUSD": "", "CLUSD": "stock", "AAPL": "stock", "^GSPC": "stock"},
+    )
+    assert seen["BTCUSD"] is True     # 24/7
+    assert seen["GCUSD"] is True      # gold future, ~23h
+    assert seen["CLUSD"] is True      # crude future, ~23h
+    assert seen["AAPL"] is False      # equity stays clipped
+    assert seen["^GSPC"] is False     # index tracks the equity session
+
+
+@pytest.mark.asyncio
+async def test_sparkline_cache_key_separates_extended_from_regular(monkeypatch):
+    """The series DEPENDS on the window, so the cache key must too. Latent while
+    extended_hours was uniformly False — live the moment resolution was fixed."""
+    tsvc._sparkline_cache.clear()
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        if extended_hours:
+            return [_bar("2026-07-09 02:00:00", 5.0), _bar("2026-07-09 22:00:00", 9.0)]
+        return [_bar("2026-07-09 09:30:00", 1.0), _bar("2026-07-09 15:55:00", 2.0)]
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    svc = TrackingService()
+
+    # Same ticker, both windows — the second must NOT be served the first's series.
+    ext = await svc._get_all_sparklines(["XYZUSD"], {"XYZUSD": "crypto"})
+    reg = await svc._get_all_sparklines(["XYZUSD"], {"XYZUSD": "equity-forced"})
+
+    assert ext["XYZUSD"] == [5.0, 9.0]
+    # 'equity-forced' isn't a trusted class, so the symbol decides → still crypto.
+    assert reg["XYZUSD"] == [5.0, 9.0]
+    # Direct key check: the two variants occupy distinct slots.
+    tsvc._sparkline_cache_set("ZZZ", [1.0, 2.0], extended_hours=True)
+    tsvc._sparkline_cache_set("ZZZ", [3.0, 4.0], extended_hours=False)
+    assert tsvc._sparkline_cache_get("ZZZ", True) == [1.0, 2.0]
+    assert tsvc._sparkline_cache_get("ZZZ", False) == [3.0, 4.0]
+
+
+# ════════════════════ sub-dollar sparkline keeps its shape ════════════════
+
+
+@pytest.mark.asyncio
+async def test_sub_dollar_sparkline_is_not_flattened_to_one_level(monkeypatch):
+    """round(c, 2) collapsed a $0.20 holding's whole session into 1-2 levels, so
+    the card drew a dead-flat line next to a live non-zero % change."""
+    tsvc._sparkline_cache.clear()
+    closes = [0.2015, 0.2021, 0.2033, 0.2028, 0.2044, 0.2049, 0.2037]
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return [_bar(f"2026-07-09 10:{i:02d}:00", c) for i, c in enumerate(closes)]
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    svc = TrackingService()
+    out = await svc._get_all_sparklines(["PENNY"], {"PENNY": "stock"})
+
+    series = out["PENNY"]
+    assert len(series) == len(closes)
+    assert min(series) != max(series), "series flattened — chart would be a dead line"
+    assert len(set(series)) >= 5      # real shape preserved, not 1-2 levels
+
+
+@pytest.mark.asyncio
+async def test_large_price_sparkline_stays_at_two_decimals(monkeypatch):
+    """Precision scales to magnitude — normal equities must not gain noise digits."""
+    tsvc._sparkline_cache.clear()
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return [
+            _bar("2026-07-09 10:00:00", 144.2712),
+            _bar("2026-07-09 10:05:00", 144.9988),
+        ]
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    svc = TrackingService()
+    out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
+    assert out["ORCL"] == [144.27, 145.0]
+
+
+# ═════════════ a fully-degraded feed must not be pinned in cache ══════════
+
+
+@pytest.mark.asyncio
+async def test_feed_with_zero_resolved_quotes_is_not_cached(monkeypatch):
+    """Otherwise one FMP blip looked like a 30-second outage on the tab: every
+    row shows a placeholder price and the client's retries re-read the same
+    cached placeholders."""
+    tsvc._feed_cache.clear()
+    tsvc._sparkline_cache.clear()
+
+    watchlist = [{"ticker": "ORCL", "company_name": "Oracle"}]
+    monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(watchlist))
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return []
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+
+    svc = TrackingService()
+    svc.fmp = _QuoteOnlyFMP({})           # every quote unresolved
+    feed = await svc.get_tracking_feed("u-degraded")
+
+    assert len(feed.assets) == 1
+    assert tsvc._feed_cache_get("u-degraded") is None, "degraded feed was pinned"
+
+    # A feed that DID resolve its quotes is cached as normal.
+    svc.fmp = _QuoteOnlyFMP({"ORCL": {"symbol": "ORCL", "price": 1.0, "changePercentage": 0.0}})
+    await svc.get_tracking_feed("u-healthy")
+    assert tsvc._feed_cache_get("u-healthy") is not None

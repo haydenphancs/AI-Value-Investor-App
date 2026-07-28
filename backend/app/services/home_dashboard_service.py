@@ -30,7 +30,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
-from app.services.chart_helper import fetch_chart_data
+from app.services.asset_class import trades_extended_hours
+from app.services.chart_helper import fetch_chart_data, sparkline_precision
+from app.utils.market_hours import (
+    ET as _ET_ZONE,
+    SESSION_AFTERHOURS,
+    SESSION_CLOSED,
+    SESSION_PREMARKET,
+    SESSION_REGULAR,
+    session_phase,
+)
 from app.schemas.home_dashboard import (
     HomeDashboardResponse,
     MarketPulseItemResponse,
@@ -62,6 +71,16 @@ _PULSE_SYMBOLS: List[Dict[str, str]] = [
 _SPARKLINE_POINTS = 30          # downsampled intraday closes per mini-chart
 _CACHE_TTL_SECONDS = 300        # 5 min — live market-data freshness ceiling
 _CACHE_KEY = "dashboard"
+# A build that lost tiles is cached only briefly. `_build_pulse` swallows per-tile
+# failures and can NEVER raise, so "didn't raise" is not "succeeded" — without
+# this, one 2-second FMP 429 pinned a partial (or empty) strip in a CLASS-level
+# cache for the full 5 minutes, for every user.
+_CACHE_DEGRADED_TTL_SECONDS = 45
+# Ceiling on one pulse build. Scanners/signals/themes each have an 8s guard; pulse
+# was the only bare `await` in the dashboard gather, so a single hung FMP call
+# (30s httpx read timeout + retries) blew past the iOS 30s URLSession ceiling and
+# turned the WHOLE Home screen into an error banner.
+_PULSE_BUILD_TIMEOUT_SECONDS = 6
 
 
 # ── Daily Scanners config ─────────────────────────────────────────────
@@ -166,35 +185,36 @@ def _load_short_universe() -> List[str]:
 # ── Pure helpers (unit-tested without network) ────────────────────────
 
 
+# session_phase() → the Home strip's header copy. Kept as a map so the phase
+# vocabulary stays owned by utils/market_hours and only the wording lives here.
+_PHASE_TEXT: Dict[str, Tuple[str, bool]] = {
+    SESSION_PREMARKET: ("Pre-Market", False),
+    SESSION_REGULAR: ("Markets Open", True),
+    SESSION_AFTERHOURS: ("After Hours", False),
+    SESSION_CLOSED: ("Markets Closed", False),
+}
+
+
 def _market_status(now: Optional[datetime] = None) -> Tuple[str, bool]:
     """Return ``(display_text, is_open)`` for the US equity session.
 
-    Uses real America/New_York time (DST-aware) so the open/closed copy is
-    correct year-round. ``now`` is injectable for testing.
+    Delegates to ``utils.market_hours.session_phase`` — the ONE holiday- and
+    half-day-aware implementation — instead of re-deriving the bands here. The
+    old local copy knew only weekday + time-of-day, so on the ~10 market holidays
+    and 2 half-days a year the strip claimed "Markets Open" with a green blinking
+    dot over stale closes. That mattered beyond cosmetics: this same helper gates
+    ``main.py``'s scanner pre-warmer (which then burned FMP quota all day on a
+    shut tape) and feeds ``chat_service``'s "these are the current numbers" line.
+
+    ``now`` is injectable for testing and is interpreted as **ET when naive**.
+    That localization is load-bearing: ``session_phase`` stamps a naive datetime
+    as UTC (correct for its own callers), so passing one straight through would
+    shift every boundary by 4–5 hours.
     """
-    if now is None:
-        try:
-            from zoneinfo import ZoneInfo
-
-            now = datetime.now(ZoneInfo("America/New_York"))
-        except Exception:
-            # Fallback: fixed EST offset if tzdata is somehow unavailable.
-            now = datetime.now(tz=timezone(timedelta(hours=-5)))
-
-    weekday = now.weekday()  # 0=Monday … 6=Sunday
-    minutes = now.hour * 60 + now.minute
-
-    if weekday >= 5:
-        return "Markets Closed", False
-    if minutes < 4 * 60:                 # before 4:00 AM
-        return "Markets Closed", False
-    if minutes < 9 * 60 + 30:            # 4:00 AM – 9:30 AM
-        return "Pre-Market", False
-    if minutes < 16 * 60:                # 9:30 AM – 4:00 PM
-        return "Markets Open", True
-    if minutes < 20 * 60:                # 4:00 PM – 8:00 PM
-        return "After Hours", False
-    return "Markets Closed", False
+    if now is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=_ET_ZONE)
+    phase = session_phase(now)
+    return _PHASE_TEXT.get(phase, ("Markets Closed", False))
 
 
 def _finite_float(v: Any) -> Optional[float]:
@@ -260,11 +280,17 @@ def _intraday_sparkline(bars: Any, points: int = _SPARKLINE_POINTS) -> List[floa
     for b in day_bars:
         cf = _finite_float(b.get("close"))
         if cf is not None and cf > 0:
-            closes.append(round(cf, 2))
+            closes.append(cf)
 
     if len(closes) < 2:
         return []
-    return [round(c, 2) for c in _downsample(closes, points)]
+    # Precision scales to the series' own magnitude. A flat round(c, 2) collapses
+    # any sub-dollar asset into a handful of distinct levels, so the mini-chart
+    # draws a dead-flat line next to a live non-zero % change. Mirrors
+    # tracking_service._sparkline_precision (the holdings-card twin).
+    sampled = _downsample(closes, points)
+    digits = sparkline_precision(sampled)
+    return [round(c, digits) for c in sampled]
 
 
 # ── Scanner pure helpers (unit-tested without network) ────────────────
@@ -601,7 +627,7 @@ class HomeDashboardService:
         from app.services.signals_service import get_signals_service
 
         pulse, scanners, signals, themes = await asyncio.gather(
-            self._get_pulse_cached(),
+            self._get_pulse_guarded(),
             self._get_scanners_guarded(),
             get_signals_service().get_signals_guarded(),
             self._get_themes_guarded(),
@@ -619,11 +645,27 @@ class HomeDashboardService:
     # ── Market Pulse (cache-aside) ────────────────────────────────────
 
     async def _get_pulse_cached(self) -> List[MarketPulseItemResponse]:
-        """The Market Pulse list, cache-aside (5 min) + in-flight dedup."""
+        """The Market Pulse list, cache-aside + in-flight dedup.
+
+        TTL depends on COMPLETENESS, not on "didn't raise": a full strip is good
+        for 5 minutes, a degraded one for 45 seconds. `_build_pulse` catches every
+        per-tile failure and returns whatever survived, so it cannot raise — the
+        old unconditional write meant a transient FMP blip pinned a partial or
+        empty strip for the whole 5-minute window, in a CLASS-level cache shared
+        by every user. Every sibling builder in this file (get_scanners,
+        get_themes, _cached_float) already refuses to pin a degraded result.
+        """
         cached = self._cache.get(_CACHE_KEY)
-        if cached is not None and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
-            logger.debug("Market pulse served from in-memory cache")
-            return cached[1]
+        if cached is not None:
+            age = time.time() - cached[0]
+            ttl = (
+                _CACHE_TTL_SECONDS
+                if len(cached[1]) == len(_PULSE_SYMBOLS)
+                else _CACHE_DEGRADED_TTL_SECONDS
+            )
+            if age < ttl:
+                logger.debug("Market pulse served from in-memory cache")
+                return cached[1]
 
         inflight = self._inflight.get(_CACHE_KEY)
         if inflight is not None:
@@ -635,7 +677,17 @@ class HomeDashboardService:
         self._inflight[_CACHE_KEY] = fut
         try:
             pulse = await self._build_pulse()
-            self._cache[_CACHE_KEY] = (time.time(), pulse)  # cache only on success
+            if pulse:
+                # An empty build is never cached at all (nothing to serve, and the
+                # next request should retry immediately); a partial one is cached
+                # so it can still be served as "last known good", but at the short
+                # TTL resolved above.
+                self._cache[_CACHE_KEY] = (time.time(), pulse)
+                if len(pulse) < len(_PULSE_SYMBOLS):
+                    logger.warning(
+                        "Market pulse degraded (%d/%d tiles) — caching for only %ds",
+                        len(pulse), len(_PULSE_SYMBOLS), _CACHE_DEGRADED_TTL_SECONDS,
+                    )
             if not fut.done():
                 fut.set_result(pulse)
             return pulse
@@ -645,6 +697,45 @@ class HomeDashboardService:
             raise
         finally:
             self._inflight.pop(_CACHE_KEY, None)
+
+    async def _get_pulse_guarded(self) -> List[MarketPulseItemResponse]:
+        """`_get_pulse_cached` under a wall-clock ceiling, degrading to stale/empty.
+
+        Mirrors `_get_scanners_guarded`. The `shield` is load-bearing: a per-request
+        timeout must NOT cancel the shared build, because CancelledError is a
+        BaseException that would poison every awaiter parked on `_inflight` (the
+        documented scaling gotcha). The shielded build keeps running and warms the
+        cache for the next request.
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(self._get_pulse_cached()),
+                timeout=_PULSE_BUILD_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            cached = self._cache.get(_CACHE_KEY)
+            if cached is not None:
+                logger.warning(
+                    "Market pulse build exceeded %ds — serving last cached strip "
+                    "(%d tiles, %.0fs old); build continues in background",
+                    _PULSE_BUILD_TIMEOUT_SECONDS, len(cached[1]), time.time() - cached[0],
+                )
+                return cached[1]
+            logger.warning(
+                "Market pulse build exceeded %ds with a cold cache — dashboard "
+                "ships without the strip this round",
+                _PULSE_BUILD_TIMEOUT_SECONDS,
+            )
+            return []
+        except Exception as exc:
+            # Never let the strip take the whole dashboard down; the other three
+            # sections are independent and already degrade on their own.
+            logger.warning(
+                "Market pulse failed: %s: %s — dashboard ships without the strip",
+                type(exc).__name__, exc,
+            )
+            cached = self._cache.get(_CACHE_KEY)
+            return cached[1] if cached is not None else []
 
     async def _build_pulse(self) -> List[MarketPulseItemResponse]:
         results = await asyncio.gather(
@@ -1305,9 +1396,16 @@ class HomeDashboardService:
         non-fatal — the tile still renders with an empty series.
         """
         symbol = cfg["symbol"]
+        # Bitcoin trades 24/7 and the FMP commodity codes (GCUSD/CLUSD) are
+        # continuously-quoted futures, so their intraday series must NOT be clipped
+        # to the US equity session — that is what their own detail charts do
+        # (crypto_service / commodity_service both pass extended_hours=True).
+        # _PULSE_SYMBOLS already carries the class per tile.
         quote, spark = await asyncio.gather(
             self.fmp.get_stock_price_quote(symbol),
-            self._fetch_sparkline(symbol),
+            self._fetch_sparkline(
+                symbol, extended_hours=trades_extended_hours(cfg.get("type", ""))
+            ),
         )
 
         if not quote:
@@ -1344,21 +1442,39 @@ class HomeDashboardService:
             name=cfg["name"],
             type=cfg["type"],
             price=round(price_f, 2),
-            change_percent=round(change_f, 2),
+            # `+ 0.0` collapses signed zero. round(-0.001, 2) is -0.0, and the iOS
+            # repository colours off `changePercent >= 0` — which is TRUE for -0.0 —
+            # while formatting with "%+.2f", which prints "-0.00". The tile would
+            # read "-0.00%" in green. Same normalization _movers_from_universe and
+            # _theme_change already apply.
+            change_percent=round(change_f, 2) + 0.0,
             previous_close=previous_close,
             spark=spark,
         )
 
-    async def _fetch_sparkline(self, symbol: str) -> List[float]:
+    async def _fetch_sparkline(
+        self, symbol: str, extended_hours: bool = False
+    ) -> List[float]:
         """Latest-session 1D intraday closes (oldest-first) for the mini-chart.
 
-        Uses the SAME series the TickerDetailView 1D chart and the holdings
-        cards draw (5-min intraday, regular hours, via the shared chart_helper),
-        so the dashed previous-close reference reads correctly. Returns [] on
-        failure — never a synthetic series.
+        Uses the SAME series the detail chart and the holdings cards draw (5-min
+        intraday via the shared chart_helper), in the SAME session window that
+        asset's detail chart uses — ``extended_hours=True`` for 24/7 assets
+        (crypto, commodity futures), regular hours for equities and indices.
+
+        That window is load-bearing, not cosmetic: ``_filter_regular_hours`` is a
+        pure time-of-day test, so fetching a 24/7 series without it strips ~70% of
+        the bars and ``_intraday_sparkline`` then pins the "latest day" to the last
+        SURVIVING bar — the Bitcoin tile ends up drawing yesterday's 09:30–16:00
+        slice beside a live price, contradicting both its own % change and the
+        detail chart one tap away.
+
+        Returns [] on failure — never a synthetic series.
         """
         try:
-            bars = await fetch_chart_data(self.fmp, symbol, "1D")
+            bars = await fetch_chart_data(
+                self.fmp, symbol, "1D", extended_hours=extended_hours
+            )
             return _intraday_sparkline(bars)
         except Exception as exc:
             logger.warning(

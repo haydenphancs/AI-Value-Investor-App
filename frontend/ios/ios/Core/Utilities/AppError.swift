@@ -163,6 +163,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         }
     }
 
+    /// A genuine authentication failure (the token/session is invalid), as opposed
+    /// to a transient network/server error. Used at launch to decide whether to
+    /// clear the stored token — a transient offline error must NOT sign the user out.
+    var isAuthError: Bool {
+        switch self {
+        case .unauthorized, .tokenExpired, .forbidden:
+            return true
+        default:
+            return false
+        }
+    }
+
     // MARK: - Factory
 
     /// Create AppError from any Error
@@ -208,13 +220,11 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return .rateLimited(retryAfter: retryAfter)
         case .businessError(let code, let message):
             // Map backend error codes. The backend emits the flat code INSUFFICIENT_CREDITS
-            // (HTTP 402); the legacy BIZ_2001/2002 prefixes are never emitted (kept for
-            // back-compat only). required/available aren't carried on businessError, so this
-            // uses the generic-upgrade branch of .insufficientCredits (required==0 → no
-            // "requires 0 credits" copy) while still giving the "Insufficient Credits" title
-            // + "Upgrade" action instead of a generic .apiError.
-            if code == "INSUFFICIENT_CREDITS"
-                || code.starts(with: "BIZ_2001") || code.starts(with: "BIZ_2002") {
+            // (HTTP 402). required/available aren't carried on businessError, so this uses the
+            // generic-upgrade branch of .insufficientCredits (required==0 → no "requires 0
+            // credits" copy) while still giving the "Insufficient Credits" title + "Upgrade"
+            // action instead of a generic .apiError.
+            if code == "INSUFFICIENT_CREDITS" {
                 return .insufficientCredits(required: 0, available: 0)
             }
             // Capacity / back-pressure codes (HTTP 409). SYSTEM_BUSY = the whole
@@ -239,6 +249,14 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             // Per-user daily chat budget exhausted (HTTP 409). Surface the backend
             // user_message verbatim (matches the SYSTEM_BUSY capacity handling above).
             if code == "CHAT_DAILY_LIMIT_REACHED" {
+                return .apiError(code: code, message: message)
+            }
+            // The holdings datastore was transiently unreadable (HTTP 503). This
+            // is deliberately NOT an empty feed: the Assets tab purges portfolio
+            // tickers that are missing from the feed, so the client must be able
+            // to tell "couldn't read" from "you have nothing" or it deletes the
+            // user's portfolios. Surface the backend's retry copy verbatim.
+            if code == "WATCHLIST_UNAVAILABLE" {
                 return .apiError(code: code, message: message)
             }
             return .apiError(code: code, message: message)

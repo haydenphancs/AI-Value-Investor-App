@@ -55,6 +55,12 @@ class ErrorCode(str, Enum):
     # ── Data / pipeline ──────────────────────────────────────────────
     DATA_INCOMPLETE = "DATA_INCOMPLETE"
     REPORT_GENERATION_FAILED = "REPORT_GENERATION_FAILED"
+    # The user's watchlist row set could not be READ (Supabase/PostgREST blip).
+    # Load-bearing: this MUST be distinguishable from "the watchlist is empty".
+    # The Assets tab purges portfolio tickers that are absent from the feed, so a
+    # read failure laundered into an empty 200 makes the client delete every
+    # ticker (and its hand-entered shares) from every portfolio, permanently.
+    WATCHLIST_UNAVAILABLE = "WATCHLIST_UNAVAILABLE"
 
     # ── Research-flow specific ───────────────────────────────────────
     REPORT_NOT_FOUND = "REPORT_NOT_FOUND"
@@ -107,6 +113,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.REPORT_GENERATION_FAILED: (
         "The report failed to generate. Please try again."
     ),
+    ErrorCode.WATCHLIST_UNAVAILABLE: (
+        "We couldn't load your holdings right now. Pull to refresh in a moment."
+    ),
     ErrorCode.REPORT_NOT_FOUND: (
         "That report no longer exists."
     ),
@@ -148,6 +157,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.SYSTEM_BUSY: "retry_later",
     ErrorCode.CHAT_MESSAGE_TOO_LONG: "fix_input",
     ErrorCode.CHAT_DAILY_LIMIT_REACHED: "retry_later",
+    ErrorCode.WATCHLIST_UNAVAILABLE: "retry_later",
 }
 
 
@@ -182,6 +192,10 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.CHAT_MESSAGE_TOO_LONG: 400,
     # 409 (NOT 429): iOS swallows 429 bodies before decode; 409 surfaces the copy.
     ErrorCode.CHAT_DAILY_LIMIT_REACHED: 409,
+    # 503 Service Unavailable — the datastore is transiently unreadable. NOT 200
+    # with an empty list (see the enum comment) and NOT 500: it is retryable and
+    # the client must be able to tell "couldn't read" from "you have nothing".
+    ErrorCode.WATCHLIST_UNAVAILABLE: 503,
 }
 
 
@@ -269,6 +283,16 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # ── Profile-not-found from collector / service ────────────────────
     if isinstance(exc, ValueError) and "profile" in msg:
         return ErrorCode.TICKER_NOT_FOUND, _DEFAULT_STATUS[ErrorCode.TICKER_NOT_FOUND]
+
+    # ── Watchlist datastore unreadable (tracking_service) ─────────────
+    # Checked BEFORE the generic heuristics below: a PostgREST read timeout
+    # carries "timeout" in its message and would otherwise be mislabelled
+    # FMP_UNAVAILABLE, which points the user (and the logs) at the wrong system.
+    if "watchlistunavailable" in cls:
+        return (
+            ErrorCode.WATCHLIST_UNAVAILABLE,
+            _DEFAULT_STATUS[ErrorCode.WATCHLIST_UNAVAILABLE],
+        )
 
     # ── Gemini / Google generative AI errors ──────────────────────────
     if (

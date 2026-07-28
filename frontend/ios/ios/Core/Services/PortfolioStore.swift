@@ -233,6 +233,18 @@ final class PortfolioStore: ObservableObject {
     /// watchlist (e.g. removed from another device). Idempotent — only fires
     /// the per-portfolio sync if something actually changed.
     func purgeTickers(notIn allowed: Set<String>) async {
+        // NEVER purge against an empty allow-set. A total-wipe delta INFERRED from
+        // a feed response is never trustworthy: the tracking feed returns an empty
+        // asset list both when the watchlist is genuinely empty AND (historically)
+        // when the datastore read failed, and an empty set makes every portfolio
+        // differ → setTickers([]) → the backend deletes every portfolio_items row
+        // with no reinsert, destroying hand-entered shares/market_value for good.
+        // Genuine emptying always flows through the explicit removeTicker /
+        // removeTickerFromAllPortfolios paths, which are per-ticker and intentional.
+        guard !allowed.isEmpty else {
+            print("[PortfolioStore] ⚠️ Skipping purge: empty allow-set (degraded or empty feed) — refusing to clear \(portfolios.count) portfolio(s)")
+            return
+        }
         for portfolio in portfolios {
             let upperAllowed = Set(allowed.map { $0.uppercased() })
             let filteredTickers = portfolio.tickers.filter { upperAllowed.contains($0) }

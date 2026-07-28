@@ -22,6 +22,10 @@ google-genai==1.75.0
 # HTTP client (for FMP API). 0.28.1 required by google-genai; supabase 2.16 allows it (<0.29).
 httpx[socks]==0.28.1
 
+# HTTP/2 support for httpx — REQUIRED by APNs push (app/services/push_service.py
+# opens httpx.AsyncClient(http2=True); APNs only speaks HTTP/2).
+h2>=4.1.0
+
 # WebSocket (for live price streaming)
 websockets>=12.0
 

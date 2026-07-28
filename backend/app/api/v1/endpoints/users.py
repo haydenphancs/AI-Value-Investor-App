@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 import logging
 
+from app.api.error_response import ErrorCode, make_error_response
 from app.database import get_supabase
 from app.dependencies import (
     get_current_user,
@@ -14,7 +15,22 @@ from app.dependencies import (
     GUEST_USER_ID,
 )
 from app.schemas.user import UserResponse, UserCreditsResponse, UpdateProfileRequest
+from app.schemas.subscription import SubscriptionResponse
+from app.schemas.settings import (
+    UserSettingsResponse,
+    UpdateUserSettingsRequest,
+    DeviceRegisterRequest,
+    DeviceRegisterResponse,
+)
 from app.services.credit_service import CreditService, CreditServiceUnavailable
+from app.services.subscription_service import (
+    SubscriptionService,
+    display_name_for_tier,
+)
+from app.services.user_settings_service import (
+    UserSettingsService,
+    PreferencesTooLarge,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +86,74 @@ async def get_user_credits(
     except Exception as e:
         logger.error(f"Failed to fetch credits: {e}")
         return UserCreditsResponse(total=50, used=0, remaining=50)
+
+
+@router.get("/me/subscription", response_model=SubscriptionResponse)
+async def get_my_subscription(
+    user: dict = Depends(get_current_user),
+):
+    """Current user's subscription entitlement. Falls back to the tier on the
+    users row (mirrored by receipt-validation webhooks), else Free, when no
+    `subscriptions` row exists yet. Auth-only — guests have no subscription."""
+    sub = SubscriptionService().get_user_subscription(user["id"])
+    if not sub:
+        tier = user.get("tier", "free")
+        return SubscriptionResponse(
+            tier=tier,
+            display_name=display_name_for_tier(tier),
+            status="active",
+        )
+    tier = sub.get("tier", "free")
+    return SubscriptionResponse(
+        tier=tier,
+        display_name=display_name_for_tier(tier),
+        status=sub.get("status", "active"),
+        current_period_end=sub.get("current_period_end"),
+        store=sub.get("store"),
+    )
+
+
+@router.get("/me/settings", response_model=UserSettingsResponse)
+async def get_my_settings(
+    user: dict = Depends(get_current_user),
+):
+    """Fetch the current user's synced preference blob (appearance, notification
+    toggles, general prefs). Empty {} when nothing has been synced yet."""
+    prefs = UserSettingsService().get_settings(user["id"])
+    return UserSettingsResponse(preferences=prefs)
+
+
+@router.put("/me/settings", response_model=UserSettingsResponse)
+async def update_my_settings(
+    request: UpdateUserSettingsRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Full-blob replace of the current user's synced preferences."""
+    try:
+        prefs = UserSettingsService().upsert_settings(user["id"], request.preferences)
+    except PreferencesTooLarge as e:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=str(e),
+            user_message="Your settings couldn't be saved. Please try again.",
+        )
+    return UserSettingsResponse(preferences=prefs)
+
+
+@router.post("/me/devices", response_model=DeviceRegisterResponse)
+async def register_device(
+    request: DeviceRegisterRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Register (or re-bind) an APNs device token for push notifications.
+    Auth-only: a push token is only useful attached to a real user."""
+    ok = UserSettingsService().register_device(
+        user_id=user["id"],
+        token=request.token,
+        platform=request.platform,
+        environment=request.environment,
+    )
+    return DeviceRegisterResponse(registered=ok)
 
 
 @router.patch("/me", response_model=UserResponse)

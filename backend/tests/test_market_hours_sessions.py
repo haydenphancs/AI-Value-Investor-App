@@ -176,3 +176,47 @@ def test_2027_holidays_are_closed_at_midday(y, m, d):
     # SESSION_REGULAR and the sweeper generated on a closed market.
     assert session_phase(_et(y, m, d, 11, 0)) == SESSION_CLOSED
     assert is_market_active(_et(y, m, d, 11, 0)) is False
+
+
+# ── Naive-datetime contract (relied on by home_dashboard_service) ────────
+# `home_dashboard_service._market_status` delegates here, but its own callers and
+# tests pass naive datetimes meaning EASTERN, while this module reads a naive
+# datetime as UTC. That mismatch silently shifts every boundary 4-5 hours, so
+# _market_status localizes to ET before delegating. Pin the contract here so the
+# localization can never be "cleaned up" as redundant.
+
+
+def test_naive_datetime_is_interpreted_as_utc():
+    from datetime import datetime as _dt
+
+    from app.utils.market_hours import SESSION_PREMARKET, SESSION_REGULAR, session_phase
+
+    # 13:30 UTC == 09:30 ET (EDT) → the opening bell.
+    assert session_phase(_dt(2026, 6, 29, 13, 30)) == SESSION_REGULAR
+    # The SAME wall-clock number read as ET would be pre-market. Passing 09:30
+    # naive therefore lands in pre-market here — which is why _market_status must
+    # localize first rather than forward the value untouched.
+    assert session_phase(_dt(2026, 6, 29, 9, 30)) == SESSION_PREMARKET
+
+
+def test_home_dashboard_market_status_localizes_naive_input_to_eastern():
+    """The delegation guard rail, asserted from the consumer side."""
+    from datetime import datetime as _dt
+
+    from app.services.home_dashboard_service import _market_status
+
+    assert _market_status(_dt(2026, 6, 29, 9, 30)) == ("Markets Open", True)
+    assert _market_status(_dt(2026, 6, 29, 9, 29)) == ("Pre-Market", False)
+    # Holidays/half-days now flow through from the shared calendar.
+    assert _market_status(_dt(2026, 11, 26, 11, 0)) == ("Markets Closed", False)
+    assert _market_status(_dt(2026, 11, 27, 13, 0)) == ("Markets Closed", False)
+
+
+def test_home_dashboard_market_status_accepts_aware_input_unchanged():
+    from datetime import datetime as _dt
+
+    from app.services.home_dashboard_service import _market_status
+    from app.utils.market_hours import ET
+
+    aware = _dt(2026, 6, 29, 12, 0, tzinfo=ET)
+    assert _market_status(aware) == ("Markets Open", True)

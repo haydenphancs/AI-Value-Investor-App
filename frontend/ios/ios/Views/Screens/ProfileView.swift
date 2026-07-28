@@ -12,10 +12,10 @@ struct ProfileView: View {
     @Environment(\.appState) private var appState
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel = ProfileViewModel()
-    /// Terms / Privacy open in the in-app browser. Held locally rather than on
-    /// the ViewModel because these two links are the view's own chrome, not
-    /// profile state.
-    @State private var browserLink: BrowserLink?
+    /// Presents the sign-in sheet (guest-first: sign-in is optional and offered here).
+    @State private var showSignIn = false
+    /// Presents the upgrade / plan paywall (from the Upgrade card + Add Credits).
+    @State private var showPaywall = false
 
     var body: some View {
         NavigationStack {
@@ -28,8 +28,11 @@ struct ProfileView: View {
                         // Section 1: User Identity & Tier
                         userIdentitySection
 
-                        // Section 2: Credit Management
-                        creditManagementSection
+                        // Section 2: Credit Management (signed-in only — guests are
+                        // not credit-metered, so the balance is meaningless for them)
+                        if viewModel.isAuthenticated {
+                            creditManagementSection
+                        }
 
                         // Section 3: App Settings & Preferences
                         settingsSection
@@ -37,8 +40,10 @@ struct ProfileView: View {
                         // Section 4: About & Legal
                         aboutSection
 
-                        // Section 5: Sign Out
-                        signOutSection
+                        // Section 5: Sign Out (only when signed in)
+                        if viewModel.isAuthenticated {
+                            signOutSection
+                        }
 
                         Spacer()
                             .frame(height: AppSpacing.xxxl)
@@ -69,39 +74,86 @@ struct ProfileView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .inAppBrowser(link: $browserLink)
+        .sheet(isPresented: $showSignIn) {
+            SignInView()
+                .environment(appState)
+                .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView()
+                .environment(\.appState, appState)
+                .preferredColorScheme(.dark)
+        }
+        .onChange(of: appState.auth.status) { _, newStatus in
+            // Auth just succeeded from the sheet → dismiss it and refresh
+            // the now-real profile + credits.
+            if newStatus == .authenticated {
+                showSignIn = false
+                viewModel.loadData()
+            }
+        }
     }
 
     // MARK: - Section 1: User Identity & Tier
 
     private var userIdentitySection: some View {
         VStack(spacing: AppSpacing.lg) {
-            // Avatar + Name + Email
             VStack(spacing: AppSpacing.md) {
                 ProfileAvatarView(
                     avatarUrl: viewModel.avatarUrl,
                     size: 80
                 )
 
-                VStack(spacing: AppSpacing.xs) {
-                    Text(viewModel.displayName)
-                        .font(AppTypography.titleCompact)
-                        .foregroundColor(AppColors.textPrimary)
+                if viewModel.isAuthenticated {
+                    // Signed in: real name / email / tier / member-since.
+                    VStack(spacing: AppSpacing.xs) {
+                        Text(viewModel.displayName)
+                            .font(AppTypography.titleCompact)
+                            .foregroundColor(AppColors.textPrimary)
 
-                    Text(viewModel.email)
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textSecondary)
+                        Text(viewModel.email)
+                            .font(AppTypography.bodySmall)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+
+                    TierBadge(tier: viewModel.userTier)
+
+                    Text(viewModel.memberSince)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                } else {
+                    // Guest: prompt to sign in.
+                    VStack(spacing: AppSpacing.xs) {
+                        Text("Guest")
+                            .font(AppTypography.titleCompact)
+                            .foregroundColor(AppColors.textPrimary)
+
+                        Text("Sign in to sync your account and unlock monthly credits.")
+                            .font(AppTypography.bodySmall)
+                            .foregroundColor(AppColors.textSecondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Button(action: { showSignIn = true }) {
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: "person.crop.circle.badge.plus")
+                                .font(AppTypography.iconSmall)
+                            Text("Sign In")
+                                .font(AppTypography.bodyEmphasis)
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, AppSpacing.md)
+                        .background(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                                .fill(AppColors.primaryBlue)
+                        )
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .padding(.top, AppSpacing.xs)
                 }
-
-                // Membership Badge
-                TierBadge(tier: viewModel.userTier)
-
-                // Member Since
-                Text(viewModel.memberSince)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
             }
-
         }
         .padding(.horizontal, AppSpacing.lg)
     }
@@ -146,14 +198,14 @@ struct ProfileView: View {
 
                     // Reset Date + Add Credits
                     HStack {
-                        Text("Resets on Mar 1")
+                        Text(viewModel.creditResetLabel)
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textMuted)
 
                         Spacer()
 
                         Button(action: {
-                            viewModel.addMoreCredits()
+                            showPaywall = true
                         }) {
                             HStack(spacing: AppSpacing.xs) {
                                 Image(systemName: "plus")
@@ -186,7 +238,10 @@ struct ProfileView: View {
 
                 // Upgrade CTA
                 if viewModel.userTier == .free {
-                    UpgradeCard()
+                    Button(action: { showPaywall = true }) {
+                        UpgradeCard()
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
 
             }
@@ -325,26 +380,28 @@ struct ProfileView: View {
 
                 settingsRowDivider
 
-                // Terms of Service
-                ProfileSettingsRow(
-                    icon: "doc.text.fill",
-                    iconColor: AppColors.textSecondary,
-                    title: "Terms of Service",
-                    showChevron: true
-                ) {
-                    openTerms()
+                // Terms of Use (native in-app screen)
+                NavigationLink {
+                    TermsOfUseView()
+                } label: {
+                    ProfileSettingsRowContent(
+                        icon: "doc.text.fill",
+                        iconColor: AppColors.textSecondary,
+                        title: "Terms of Use"
+                    )
                 }
 
                 settingsRowDivider
 
-                // Privacy Policy
-                ProfileSettingsRow(
-                    icon: "hand.raised.fill",
-                    iconColor: AppColors.textSecondary,
-                    title: "Privacy Policy",
-                    showChevron: true
-                ) {
-                    openPrivacy()
+                // Privacy Policy (native in-app screen)
+                NavigationLink {
+                    PrivacyPolicyView()
+                } label: {
+                    ProfileSettingsRowContent(
+                        icon: "hand.raised.fill",
+                        iconColor: AppColors.textSecondary,
+                        title: "Privacy Policy"
+                    )
                 }
             }
             .background(AppColors.cardBackground)
@@ -422,12 +479,11 @@ struct ProfileView: View {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 
-    // The two `mailto:` handlers below deliberately keep
-    // `UIApplication.shared.open`. `SFSafariViewController` accepts http/https
-    // ONLY, so routing a mailto: through the in-app browser is a runtime
-    // failure — these must hand off to Mail. `openExternal(_:into:)` enforces
-    // the same rule, but stating it here stops the next reader "fixing" the
-    // inconsistency.
+    // The two `mailto:` handlers below deliberately use `UIApplication.shared.open`
+    // (not the in-app browser): `SFSafariViewController` accepts http/https ONLY, so a
+    // mailto: must hand off to Mail. Terms/Privacy now open native in-app screens
+    // (TermsOfUseView / PrivacyPolicyView), so there is no longer an in-app web browser
+    // on this screen.
 
     private func openFeedback() {
         if let url = URL(string: "mailto:feedback@caydexinvest.com?subject=App%20Feedback") {
@@ -438,18 +494,6 @@ struct ProfileView: View {
     private func openSupport() {
         if let url = URL(string: "mailto:support@caydexinvest.com?subject=Support%20Request") {
             UIApplication.shared.open(url)
-        }
-    }
-
-    private func openTerms() {
-        if let url = URL(string: "https://caydexinvest.com/terms") {
-            openExternal(url, into: &browserLink)
-        }
-    }
-
-    private func openPrivacy() {
-        if let url = URL(string: "https://caydexinvest.com/privacy") {
-            openExternal(url, into: &browserLink)
         }
     }
 }
@@ -484,7 +528,7 @@ struct TierBadge: View {
         switch tier {
         case .free: return "FREE"
         case .pro: return "PRO"
-        case .premium: return "PREMIUM"
+        case .premium: return "MAX"   // 'premium' enum is displayed as "Max" (plan_credits.display_name)
         }
     }
 

@@ -26,6 +26,9 @@ struct iosApp: App {
     /// Tracks if services have been configured
     @State private var isConfigured = false
 
+    /// APNs remote-notification callbacks (device token registration).
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     // MARK: - Initialization
 
     init() {
@@ -57,8 +60,24 @@ struct iosApp: App {
                     let apiClient = APIClient.shared
                     let authService = AuthService(apiClient: apiClient)
 
-                    // Configure AppState with services
-                    // Token restoration is handled inside restoreAuthState()
+                    // Settings sync + push need the AppState ref before auth restore.
+                    SettingsSyncManager.shared.configure(appState: appState)
+                    PushNotificationManager.shared.configure(appState: appState)
+
+                    // Apply the persisted appearance choice (default .dark).
+                    AppearanceManager.applyStored()
+
+                    // Enable 401 → refresh → retry BEFORE auth restore runs, so the
+                    // interceptor is armed when restoreAuthState makes its first call.
+                    // On an expired token the APIClient asks AuthService to refresh
+                    // (rewriting the Keychain + the client's token) and retries once.
+                    await apiClient.setTokenRefresher {
+                        try? await authService.refreshToken()
+                        return await authService.getStoredToken()
+                    }
+
+                    // Configure AppState with services. Token restoration runs inside
+                    // restoreAuthState() (kicked off here) and relies on the interceptor.
                     appState.configure(
                         apiClient: apiClient,
                         authService: authService
@@ -75,12 +94,18 @@ struct iosApp: App {
     // MARK: - Appearance Configuration
 
     private func configureAppearance() {
-        // Navigation bar appearance
+        // Navigation bar appearance.
+        // Use dynamic (light/dark-aware) colors so the bar follows the window's
+        // appearance override (AppearanceManager) instead of freezing to dark.
         let navAppearance = UINavigationBarAppearance()
         navAppearance.configureWithOpaqueBackground()
-        navAppearance.backgroundColor = UIColor(AppColors.background)
-        navAppearance.titleTextAttributes = [.foregroundColor: UIColor.white]
-        navAppearance.largeTitleTextAttributes = [.foregroundColor: UIColor.white]
+        navAppearance.backgroundColor = UIColor { traits in
+            traits.userInterfaceStyle == .light
+                ? UIColor(hexString: "F4F5F8")   // AppColors.background (light)
+                : UIColor(hexString: "171B26")   // AppColors.background (dark)
+        }
+        navAppearance.titleTextAttributes = [.foregroundColor: UIColor.label]
+        navAppearance.largeTitleTextAttributes = [.foregroundColor: UIColor.label]
 
         UINavigationBar.appearance().standardAppearance = navAppearance
         UINavigationBar.appearance().compactAppearance = navAppearance
@@ -102,10 +127,10 @@ struct RootView: View {
                 SplashView()
 
             case .unauthenticated:
-                // TEMP: login UI not built yet — fall through to main app.
-                // Backend research/credits endpoints fall back to the
-                // GUEST_USER_ID row so charge/refund still work end-to-end.
-                // Restore SignInView() here once the proper login flow ships.
+                // Guest-first BY DESIGN: the app is fully usable signed-out.
+                // Requests without a Bearer token fall back to the backend
+                // GUEST_USER_ID; sign-in is offered from the Account screen and
+                // unlocks real per-user profile / credits / tier / upgrade.
                 RootContainerView()
 
             case .authenticated:

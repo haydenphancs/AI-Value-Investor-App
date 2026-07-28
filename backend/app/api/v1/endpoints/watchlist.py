@@ -11,6 +11,7 @@ import logging
 from app.database import get_supabase
 from app.dependencies import get_current_user_or_guest
 from app.integrations.fmp import get_fmp_client
+from app.services.tracking_service import invalidate_feed_cache
 from app.schemas.watchlist import (
     AddToWatchlistRequest,
     RemoveFromWatchlistRequest,
@@ -105,6 +106,10 @@ async def add_to_watchlist(
         result = supabase.table("watchlist_items").insert(data).execute()
         item = result.data[0] if result.data else data
         logger.info("[Watchlist] Added %s to watchlist (id=%s)", ticker, item.get("id", "?"))
+        # The Assets tab refreshes right after an add and purges portfolio tickers
+        # missing from the feed. A stale cached feed here means the just-added
+        # ticker reads as an orphan and gets deleted again — the add undoes itself.
+        invalidate_feed_cache(user_id)
         return item
     except Exception as exc:
         logger.error("[Watchlist] DB error inserting %s: %s", ticker, exc)
@@ -135,6 +140,9 @@ async def remove_from_watchlist(
         else:
             logger.info("[Watchlist] Removed %s from watchlist", ticker)
 
+        # Keep the feed honest immediately — a stale cache would keep serving the
+        # removed ticker for up to FEED_CACHE_TTL after the row is gone.
+        invalidate_feed_cache(user_id)
         return {"message": f"{ticker} removed from watchlist"}
     except Exception as exc:
         logger.error("[Watchlist] DB error deleting %s: %s", ticker, exc)

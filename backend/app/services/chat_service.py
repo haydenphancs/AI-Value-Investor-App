@@ -24,6 +24,7 @@ from app.integrations.fmp import get_fmp_client
 from app.config import settings
 from app.schemas.chat import StockChartWidget, HistoricalDataPoint
 from app.services.agents.persona_config import IDENTITY_RULE
+from app.services.asset_class import detect_asset_class
 from app.services.chat_security import cap_prompt, neutralize_fences
 
 logger = logging.getLogger(__name__)
@@ -1127,29 +1128,19 @@ class ChatService:
 
     @staticmethod
     def _detect_asset_type(stock_id: str) -> str:
-        """Detect asset type from the symbol format."""
+        """Detect asset type from the symbol format.
+
+        Delegates to the shared `asset_class.detect_asset_class` so the chat
+        card, the holdings sparkline and the Home pulse tile all classify a
+        symbol identically — the classification decides whether an intraday
+        series is clipped to US regular hours, so a second copy of these sets
+        drifting would make the same ticker render two different charts. This
+        wrapper only re-cases to chat's uppercase vocabulary and keeps the
+        "NORMAL" sentinel for a missing symbol.
+        """
         if not stock_id:
             return "NORMAL"
-        sid = stock_id.upper()
-        if sid.startswith("^"):
-            return "INDEX"
-        # Commodity symbols FIRST — the FMP USD-suffixed codes (GCUSD/CLUSD/SIUSD/…) would
-        # otherwise be swallowed by the generic endswith("USD") crypto heuristic below and
-        # mis-voiced as crypto. No symbol collides between the commodity and crypto sets.
-        if sid in {
-            "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "HGUSD",
-            "ZSUSD", "ZCUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
-            "SBUSD", "CTUSD", "CCUSD",
-            "GOLD", "SILVER", "OIL", "NATGAS", "PLATINUM", "COPPER",
-        }:
-            return "COMMODITY"
-        # Common crypto suffixes
-        if sid.endswith("USD") or sid.endswith("USDT") or sid in {
-            "BTC", "ETH", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK",
-            "XRP", "DOGE", "SHIB", "UNI", "AAVE", "LTC", "BCH", "ATOM",
-        }:
-            return "CRYPTO"
-        return "STOCK"
+        return detect_asset_class(stock_id).upper()
 
     # ── Deep dive cache ───────────────────────────────────────────
 

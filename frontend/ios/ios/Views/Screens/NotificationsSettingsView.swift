@@ -151,6 +151,10 @@ struct NotificationsSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppColors.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
+        // Ask for push permission when the user opens Notifications (iOS prompts once).
+        .onAppear { PushNotificationManager.shared.requestAuthorization() }
+        // Sync the toggles to the backend when leaving (no-op for guests).
+        .onDisappear { SettingsSyncManager.shared.push() }
     }
 
     // MARK: - Notification Group Builder

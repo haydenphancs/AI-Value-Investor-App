@@ -39,6 +39,7 @@ from app.database import get_supabase
 from app.dependencies import get_current_user_or_guest
 from app.schemas.tracking import PortfolioInsightsResponse
 from app.services.portfolio_insights_service import PortfolioInsightsService
+from app.services.tracking_service import invalidate_feed_cache
 
 logger = logging.getLogger(__name__)
 
@@ -488,6 +489,10 @@ async def set_portfolio_tickers(
     supabase.table("portfolios").update(
         {"updated_at": datetime.utcnow().isoformat()}
     ).eq("id", portfolio_id).execute()
+
+    # Membership changed → the cached Assets feed is stale. Left alone, the next
+    # refresh reads pre-write state and the client's orphan purge acts on it.
+    invalidate_feed_cache(user["id"])
 
     refreshed = (
         supabase.table("portfolios")

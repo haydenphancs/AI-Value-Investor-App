@@ -16,7 +16,12 @@ from typing import Optional, List, Dict, Any, Tuple
 import logging
 
 from app.integrations.fmp import get_fmp_client, FMPClient
-from app.services.chart_helper import fetch_chart_data
+from app.services.chart_helper import (
+    fetch_chart_data,
+    sparkline_precision,
+    _finite_or_none,
+)
+from app.services.asset_class import symbol_trades_extended_hours
 from app.database import get_supabase
 from app.schemas.tracking import (
     TrackedAssetResponse,
@@ -40,6 +45,19 @@ from app.services._earnings_common import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class WatchlistUnavailableError(Exception):
+    """The user's watchlist rows could not be READ from Supabase.
+
+    Deliberately NOT degraded into an empty feed. The iOS Assets tab purges any
+    portfolio ticker that is absent from this feed, so an unreadable watchlist
+    laundered into a successful empty response makes the client permanently
+    delete every ticker — and every hand-entered shares/market_value — from every
+    portfolio. Raising lets the endpoint answer 503 WATCHLIST_UNAVAILABLE, which
+    the client can tell apart from "you have nothing on your watchlist".
+    """
+
 
 # ── Simple TTL Caches ───────────────────────────────────────────────
 
@@ -65,19 +83,51 @@ def _feed_cache_set(user_id: str, value: TrackingFeedResponse) -> None:
     _feed_cache[user_id] = (_time.monotonic(), value)
 
 
-def _sparkline_cache_get(ticker: str) -> Optional[List[float]]:
-    entry = _sparkline_cache.get(ticker)
+def invalidate_feed_cache(user_id: str) -> None:
+    """Drop a user's cached feed after a watchlist/portfolio membership write.
+
+    Load-bearing, not an optimisation. The Assets tab purges any portfolio ticker
+    that is missing from this feed, and `addTickerFromSearch` refreshes the feed
+    immediately after adding. Without this, that refresh reads the PRE-ADD cached
+    response for up to `FEED_CACHE_TTL`, the just-added ticker looks like an
+    orphan, and the client deletes it again server-side — the add silently undoes
+    itself. The 30s price-refresh timer keeps the entry warm, so this is the
+    common path, not a rare race.
+    """
+    if _feed_cache.pop(user_id, None) is not None:
+        logger.debug("[Tracking] feed cache invalidated for user %s", user_id)
+
+
+def _sparkline_cache_key(ticker: str, extended_hours: bool) -> str:
+    """Cache key for one ticker's sparkline series.
+
+    MUST include the session window: the same ticker fetched with
+    `extended_hours=True` and `False` yields two DIFFERENT series (the regular
+    -hours variant is clipped to 09:30–16:00 ET). Keying on the ticker alone lets
+    whichever request lands first pin its variant for every other caller.
+    """
+    return f"{ticker}:{'ext' if extended_hours else 'reg'}"
+
+
+def _sparkline_cache_get(ticker: str, extended_hours: bool = False) -> Optional[List[float]]:
+    key = _sparkline_cache_key(ticker, extended_hours)
+    entry = _sparkline_cache.get(key)
     if entry is None:
         return None
     ts, value = entry
     if _time.monotonic() - ts > SPARKLINE_CACHE_TTL:
-        del _sparkline_cache[ticker]
+        del _sparkline_cache[key]
         return None
     return value
 
 
-def _sparkline_cache_set(ticker: str, value: List[float]) -> None:
-    _sparkline_cache[ticker] = (_time.monotonic(), value)
+def _sparkline_cache_set(ticker: str, value: List[float], extended_hours: bool = False) -> None:
+    _sparkline_cache[_sparkline_cache_key(ticker, extended_hours)] = (_time.monotonic(), value)
+
+
+# Re-exported under the module-private name the sparkline builder uses, so both
+# sparkline paths share ONE precision rule (see chart_helper.sparkline_precision).
+_sparkline_precision = sparkline_precision
 
 
 def _downsample(values: List[float], target: int) -> List[float]:
@@ -121,15 +171,30 @@ class TrackingService:
             )
             watchlist = result.data or []
         except Exception as exc:
-            logger.error("Failed to fetch watchlist for user %s: %s", user_id, exc)
-            return TrackingFeedResponse()
+            # RAISE — never degrade a failed READ into an empty feed. The two are
+            # indistinguishable on the wire, and the iOS Assets tab purges every
+            # portfolio ticker missing from this feed, so a laundered read failure
+            # permanently deletes the user's portfolios (tickers AND hand-entered
+            # shares/market_value). The endpoint maps this to 503
+            # WATCHLIST_UNAVAILABLE so the client can tell the two apart.
+            logger.exception(
+                "[Tracking] watchlist read failed for user %s: %s: %s",
+                user_id, type(exc).__name__, exc,
+            )
+            raise WatchlistUnavailableError(
+                f"watchlist read failed for user {user_id}: {type(exc).__name__}: {exc}"
+            ) from exc
 
         if not watchlist:
             return TrackingFeedResponse()
 
         tickers = [item["ticker"] for item in watchlist]
-        # Ticker → asset_type so the sparkline fetch can keep crypto (24/7) on
-        # its full intraday series instead of clipping it to US market hours.
+        # Ticker → asset_type so the sparkline fetch can keep 24/7 assets (crypto,
+        # continuously-quoted commodity futures) on their full intraday series
+        # instead of clipping them to the US equity session. The stored column is
+        # only a hint — it defaults to 'Stock' and `POST /api/v1/watchlist` (the
+        # path the iOS add flow uses) never writes it — so `resolve_asset_class`
+        # falls back to symbol detection. See services/asset_class.py.
         asset_types = {
             item["ticker"]: str(item.get("asset_type") or "").lower()
             for item in watchlist
@@ -200,19 +265,43 @@ class TrackingService:
                 quote = quotes_map.get(ticker, {})
                 sparkline = sparklines_map.get(ticker, [])
 
+                # EVERY numeric goes through `_finite_or_none`. A bare float() is
+                # the trap here: `float("nan")` is TRUTHY so a NaN survives the
+                # `or` fallbacks below, `round(nan, 2)` doesn't raise so the
+                # per-row `except` never fires, and Pydantic accepts it on the
+                # REQUIRED `price`/`change_percent` fields. Starlette then renders
+                # with allow_nan=False and 500s the WHOLE feed — one bad cell on
+                # one ticker blanks the entire Assets tab, and the poisoned object
+                # is already in `_feed_cache`, so it re-500s for the full TTL.
+                # (Same guard commodity_service applies to this exact payload.)
+                #
                 # FMP spells this `changePercentage` for equities but
                 # `changesPercentage` (plural) for crypto / indices /
                 # commodities on the SAME /quote path — read both or those
                 # non-stock rows always report a flat +0.00%. Mirrors the
                 # defensive read in stock_overview_service / index_service.
-                change_pct = (
-                    quote.get("changePercentage")
-                    or quote.get("changesPercentage")
-                    or 0
-                )
-                price = quote.get("price") or 0
-                prev_close_raw = quote.get("previousClose")
-                market_cap_raw = quote.get("marketCap")
+                change_pct = _finite_or_none(quote.get("changePercentage"))
+                if change_pct is None:
+                    change_pct = _finite_or_none(quote.get("changesPercentage"))
+                price_f = _finite_or_none(quote.get("price"))
+                prev_close_f = _finite_or_none(quote.get("previousClose"))
+                market_cap_f = _finite_or_none(quote.get("marketCap"))
+
+                if quote and (price_f is None or change_pct is None):
+                    # Never silent: a quote that arrived but carried an unusable
+                    # number is exactly the case that used to take the tab down.
+                    logger.warning(
+                        "[Tracking] %s: dropped non-finite/missing quote field(s) "
+                        "(price=%r change=%r) — row degrades instead of 500ing the feed",
+                        ticker, quote.get("price"), quote.get("changePercentage"),
+                    )
+
+                price = price_f if price_f is not None else 0
+                # `+ 0.0` collapses signed zero: round(-0.001, 2) is -0.0, and on
+                # iOS `-0.0 >= 0` is true, so the row would show a green up-arrow
+                # while formatting the value as "-0.00". Same normalization the
+                # movers scanner applies for the same reason.
+                change_pct = (change_pct if change_pct is not None else 0.0) + 0.0
 
                 # Holding info — these columns live on watchlist_items and
                 # are populated by the Portfolio Insights config sheet. iOS
@@ -226,8 +315,8 @@ class TrackingService:
                         ticker=ticker,
                         company_name=item.get("company_name") or quote.get("name") or ticker,
                         price=round(float(price), 2),
-                        change_percent=round(float(change_pct), 2),
-                        previous_close=round(float(prev_close_raw), 2) if prev_close_raw else None,
+                        change_percent=round(float(change_pct), 2) + 0.0,
+                        previous_close=round(prev_close_f, 2) if prev_close_f else None,
                         sparkline_data=sparkline,
                         logo_url=item.get("logo_url"),
                         # Sector/country live on the watchlist row (seeded on
@@ -236,9 +325,9 @@ class TrackingService:
                         # old `quote.get(...)` fallback was always null.
                         sector=item.get("sector"),
                         country=item.get("country"),
-                        market_cap=float(market_cap_raw) if market_cap_raw else None,
-                        shares=float(shares) if shares is not None else None,
-                        market_value=float(stored_value) if stored_value is not None else None,
+                        market_cap=market_cap_f if market_cap_f else None,
+                        shares=_finite_or_none(shares),
+                        market_value=_finite_or_none(stored_value),
                         asset_type=item.get("asset_type"),
                     )
                 )
@@ -253,7 +342,19 @@ class TrackingService:
                 )
 
         feed = TrackingFeedResponse(assets=assets, alerts=alerts)
-        _feed_cache_set(user_id, feed)
+        # Don't PIN a fully-degraded feed. If the quote fan-out resolved nothing at
+        # all, every row carries a placeholder price; caching that for the full TTL
+        # makes one transient FMP blip look like a 30-second outage on the tab and
+        # suppresses the retry the 30s client timer would otherwise perform.
+        # Mirrors get_scanners' "empty, uncached → retries" posture.
+        if quotes_map or not tickers:
+            _feed_cache_set(user_id, feed)
+        else:
+            logger.warning(
+                "[Tracking] all %d quotes unresolved for user %s — serving degraded "
+                "feed UNCACHED so the next request retries",
+                len(tickers), user_id,
+            )
         return feed
 
     # ── Batch Quotes ────────────────────────────────────────────────
@@ -276,36 +377,44 @@ class TrackingService:
     ) -> Dict[str, List[float]]:
         """Fetch sparkline data for all tickers concurrently.
 
-        ``asset_types`` maps ticker → lowercase asset_type so a 24/7 asset
-        (crypto) keeps its full intraday series instead of being clipped to
-        US regular market hours (which would fold most of its session away and
-        diverge from the crypto detail 1D chart, which uses extended hours).
+        ``asset_types`` maps ticker → the STORED ``asset_type`` column, used only
+        as a hint: it defaults to ``'Stock'`` and ``POST /api/v1/watchlist`` (the
+        path the iOS add-ticker flow uses) never writes it, so a Bitcoin row
+        claims to be an equity. ``resolve_asset_class`` therefore falls back to
+        symbol detection, and any 24/7 asset (crypto + continuously-quoted
+        commodity futures) keeps its full intraday series instead of being
+        clipped to the US equity session — which would fold most of its day away
+        and diverge from the detail 1D chart one tap later.
         """
         asset_types = asset_types or {}
 
         async def _fetch_one(ticker: str) -> Tuple[str, List[float]]:
-            # Check per-ticker cache
-            cached = _sparkline_cache_get(ticker)
+            # Resolve the session window FIRST — it is part of the cache identity
+            # (the same ticker yields a different series under each window).
+            extended_hours = symbol_trades_extended_hours(
+                ticker, asset_types.get(ticker)
+            )
+
+            cached = _sparkline_cache_get(ticker, extended_hours)
             if cached is not None:
                 return (ticker, cached)
 
             try:
                 # Use the SAME series the TickerDetailView 1D chart draws:
-                # 5-min intraday bars, regular market hours only, oldest-first
-                # (via the shared chart_helper). This keeps the holdings-card
-                # sparkline visually consistent with the chart the user sees
-                # when they open the ticker — the old path drew a ~1-month
-                # daily-EOD line, which looked nothing like the 1D chart.
-                # Crypto trades 24/7, so it (and only it) keeps extended hours,
-                # mirroring crypto_service's detail chart.
-                extended_hours = asset_types.get(ticker, "") == "crypto"
+                # 5-min intraday bars, oldest-first, via the shared chart_helper,
+                # with the SAME session window that asset's detail chart uses
+                # (crypto_service and commodity_service both pass
+                # extended_hours=True). This keeps the holdings-card sparkline
+                # consistent with the chart the user sees when they open the
+                # ticker — the old path drew a ~1-month daily-EOD line, which
+                # looked nothing like the 1D chart.
                 bars = await fetch_chart_data(
                     self.fmp, ticker, "1D", extended_hours=extended_hours
                 )
                 if not bars:
                     # Honest empty — never fabricate. iOS SparklineView draws
                     # nothing for an empty/1-point series.
-                    _sparkline_cache_set(ticker, [])
+                    _sparkline_cache_set(ticker, [], extended_hours)
                     return (ticker, [])
 
                 # Keep only the most recent trading day — mirrors the iOS
@@ -316,17 +425,28 @@ class TrackingService:
                     b for b in bars if str(b.get("date", "")).startswith(last_day)
                 ]
 
+                # `_finite_or_none` (not bare float()): chart_helper already drops
+                # non-finite closes on the intraday path, but this list feeds a
+                # REQUIRED `List[float]` that Starlette renders with
+                # allow_nan=False — keep the guard local so a future chart_helper
+                # branch can't silently reopen the hole.
                 closes = [
-                    float(b["close"]) for b in day_bars if b.get("close") is not None
+                    c for c in (_finite_or_none(b.get("close")) for b in day_bars)
+                    if c is not None and c > 0
                 ]
                 if len(closes) < 2:
-                    _sparkline_cache_set(ticker, [])
+                    _sparkline_cache_set(ticker, [], extended_hours)
                     return (ticker, [])
 
                 # ~78 five-min bars per session → downsample so the card payload
-                # stays small and the tiny chart reads cleanly.
-                sparkline = [round(c, 2) for c in _downsample(closes, 30)]
-                _sparkline_cache_set(ticker, sparkline)
+                # stays small and the tiny chart reads cleanly. Precision scales to
+                # the series' own magnitude: a flat round(c, 2) collapses a $0.20
+                # holding to 1–4 distinct levels, drawing a dead-flat line next to
+                # a live "+0.39%".
+                sampled = _downsample(closes, 30)
+                digits = _sparkline_precision(sampled)
+                sparkline = [round(c, digits) for c in sampled]
+                _sparkline_cache_set(ticker, sparkline, extended_hours)
                 return (ticker, sparkline)
             except Exception as exc:
                 logger.warning(

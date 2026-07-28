@@ -157,3 +157,68 @@ def test_stock_extract_chart_data_drops_bad_rows():
 
 def test_stock_extract_chart_data_empty():
     assert _extract_chart_data([], "1Y") == []
+
+
+# ── _filter_regular_hours: what it does and does NOT do ──────────
+# Documented deliberately, because two separate reviewers mis-stated it. It is a
+# pure TIME-OF-DAY test with no calendar awareness at all — which is exactly why
+# the fix for the 24/7 tiles belongs at the CALL SITE (pass extended_hours=True
+# for crypto/commodities), not inside this filter.
+
+
+def test_filter_regular_hours_is_time_of_day_only_not_calendar_aware():
+    rows = [
+        {"date": "2026-06-27 10:00:00", "close": 1.0},  # SATURDAY, inside 09:30-16:00
+        {"date": "2026-06-29 02:00:00", "close": 2.0},  # weekday, overnight
+        {"date": "2026-06-29 09:29:00", "close": 3.0},  # one minute before the bell
+        {"date": "2026-06-29 09:30:00", "close": 4.0},  # the bell
+        {"date": "2026-06-29 15:59:00", "close": 5.0},  # last regular minute
+        {"date": "2026-06-29 16:00:00", "close": 6.0},  # the close — excluded
+        {"date": "2026-06-29 20:00:00", "close": 7.0},  # after hours
+    ]
+    kept = [r["close"] for r in chart_helper._filter_regular_hours(rows)]
+    # The Saturday bar SURVIVES (no weekday check) while the weekday overnight and
+    # after-hours bars are dropped. A 24/7 asset therefore loses most of its day.
+    assert kept == [1.0, 4.0, 5.0]
+
+
+def test_filter_regular_hours_keeps_daily_and_unparseable_rows():
+    rows = [
+        {"date": "2026-06-29", "close": 1.0},            # daily bar (len <= 10)
+        {"date": "29/06/2026 10:00", "close": 2.0},      # unparseable timestamp
+    ]
+    kept = [r["close"] for r in chart_helper._filter_regular_hours(rows)]
+    assert kept == [1.0, 2.0]  # kept, not silently dropped
+
+
+# ── sparkline_precision ──────────────────────────────────────────
+# Shared by BOTH mini-chart builders (tracking_service holdings cards and
+# home_dashboard_service pulse tiles). A flat round(c, 2) collapsed any sub-dollar
+# series into a couple of levels, so the card drew a dead-flat line beside a live
+# non-zero % change.
+
+
+def test_sparkline_precision_scales_to_magnitude():
+    p = chart_helper.sparkline_precision
+    assert p([144.27, 145.01]) == 2          # normal equity — no noise digits
+    assert p([12.5, 12.9]) == 2
+    assert p([4.10, 4.22]) == 3              # low single digits
+    assert p([0.2015, 0.2049]) == 5          # penny stock keeps its shape
+    assert p([0.00001234, 0.00001301]) == 8  # sub-cent coin, capped at 8dp
+
+
+def test_sparkline_precision_ignores_zeros_and_empty():
+    p = chart_helper.sparkline_precision
+    assert p([]) == 8                        # nothing to measure → most precise
+    assert p([0.0, 0.0]) == 8                # all-zero: `min` default path
+    assert p([0.0, 250.0]) == 2              # a zero must not force max precision
+
+
+def test_sub_dollar_series_survives_rounding_at_its_own_precision():
+    closes = [0.2015, 0.2021, 0.2033, 0.2028, 0.2044]
+    digits = chart_helper.sparkline_precision(closes)
+    rounded = [round(c, digits) for c in closes]
+    assert min(rounded) != max(rounded)
+    assert len(set(rounded)) == len(set(closes))   # no collapsing
+    # The old behaviour, pinned so the regression is unmistakable.
+    assert len({round(c, 2) for c in closes}) == 1

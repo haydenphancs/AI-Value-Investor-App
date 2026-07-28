@@ -58,8 +58,15 @@ struct TrackedAsset: Identifiable {
     /// backends / degraded rows). Preferred over the derived value below.
     let backendPreviousClose: Double?
 
+    /// Signed zero collapsed to +0 — see `PriceChangeLabel.normalizedChange`.
+    /// `-0.0` (what a barely-negative move rounds to) satisfies `>= 0` yet still
+    /// formats as "-0.00", so the two readers below would disagree on the sign.
+    private var normalizedChange: Double {
+        changePercent == 0 ? 0 : changePercent
+    }
+
     var isPositive: Bool {
-        changePercent >= 0
+        normalizedChange >= 0
     }
 
     /// Previous trading day's close — the sparkline's dotted baseline. Uses the
@@ -112,8 +119,8 @@ struct TrackedAsset: Identifiable {
     }
 
     var formattedChange: String {
-        let sign = changePercent >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.2f", changePercent))%"
+        let sign = isPositive ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", normalizedChange))%"
     }
 }
 

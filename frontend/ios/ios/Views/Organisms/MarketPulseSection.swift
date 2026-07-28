@@ -26,13 +26,24 @@ struct MarketPulseSection: View {
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, 10)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(items) { item in
-                        MarketPulseCard(item: item) { onTap?(item) }
+            if items.isEmpty {
+                // The status header above is still correct when the tiles fail
+                // (it's derived server-side from the clock + holiday calendar, not
+                // from quotes), so say plainly that the quotes are missing rather
+                // than silently rendering an empty strip.
+                Text("Market data unavailable — pull to refresh.")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.horizontal, AppSpacing.lg)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(items) { item in
+                            MarketPulseCard(item: item) { onTap?(item) }
+                        }
                     }
+                    .padding(.horizontal, AppSpacing.lg)
                 }
-                .padding(.horizontal, AppSpacing.lg)
             }
         }
     }

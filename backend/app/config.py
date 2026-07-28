@@ -162,6 +162,17 @@ class Settings(BaseSettings):
     CHAT_CREDIT_COST: int = 1
     REPORT_CREDIT_COST: int = 20
 
+    # ── APNs push notifications (token-based auth via a .p8 key) ───────────────
+    # All optional: with any unset, push is simply disabled (PushService.enabled
+    # is False) and registration still records device tokens for later. NEVER
+    # commit the .p8 — set APNS_AUTH_KEY to the key file's CONTENTS via env/secret.
+    APNS_KEY_ID: Optional[str] = None          # 10-char Key ID from the .p8
+    APNS_TEAM_ID: Optional[str] = None         # Apple Developer Team ID (WG697LVCS9)
+    APNS_AUTH_KEY: Optional[str] = None        # PEM contents of the AuthKey_XXXX.p8
+    APNS_BUNDLE_ID: str = "com.phan.caydex"    # apns-topic
+    # "production" → api.push.apple.com ; "sandbox" → api.sandbox.push.apple.com
+    APNS_ENV: str = "sandbox"
+
     # Gemini quota (429) handling. Instead of skipping retries on a rate-limit
     # error, back off and retry a bounded number of times — paired with the
     # agent-run semaphore this recovers transient 429s rather than degrading a

@@ -166,3 +166,60 @@ def test_optional_item_lists_serialize_as_null_not_missing():
     for k in ("whale_trade_items", "analyst_rating_items", "insider_transaction_items"):
         assert k in alert
         assert alert[k] is None
+
+
+# ── Wire serialization (the mechanism that actually 500s) ───────────────
+# This file pinned model SHAPE but never that the model can be RENDERED. FastAPI
+# hands the response to Starlette's JSONResponse, which calls
+# json.dumps(..., allow_nan=False) — so a NaN that Pydantic happily accepts on a
+# required float raises ValueError at render time and 500s the WHOLE feed. That
+# gap is exactly how the bare-float() merge loop shipped.
+
+import json
+import math
+
+
+def test_feed_with_extreme_but_finite_values_serializes():
+    feed = TrackingFeedResponse(
+        assets=[
+            TrackedAssetResponse(
+                ticker="TINY", company_name="Sub-cent Co",
+                price=0.00000123, change_percent=-0.0, previous_close=0.00000121,
+                sparkline_data=[0.00000121, 0.00000123],
+                market_cap=1.7e14, shares=1e12, market_value=9.9e13,
+            ),
+            TrackedAssetResponse(
+                ticker="HUGE", company_name="Mega Co",
+                price=1e12, change_percent=999.99, previous_close=1e11,
+                sparkline_data=[1e11, 1e12],
+            ),
+        ]
+    )
+    json.dumps(feed.model_dump(), allow_nan=False)
+
+
+def test_required_asset_fields_are_never_null_on_the_wire():
+    """`price`, `change_percent` and `sparkline_data` are non-Optional `let`s on
+    the Swift side, and Swift arrays decode strictly — one null blanks the whole
+    Holdings list, not just the offending row."""
+    dumped = TrackedAssetResponse(ticker="ORCL", company_name="Oracle").model_dump()
+    for key in ASSET_REQUIRED:
+        assert key in dumped, f"{key} missing from the payload"
+        assert dumped[key] is not None, f"{key} is null — iOS decode would throw"
+    # And the defaults are usable numbers, not sentinels iOS would render as data.
+    assert math.isfinite(dumped["price"])
+    assert math.isfinite(dumped["change_percent"])
+    assert dumped["sparkline_data"] == []
+
+
+def test_signed_zero_change_percent_would_break_the_ios_sign_logic():
+    """Documents WHY the service normalizes with `+ 0.0`. Swift reads
+    `-0.0 >= 0` as true (green up-arrow) but formats it "-0.00" — rendering the
+    literal string "+-0.00%". Nothing in the schema prevents it, so the guard
+    lives in the service and this pins the hazard."""
+    leaked = TrackedAssetResponse(
+        ticker="X", company_name="X", change_percent=-0.0
+    ).model_dump()
+    assert math.copysign(1.0, leaked["change_percent"]) == -1.0
+    # …which is precisely the value the service must never produce; see
+    # test_tracking_service_math.test_barely_negative_change_never_serializes_as_signed_zero.

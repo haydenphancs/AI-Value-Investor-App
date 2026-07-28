@@ -16,19 +16,22 @@ import Security
 
 // MARK: - Auth Response
 
+/// Mirrors the backend `TokenResponse` (`backend/app/schemas/auth.py`) EXACTLY:
+/// `{access_token, refresh_token, token_type, user_id}`. The backend does NOT nest
+/// the user object or an `expires_in` here — an earlier DTO that required those two
+/// fields made every login/register/refresh throw `DecodingError`. The canonical
+/// profile is fetched separately via `GET /users/me` after the token is stored.
 struct AuthResponse: Decodable, Sendable {
     let accessToken: String
     let refreshToken: String
-    let expiresIn: Int
     let tokenType: String
-    let user: UserProfile
+    let userId: String
 
     enum CodingKeys: String, CodingKey {
         case accessToken = "access_token"
         case refreshToken = "refresh_token"
-        case expiresIn = "expires_in"
         case tokenType = "token_type"
-        case user
+        case userId = "user_id"
     }
 }
 
@@ -55,7 +58,9 @@ final class AuthService {
 
     // MARK: - Authentication
 
-    /// Sign in with email and password
+    /// Sign in with email and password.
+    /// Stores the tokens, arms the API client, then fetches the canonical profile
+    /// from `GET /users/me` (the token body does not carry the user object).
     func signIn(email: String, password: String) async throws -> UserProfile {
         let response = try await apiClient.request(
             endpoint: .signIn(email: email, password: password),
@@ -68,10 +73,11 @@ final class AuthService {
         // Update API client
         await apiClient.setAuthToken(response.accessToken)
 
-        return response.user
+        return try await fetchCurrentUser()
     }
 
-    /// Sign up with email and password
+    /// Sign up with email and password.
+    /// Same flow as `signIn`: store tokens → arm client → fetch `/users/me`.
     func signUp(email: String, password: String, displayName: String) async throws -> UserProfile {
         let response = try await apiClient.request(
             endpoint: .signUp(email: email, password: password, displayName: displayName),
@@ -84,7 +90,17 @@ final class AuthService {
         // Update API client
         await apiClient.setAuthToken(response.accessToken)
 
-        return response.user
+        return try await fetchCurrentUser()
+    }
+
+    /// Fetch the current user's canonical profile (`GET /users/me`).
+    /// `UserProfile` decodes the backend `UserResponse`; the extra `updated_at`
+    /// field is ignored by the decoder.
+    func fetchCurrentUser() async throws -> UserProfile {
+        try await apiClient.request(
+            endpoint: .getCurrentUser,
+            responseType: UserProfile.self
+        )
     }
 
     /// Sign out

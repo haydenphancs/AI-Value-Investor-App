@@ -28,6 +28,15 @@ actor APIClient {
     private let encoder: JSONEncoder
     private var authToken: String?
 
+    /// Refreshes the auth token on a 401. Wired from the app root to
+    /// `AuthService.refreshToken()`. Returns the new access token, or nil when the
+    /// refresh fails (the caller then surfaces `.unauthorized`).
+    private var tokenRefresher: (@Sendable () async -> String?)?
+
+    /// Single-flight guard: a burst of concurrent 401s triggers ONE refresh, not a
+    /// storm. Followers await the in-flight refresh instead of starting their own.
+    private var refreshInFlight: Task<String?, Never>?
+
     /// Enable debug logging
     var isDebugLoggingEnabled: Bool = false
 
@@ -72,13 +81,35 @@ actor APIClient {
         self.authToken = token
     }
 
+    /// Install the token-refresh hook (called once from the app root after auth is
+    /// configured). Enables the 401 → refresh → retry-once behavior below.
+    func setTokenRefresher(_ refresher: @escaping @Sendable () async -> String?) {
+        self.tokenRefresher = refresher
+    }
+
+    /// Run the refresher at most once concurrently. Concurrent 401s share the same
+    /// in-flight refresh; on success `authToken` is updated for all subsequent calls.
+    private func refreshTokenSingleFlight() async -> String? {
+        if let inFlight = refreshInFlight {
+            return await inFlight.value
+        }
+        guard let refresher = tokenRefresher else { return nil }
+        let task = Task { await refresher() }
+        refreshInFlight = task
+        let newToken = await task.value
+        refreshInFlight = nil
+        if let newToken { self.authToken = newToken }
+        return newToken
+    }
+
     // MARK: - Request Methods
 
     /// Make a request and decode the response
     func request<T: Decodable>(
         endpoint: APIEndpoint,
         responseType: T.Type,
-        retryCount: Int = 2
+        retryCount: Int = 2,
+        allowAuthRetry: Bool = true
     ) async throws -> T {
         let request = try buildRequest(for: endpoint)
 
@@ -98,10 +129,23 @@ actor APIClient {
             return try decoder.decode(T.self, from: data)
 
         } catch let error as APIError {
+            // 401 → single-flight token refresh → retry ONCE. Skipped for the auth
+            // endpoints themselves (a failed login must surface, not loop) and when
+            // this call is already the post-refresh retry.
+            if case .unauthorized = error,
+               allowAuthRetry,
+               tokenRefresher != nil,
+               !endpoint.isAuthEndpoint,
+               await refreshTokenSingleFlight() != nil {
+                return try await self.request(
+                    endpoint: endpoint, responseType: responseType,
+                    retryCount: retryCount, allowAuthRetry: false
+                )
+            }
             // Retry on server errors
             if retryCount > 0, case .serverError = error {
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-                return try await self.request(endpoint: endpoint, responseType: responseType, retryCount: retryCount - 1)
+                return try await self.request(endpoint: endpoint, responseType: responseType, retryCount: retryCount - 1, allowAuthRetry: allowAuthRetry)
             }
             throw error
         } catch let error as DecodingError {
@@ -118,7 +162,7 @@ actor APIClient {
     }
 
     /// Make a request without expecting a response body
-    func request(endpoint: APIEndpoint) async throws {
+    func request(endpoint: APIEndpoint, allowAuthRetry: Bool = true) async throws {
         let request = try buildRequest(for: endpoint)
 
         logRequest(request, endpoint: endpoint)
@@ -135,6 +179,14 @@ actor APIClient {
             try validateResponse(httpResponse, data: data)
 
         } catch let apiError as APIError {
+            // 401 → single-flight refresh → retry once (see request<T> for rationale).
+            if case .unauthorized = apiError,
+               allowAuthRetry,
+               tokenRefresher != nil,
+               !endpoint.isAuthEndpoint,
+               await refreshTokenSingleFlight() != nil {
+                return try await self.request(endpoint: endpoint, allowAuthRetry: false)
+            }
             throw apiError
         } catch {
             // Connection failed — try failover

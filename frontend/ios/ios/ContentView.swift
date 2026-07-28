@@ -305,7 +305,7 @@ struct ResearchViewWithBinding: View {
             .preferredColorScheme(.dark)
         }
         .sheet(isPresented: $viewModel.showCreditsSheet) {
-            CreditsPricingSheet(currentBalance: viewModel.creditBalance.credits)
+            PaywallView()
         }
         .sheet(isPresented: $viewModel.showPersonasSheet) {
             PersonasSheet(

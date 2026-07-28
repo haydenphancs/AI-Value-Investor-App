@@ -14,7 +14,15 @@ class ProfileViewModel: BaseViewModel {
 
     // MARK: - Published Properties
 
-    @Published var appearanceMode: AppearanceMode = .system
+    /// Backed by AppearanceManager (UserDefaults). Changing it persists + applies the
+    /// window style and syncs the choice to the backend for signed-in users.
+    @Published var appearanceMode: AppearanceMode = AppearanceManager.current {
+        didSet {
+            guard oldValue != appearanceMode else { return }
+            AppearanceManager.set(appearanceMode)
+            SettingsSyncManager.shared.push()   // self-gates on auth
+        }
+    }
     @Published var showDeleteConfirmation: Bool = false
     @Published var showSignOutConfirmation: Bool = false
     @Published var isDeleting: Bool = false
@@ -40,6 +48,29 @@ class ProfileViewModel: BaseViewModel {
 
     var creditResetDate: String? {
         appState?.user.credits?.resetsAt
+    }
+
+    /// Human label for the monthly reset. Derived from the backend `resets_at`
+    /// (written by `ensure_credit_period` = next-month boundary in ET). Falls back
+    /// to "Renews monthly" when absent (e.g. a brand-new row) or unparseable.
+    var creditResetLabel: String {
+        guard let resetsAt = appState?.user.credits?.resetsAt,
+              let date = Self.parseISODate(resetsAt) else {
+            return "Renews monthly"
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return "Resets on \(formatter.string(from: date))"
+    }
+
+    /// Parse an ISO-8601 timestamp tolerant of fractional seconds (Postgres/Supabase
+    /// timestamptz may or may not include them).
+    static func parseISODate(_ string: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: string) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: string)
     }
 
     // MARK: - User Info
@@ -73,6 +104,12 @@ class ProfileViewModel: BaseViewModel {
         appState?.user.tier ?? .free
     }
 
+    /// Whether a real user is signed in. Guest-first: when false the Profile
+    /// screen shows a Sign In affordance instead of the identity/credit blocks.
+    var isAuthenticated: Bool {
+        appState?.auth.isAuthenticated ?? false
+    }
+
     // MARK: - Activity Stats
 
     var totalReports: Int {
@@ -97,11 +134,6 @@ class ProfileViewModel: BaseViewModel {
             self?.isDeleting = false
             self?.appState?.signOut()
         }
-    }
-
-    func addMoreCredits() {
-        // Will open credits purchase flow
-        print("Navigate to add credits")
     }
 
     func loadCredits() {
@@ -139,6 +171,14 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
     var colorScheme: ColorScheme? {
         switch self {
         case .system: return nil
+        case .dark: return .dark
+        case .light: return .light
+        }
+    }
+
+    var interfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .system: return .unspecified
         case .dark: return .dark
         case .light: return .light
         }

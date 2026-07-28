@@ -8,50 +8,66 @@
 import SwiftUI
 
 // MARK: - App Colors
+//
+// APPEARANCE / LIGHT MODE
+// -----------------------
+// The theme (System / Dark / Light) is driven by `overrideUserInterfaceStyle`
+// on the window — see `Core/Utilities/AppearanceManager.swift`. For the app to
+// actually *look* different in light mode, the SURFACE and TEXT tokens below
+// resolve per `userInterfaceStyle` at render time via `Color(lightHex:darkHex:)`
+// (a dynamic `UIColor` under the hood — see the extension at the bottom of this
+// file). ACCENT / SENTIMENT / BRAND / CHART tokens are intentionally CONSTANT
+// across modes: a brand blue stays blue, gains stay green, losses stay red —
+// these read acceptably on both a dark and a light surface, matching how
+// Robinhood/Webull/Yahoo treat their semantic colors.
+//
+// The default choice is Dark (AppearanceManager.current == .dark), and every
+// adaptive token's `darkHex` is the ORIGINAL value — so the shipped dark look
+// is byte-for-byte unchanged unless the user explicitly picks Light or System.
 struct AppColors {
-    // Background Colors
-    static let background = Color(hex: "171B26")
-    static let cardBackground = Color(hex: "1E2330")
-    static let cardBackgroundLight = Color(hex: "252B3B")
+    // Background Colors — adaptive
+    static let background = Color(lightHex: "F4F5F8", darkHex: "171B26")
+    static let cardBackground = Color(lightHex: "FFFFFF", darkHex: "1E2330")
+    static let cardBackgroundLight = Color(lightHex: "EDF0F5", darkHex: "252B3B")
 
-    // Accent Colors
+    // Accent Colors — constant across modes
     static let primaryBlue = Color(hex: "3B82F6")
     static let accentCyan = Color(hex: "06B6D4")
     static let accentYellow = Color(hex: "FACC15")
 
-    // Sentiment Colors
+    // Sentiment Colors — constant across modes
     static let bullish = Color(hex: "22C55E")
     static let bearish = Color(hex: "EF4444")
     static let neutral = Color(hex: "F59E0B")
 
-    // Text Colors
-    static let textPrimary = Color.white
-    static let textSecondary = Color(hex: "9CA3AF")
-    static let textMuted = Color(hex: "6B7280")
+    // Text Colors — adaptive
+    static let textPrimary = Color(lightHex: "111827", darkHex: "FFFFFF")
+    static let textSecondary = Color(lightHex: "5C6470", darkHex: "9CA3AF")
+    static let textMuted = Color(lightHex: "8A93A0", darkHex: "6B7280")
 
-    // Alert Colors
+    // Alert Colors — constant across modes
     static let alertOrange = Color(hex: "F97316")
     static let alertBlue = Color(hex: "3B82F6")
     static let alertPurple = Color(hex: "A855F7")
 
-    // Card Gradient Colors
+    // Card Gradient Colors — constant (brand marks)
     static let microsoftBlue = Color(hex: "0078D4")
     static let googleBlue = Color(hex: "4285F4")
     static let amdRed = Color(hex: "ED1C24")
 
     // Tab Bar
-    static let tabBarBackground = Color(hex: "171B26")
+    static let tabBarBackground = Color(lightHex: "FFFFFF", darkHex: "171B26")
     static let tabBarSelected = Color(hex: "3B82F6")
-    static let tabBarUnselected = Color(hex: "6B7280")
+    static let tabBarUnselected = Color(lightHex: "8A93A0", darkHex: "6B7280")
 
-    // Growth Chart Colors
+    // Growth Chart Colors — series accents constant; control surfaces adaptive
     static let growthBarBlue = Color(hex: "5B9CF6")
     static let growthYoYYellow = Color(hex: "FACC15")
     static let growthSectorGray = Color(hex: "9CA3AF")
     static let chipSelectedBackground = Color(hex: "3B82F6")
-    static let chipUnselectedBackground = Color(hex: "2D3548")
-    static let toggleBackground = Color(hex: "1E2330")
-    static let toggleSelectedBackground = Color(hex: "374151")
+    static let chipUnselectedBackground = Color(lightHex: "E7EAF0", darkHex: "2D3548")
+    static let toggleBackground = Color(lightHex: "EDF0F5", darkHex: "1E2330")
+    static let toggleSelectedBackground = Color(lightHex: "D5DAE3", darkHex: "374151")
 
     // Profit Power Chart Colors
     static let profitGrossMargin = Color(hex: "3B82F6")       // Blue - matches primaryBlue
@@ -90,6 +106,53 @@ extension Color {
             blue: Double(b) / 255,
             opacity: Double(a) / 255
         )
+    }
+}
+
+// MARK: - Adaptive (light / dark) color support
+//
+// Backs the surface + text tokens in `AppColors`. The dynamic `UIColor` closure
+// is re-evaluated by UIKit/SwiftUI whenever the effective `userInterfaceStyle`
+// changes (including when `AppearanceManager` flips the window override), so a
+// token switches instantly with no view rebuild required.
+
+extension UIColor {
+    /// Build a `UIColor` from a hex string (RGB / ARGB), mirroring `Color(hex:)`.
+    convenience init(hexString: String) {
+        let hex = hexString.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch hex.count {
+        case 3: // RGB (12-bit)
+            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+        case 6: // RGB (24-bit)
+            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+        case 8: // ARGB (32-bit)
+            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+        default:
+            (a, r, g, b) = (255, 0, 0, 0)
+        }
+        self.init(
+            red: CGFloat(r) / 255,
+            green: CGFloat(g) / 255,
+            blue: CGFloat(b) / 255,
+            alpha: CGFloat(a) / 255
+        )
+    }
+}
+
+extension Color {
+    /// Adaptive token: resolves to `light` in light mode and to `dark` in dark
+    /// (and for `.unspecified`). Because the app's default appearance is Dark,
+    /// callers passing the original value as `darkHex` keep the exact shipped
+    /// look until the user chooses Light or System.
+    init(lightHex light: String, darkHex dark: String) {
+        self = Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .light
+                ? UIColor(hexString: light)
+                : UIColor(hexString: dark)
+        })
     }
 }
 

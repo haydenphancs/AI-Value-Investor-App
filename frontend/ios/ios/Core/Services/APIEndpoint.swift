@@ -42,6 +42,13 @@ enum APIEndpoint: Sendable {
     case getUserCredits
     case updateProfile(displayName: String?, avatarUrl: String?)
 
+    // MARK: - Billing / Subscription / Settings / Devices
+    case getPlanCatalog                                    // public tier catalog (guest-safe)
+    case getMySubscription                                 // current user's entitlement
+    case getMySettings                                     // synced preference blob
+    case updateMySettings(preferences: [String: PreferenceValue])
+    case registerDevice(token: String, platform: String, environment: String?)
+
     // MARK: - Stocks
     case searchStocks(query: String, limit: Int)
     case getStock(ticker: String)
@@ -216,6 +223,16 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me/credits"
         case .updateProfile:
             return "/api/v1/users/me"
+
+        // Billing / Subscription / Settings / Devices
+        case .getPlanCatalog:
+            return "/api/v1/billing/plans"
+        case .getMySubscription:
+            return "/api/v1/users/me/subscription"
+        case .getMySettings, .updateMySettings:
+            return "/api/v1/users/me/settings"
+        case .registerDevice:
+            return "/api/v1/users/me/devices"
 
         // Stocks
         case .searchStocks:
@@ -468,8 +485,12 @@ enum APIEndpoint: Sendable {
             return .PATCH
 
         case .bulkUpdateHoldings,
-             .renamePortfolio, .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios:
+             .renamePortfolio, .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios,
+             .updateMySettings:
             return .PUT
+
+        case .registerDevice:
+            return .POST
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
              .unfollowWhale, .deletePortfolio, .removeBookBookmark, .uncompleteLearnItem:
@@ -581,6 +602,12 @@ enum APIEndpoint: Sendable {
         case .updateProfile(let displayName, let avatarUrl):
             return UpdateProfileRequest(displayName: displayName, avatarUrl: avatarUrl)
 
+        case .updateMySettings(let preferences):
+            return UpdateUserSettingsRequestBody(preferences: preferences)
+
+        case .registerDevice(let token, let platform, let environment):
+            return DeviceRegisterRequestBody(token: token, platform: platform, environment: environment)
+
         case .addToWatchlist(let stockId):
             return AddToWatchlistRequest(stockId: stockId)
 
@@ -657,12 +684,28 @@ enum APIEndpoint: Sendable {
         }
     }
 
+    // MARK: - Auth Endpoint
+
+    /// The auth flow endpoints themselves. The APIClient's 401 → refresh → retry
+    /// interceptor skips these so a failed login/refresh surfaces instead of looping.
+    nonisolated var isAuthEndpoint: Bool {
+        switch self {
+        case .signIn, .signUp, .refreshToken, .signOut:
+            return true
+        default:
+            return false
+        }
+    }
+
     // MARK: - Auth Required
 
     nonisolated var requiresAuth: Bool {
         switch self {
         // Auth endpoints
         case .signIn, .signUp, .refreshToken:
+            return false
+        // Public tier catalog — the paywall must render for guests too.
+        case .getPlanCatalog:
             return false
         // Stock/crypto/commodity endpoints are public on the backend
         case .searchStocks, .getStock, .getStockOverview, .getStockOverviewCore, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
@@ -761,6 +804,18 @@ nonisolated struct RefreshTokenRequest: Encodable, Sendable {
 nonisolated struct UpdateProfileRequest: Encodable, Sendable {
     let displayName: String?
     let avatarUrl: String?
+}
+
+/// PUT /users/me/settings body. Keys inside `preferences` are already snake_case
+/// (the @AppStorage keys), so the encoder's convertToSnakeCase leaves them intact.
+nonisolated struct UpdateUserSettingsRequestBody: Encodable, Sendable {
+    let preferences: [String: PreferenceValue]
+}
+
+nonisolated struct DeviceRegisterRequestBody: Encodable, Sendable {
+    let token: String
+    let platform: String
+    let environment: String?
 }
 
 nonisolated struct AddToWatchlistRequest: Encodable, Sendable {

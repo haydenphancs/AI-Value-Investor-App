@@ -101,16 +101,77 @@ final class AppState {
 
     // MARK: - Auth Actions
 
+    /// Guest-first auth restore. Runs on launch:
+    ///  - No stored token  → stay a guest (`.unauthenticated`); the app is fully
+    ///    usable and requests fall back to the backend's GUEST_USER_ID.
+    ///  - Stored token      → arm the API client, fetch `/users/me`, and go
+    ///    `.authenticated`. On a 401 (expired), try ONE refresh then retry.
+    ///  - Any hard failure  → drop to guest (never a login wall).
     private func restoreAuthState() async {
-        // DEV: auth disabled. Backend's research/credits endpoints already
-        // have a guest fallback (GUEST_USER_ID) — requests without a Bearer
-        // token are attributed to that guest. We force `.authenticated` so
-        // the iOS auth guards (e.g. ResearchViewModel.generateAnalysis) pass.
-        auth.status = .authenticated
+        guard let token = authService.getStoredToken() else {
+            auth.status = .unauthenticated   // guest — app still shown
+            return
+        }
+
+        await apiClient.setAuthToken(token)
+
+        do {
+            // The APIClient's 401 interceptor (armed before this runs) transparently
+            // refreshes an expired token and retries, so a success here means the
+            // session is valid.
+            applyProfile(try await authService.fetchCurrentUser())
+            auth.status = .authenticated
+            await onAuthenticated()
+        } catch {
+            // Only a genuine auth failure means the session is dead — clear the token.
+            // A transient error (offline / 5xx) must PRESERVE the token so the next
+            // launch can restore; we simply run as a guest for now.
+            if AppError.from(error).isAuthError {
+                authService.clearToken()
+                await apiClient.setAuthToken(nil)
+                user = UserState()
+            }
+            auth.status = .unauthenticated
+        }
     }
 
+    /// Store the fetched profile AND map its tier string into the `UserTier` enum.
+    /// This is the ONLY place `user.tier` is assigned — it drives the tier badge,
+    /// paywall highlighting, and `canGenerateResearch`.
+    func applyProfile(_ profile: UserProfile) {
+        user.profile = profile
+        user.tier = UserTier(rawValue: profile.tier) ?? .free
+    }
+
+    /// Post-authentication side effects: refresh credits + pull synced settings.
+    /// Called from every path that transitions to `.authenticated`.
+    private func onAuthenticated() async {
+        await refreshCredits()
+        SettingsSyncManager.shared.hydrate()
+        PushNotificationManager.shared.flushPendingToken()
+    }
+
+    /// Refresh the credit balance into `user.credits` (single source of truth).
+    /// Best-effort: failures are logged, not surfaced (the Profile screen shows
+    /// the last-known balance rather than an error toast).
+    func refreshCredits() async {
+        do {
+            user.credits = try await apiClient.request(
+                endpoint: .getUserCredits,
+                responseType: CreditInfo.self
+            )
+        } catch {
+            #if DEBUG
+            print("⚠️ [AppState] refreshCredits failed: \(AppError.from(error).message)")
+            #endif
+        }
+    }
+
+    /// Sign out. Resets local state immediately for a snappy UI; the backend
+    /// `/auth/logout` call + Keychain/APIClient token clear run in the background
+    /// (they need the token to still be set, so they fire before it is cleared).
     func signOut() {
-        authService.clearToken()
+        Task { [authService] in await authService?.signOut() }
         auth.status = .unauthenticated
         user = UserState()
         watchlist = WatchlistState()
@@ -121,9 +182,9 @@ final class AppState {
     func signIn(email: String, password: String) async throws {
         auth.status = .loading
         do {
-            let profile = try await authService.signIn(email: email, password: password)
-            self.user.profile = profile
+            applyProfile(try await authService.signIn(email: email, password: password))
             auth.status = .authenticated
+            await onAuthenticated()
         } catch {
             auth.status = .unauthenticated
             throw error
@@ -134,11 +195,11 @@ final class AppState {
     func signUp(email: String, password: String, displayName: String) async throws {
         auth.status = .loading
         do {
-            let profile = try await authService.signUp(
+            applyProfile(try await authService.signUp(
                 email: email, password: password, displayName: displayName
-            )
-            self.user.profile = profile
+            ))
             auth.status = .authenticated
+            await onAuthenticated()
         } catch {
             auth.status = .unauthenticated
             throw error

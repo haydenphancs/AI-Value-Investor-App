@@ -85,7 +85,7 @@ struct ResearchContentView: View {
                 Text("This can't be undone.")
             }
             .sheet(isPresented: $viewModel.showCreditsSheet) {
-                CreditsPricingSheet(currentBalance: viewModel.creditBalance.credits)
+                PaywallView()
             }
             .sheet(isPresented: $viewModel.showPersonasSheet) {
                 PersonasSheet(

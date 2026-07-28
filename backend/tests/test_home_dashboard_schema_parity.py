@@ -37,6 +37,7 @@ from app.services.home_dashboard_service import (
     _market_status,
 )
 from app.services.signals_service import SignalsService, _SIGNALS_CACHE_KEY
+from app.services import home_dashboard_service as hds
 import time as _time
 
 
@@ -213,6 +214,7 @@ class _FakeFMP:
     def __init__(self):
         self.quote_calls = 0
         self.intraday_calls = 0
+        self.intraday_extended_hours: dict[str, bool | None] = {}
 
     async def get_stock_price_quote(self, ticker: str):
         self.quote_calls += 1
@@ -221,11 +223,19 @@ class _FakeFMP:
 
     async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None):
         self.intraday_calls += 1
+        self.intraday_extended_hours[ticker] = None  # set by fetch_chart_data caller
         await asyncio.sleep(0)
+        # NOTE: the 02:00 and 20:00 ET bars are load-bearing. This fake used to
+        # emit ONLY 10:00/11:00/12:00 — all inside 09:30–16:00 — so every test
+        # passed identically whether or not the regular-hours filter ran. That
+        # blind spot is exactly why the Bitcoin tile shipped clipped to the equity
+        # session. Off-hours bars make the two windows distinguishable.
         return [
+            {"date": "2026-06-26 02:00:00", "open": 98.0, "high": 98.5, "low": 97.5, "close": 98.0, "volume": 5},
             {"date": "2026-06-26 10:00:00", "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0, "volume": 10},
             {"date": "2026-06-26 11:00:00", "open": 100.0, "high": 101.2, "low": 100.0, "close": 101.0, "volume": 12},
             {"date": "2026-06-26 12:00:00", "open": 101.0, "high": 102.4, "low": 100.8, "close": 102.0, "volume": 14},
+            {"date": "2026-06-26 20:00:00", "open": 102.0, "high": 103.5, "low": 101.8, "close": 103.0, "volume": 8},
         ]
 
 
@@ -344,3 +354,211 @@ async def test_pulse_non_finite_price_drops_tile_and_never_serializes_nan():
         assert p.previous_close is None or _m.isfinite(p.previous_close)
     # The whole response serializes with NO non-standard tokens.
     json.dumps(resp.model_dump(), allow_nan=False)
+
+
+# ── 5. Session window per asset class (24/7 tiles) ────────────────────
+# Regression: _fetch_sparkline called fetch_chart_data(..., "1D") with the
+# DEFAULT extended_hours=False for every tile, so chart_helper._filter_regular_hours
+# (a pure time-of-day test) stripped ~70% of Bitcoin's and gold/crude's bars, and
+# _intraday_sparkline then pinned "latest day" to the last SURVIVING bar. The tile
+# drew an equity-session slice next to a 24/7 live price — and contradicted the
+# crypto/commodity DETAIL charts, which both pass extended_hours=True.
+
+
+@pytest.mark.asyncio
+async def test_pulse_sparkline_window_follows_the_asset_class(monkeypatch):
+    svc, _fake = _fresh_service()
+    seen: dict[str, bool] = {}
+
+    real_fetch = hds.fetch_chart_data
+
+    async def spy_fetch(fmp, symbol, range_code, interval=None, extended_hours=False):
+        seen[symbol] = extended_hours
+        return await real_fetch(
+            fmp, symbol, range_code, interval=interval, extended_hours=extended_hours
+        )
+
+    monkeypatch.setattr(hds, "fetch_chart_data", spy_fetch)
+    await svc.get_dashboard()
+
+    by_symbol = {c["symbol"]: c["type"] for c in _PULSE_SYMBOLS}
+    for symbol, kind in by_symbol.items():
+        expected = kind in ("crypto", "commodity")
+        assert seen[symbol] is expected, f"{symbol} ({kind}) window mismatch"
+
+
+@pytest.mark.asyncio
+async def test_off_hours_bars_survive_for_crypto_and_are_clipped_for_indices():
+    """The behavioural half of the test above: same upstream bars, different series."""
+    svc, _fake = _fresh_service()
+    resp = await svc.get_dashboard()
+    tiles = {p.symbol: p for p in resp.pulse}
+
+    # ^GSPC (index) → only the 09:30–16:00 ET bars.
+    assert tiles["^GSPC"].spark == [100.0, 101.0, 102.0]
+    # BTCUSD (crypto) → the 02:00 and 20:00 ET bars survive too.
+    assert tiles["BTCUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
+    # GCUSD / CLUSD are continuously-quoted futures — same treatment as crypto.
+    assert tiles["GCUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
+    assert tiles["CLUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
+
+
+# ── 6. Signed zero ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_barely_negative_pulse_change_never_serializes_signed_zero():
+    """round(-0.001, 2) is -0.0. iOS reads `changePercent >= 0` as TRUE for -0.0
+    (tile paints green) while "%+.2f" prints "-0.00%" — a red number in green."""
+    import math as _m
+
+    svc, _fake = _fresh_service()
+
+    async def tiny_negative_quote(ticker: str):
+        return {"price": 42.0, "changesPercentage": -0.001, "previousClose": 42.0}
+
+    svc.fmp.get_stock_price_quote = tiny_negative_quote  # type: ignore[assignment]
+    resp = await svc.get_dashboard()
+
+    assert resp.pulse, "expected tiles"
+    for p in resp.pulse:
+        assert p.change_percent == 0.0
+        assert _m.copysign(1.0, p.change_percent) == 1.0, "signed zero on the wire"
+
+
+# ── 7. Market status: holidays + half-days ────────────────────────────
+# _market_status knew only weekday + time-of-day, so on ~10 holidays and 2
+# half-days a year the strip read "Markets Open" over stale closes — and the same
+# helper gates main.py's FMP pre-warmer and chat_service's "current numbers" line.
+
+
+def test_market_status_closed_on_a_weekday_holiday():
+    # Thanksgiving 2026 falls on Thursday 26 Nov — a weekday, mid-session.
+    assert _market_status(datetime(2026, 11, 26, 11, 0)) == ("Markets Closed", False)
+    # Christmas 2026 is a Friday.
+    assert _market_status(datetime(2026, 12, 25, 11, 0)) == ("Markets Closed", False)
+    # Good Friday 2026.
+    assert _market_status(datetime(2026, 4, 3, 11, 0)) == ("Markets Closed", False)
+
+
+def test_market_status_half_day_closes_at_1pm():
+    # Day after Thanksgiving 2026 — trades to 13:00 ET, then shut (no after-hours).
+    half_day = (2026, 11, 27)
+    assert _market_status(datetime(*half_day, 11, 0)) == ("Markets Open", True)
+    assert _market_status(datetime(*half_day, 12, 59)) == ("Markets Open", True)
+    assert _market_status(datetime(*half_day, 13, 0)) == ("Markets Closed", False)
+    assert _market_status(datetime(*half_day, 17, 0)) == ("Markets Closed", False)
+
+
+def test_market_status_naive_datetime_is_read_as_eastern():
+    """Guard rail for the delegation: utils.market_hours.session_phase stamps a
+    naive datetime as UTC, but every case in this file means ET. _market_status
+    must localize before delegating, or every boundary shifts 4-5 hours."""
+    # 09:30 ET is 13:30 UTC. If the naive value were read as UTC it would land in
+    # pre-market (04:00-09:30 ET), not the open.
+    assert _market_status(datetime(2026, 6, 29, 9, 30)) == ("Markets Open", True)
+    # 20:00 ET is midnight UTC — read as UTC it would be "closed" for the wrong
+    # reason on the wrong day.
+    assert _market_status(datetime(2026, 6, 29, 19, 59)) == ("After Hours", False)
+
+
+# ── 8. Degraded pulse: TTL + timeout guard ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_partial_pulse_is_not_pinned_for_the_full_ttl():
+    """_build_pulse swallows per-tile failures and can never raise, so "didn't
+    raise" was not "succeeded": one 2s FMP blip pinned a partial strip in a
+    CLASS-level cache for the full 5 minutes, for every user."""
+    svc, _fake = _fresh_service()
+
+    async def flaky_quote(ticker: str):
+        if ticker == "BTCUSD":
+            raise RuntimeError("FMP boom")
+        return {"price": 42.0, "changesPercentage": 0.5, "previousClose": 41.0}
+
+    svc.fmp.get_stock_price_quote = flaky_quote  # type: ignore[assignment]
+    resp = await svc.get_dashboard()
+    assert len(resp.pulse) == len(_PULSE_SYMBOLS) - 1
+
+    ts, cached = HomeDashboardService._cache[hds._CACHE_KEY]
+    assert len(cached) < len(_PULSE_SYMBOLS)
+    # Age it past the DEGRADED ttl but well inside the healthy one.
+    HomeDashboardService._cache[hds._CACHE_KEY] = (
+        ts - (hds._CACHE_DEGRADED_TTL_SECONDS + 1), cached
+    )
+    svc.fmp.get_stock_price_quote = _FakeFMP().get_stock_price_quote  # type: ignore[assignment]
+    again = await svc.get_dashboard()
+    assert len(again.pulse) == len(_PULSE_SYMBOLS), "degraded strip was pinned"
+
+
+@pytest.mark.asyncio
+async def test_healthy_pulse_is_cached_for_the_full_ttl():
+    svc, fake = _fresh_service()
+    await svc.get_dashboard()
+    ts, cached = HomeDashboardService._cache[hds._CACHE_KEY]
+    assert len(cached) == len(_PULSE_SYMBOLS)
+
+    # Just past the degraded TTL — a COMPLETE strip must still be served.
+    HomeDashboardService._cache[hds._CACHE_KEY] = (
+        ts - (hds._CACHE_DEGRADED_TTL_SECONDS + 1), cached
+    )
+    calls_before = fake.quote_calls
+    await svc.get_dashboard()
+    assert fake.quote_calls == calls_before, "healthy strip re-fetched too early"
+
+
+@pytest.mark.asyncio
+async def test_slow_pulse_build_does_not_block_the_dashboard(monkeypatch):
+    """Scanners/signals/themes each had an 8s ceiling; pulse was a bare await in
+    the same gather, so one hung FMP call (30s httpx timeout + retries) blew past
+    the iOS 30s URLSession ceiling and turned all of Home into an error banner."""
+    svc, _fake = _fresh_service()
+    monkeypatch.setattr(hds, "_PULSE_BUILD_TIMEOUT_SECONDS", 0.05)
+
+    async def slow_quote(ticker: str):
+        await asyncio.sleep(0.3)      # slower than the ceiling, fast enough to finish
+        return {"price": 1.0, "changesPercentage": 0.0, "previousClose": 1.0}
+
+    svc.fmp.get_stock_price_quote = slow_quote  # type: ignore[assignment]
+
+    resp = await asyncio.wait_for(svc.get_dashboard(), timeout=2.0)
+    # Cold cache → ships without the strip rather than stalling the whole screen.
+    assert resp.pulse == []
+    assert isinstance(resp, HomeDashboardResponse)
+
+    # The `shield` is the load-bearing half: the timeout must NOT cancel the
+    # shared build (CancelledError is a BaseException and would poison every
+    # awaiter parked on `_inflight`). It keeps running and warms the cache, so
+    # the NEXT request is served instantly.
+    await asyncio.sleep(0.5)
+    assert hds._CACHE_KEY in HomeDashboardService._cache
+    assert len(HomeDashboardService._cache[hds._CACHE_KEY][1]) == len(_PULSE_SYMBOLS)
+    assert HomeDashboardService._inflight == {}, "in-flight future leaked"
+
+
+@pytest.mark.asyncio
+async def test_pulse_timeout_serves_the_last_good_strip(monkeypatch):
+    svc, _fake = _fresh_service()
+    await svc.get_dashboard()                       # warm the cache
+    good = list(HomeDashboardService._cache[hds._CACHE_KEY][1])
+    assert len(good) == len(_PULSE_SYMBOLS)
+
+    # Expire it, then make the rebuild slower than the ceiling.
+    HomeDashboardService._cache[hds._CACHE_KEY] = (0.0, good)
+    monkeypatch.setattr(hds, "_PULSE_BUILD_TIMEOUT_SECONDS", 0.05)
+
+    async def slow_quote(ticker: str):
+        await asyncio.sleep(0.3)
+        return {"price": 7.0, "changesPercentage": 0.0, "previousClose": 7.0}
+
+    svc.fmp.get_stock_price_quote = slow_quote  # type: ignore[assignment]
+
+    resp = await asyncio.wait_for(svc.get_dashboard(), timeout=2.0)
+    # Stale beats blank.
+    assert [p.symbol for p in resp.pulse] == [p.symbol for p in good]
+
+    # …and the shielded rebuild still lands, replacing the stale strip.
+    await asyncio.sleep(0.5)
+    assert HomeDashboardService._cache[hds._CACHE_KEY][1][0].price == 7.0
+    assert HomeDashboardService._inflight == {}

@@ -312,12 +312,25 @@ struct AssetsTabContent: View {
                     .padding(.top, AppSpacing.sm)
 
                 // Assets List Section — scoped to the active portfolio.
-                AssetsListSection(
-                    assets: viewModel.filteredAssets,
-                    onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
-                    onRemoveAsset: { asset in viewModel.removeAsset(asset) },
-                    onRemoveFromAll: { asset in viewModel.removeAssetFromAll(asset) }
-                )
+                // An empty list is ambiguous on its own ("you own nothing" vs
+                // "we couldn't load it"), so the two states are told apart here:
+                // a load failure shows the AppError copy + Retry, a genuinely
+                // empty portfolio invites the user to add a ticker.
+                if viewModel.filteredAssets.isEmpty {
+                    AssetsPlaceholderCard(
+                        errorMessage: viewModel.assetsErrorMessage,
+                        isLoading: viewModel.isLoading,
+                        onRetry: { Task { await viewModel.refresh() } },
+                        onAdd: { viewModel.addNewAsset() }
+                    )
+                } else {
+                    AssetsListSection(
+                        assets: viewModel.filteredAssets,
+                        onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
+                        onRemoveAsset: { asset in viewModel.removeAsset(asset) },
+                        onRemoveFromAll: { asset in viewModel.removeAssetFromAll(asset) }
+                    )
+                }
 
                 // Alerts & Upcoming Events — filtered to this portfolio's tickers.
                 AlertsEventsSection(

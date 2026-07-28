@@ -12,13 +12,23 @@ struct PriceChangeLabel: View {
     var showArrow: Bool = true
     var fontSize: CGFloat = 13
 
+    /// Signed zero collapsed to +0. `-0.0` is the value any barely-negative move
+    /// rounds to server-side, and it breaks BOTH readers below in opposite
+    /// directions: `-0.0 >= 0` is `true` (so the arrow and colour say "up") while
+    /// `String(format: "%.2f", -0.0)` preserves the sign bit and prints "-0.00" —
+    /// the label rendered the literal string "+-0.00%". Normalising once here
+    /// keeps the arrow, the colour and the text agreeing on one sign.
+    private var normalizedChange: Double {
+        changePercent == 0 ? 0 : changePercent
+    }
+
     private var isPositive: Bool {
-        changePercent >= 0
+        normalizedChange >= 0
     }
 
     private var formattedChange: String {
-        let sign = changePercent >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.2f", changePercent))%"
+        let sign = isPositive ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", normalizedChange))%"
     }
 
     private var color: Color {

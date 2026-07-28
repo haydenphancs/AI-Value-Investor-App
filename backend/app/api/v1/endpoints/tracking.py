@@ -23,7 +23,11 @@ from supabase import Client
 from typing import List, Optional
 import logging
 
-from app.api.error_response import ErrorCode, make_error_response
+from app.api.error_response import (
+    ErrorCode,
+    error_response_from_exception,
+    make_error_response,
+)
 from app.database import get_supabase
 from app.dependencies import get_current_user_or_guest
 from app.integrations.fmp import get_fmp_client
@@ -50,9 +54,22 @@ router = APIRouter()
 async def get_tracking_assets(
     user: dict = Depends(get_current_user_or_guest),
 ):
-    """Get enriched watchlist with real-time prices, sparklines, and alerts."""
+    """Get enriched watchlist with real-time prices, sparklines, and alerts.
+
+    An unreadable watchlist surfaces as 503 WATCHLIST_UNAVAILABLE rather than a
+    successful empty feed: the iOS Assets tab purges any portfolio ticker missing
+    from this response, so "couldn't read" MUST be distinguishable from "you have
+    nothing" or a datastore blip permanently deletes the user's portfolios.
+    """
     service = TrackingService()
-    return await service.get_tracking_feed(user["id"])
+    try:
+        return await service.get_tracking_feed(user["id"])
+    except Exception as e:
+        logger.error(
+            "Tracking feed failed for user %s: %s: %s",
+            user["id"], type(e).__name__, e, exc_info=True,
+        )
+        return error_response_from_exception(e, step="tracking_feed")
 
 
 # ── Portfolio Holdings CRUD ─────────────────────────────────────────

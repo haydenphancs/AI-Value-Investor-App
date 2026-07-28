@@ -26,6 +26,29 @@ def _finite_or_none(v: Any) -> Optional[float]:
         return None
     return f if math.isfinite(f) else None
 
+def sparkline_precision(values: List[float]) -> int:
+    """Decimal places that preserve a mini-chart series' SHAPE at its magnitude.
+
+    Lives here (not in a service) because BOTH sparkline builders need the same
+    answer — ``tracking_service._get_all_sparklines`` for the holdings cards and
+    ``home_dashboard_service._intraday_sparkline`` for the Market Pulse tiles —
+    and the two already carry duplicated ``_downsample`` copies that have to be
+    kept in sync by hand. One helper, one behaviour.
+
+    A flat ``round(c, 2)`` collapses a $0.20 holding's entire session into 1–4
+    distinct levels, so the card draws a dead-flat line beside a live "+0.39%".
+    Capped at 8dp so a sub-cent coin can't bloat the payload.
+    """
+    smallest = min((abs(v) for v in values if v), default=0.0)
+    if smallest >= 10:
+        return 2
+    if smallest >= 1:
+        return 3
+    if smallest >= 0.01:
+        return 5
+    return 8
+
+
 # Valid interval values
 INTRADAY_INTERVALS = {"1min", "5min", "15min", "30min", "1hour", "4hour"}
 DAILY_INTERVALS = {"daily"}

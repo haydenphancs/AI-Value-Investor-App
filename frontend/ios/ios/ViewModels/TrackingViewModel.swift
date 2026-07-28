@@ -65,6 +65,12 @@ class TrackingViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var isRefreshing: Bool = false
 
+    /// User-facing copy when the assets feed could not be loaded, mapped through
+    /// `AppError` (never a raw backend string). Without this an outage was
+    /// pixel-identical to an empty portfolio — the list just rendered nothing,
+    /// with no explanation and no retry affordance.
+    @Published var assetsErrorMessage: String?
+
     // Sheet States
     @Published var showAddAssetSheet: Bool = false
     @Published var showSortSheet: Bool = false
@@ -417,8 +423,20 @@ class TrackingViewModel: ObservableObject {
         // watchlist (e.g. removed on another device). Only purge when the
         // feed call actually succeeded — otherwise we'd wipe real tickers
         // off portfolios on a transient network failure.
+        //
+        // The allow-set is unioned with anything the user just added: the feed is
+        // cached server-side for 30s, so a refresh fired immediately after an add
+        // can still return the PRE-ADD list, and the brand-new ticker would look
+        // like an orphan and be deleted again — the add silently undoing itself.
+        // (The backend now invalidates that cache on write too; this is the
+        // client-side belt to that braces.) `purgeTickers` additionally refuses an
+        // empty allow-set outright — see PortfolioStore.
         if feedSucceeded {
-            await portfolioStore.purgeTickers(notIn: Set(trackedAssets.map(\.ticker)))
+            var allowed = Set(trackedAssets.map(\.ticker))
+            for pending in recentlyAddedTickers.values {
+                allowed.formUnion(pending)
+            }
+            await portfolioStore.purgeTickers(notIn: allowed)
         }
 
         // The diversification score is computed server-side (single source of
@@ -472,10 +490,18 @@ class TrackingViewModel: ObservableObject {
             )
             self.trackedAssets = feed.assets.map { $0.toTrackedAsset() }
             self.alerts = feed.alerts.map { $0.toAppAlert() }
+            self.assetsErrorMessage = nil
             print("[TrackingVM] ✅ Loaded \(feed.assets.count) assets, \(feed.alerts.count) alerts from API")
             return true
         } catch {
-            print("[TrackingVM] ❌ Tracking feed failed: \(error)")
+            let appError = AppError.from(error)
+            print("[TrackingVM] ❌ Tracking feed failed: \(appError.title): \(error)")
+            // Surface it. A silent empty list reads as "you own nothing", which is
+            // a different (and wrong) statement about the user's own money.
+            // The backend now answers 503 WATCHLIST_UNAVAILABLE rather than a
+            // successful empty feed when the datastore is unreadable, so this
+            // branch is reached instead of a false success.
+            self.assetsErrorMessage = appError.message
             // Do NOT seed fabricated sample prices/alerts here. Rendering a
             // fake $178.42 quote or a "$2.4B Warren Buffett bought" rollup as
             // if it were the user's real holdings/alerts is worse than an
@@ -580,7 +606,13 @@ class TrackingViewModel: ObservableObject {
 
     // MARK: - Live Price Refresh
 
-    /// Periodically re-fetches asset prices while the market is active.
+    /// Periodically re-fetches asset prices while there is something that can move.
+    ///
+    /// The gate is deliberately NOT a bare `isMarketActive()`: that is the US
+    /// equity session, so a crypto holding (24/7) or a commodity future froze
+    /// every evening and all weekend — exactly when a crypto holder checks. It
+    /// now also refreshes whenever the tracked set contains a round-the-clock
+    /// asset, mirroring the backend's `asset_class.trades_extended_hours`.
     func startPriceRefreshTimer() {
         priceRefreshTask?.cancel()
         priceRefreshTask = Task { [weak self] in
@@ -588,9 +620,12 @@ class TrackingViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
-                guard MarketHoursUtil.isMarketActive() else { continue }
+                let assets = self.trackedAssets
+                guard MarketHoursUtil.shouldRefreshPrices(
+                    assetTypes: assets.map(\.assetType),
+                    symbols: assets.map(\.ticker)
+                ) else { continue }
                 await self.loadTrackingFeed()
-                print("[TrackingVM] 🔄 Auto-refreshed asset prices")
             }
         }
     }

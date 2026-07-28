@@ -16,6 +16,9 @@ import SwiftUI
 
 struct HomeDashboardView: View {
     @Environment(AppState.self) private var appState
+    /// True while Home is the visible tab. Tabs are opacity-mounted, so this is
+    /// the only signal that the screen became (or stopped being) visible.
+    @Environment(\.isActiveTab) private var isActiveTab
     @StateObject private var viewModel: HomeDashboardViewModel
     @Binding var selectedTab: HomeTab
 
@@ -62,7 +65,34 @@ struct HomeDashboardView: View {
                 LoadingOverlay()
             }
         }
-        .task { await viewModel.loadIfNeeded() }
+        // Home is opacity-mounted: it never leaves the view hierarchy, so a plain
+        // `.task` fires ONCE per process and `onAppear`/`onDisappear` never fire
+        // on a tab switch. Without a re-trigger the strip kept launch-time prices
+        // and a launch-time "Pre-Market" header for the whole session.
+        //
+        // `.task(id:)` covers BOTH cases — it runs on first appearance with the
+        // initial value AND again whenever the tab-activation flag flips — so it
+        // replaces the plain `.task` outright. Keeping both would fire two
+        // concurrent loads on launch.
+        .task(id: isActiveTab) {
+            guard isActiveTab else {
+                viewModel.stopAutoRefresh()
+                return
+            }
+            await viewModel.loadIfStale()
+            viewModel.startAutoRefresh()
+        }
+        // Returning from the background is the other way a user arrives at hours
+        // -old data. `scenePhase` is unused in this codebase; this is the
+        // NotificationCenter idiom UpdatesView already uses.
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIApplication.didBecomeActiveNotification
+            )
+        ) { _ in
+            guard isActiveTab else { return }
+            Task { await viewModel.loadIfStale() }
+        }
         .sheet(isPresented: $showSearch) {
             SearchView()
         }
@@ -118,17 +148,19 @@ struct HomeDashboardView: View {
 
                 if let data = viewModel.data {
                     // Each section is hidden when its data is empty so an empty
-                    // array (a future live repo could return one) never renders a
-                    // header over dead space.
-                    if !data.pulse.isEmpty {
-                        MarketPulseSection(
-                            statusText: data.marketStatusText,
-                            isOpen: data.marketIsOpen,
-                            items: data.pulse,
-                            onTap: openPulse
-                        )
-                        .padding(.top, AppSpacing.sm)
-                    }
+                    // array never renders a header over dead space — EXCEPT Market
+                    // Pulse. Its "Markets Open/Closed" header is computed fresh
+                    // server-side and is still true when the tiles fail, so hiding
+                    // the whole section on an upstream blip removed correct
+                    // information (and made the outage look like a layout bug).
+                    // The section renders its own honest placeholder instead.
+                    MarketPulseSection(
+                        statusText: data.marketStatusText,
+                        isOpen: data.marketIsOpen,
+                        items: data.pulse,
+                        onTap: openPulse
+                    )
+                    .padding(.top, AppSpacing.sm)
 
                     if !data.scanners.isEmpty {
                         DailyScannersSection(

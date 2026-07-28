@@ -186,6 +186,8 @@ struct AppSettingsView: View {
         .onAppear {
             calculateCacheSize()
         }
+        // Sync general prefs to the backend when leaving (no-op for guests).
+        .onDisappear { SettingsSyncManager.shared.push() }
         .alert("Clear Cache", isPresented: $showClearCacheConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Clear", role: .destructive) {

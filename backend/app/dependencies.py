@@ -112,12 +112,27 @@ async def get_current_user_or_guest(
                 pass
 
         if user_id:
+            # A VALID token resolved to a real user_id. A transient users-table read
+            # failure here must NOT silently fall through to the shared guest — that
+            # would serve the guest's balance to a signed-in user and skip their
+            # monthly reset. Surface a retryable error instead. (limit(1), not
+            # single(), so "no row" is an empty list, not an exception.)
             try:
-                result = supabase.table("users").select("*").eq("id", user_id).single().execute()
-                if result.data:
-                    return result.data
-            except Exception:
-                pass
+                result = supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
+            except Exception as e:
+                logger.error(
+                    "users read failed for authenticated user=%s: %s: %s",
+                    user_id, type(e).__name__, e,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Temporarily unable to load your account. Please try again.",
+                )
+            rows = result.data or []
+            if rows:
+                return rows[0]
+            # Valid token but no public.users row (rare — the signup trigger seeds it).
+            # Fall through to guest as before rather than 500 a first-launch edge.
 
     return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
 

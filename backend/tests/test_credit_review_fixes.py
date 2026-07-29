@@ -142,8 +142,9 @@ def _credits_supabase(row):
     q = MagicMock()
     q.select.return_value = q
     q.eq.return_value = q
-    q.single.return_value = q
-    q.execute.return_value = MagicMock(data=row)
+    q.limit.return_value = q          # endpoint now reads via .limit(1), not .single()
+    q.single.return_value = q         # harmless back-compat
+    q.execute.return_value = MagicMock(data=[row])  # list result (limit(1))
     sb = MagicMock()
     sb.table.return_value = q
     return sb

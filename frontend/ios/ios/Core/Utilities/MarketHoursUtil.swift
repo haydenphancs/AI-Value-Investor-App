@@ -93,11 +93,15 @@ enum MarketHoursUtil {
 
     /// FMP's USD-suffixed commodity codes, checked before the generic crypto
     /// `USD` suffix test so gold and crude aren't classified as coins.
+    /// Unambiguous FMP futures codes only. The friendly English names the
+    /// backend keeps for chat voicing ("GOLD", "OIL", …) are deliberately absent:
+    /// GOLD is Barrick Mining (NYSE), a regular-session equity, and treating it
+    /// as a commodity here would un-gate the 30s poll 24/7 for an ordinary
+    /// equity portfolio. Mirrors backend `asset_class._COMMODITY_SYMBOLS`.
     private static let commoditySymbols: Set<String> = [
         "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "HGUSD",
         "ZSUSD", "ZCUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
         "SBUSD", "CTUSD", "CCUSD",
-        "GOLD", "SILVER", "OIL", "NATGAS", "PLATINUM", "COPPER",
     ]
 
     private static let bareCryptoSymbols: Set<String> = [

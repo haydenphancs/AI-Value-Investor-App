@@ -115,24 +115,56 @@ final class AppState {
 
         await apiClient.setAuthToken(token)
 
+        // Own the refresh decision here (allowAuthRetry:false bypasses the APIClient
+        // interceptor) so a TRANSIENT failure is never mistaken for a dead session.
         do {
-            // The APIClient's 401 interceptor (armed before this runs) transparently
-            // refreshes an expired token and retries, so a success here means the
-            // session is valid.
-            applyProfile(try await authService.fetchCurrentUser())
+            applyProfile(try await fetchCurrentUserNoRetry())
             auth.status = .authenticated
             await onAuthenticated()
+            return
         } catch {
-            // Only a genuine auth failure means the session is dead — clear the token.
-            // A transient error (offline / 5xx) must PRESERVE the token so the next
-            // launch can restore; we simply run as a guest for now.
+            // A non-auth error (offline / 5xx) → preserve the token, run as guest.
+            guard AppError.from(error).isAuthError else {
+                auth.status = .unauthenticated
+                return
+            }
+            // Access token rejected → fall through to an explicit refresh.
+        }
+
+        do {
+            try await authService.refreshToken()
+        } catch {
+            // Clear ONLY on a genuine auth failure (refresh token itself dead). A
+            // transient refresh outage (offline / 5xx) preserves the token so the
+            // next launch can restore.
             if AppError.from(error).isAuthError {
                 authService.clearToken()
                 await apiClient.setAuthToken(nil)
                 user = UserState()
             }
             auth.status = .unauthenticated
+            return
         }
+
+        // Refresh succeeded → retry the profile once.
+        do {
+            applyProfile(try await fetchCurrentUserNoRetry())
+            auth.status = .authenticated
+            await onAuthenticated()
+        } catch {
+            // Refreshed OK but the profile read still failed → transient; preserve token.
+            auth.status = .unauthenticated
+        }
+    }
+
+    /// Fetch `/users/me` WITHOUT the APIClient 401-refresh interceptor, so
+    /// `restoreAuthState` can distinguish a transient failure from a dead session.
+    private func fetchCurrentUserNoRetry() async throws -> UserProfile {
+        try await apiClient.request(
+            endpoint: .getCurrentUser,
+            responseType: UserProfile.self,
+            allowAuthRetry: false
+        )
     }
 
     /// Store the fetched profile AND map its tier string into the `UserTier` enum.

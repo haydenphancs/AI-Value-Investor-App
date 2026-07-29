@@ -296,8 +296,17 @@ struct AppSettingsView: View {
     }
 
     private func deleteAccount() {
-        // In production, call delete account API first
-        appState.signOut()
+        // Actually delete the account server-side (cascades all user data) BEFORE
+        // signing out. Surface a failure instead of silently signing out — a failed
+        // delete that just logs the user out would leave their data intact.
+        Task {
+            do {
+                try await appState.apiClient.request(endpoint: .deleteAccount)
+                appState.signOut()
+            } catch {
+                appState.currentError = AppError.from(error)
+            }
+        }
     }
 }
 

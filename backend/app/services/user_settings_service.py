@@ -27,6 +27,24 @@ def preferences_too_large(preferences: Dict[str, Any]) -> bool:
     return len(json.dumps(preferences)) > MAX_PREFERENCES_BYTES
 
 
+def sanitize_preferences(preferences: Dict[str, Any]) -> Dict[str, Any]:
+    """Pure: keep only scalar values (bool/int/float/str) the iOS client can decode.
+
+    The iOS PreferenceValue decodes bool/int/double/string only; a nested object,
+    array, or null would break the whole settings decode. Dropping non-scalars here
+    (defense-in-depth with the tolerant iOS decoder) guarantees we never persist a
+    blob the client can't read. Non-dict input yields {}.
+    """
+    if not isinstance(preferences, dict):
+        return {}
+    # NB: bool is a subclass of int — both are kept intentionally.
+    return {
+        k: v
+        for k, v in preferences.items()
+        if isinstance(k, str) and isinstance(v, (bool, int, float, str))
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -59,6 +77,9 @@ class UserSettingsService:
         """Full-blob replace of the user's preferences. Raises PreferencesTooLarge
         on an oversized blob (→ endpoint maps to INVALID_INPUT); re-raises on a
         genuine DB failure (→ 500) so a lost sync is loud, not silent."""
+        # Drop non-scalar values BEFORE the size check so a huge nested blob can't
+        # both bypass sanitization and trip the limit on junk we'd discard anyway.
+        preferences = sanitize_preferences(preferences)
         if preferences_too_large(preferences):
             raise PreferencesTooLarge(
                 f"preferences blob exceeds {MAX_PREFERENCES_BYTES} bytes"

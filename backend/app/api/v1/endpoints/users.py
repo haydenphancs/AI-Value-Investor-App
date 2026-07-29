@@ -37,6 +37,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def credits_response_from_rows(rows: list) -> UserCreditsResponse:
+    """Build the credits response from a (possibly empty) query result.
+
+    Genuinely no row → optimistic Free-tier default (the signup trigger normally
+    seeds a row; this is the rare first-touch safety net). A transient READ ERROR is
+    NOT handled here — the caller must surface it as retryable, never fabricate a
+    balance (a masked error would show a Pro user "50" and mis-drive the UI).
+    """
+    if not rows:
+        return UserCreditsResponse(total=50, used=0, remaining=50)
+    return UserCreditsResponse(**rows[0])
+
+
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_info(
     user: dict = Depends(get_current_user),
@@ -71,21 +84,24 @@ async def get_user_credits(
             logger.warning(
                 "ensure_period unavailable for user=%s — serving raw balance", user["id"]
             )
+    # limit(1) (not single()) so a genuine "no row" is an empty list, distinct from a
+    # transient read error which raises. We must NOT launder a transient error into a
+    # fabricated Free balance — that would show a real user the wrong credits.
     try:
         result = supabase.table("user_credits").select(
             "total, used, remaining, resets_at"
-        ).eq("user_id", user["id"]).single().execute()
-
-        if not result.data:
-            # No credit row yet → optimistic Free-tier allocation (mirrors
-            # plan_credits.free = 50; migration 100). The signup trigger normally
-            # seeds a row, so this is a rare safety net.
-            return UserCreditsResponse(total=50, used=0, remaining=50)
-
-        return UserCreditsResponse(**result.data)
+        ).eq("user_id", user["id"]).limit(1).execute()
     except Exception as e:
-        logger.error(f"Failed to fetch credits: {e}")
-        return UserCreditsResponse(total=50, used=0, remaining=50)
+        logger.error(
+            "Credits read failed for user=%s: %s: %s", user["id"], type(e).__name__, e
+        )
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            message=f"credits read failed: {type(e).__name__}",
+            user_message="Couldn't load your credits right now. Please try again.",
+        )
+
+    return credits_response_from_rows(result.data or [])
 
 
 @router.get("/me/subscription", response_model=SubscriptionResponse)
@@ -181,3 +197,36 @@ async def update_profile(
         created_at=updated["created_at"],
         updated_at=updated.get("updated_at"),
     )
+
+
+@router.delete("/me")
+async def delete_account(
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """Permanently delete the CALLER'S OWN account.
+
+    Deletes the auth.users row via the Supabase admin API; `public.users.id`
+    references `auth.users(id) ON DELETE CASCADE`, and every user-scoped table
+    (user_credits, subscriptions, watchlist_items, portfolios, research_reports,
+    user_settings, device_tokens, …) references `public.users(id) ON DELETE
+    CASCADE`, so this removes all of the user's data in one call. Auth-only
+    (`get_current_user` 401s guests); the extra guard is defense-in-depth.
+    """
+    user_id = user["id"]
+    if user_id == GUEST_USER_ID:
+        raise HTTPException(status_code=403, detail="Cannot delete the guest account.")
+    try:
+        # Cascades auth.users -> public.users -> all user-scoped child tables.
+        supabase.auth.admin.delete_user(user_id)
+    except Exception as e:
+        logger.error(
+            "Account deletion failed for user=%s: %s: %s",
+            user_id, type(e).__name__, e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Couldn't delete your account. Please try again.",
+        )
+    logger.info("Account deleted for user=%s", user_id)
+    return {"deleted": True}

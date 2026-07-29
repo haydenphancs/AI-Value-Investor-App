@@ -1140,7 +1140,11 @@ class ChatService:
         """
         if not stock_id:
             return "NORMAL"
-        return detect_asset_class(stock_id).upper()
+        # `include_aliases=True` preserves chat's long-standing handling of the
+        # friendly names ("GOLD", "OIL", …) — chat only VOICES the asset, so a
+        # name collision with a listed equity costs a wording nuance, not a wrong
+        # chart. The chart/refresh callers deliberately leave it off.
+        return detect_asset_class(stock_id, include_aliases=True).upper()
 
     # ── Deep dive cache ───────────────────────────────────────────
 

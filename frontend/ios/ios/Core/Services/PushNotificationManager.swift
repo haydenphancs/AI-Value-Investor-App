@@ -66,12 +66,15 @@ final class PushNotificationManager {
             pendingToken = token   // register once the user signs in
             return
         }
-        pendingToken = nil
         let environment = apnsEnvironment
         Task {
             do {
                 _ = try await repository.registerDevice(token: token, environment: environment)
+                pendingToken = nil   // clear ONLY on confirmed success
             } catch {
+                // Keep the token so flushPendingToken() can retry — a transient
+                // offline/5xx must not permanently drop the device registration.
+                pendingToken = token
                 #if DEBUG
                 print("⚠️ [Push] device registration failed: \(AppError.from(error).message)")
                 #endif

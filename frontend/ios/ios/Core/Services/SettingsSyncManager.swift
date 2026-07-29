@@ -16,6 +16,12 @@
 
 import Foundation
 
+extension Notification.Name {
+    /// Posted after the backend settings blob is applied to UserDefaults, so open
+    /// screens (e.g. the Profile appearance picker) can refresh from the store.
+    static let caydexSettingsHydrated = Notification.Name("caydexSettingsHydrated")
+}
+
 @MainActor
 final class SettingsSyncManager {
 
@@ -24,6 +30,11 @@ final class SettingsSyncManager {
     private let repository: AccountRepositoryProtocol
     private weak var appState: AppState?
     private let defaults = UserDefaults.standard
+
+    /// True once the current session's settings have been pulled from the server.
+    /// `push()` no-ops until this is set, so a partial local snapshot can't
+    /// full-replace (clobber) richer server settings before we've read them.
+    private var hasHydrated = false
 
     // Boolean toggles (NotificationsSettingsView + AppSettingsView).
     static let boolKeys: [String] = [
@@ -53,13 +64,19 @@ final class SettingsSyncManager {
     }
 
     /// Pull the backend preference blob into UserDefaults (authed only).
+    /// Blocks `push()` until it completes so a partial local snapshot can't clobber
+    /// richer server settings on a fresh install / new session.
     func hydrate() {
         guard isAuthenticated else { return }
+        hasHydrated = false   // re-gate for this (possibly new) session
         Task {
             do {
                 let prefs = try await repository.fetchSettings()
                 apply(prefs)
+                hasHydrated = true   // safe to push now (server state is known)
             } catch {
+                // Leave hasHydrated false so push() stays gated — we don't know the
+                // server state, so pushing would risk a clobber. A later hydrate retries.
                 #if DEBUG
                 print("⚠️ [Settings] hydrate failed: \(AppError.from(error).message)")
                 #endif
@@ -68,8 +85,9 @@ final class SettingsSyncManager {
     }
 
     /// Push current UserDefaults values to the backend (best-effort, authed only).
+    /// No-ops until the first successful `hydrate()` (see `hasHydrated`).
     func push() {
-        guard isAuthenticated else { return }
+        guard isAuthenticated, hasHydrated else { return }
         let blob = currentBlob()
         Task {
             do {
@@ -108,5 +126,7 @@ final class SettingsSyncManager {
         }
         // Re-apply appearance in case the synced blob changed it.
         AppearanceManager.applyStored()
+        // Let open screens refresh from the store (e.g. the appearance picker).
+        NotificationCenter.default.post(name: .caydexSettingsHydrated, object: nil)
     }
 }

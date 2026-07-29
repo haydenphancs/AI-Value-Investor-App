@@ -61,7 +61,13 @@ struct HomeDashboardView: View {
                 CustomTabBar(selectedTab: $selectedTab)
             }
 
-            if viewModel.isLoading && viewModel.data == nil {
+            // FIRST attempt only. `LoadingOverlay` is a full-screen dim that
+            // swallows every touch (the same tap-eater the detail views removed),
+            // and `isLoading && data == nil` stays true for every retry while the
+            // first load keeps failing — so without `!hasAttemptedLoad` the 60s
+            // auto-refresh re-raised it once a minute during an outage and locked
+            // the user out of the tab bar. Later failures surface via errorBanner.
+            if viewModel.isLoading && viewModel.data == nil && !viewModel.hasAttemptedLoad {
                 LoadingOverlay()
             }
         }

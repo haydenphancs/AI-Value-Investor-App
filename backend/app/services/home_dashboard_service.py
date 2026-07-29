@@ -81,6 +81,14 @@ _CACHE_DEGRADED_TTL_SECONDS = 45
 # (30s httpx read timeout + retries) blew past the iOS 30s URLSession ceiling and
 # turned the WHOLE Home screen into an error banner.
 _PULSE_BUILD_TIMEOUT_SECONDS = 6
+# Ceiling on serving a STALE strip from the guard's degraded paths. Unlike the
+# scanners (a 20-min ranked list, where "any age" is fine), the pulse is live
+# PRICES rendered under a freshly-computed "Markets Open" header with a green
+# blinking dot, and nothing on the wire carries an as-of stamp. An empty build is
+# deliberately never cached, so during a total FMP outage the same entry would
+# otherwise be re-served forever, ageing without bound while the header keeps
+# claiming the market is open. Past this ceiling the honest empty placeholder wins.
+_STALE_SERVE_CEILING_SECONDS = _CACHE_TTL_SECONDS * 2   # 10 min
 
 
 # ── Daily Scanners config ─────────────────────────────────────────────
@@ -713,29 +721,46 @@ class HomeDashboardService:
                 timeout=_PULSE_BUILD_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            cached = self._cache.get(_CACHE_KEY)
-            if cached is not None:
-                logger.warning(
-                    "Market pulse build exceeded %ds — serving last cached strip "
-                    "(%d tiles, %.0fs old); build continues in background",
-                    _PULSE_BUILD_TIMEOUT_SECONDS, len(cached[1]), time.time() - cached[0],
-                )
-                return cached[1]
             logger.warning(
-                "Market pulse build exceeded %ds with a cold cache — dashboard "
-                "ships without the strip this round",
+                "Market pulse build exceeded %ds — falling back to the cached "
+                "strip; the shielded build continues in the background",
                 _PULSE_BUILD_TIMEOUT_SECONDS,
             )
-            return []
+            return self._stale_pulse()
         except Exception as exc:
             # Never let the strip take the whole dashboard down; the other three
             # sections are independent and already degrade on their own.
             logger.warning(
-                "Market pulse failed: %s: %s — dashboard ships without the strip",
+                "Market pulse failed: %s: %s — falling back to the cached strip",
                 type(exc).__name__, exc,
             )
-            cached = self._cache.get(_CACHE_KEY)
-            return cached[1] if cached is not None else []
+            return self._stale_pulse()
+
+    def _stale_pulse(self) -> List[MarketPulseItemResponse]:
+        """The cached strip, but only while it is young enough to pass off as live.
+
+        Stale beats blank — up to a point. These prices render under a market
+        status computed fresh on every request, so an unbounded stale serve would
+        show a green "Markets Open" dot over quotes frozen half an hour ago with
+        nothing on screen saying so. Past the ceiling, return nothing and let the
+        client show its honest "Market data unavailable" placeholder.
+        """
+        cached = self._cache.get(_CACHE_KEY)
+        if cached is None:
+            return []
+        age = time.time() - cached[0]
+        if age >= _STALE_SERVE_CEILING_SECONDS:
+            logger.warning(
+                "Market pulse cache too old to serve (%.0fs >= %ds) — shipping an "
+                "empty strip so the client shows 'Market data unavailable' rather "
+                "than stale prices under a live market header",
+                age, _STALE_SERVE_CEILING_SECONDS,
+            )
+            return []
+        logger.info(
+            "Serving stale market pulse (%d tiles, %.0fs old)", len(cached[1]), age
+        )
+        return cached[1]
 
     async def _build_pulse(self) -> List[MarketPulseItemResponse]:
         results = await asyncio.gather(

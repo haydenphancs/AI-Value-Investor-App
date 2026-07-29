@@ -32,6 +32,16 @@ _COMMODITY_SYMBOLS = frozenset({
     "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "HGUSD",
     "ZSUSD", "ZCUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
     "SBUSD", "CTUSD", "CCUSD",
+})
+
+# Friendly English names, matched ONLY when a caller opts in. Deliberately NOT
+# part of the session-window decision: several are real listed equities —
+# "GOLD" is Barrick Mining (NYSE), and this repo's own commodities endpoint
+# lists it among the gold-related EQUITIES ("GC": "GLD,IAU,GOLD,NEM,AEM").
+# Treating it as a commodity would give an ordinary equity holding a 24/7
+# refresh gate and an extended-hours sparkline unlike every other equity row
+# beside it. Chat opts in because it only voices the name, never fetches a chart.
+_COMMODITY_ALIASES = frozenset({
     "GOLD", "SILVER", "OIL", "NATGAS", "PLATINUM", "COPPER",
 })
 
@@ -51,13 +61,20 @@ _ROUND_THE_CLOCK = frozenset({"crypto", "commodity"})
 _TRUSTED_STORED_CLASSES = frozenset({"crypto", "commodity", "index", "etf"})
 
 
-def detect_asset_class(symbol: Optional[str]) -> str:
+def detect_asset_class(
+    symbol: Optional[str], *, include_aliases: bool = False
+) -> str:
     """Classify a symbol as ``index`` | ``commodity`` | ``crypto`` | ``stock``.
 
     Lowercase to match the app's wire vocabulary (``MarketTickerType`` on iOS,
     ``_PULSE_SYMBOLS[i]["type"]`` on the backend). An empty/unknown symbol is
     treated as a stock — the conservative default, since it keeps the regular
     -hours filter on rather than silently widening a series.
+
+    ``include_aliases`` opts in to the friendly English commodity names
+    (``GOLD``, ``OIL``, …). Off by default because those collide with real
+    listed equities; only callers that merely *describe* an asset (chat) should
+    turn it on, never a caller choosing a chart's session window.
     """
     if not symbol:
         return "stock"
@@ -66,7 +83,7 @@ def detect_asset_class(symbol: Optional[str]) -> str:
         return "stock"
     if sid.startswith("^"):
         return "index"
-    if sid in _COMMODITY_SYMBOLS:
+    if sid in _COMMODITY_SYMBOLS or (include_aliases and sid in _COMMODITY_ALIASES):
         return "commodity"
     # The USD/USDT suffix rule needs a base symbol in front of it. "USD" on its
     # own is a real listed ETF (ProShares Ultra Semiconductors); without the

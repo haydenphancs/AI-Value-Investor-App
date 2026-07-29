@@ -204,7 +204,7 @@ actor APIClient {
     /// request building, validation, auth, and structured-error contract as
     /// `request` — on a non-2xx status `validateResponse` still decodes the
     /// backend's APIError body (e.g. REPORT_NOT_READY) into an `APIError`.
-    func downloadData(endpoint: APIEndpoint, retryCount: Int = 1) async throws -> Data {
+    func downloadData(endpoint: APIEndpoint, retryCount: Int = 1, allowAuthRetry: Bool = true) async throws -> Data {
         let request = try buildRequest(for: endpoint)
         logRequest(request, endpoint: endpoint)
 
@@ -224,9 +224,18 @@ actor APIClient {
             return data
 
         } catch let error as APIError {
+            // 401 → single-flight refresh → retry once (same as request<T>), so an
+            // authed download (e.g. report PDF) survives an expired access token.
+            if case .unauthorized = error,
+               allowAuthRetry,
+               tokenRefresher != nil,
+               !endpoint.isAuthEndpoint,
+               await refreshTokenSingleFlight() != nil {
+                return try await downloadData(endpoint: endpoint, retryCount: retryCount, allowAuthRetry: false)
+            }
             if retryCount > 0, case .serverError = error {
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-                return try await downloadData(endpoint: endpoint, retryCount: retryCount - 1)
+                return try await downloadData(endpoint: endpoint, retryCount: retryCount - 1, allowAuthRetry: allowAuthRetry)
             }
             throw error
         } catch {

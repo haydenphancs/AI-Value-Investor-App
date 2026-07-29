@@ -151,6 +151,13 @@ struct AnalysisPersona: Identifiable, Hashable {
 
     static let fallbacks: [AnalysisPersona] = allCases
 
+    /// The user's "Default Analyst" (Settings → AI & Research), stored by `.key`.
+    /// Falls back to Warren Buffett when unset or unrecognized.
+    static var settingsDefault: AnalysisPersona {
+        let storedKey = UserDefaults.standard.string(forKey: "default_persona") ?? warrenBuffett.key
+        return allCases.first { $0.key == storedKey } ?? warrenBuffett
+    }
+
     /// Build an `AnalysisPersona` from a backend `agent_personas` row.
     /// Falls back to the matching hardcoded persona's fields when the backend
     /// returns null/empty for icon/color/description.

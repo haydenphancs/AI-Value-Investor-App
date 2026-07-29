@@ -64,7 +64,7 @@ struct MoneyMoveArticleContent: View {
     private var completionButton: some View {
         Button {
             progress.toggleCompleted(slug: article.slug)
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            Haptics.success()
         } label: {
             HStack(spacing: AppSpacing.sm) {
                 Image(systemName: isCompleted ? "checkmark.circle.fill" : "checkmark.circle")

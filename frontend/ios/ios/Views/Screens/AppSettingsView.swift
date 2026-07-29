@@ -2,179 +2,47 @@
 //  AppSettingsView.swift
 //  ios
 //
-//  Screen: General app settings — currency, defaults, cache, delete account
+//  Screen: General app settings — research defaults, playback, subscription,
+//  security (App Lock), data, about, and account deletion.
 //
 
 import SwiftUI
+import StoreKit
 
 struct AppSettingsView: View {
     @Environment(\.appState) private var appState
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.requestReview) private var requestReview
 
-    @AppStorage("default_currency") private var defaultCurrency: String = "USD"
-    @AppStorage("default_persona") private var defaultPersona: String = "buffett"
-    @AppStorage("auto_refresh_quotes") private var autoRefreshQuotes: Bool = true
-    @AppStorage("show_premarket") private var showPremarket: Bool = true
-    @AppStorage("compact_numbers") private var compactNumbers: Bool = false
+    // Synced preferences (see SettingsSyncManager key lists).
+    @AppStorage("default_persona") private var defaultPersona: String = AnalysisPersona.warrenBuffett.key
+    @AppStorage("playback_speed") private var playbackSpeedRaw: Double = PlaybackSpeed.normal.rawValue
+    @AppStorage("autoplay_next") private var autoplayNext: Bool = true
     @AppStorage("haptic_feedback") private var hapticFeedback: Bool = true
 
-    @State private var showDeleteConfirmation: Bool = false
-    @State private var showClearCacheConfirmation: Bool = false
-    @State private var cacheSize: String = "Calculating..."
+    // Device-local (NOT synced): App Lock security state.
+    @State private var appLockEnabled: Bool = AppLockManager.shared.isEnabled
+
+    @State private var showDeleteConfirmation = false
+    @State private var showClearCacheConfirmation = false
+    @State private var showRestoreInfo = false
+    @State private var cacheSize = "Calculating..."
 
     var body: some View {
         ZStack {
-            AppColors.background
-                .ignoresSafeArea()
+            AppColors.background.ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: AppSpacing.xxl) {
-                    // Market Defaults
-                    settingsGroup(title: "Market Preferences", icon: "chart.xyaxis.line") {
-                        // Currency
-                        HStack {
-                            settingsLabel(title: "Default Currency", subtitle: "For prices and valuations")
+                    aiResearchSection
+                    playbackSection
+                    subscriptionSection
+                    if AppLockManager.shared.isAvailable { securitySection }
+                    generalSection
+                    aboutSection
+                    dangerZoneSection
 
-                            Spacer()
-
-                            Picker("Currency", selection: $defaultCurrency) {
-                                Text("USD ($)").tag("USD")
-                                Text("EUR (\u{20AC})").tag("EUR")
-                                Text("GBP (\u{00A3})").tag("GBP")
-                                Text("JPY (\u{00A5})").tag("JPY")
-                                Text("CAD (C$)").tag("CAD")
-                            }
-                            .tint(AppColors.primaryBlue)
-                        }
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.vertical, AppSpacing.md)
-                        .background(AppColors.cardBackground)
-
-                        SettingsToggleRow(
-                            title: "Auto-Refresh Quotes",
-                            subtitle: "Live price updates when app is open",
-                            isOn: $autoRefreshQuotes
-                        )
-
-                        SettingsToggleRow(
-                            title: "Pre/After-Market Data",
-                            subtitle: "Show extended hours pricing",
-                            isOn: $showPremarket
-                        )
-
-                        SettingsToggleRow(
-                            title: "Compact Numbers",
-                            subtitle: "Show 1.2B instead of 1,200,000,000",
-                            isOn: $compactNumbers
-                        )
-                    }
-
-                    // AI & Research
-                    settingsGroup(title: "AI & Research", icon: "brain") {
-                        HStack {
-                            settingsLabel(title: "Default Analyst", subtitle: "Pre-selected for new research")
-
-                            Spacer()
-
-                            Picker("Persona", selection: $defaultPersona) {
-                                Text("Buffett").tag("buffett")
-                                Text("Lynch").tag("lynch")
-                                Text("Wood").tag("wood")
-                                Text("Ackman").tag("ackman")
-                            }
-                            .tint(AppColors.primaryBlue)
-                        }
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.vertical, AppSpacing.md)
-                        .background(AppColors.cardBackground)
-                    }
-
-                    // General
-                    settingsGroup(title: "General", icon: "wrench.and.screwdriver") {
-                        SettingsToggleRow(
-                            title: "Haptic Feedback",
-                            subtitle: "Vibrations for interactions",
-                            isOn: $hapticFeedback
-                        )
-
-                        // Clear Cache
-                        Button(action: {
-                            showClearCacheConfirmation = true
-                        }) {
-                            HStack {
-                                settingsLabel(title: "Clear Cache", subtitle: cacheSize)
-                                Spacer()
-                                Image(systemName: "trash")
-                                    .font(AppTypography.iconSmall)
-                                    .foregroundColor(AppColors.textMuted)
-                            }
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.vertical, AppSpacing.md)
-                            .background(AppColors.cardBackground)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-
-                    // Danger Zone
-                    VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                        HStack(spacing: AppSpacing.sm) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(AppTypography.iconSmall)
-                                .foregroundColor(AppColors.bearish)
-
-                            Text("DANGER ZONE")
-                                .font(AppTypography.labelSmallEmphasis)
-                                .foregroundColor(AppColors.bearish)
-                                .tracking(0.5)
-                        }
-                        .padding(.leading, AppSpacing.xs)
-
-                        Button(action: {
-                            showDeleteConfirmation = true
-                        }) {
-                            HStack(spacing: AppSpacing.md) {
-                                Image(systemName: "person.crop.circle.badge.xmark")
-                                    .font(AppTypography.iconDefault)
-                                    .foregroundColor(AppColors.bearish)
-                                    .frame(width: 28, height: 28)
-                                    .background(AppColors.bearish.opacity(0.15))
-                                    .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.small))
-
-                                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                                    Text("Delete Account")
-                                        .font(AppTypography.body)
-                                        .foregroundColor(AppColors.bearish)
-
-                                    Text("Permanently remove your account and all data")
-                                        .font(AppTypography.caption)
-                                        .foregroundColor(AppColors.textMuted)
-                                }
-
-                                Spacer()
-
-                                Image(systemName: "chevron.right")
-                                    .font(AppTypography.iconSmall).fontWeight(.semibold)
-                                    .foregroundColor(AppColors.textMuted)
-                            }
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.vertical, AppSpacing.md)
-                            .background(
-                                RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                                    .fill(AppColors.cardBackground)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                                            .stroke(AppColors.bearish.opacity(0.2), lineWidth: 1)
-                                    )
-                            )
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-                    .padding(.horizontal, AppSpacing.lg)
-
-                    Spacer()
-                        .frame(height: AppSpacing.xxxl)
+                    Spacer().frame(height: AppSpacing.xxxl)
                 }
                 .padding(.top, AppSpacing.md)
             }
@@ -183,30 +51,233 @@ struct AppSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppColors.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .onAppear {
-            calculateCacheSize()
-        }
+        .onAppear { calculateCacheSize() }
         // Sync general prefs to the backend when leaving (no-op for guests).
         .onDisappear { SettingsSyncManager.shared.push() }
+        .onChange(of: playbackSpeedRaw) { _, newValue in
+            AudioManager.shared.playbackSpeed = PlaybackSpeed(rawValue: newValue) ?? .normal
+        }
+        .onChange(of: appLockEnabled) { _, newValue in
+            // Ignore programmatic reverts (state already matches the manager).
+            guard newValue != AppLockManager.shared.isEnabled else { return }
+            Task {
+                let ok = await AppLockManager.shared.setEnabled(newValue)
+                if newValue && !ok { appLockEnabled = false }  // enable cancelled → revert
+            }
+        }
         .alert("Clear Cache", isPresented: $showClearCacheConfirmation) {
             Button("Cancel", role: .cancel) {}
-            Button("Clear", role: .destructive) {
-                clearCache()
-            }
+            Button("Clear", role: .destructive) { clearCache() }
         } message: {
             Text("This will clear cached images and data. Your account, settings, and saved research will not be affected.")
         }
+        .alert("Restore Purchases", isPresented: $showRestoreInfo) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("In-app purchases aren't available yet. Once they ship, this will restore any subscription tied to your Apple ID.")
+        }
         .alert("Delete Account", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
-            Button("Delete Forever", role: .destructive) {
-                deleteAccount()
-            }
+            Button("Delete Forever", role: .destructive) { deleteAccount() }
         } message: {
             Text("This action is permanent and cannot be undone. All your research reports, watchlists, and settings will be deleted.")
         }
     }
 
-    // MARK: - Settings Group Builder
+    // MARK: - AI & Research
+
+    private var aiResearchSection: some View {
+        settingsGroup(title: "AI & Research", icon: "brain") {
+            HStack {
+                settingsLabel(title: "Default Analyst", subtitle: "Pre-selected for new research")
+                Spacer()
+                Picker("Analyst", selection: $defaultPersona) {
+                    ForEach(AnalysisPersona.allCases) { persona in
+                        Text(persona.name).tag(persona.key)
+                    }
+                }
+                .tint(AppColors.primaryBlue)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.md)
+            .background(AppColors.cardBackground)
+        }
+    }
+
+    // MARK: - Playback
+
+    private var playbackSection: some View {
+        settingsGroup(title: "Playback", icon: "headphones") {
+            HStack {
+                settingsLabel(title: "Default Speed", subtitle: "For book & lesson narration")
+                Spacer()
+                Picker("Speed", selection: $playbackSpeedRaw) {
+                    ForEach(PlaybackSpeed.allCases) { speed in
+                        Text(speed.label).tag(speed.rawValue)
+                    }
+                }
+                .tint(AppColors.primaryBlue)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.md)
+            .background(AppColors.cardBackground)
+
+            SettingsToggleRow(
+                title: "Autoplay Next",
+                subtitle: "Continue to the next track automatically",
+                isOn: $autoplayNext
+            )
+        }
+    }
+
+    // MARK: - Subscription
+
+    private var subscriptionSection: some View {
+        settingsGroup(title: "Subscription", icon: "creditcard") {
+            Button(action: openManageSubscription) {
+                actionRow(title: "Manage Subscription",
+                          subtitle: "Change or cancel in the App Store",
+                          systemImage: "arrow.up.right.square")
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Button(action: { showRestoreInfo = true }) {
+                actionRow(title: "Restore Purchases",
+                          subtitle: "Recover a subscription on this Apple ID",
+                          systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+    }
+
+    // MARK: - Security
+
+    private var securitySection: some View {
+        settingsGroup(title: "Security", icon: "lock.shield") {
+            SettingsToggleRow(
+                title: "App Lock",
+                subtitle: "Require \(AppLockManager.shared.biometryLabel) to open Caydex",
+                isOn: $appLockEnabled
+            )
+        }
+    }
+
+    // MARK: - General
+
+    private var generalSection: some View {
+        settingsGroup(title: "General", icon: "wrench.and.screwdriver") {
+            SettingsToggleRow(
+                title: "Haptic Feedback",
+                subtitle: "Vibrations for interactions",
+                isOn: $hapticFeedback
+            )
+
+            Button(action: { showClearCacheConfirmation = true }) {
+                HStack {
+                    settingsLabel(title: "Clear Cache", subtitle: cacheSize)
+                    Spacer()
+                    Image(systemName: "trash")
+                        .font(AppTypography.iconSmall)
+                        .foregroundColor(AppColors.textMuted)
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.md)
+                .background(AppColors.cardBackground)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+    }
+
+    // MARK: - About
+
+    private var aboutSection: some View {
+        settingsGroup(title: "About", icon: "info.circle") {
+            Button(action: { requestReview() }) {
+                actionRow(title: "Rate the App",
+                          subtitle: "Tell us what you think",
+                          systemImage: "star")
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            NavigationLink {
+                AcknowledgementsView()
+            } label: {
+                actionRow(title: "Acknowledgements",
+                          subtitle: "Open-source licenses",
+                          systemImage: "doc.plaintext")
+            }
+
+            HStack {
+                settingsLabel(title: "Version", subtitle: "Caydex")
+                Spacer()
+                Text("\(appVersion) (\(buildNumber))")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textMuted)
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.md)
+            .background(AppColors.cardBackground)
+        }
+    }
+
+    // MARK: - Danger Zone
+
+    private var dangerZoneSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(AppTypography.iconSmall)
+                    .foregroundColor(AppColors.bearish)
+                Text("DANGER ZONE")
+                    .font(AppTypography.labelSmallEmphasis)
+                    .foregroundColor(AppColors.bearish)
+                    .tracking(0.5)
+            }
+            .padding(.leading, AppSpacing.xs)
+
+            Button(action: { showDeleteConfirmation = true }) {
+                HStack(spacing: AppSpacing.md) {
+                    Image(systemName: "person.crop.circle.badge.xmark")
+                        .font(AppTypography.iconDefault)
+                        .foregroundColor(AppColors.bearish)
+                        .frame(width: 28, height: 28)
+                        .background(AppColors.bearish.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.small))
+
+                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                        Text("Delete Account")
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.bearish)
+                        Text("Permanently remove your account and all data")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.iconSmall).fontWeight(.semibold)
+                        .foregroundColor(AppColors.textMuted)
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.md)
+                .background(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                        .fill(AppColors.cardBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                                .stroke(AppColors.bearish.opacity(0.2), lineWidth: 1)
+                        )
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+        .padding(.horizontal, AppSpacing.lg)
+    }
+
+    // MARK: - Builders
 
     @ViewBuilder
     private func settingsGroup<Content: View>(
@@ -219,7 +290,6 @@ struct AppSettingsView: View {
                 Image(systemName: icon)
                     .font(AppTypography.iconSmall)
                     .foregroundColor(AppColors.textMuted)
-
                 Text(title.uppercased())
                     .font(AppTypography.labelSmallEmphasis)
                     .foregroundColor(AppColors.textMuted)
@@ -227,10 +297,8 @@ struct AppSettingsView: View {
             }
             .padding(.leading, AppSpacing.xs)
 
-            VStack(spacing: 1) {
-                content()
-            }
-            .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+            VStack(spacing: 1) { content() }
+                .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
         }
         .padding(.horizontal, AppSpacing.lg)
     }
@@ -241,14 +309,42 @@ struct AppSettingsView: View {
             Text(title)
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textPrimary)
-
             Text(subtitle)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
         }
     }
 
+    @ViewBuilder
+    private func actionRow(title: String, subtitle: String, systemImage: String) -> some View {
+        HStack {
+            settingsLabel(title: title, subtitle: subtitle)
+            Spacer()
+            Image(systemName: systemImage)
+                .font(AppTypography.iconSmall)
+                .foregroundColor(AppColors.textMuted)
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.md)
+        .background(AppColors.cardBackground)
+        .contentShape(Rectangle())
+    }
+
     // MARK: - Helpers
+
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
+
+    private var buildNumber: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+    }
+
+    private func openManageSubscription() {
+        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
+            UIApplication.shared.open(url)
+        }
+    }
 
     private func calculateCacheSize() {
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
@@ -256,7 +352,6 @@ struct AppSettingsView: View {
             cacheSize = "Unable to calculate"
             return
         }
-
         DispatchQueue.global(qos: .utility).async {
             var size: Int64 = 0
             if let enumerator = FileManager.default.enumerator(
@@ -270,35 +365,25 @@ struct AppSettingsView: View {
                     }
                 }
             }
-
             let formatter = ByteCountFormatter()
             formatter.countStyle = .file
             let formatted = formatter.string(fromByteCount: size)
-
-            DispatchQueue.main.async {
-                cacheSize = formatted
-            }
+            DispatchQueue.main.async { cacheSize = formatted }
         }
     }
 
     private func clearCache() {
-        // Clear filesystem cache (images, URLCache temp files)
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         guard let cacheURL else { return }
-
         try? FileManager.default.removeItem(at: cacheURL)
         try? FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
-
-        // Clear in-memory API response cache
         StockRepository.shared.clearCache()
-
         calculateCacheSize()
     }
 
     private func deleteAccount() {
         // Actually delete the account server-side (cascades all user data) BEFORE
-        // signing out. Surface a failure instead of silently signing out — a failed
-        // delete that just logs the user out would leave their data intact.
+        // signing out. Surface a failure instead of silently signing out.
         Task {
             do {
                 try await appState.apiClient.request(endpoint: .deleteAccount)
@@ -323,14 +408,11 @@ struct SettingsToggleRow: View {
                 Text(title)
                     .font(AppTypography.body)
                     .foregroundColor(AppColors.textPrimary)
-
                 Text(subtitle)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             }
-
             Spacer()
-
             Toggle("", isOn: $isOn)
                 .labelsHidden()
                 .tint(AppColors.primaryBlue)
@@ -346,7 +428,7 @@ struct SettingsToggleRow: View {
 #Preview {
     NavigationStack {
         AppSettingsView()
-            .environment(AppState())
+            .environment(\.appState, AppState())
     }
     .preferredColorScheme(.dark)
 }

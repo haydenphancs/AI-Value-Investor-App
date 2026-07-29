@@ -40,7 +40,10 @@ final class AudioManager: ObservableObject {
     @Published private(set) var playbackState: PlaybackState = .idle
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
-    @Published var playbackSpeed: PlaybackSpeed = .normal
+    // Initial speed from the user's saved default (Settings → Playback); 0.0 when
+    // unset falls back to .normal.
+    @Published var playbackSpeed: PlaybackSpeed =
+        PlaybackSpeed(rawValue: UserDefaults.standard.double(forKey: "playback_speed")) ?? .normal
     @Published var sleepTimer: SleepTimerOption = .off
     @Published private(set) var sleepTimerRemaining: TimeInterval = 0
 
@@ -952,7 +955,9 @@ final class AudioManager: ObservableObject {
             playbackDidComplete.send(episode)
         }
 
-        if !queue.isEmpty && !stopAtEndOfEpisode {
+        // Autoplay-next honors the user's setting (Settings → Playback); default on.
+        let autoplayNext = UserDefaults.standard.object(forKey: "autoplay_next") as? Bool ?? true
+        if !queue.isEmpty && !stopAtEndOfEpisode && autoplayNext {
             playNext()
         } else {
             playbackState = .paused

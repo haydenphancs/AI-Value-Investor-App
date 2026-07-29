@@ -362,7 +362,7 @@ struct BookCoreDetailView: View {
                 coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds)
         }
         if !newly.isEmpty {
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            Haptics.success()
         }
     }
 
@@ -393,7 +393,7 @@ struct BookCoreDetailView: View {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             progress.markCompleted(order: book.curriculumOrder, core: last.number)
         }
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        Haptics.success()
     }
 
     // MARK: - Completion Handling
@@ -401,9 +401,8 @@ struct BookCoreDetailView: View {
         // Don't re-complete if already done
         guard !isCurrentCoreCompleted else { return }
 
-        // Trigger success haptic feedback
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(.success)
+        // Trigger success haptic feedback (gated by the Haptics setting)
+        Haptics.success()
 
         // Mark current core as completed (persists locally + syncs to backend).
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {

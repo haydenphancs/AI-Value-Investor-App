@@ -36,19 +36,25 @@ final class SettingsSyncManager {
     /// full-replace (clobber) richer server settings before we've read them.
     private var hasHydrated = false
 
-    // Boolean toggles (NotificationsSettingsView + AppSettingsView).
+    // Boolean toggles (NotificationsSettingsView + AppSettingsView). App Lock is
+    // deliberately NOT synced — it's device-local security.
     static let boolKeys: [String] = [
         "notify_earnings_alerts", "notify_earnings_surprises", "notify_earnings_upcoming",
         "notify_market_alerts", "notify_market_macro", "notify_market_volatility", "notify_market_sector",
         "notify_smart_money", "notify_smart_money_whale", "notify_smart_money_insider",
         "notify_smart_money_institutional",
         "notify_research_complete", "notify_watchlist_changes",
-        "auto_refresh_quotes", "show_premarket", "compact_numbers", "haptic_feedback",
+        "haptic_feedback", "autoplay_next",
     ]
 
-    // String preferences (currency, persona, appearance).
+    // String preferences (persona, appearance). Currency is USD-only (no picker).
     static let stringKeys: [String] = [
-        "default_currency", "default_persona", AppearanceManager.storageKey,
+        "default_persona", AppearanceManager.storageKey,
+    ]
+
+    // Numeric preferences (playback speed).
+    static let doubleKeys: [String] = [
+        "playback_speed",
     ]
 
     private init(repository: AccountRepositoryProtocol = AccountRepository.shared) {
@@ -111,6 +117,9 @@ final class SettingsSyncManager {
             if let value = defaults.string(forKey: key) {
                 blob[key] = .string(value)
             }
+        }
+        for key in Self.doubleKeys where defaults.object(forKey: key) != nil {
+            blob[key] = .double(defaults.double(forKey: key))
         }
         return blob
     }

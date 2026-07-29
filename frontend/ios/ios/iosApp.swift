@@ -96,6 +96,10 @@ struct iosApp: App {
                     // Handles: started/stopped localhost while app was backgrounded.
                     Task { await ServerEnvironmentManager.shared.resolve() }
                 }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+                    // Re-lock the app when it backgrounds (if App Lock is enabled).
+                    AppLockManager.shared.lockIfEnabled()
+                }
         }
     }
 
@@ -126,6 +130,7 @@ struct iosApp: App {
 /// Root view that handles auth state and navigation
 struct RootView: View {
     @Environment(AppState.self) private var appState
+    @State private var appLock = AppLockManager.shared
 
     var body: some View {
         Group {
@@ -159,6 +164,15 @@ struct RootView: View {
                 ToastView(message: toast)
             }
         }
+        .overlay {
+            // App Lock cover — sits above everything until the user authenticates.
+            if appLock.isLocked {
+                AppLockView()
+                    .transition(.opacity)
+                    .zIndex(1000)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: appLock.isLocked)
     }
 }
 

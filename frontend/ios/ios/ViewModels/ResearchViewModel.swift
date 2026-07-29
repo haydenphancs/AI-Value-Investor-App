@@ -16,7 +16,7 @@ class ResearchViewModel: ObservableObject {
     @Published var searchText: String = ""
     @Published var quickTickers: [QuickTicker] = QuickTicker.defaults
     @Published var personas: [AnalysisPersona] = AnalysisPersona.allCases
-    @Published var selectedPersona: AnalysisPersona = .warrenBuffett
+    @Published var selectedPersona: AnalysisPersona = AnalysisPersona.settingsDefault
     @Published var features: [AnalysisFeature] = AnalysisFeature.allFeatures
     @Published var creditBalance: CreditBalance = .mock
     @Published var trendingAnalyses: [TrendingAnalysis] = TrendingAnalysis.mockTrending

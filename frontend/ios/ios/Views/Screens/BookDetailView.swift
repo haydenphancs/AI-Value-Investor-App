@@ -188,7 +188,7 @@ struct BookDetailView: View {
                     coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds)
             }
             if !newly.isEmpty {
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                Haptics.success()
             }
         }
     }

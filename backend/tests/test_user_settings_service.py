@@ -5,8 +5,31 @@ Pure function only — no Supabase, no network.
 
 from app.services.user_settings_service import (
     preferences_too_large,
+    sanitize_preferences,
     MAX_PREFERENCES_BYTES,
 )
+
+
+def test_sanitize_keeps_scalar_values():
+    prefs = {"appearance_mode": "dark", "notify_earnings_alerts": True,
+             "count": 3, "ratio": 1.5}
+    assert sanitize_preferences(prefs) == prefs
+
+
+def test_sanitize_drops_nested_object_array_and_null():
+    prefs = {"default_currency": "USD", "obj": {"a": 1}, "arr": [1, 2], "nada": None}
+    # Only the scalar survives — a nested/null value would break the iOS decode.
+    assert sanitize_preferences(prefs) == {"default_currency": "USD"}
+
+
+def test_sanitize_keeps_false_bool():
+    # bool is a subclass of int; False must be kept, not dropped as "falsy".
+    assert sanitize_preferences({"show_premarket": False}) == {"show_premarket": False}
+
+
+def test_sanitize_non_dict_returns_empty():
+    assert sanitize_preferences(None) == {}
+    assert sanitize_preferences([1, 2, 3]) == {}
 
 
 def test_empty_preferences_ok():

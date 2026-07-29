@@ -72,8 +72,16 @@ struct iosApp: App {
                     // On an expired token the APIClient asks AuthService to refresh
                     // (rewriting the Keychain + the client's token) and retries once.
                     await apiClient.setTokenRefresher {
-                        try? await authService.refreshToken()
-                        return await authService.getStoredToken()
+                        // Return the NEW token only on a genuine refresh success.
+                        // On ANY failure return nil — never fall back to the old
+                        // (expired) token, which would launder a transient refresh
+                        // outage into a doomed retry and a spurious sign-out.
+                        do {
+                            try await authService.refreshToken()
+                            return await authService.getStoredToken()
+                        } catch {
+                            return nil
+                        }
                     }
 
                     // Configure AppState with services. Token restoration runs inside

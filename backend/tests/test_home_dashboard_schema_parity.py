@@ -544,8 +544,13 @@ async def test_pulse_timeout_serves_the_last_good_strip(monkeypatch):
     good = list(HomeDashboardService._cache[hds._CACHE_KEY][1])
     assert len(good) == len(_PULSE_SYMBOLS)
 
-    # Expire it, then make the rebuild slower than the ceiling.
-    HomeDashboardService._cache[hds._CACHE_KEY] = (0.0, good)
+    # Age it just past the normal TTL — expired, but still inside the
+    # stale-serve ceiling, which is what "serve the last good strip" means.
+    # (An epoch-0 timestamp would be older than the ceiling and correctly
+    # yield the honest empty strip — see the ceiling test below.)
+    HomeDashboardService._cache[hds._CACHE_KEY] = (
+        _time.time() - (hds._CACHE_TTL_SECONDS + 5), good
+    )
     monkeypatch.setattr(hds, "_PULSE_BUILD_TIMEOUT_SECONDS", 0.05)
 
     async def slow_quote(ticker: str):
@@ -562,3 +567,45 @@ async def test_pulse_timeout_serves_the_last_good_strip(monkeypatch):
     await asyncio.sleep(0.5)
     assert HomeDashboardService._cache[hds._CACHE_KEY][1][0].price == 7.0
     assert HomeDashboardService._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_stale_pulse_is_not_served_past_the_ceiling(monkeypatch):
+    """Stale beats blank — but only up to a point. These prices render under a
+    market status recomputed fresh on every request, so an unbounded stale serve
+    shows a green "Markets Open" dot over quotes frozen half an hour ago. An
+    EMPTY build is deliberately never cached, so during a total FMP outage the
+    same entry would otherwise be re-served forever, ageing without bound."""
+    svc, _fake = _fresh_service()
+    await svc.get_dashboard()
+    good = list(HomeDashboardService._cache[hds._CACHE_KEY][1])
+
+    monkeypatch.setattr(hds, "_PULSE_BUILD_TIMEOUT_SECONDS", 0.05)
+
+    async def dead_quote(ticker: str):
+        await asyncio.sleep(0.3)
+        return {}                      # every tile drops → _build_pulse returns []
+
+    svc.fmp.get_stock_price_quote = dead_quote  # type: ignore[assignment]
+
+    # Just inside the ceiling → the stale strip is still served.
+    HomeDashboardService._cache[hds._CACHE_KEY] = (
+        _time.time() - (hds._STALE_SERVE_CEILING_SECONDS - 5), good
+    )
+    resp = await asyncio.wait_for(svc.get_dashboard(), timeout=2.0)
+    assert [p.symbol for p in resp.pulse] == [p.symbol for p in good]
+    await asyncio.sleep(0.4)           # let the shielded empty build finish
+    # An empty build must NOT overwrite the cache (nothing to serve next time).
+    assert HomeDashboardService._cache[hds._CACHE_KEY][1] == good
+
+    # Past the ceiling → honest empty, so iOS shows "Market data unavailable"
+    # instead of half-hour-old prices under a live market header.
+    HomeDashboardService._cache[hds._CACHE_KEY] = (
+        _time.time() - (hds._STALE_SERVE_CEILING_SECONDS + 1), good
+    )
+    HomeDashboardService._inflight.clear()
+    resp = await asyncio.wait_for(svc.get_dashboard(), timeout=2.0)
+    assert resp.pulse == []
+    # The status header is still computed fresh and still correct.
+    assert resp.market_status_text
+    await asyncio.sleep(0.4)

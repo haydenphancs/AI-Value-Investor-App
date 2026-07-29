@@ -41,6 +41,7 @@ enum APIEndpoint: Sendable {
     case getCurrentUser
     case getUserCredits
     case updateProfile(displayName: String?, avatarUrl: String?)
+    case deleteAccount
 
     // MARK: - Billing / Subscription / Settings / Devices
     case getPlanCatalog                                    // public tier catalog (guest-safe)
@@ -221,7 +222,7 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me"
         case .getUserCredits:
             return "/api/v1/users/me/credits"
-        case .updateProfile:
+        case .updateProfile, .deleteAccount:
             return "/api/v1/users/me"
 
         // Billing / Subscription / Settings / Devices
@@ -493,7 +494,8 @@ enum APIEndpoint: Sendable {
             return .POST
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
-             .unfollowWhale, .deletePortfolio, .removeBookBookmark, .uncompleteLearnItem:
+             .unfollowWhale, .deletePortfolio, .removeBookBookmark, .uncompleteLearnItem,
+             .deleteAccount:
             return .DELETE
 
         default:

@@ -51,8 +51,39 @@ enum PreferenceValue: Codable, Equatable, Sendable {
 
 // MARK: - Settings response
 
-struct UserSettingsDTO: Codable, Sendable {
+/// Dynamic coding key for iterating an arbitrary JSON object's keys.
+private struct PreferenceKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { self.stringValue = String(intValue); self.intValue = intValue }
+}
+
+struct UserSettingsDTO: Decodable, Sendable {
     let preferences: [String: PreferenceValue]
+
+    private enum CodingKeys: String, CodingKey { case preferences }
+
+    init(preferences: [String: PreferenceValue]) {
+        self.preferences = preferences
+    }
+
+    /// Lenient decode: iterate the preferences object key-by-key and SKIP any value
+    /// that isn't a supported scalar (null / nested object / array). A single bad key
+    /// must not fail the whole decode and silently void ALL synced settings — decode
+    /// the good ones and drop the rest.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        var result: [String: PreferenceValue] = [:]
+        if let prefs = try? container.nestedContainer(keyedBy: PreferenceKey.self, forKey: .preferences) {
+            for key in prefs.allKeys {
+                if let value = try? prefs.decode(PreferenceValue.self, forKey: key) {
+                    result[key.stringValue] = value
+                }
+            }
+        }
+        self.preferences = result
+    }
 }
 
 // MARK: - Device registration response

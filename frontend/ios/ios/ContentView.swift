@@ -306,6 +306,7 @@ struct ResearchViewWithBinding: View {
         }
         .sheet(isPresented: $viewModel.showCreditsSheet) {
             PaywallView()
+                .environment(\.appState, appState)
         }
         .sheet(isPresented: $viewModel.showPersonasSheet) {
             PersonasSheet(

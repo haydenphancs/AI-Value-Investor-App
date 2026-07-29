@@ -38,7 +38,10 @@ from app.services.asset_class import (
         ("^GSPC", "index"), ("^IXIC", "index"), ("^DJI", "index"),
         # Commodities — matched BEFORE the crypto USD-suffix rule.
         ("GCUSD", "commodity"), ("CLUSD", "commodity"), ("SIUSD", "commodity"),
-        ("GOLD", "commodity"), ("NATGAS", "commodity"),
+        # …but the friendly English names are NOT commodities by default: they
+        # collide with real listed equities (see the dedicated test below).
+        ("GOLD", "stock"), ("SILVER", "stock"), ("OIL", "stock"),
+        ("NATGAS", "stock"),
         # Crypto.
         ("BTCUSD", "crypto"), ("ETHUSD", "crypto"), ("SOLUSDT", "crypto"),
         ("BTC", "crypto"), ("DOGE", "crypto"),
@@ -49,6 +52,21 @@ from app.services.asset_class import (
 )
 def test_detect_asset_class(symbol, expected):
     assert detect_asset_class(symbol) == expected
+
+
+def test_friendly_commodity_names_are_equities_unless_opted_in():
+    """"GOLD" is Barrick Mining (NYSE) — this repo's own commodities endpoint
+    lists it among the gold-related EQUITIES. Classifying it as a commodity gives
+    an ordinary equity holding a 24/7 refresh gate and an extended-hours
+    sparkline unlike every other equity row beside it in the same list."""
+    for alias in ("GOLD", "SILVER", "OIL", "NATGAS", "PLATINUM", "COPPER"):
+        assert detect_asset_class(alias) == "stock", alias
+        assert symbol_trades_extended_hours(alias, "Stock") is False, alias
+        # Opt-in (chat voicing) still resolves them as commodities.
+        assert detect_asset_class(alias, include_aliases=True) == "commodity", alias
+    # The unambiguous futures codes are unaffected either way.
+    assert detect_asset_class("GCUSD") == "commodity"
+    assert symbol_trades_extended_hours("GCUSD", "Stock") is True
 
 
 def test_bare_usd_ticker_is_not_a_coin():

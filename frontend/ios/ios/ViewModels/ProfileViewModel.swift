@@ -19,9 +19,25 @@ class ProfileViewModel: BaseViewModel {
     @Published var appearanceMode: AppearanceMode = AppearanceManager.current {
         didSet {
             guard oldValue != appearanceMode else { return }
+            // A change originating from a server hydrate is already persisted + applied
+            // (and must not be pushed straight back) — only user-driven changes persist+sync.
+            guard !isApplyingRemoteAppearance else { return }
             AppearanceManager.set(appearanceMode)
             SettingsSyncManager.shared.push()   // self-gates on auth
         }
+    }
+    /// True while reflecting a hydrated (server) appearance into the picker, so the
+    /// `didSet` above doesn't re-persist/re-push a value that came FROM the server.
+    private var isApplyingRemoteAppearance = false
+
+    /// Re-read the appearance choice from the store into the picker (call after a
+    /// settings hydrate changes `appearance_mode` while this screen is open).
+    func syncAppearanceFromStore() {
+        let stored = AppearanceManager.current
+        guard stored != appearanceMode else { return }
+        isApplyingRemoteAppearance = true
+        appearanceMode = stored
+        isApplyingRemoteAppearance = false
     }
     @Published var showDeleteConfirmation: Bool = false
     @Published var showSignOutConfirmation: Bool = false
@@ -89,10 +105,10 @@ class ProfileViewModel: BaseViewModel {
 
     var memberSince: String {
         guard let createdAt = appState?.user.profile?.createdAt else { return "N/A" }
-        // Parse ISO 8601 date and format
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = isoFormatter.date(from: createdAt) {
+        // Reuse the tolerant parser (handles timestamps WITH or WITHOUT fractional
+        // seconds — a plain formatter with .withFractionalSeconds fails on whole-second
+        // values this backend emits, silently degrading to "Member since 2024-03").
+        if let date = Self.parseISODate(createdAt) {
             let displayFormatter = DateFormatter()
             displayFormatter.dateFormat = "MMM yyyy"
             return "Member since \(displayFormatter.string(from: date))"
@@ -129,8 +145,9 @@ class ProfileViewModel: BaseViewModel {
     func deleteAccount() {
         isDeleting = true
         performTask("deleteAccount") { [weak self] in
-            // Call delete account API
-            try await self?.apiClient.request(endpoint: .signOut)
+            // Actually delete the account (cascades all data), THEN sign out.
+            // performTask surfaces any failure via errorMessage instead of signing out.
+            try await self?.apiClient.request(endpoint: .deleteAccount)
             self?.isDeleting = false
             self?.appState?.signOut()
         }

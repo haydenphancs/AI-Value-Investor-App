@@ -49,6 +49,14 @@ final class AuthService {
     private static let accessTokenKey = "access_token"
     private static let refreshTokenKey = "refresh_token"
 
+    /// Monotonic session counter, bumped on every session transition (sign-in,
+    /// sign-up, sign-out). A token-persisting operation (refresh) that started
+    /// under an older epoch discards its result, and sign-out's token clear is
+    /// skipped if a newer session began mid-logout. This makes sign-out/sign-in
+    /// races safe (a stale refresh can't resurrect a signed-out session; a quick
+    /// re-sign-in isn't wiped by a late logout clear). @MainActor serializes it.
+    private var sessionEpoch: Int = 0
+
     // MARK: - Initialization
 
     init(apiClient: APIClient, keychain: KeychainService? = nil) {
@@ -69,6 +77,7 @@ final class AuthService {
 
         // Store tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
+        sessionEpoch += 1   // new session — invalidate any in-flight older-session refresh
 
         // Update API client
         await apiClient.setAuthToken(response.accessToken)
@@ -86,6 +95,7 @@ final class AuthService {
 
         // Store tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
+        sessionEpoch += 1   // new session — invalidate any in-flight older-session refresh
 
         // Update API client
         await apiClient.setAuthToken(response.accessToken)
@@ -105,13 +115,16 @@ final class AuthService {
 
     /// Sign out
     func signOut() async {
-        // Call backend to invalidate token
+        sessionEpoch += 1
+        let epoch = sessionEpoch
+
+        // Best-effort backend logout with the current token.
         try? await apiClient.request(endpoint: .signOut)
 
-        // Clear tokens
+        // Only clear if no NEWER session started during the logout round-trip — a
+        // quick re-sign-in bumps the epoch and its fresh tokens must survive.
+        guard epoch == sessionEpoch else { return }
         clearToken()
-
-        // Clear API client token
         await apiClient.setAuthToken(nil)
     }
 
@@ -121,10 +134,16 @@ final class AuthService {
             throw APIError.unauthorized
         }
 
+        let epoch = sessionEpoch
         let response = try await apiClient.request(
             endpoint: .refreshToken(refreshToken: refreshToken),
             responseType: AuthResponse.self
         )
+
+        // Discard the refreshed tokens if the session changed mid-flight (sign-out
+        // or a new sign-in) — otherwise a stale refresh could re-arm a signed-out
+        // session or clobber a newer one.
+        guard epoch == sessionEpoch else { return }
 
         // Store new tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)

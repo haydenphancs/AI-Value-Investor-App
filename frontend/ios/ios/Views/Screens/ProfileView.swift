@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct ProfileView: View {
     @Environment(\.appState) private var appState
@@ -91,6 +92,11 @@ struct ProfileView: View {
                 showSignIn = false
                 viewModel.loadData()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .caydexSettingsHydrated)) { _ in
+            // Settings just synced from the server → reflect any appearance change
+            // in the picker (otherwise it shows the pre-sign-in selection).
+            viewModel.syncAppearanceFromStore()
         }
     }
 

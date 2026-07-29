@@ -22,6 +22,17 @@ final class HomeDashboardViewModel: ObservableObject {
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var errorMessage: String?
 
+    /// True once a load has been ATTEMPTED (successfully or not).
+    ///
+    /// Gates the full-screen `LoadingOverlay`, which dims the screen and — like
+    /// the copies removed from the detail views — swallows every touch including
+    /// the tab bar. Without this, the 60s auto-refresh re-raised that overlay on
+    /// every poll for as long as the first load kept failing (`isLoading &&
+    /// data == nil` stays true), locking the user out of the app in ~30s bursts
+    /// during an outage. After the first attempt the error banner carries the
+    /// message instead and the UI stays interactive.
+    @Published private(set) var hasAttemptedLoad: Bool = false
+
     // MARK: - Dependencies
     private let repository: HomeRepositoryProtocol
 
@@ -93,6 +104,7 @@ final class HomeDashboardViewModel: ObservableObject {
             #endif
         }
         isLoading = false
+        hasAttemptedLoad = true
     }
 
     /// Pull-to-refresh — always re-fetches, regardless of staleness.

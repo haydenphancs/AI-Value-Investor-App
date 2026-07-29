@@ -38,6 +38,18 @@ _HOSTS = {
 }
 
 
+def host_for_environment(environment: Optional[str], default: str) -> str:
+    """Pure: pick the APNs host for a token's stored environment.
+
+    A device token is bound to the environment it was minted in (sandbox in DEBUG,
+    production in Release). Routing a sandbox token to the prod host (or vice-versa)
+    yields BadDeviceToken, so each token must go to ITS OWN host — never a single
+    global one. Falls back to `default` (the server's APNS_ENV) then sandbox.
+    """
+    env = (environment or default or "sandbox").lower()
+    return _HOSTS.get(env, _HOSTS["sandbox"])
+
+
 class PushService:
     # Class-level JWT cache shared across instances (the signing inputs are static).
     _jwt: Optional[str] = None
@@ -55,10 +67,6 @@ class PushService:
             and settings.APNS_AUTH_KEY
             and settings.APNS_BUNDLE_ID
         )
-
-    @property
-    def _base_url(self) -> str:
-        return _HOSTS.get(settings.APNS_ENV, _HOSTS["sandbox"])
 
     def _provider_jwt(self) -> Optional[str]:
         """Mint (and cache) the ES256 provider token used as the APNs bearer.
@@ -85,15 +93,21 @@ class PushService:
             logger.error("APNs provider JWT mint failed (%s: %s)", type(e).__name__, e)
             return None
 
-    def _device_tokens_for(self, user_id: str) -> List[str]:
+    def _device_tokens_for(self, user_id: str) -> List[dict]:
+        """Return the user's device tokens WITH their per-token environment so each
+        can be routed to the correct APNs host."""
         try:
             result = (
                 self.supabase.table("device_tokens")
-                .select("token")
+                .select("token, environment")
                 .eq("user_id", user_id)
                 .execute()
             )
-            return [r["token"] for r in (result.data or []) if r.get("token")]
+            return [
+                {"token": r["token"], "environment": r.get("environment")}
+                for r in (result.data or [])
+                if r.get("token")
+            ]
         except Exception as e:
             logger.error(
                 "device_tokens read failed for user=%s (%s: %s)",
@@ -127,8 +141,8 @@ class PushService:
             logger.info("Push disabled (APNs not configured) — skipping send to %s", user_id)
             return 0
 
-        tokens = self._device_tokens_for(user_id)
-        if not tokens:
+        devices = self._device_tokens_for(user_id)
+        if not devices:
             return 0
 
         jwt_token = self._provider_jwt()
@@ -150,10 +164,12 @@ class PushService:
         accepted = 0
         try:
             async with httpx.AsyncClient(http2=True, timeout=httpx.Timeout(10.0)) as client:
-                for token in tokens:
+                for device in devices:
+                    token = device["token"]
+                    host = host_for_environment(device.get("environment"), settings.APNS_ENV)
                     try:
                         resp = await client.post(
-                            f"{self._base_url}/3/device/{token}",
+                            f"{host}/3/device/{token}",
                             headers=headers,
                             json=payload,
                         )
@@ -165,8 +181,10 @@ class PushService:
                         continue
                     if resp.status_code == 200:
                         accepted += 1
-                    elif resp.status_code == 410 or "BadDeviceToken" in resp.text:
-                        # Token no longer valid → prune so we stop trying it.
+                    elif resp.status_code == 410:
+                        # 410 Unregistered = token is genuinely dead → prune.
+                        # NOT on 400/BadDeviceToken: that can be an env/routing issue,
+                        # and pruning a valid token would silently stop notifications.
                         self._prune_token(token)
                     else:
                         logger.warning(

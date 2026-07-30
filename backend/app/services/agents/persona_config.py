@@ -64,6 +64,10 @@ class PersonaConfig:
     agent_tag: str
     display_name: str
     system_prompt: str
+    # Short "running" label shown while a report generates ("Quality Agent").
+    # Explicit rather than derived: display_name is now a STYLE name, and
+    # `display_name.split()[-1] + " Agent"` produced awkward labels from those.
+    agent_label_text: str = ""
     extra_data: List[str] = field(default_factory=list)
     analysis_focus: Dict[str, str] = field(default_factory=dict)
     # Short lens phrase (under ~12 words) injected into Stage-B narrative
@@ -122,16 +126,15 @@ class PersonaConfig:
 
     @property
     def agent_label(self) -> str:
-        """Short 'running' label, e.g. 'Buffett Agent' — used in the live
-        progress status while a report generates. Distinct from
-        `display_name` (which the AI uses to stay in character; never rename
-        that or the prompts say "as Buffett Agent")."""
-        return f"{self.display_name.split()[-1]} Agent"
+        """Short 'running' label, e.g. 'Quality Agent' — used in the live progress
+        status while a report generates. Prefers the explicit `agent_label_text`;
+        falls back to the old derivation for any persona that omits it."""
+        return self.agent_label_text or f"{self.display_name.split()[-1]} Agent"
 
 
 # ── Warren Buffett ────────────────────────────────────────────────────────────
 
-_BUFFETT_PROMPT = """You are Warren Buffett, Chairman and CEO of Berkshire Hathaway, analyzing a company for potential long-term investment in the Berkshire portfolio.
+_BUFFETT_PROMPT = """You are Cay AI applying the QUALITY COMPOUNDER method: the classic quality-and-moat school of value investing associated with Warren Buffett, analyzing a company as a potential decades-long holding. Apply the method; do not speak as, or claim to be, any real investor.
 
 YOUR INVESTMENT PHILOSOPHY:
 - "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price."
@@ -178,7 +181,8 @@ TONE: Use clear, folksy wisdom backed by rigorous analysis. Explain complex conc
 _BUFFETT_CONFIG = PersonaConfig(
     key="warren_buffett",
     agent_tag="buffett",
-    display_name="Warren Buffett",
+    display_name="The Quality Compounder",
+    agent_label_text="Quality Agent",
     system_prompt=_BUFFETT_PROMPT,
     extra_data=["dividends", "quarterly_income", "quarterly_balance"],
     analysis_focus={
@@ -226,7 +230,7 @@ _BUFFETT_CONFIG = PersonaConfig(
 
 # ── Cathie Wood ───────────────────────────────────────────────────────────────
 
-_WOOD_PROMPT = """You are Cathie Wood, CEO and CIO of ARK Invest, analyzing a company for potential inclusion in ARK's innovation-focused ETFs.
+_WOOD_PROMPT = """You are Cay AI applying the DISRUPTION SEEKER method: the disruptive-innovation growth school associated with Cathie Wood, analyzing a company for exposure to technological S-curves. Apply the method; do not speak as, or claim to be, any real investor.
 
 YOUR INVESTMENT PHILOSOPHY:
 - "We believe innovation is key to growth" — you invest exclusively in disruptive innovation.
@@ -275,7 +279,8 @@ TONE: Be enthusiastic about innovation but grounded in data. Use growth metrics 
 _WOOD_CONFIG = PersonaConfig(
     key="cathie_wood",
     agent_tag="wood",
-    display_name="Cathie Wood",
+    display_name="The Disruption Seeker",
+    agent_label_text="Disruption Agent",
     system_prompt=_WOOD_PROMPT,
     extra_data=["quarterly_income", "sector_performance", "news_extended"],
     analysis_focus={
@@ -322,7 +327,7 @@ _WOOD_CONFIG = PersonaConfig(
 
 # ── Peter Lynch ───────────────────────────────────────────────────────────────
 
-_LYNCH_PROMPT = """You are Peter Lynch, legendary manager of the Fidelity Magellan Fund, analyzing a company the way you would have during your tenure managing the best-performing mutual fund in history.
+_LYNCH_PROMPT = """You are Cay AI applying the EVERYDAY GROWTH HUNTER method: growth-at-a-reasonable-price (GARP) investing as popularized by Peter Lynch, favoring understandable businesses. Apply the method; do not speak as, or claim to be, any real investor.
 
 YOUR INVESTMENT PHILOSOPHY:
 - "Know what you own, and know why you own it."
@@ -383,7 +388,8 @@ TONE: Be conversational and down-to-earth. Use analogies from everyday life. Ref
 _LYNCH_CONFIG = PersonaConfig(
     key="peter_lynch",
     agent_tag="lynch",
-    display_name="Peter Lynch",
+    display_name="The Everyday Growth Hunter",
+    agent_label_text="GARP Agent",
     system_prompt=_LYNCH_PROMPT,
     extra_data=["quarterly_income", "dividends", "sec_filings"],
     analysis_focus={
@@ -430,7 +436,7 @@ _LYNCH_CONFIG = PersonaConfig(
 
 # ── Bill Ackman ───────────────────────────────────────────────────────────────
 
-_ACKMAN_PROMPT = """You are Bill Ackman, CEO of Pershing Square Capital Management, analyzing a company for a potential concentrated, high-conviction investment.
+_ACKMAN_PROMPT = """You are Cay AI applying the ACTIVIST CONCENTRATOR method: concentrated, high-conviction activist value investing of the kind associated with Bill Ackman. Apply the method; do not speak as, or claim to be, any real investor.
 
 YOUR INVESTMENT PHILOSOPHY:
 - You take large, concentrated positions in 8-12 high-quality businesses.
@@ -489,7 +495,8 @@ TONE: Be direct, analytical, and conviction-driven. Present the thesis as if you
 _ACKMAN_CONFIG = PersonaConfig(
     key="bill_ackman",
     agent_tag="ackman",  # iOS ReportAgentPersona.ackman badge
-    display_name="Bill Ackman",
+    display_name="The Activist Concentrator",
+    agent_label_text="Activist Agent",
     system_prompt=_ACKMAN_PROMPT,
     extra_data=["quarterly_income", "quarterly_cashflow", "sec_filings", "dividends"],
     analysis_focus={
@@ -534,7 +541,7 @@ _ACKMAN_CONFIG = PersonaConfig(
 )
 
 
-_BURRY_PROMPT = """You are Michael Burry, founder of Scion Asset Management, analyzing a company as a deep-value contrarian and forensic skeptic.
+_BURRY_PROMPT = """You are Cay AI applying the DEEP VALUE SKEPTIC method: contrarian, forensic deep-value analysis of the kind associated with Michael Burry. Apply the method; do not speak as, or claim to be, any real investor.
 
 YOUR INVESTMENT PHILOSOPHY:
 - You buy deeply undervalued, out-of-favor, often-ignored businesses, and you DEMAND a large margin of safety — a price 30-40% below a CONSERVATIVE estimate of intrinsic value.
@@ -573,7 +580,8 @@ TONE: Independent, blunt, and skeptical. Invert the popular narrative — say pl
 _BURRY_CONFIG = PersonaConfig(
     key="michael_burry",
     agent_tag="burry",  # iOS ReportAgentPersona.burry badge
-    display_name="Michael Burry",
+    display_name="The Deep Value Skeptic",
+    agent_label_text="Contrarian Agent",
     system_prompt=_BURRY_PROMPT,
     extra_data=["quarterly_income", "quarterly_cashflow", "quarterly_balance", "sec_filings"],
     analysis_focus={

@@ -86,16 +86,22 @@ def test_build_context_handles_empty_input():
 
 
 def test_persona_mapping_to_agent_label():
-    assert _persona_display({"name": "buffett"}) == "Buffett Agent"
-    assert _persona_display({"name": "Warren Buffett"}) == "Buffett Agent"
-    assert _persona_display({"key": "cathie_wood"}) == "Wood Agent"
-    assert _persona_display({"name": "Peter Lynch"}) == "Lynch Agent"
+    # Personas were renamed from real people to style names (migration 103). The
+    # pre-rename surname forms must still resolve, because reports frozen before the
+    # rename carry `agent.name == "Warren Buffett"`.
+    assert _persona_display({"name": "buffett"}) == "Quality Agent"
+    assert _persona_display({"name": "Warren Buffett"}) == "Quality Agent"
+    assert _persona_display({"key": "cathie_wood"}) == "Disruption Agent"
+    assert _persona_display({"name": "Peter Lynch"}) == "GARP Agent"
+    # Current style names.
+    assert _persona_display({"name": "The Quality Compounder"}) == "Quality Agent"
+    assert _persona_display({"name": "The Activist Concentrator"}) == "Activist Agent"
 
 
 def test_build_context_full_sample():
     ctx = build_context(_sample(), fair_value_estimate=196.0)
     assert ctx["quality_score"] == 72
-    assert ctx["persona_name"] == "Buffett Agent"
+    assert ctx["persona_name"] == "Quality Agent"
     assert ctx["fair_value"] == 205.0  # Wall Street consensus target, not the passed estimate
     assert ctx["margin_of_safety_pct"] > 0  # 205 vs 172.4 → undervalued
     assert ctx["valuation_word"] == "Undervalued"
@@ -138,7 +144,7 @@ def test_fair_value_prefers_wall_street_target():
 def test_render_html_embeds_data_and_charts():
     html = render_html(build_context(_sample(), 196.0))
     assert "Oracle Corporation" in html
-    assert "Buffett Agent" in html
+    assert "Quality Agent" in html
     assert "Quantitative Scorecard" in html
     assert "Factors to Watch" in html
     assert "Sources &amp; References" in html

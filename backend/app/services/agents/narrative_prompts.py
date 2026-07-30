@@ -1136,7 +1136,7 @@ EVIDENCE:
 {_style_block(persona)}
 LENGTH: 2 to 3 sentences, under 60 words.
 
-SIGNAL ASYMMETRY (most important rule, Peter Lynch):
+SIGNAL ASYMMETRY (most important rule, GARP method):
 - BUYS carry HIGH signal. Insiders buy for one reason only: they expect the stock to rise. Even a small buy alongside a dominant holder is a strong endorsement.
 - SELLS carry LOW to medium signal. They happen for many reasons (tax, diversification, estate, scheduled 10b5-1); name selling but qualify the motive, never treat it as proof of a bearish view.
 - A dominant holder's large stake structurally aligns interests but does NOT erase selling or dilution.

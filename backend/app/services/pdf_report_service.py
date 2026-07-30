@@ -73,23 +73,47 @@ _CONSENSUS_ORDER: list[tuple[str, str, str]] = [
 ]
 
 
-# Persona key/name -> "<Surname> Agent" display name (matches iOS agent tags).
-_PERSONA_DISPLAY: dict[str, str] = {
-    "warren_buffett": "Buffett Agent",
-    "buffett": "Buffett Agent",
-    "cathie_wood": "Wood Agent",
-    "wood": "Wood Agent",
-    "peter_lynch": "Lynch Agent",
-    "lynch": "Lynch Agent",
-    "bill_ackman": "Ackman Agent",
-    "ackman": "Ackman Agent",
-    "michael_burry": "Burry Agent",
-    "burry": "Burry Agent",
+# Persona lookup -> style agent label, DERIVED from persona_config so it can never drift.
+#
+# These labels were real surnames ("Buffett Agent", "Wood Agent", …) printed as the
+# persona header of the downloadable PDF. Migration 103 renamed the personas to style
+# names to remove right-of-publicity exposure, and this had to move with it or the
+# exported document would keep naming real people.
+#
+# Keyed by BOTH `key` and `agent_tag`: the frozen `report_data.agent` carries the tag
+# ("buffett"), so historical reports resolve through the same map.
+def _build_persona_display() -> dict[str, str]:
+    from app.services.agents.persona_config import (  # noqa: PLC0415 — avoid import cycle
+        PERSONA_KEYS,
+        get_persona_config,
+    )
+
+    out: dict[str, str] = {}
+    for key in PERSONA_KEYS:
+        cfg = get_persona_config(key)
+        out[key] = cfg.agent_label
+        out[cfg.agent_tag] = cfg.agent_label
+        # The style display name itself, so a report carrying `agent.name` resolves.
+        out[cfg.display_name.lower()] = cfg.agent_label
+    return out
+
+
+_PERSONA_DISPLAY: dict[str, str] = _build_persona_display()
+
+# Pre-rename surname fragments -> current label. A report frozen BEFORE the rename has
+# `agent.name == "Warren Buffett"`, and without this it would fall through to the generic
+# tail below and print the old surname.
+_LEGACY_PERSONA_NAME_FRAGMENTS: dict[str, str] = {
+    "buffett": "Quality Agent",
+    "wood": "Disruption Agent",
+    "lynch": "GARP Agent",
+    "ackman": "Activist Agent",
+    "burry": "Contrarian Agent",
 }
 
 
 def _persona_display(agent: dict) -> str:
-    """Map a persona to its '<Surname> Agent' display name."""
+    """Map a persona to its style agent label (e.g. 'Quality Agent')."""
     key = str(agent.get("key") or "").strip().lower()
     if key in _PERSONA_DISPLAY:
         return _PERSONA_DISPLAY[key]
@@ -97,9 +121,13 @@ def _persona_display(agent: dict) -> str:
     if not name:
         return "Cay AI Agent"
     low = name.lower()
-    for k, v in _PERSONA_DISPLAY.items():
-        if v.split()[0].lower() in low:
-            return v
+    # Exact style-name / key / tag match.
+    if low in _PERSONA_DISPLAY:
+        return _PERSONA_DISPLAY[low]
+    # Then pre-rename surnames ("Warren Buffett", "Buffett Agent").
+    for fragment, label in _LEGACY_PERSONA_NAME_FRAGMENTS.items():
+        if fragment in low:
+            return label
     last = name.split()[-1]
     return name if last.lower() == "agent" else f"{last} Agent"
 

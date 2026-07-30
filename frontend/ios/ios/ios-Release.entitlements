@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  RELEASE entitlements (TestFlight + App Store).
+
+  Split from ios.entitlements because `aps-environment` must differ per configuration:
+  a Debug build talks to the APNs sandbox, a distribution build talks to production, and
+  the device token issued is only valid for the environment named here. One shared file
+  cannot be correct for both — a `development` value in a TestFlight build makes every
+  push silently fail.
+
+  The backend already records which environment a token belongs to
+  (`device_tokens.environment`) and routes accordingly, so the two sides agree.
+-->
+<plist version="1.0">
+<dict>
+	<key>aps-environment</key>
+	<string>production</string>
+</dict>
+</plist>

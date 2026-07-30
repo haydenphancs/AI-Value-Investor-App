@@ -490,7 +490,7 @@ class ShortInterestSignalResponse(BaseModel):
     change_3m: Optional[float] = None  # % vs ~3 months ago
     settlement_date: Optional[str] = None
     # Up to 12 FINRA settlement-date points. Empty when only a snapshot was
-    # available (Nasdaq/Yahoo fallback) → iOS renders no trend chart.
+    # available (Nasdaq snapshot fallback) → iOS renders no trend chart.
     history: List[ShortInterestPointResponse] = []
 
 

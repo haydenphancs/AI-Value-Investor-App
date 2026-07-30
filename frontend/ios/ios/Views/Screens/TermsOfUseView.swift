@@ -14,7 +14,7 @@ struct TermsOfUseView: View {
     var body: some View {
         LegalDocumentView(
             title: "Terms of Use",
-            lastUpdated: "July 27, 2026",
+            lastUpdated: "July 29, 2026",
             intro: "These Terms of Use (\u{201C}Terms\u{201D}) govern your access to and use of the Caydex mobile application and related services (the \u{201C}App\u{201D}), operated by Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}). By downloading, accessing, or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.",
             sections: Self.sections
         )
@@ -75,7 +75,21 @@ struct TermsOfUseView: View {
             heading: "Intellectual Property",
             paragraphs: [
                 "The App, including its software, design, text, and branding, is owned by Caydex or its licensors and is protected by intellectual property laws. Subject to these Terms, we grant you a limited, personal, non-exclusive, non-transferable, revocable license to use the App for your own non-commercial use.",
+                // Carve-out added deliberately: without it, the sentence above claimed
+                // Caydex owns ALL text in the app, which is not true of market data,
+                // news, filings, or the ideas discussed in our book study guides.
+                "This does not claim ownership of third-party material presented in the App. Market data, news content, corporate filings, and other third-party information belong to their respective owners and are used under licence or as public records \u{2014} see Data Sources in the App. Our educational summaries of published books are our own original writing about those books; the underlying books, their titles, and their authors\u{2019} rights belong to their respective owners, and Caydex is not affiliated with, authorised, or endorsed by any author or publisher.",
+                "Third-party names, marks, and logos are the property of their owners. We use them to identify companies, securities, data providers, and works we discuss. Their use does not imply any affiliation with, sponsorship by, or endorsement of Caydex.",
                 "You retain ownership of content you submit, and grant us a license to process it as needed to operate and improve the App."
+            ]
+        ),
+        LegalSection(
+            heading: "Copyright Complaints",
+            paragraphs: [
+                "We respect intellectual property rights and respond to clear notices of alleged copyright infringement concerning material in the App.",
+                "If you believe material in the App infringes your copyright, send a written notice to copyright@caydexinvest.com including: (1) your physical or electronic signature; (2) identification of the copyrighted work you claim is infringed; (3) identification of the material you claim is infringing and enough detail for us to locate it in the App; (4) your name, address, telephone number, and email; (5) a statement that you have a good-faith belief the use is not authorised by the copyright owner, its agent, or the law; and (6) a statement that the information in your notice is accurate and, under penalty of perjury, that you are the copyright owner or authorised to act on the owner\u{2019}s behalf.",
+                "We will review complete notices promptly and may remove or disable access to material we determine is likely infringing. If you believe your material was removed in error, you may send a counter-notice to the same address with equivalent detail.",
+                "Please note that under U.S. law you may be liable for damages, including costs and attorneys\u{2019} fees, if you knowingly misrepresent that material is infringing."
             ]
         ),
         LegalSection(

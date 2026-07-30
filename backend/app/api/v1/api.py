@@ -11,7 +11,6 @@ from app.api.v1.endpoints import (
     billing,
     stocks,
     watchlist,
-    news,
     research,
     chat,
     home,
@@ -39,7 +38,12 @@ api_router.include_router(ticker_report.router, prefix="/stocks", tags=["Ticker 
 api_router.include_router(indices.router, prefix="/indices", tags=["Indices"])
 api_router.include_router(etfs.router, prefix="/etfs", tags=["ETFs"])
 api_router.include_router(watchlist.router, prefix="/watchlist", tags=["Watchlist"])
-api_router.include_router(news.router, prefix="/news", tags=["News"])
+# NOTE: the legacy /news router was REMOVED. Its two endpoints served the
+# `news_articles` table, which nothing writes and no client called — so it served
+# stale third-party headlines, summaries, thumbnails and publisher logos
+# indefinitely, with no expiry. Live news is per-asset (/stocks/{t}/news,
+# /updates/feed) off `ticker_news_cache`, which has a 6h expiry + cleanup.
+# See migration 104 for the row cleanup.
 api_router.include_router(updates.router, prefix="/updates", tags=["Updates"])
 api_router.include_router(research.router, prefix="/research", tags=["Research"])
 api_router.include_router(crypto.router, prefix="/crypto", tags=["Crypto"])

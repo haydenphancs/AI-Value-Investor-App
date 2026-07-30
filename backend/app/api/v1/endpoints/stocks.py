@@ -549,7 +549,7 @@ async def get_stock_details(ticker: str):
             if own_pct is not None:
                 response["percent_institutional"] = float(own_pct)
 
-        # Short % of Float from Yahoo Finance
+        # Short % of Float from the short-interest integration
         if isinstance(short_data, dict) and short_data.get("short_percent_of_float") is not None:
             response["short_percent_float"] = short_data["short_percent_of_float"]
 

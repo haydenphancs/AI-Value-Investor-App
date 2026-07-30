@@ -131,7 +131,7 @@ _SHORT_PCT_SANITY_MAX = 100.0
 # settlement date against a current float yields a misleading ratio, so a FINRA/
 # Nasdaq print whose settlement is older than this is dropped. FINRA publishes
 # ~twice monthly, so a latest print older than ~2 cycles means the name stopped
-# being reported (delisted/halted) or the feed is stale. Yahoo's precomputed % of
+# being reported (delisted/halted) or the feed is stale. A precomputed % of
 # float carries no settlement date and is internally date-consistent → exempt.
 _SHORT_MAX_SETTLEMENT_AGE_DAYS = 60
 # Only quote the top-N most-shorted candidates (rather than the whole universe)
@@ -339,7 +339,7 @@ def _rvol(volume: Any, avg_volume: Any) -> Optional[float]:
 def _short_pct(shares_short: Any, float_shares: Any, precomputed_pct: Any) -> Optional[float]:
     """Short interest as % of float. Mirrors ``stock_overview_service``: PRIMARY =
     ``shares_short`` (FINRA) / ``floatShares`` (FMP) × 100; FALLBACK = the
-    integration's already-percent ``short_percent_of_float`` (Yahoo tier).
+    integration's already-percent ``short_percent_of_float``.
     Implausible results (> 100%, from a float/shares-short unit or split mismatch)
     are rejected. ``None`` when neither path yields a sane positive number."""
     try:
@@ -368,7 +368,7 @@ def _short_data_is_fresh(
     The card divides a FINRA/Nasdaq ``shares_short`` (as of a settlement date) by
     the CURRENT FMP float, so a stale settlement against a current float produces
     a misleading ratio. When a ``settlement_date`` is present, require it within
-    ``_SHORT_MAX_SETTLEMENT_AGE_DAYS``. When absent (Yahoo's precomputed % of
+    ``_SHORT_MAX_SETTLEMENT_AGE_DAYS``. When absent (a precomputed % of
     float is internally date-consistent) or unparseable, don't reject — the
     freshness guard is for the compute-from-float path, not a blanket filter.
     """
@@ -1005,7 +1005,7 @@ class HomeDashboardService:
             shares_short = si.get("shares_short")
             precomputed = si.get("short_percent_of_float")
             # Fetch float to COMPUTE % when there's no usable precomputed value —
-            # None OR <= 0 (a Yahoo data glitch is falsy-but-present, and must not
+            # None OR <= 0 (an upstream glitch is falsy-but-present, and must not
             # suppress the FINRA/float compute path) — but we do have shares_short.
             precomputed_usable = isinstance(precomputed, (int, float)) and precomputed > 0
             float_shares = None
@@ -1019,7 +1019,7 @@ class HomeDashboardService:
                 "short_percent_of_float": pct,
                 # Carried through so the card can show "As of {settlement}" — the
                 # FINRA print is bi-monthly, not a live daily figure. None for the
-                # Yahoo precomputed path (no settlement date).
+                # Precomputed-percent path (no settlement date).
                 "settlement_date": si.get("settlement_date"),
             }
 
@@ -1075,7 +1075,7 @@ class HomeDashboardService:
         if not rows:
             return None
         # Card-level "as of" = the latest settlement among the shown rows (ISO
-        # strings sort chronologically); None when none carry a date (all-Yahoo).
+        # strings sort chronologically); None when none carry a date.
         as_of = max(
             (e["settlement_date"] for e in enriched if e.get("settlement_date")),
             default=None,

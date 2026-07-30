@@ -177,11 +177,11 @@ private struct BookLibraryHeader: View {
 
             // Title section
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                Text("Book Library")
+                Text("Book Guides")
                     .font(AppTypography.titleLarge)
                     .foregroundColor(AppColors.textPrimary)
 
-                Text("10 essential books to master value investing")
+                Text("Original study guides to 10 essential investing books")
                     .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
             }
@@ -247,7 +247,7 @@ private struct ProgressDashboardCard: View {
                             .font(AppTypography.titleHero)
                             .foregroundColor(.white)
 
-                        Text("Books Mastered")
+                        Text("Guides Completed")
                             .font(AppTypography.headingSmall)
                             .foregroundColor(.white.opacity(0.9))
                     }
@@ -383,7 +383,7 @@ private struct ProgressBadgePill: View {
             Image(systemName: "trophy.fill")
                 .font(AppTypography.iconTiny).fontWeight(.semibold)
 
-            Text("\(count) MASTERED")
+            Text("\(count) COMPLETED")
                 .font(AppTypography.captionEmphasis)
         }
         .foregroundColor(.white)

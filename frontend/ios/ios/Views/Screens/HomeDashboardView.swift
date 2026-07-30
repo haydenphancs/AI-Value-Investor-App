@@ -196,14 +196,16 @@ struct HomeDashboardView: View {
                             onThemeTap: { themeDetailTarget = ThemeDetailTarget(slug: $0.slug) }
                         )
                     }
-                }
 
-                // Scanners and App-Exclusive Signals surface per-ticker signals, so
-                // the dashboard carries the notice + a route to the full disclaimers.
-                InlineDisclaimerNotice()
-                    .padding(.horizontal, AppSpacing.lg)
-                    .padding(.top, AppSpacing.md)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    // Scanners and App-Exclusive Signals surface per-ticker signals, so
+                    // the dashboard carries the notice + a route to the full disclaimers.
+                    // INSIDE `if let data` on purpose: outside it, this rendered above the
+                    // loading spinner on a cold start, reading as a stray header.
+                    InlineDisclaimerNotice()
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.top, AppSpacing.md)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
 
                 Spacer()
                     .frame(height: 100)

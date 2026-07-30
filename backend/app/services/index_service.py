@@ -872,7 +872,7 @@ class IndexService:
                 story_template=macro_story,
             ),
             generated_date=today_str,
-            generated_by="Gemini 2.0 Flash",
+            generated_by="Cay AI",
         )
 
     async def _generate_ai_stories(

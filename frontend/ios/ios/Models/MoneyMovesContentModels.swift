@@ -314,7 +314,10 @@ struct ArticleAuthorDTO: Decodable {
             name: name,
             avatarName: nil,
             title: title,
-            isVerified: isVerified ?? true,
+            // Default to NOT verified. A "verified" badge is a factual claim about a
+            // real person; defaulting it to true means any article that omits the
+            // field silently asserts one (App Review 1.1.6 / 2.3.1).
+            isVerified: isVerified ?? false,
             followerCount: followerCount ?? "0"
         )
     }

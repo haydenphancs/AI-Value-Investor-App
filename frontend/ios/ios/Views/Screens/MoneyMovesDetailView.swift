@@ -135,14 +135,6 @@ struct MoneyMovesDetailView: View {
             ?? createArticleFromMove(move)
     }
 
-    /// Stable pseudo-count in `range`, derived from a string (survives re-generation, unlike
-    /// Int.random). A plain unicode-scalar sum — Swift's `hashValue` is per-run randomized.
-    private static func stableCount(for key: String, in range: ClosedRange<Int>) -> Int {
-        let span = range.upperBound - range.lowerBound + 1
-        let sum = key.unicodeScalars.reduce(0) { ($0 &+ Int($1.value)) & 0x7fffffff }
-        return range.lowerBound + (sum % span)
-    }
-
     /// Creates a full MoneyMoveArticle from a MoneyMove card data
     private func createArticleFromMove(_ move: MoneyMove) -> MoneyMoveArticle {
         // Generate gradient colors based on category
@@ -161,19 +153,18 @@ struct MoneyMovesDetailView: View {
             subtitle: move.subtitle,
             category: move.category,
             author: ArticleAuthor(
-                name: "The Alpha",
+                name: "Caydex Research",
                 avatarName: nil,
-                title: "Investment Research",
-                isVerified: true,
-                followerCount: "45.2k"
+                title: "Editorial",
+                isVerified: false,
+                followerCount: ""
             ),
             publishedAt: Date(),
             readTimeMinutes: move.estimatedMinutes,
-            viewCount: move.learnerCount,
-            // Deterministic (not Int.random): the placeholder re-generates on every tap, so a random
-            // count would flicker (e.g. "147 comments" then "58") above the 2 sample comments each
-            // open. Derive a stable pseudo-count from the title instead.
-            commentCount: Self.stableCount(for: move.title, in: 20...200),
+            // No invented engagement metrics. `stableCount` made the fake comment count
+            // consistent across taps, which fixed the flicker but not the fabrication.
+            viewCount: "",
+            commentCount: 0,
             isBookmarked: false,
             hasAudioVersion: false,   // placeholder card: no narration audio (real articles carry audioUrl)
             heroGradientColors: gradientColors,
@@ -252,31 +243,11 @@ struct MoneyMovesDetailView: View {
                     ]
                 )
             ],
+            // Read Time is the only truthfully measurable statistic here.
             statistics: [
-                ArticleStatistic(value: move.learnerCount, label: "Investors Learning", trend: .up, trendValue: "12%"),
-                ArticleStatistic(value: "\(move.estimatedMinutes)m", label: "Read Time"),
-                ArticleStatistic(value: "4.8", label: "Rating", trend: .up, trendValue: "0.3")
+                ArticleStatistic(value: "\(move.estimatedMinutes)m", label: "Read Time")
             ],
-            comments: [
-                ArticleComment(
-                    authorName: "Michael Chen",
-                    authorAvatar: nil,
-                    content: "Excellent analysis! This really helped me understand the key factors at play.",
-                    postedAt: Calendar.current.date(byAdding: .hour, value: -3, to: Date())!,
-                    likeCount: 24,
-                    replyCount: 5,
-                    isVerified: false
-                ),
-                ArticleComment(
-                    authorName: "Sarah Williams",
-                    authorAvatar: nil,
-                    content: "The section on risk management was particularly valuable. Would love to see more case studies like this.",
-                    postedAt: Calendar.current.date(byAdding: .hour, value: -8, to: Date())!,
-                    likeCount: 18,
-                    replyCount: 2,
-                    isVerified: true
-                )
-            ],
+            comments: [],
             relatedArticles: MoneyMoveArticle.sampleDigitalFinance.relatedArticles
         )
     }
@@ -393,15 +364,19 @@ private struct FeaturedDeepDiveHeroCard: View {
                         .foregroundColor(.white.opacity(0.8))
 
                         HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "person.2.fill")
-                                .font(AppTypography.iconXS).fontWeight(.medium)
-                            Text("\(article.viewCount) investors")
-                                .font(AppTypography.caption)
+                            // Only shown when we have a real count. Empty means we don't
+                            // measure it — better to show nothing than to invent a number.
+                            if !article.viewCount.isEmpty {
+                                Image(systemName: "person.2.fill")
+                                    .font(AppTypography.iconXS).fontWeight(.medium)
+                                Text("\(article.viewCount) investors")
+                                    .font(AppTypography.caption)
+                            }
 
                             if article.hasAudioVersion {
                                 Image(systemName: "headphones")
                                     .font(AppTypography.iconXS).fontWeight(.medium)
-                                    .padding(.leading, AppSpacing.md)
+                                    .padding(.leading, article.viewCount.isEmpty ? 0 : AppSpacing.md)
                             }
                         }
                         .foregroundColor(.white.opacity(0.8))

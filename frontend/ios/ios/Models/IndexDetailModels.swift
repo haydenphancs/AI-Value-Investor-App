@@ -244,7 +244,7 @@ struct IndexSnapshotsData {
     let sectorPerformance: IndexSectorPerformanceSnapshot
     let macroForecast: IndexMacroForecastSnapshot
     let generatedDate: Date
-    let generatedBy: String  // e.g. "Gemini 2.0 Flash"
+    let generatedBy: String  // e.g. "Cay AI" — always provider-neutral
 
     var formattedGeneratedDate: String {
         IndexDetailFormatters.mediumDateFormatter.string(from: generatedDate)
@@ -395,7 +395,7 @@ extension IndexSnapshotsData {
         sectorPerformance: IndexSectorPerformanceSnapshot.sampleData,
         macroForecast: IndexMacroForecastSnapshot.sampleData,
         generatedDate: Calendar.current.date(from: DateComponents(year: 2026, month: 2, day: 10))!,
-        generatedBy: "Gemini 2.0 Flash"
+        generatedBy: "Cay AI"
     )
 }
 

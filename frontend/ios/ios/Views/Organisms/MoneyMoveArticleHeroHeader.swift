@@ -137,12 +137,14 @@ struct MoneyMoveArticleHeroHeader: View {
                                         .font(AppTypography.caption)
                                 }
 
-                                // Views
-                                HStack(spacing: AppSpacing.xs) {
-                                    Image(systemName: "eye")
-                                        .font(AppTypography.captionEmphasis).fontWeight(.medium)
-                                    Text(article.viewCount)
-                                        .font(AppTypography.caption)
+                                // Views — hidden when we have no measured count.
+                                if !article.viewCount.isEmpty {
+                                    HStack(spacing: AppSpacing.xs) {
+                                        Image(systemName: "eye")
+                                            .font(AppTypography.captionEmphasis).fontWeight(.medium)
+                                        Text(article.viewCount)
+                                            .font(AppTypography.caption)
+                                    }
                                 }
                             }
                             .foregroundColor(.white.opacity(0.7))

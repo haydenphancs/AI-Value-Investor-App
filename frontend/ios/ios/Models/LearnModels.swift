@@ -454,28 +454,28 @@ extension MoneyMove {
             subtitle: "The strategy behind unstoppable dominance.",
             category: .blueprints,
             estimatedMinutes: 9,
-            learnerCount: "2.1k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "Netflix vs. Disney+",
             subtitle: "The streaming wars breakdown.",
             category: .battles,
             estimatedMinutes: 14,
-            learnerCount: "2.3k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "Warren Buffett's Early Days",
             subtitle: "The moves that built a fortune.",
             category: .blueprints,
             estimatedMinutes: 8,
-            learnerCount: "1.8k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "Tesla vs. Traditional Auto",
             subtitle: "Innovation meets industry giants.",
             category: .battles,
             estimatedMinutes: 13,
-            learnerCount: "1.9k"
+            learnerCount: ""
         ),
         // Placeholder cards (not yet authored). They render generated boilerplate via
         // createArticleFromMove until real content is authored + served. Authored
@@ -485,28 +485,28 @@ extension MoneyMove {
             subtitle: "How Apple transformed from hardware to ecosystem.",
             category: .blueprints,
             estimatedMinutes: 6,
-            learnerCount: "1.6k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "Costco's Membership Magic",
             subtitle: "The power of customer loyalty economics.",
             category: .blueprints,
             estimatedMinutes: 9,
-            learnerCount: "1.2k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "Visa vs. Mastercard",
             subtitle: "The payment network duopoly.",
             category: .battles,
             estimatedMinutes: 12,
-            learnerCount: "1.7k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "Google vs. Microsoft: AI Wars",
             subtitle: "The battle for AI supremacy.",
             category: .battles,
             estimatedMinutes: 15,
-            learnerCount: "2.5k"
+            learnerCount: ""
         ),
         
         // New Blueprints from brainstorm
@@ -515,28 +515,28 @@ extension MoneyMove {
             subtitle: "How a gaming chip company became the engine of the AI revolution.",
             category: .blueprints,
             estimatedMinutes: 12,
-            learnerCount: "3.5k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "The Rise of LVMH",
             subtitle: "The art of acquiring and cultivating timeless brands.",
             category: .blueprints,
             estimatedMinutes: 10,
-            learnerCount: "1.4k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "Microsoft's Cloud Metamorphosis",
             subtitle: "How Satya Nadella saved a giant from irrelevance.",
             category: .blueprints,
             estimatedMinutes: 11,
-            learnerCount: "2.9k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "TSMC: The Foundry That Runs the World",
             subtitle: "The story of the most important company you've never heard of.",
             category: .blueprints,
             estimatedMinutes: 13,
-            learnerCount: "1.1k"
+            learnerCount: ""
         ),
 
         // New Battles from brainstorm
@@ -545,28 +545,28 @@ extension MoneyMove {
             subtitle: "A multi-decade battle for the heart of the computer.",
             category: .battles,
             estimatedMinutes: 14,
-            learnerCount: "2.7k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "The Home Depot vs. Lowe's",
             subtitle: "A fight for the loyalty of contractors and DIY enthusiasts.",
             category: .battles,
             estimatedMinutes: 10,
-            learnerCount: "1.5k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "Boeing vs. Airbus: The Aerospace Duopoly",
             subtitle: "A global battle for the skies, defined by engineering and politics.",
             category: .battles,
             estimatedMinutes: 16,
-            learnerCount: "2.0k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "The Rise of TikTok vs. Instagram Reels",
             subtitle: "The war for short-form video and the future of attention.",
             category: .battles,
             estimatedMinutes: 12,
-            learnerCount: "3.1k"
+            learnerCount: ""
         ),
 
         // Value Traps
@@ -575,14 +575,14 @@ extension MoneyMove {
             subtitle: "Betting the kingdom on a virtual dream.",
             category: .valueTraps,
             estimatedMinutes: 14,
-            learnerCount: "2.8k"
+            learnerCount: ""
         ),
         MoneyMove(
             title: "The Fall of Sears",
             subtitle: "How a retail titan was hollowed out from the inside.",
             category: .valueTraps,
             estimatedMinutes: 15,
-            learnerCount: "1.6k"
+            learnerCount: ""
         ),
     ]
 }
@@ -644,30 +644,12 @@ extension CommunityDiscussion {
 }
 
 extension LibraryBook {
-    // Sample discussions used across books
-    private static let sampleDiscussions: [BookDiscussion] = [
-        BookDiscussion(
-            authorName: "Michael Chen",
-            authorAvatarGradient: ["3B82F6", "1E40AF"],
-            rating: 5,
-            content: "This book completely changed my perspective on money and wealth. The lessons about assets vs liabilities are eye-opening. Highly recommend for anyone wanting to improve their financial literacy!",
-            postedDate: Calendar.current.date(byAdding: .day, value: -2, to: Date())!
-        ),
-        BookDiscussion(
-            authorName: "Sarah Johnson",
-            authorAvatarGradient: ["EC4899", "BE185D"],
-            rating: 5,
-            content: "A must-read for everyone! The storytelling approach makes complex financial concepts easy to understand. I've already started applying these principles to my own finances.",
-            postedDate: Calendar.current.date(byAdding: .day, value: -5, to: Date())!
-        ),
-        BookDiscussion(
-            authorName: "David Park",
-            authorAvatarGradient: ["22C55E", "15803D"],
-            rating: 4,
-            content: "Great foundational book for beginners. Some concepts are a bit simplified, but that's what makes it accessible. Perfect starting point for your investment journey.",
-            postedDate: Calendar.current.date(byAdding: .day, value: -7, to: Date())!
-        )
-    ]
+    // NOTE: `sampleDiscussions` was removed. It was three invented reviewers
+    // ("Michael Chen", "Sarah Johnson", "David Park") with star ratings and dated
+    // review text, rendered live on every book detail screen. There is no review
+    // feature to source real ones from, so it read as fabricated social proof
+    // (App Review 1.1.6 / 2.3.1). `discussions` is now [] for every book, and
+    // DiscussionSection is no longer rendered.
 
     static let sampleData: [LibraryBook] = [
         // Book 1 - Rich Dad Poor Dad - MASTERED
@@ -693,7 +675,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 1054,   // real measured narration length (17:34) — see BookAudioContent
             readTimeMinutes: 23,          // total read time computed from the authored core content
-            viewCount: "4.2M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 27))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Assets vs. Liabilities", description: "The rich acquire assets. The poor and middle class acquire liabilities that they think are assets.", iconName: "chart.pie.fill", iconColor: "22C55E"),
@@ -702,7 +684,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Take Risks", description: "Playing it safe is actually the riskiest thing you can do. Learn to manage risk and take calculated chances.", iconName: "bolt.fill", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[1] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 2 - The Intelligent Investor - MASTERED
@@ -728,7 +710,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 2640,
             readTimeMinutes: 44,
-            viewCount: "8.1M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 20))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Mr. Market", description: "Think of the market as a moody partner who offers to buy or sell shares daily at different prices.", iconName: "person.fill.questionmark", iconColor: "3B82F6"),
@@ -737,7 +719,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Defensive Investing", description: "Build a diversified portfolio that doesn't require constant attention.", iconName: "lock.shield.fill", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[2] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 3 - The Psychology of Money
@@ -763,7 +745,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 3660,
             readTimeMinutes: 61,
-            viewCount: "5.7M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 15))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Compounding", description: "The most powerful force in finance. Small gains over long periods create enormous wealth.", iconName: "arrow.up.right", iconColor: "22C55E"),
@@ -772,7 +754,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Reasonable > Rational", description: "Being reasonable is more sustainable than being coldly rational with money.", iconName: "heart.fill", iconColor: "EC4899")
             ],
             coreChapters: BookCoreChapter.listsByOrder[3] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 4 - One Up On Wall Street
@@ -798,7 +780,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 2640,
             readTimeMinutes: 44,
-            viewCount: "3.2M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 10))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Invest in What You Know", description: "Your personal experiences give you an edge over Wall Street analysts.", iconName: "lightbulb.fill", iconColor: "F59E0B"),
@@ -807,7 +789,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Do Your Homework", description: "Research the company's story, financials, and competitive position.", iconName: "doc.text.magnifyingglass", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[4] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 5 - Common Stocks and Uncommon Profits
@@ -833,7 +815,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 1320,
             readTimeMinutes: 22,
-            viewCount: "2.1M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 5))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Scuttlebutt Method", description: "Research by talking to customers, suppliers, competitors, and employees.", iconName: "bubble.left.and.bubble.right.fill", iconColor: "3B82F6"),
@@ -842,7 +824,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Management Quality", description: "The caliber of management is crucial to long-term success.", iconName: "person.3.fill", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[5] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 6 - The Little Book of Common Sense Investing
@@ -868,7 +850,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 3180,
             readTimeMinutes: 53,
-            viewCount: "2.8M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 28))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Index Funds Win", description: "Most active managers underperform the market over time.", iconName: "chart.line.uptrend.xyaxis", iconColor: "22C55E"),
@@ -877,7 +859,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Simple is Best", description: "A total market index fund is all most investors need.", iconName: "sparkles", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[6] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 7 - A Random Walk Down Wall Street
@@ -903,7 +885,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 2160,
             readTimeMinutes: 36,
-            viewCount: "1.9M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 20))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Efficient Markets", description: "Stock prices reflect all available information, making consistent outperformance difficult.", iconName: "equal.circle.fill", iconColor: "3B82F6"),
@@ -912,7 +894,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Buy and Hold", description: "Time in the market beats timing the market.", iconName: "hand.raised.fill", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[7] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 8 - The Essays of Warren Buffett
@@ -938,7 +920,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 1260,
             readTimeMinutes: 21,
-            viewCount: "4.5M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 15))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Circle of Competence", description: "Stay within areas you truly understand.", iconName: "circle.dashed", iconColor: "3B82F6"),
@@ -947,7 +929,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Long-term Focus", description: "Our favorite holding period is forever.", iconName: "infinity", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[8] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 9 - The Little Book that Still Beats the Market (replaces Security Analysis)
@@ -973,7 +955,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 2580,
             readTimeMinutes: 43,
-            viewCount: "1.5M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 10))!,
             keyHighlights: [
                 BookKeyHighlight(title: "The Magic Formula", description: "Rank stocks by earnings yield and return on capital, then buy the best.", iconName: "function", iconColor: "22C55E"),
@@ -982,7 +964,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Discipline Over Emotion", description: "The formula works over years precisely because most can't stick with it.", iconName: "brain.head.profile", iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[9] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         ),
 
         // Book 10 - The Most Important Thing
@@ -1008,7 +990,7 @@ extension LibraryBook {
             ),
             audioDurationSeconds: 3720,
             readTimeMinutes: 62,
-            viewCount: "2.3M",
+            viewCount: "",
             lastUpdated: Calendar.current.date(from: DateComponents(year: 2025, month: 12, day: 5))!,
             keyHighlights: [
                 BookKeyHighlight(title: "Second-Level Thinking", description: "Go beyond the obvious to find insights others miss.", iconName: "brain.head.profile", iconColor: "8B5CF6"),
@@ -1017,7 +999,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Contrarian Thinking", description: "The best opportunities come from disagreeing with consensus.", iconName: "arrow.left.arrow.right", iconColor: "22C55E")
             ],
             coreChapters: BookCoreChapter.listsByOrder[10] ?? [],
-            discussions: sampleDiscussions
+            discussions: []
         )
     ]
 }

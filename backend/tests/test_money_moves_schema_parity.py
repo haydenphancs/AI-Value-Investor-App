@@ -272,3 +272,70 @@ def test_backend_serves_typeless_content_block_verbatim():
     resp = MoneyMovesResponse(articles=[art])
     blocks = resp.articles[0]["sections"][0]["content"]
     assert "type" not in blocks[0] and blocks[1]["type"] == "paragraph"
+
+
+# ── No fabricated social proof ─────────────────────────────────────────────────
+#
+# The bundle previously shipped, on all 13 articles: a fictitious byline
+# ("The Alpha", isVerified=true, followerCount="45.2k"), invented viewCount /
+# learnerCount / commentCount figures, and invented reader comments. All of it
+# rendered to users as real engagement data — App Review 1.1.6 ("stating that the
+# app is 'for entertainment purposes' won't overcome this guideline") and 2.3.1.
+#
+# `viewCount` must stay PRESENT (the parity contract above requires the key, and
+# already-shipped app builds may decode it strictly) but must not carry a number.
+
+_FABRICATED_BYLINES = {"the alpha"}
+
+
+def _bundle_articles() -> list[dict]:
+    return json.loads(_BUNDLE_JSON.read_text())["articles"]
+
+
+def test_bundle_has_no_fictitious_bylines():
+    offenders = [
+        (a["slug"], a["author"].get("name"))
+        for a in _bundle_articles()
+        if (a.get("author") or {}).get("name", "").strip().lower() in _FABRICATED_BYLINES
+    ]
+    assert not offenders, f"fictitious author byline(s): {offenders}"
+
+
+def test_bundle_never_claims_a_verified_author():
+    """A "verified" badge is a factual claim about a real person."""
+    offenders = [
+        a["slug"] for a in _bundle_articles()
+        if (a.get("author") or {}).get("isVerified") is True
+    ]
+    assert not offenders, f"articles asserting a verified author: {offenders}"
+
+
+def test_bundle_carries_no_invented_engagement_numbers():
+    numeric = []
+    for a in _bundle_articles():
+        # viewCount must exist (wire contract) but be blank — never a figure.
+        vc = str(a.get("viewCount", "")).strip()
+        if vc:
+            numeric.append((a["slug"], "viewCount", vc))
+        for key in ("learnerCount", "commentCount", "followerCount"):
+            if a.get(key):
+                numeric.append((a["slug"], key, a[key]))
+    assert not numeric, f"invented engagement metrics present: {numeric}"
+
+
+def test_bundle_view_count_key_is_still_present():
+    """Guards the other direction: removing the key breaks strict older decoders."""
+    missing = [a["slug"] for a in _bundle_articles() if "viewCount" not in a]
+    assert not missing, f"viewCount key missing (breaks shipped decoders): {missing}"
+
+
+def test_bundle_has_no_invented_reader_comments():
+    offenders = [
+        (a["slug"], len(a["comments"]))
+        for a in _bundle_articles()
+        if a.get("comments")
+    ]
+    assert not offenders, (
+        "articles ship invented reader comments (there is no comment feature to "
+        f"source real ones from): {offenders}"
+    )

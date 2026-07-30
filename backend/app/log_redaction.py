@@ -1,11 +1,23 @@
 """
-Secret redaction for logs + Sentry events.
+Secret + PII redaction for logs and Sentry events.
 
-FMP (and some other integrations) put the API key in the request query string
-(`?...&apikey=<key>`), which httpx echoes verbatim in its HTTPStatusError message.
-That message then flows into logger.error → Sentry → the Discord digest, leaking the
-key. These helpers scrub secret-looking query params to `***` at those exits.
-CLAUDE.md rule: never log secrets.
+Two separate concerns:
+
+1. SECRETS. FMP (and some other integrations) put the API key in the request query string
+   (`?...&apikey=<key>`), which httpx echoes verbatim in its HTTPStatusError message. That
+   message flows into logger.error → Sentry → the Discord digest, leaking the key.
+   CLAUDE.md rule: never log secrets.
+
+2. PII. Sentry is a third-party processor, so anything reaching it must be disclosed. The
+   pattern set below scrubs values that have NO diagnostic value: email addresses and
+   bearer/JWT tokens.
+
+   `user_id` UUIDs are deliberately NOT redacted. They are pseudonymous, they are the
+   primary handle for diagnosing a report from logs alone, and CLAUDE.md explicitly
+   requires errors to carry `user_id` / `report_id`. Stripping them would trade real
+   debuggability for no privacy gain, since Sentry access is already restricted. The
+   correct treatment is DISCLOSURE — the privacy policy names Sentry as a recipient of
+   diagnostic data including a pseudonymous account identifier — not deletion.
 """
 
 import logging
@@ -18,11 +30,35 @@ _SECRET_QS_RE = re.compile(
     r"(?i)([?&](?:api[_-]?key|token|access[_-]?token|secret|password|key)=)[^&\s'\"]+"
 )
 
+# Email addresses. Deliberately conservative so it can't eat surrounding log structure.
+_EMAIL_RE = re.compile(
+    r"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b"
+)
+
+# `Bearer <jwt>` / bare three-segment JWTs. Access tokens can appear in a logged header
+# dict or an httpx request repr.
+_BEARER_RE = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._\-]{20,}")
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")
+
+# Supabase / Postgres connection strings, which carry the password inline.
+_DSN_RE = re.compile(r"(?i)\b(postgres(?:ql)?://[^:@\s]+:)[^@\s]+(@)")
+
 
 def redact_secrets(text: Any) -> str:
-    """Return ``str(text)`` with secret-looking query values (e.g. ``apikey=...``) → ``***``."""
+    """Return ``str(text)`` with secrets and no-diagnostic-value PII replaced by ``***``.
+
+    Covers: secret query params (``apikey=``…), email addresses, bearer tokens, bare JWTs,
+    and inline Postgres DSN passwords. Does NOT touch `user_id` UUIDs — see the module
+    docstring for why.
+    """
     try:
-        return _SECRET_QS_RE.sub(r"\1***", str(text))
+        s = str(text)
+        s = _SECRET_QS_RE.sub(r"\1***", s)
+        s = _DSN_RE.sub(r"\1***\2", s)
+        s = _BEARER_RE.sub(r"\1***", s)
+        s = _JWT_RE.sub("***", s)
+        s = _EMAIL_RE.sub("***@***", s)
+        return s
     except Exception:
         return str(text)
 

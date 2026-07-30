@@ -19,6 +19,7 @@ import logging
 
 from app.integrations.fmp import get_fmp_client
 from app.database import get_supabase
+from app.services.agents.persona_config import PERSONA_KEYS, get_persona_config
 from app.schemas.home import (
     MarketTickerResponse,
     MarketInsightResponse,
@@ -60,12 +61,12 @@ DEFAULT_MARKET_TICKERS: List[Dict[str, str]] = [
     {"symbol": "GCUSD", "name": "Gold", "type": "commodity"},
 ]
 
+# DERIVED from persona_config — the single source of truth. This used to be a
+# hardcoded duplicate of the same five display names, which is a silent drift hazard:
+# renaming a persona in persona_config would have left the Home feed showing the old
+# label. Same reasoning as IDENTITY_RULE / ADVICE_BOUNDARY being single-sourced.
 PERSONA_DISPLAY_NAMES: Dict[str, str] = {
-    "warren_buffett": "Warren Buffett",
-    "peter_lynch": "Peter Lynch",
-    "cathie_wood": "Cathie Wood",
-    "bill_ackman": "Bill Ackman",
-    "michael_burry": "Michael Burry",
+    key: get_persona_config(key).display_name for key in sorted(PERSONA_KEYS)
 }
 
 PERSONA_GRADIENT_COLORS: Dict[str, List[str]] = {

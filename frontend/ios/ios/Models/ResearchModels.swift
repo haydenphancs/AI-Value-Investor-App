@@ -58,16 +58,29 @@ struct AnalysisPersona: Identifiable, Hashable {
     /// Backwards-compat alias — call-sites used `persona.backendKey`.
     var backendKey: String { key }
 
-    /// Short "running" label, e.g. "Buffett Agent" — shown while a report is
-    /// processing (NOT the full `name`, which the AI uses to stay in character).
+    /// Short "running" label, e.g. "Quality Agent" — shown while a report is processing.
+    ///
+    /// Keyed on `key`, NOT derived from `name`. `name` is now a style name, so the old
+    /// `name.split(" ").last + " Agent"` produced "Compounder Agent" while the backend
+    /// sent "Quality Agent" — a visible mismatch. Mirrors
+    /// persona_config.PersonaConfig.agent_label_text; keep the two in sync.
     var agentLabel: String {
-        let last = name.split(separator: " ").last.map(String.init) ?? name
-        return "\(last) Agent"
+        "\(shortName) Agent"
     }
 
-    /// Short tag label — surname only ("Buffett", "Wood", "Lynch", "Ackman").
+    /// Short tag label, e.g. "Quality". Mirrors the backend's agent_label stem.
     var shortName: String {
-        name.split(separator: " ").last.map(String.init) ?? name
+        switch key {
+        case "warren_buffett": return "Quality"
+        case "cathie_wood":    return "Disruption"
+        case "peter_lynch":    return "GARP"
+        case "bill_ackman":    return "Activist"
+        case "michael_burry":  return "Contrarian"
+        default:
+            // Unknown key (a persona added backend-first): fall back to the last word
+            // of the display name rather than showing nothing.
+            return name.split(separator: " ").last.map(String.init) ?? name
+        }
     }
 
     /// Lens word for the persona-aware headline label ("Strong <lens> Profile").
@@ -97,7 +110,7 @@ struct AnalysisPersona: Identifiable, Hashable {
 
     static let warrenBuffett = AnalysisPersona(
         key: "warren_buffett",
-        name: "Warren Buffett",
+        name: "The Quality Compounder",
         tagline: "Safe, Long-term Value",
         iconName: "icon_persona_buffett",
         systemIconName: "building.columns.fill",
@@ -107,7 +120,7 @@ struct AnalysisPersona: Identifiable, Hashable {
 
     static let cathieWood = AnalysisPersona(
         key: "cathie_wood",
-        name: "Cathie Wood",
+        name: "The Disruption Seeker",
         tagline: "Disruptive Innovation",
         iconName: "icon_persona_wood",
         systemIconName: "bolt.fill",
@@ -117,8 +130,8 @@ struct AnalysisPersona: Identifiable, Hashable {
 
     static let peterLynch = AnalysisPersona(
         key: "peter_lynch",
-        name: "Peter Lynch",
-        tagline: "Growth at Value",
+        name: "The Everyday Growth Hunter",
+        tagline: "Growth at a Reasonable Price",
         iconName: "icon_persona_lynch",
         systemIconName: "chart.line.uptrend.xyaxis",
         accentColorHex: "06B6D4",
@@ -127,7 +140,7 @@ struct AnalysisPersona: Identifiable, Hashable {
 
     static let billAckman = AnalysisPersona(
         key: "bill_ackman",
-        name: "Bill Ackman",
+        name: "The Activist Concentrator",
         tagline: "Activist Value",
         iconName: "icon_persona_ackman",
         systemIconName: "megaphone.fill",
@@ -137,7 +150,7 @@ struct AnalysisPersona: Identifiable, Hashable {
 
     static let michaelBurry = AnalysisPersona(
         key: "michael_burry",
-        name: "Michael Burry",
+        name: "The Deep Value Skeptic",
         tagline: "Contrarian Deep Value",
         iconName: "icon_persona_burry",
         systemIconName: "magnifyingglass",

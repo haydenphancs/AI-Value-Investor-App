@@ -612,7 +612,7 @@ _FALLBACK_PERSONAS: List[dict] = [
     {
         "id": "fallback-warren_buffett",
         "key": "warren_buffett",
-        "name": "Warren Buffett",
+        "name": "The Quality Compounder",
         "tagline": "Safe, Long-term Value",
         "description": (
             "Focuses on fundamental value, strong moats, consistent earnings, "
@@ -625,7 +625,7 @@ _FALLBACK_PERSONAS: List[dict] = [
     {
         "id": "fallback-cathie_wood",
         "key": "cathie_wood",
-        "name": "Cathie Wood",
+        "name": "The Disruption Seeker",
         "tagline": "Disruptive Innovation",
         "description": (
             "Emphasizes disruptive innovation, emerging technologies, and "
@@ -638,8 +638,8 @@ _FALLBACK_PERSONAS: List[dict] = [
     {
         "id": "fallback-peter_lynch",
         "key": "peter_lynch",
-        "name": "Peter Lynch",
-        "tagline": "Growth at Value",
+        "name": "The Everyday Growth Hunter",
+        "tagline": "Growth at a Reasonable Price",
         "description": (
             "Looks for growth at a reasonable price (GARP), with focus on "
             "companies you understand and can spot in everyday life."
@@ -651,7 +651,7 @@ _FALLBACK_PERSONAS: List[dict] = [
     {
         "id": "fallback-bill_ackman",
         "key": "bill_ackman",
-        "name": "Bill Ackman",
+        "name": "The Activist Concentrator",
         "tagline": "Activist Value",
         "description": (
             "Takes concentrated positions in high-quality businesses, uses "
@@ -665,7 +665,7 @@ _FALLBACK_PERSONAS: List[dict] = [
     {
         "id": "fallback-michael_burry",
         "key": "michael_burry",
-        "name": "Michael Burry",
+        "name": "The Deep Value Skeptic",
         "tagline": "Contrarian Deep Value",
         "description": (
             "A contrarian skeptic who hunts deeply undervalued, out-of-favor "

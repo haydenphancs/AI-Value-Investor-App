@@ -262,12 +262,58 @@ struct DailyBriefingItem: Identifiable, Codable {
 }
 
 // MARK: - Investor Persona
+/// Analysis styles shown on the Home "recent research" feed.
+///
+/// These were named after real living investors (Warren Buffett, Cathie Wood, …).
+/// Naming a commercial product feature after a living person creates right-of-publicity
+/// and false-endorsement exposure, so the labels are now style names. The backend's
+/// stable `key` / `agent_tag` identifiers did NOT change — only these labels.
+///
+/// The wire value is the DISPLAY NAME (see `RecentResearchResponse.persona`), so the
+/// legacy names must stay decodable: migrations are applied by hand, so there is a
+/// window where the deployed backend still serves the old labels from `agent_personas`.
+/// Without the mapping below every report in that window would silently mislabel as
+/// the first case.
 enum InvestorPersona: String, CaseIterable, Codable {
-    case warrenBuffett = "Warren Buffett"
-    case peterLynch = "Peter Lynch"
-    case cathieWood = "Cathie Wood"
-    case billAckman = "Bill Ackman"
-    case michaelBurry = "Michael Burry"
+    case qualityCompounder = "The Quality Compounder"
+    case everydayGrowthHunter = "The Everyday Growth Hunter"
+    case disruptionSeeker = "The Disruption Seeker"
+    case activistConcentrator = "The Activist Concentrator"
+    case deepValueSkeptic = "The Deep Value Skeptic"
+
+    /// Pre-rename labels, mapped to their current case.
+    private static let legacyNames: [String: InvestorPersona] = [
+        "Warren Buffett": .qualityCompounder,
+        "Peter Lynch": .everydayGrowthHunter,
+        "Cathie Wood": .disruptionSeeker,
+        "Bill Ackman": .activistConcentrator,
+        "Michael Burry": .deepValueSkeptic
+    ]
+
+    /// Also accepts the backend `key` form, in case a caller sends that instead.
+    private static let backendKeys: [String: InvestorPersona] = [
+        "warren_buffett": .qualityCompounder,
+        "peter_lynch": .everydayGrowthHunter,
+        "cathie_wood": .disruptionSeeker,
+        "bill_ackman": .activistConcentrator,
+        "michael_burry": .deepValueSkeptic
+    ]
+
+    /// `rawValue` (the synthesized getter) is the single source for the canonical
+    /// string — no second copy of the names to drift out of sync. Safe from recursion:
+    /// `allCases` and `rawValue` are both synthesized and never call this initializer.
+    init?(rawValue: String) {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let match = Self.allCases.first(where: { $0.rawValue == trimmed }) {
+            self = match
+        } else if let legacy = Self.legacyNames[trimmed] {
+            self = legacy
+        } else if let byKey = Self.backendKeys[trimmed.lowercased()] {
+            self = byKey
+        } else {
+            return nil
+        }
+    }
 
     var displayName: String {
         rawValue
@@ -275,11 +321,11 @@ enum InvestorPersona: String, CaseIterable, Codable {
 
     var badgeColor: String {
         switch self {
-        case .warrenBuffett: return "4F46E5"
-        case .peterLynch: return "059669"
-        case .cathieWood: return "DC2626"
-        case .billAckman: return "DC2626"
-        case .michaelBurry: return "991B1B"
+        case .qualityCompounder: return "4F46E5"
+        case .everydayGrowthHunter: return "059669"
+        case .disruptionSeeker: return "DC2626"
+        case .activistConcentrator: return "DC2626"
+        case .deepValueSkeptic: return "991B1B"
         }
     }
 }
@@ -337,7 +383,7 @@ struct ResearchReport: Identifiable, Codable {
         // Tolerant: an unknown/newly-added persona display name must NOT throw —
         // a single un-decodable element aborts the WHOLE home-feed array decode and
         // collapses the entire feed to mock data. Default rather than crash.
-        self.persona = (try? c.decode(InvestorPersona.self, forKey: .persona)) ?? .warrenBuffett
+        self.persona = (try? c.decode(InvestorPersona.self, forKey: .persona)) ?? .qualityCompounder
         self.headline = try c.decode(String.self, forKey: .headline)
         self.summary = try c.decode(String.self, forKey: .summary)
         self.rating = try c.decode(Double.self, forKey: .rating)

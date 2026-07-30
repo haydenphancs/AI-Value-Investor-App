@@ -38,7 +38,8 @@ class RecentResearchResponse(BaseModel):
     stock_ticker: str
     stock_name: str
     company_logo_name: str
-    persona: str  # Display name: "Warren Buffett", "Peter Lynch", etc.
+    persona: str  # Style display name, e.g. "The Quality Compounder".
+    # Derived from persona_config.display_name via home_service.PERSONA_DISPLAY_NAMES.
     headline: str
     summary: str
     rating: float  # 0-100 scale

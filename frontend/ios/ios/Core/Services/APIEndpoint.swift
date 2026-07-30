@@ -140,10 +140,6 @@ enum APIEndpoint: Sendable {
     case rateReport(reportId: String, rating: Int, feedback: String?)
     case deleteReport(reportId: String)
 
-    // MARK: - News
-    case getNewsFeed(page: Int, perPage: Int)
-    case getNewsArticle(articleId: String)
-
     // MARK: - Updates screen
     /// Filter pills for the Updates tab bar: "Market" + the user's watchlist,
     /// each with its session change %. Optional auth (guest-safe).
@@ -377,12 +373,6 @@ enum APIEndpoint: Sendable {
         case .deleteReport(let reportId):
             return "/api/v1/research/reports/\(reportId)"
 
-        // News
-        case .getNewsFeed:
-            return "/api/v1/news"
-        case .getNewsArticle(let articleId):
-            return "/api/v1/news/\(articleId)"
-
         // Updates screen
         case .getUpdatesTabs:
             return "/api/v1/updates/tabs"
@@ -571,9 +561,6 @@ enum APIEndpoint: Sendable {
         case .getMyReports(let limit):
             return ["limit": String(limit)]
 
-        case .getNewsFeed(let page, let perPage):
-            return ["page": String(page), "per_page": String(perPage)]
-
         case .listChatSessions(let limit, let offset):
             return ["limit": String(limit), "offset": String(offset)]
 
@@ -713,9 +700,6 @@ enum APIEndpoint: Sendable {
         case .searchStocks, .getStock, .getStockOverview, .getStockOverviewCore, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
              .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .prewarmReportCollection, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getIndexNews, .enrichIndexNews, .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getETFNews, .enrichETFNews, .getCommodityDetail, .getCommodityNews, .enrichCommodityNews:
-            return false
-        // News endpoints are public
-        case .getNewsFeed, .getNewsArticle:
             return false
         // Updates: /tabs uses OPTIONAL auth (guest watchlist when signed out);
         // /feed and /news/enrich are fully public market data.

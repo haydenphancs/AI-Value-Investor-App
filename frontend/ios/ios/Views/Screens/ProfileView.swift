@@ -386,6 +386,19 @@ struct ProfileView: View {
 
                 settingsRowDivider
 
+                // Data Sources — attribution for every upstream market-data provider.
+                NavigationLink {
+                    DataSourcesView()
+                } label: {
+                    ProfileSettingsRowContent(
+                        icon: "chart.bar.doc.horizontal.fill",
+                        iconColor: AppColors.textSecondary,
+                        title: "Data Sources"
+                    )
+                }
+
+                settingsRowDivider
+
                 // Terms of Use (native in-app screen)
                 NavigationLink {
                     TermsOfUseView()

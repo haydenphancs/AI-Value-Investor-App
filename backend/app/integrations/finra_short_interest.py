@@ -4,12 +4,11 @@ Short Interest — multi-source fetcher with caching.
 Sources (in priority order):
   1. FINRA Consolidated Short Interest API — OAuth, covers ALL exchanges
   2. Nasdaq public API — free, no auth, covers NASDAQ-listed stocks only
-  3. Yahoo Finance via proxy — covers all stocks (NYSE, AMEX, etc.)
 
 Two-tier cache-aside pattern:
   Tier 1: In-memory dict (3-day TTL)
   Tier 2: Supabase short_interest_cache table (3-day TTL)
-  Miss:   Try FINRA first, then Nasdaq, then Yahoo proxy fallback
+  Miss:   Try FINRA first, then Nasdaq
 
 FINRA publishes short interest twice monthly (~15th and end of month) with an
 ~8-business-day reporting lag. The 3-day TTL sits UNDER that ~14-day publish
@@ -38,13 +37,17 @@ _NASDAQ_SHORT_INTEREST_URL = (
     "https://api.nasdaq.com/api/quote/{ticker}/short-interest?assetClass=stocks"
 )
 
+# Honest identifying UA. This previously spoofed Chrome on macOS, which was part of the
+# removed Yahoo path (proxy rotation + harvested crumb/cookie auth). Nasdaq's public JSON
+# endpoint does not require a browser UA, and misrepresenting the client is exactly the
+# behaviour Caydex's own Terms forbid users from doing to Caydex.
 _HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": "Caydex/1.0 (+https://caydexinvest.com)",
     "Accept": "application/json",
 }
+
+# Cooldown after a 429 from any upstream (FINRA, Nasdaq).
+_RATE_LIMIT_COOLDOWN = 300  # 5 minutes
 
 # ── In-memory cache (Tier 1) ────────────────────────────────────
 
@@ -56,7 +59,7 @@ _SUPABASE_TTL_DAYS = 3  # matches in-memory; under the ~14-day publish cadence (
 # Entries written before the 12-month `history` series feature lack the
 # `history` key. This date floor invalidates those rows ONCE (re-fetch a fresh
 # FINRA series), without permanently re-fetching legit snapshot-only
-# Nasdaq/Yahoo tickers — mirrors the ticker_report_cache schema-floor pattern.
+# Nasdaq tickers — mirrors the ticker_report_cache schema-floor pattern.
 _SI_SCHEMA_FLOOR = datetime(2026, 6, 7, 0, 0, 0, tzinfo=timezone.utc)
 
 # ── Nasdaq safeguards ───────────────────────────────────────────
@@ -66,17 +69,6 @@ _nasdaq_consecutive_failures: int = 0
 _MAX_CONSECUTIVE_FAILURES = 10
 _nasdaq_rate_limited_until: float = 0
 
-# ── Yahoo proxy safeguards ──────────────────────────────────────
-
-_yahoo_kill_switch: bool = False
-_yahoo_rate_limited_until: float = 0
-_RATE_LIMIT_COOLDOWN = 300  # 5 minutes
-
-# Yahoo auth tokens (crumb + cookies)
-_yahoo_crumb: Optional[str] = None
-_yahoo_cookies: Optional[httpx.Cookies] = None
-_yahoo_auth_ts: float = 0
-_YAHOO_AUTH_TTL = 1800  # refresh auth every 30 min
 
 # ── FINRA API safeguards ───────────────────────────────────────
 
@@ -100,7 +92,6 @@ _FINRA_TOKEN_TTL = 1500  # 25 min (tokens typically valid ~30 min)
 # ── HTTP clients ────────────────────────────────────────────────
 
 _http_client: Optional[httpx.AsyncClient] = None
-_yahoo_http_client: Optional[httpx.AsyncClient] = None
 _finra_http_client: Optional[httpx.AsyncClient] = None
 
 
@@ -125,7 +116,7 @@ def _is_stale_finra_snapshot(data: Any) -> bool:
     before the integration built the 12-month series. Forces a re-fetch so the
     trend chart can fill. CANNOT loop: current FINRA code always builds `history`
     whenever short_change_3m exists (change_3m needs >=2 settlement rows ~90 days
-    apart → >=2 history points). Nasdaq/Yahoo snapshots carry no short_change_3m,
+    apart → >=2 history points). Nasdaq snapshots carry no short_change_3m,
     so legitimate snapshot-only tickers are never flagged."""
     return (
         isinstance(data, dict)
@@ -506,7 +497,7 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
             # Nasdaq returns data=null for non-NASDAQ-listed stocks (NYSE, AMEX)
             msg = body.get("message", "")
             if "not available" in msg.lower() or "only supported" in msg.lower():
-                logger.info(f"Nasdaq: not available for {ticker} (likely NYSE) — will try Yahoo")
+                logger.info(f"Nasdaq: not available for {ticker} (likely NYSE)")
             return None
 
         table = data.get("shortInterestTable", {})
@@ -547,152 +538,19 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-# ── Yahoo Finance via proxy (fallback for NYSE stocks) ──────────
-
-
-async def _get_yahoo_client() -> Optional[httpx.AsyncClient]:
-    """Get or create proxy-enabled Yahoo Finance client."""
-    global _yahoo_http_client
-
-    proxy_url = os.getenv("YAHOO_PROXY_URL")
-    if not proxy_url:
-        return None
-
-    if _yahoo_http_client is None or _yahoo_http_client.is_closed:
-        _yahoo_http_client = httpx.AsyncClient(
-            proxy=proxy_url,
-            follow_redirects=True,
-            timeout=15.0,
-        )
-    return _yahoo_http_client
-
-
-async def _ensure_yahoo_auth(client: httpx.AsyncClient) -> bool:
-    """Get/refresh Yahoo Finance crumb + cookies via proxy."""
-    global _yahoo_crumb, _yahoo_cookies, _yahoo_auth_ts, _yahoo_rate_limited_until
-
-    if _yahoo_crumb and _yahoo_cookies and (time.time() - _yahoo_auth_ts < _YAHOO_AUTH_TTL):
-        return True
-
-    try:
-        r1 = await client.get("https://fc.yahoo.com", headers=_HEADERS)
-        _yahoo_cookies = r1.cookies
-
-        r2 = await client.get(
-            "https://query2.finance.yahoo.com/v1/test/getcrumb",
-            headers=_HEADERS,
-            cookies=_yahoo_cookies,
-        )
-        if r2.status_code == 429:
-            logger.warning("Yahoo crumb endpoint rate-limited (429)")
-            _yahoo_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN
-            return False
-        if r2.status_code == 200 and r2.text.strip():
-            _yahoo_crumb = r2.text.strip()
-            _yahoo_auth_ts = time.time()
-            logger.info("Yahoo Finance auth refreshed via proxy")
-            return True
-        else:
-            logger.warning(f"Yahoo crumb fetch failed: {r2.status_code}")
-            return False
-    except Exception as e:
-        logger.warning(f"Yahoo auth failed via proxy: {e}")
-        return False
-
-
-async def _fetch_from_yahoo(ticker: str) -> Optional[Dict[str, Any]]:
-    """
-    Call Yahoo Finance API via proxy for short interest data.
-    Used as fallback for stocks not covered by Nasdaq (NYSE, AMEX).
-    """
-    global _yahoo_kill_switch, _yahoo_rate_limited_until, _yahoo_auth_ts
-
-    if _yahoo_kill_switch:
-        return None
-
-    if time.time() < _yahoo_rate_limited_until:
-        logger.info(f"Yahoo cooldown active, skipping {ticker}")
-        return None
-
-    client = await _get_yahoo_client()
-    if client is None:
-        # No proxy configured — Yahoo fallback unavailable
-        return None
-
-    try:
-        auth_ok = await _ensure_yahoo_auth(client)
-        if not auth_ok:
-            return None
-
-        url = (
-            f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-            f"?modules=defaultKeyStatistics&formatted=false&crumb={_yahoo_crumb}"
-        )
-        r = await client.get(url, headers=_HEADERS, cookies=_yahoo_cookies)
-
-        if r.status_code == 429:
-            logger.warning(f"Yahoo rate-limited (429) for {ticker}")
-            _yahoo_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN
-            _yahoo_auth_ts = 0
-            return None
-
-        if r.status_code in (401, 403):
-            logger.warning(f"Yahoo auth failed for {ticker}: {r.status_code}")
-            _yahoo_auth_ts = 0  # force auth refresh
-            return None
-
-        if r.status_code != 200:
-            logger.warning(f"Yahoo API failed for {ticker}: {r.status_code}")
-            return None
-
-        data = r.json()
-        ks = (
-            data.get("quoteSummary", {})
-            .get("result", [{}])[0]
-            .get("defaultKeyStatistics", {})
-        )
-
-        result: Dict[str, Any] = {}
-
-        spf = ks.get("shortPercentOfFloat")
-        if spf is not None:
-            result["short_percent_of_float"] = round(float(spf) * 100, 2)
-
-        sr = ks.get("shortRatio")
-        if sr is not None:
-            result["short_ratio"] = round(float(sr), 2)
-
-        ss = ks.get("sharesShort")
-        if ss is not None:
-            result["shares_short"] = int(ss)
-
-        sspm = ks.get("sharesShortPriorMonth")
-        if sspm is not None:
-            result["shares_short_prior_month"] = int(sspm)
-
-        if result:
-            logger.info(f"Yahoo (proxy) short interest for {ticker}: shares_short={result.get('shares_short')}")
-            return result
-        return None
-
-    except Exception as e:
-        logger.warning(f"Yahoo API error for {ticker}: {e}")
-        return None
-
-
 # ── Public API ──────────────────────────────────────────────────
 
 
 async def get_short_interest(ticker: str) -> Dict[str, Any]:
     """
     Fetch short interest data with two-tier caching.
-    Tries FINRA API first, then Nasdaq, then Yahoo via proxy.
+    Tries FINRA API first, then Nasdaq.
 
     Returns dict with:
       - shares_short: int
       - shares_short_prior_month: int (if available)
       - short_ratio: float (days to cover)
-      - short_percent_of_float: float (from Yahoo, if available)
+      - short_percent_of_float: float (if the source supplies it)
       - settlement_date: str (if available)
     """
     ticker = ticker.upper()
@@ -718,10 +576,6 @@ async def get_short_interest(ticker: str) -> Dict[str, Any]:
     # Fallback 1: Nasdaq (covers NASDAQ-listed stocks)
     if not result:
         result = await _fetch_from_nasdaq(ticker)
-
-    # Fallback 2: Yahoo Finance via proxy (covers NYSE, AMEX, etc.)
-    if not result:
-        result = await _fetch_from_yahoo(ticker)
 
     if result:
         _mem_cache_set(mem_key, result)

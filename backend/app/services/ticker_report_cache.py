@@ -237,7 +237,7 @@ def _short_interest_payload_stale(report: Any) -> bool:
     12-month settlement series whenever `change_3m` exists (it needs >=2 FINRA
     rows ~90 days apart → >=2 history points). Treat such a report as stale so
     it regenerates and the trend chart fills — robust to entries cached AFTER
-    the date floor by not-yet-redeployed code. Nasdaq/Yahoo-only tickers have
+    the date floor by not-yet-redeployed code. Nasdaq-only tickers have
     change_3m=None and are never flagged, so this cannot loop once the backend
     runs the history-building code. Mirrors
     `finra_short_interest._is_stale_finra_snapshot` at the report layer."""

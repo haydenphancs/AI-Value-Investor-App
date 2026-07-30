@@ -659,6 +659,18 @@ private struct BookDetailCoreContent: View {
             // Discussion Section removed — the reviews it rendered were invented
             // (see the note on LibraryBook.sampleData). `DiscussionSection` is kept
             // for when a real review feature exists to feed it.
+
+            // Attribution + non-affiliation. The screen shows the real title, author,
+            // and author bio, so it has to be explicit that this is our own writing
+            // about the book rather than the book itself or an authorised edition.
+            AnalysisDisclaimerText(
+                text: "This guide is Caydex's own summary of the ideas in \(book.title) "
+                    + "by \(book.author). It is not the book, not an abridgement of it, "
+                    + "and not a substitute for reading it. Caydex is not affiliated "
+                    + "with, authorised, or endorsed by the author or publisher. "
+                    + "Narration is AI-generated."
+            )
+            .padding(.top, AppSpacing.md)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.xl)

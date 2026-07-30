@@ -453,7 +453,7 @@ class StockOverviewService:
             logger.warning(f"Ownership snapshot failed for {ticker}: {ownership_snapshot}")
             ownership_snapshot = None
 
-        # ── Ensure short interest is populated (FINRA/Nasdaq/Yahoo) ──
+        # ── Ensure short interest is populated (FINRA/Nasdaq) ──
         if not fundamentals.get("short_interest"):
             from app.integrations.finra_short_interest import get_short_interest
             fundamentals["short_interest"] = await get_short_interest(ticker)
@@ -525,7 +525,7 @@ class StockOverviewService:
             _cache_set(mem_key, db_data)
             return db_data
 
-        # Miss: fetch from FMP + Yahoo
+        # Miss: fetch from FMP + short-interest integration
         logger.info(f"Fundamentals MISS for {ticker} — fetching from APIs")
         data = await self._fetch_fundamentals(ticker)
 
@@ -1117,12 +1117,12 @@ class StockOverviewService:
         short_interest = short_interest or {}
         short_pct_val = None
 
-        # Primary: compute from sharesShort (Yahoo) / floatShares (FMP)
+        # Primary: compute from sharesShort (FINRA/Nasdaq) / floatShares (FMP)
         shares_short = short_interest.get("shares_short")
         if shares_short and shares_short > 0 and float_shares_val and float_shares_val > 0:
             short_pct_val = round((shares_short / float_shares_val) * 100, 2)
 
-        # Fallback 1: use Yahoo's pre-computed short_percent_of_float
+        # Fallback 1: a source-supplied pre-computed short_percent_of_float
         if short_pct_val is None:
             short_pct_val = short_interest.get("short_percent_of_float")
 

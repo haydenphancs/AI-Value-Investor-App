@@ -65,13 +65,15 @@ struct RelatedMoneyMoveCard: View {
                         }
                         .foregroundColor(AppColors.textMuted)
 
-                        HStack(spacing: AppSpacing.xxs) {
-                            Image(systemName: "eye")
-                                .font(AppTypography.iconTiny).fontWeight(.medium)
-                            Text(article.viewCount)
-                                .font(AppTypography.caption)
+                        if !article.viewCount.isEmpty {
+                            HStack(spacing: AppSpacing.xxs) {
+                                Image(systemName: "eye")
+                                    .font(AppTypography.iconTiny).fontWeight(.medium)
+                                Text(article.viewCount)
+                                    .font(AppTypography.caption)
+                            }
+                            .foregroundColor(AppColors.textMuted)
                         }
-                        .foregroundColor(AppColors.textMuted)
                     }
                 }
                 .padding(AppSpacing.md)

@@ -352,16 +352,18 @@ struct LearnContentView: View {
             subtitle: move.subtitle,
             category: move.category,
             author: ArticleAuthor(
-                name: "The Alpha",
+                name: "Caydex Research",
                 avatarName: nil,
-                title: "Investment Research",
-                isVerified: true,
-                followerCount: "45.2k"
+                title: "Editorial",
+                isVerified: false,
+                followerCount: ""
             ),
             publishedAt: Date(),
             readTimeMinutes: move.estimatedMinutes,
-            viewCount: move.learnerCount,
-            commentCount: Int.random(in: 20...200),
+            // No invented engagement metrics. These were a fabricated learner count
+            // and a RANDOM comment count, both presented to users as real.
+            viewCount: "",
+            commentCount: 0,
             isBookmarked: false,
             hasAudioVersion: false,   // placeholder card: no narration audio (real articles carry audioUrl)
             heroGradientColors: gradientColors,
@@ -440,31 +442,15 @@ struct LearnContentView: View {
                     ]
                 )
             ],
+            // Read Time is the only statistic we can state truthfully. The removed two
+            // were an invented "Investors Learning" count with a fabricated +12% trend
+            // and a hardcoded "4.8 Rating" — neither is measured anywhere.
             statistics: [
-                ArticleStatistic(value: move.learnerCount, label: "Investors Learning", trend: .up, trendValue: "12%"),
-                ArticleStatistic(value: "\(move.estimatedMinutes)m", label: "Read Time"),
-                ArticleStatistic(value: "4.8", label: "Rating", trend: .up, trendValue: "0.3")
+                ArticleStatistic(value: "\(move.estimatedMinutes)m", label: "Read Time")
             ],
-            comments: [
-                ArticleComment(
-                    authorName: "Michael Chen",
-                    authorAvatar: nil,
-                    content: "Excellent analysis! This really helped me understand the key factors at play.",
-                    postedAt: Calendar.current.date(byAdding: .hour, value: -3, to: Date())!,
-                    likeCount: 24,
-                    replyCount: 5,
-                    isVerified: false
-                ),
-                ArticleComment(
-                    authorName: "Sarah Williams",
-                    authorAvatar: nil,
-                    content: "The section on risk management was particularly valuable. Would love to see more case studies like this.",
-                    postedAt: Calendar.current.date(byAdding: .hour, value: -8, to: Date())!,
-                    likeCount: 18,
-                    replyCount: 2,
-                    isVerified: true
-                )
-            ],
+            // No invented reader comments. There is no comment feature to source them
+            // from, so any comment shown here is fiction presented as user content.
+            comments: [],
             relatedArticles: MoneyMoveArticle.sampleDigitalFinance.relatedArticles
         )
     }

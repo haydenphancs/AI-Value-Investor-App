@@ -74,7 +74,10 @@ struct MoneyMoveCard: View {
                 // Meta info
                 HStack(spacing: AppSpacing.lg) {
                     ReadTimeLabel(minutes: moneyMove.estimatedMinutes)
-                    LearnerCountBadge(count: moneyMove.learnerCount)
+                    // Only when there is a real count to show.
+                    if !moneyMove.learnerCount.isEmpty {
+                        LearnerCountBadge(count: moneyMove.learnerCount)
+                    }
                 }
             }
             .padding(AppSpacing.lg)

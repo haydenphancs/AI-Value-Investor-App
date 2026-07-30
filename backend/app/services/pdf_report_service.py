@@ -19,6 +19,7 @@ crashing app boot. The CPU-bound render + the sync Storage upload are pushed to
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -104,12 +105,22 @@ def _persona_display(agent: dict) -> str:
 
 
 def _num(v: Any) -> Optional[float]:
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        return float(v)
-    try:
-        return float(v)
-    except (TypeError, ValueError):
+    """Coerce to float, or None. NaN/Inf are treated as ABSENT, not as numbers.
+
+    A non-finite value that survives here renders as "$nan" in the PDF and, worse,
+    silently defeats the margin-of-safety comparisons below (NaN is truthy, and
+    ``nan >= 1`` and ``nan <= -1`` are both False, so it would fall through to
+    "Fairly Valued"). Upstream FMP payloads do occasionally carry NaN.
+    """
+    if isinstance(v, bool):
         return None
+    if not isinstance(v, (int, float)):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+    f = float(v)
+    return f if math.isfinite(f) else None
 
 
 _MONTH_ABBR = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -250,11 +261,21 @@ def build_context(
     # ── Fair value / margin of safety ─────────────────────────────────────────
     price_action = data.get("price_action") or {}
     current_price = _num(price_action.get("current_price"))
-    # Fair value = Wall Street analyst consensus target (the hero card is labeled
-    # "Per Wall Street consensus"). Fall back to the stored estimate only when the
-    # consensus has no target.
+    # Fair value prefers the Wall Street analyst consensus target and falls back to
+    # our own DCF-derived estimate when the consensus has no target. The hero card
+    # MUST state which one it actually used — labeling our own estimate as analyst
+    # consensus misattributes it to third parties (and is affirmatively misleading).
     ws_target = _num((data.get("wall_street_consensus") or {}).get("target_price"))
-    fair_value = ws_target or _num(fair_value_estimate) or _num(data.get("fair_value_estimate"))
+    own_estimate = _num(fair_value_estimate) or _num(data.get("fair_value_estimate"))
+    if ws_target:
+        fair_value = ws_target
+        fair_value_basis = "Per Wall Street consensus"
+    elif own_estimate:
+        fair_value = own_estimate
+        fair_value_basis = "Caydex estimate · no analyst target"
+    else:
+        fair_value = None
+        fair_value_basis = ""
     mos_pct = None
     valuation_word = "—"
     valuation_color = pdf_charts.MUTED
@@ -497,6 +518,7 @@ def build_context(
         "quality_score": int(round(quality)),
         "quality_label": quality_label,
         "fair_value": fair_value,
+        "fair_value_basis": fair_value_basis,
         "current_price": current_price,
         "margin_of_safety_pct": mos_pct,
         "valuation_word": valuation_word,

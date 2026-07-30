@@ -89,7 +89,10 @@ class IndexSnapshotsDataResponse(BaseModel):
     sector_performance: SectorPerformanceSnapshotResponse
     macro_forecast: MacroForecastSnapshotResponse
     generated_date: str  # "2026-03-01"
-    generated_by: str  # "Gemini 2.0 Flash"
+    # Attribution string. MUST stay provider-neutral ("Cay AI") — naming the
+    # underlying model here would breach the identity rule in
+    # services/agents/persona_config.py, and this field ships in the wire payload.
+    generated_by: str  # "Cay AI"
 
 
 # ── Profile ──────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 3Py1YesKnc7NOq9mbWAsYIblWchxSMADSfSnqSeDVbw50oj3sTeI0Y7NmYsNgig
+\restrict JORd88cKqxIvAW1M5YSZvyD6GmtQ4iQjM1gKeOs1aMhKoSGNdCHTQjMzX7rdpZQ
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -465,7 +465,8 @@ CREATE TYPE realtime.equality_op AS ENUM (
 CREATE TYPE realtime.user_defined_filter AS (
 	column_name text,
 	op realtime.equality_op,
-	value text
+	value text,
+	negate boolean
 );
 
 
@@ -940,6 +941,54 @@ CREATE FUNCTION pgbouncer.get_auth(p_usename text) RETURNS TABLE(username text, 
 
 
 --
+-- Name: add_chat_tokens(uuid, date, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.add_chat_tokens(p_user_id uuid, p_day date, p_tokens integer) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_tokens BIGINT;
+BEGIN
+    IF p_tokens IS NULL OR p_tokens <= 0 THEN
+        p_tokens := 0;
+    END IF;
+
+    INSERT INTO chat_usage_budget (user_id, budget_day, token_count, updated_at)
+    VALUES (p_user_id, p_day, p_tokens, NOW())
+    ON CONFLICT (user_id, budget_day) DO UPDATE
+        SET token_count = chat_usage_budget.token_count + p_tokens,
+            updated_at = NOW()
+    RETURNING token_count INTO v_tokens;
+
+    RETURN COALESCE(v_tokens, 0);
+END;
+$$;
+
+
+--
+-- Name: add_credit_transaction(uuid, integer, text, text, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.add_credit_transaction(p_user_id uuid, p_delta integer, p_reason text, p_ref_id text, p_balance_after integer) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_id BIGINT;
+BEGIN
+    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
+    VALUES (p_user_id, p_delta, p_reason, p_ref_id, p_balance_after)
+    RETURNING id INTO v_id;
+    RETURN v_id;
+END;
+$$;
+
+
+--
 -- Name: charge_user_credits(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -958,6 +1007,81 @@ BEGIN
     RETURNING (total - used) INTO new_remaining;
 
     RETURN new_remaining;  -- NULL when WHERE missed (insufficient balance)
+END;
+$$;
+
+
+--
+-- Name: claim_chat_turn(uuid, date, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_chat_turn(p_user_id uuid, p_day date, p_turn_limit integer) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    -- Guard the INSERT path: the cap only constrains the DO UPDATE branch, so without
+    -- this a limit of 0 (intended kill switch) or NULL (missing env var) would still
+    -- grant the day's FIRST turn — the one case the operator most wants blocked.
+    IF p_turn_limit IS NULL OR p_turn_limit <= 0 THEN
+        RETURN -1;
+    END IF;
+
+    INSERT INTO chat_usage_budget (user_id, budget_day, turn_count, updated_at)
+    VALUES (p_user_id, p_day, 1, NOW())
+    ON CONFLICT (user_id, budget_day) DO UPDATE
+        SET turn_count = chat_usage_budget.turn_count + 1,
+            updated_at = NOW()
+        WHERE chat_usage_budget.turn_count < p_turn_limit
+    RETURNING turn_count INTO v_count;
+
+    -- No row returned => the WHERE on DO UPDATE failed => the cap is reached.
+    IF v_count IS NULL THEN
+        RETURN -1;
+    END IF;
+    RETURN v_count;
+END;
+$$;
+
+
+--
+-- Name: claim_updates_insight_scope(text, timestamp with time zone, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_updates_insight_scope(p_scope text, p_now timestamp with time zone, p_stale_seconds integer, p_attempt_cap integer, p_daily_cap integer) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_ok BOOLEAN;
+    -- ET trading date, not UTC. See the header comment.
+    v_today DATE := (p_now AT TIME ZONE 'America/New_York')::date;
+BEGIN
+    INSERT INTO updates_insight_state (scope, regen_day, updated_at)
+    VALUES (p_scope, v_today, p_now)
+    ON CONFLICT (scope) DO NOTHING;
+
+    UPDATE updates_insight_state s
+       SET regen_day = v_today,
+           attempts_today    = CASE WHEN s.regen_day IS DISTINCT FROM v_today
+                                    THEN 1 ELSE s.attempts_today + 1 END,
+           regen_count_today = CASE WHEN s.regen_day IS DISTINCT FROM v_today
+                                    THEN 0 ELSE s.regen_count_today END,
+           claim_at = p_now,
+           updated_at = p_now
+     WHERE s.scope = p_scope
+       AND (s.claim_at IS NULL
+            OR s.claim_at <= p_now - make_interval(secs => p_stale_seconds))
+       AND (s.regen_day IS DISTINCT FROM v_today
+            OR (s.attempts_today < p_attempt_cap
+                AND s.regen_count_today < p_daily_cap))
+    RETURNING TRUE INTO v_ok;
+
+    RETURN COALESCE(v_ok, FALSE);
 END;
 $$;
 
@@ -1007,6 +1131,89 @@ BEGIN
         WHEN 'premium' THEN 100
     END, 0);
     RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: ensure_credit_period(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ensure_credit_period(p_user_id uuid) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    _GUEST       CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_tier       public.user_tier;
+    v_alloc      INTEGER;
+    v_now_et     TIMESTAMP;      -- ET wall-clock (no tz)
+    v_next_reset TIMESTAMPTZ;
+    v_row        public.user_credits%ROWTYPE;
+    v_remaining  INTEGER;
+BEGIN
+    -- Never reset the shared guest bucket (protects the live guest app's fixed balance).
+    IF p_user_id = _GUEST THEN
+        SELECT (total - used) INTO v_remaining
+          FROM public.user_credits WHERE user_id = p_user_id;
+        RETURN COALESCE(v_remaining, 0);
+    END IF;
+
+    -- Resolve tier -> monthly allocation (fall back to 'free' / 0 if unknown).
+    SELECT u.tier INTO v_tier FROM public.users u WHERE u.id = p_user_id;
+    IF v_tier IS NULL THEN
+        v_tier := 'free';
+    END IF;
+    SELECT monthly_credits INTO v_alloc FROM public.plan_credits WHERE tier = v_tier;
+    IF v_alloc IS NULL THEN
+        v_alloc := 0;
+    END IF;
+
+    -- Next month boundary in ET, as a timestamptz.
+    v_now_et     := (now() AT TIME ZONE 'America/New_York');
+    v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
+                        AT TIME ZONE 'America/New_York';
+
+    -- Lock (or create) the balance row.
+    SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        -- FOR UPDATE cannot lock a row that does not exist yet, so two concurrent
+        -- first-touch calls could both reach here. ON CONFLICT DO NOTHING makes the
+        -- loser a no-op instead of a unique_violation on user_credits_user_id_key.
+        INSERT INTO public.user_credits (user_id, total, used, resets_at, updated_at)
+        VALUES (p_user_id, v_alloc, 0, v_next_reset, NOW())
+        ON CONFLICT (user_id) DO NOTHING;
+
+        IF FOUND THEN
+            -- We created the row: log the initial grant exactly once.
+            INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, v_alloc, 'grant', to_char(v_now_et, 'YYYY-MM'), v_alloc);
+            RETURN v_alloc;
+        END IF;
+
+        -- A concurrent call created it first; return the live remaining (no grant log).
+        SELECT (total - used) INTO v_remaining
+          FROM public.user_credits WHERE user_id = p_user_id;
+        RETURN COALESCE(v_remaining, v_alloc);
+    END IF;
+
+    -- Due for reset? (never set, or the stored boundary has passed.)
+    IF v_row.resets_at IS NULL OR now() >= v_row.resets_at THEN
+        UPDATE public.user_credits
+           SET total      = v_alloc,
+               used       = 0,
+               resets_at  = v_next_reset,
+               updated_at = NOW()
+         WHERE user_id = p_user_id;
+        INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
+        VALUES (p_user_id, v_alloc, 'monthly_reset', to_char(v_now_et, 'YYYY-MM'), v_alloc);
+        RETURN v_alloc;
+    END IF;
+
+    -- Not due: return the live remaining unchanged.
+    RETURN (v_row.total - v_row.used);
 END;
 $$;
 
@@ -1072,6 +1279,44 @@ $$;
 
 
 --
+-- Name: increment_ai_insight_budget(date, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_ai_insight_budget(p_day date, p_limit integer) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    -- Guard the INSERT path. The cap below only constrains the DO UPDATE branch,
+    -- so without this a limit of 0 (an intended kill switch) or NULL (a missing
+    -- env var) would still grant the day's FIRST generation — the one case where
+    -- the operator most wants zero.
+    IF p_limit IS NULL OR p_limit <= 0 THEN
+        RETURN -1;
+    END IF;
+
+    INSERT INTO ai_insight_budget (budget_day, gen_count, updated_at)
+    VALUES (p_day, 1, NOW())
+    ON CONFLICT (budget_day) DO UPDATE
+        SET gen_count = ai_insight_budget.gen_count + 1,
+            updated_at = NOW()
+        WHERE ai_insight_budget.gen_count < p_limit
+    RETURNING gen_count INTO v_count;
+
+    -- No row returned => the WHERE on DO UPDATE failed => the cap is reached.
+    -- Return -1 so the caller can distinguish "budget exhausted" from "count=N".
+    IF v_count IS NULL THEN
+        RETURN -1;
+    END IF;
+    RETURN v_count;
+END;
+$$;
+
+
+--
 -- Name: increment_chat_message_count(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1085,6 +1330,85 @@ BEGIN
         last_message_at = now()
     WHERE id = NEW.session_id;
     RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: increment_updates_insight_success(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_updates_insight_success(p_scope text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    UPDATE updates_insight_state
+       SET regen_count_today = regen_count_today + 1,
+           updated_at = NOW()
+     WHERE scope = p_scope
+    RETURNING regen_count_today INTO v_count;
+    RETURN COALESCE(v_count, 0);
+END;
+$$;
+
+
+--
+-- Name: refund_credits(uuid, integer, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    _GUEST CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_remaining INTEGER;
+    v_delta     INTEGER;
+BEGIN
+    IF p_user_id = _GUEST THEN
+        SELECT (total - used) INTO v_remaining
+          FROM public.user_credits WHERE user_id = p_user_id;
+        RETURN COALESCE(v_remaining, 0);
+    END IF;
+
+    -- Non-positive refund is a caller/sign bug — no-op (a negative amount would DEBIT).
+    IF p_amount IS NULL OR p_amount <= 0 THEN
+        SELECT (total - used) INTO v_remaining
+          FROM public.user_credits WHERE user_id = p_user_id;
+        RETURN v_remaining;
+    END IF;
+
+    -- Refund, flooring `used` at 0 (a stray double-refund can't drive it negative and
+    -- silently grant credits). NOT idempotent — callers guarantee at-most-once. The ledger
+    -- records the ACTUAL change (old_used - new_used = LEAST(old_used, p_amount)), NOT the
+    -- requested amount, so a (contract-forbidden) over-refund can't desync sum(delta) from
+    -- the balance. The CTE's SELECT ... FOR UPDATE captures old_used and serializes
+    -- concurrent refunds on the single (user_id-unique) row.
+    WITH prev AS (
+        SELECT used AS old_used FROM public.user_credits
+         WHERE user_id = p_user_id FOR UPDATE
+    )
+    UPDATE public.user_credits u
+       SET used       = GREATEST(0, u.used - p_amount),
+           updated_at = NOW()
+      FROM prev
+     WHERE u.user_id = p_user_id
+    RETURNING (u.total - u.used), (prev.old_used - u.used)
+      INTO v_remaining, v_delta;
+
+    IF v_remaining IS NULL THEN
+        RETURN NULL;  -- no credit row for this user (nothing to refund)
+    END IF;
+
+    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
+    VALUES (p_user_id, v_delta, p_reason, p_ref_id, v_remaining);
+
+    RETURN v_remaining;
 END;
 $$;
 
@@ -1107,6 +1431,31 @@ BEGIN
     RETURNING (total - used) INTO new_remaining;
 
     RETURN new_remaining;
+END;
+$$;
+
+
+--
+-- Name: release_chat_turn(uuid, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.release_chat_turn(p_user_id uuid, p_day date) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    UPDATE chat_usage_budget
+       SET turn_count = GREATEST(0, turn_count - 1),
+           updated_at = NOW()
+     WHERE user_id = p_user_id
+       AND budget_day = p_day
+    RETURNING turn_count INTO v_count;
+
+    -- No row (never claimed today) => nothing to release.
+    RETURN COALESCE(v_count, 0);
 END;
 $$;
 
@@ -1264,6 +1613,64 @@ $$;
 --
 
 COMMENT ON FUNCTION public.search_filing_chunks(query_embedding public.vector, match_threshold double precision, match_count integer, filter_ticker text, filter_filing_type text) IS 'Semantic search across SEC filing chunks. Optionally filter by ticker and filing type.';
+
+
+--
+-- Name: spend_credits(uuid, integer, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.spend_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    _GUEST CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_remaining INTEGER;
+BEGIN
+    -- Guests are never metered (shared pool; never refilled). Return current remaining
+    -- (non-NULL = "ok, not charged") without debiting.
+    IF p_user_id = _GUEST THEN
+        SELECT (total - used) INTO v_remaining
+          FROM public.user_credits WHERE user_id = p_user_id;
+        RETURN COALESCE(v_remaining, 0);
+    END IF;
+
+    -- Non-positive charge is a caller/sign bug — no-op (a negative amount would MINT
+    -- credits via the predicate below). Return current remaining, no debit, no ledger row.
+    IF p_amount IS NULL OR p_amount <= 0 THEN
+        SELECT (total - used) INTO v_remaining
+          FROM public.user_credits WHERE user_id = p_user_id;
+        RETURN COALESCE(v_remaining, 0);
+    END IF;
+
+    -- Roll into the current month's tier allocation first (no-op mid-month). This takes
+    -- SELECT ... FOR UPDATE on the single user_credits row and holds it for this whole
+    -- transaction, so the charge UPDATE below serializes with concurrent spends.
+    PERFORM public.ensure_credit_period(p_user_id);
+
+    -- Atomic check-and-debit (mirrors charge_user_credits, migration 041): the
+    -- (total - used) >= amount predicate means no row mutates when the balance is
+    -- insufficient — no race window, never negative. `remaining` is a GENERATED column,
+    -- so we only ever write `used`.
+    UPDATE public.user_credits
+       SET used       = used + p_amount,
+           updated_at = NOW()
+     WHERE user_id   = p_user_id
+       AND (total - used) >= p_amount
+    RETURNING (total - used) INTO v_remaining;
+
+    IF v_remaining IS NULL THEN
+        RETURN NULL;  -- insufficient (caller → 402); nothing debited, no ledger row
+    END IF;
+
+    -- Ledger the spend in the SAME transaction (guaranteed, not best-effort).
+    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
+    VALUES (p_user_id, -p_amount, p_reason, p_ref_id, v_remaining);
+
+    RETURN v_remaining;
+END;
+$$;
 
 
 --
@@ -1530,6 +1937,18 @@ begin
 
                     execute 'execute walrus_rls_stmt' into subscription_has_access;
 
+                    -- Reset the role on every FOR..LOOP batch execution.
+                    -- The first batch of 10 rows is pre-fetched using the current connection role (PG internal behaviour)
+                    -- then we have to reset it again otherwise it would use the role defined in the `set_config` above
+                    -- to fetch the remaining rows when rows>10, which could be a user-defined role that lacks execution grants.
+                    -- The flow is:
+                    --   1. run batch with conn role
+                    --   2. set_config working_role
+                    --   3. execute walrus
+                    --   4. reset role (revert)
+                    --   5. repeat
+                    perform set_config('role', null, true);
+
                     if subscription_has_access then
                         visible_role_sub_ids = visible_role_sub_ids || subscription_id;
                     end if;
@@ -1788,39 +2207,105 @@ $$;
 
 
 --
+-- Name: check_equality_op(realtime.equality_op, regtype, text, text, boolean); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text, negate boolean) RETURNS boolean
+    LANGUAGE plpgsql STABLE
+    AS $$
+declare
+    op_symbol text;
+    res boolean;
+begin
+    -- IS DISTINCT FROM / IS NOT DISTINCT FROM: infix, both sides typed literals
+    if op = 'isdistinct' then
+        execute format(
+            'select %L::%s %s %L::%s',
+            val_1,
+            type_::text,
+            case when negate then 'IS NOT DISTINCT FROM' else 'IS DISTINCT FROM' end,
+            val_2,
+            type_::text
+        ) into res;
+        return res;
+    end if;
+
+    -- IS requires a keyword RHS (NULL, TRUE, FALSE, UNKNOWN), not a typed literal
+    if op = 'is' then
+        if val_2 not in ('null', 'true', 'false', 'unknown') then
+            raise exception 'invalid value for is filter: must be null, true, false, or unknown';
+        end if;
+        execute format(
+            'select %L::%s %s %s',
+            val_1,
+            type_::text,
+            case when negate then 'IS NOT' else 'IS' end,
+            upper(val_2)
+        ) into res;
+        return res;
+    end if;
+
+    op_symbol = case
+        when op = 'eq'    then '='
+        when op = 'neq'   then '!='
+        when op = 'lt'    then '<'
+        when op = 'lte'   then '<='
+        when op = 'gt'    then '>'
+        when op = 'gte'   then '>='
+        when op = 'in'    then '= any'
+        when op = 'like'   then 'LIKE'
+        when op = 'ilike'  then 'ILIKE'
+        when op = 'match'  then '~'
+        when op = 'imatch' then '~*'
+        else null
+    end;
+
+    if op_symbol is null then
+        raise exception 'unsupported equality operator: %', op::text;
+    end if;
+
+    execute format(
+        'select %L::%s %s (%L::%s)',
+        val_1,
+        type_::text,
+        op_symbol,
+        val_2,
+        case when op = 'in' then type_::text || '[]' else type_::text end
+    ) into res;
+
+    return case when negate then not res else res end;
+end;
+$$;
+
+
+--
 -- Name: is_visible_through_filters(realtime.wal_column[], realtime.user_defined_filter[]); Type: FUNCTION; Schema: realtime; Owner: -
 --
 
 CREATE FUNCTION realtime.is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]) RETURNS boolean
-    LANGUAGE sql IMMUTABLE
-    AS $_$
-/*
-Should the record be visible (true) or filtered out (false) after *filters* are applied
-*/
+    LANGUAGE sql STABLE
+    AS $$
     select
-        -- Default to allowed when no filters present
-        $2 is null -- no filters. this should not happen because subscriptions has a default
-        or array_length($2, 1) is null -- array length of an empty array is null
-        or bool_and(
-            coalesce(
+        filters is null
+        or array_length(filters, 1) is null
+        or coalesce(
+            count(col.name) = count(1)
+            and sum(
                 realtime.check_equality_op(
                     op:=f.op,
-                    type_:=coalesce(
-                        col.type_oid::regtype, -- null when wal2json version <= 2.4
-                        col.type_name::regtype
-                    ),
-                    -- cast jsonb to text
+                    type_:=coalesce(col.type_oid::regtype, col.type_name::regtype),
                     val_1:=col.value #>> '{}',
-                    val_2:=f.value
-                ),
-                false -- if null, filter does not match
-            )
+                    val_2:=f.value,
+                    negate:=coalesce(f.negate, false)
+                )::int
+            ) filter (where col.name is not null) = count(col.name),
+            false
         )
     from
         unnest(filters) f
-        join unnest(columns) col
+        left join unnest(columns) col
             on f.column_name = col.name;
-$_$;
+$$;
 
 
 --
@@ -2018,7 +2503,48 @@ begin
             if coalesce(jsonb_array_length(in_val), 0) > 100 then
                 raise exception 'too many values for `in` filter. Maximum 100';
             end if;
+        elsif filter.op = 'is'::realtime.equality_op then
+            -- `is` requires a keyword RHS rather than a typed literal
+            if filter.value not in ('null', 'true', 'false', 'unknown') then
+                raise exception 'invalid value for is filter: must be null, true, false, or unknown';
+            end if;
+            -- IS NULL works for any type, but IS TRUE/FALSE/UNKNOWN require a boolean
+            -- operand. Reject the non-null keywords on non-boolean columns here so they
+            -- don't abort apply_rls at WAL time.
+            if filter.value <> 'null' and col_type <> 'boolean'::regtype then
+                raise exception 'is % filter requires a boolean column, got %', filter.value, col_type::text;
+            end if;
+        elsif filter.op in ('like'::realtime.equality_op, 'ilike'::realtime.equality_op) then
+            -- like/ilike apply the text pattern operator (~~); reject column types that
+            -- have no such operator instead of failing at WAL time
+            if not exists (
+                select 1 from pg_catalog.pg_operator
+                where oprname = '~~' and oprleft = col_type
+            ) then
+                raise exception 'operator % requires a text-compatible column type, got %', filter.op::text, col_type::text;
+            end if;
+        elsif filter.op in ('match'::realtime.equality_op, 'imatch'::realtime.equality_op) then
+            -- match/imatch apply the regex operators ~ / ~*; reject column types that have
+            -- no such operator (e.g. integer) instead of failing at WAL time, mirroring the
+            -- like/ilike guard above.
+            if not exists (
+                select 1 from pg_catalog.pg_operator
+                where oprname = case when filter.op = 'imatch'::realtime.equality_op then '~*' else '~' end
+                  and oprleft = col_type
+                  and oprright = col_type
+                  and oprresult = 'boolean'::regtype
+            ) then
+                raise exception 'operator % requires a text-compatible column type, got %', filter.op::text, col_type::text;
+            end if;
+            -- validate the regex eagerly so a bad pattern is rejected here, not inside
+            -- apply_rls where it would abort the WAL stream for the entity
+            begin
+                perform '' ~ filter.value;
+            exception when others then
+                raise exception 'invalid regular expression for % filter: %', filter.op::text, sqlerrm;
+            end;
         else
+            -- eq/neq/lt/lte/gt/gte: value must be coercable to the type
             perform realtime.cast(filter.value, col_type);
         end if;
     end loop;
@@ -2031,8 +2557,10 @@ begin
         end loop;
     end if;
 
+    -- Apply consistent order to filters so the unique constraint can't be tricked by a
+    -- different filter order. negate is part of the sort key.
     new.filters = coalesce(
-        array_agg(f order by f.column_name, f.op, f.value),
+        array_agg(f order by f.column_name, f.op, f.value, f.negate),
         '{}'
     ) from unnest(new.filters) f;
 
@@ -3683,6 +4211,66 @@ COMMENT ON COLUMN public.agent_personas.persona_prompt IS 'System prompt sent to
 
 
 --
+-- Name: ai_insight_budget; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_insight_budget (
+    budget_day date NOT NULL,
+    gen_count integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: ai_insight_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_insight_cache (
+    id bigint NOT NULL,
+    scope text NOT NULL,
+    headline text NOT NULL,
+    bullets jsonb NOT NULL,
+    sentiment text NOT NULL,
+    article_count integer DEFAULT 0 NOT NULL,
+    inputset_id text NOT NULL,
+    prompt_version integer DEFAULT 1 NOT NULL,
+    ai_model text NOT NULL,
+    trigger_reason text,
+    generated_at timestamp with time zone DEFAULT now() NOT NULL,
+    close_cycle timestamp with time zone NOT NULL,
+    soft_expires_at timestamp with time zone NOT NULL,
+    hard_expires_at timestamp with time zone NOT NULL,
+    price_move jsonb,
+    sources jsonb,
+    CONSTRAINT ai_insight_article_count_check CHECK ((article_count >= 0)),
+    CONSTRAINT ai_insight_bullets_check CHECK (((jsonb_typeof(bullets) = 'array'::text) AND ((jsonb_array_length(bullets) >= 2) AND (jsonb_array_length(bullets) <= 5)))),
+    CONSTRAINT ai_insight_expiry_order_check CHECK ((soft_expires_at <= hard_expires_at)),
+    CONSTRAINT ai_insight_headline_check CHECK (((char_length(headline) >= 1) AND (char_length(headline) <= 240))),
+    CONSTRAINT ai_insight_scope_check CHECK (((char_length(scope) >= 1) AND (char_length(scope) <= 32))),
+    CONSTRAINT ai_insight_sentiment_check CHECK ((lower(sentiment) = ANY (ARRAY['bullish'::text, 'bearish'::text, 'neutral'::text])))
+);
+
+
+--
+-- Name: ai_insight_cache_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.ai_insight_cache_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: ai_insight_cache_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.ai_insight_cache_id_seq OWNED BY public.ai_insight_cache.id;
+
+
+--
 -- Name: article_chunks; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3860,7 +4448,10 @@ CREATE TABLE public.chat_sessions (
     message_count integer DEFAULT 0 NOT NULL,
     is_saved boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    last_message_at timestamp with time zone DEFAULT now() NOT NULL
+    last_message_at timestamp with time zone DEFAULT now() NOT NULL,
+    context_type text,
+    reference_id text,
+    context_snapshot text
 );
 
 
@@ -3876,6 +4467,40 @@ COMMENT ON TABLE public.chat_sessions IS 'AI chat sessions. Types: BOOK, CONCEPT
 --
 
 COMMENT ON COLUMN public.chat_sessions.stock_id IS 'Ticker symbol if chat is about a specific stock';
+
+
+--
+-- Name: COLUMN chat_sessions.context_type; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_sessions.context_type IS 'Screen the chat is grounded on (ChatContextType): TICKER_REPORT, STOCK, ETF, CRYPTO, INDEX, COMMODITY, MONEY_MOVES_ARTICLE, JOURNEY_LESSON, BOOK, NONE. NULL for legacy/general chats.';
+
+
+--
+-- Name: COLUMN chat_sessions.reference_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_sessions.reference_id IS 'Identifier the ChatContextResolver fetches by: ticker, "TICKER|persona" (reports), article slug, book curriculum order, etc. NULL when context_type is NONE/absent.';
+
+
+--
+-- Name: COLUMN chat_sessions.context_snapshot; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_sessions.context_snapshot IS 'Last on-screen grounding snapshot iOS sent (SendChatMessageRequest.context), persisted so a history reopen (where iOS sends no context) can replay the exact data the user saw. Written best-effort by the chat endpoints; NULL for legacy/general chats and any turn that never carried a client snapshot.';
+
+
+--
+-- Name: chat_usage_budget; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_usage_budget (
+    user_id uuid NOT NULL,
+    budget_day date NOT NULL,
+    turn_count integer DEFAULT 0 NOT NULL,
+    token_count bigint DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
 
 
 --
@@ -3970,6 +4595,40 @@ CREATE TABLE public.competitor_intel_cache (
 
 
 --
+-- Name: credit_transactions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.credit_transactions (
+    id bigint NOT NULL,
+    user_id uuid NOT NULL,
+    delta integer NOT NULL,
+    reason text NOT NULL,
+    ref_id text,
+    balance_after integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: credit_transactions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.credit_transactions_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: credit_transactions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.credit_transactions_id_seq OWNED BY public.credit_transactions.id;
+
+
+--
 -- Name: crypto_coin_id_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4047,6 +4706,53 @@ COMMENT ON COLUMN public.daily_briefings.priority IS 'Higher priority items appe
 
 
 --
+-- Name: device_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.device_tokens (
+    id bigint NOT NULL,
+    user_id uuid NOT NULL,
+    token text NOT NULL,
+    platform text DEFAULT 'ios'::text NOT NULL,
+    environment text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: device_tokens_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.device_tokens_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: device_tokens_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.device_tokens_id_seq OWNED BY public.device_tokens.id;
+
+
+--
+-- Name: earnings_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.earnings_cache (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ticker text NOT NULL,
+    response_json jsonb NOT NULL,
+    cached_at timestamp with time zone DEFAULT now() NOT NULL,
+    next_earnings_date text
+);
+
+
+--
 -- Name: etf_detail_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4119,6 +4825,19 @@ CREATE TABLE public.geopolitical_macro_cache (
     model_version text,
     computed_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL
+);
+
+
+--
+-- Name: growth_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.growth_cache (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ticker text NOT NULL,
+    response_json jsonb NOT NULL,
+    cached_at timestamp with time zone DEFAULT now() NOT NULL,
+    next_earnings_date text
 );
 
 
@@ -4623,6 +5342,21 @@ COMMENT ON COLUMN public.news_articles.key_takeaways IS 'JSONB array: [{index, t
 
 
 --
+-- Name: plan_credits; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.plan_credits (
+    tier public.user_tier NOT NULL,
+    monthly_credits integer NOT NULL,
+    price_cents integer DEFAULT 0 NOT NULL,
+    display_name text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT plan_credits_monthly_nonneg CHECK ((monthly_credits >= 0)),
+    CONSTRAINT plan_credits_price_nonneg CHECK ((price_cents >= 0))
+);
+
+
+--
 -- Name: portfolio_holdings; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4734,7 +5468,9 @@ CREATE TABLE public.price_catalyst_cache (
     sources jsonb DEFAULT '[]'::jsonb NOT NULL,
     model_version text,
     computed_at timestamp with time zone DEFAULT now() NOT NULL,
-    expires_at timestamp with time zone NOT NULL
+    expires_at timestamp with time zone NOT NULL,
+    window_label text,
+    change_pct double precision
 );
 
 
@@ -5019,6 +5755,23 @@ CREATE TABLE public.stock_fundamentals_cache (
 
 
 --
+-- Name: subscriptions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.subscriptions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    tier public.user_tier DEFAULT 'free'::public.user_tier NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    store text,
+    original_transaction_id text,
+    current_period_end timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: ticker_data_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5066,6 +5819,119 @@ CREATE TABLE public.ticker_report_cache (
     ticker_report_data jsonb NOT NULL,
     cached_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: ticker_volatility_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ticker_volatility_cache (
+    ticker text NOT NULL,
+    sigma_daily double precision,
+    sample_size integer DEFAULT 0 NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL
+);
+
+
+--
+-- Name: trending_themes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.trending_themes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    slug text NOT NULL,
+    category text NOT NULL,
+    title text NOT NULL,
+    image_url text,
+    accent_hex text DEFAULT '22D3EE'::text NOT NULL,
+    tickers text[] DEFAULT '{}'::text[] NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    sort_order integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    subtitle text
+);
+
+
+--
+-- Name: TABLE trending_themes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.trending_themes IS 'Server-driven Home "Emerging Frontiers" theme cards. Edit rows to change cards/tickers/images with no app release.';
+
+
+--
+-- Name: COLUMN trending_themes.category; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.category IS 'Editorial grouping (the "boring name", e.g. "AI & Semiconductors"). Not sent to the client.';
+
+
+--
+-- Name: COLUMN trending_themes.accent_hex; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.accent_hex IS 'Card accent colour as a 6-digit hex WITHOUT a leading #, e.g. "22D3EE". iOS decodes via Color(hex:).';
+
+
+--
+-- Name: COLUMN trending_themes.tickers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.tickers IS 'Curated constituents. Backend serves ticker_count = cardinality(tickers) and avg daily % change; not sent verbatim.';
+
+
+--
+-- Name: COLUMN trending_themes.subtitle; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.subtitle IS 'Editorial tagline shown under the title on the theme detail hero. Editable in Supabase; no app release.';
+
+
+--
+-- Name: updates_insight_state; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.updates_insight_state (
+    id bigint NOT NULL,
+    scope text NOT NULL,
+    watch_count integer DEFAULT 0 NOT NULL,
+    last_inputset_id text,
+    last_price_band text,
+    last_trigger_reason text,
+    last_skip_reason text,
+    last_evaluated_at timestamp with time zone,
+    last_generated_at timestamp with time zone,
+    close_cycle timestamp with time zone,
+    regen_day date,
+    regen_count_today integer DEFAULT 0 NOT NULL,
+    attempts_today integer DEFAULT 0 NOT NULL,
+    last_failure_at timestamp with time zone,
+    last_error text,
+    claim_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT updates_insight_state_scope_check CHECK (((char_length(scope) >= 1) AND (char_length(scope) <= 32)))
+);
+
+
+--
+-- Name: updates_insight_state_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.updates_insight_state_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: updates_insight_state_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.updates_insight_state_id_seq OWNED BY public.updates_insight_state.id;
 
 
 --
@@ -5193,6 +6059,17 @@ CREATE TABLE public.user_lesson_progress (
     lesson_id uuid NOT NULL,
     status public.lesson_status DEFAULT 'notStarted'::public.lesson_status NOT NULL,
     completed_at timestamp with time zone
+);
+
+
+--
+-- Name: user_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_settings (
+    user_id uuid NOT NULL,
+    preferences jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -5538,6 +6415,7 @@ CREATE TABLE public.whales (
     associated_ticker text,
     return_source text DEFAULT ''::text,
     return_label text DEFAULT ''::text,
+    firm_name text,
     CONSTRAINT whales_followers_count_nonneg CHECK ((followers_count >= 0)),
     CONSTRAINT whales_portfolio_value_nonneg CHECK (((portfolio_value IS NULL) OR (portfolio_value >= (0)::numeric)))
 );
@@ -5583,6 +6461,13 @@ COMMENT ON COLUMN public.whales.fmp_name IS 'Exact name for FMP congressional tr
 --
 
 COMMENT ON COLUMN public.whales.last_hydrated_at IS 'Timestamp of last successful hydration run';
+
+
+--
+-- Name: COLUMN whales.firm_name; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.whales.firm_name IS 'Firm a person-fronted whale runs (e.g. "Bridgewater Associates" for Ray Dalio). NULL for institutions/politicians.';
 
 
 --
@@ -5809,10 +6694,31 @@ ALTER TABLE ONLY auth.refresh_tokens ALTER COLUMN id SET DEFAULT nextval('auth.r
 
 
 --
+-- Name: ai_insight_cache id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_insight_cache ALTER COLUMN id SET DEFAULT nextval('public.ai_insight_cache_id_seq'::regclass);
+
+
+--
 -- Name: competitor_intel_audit id; Type: DEFAULT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.competitor_intel_audit ALTER COLUMN id SET DEFAULT nextval('public.competitor_intel_audit_id_seq'::regclass);
+
+
+--
+-- Name: credit_transactions id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credit_transactions ALTER COLUMN id SET DEFAULT nextval('public.credit_transactions_id_seq'::regclass);
+
+
+--
+-- Name: device_tokens id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_tokens ALTER COLUMN id SET DEFAULT nextval('public.device_tokens_id_seq'::regclass);
 
 
 --
@@ -5869,6 +6775,13 @@ ALTER TABLE ONLY public.price_catalyst_audit ALTER COLUMN id SET DEFAULT nextval
 --
 
 ALTER TABLE ONLY public.signals_cache ALTER COLUMN id SET DEFAULT nextval('public.signals_cache_id_seq'::regclass);
+
+
+--
+-- Name: updates_insight_state id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.updates_insight_state ALTER COLUMN id SET DEFAULT nextval('public.updates_insight_state_id_seq'::regclass);
 
 
 --
@@ -6166,6 +7079,30 @@ ALTER TABLE ONLY public.agent_personas
 
 
 --
+-- Name: ai_insight_budget ai_insight_budget_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_insight_budget
+    ADD CONSTRAINT ai_insight_budget_pkey PRIMARY KEY (budget_day);
+
+
+--
+-- Name: ai_insight_cache ai_insight_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_insight_cache
+    ADD CONSTRAINT ai_insight_cache_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ai_insight_cache ai_insight_cache_scope_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_insight_cache
+    ADD CONSTRAINT ai_insight_cache_scope_key UNIQUE (scope);
+
+
+--
 -- Name: article_chunks article_chunks_article_id_chunk_index_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6254,6 +7191,14 @@ ALTER TABLE ONLY public.chat_sessions
 
 
 --
+-- Name: chat_usage_budget chat_usage_budget_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_usage_budget
+    ADD CONSTRAINT chat_usage_budget_pkey PRIMARY KEY (user_id, budget_day);
+
+
+--
 -- Name: company_filing_chunks company_filing_chunks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6283,6 +7228,14 @@ ALTER TABLE ONLY public.competitor_intel_audit
 
 ALTER TABLE ONLY public.competitor_intel_cache
     ADD CONSTRAINT competitor_intel_cache_pkey PRIMARY KEY (ticker);
+
+
+--
+-- Name: credit_transactions credit_transactions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credit_transactions
+    ADD CONSTRAINT credit_transactions_pkey PRIMARY KEY (id);
 
 
 --
@@ -6334,6 +7287,30 @@ ALTER TABLE ONLY public.daily_briefings
 
 
 --
+-- Name: device_tokens device_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_tokens
+    ADD CONSTRAINT device_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: device_tokens device_tokens_token_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_tokens
+    ADD CONSTRAINT device_tokens_token_key UNIQUE (token);
+
+
+--
+-- Name: earnings_cache earnings_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.earnings_cache
+    ADD CONSTRAINT earnings_cache_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: etf_detail_cache etf_detail_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6379,6 +7356,14 @@ ALTER TABLE ONLY public.geopolitical_macro_audit
 
 ALTER TABLE ONLY public.geopolitical_macro_cache
     ADD CONSTRAINT geopolitical_macro_cache_pkey PRIMARY KEY (scope);
+
+
+--
+-- Name: growth_cache growth_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.growth_cache
+    ADD CONSTRAINT growth_cache_pkey PRIMARY KEY (id);
 
 
 --
@@ -6563,6 +7548,14 @@ ALTER TABLE ONLY public.news_articles
 
 ALTER TABLE ONLY public.news_articles
     ADD CONSTRAINT news_articles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: plan_credits plan_credits_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.plan_credits
+    ADD CONSTRAINT plan_credits_pkey PRIMARY KEY (tier);
 
 
 --
@@ -6782,6 +7775,22 @@ ALTER TABLE ONLY public.stock_fundamentals_cache
 
 
 --
+-- Name: subscriptions subscriptions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscriptions
+    ADD CONSTRAINT subscriptions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: subscriptions subscriptions_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscriptions
+    ADD CONSTRAINT subscriptions_user_id_key UNIQUE (user_id);
+
+
+--
 -- Name: ticker_data_cache ticker_data_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6811,6 +7820,46 @@ ALTER TABLE ONLY public.ticker_news_cache
 
 ALTER TABLE ONLY public.ticker_report_cache
     ADD CONSTRAINT ticker_report_cache_pkey PRIMARY KEY (ticker, persona);
+
+
+--
+-- Name: ticker_volatility_cache ticker_volatility_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ticker_volatility_cache
+    ADD CONSTRAINT ticker_volatility_cache_pkey PRIMARY KEY (ticker);
+
+
+--
+-- Name: trending_themes trending_themes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trending_themes
+    ADD CONSTRAINT trending_themes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: trending_themes trending_themes_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trending_themes
+    ADD CONSTRAINT trending_themes_slug_key UNIQUE (slug);
+
+
+--
+-- Name: updates_insight_state updates_insight_state_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.updates_insight_state
+    ADD CONSTRAINT updates_insight_state_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: updates_insight_state updates_insight_state_scope_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.updates_insight_state
+    ADD CONSTRAINT updates_insight_state_scope_key UNIQUE (scope);
 
 
 --
@@ -6899,6 +7948,14 @@ ALTER TABLE ONLY public.user_lesson_progress
 
 ALTER TABLE ONLY public.user_lesson_progress
     ADD CONSTRAINT user_lesson_progress_user_id_lesson_id_key UNIQUE (user_id, lesson_id);
+
+
+--
+-- Name: user_settings user_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_settings
+    ADD CONSTRAINT user_settings_pkey PRIMARY KEY (user_id);
 
 
 --
@@ -7564,6 +8621,13 @@ CREATE INDEX idx_agent_personas_key ON public.agent_personas USING btree (key);
 
 
 --
+-- Name: idx_ai_insight_cache_expiry; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ai_insight_cache_expiry ON public.ai_insight_cache USING btree (hard_expires_at);
+
+
+--
 -- Name: idx_article_chunks_article; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7662,6 +8726,13 @@ CREATE INDEX idx_chat_sessions_user ON public.chat_sessions USING btree (user_id
 
 
 --
+-- Name: idx_chat_usage_budget_day; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chat_usage_budget_day ON public.chat_usage_budget USING btree (budget_day);
+
+
+--
 -- Name: idx_competitor_intel_audit_computed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7690,6 +8761,13 @@ CREATE INDEX idx_competitor_intel_cache_expires ON public.competitor_intel_cache
 
 
 --
+-- Name: idx_credit_transactions_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_credit_transactions_user ON public.credit_transactions USING btree (user_id, created_at DESC);
+
+
+--
 -- Name: idx_crypto_fundamentals_cache_symbol; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7708,6 +8786,20 @@ CREATE INDEX idx_crypto_snapshots_symbol ON public.crypto_snapshots USING btree 
 --
 
 CREATE INDEX idx_daily_briefings_active ON public.daily_briefings USING btree (is_active, priority DESC) WHERE (is_active = true);
+
+
+--
+-- Name: idx_device_tokens_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_device_tokens_user ON public.device_tokens USING btree (user_id);
+
+
+--
+-- Name: idx_earnings_cache_ticker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_earnings_cache_ticker ON public.earnings_cache USING btree (ticker);
 
 
 --
@@ -7778,6 +8870,13 @@ CREATE INDEX idx_geopolitical_macro_audit_run_id ON public.geopolitical_macro_au
 --
 
 CREATE INDEX idx_geopolitical_macro_cache_expires ON public.geopolitical_macro_cache USING btree (expires_at);
+
+
+--
+-- Name: idx_growth_cache_ticker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_growth_cache_ticker ON public.growth_cache USING btree (ticker);
 
 
 --
@@ -8222,6 +9321,20 @@ CREATE INDEX idx_study_schedules_user ON public.user_study_schedules USING btree
 
 
 --
+-- Name: idx_subscriptions_expiry; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_subscriptions_expiry ON public.subscriptions USING btree (status, current_period_end);
+
+
+--
+-- Name: idx_subscriptions_txn; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_subscriptions_txn ON public.subscriptions USING btree (original_transaction_id);
+
+
+--
 -- Name: idx_ticker_data_cache_cached_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8247,6 +9360,41 @@ CREATE INDEX idx_ticker_news_cache_ticker_expires ON public.ticker_news_cache US
 --
 
 CREATE INDEX idx_ticker_report_cache_cached_at ON public.ticker_report_cache USING btree (cached_at DESC);
+
+
+--
+-- Name: idx_ticker_volatility_cache_expiry; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ticker_volatility_cache_expiry ON public.ticker_volatility_cache USING btree (expires_at);
+
+
+--
+-- Name: idx_trending_themes_active_sort; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_trending_themes_active_sort ON public.trending_themes USING btree (is_active, sort_order);
+
+
+--
+-- Name: idx_trending_themes_slug; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_trending_themes_slug ON public.trending_themes USING btree (slug);
+
+
+--
+-- Name: idx_updates_insight_state_due; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_updates_insight_state_due ON public.updates_insight_state USING btree (last_evaluated_at) WHERE (claim_at IS NULL);
+
+
+--
+-- Name: idx_updates_insight_state_watch; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_updates_insight_state_watch ON public.updates_insight_state USING btree (watch_count DESC);
 
 
 --
@@ -8404,13 +9552,6 @@ CREATE INDEX idx_whales_category ON public.whales USING btree (category);
 
 
 --
--- Name: idx_whales_cik; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_whales_cik ON public.whales USING btree (cik) WHERE (cik IS NOT NULL);
-
-
---
 -- Name: idx_whales_last_hydrated_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8429,6 +9570,13 @@ CREATE INDEX idx_whales_name ON public.whales USING btree (name);
 --
 
 CREATE UNIQUE INDEX uq_whale_trade_groups_whale_date ON public.whale_trade_groups USING btree (whale_id, date);
+
+
+--
+-- Name: uq_whales_cik; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_whales_cik ON public.whales USING btree (cik) WHERE (cik IS NOT NULL);
 
 
 --
@@ -8790,6 +9938,14 @@ ALTER TABLE ONLY public.chat_sessions
 
 
 --
+-- Name: device_tokens device_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_tokens
+    ADD CONSTRAINT device_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: portfolio_holdings portfolio_holdings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8822,6 +9978,14 @@ ALTER TABLE ONLY public.research_reports
 
 
 --
+-- Name: subscriptions subscriptions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscriptions
+    ADD CONSTRAINT subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: user_bookmarks user_bookmarks_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8851,6 +10015,14 @@ ALTER TABLE ONLY public.user_lesson_progress
 
 ALTER TABLE ONLY public.user_lesson_progress
     ADD CONSTRAINT user_lesson_progress_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_settings user_settings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_settings
+    ADD CONSTRAINT user_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -9108,13 +10280,6 @@ CREATE POLICY "Allow service_role full access" ON public.sector_benchmarks TO se
 
 
 --
--- Name: ticker_data_cache Service role full access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access" ON public.ticker_data_cache USING (true) WITH CHECK (true);
-
-
---
 -- Name: portfolio_holdings Service role full access on holdings; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -9200,6 +10365,39 @@ CREATE POLICY "Users manage own portfolios" ON public.portfolios USING ((auth.ui
 --
 
 ALTER TABLE public.agent_personas ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ai_insight_budget; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.ai_insight_budget ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ai_insight_budget ai_insight_budget_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ai_insight_budget_service_all ON public.ai_insight_budget TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: ai_insight_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.ai_insight_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ai_insight_cache ai_insight_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ai_insight_cache_public_read ON public.ai_insight_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: ai_insight_cache ai_insight_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ai_insight_cache_service_write ON public.ai_insight_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: article_chunks; Type: ROW SECURITY; Schema: public; Owner: -
@@ -9381,6 +10579,19 @@ CREATE POLICY chat_sessions_update_own ON public.chat_sessions FOR UPDATE USING 
 
 
 --
+-- Name: chat_usage_budget; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.chat_usage_budget ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: chat_usage_budget chat_usage_budget_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_usage_budget_service_all ON public.chat_usage_budget TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: company_filing_chunks; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -9444,6 +10655,26 @@ CREATE POLICY competitor_intel_cache_public_read ON public.competitor_intel_cach
 --
 
 CREATE POLICY competitor_intel_cache_service_write ON public.competitor_intel_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: credit_transactions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.credit_transactions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: credit_transactions credit_transactions_select_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY credit_transactions_select_own ON public.credit_transactions FOR SELECT TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: credit_transactions credit_transactions_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY credit_transactions_service_all ON public.credit_transactions TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -9541,6 +10772,60 @@ CREATE POLICY daily_briefings_service_all ON public.daily_briefings TO service_r
 
 
 --
+-- Name: device_tokens; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.device_tokens ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: device_tokens device_tokens_delete_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY device_tokens_delete_own ON public.device_tokens FOR DELETE TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: device_tokens device_tokens_insert_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY device_tokens_insert_own ON public.device_tokens FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
+
+
+--
+-- Name: device_tokens device_tokens_select_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY device_tokens_select_own ON public.device_tokens FOR SELECT TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: device_tokens device_tokens_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY device_tokens_service_all ON public.device_tokens TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: device_tokens device_tokens_update_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY device_tokens_update_own ON public.device_tokens FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: earnings_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.earnings_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: earnings_cache earnings_cache_service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY earnings_cache_service_role_all ON public.earnings_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: etf_detail_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -9625,6 +10910,19 @@ CREATE POLICY geopolitical_macro_cache_public_read ON public.geopolitical_macro_
 --
 
 CREATE POLICY geopolitical_macro_cache_service_write ON public.geopolitical_macro_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: growth_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.growth_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: growth_cache growth_cache_service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY growth_cache_service_role_all ON public.growth_cache TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -9982,6 +11280,26 @@ CREATE POLICY personas_service_all ON public.agent_personas USING ((auth.role() 
 
 
 --
+-- Name: plan_credits; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.plan_credits ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: plan_credits plan_credits_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY plan_credits_public_read ON public.plan_credits FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: plan_credits plan_credits_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY plan_credits_service_all ON public.plan_credits TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: portfolio_holdings; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -10283,10 +11601,37 @@ CREATE POLICY study_schedules_update_own ON public.user_study_schedules FOR UPDA
 
 
 --
+-- Name: subscriptions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.subscriptions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: subscriptions subscriptions_select_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY subscriptions_select_own ON public.subscriptions FOR SELECT TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: subscriptions subscriptions_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY subscriptions_service_all ON public.subscriptions TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: ticker_data_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.ticker_data_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ticker_data_cache ticker_data_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ticker_data_cache_service_all ON public.ticker_data_cache TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: ticker_news_cache; Type: ROW SECURITY; Schema: public; Owner: -
@@ -10319,6 +11664,59 @@ CREATE POLICY ticker_report_cache_public_read ON public.ticker_report_cache FOR 
 --
 
 CREATE POLICY ticker_report_cache_service_write ON public.ticker_report_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: ticker_volatility_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.ticker_volatility_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ticker_volatility_cache ticker_volatility_cache_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ticker_volatility_cache_public_read ON public.ticker_volatility_cache FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: ticker_volatility_cache ticker_volatility_cache_service_write; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY ticker_volatility_cache_service_write ON public.ticker_volatility_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: trending_themes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.trending_themes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: trending_themes trending_themes_select_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY trending_themes_select_all ON public.trending_themes FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: trending_themes trending_themes_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY trending_themes_service_all ON public.trending_themes TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: updates_insight_state; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.updates_insight_state ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: updates_insight_state updates_insight_state_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY updates_insight_state_service_all ON public.updates_insight_state TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -10420,6 +11818,40 @@ CREATE POLICY user_learn_progress_update_own ON public.user_learn_progress FOR U
 --
 
 ALTER TABLE public.user_lesson_progress ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_settings; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_settings ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_settings user_settings_insert_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_settings_insert_own ON public.user_settings FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
+
+
+--
+-- Name: user_settings user_settings_select_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_settings_select_own ON public.user_settings FOR SELECT TO authenticated USING ((auth.uid() = user_id));
+
+
+--
+-- Name: user_settings user_settings_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_settings_service_all ON public.user_settings TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: user_settings user_settings_update_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_settings_update_own ON public.user_settings FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
+
 
 --
 -- Name: user_study_schedules; Type: ROW SECURITY; Schema: public; Owner: -
@@ -10728,6 +12160,20 @@ ALTER TABLE storage.buckets_analytics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage.buckets_vectors ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: objects home_theme_media_public_read; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY home_theme_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'home-theme-media'::text));
+
+
+--
+-- Name: objects home_theme_media_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY home_theme_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'home-theme-media'::text)) WITH CHECK ((bucket_id = 'home-theme-media'::text));
+
+
+--
 -- Name: objects journey_media_public_read; Type: POLICY; Schema: storage; Owner: -
 --
 
@@ -10855,5 +12301,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 3Py1YesKnc7NOq9mbWAsYIblWchxSMADSfSnqSeDVbw50oj3sTeI0Y7NmYsNgig
+\unrestrict JORd88cKqxIvAW1M5YSZvyD6GmtQ4iQjM1gKeOs1aMhKoSGNdCHTQjMzX7rdpZQ
 

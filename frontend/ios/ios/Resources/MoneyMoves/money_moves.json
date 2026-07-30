@@ -8,16 +8,12 @@
       "cardSubtitle": "Where DeFi, AI, and embedded finance are remaking how money moves.",
       "category": "blueprints",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 2,
-      "viewCount": "4.2M",
-      "learnerCount": "4.2M",
       "sortOrder": 0,
-      "commentCount": 124,
       "publishedDaysAgo": 3,
       "tagLabel": "MUST READ",
       "isFeatured": true,
@@ -335,7 +331,8 @@
           "trendValue": "89%"
         }
       ],
-      "audioDurationSeconds": 156
+      "audioDurationSeconds": 156,
+      "viewCount": ""
     },
     {
       "slug": "how-amazon-built-its-moat",
@@ -343,16 +340,12 @@
       "subtitle": "Relentless reinvestment, a self-reinforcing flywheel, and a cloud empire turned an online bookstore into one of the widest moats in business.",
       "category": "blueprints",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 6,
-      "viewCount": "3.1M",
-      "learnerCount": "2.1k",
       "sortOrder": 0,
-      "commentCount": 86,
       "publishedDaysAgo": 5,
       "tagLabel": "CASE STUDY",
       "isFeatured": false,
@@ -924,24 +917,6 @@
           "trend": "up"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Daniel Reyes",
-          "content": "The flywheel section finally made AWS-funds-retail click for me.",
-          "likeCount": 31,
-          "replyCount": 4,
-          "isVerified": false,
-          "hoursAgo": 6
-        },
-        {
-          "authorName": "Priya Nair",
-          "content": "Great reminder that 'stacked moats' beat any single advantage. Would love a Costco deep dive next.",
-          "likeCount": 22,
-          "replyCount": 2,
-          "isVerified": true,
-          "hoursAgo": 14
-        }
-      ],
       "relatedArticles": [
         {
           "title": "The Future of Digital Finance",
@@ -978,7 +953,8 @@
         }
       ],
       "cardSubtitle": "The strategy behind unstoppable dominance.",
-      "audioDurationSeconds": 439
+      "audioDurationSeconds": 439,
+      "viewCount": ""
     },
     {
       "slug": "warren-buffetts-early-days",
@@ -986,16 +962,12 @@
       "subtitle": "From a paperboy with a pinball empire to the Buffett Partnership — how the world's greatest investor learned his craft long before he was famous.",
       "category": "blueprints",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 6,
-      "viewCount": "2.4M",
-      "learnerCount": "1.8k",
       "sortOrder": 1,
-      "commentCount": 64,
       "publishedDaysAgo": 8,
       "tagLabel": "ORIGIN STORY",
       "isFeatured": false,
@@ -1494,24 +1466,6 @@
           "trend": "up"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Marcus Webb",
-          "content": "The 'temperament beats IQ' part hit hard. Good reminder that the edge is patience, not genius.",
-          "likeCount": 27,
-          "replyCount": 3,
-          "isVerified": false,
-          "hoursAgo": 7
-        },
-        {
-          "authorName": "Elena Sokolova",
-          "content": "Loved the cigar-butt to wonderful-companies arc. Munger's influence is so underrated.",
-          "likeCount": 19,
-          "replyCount": 2,
-          "isVerified": true,
-          "hoursAgo": 15
-        }
-      ],
       "relatedArticles": [
         {
           "title": "How Amazon Built Its Moat",
@@ -1548,7 +1502,8 @@
         }
       ],
       "cardSubtitle": "The moves that built a fortune.",
-      "audioDurationSeconds": 420
+      "audioDurationSeconds": 420,
+      "viewCount": ""
     },
     {
       "slug": "apples-services-revolution",
@@ -1556,16 +1511,12 @@
       "subtitle": "How Apple stopped depending on the next iPhone and turned two billion devices into a recurring, high-margin annuity.",
       "category": "blueprints",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 4,
-      "viewCount": "2.0M",
-      "learnerCount": "1.6k",
       "sortOrder": 2,
-      "commentCount": 52,
       "publishedDaysAgo": 11,
       "tagLabel": "THE PIVOT",
       "isFeatured": false,
@@ -1927,24 +1878,6 @@
           "trend": "up"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Jordan Pike",
-          "content": "The margin mix point is the whole thesis. Same revenue, very different earnings power.",
-          "likeCount": 24,
-          "replyCount": 3,
-          "isVerified": false,
-          "hoursAgo": 9
-        },
-        {
-          "authorName": "Aisha Rahman",
-          "content": "Recurring revenue gets a premium multiple for a reason. Great breakdown of the pivot.",
-          "likeCount": 17,
-          "replyCount": 1,
-          "isVerified": true,
-          "hoursAgo": 20
-        }
-      ],
       "relatedArticles": [
         {
           "title": "How Amazon Built Its Moat",
@@ -1981,7 +1914,8 @@
         }
       ],
       "cardSubtitle": "How Apple transformed from hardware to ecosystem.",
-      "audioDurationSeconds": 276
+      "audioDurationSeconds": 276,
+      "viewCount": ""
     },
     {
       "slug": "costcos-membership-magic",
@@ -1990,16 +1924,12 @@
       "cardSubtitle": "The power of customer loyalty economics.",
       "category": "blueprints",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 5,
-      "viewCount": "1.7M",
-      "learnerCount": "1.2k",
       "sortOrder": 3,
-      "commentCount": 48,
       "publishedDaysAgo": 12,
       "tagLabel": "BLUEPRINT",
       "isFeatured": false,
@@ -2389,24 +2319,6 @@
           "trend": "neutral"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Hannah Cole",
-          "content": "Never thought about membership fees being the actual product. Brilliant breakdown.",
-          "likeCount": 26,
-          "replyCount": 3,
-          "isVerified": false,
-          "hoursAgo": 8
-        },
-        {
-          "authorName": "Diego Santos",
-          "content": "The 'aligned with the customer' point is the whole moat. Costco wants you to save.",
-          "likeCount": 18,
-          "replyCount": 1,
-          "isVerified": true,
-          "hoursAgo": 17
-        }
-      ],
       "relatedArticles": [
         {
           "title": "How Amazon Built Its Moat",
@@ -2442,7 +2354,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 343
+      "audioDurationSeconds": 343,
+      "viewCount": ""
     },
     {
       "slug": "the-fall-of-enron",
@@ -2451,16 +2364,12 @@
       "cardSubtitle": "Red flags every investor should know.",
       "category": "valueTraps",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 4,
-      "viewCount": "2.6M",
-      "learnerCount": "1.5k",
       "sortOrder": 4,
-      "commentCount": 71,
       "publishedDaysAgo": 12,
       "tagLabel": "ANATOMY OF A FRAUD",
       "isFeatured": false,
@@ -2825,24 +2734,6 @@
           "trend": "neutral"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Robert Klein",
-          "content": "Profit is an opinion, cash is a fact — framing it that way finally made accounting click.",
-          "likeCount": 33,
-          "replyCount": 5,
-          "isVerified": false,
-          "hoursAgo": 9
-        },
-        {
-          "authorName": "Sofia Marchetti",
-          "content": "The auditor going down with the company still amazes me. Conflicts everywhere.",
-          "likeCount": 21,
-          "replyCount": 2,
-          "isVerified": true,
-          "hoursAgo": 19
-        }
-      ],
       "relatedArticles": [
         {
           "title": "WeWork's Unraveling",
@@ -2878,7 +2769,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 305
+      "audioDurationSeconds": 305,
+      "viewCount": ""
     },
     {
       "slug": "netflix-vs-disney-plus",
@@ -2887,16 +2779,12 @@
       "cardSubtitle": "The streaming wars breakdown.",
       "category": "battles",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 4,
-      "viewCount": "2.3M",
-      "learnerCount": "2.3k",
       "sortOrder": 5,
-      "commentCount": 58,
       "publishedDaysAgo": 10,
       "tagLabel": "HEAD TO HEAD",
       "isFeatured": false,
@@ -3199,24 +3087,6 @@
           "trend": "up"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Tyler Brooks",
-          "content": "'Subscribers are vanity, profit per subscriber is sanity' — stealing that one.",
-          "likeCount": 29,
-          "replyCount": 4,
-          "isVerified": false,
-          "hoursAgo": 7
-        },
-        {
-          "authorName": "Mei Lin",
-          "content": "Disney's IP flywheel across parks and toys is so underrated in this debate.",
-          "likeCount": 16,
-          "replyCount": 2,
-          "isVerified": true,
-          "hoursAgo": 16
-        }
-      ],
       "relatedArticles": [
         {
           "title": "Tesla vs. Traditional Auto",
@@ -3252,7 +3122,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 273
+      "audioDurationSeconds": 273,
+      "viewCount": ""
     },
     {
       "slug": "tesla-vs-traditional-auto",
@@ -3261,16 +3132,12 @@
       "cardSubtitle": "Innovation meets industry giants.",
       "category": "battles",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 4,
-      "viewCount": "2.1M",
-      "learnerCount": "1.9k",
       "sortOrder": 6,
-      "commentCount": 63,
       "publishedDaysAgo": 9,
       "tagLabel": "DISRUPTOR VS INCUMBENTS",
       "isFeatured": false,
@@ -3553,24 +3420,6 @@
           "trend": "up"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Priya Desai",
-          "content": "The 'different scorecards' framing is exactly how I try to value disruptors now.",
-          "likeCount": 31,
-          "replyCount": 4,
-          "isVerified": false,
-          "hoursAgo": 8
-        },
-        {
-          "authorName": "Frank Mueller",
-          "content": "As an ex-auto guy: people massively underestimate how hard scaling production is.",
-          "likeCount": 24,
-          "replyCount": 3,
-          "isVerified": true,
-          "hoursAgo": 18
-        }
-      ],
       "relatedArticles": [
         {
           "title": "Netflix vs. Disney+",
@@ -3606,7 +3455,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 279
+      "audioDurationSeconds": 279,
+      "viewCount": ""
     },
     {
       "slug": "weworks-unraveling",
@@ -3615,16 +3465,12 @@
       "cardSubtitle": "When valuations don't match reality.",
       "category": "valueTraps",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 4,
-      "viewCount": "1.9M",
-      "learnerCount": "1.3k",
       "sortOrder": 7,
-      "commentCount": 54,
       "publishedDaysAgo": 11,
       "tagLabel": "THE UNRAVELING",
       "isFeatured": false,
@@ -3953,24 +3799,6 @@
           "trend": "neutral"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Grace Okafor",
-          "content": "The S-1 really is where the story meets the auditors. Wild how fast it unraveled.",
-          "likeCount": 28,
-          "replyCount": 3,
-          "isVerified": false,
-          "hoursAgo": 10
-        },
-        {
-          "authorName": "Lucas Bianchi",
-          "content": "Self-dealing plus super-voting shares should always be an instant red flag.",
-          "likeCount": 19,
-          "replyCount": 2,
-          "isVerified": true,
-          "hoursAgo": 21
-        }
-      ],
       "relatedArticles": [
         {
           "title": "The Fall of Enron",
@@ -4006,7 +3834,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 269
+      "audioDurationSeconds": 269,
+      "viewCount": ""
     },
     {
       "slug": "the-ftx-collapse",
@@ -4015,16 +3844,12 @@
       "cardSubtitle": "Crypto's biggest fraud unraveled.",
       "category": "valueTraps",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 3,
-      "viewCount": "2.8M",
-      "learnerCount": "3.2k",
       "sortOrder": 8,
-      "commentCount": 67,
       "publishedDaysAgo": 13,
       "tagLabel": "CAUTIONARY TALE",
       "isFeatured": false,
@@ -4305,24 +4130,6 @@
           "trend": "neutral"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Nadia Farouk",
-          "content": "'Not your keys, not your coins' hits different after reading this. Custody is everything.",
-          "likeCount": 35,
-          "replyCount": 6,
-          "isVerified": false,
-          "hoursAgo": 6
-        },
-        {
-          "authorName": "Owen Reilly",
-          "content": "Celebrity endorsements are not due diligence. Painful but necessary reminder.",
-          "likeCount": 22,
-          "replyCount": 2,
-          "isVerified": true,
-          "hoursAgo": 14
-        }
-      ],
       "relatedArticles": [
         {
           "title": "Theranos: Blood & Lies",
@@ -4358,7 +4165,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 241
+      "audioDurationSeconds": 241,
+      "viewCount": ""
     },
     {
       "slug": "theranos-blood-and-lies",
@@ -4367,16 +4175,12 @@
       "cardSubtitle": "The $9 billion medical fraud.",
       "category": "valueTraps",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 3,
-      "viewCount": "2.5M",
-      "learnerCount": "2.8k",
       "sortOrder": 9,
-      "commentCount": 61,
       "publishedDaysAgo": 12,
       "tagLabel": "RED FLAGS",
       "isFeatured": false,
@@ -4698,24 +4502,6 @@
           "trend": "neutral"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Anika Patel",
-          "content": "The board being all statesmen and no scientists is the detail that says it all.",
-          "likeCount": 30,
-          "replyCount": 4,
-          "isVerified": false,
-          "hoursAgo": 9
-        },
-        {
-          "authorName": "Carlos Mendez",
-          "content": "Whistleblowers > prestige. Independent verification should never be optional.",
-          "likeCount": 20,
-          "replyCount": 1,
-          "isVerified": true,
-          "hoursAgo": 20
-        }
-      ],
       "relatedArticles": [
         {
           "title": "The Fall of Enron",
@@ -4751,7 +4537,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 254
+      "audioDurationSeconds": 254,
+      "viewCount": ""
     },
     {
       "slug": "visa-vs-mastercard",
@@ -4760,16 +4547,12 @@
       "cardSubtitle": "The payment network duopoly.",
       "category": "battles",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 3,
-      "viewCount": "1.7M",
-      "learnerCount": "1.7k",
       "sortOrder": 10,
-      "commentCount": 49,
       "publishedDaysAgo": 10,
       "tagLabel": "THE DUOPOLY",
       "isFeatured": false,
@@ -5050,24 +4833,6 @@
           "trend": "up"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Ben Whitaker",
-          "content": "Toll-booth economics is my favorite mental model and this nails why.",
-          "likeCount": 27,
-          "replyCount": 3,
-          "isVerified": false,
-          "hoursAgo": 8
-        },
-        {
-          "authorName": "Yuki Tanaka",
-          "content": "People always confuse the networks with the banks. Great clarification.",
-          "likeCount": 15,
-          "replyCount": 1,
-          "isVerified": true,
-          "hoursAgo": 17
-        }
-      ],
       "relatedArticles": [
         {
           "title": "Google vs. Microsoft: AI Wars",
@@ -5103,7 +4868,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 245
+      "audioDurationSeconds": 245,
+      "viewCount": ""
     },
     {
       "slug": "google-vs-microsoft-ai-wars",
@@ -5112,16 +4878,12 @@
       "cardSubtitle": "The battle for AI supremacy.",
       "category": "battles",
       "author": {
-        "name": "The Alpha",
-        "title": "Investment Research",
-        "isVerified": true,
-        "followerCount": "45.2k"
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
       },
       "readTimeMinutes": 3,
-      "viewCount": "2.4M",
-      "learnerCount": "2.5k",
       "sortOrder": 11,
-      "commentCount": 72,
       "publishedDaysAgo": 8,
       "tagLabel": "AI ARMS RACE",
       "isFeatured": false,
@@ -5419,24 +5181,6 @@
           "trend": "up"
         }
       ],
-      "comments": [
-        {
-          "authorName": "Ravi Anand",
-          "content": "Offense vs defense is the perfect lens. Microsoft has so much less to lose here.",
-          "likeCount": 34,
-          "replyCount": 5,
-          "isVerified": false,
-          "hoursAgo": 7
-        },
-        {
-          "authorName": "Helena Vogt",
-          "content": "The cloud being the real prize, not the chatbot, is the insight most people miss.",
-          "likeCount": 23,
-          "replyCount": 2,
-          "isVerified": true,
-          "hoursAgo": 15
-        }
-      ],
       "relatedArticles": [
         {
           "title": "Tesla vs. Traditional Auto",
@@ -5472,7 +5216,8 @@
           ]
         }
       ],
-      "audioDurationSeconds": 264
+      "audioDurationSeconds": 264,
+      "viewCount": ""
     }
   ]
 }

@@ -656,8 +656,9 @@ private struct BookDetailCoreContent: View {
                 }
             )
 
-            // Discussion Section
-            DiscussionSection(discussions: book.discussions)
+            // Discussion Section removed — the reviews it rendered were invented
+            // (see the note on LibraryBook.sampleData). `DiscussionSection` is kept
+            // for when a real review feature exists to feed it.
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.xl)

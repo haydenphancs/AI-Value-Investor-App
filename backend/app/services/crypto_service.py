@@ -1466,7 +1466,8 @@ class CryptoService:
                         "category": snap.category,
                         "paragraphs": snap.paragraphs,
                         "generated_at": datetime.now(timezone.utc).isoformat(),
-                        "generated_by": "gemini-2.5-flash",
+                        # Provider-neutral: crypto_snapshots is anon-readable.
+                        "generated_by": "Cay AI",
                     },
                     on_conflict="symbol,category",
                 ).execute()

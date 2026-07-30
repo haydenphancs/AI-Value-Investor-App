@@ -131,6 +131,9 @@ struct iosApp: App {
 struct RootView: View {
     @Environment(AppState.self) private var appState
     @State private var appLock = AppLockManager.shared
+    /// One-time first-run disclaimer acknowledgement. See
+    /// DisclaimerAcknowledgementView for why this exists.
+    @AppStorage("has_acknowledged_disclaimers") private var hasAcknowledgedDisclaimers = false
 
     var body: some View {
         Group {
@@ -162,6 +165,18 @@ struct RootView: View {
             // Global toast messages
             if let toast = appState.toastMessage {
                 ToastView(message: toast)
+            }
+        }
+        .overlay {
+            // First-run disclaimer acknowledgement. Above normal content but BELOW the
+            // App Lock cover — a locked app must not leak content behind this sheet.
+            // Not shown while auth state is still resolving (splash), so it doesn't
+            // flash over the launch screen.
+            if !hasAcknowledgedDisclaimers, appState.auth.status != .unknown,
+               appState.auth.status != .loading {
+                DisclaimerAcknowledgementView()
+                    .transition(.opacity)
+                    .zIndex(900)
             }
         }
         .overlay {

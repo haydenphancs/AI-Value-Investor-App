@@ -33,6 +33,30 @@ IDENTITY_RULE = (
 # Back-compat private alias (kept so existing `_IDENTITY_RULE` references don't break).
 _IDENTITY_RULE = IDENTITY_RULE
 
+# Shared advice boundary — the SINGLE source of truth, appended unconditionally to
+# every persona prompt and imported by the chat system prompt.
+#
+# The first paragraph (no buy/sell/hold directive) already existed. The second is new
+# and covers SUITABILITY, which nothing addressed before: the app itself ships prompts
+# like "Should I buy?" and "Is this ETF right for me?", and Caydex deliberately collects
+# no risk tolerance, income, net worth or time horizon. Answering as though it knew the
+# user's circumstances would both mislead them and undercut the impersonal-advice
+# posture that keeps this an educational publication rather than advisory activity.
+ADVICE_BOUNDARY = (
+    "\n\nADVICE BOUNDARY (never violate):\n"
+    "Frame everything as analysis and education. Never tell the user to buy, sell, or "
+    "hold; lay out the bull and bear arguments and the evidence, not an instruction to "
+    "trade.\n"
+    "Never give PERSONALIZED or suitability advice. You do not know this user's "
+    "finances, risk tolerance, time horizon, tax situation, or goals, and you must not "
+    "assume or ask for them. If asked whether something is 'right for me', 'suitable', "
+    "or 'should I buy', do not answer it as a personal recommendation: explain the "
+    "tradeoffs and what a reader would need to weigh, note that it depends on "
+    "individual circumstances you cannot see, and say Caydex is not a registered "
+    "investment adviser and cannot give personal advice. Never claim or imply you are "
+    "a licensed or registered adviser, broker, or financial planner."
+)
+
 
 @dataclass
 class PersonaConfig:
@@ -60,8 +84,15 @@ class PersonaConfig:
     def __post_init__(self):
         # _IDENTITY_RULE first (never break it), then the philosophy, then a
         # programmatic "how to bias" block built from the structured fields so the
-        # prompt and the fields can never drift apart.
-        self.system_prompt = _IDENTITY_RULE + self.system_prompt + self._bias_block()
+        # prompt and the fields can never drift apart, then the advice boundary.
+        #
+        # ADVICE_BOUNDARY is appended UNCONDITIONALLY. It used to live inside
+        # _bias_block(), which returns "" early when a persona sets none of the
+        # structured style fields — so such a persona shipped with no compliance
+        # instruction at all.
+        self.system_prompt = (
+            _IDENTITY_RULE + self.system_prompt + self._bias_block() + ADVICE_BOUNDARY
+        )
 
     def _bias_block(self) -> str:
         """Explicit, persona-specific steering for the score, bull/bear, and
@@ -87,11 +118,6 @@ class PersonaConfig:
                 "Treat these as disqualifiers that should sink the read: "
                 + "; ".join(self.red_flags) + "."
             )
-        lines.append(
-            "Frame everything as analysis and education. Never tell the user to buy, "
-            "sell, or hold; lay out the bull and bear arguments and the evidence, not "
-            "an instruction to trade."
-        )
         return "\n".join(lines)
 
     @property

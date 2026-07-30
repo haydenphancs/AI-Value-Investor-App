@@ -198,6 +198,13 @@ struct HomeDashboardView: View {
                     }
                 }
 
+                // Scanners and App-Exclusive Signals surface per-ticker signals, so
+                // the dashboard carries the notice + a route to the full disclaimers.
+                InlineDisclaimerNotice()
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.top, AppSpacing.md)
+                    .frame(maxWidth: .infinity, alignment: .center)
+
                 Spacer()
                     .frame(height: 100)
             }

@@ -45,6 +45,9 @@ struct CryptoDetailSnapshotsSection: View {
             AIDeepResearchButton {
                 onDeepResearchTap?()
             }
+
+            // Disclaimer — AI-derived verdicts on a specific asset.
+            AnalysisDisclaimerText()
         }
         .padding(AppSpacing.lg)
         .background(

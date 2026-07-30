@@ -44,6 +44,44 @@ enum MonitoringConfig {
         case .production:  return "production"
         }
     }
+
+    // MARK: - Redaction
+
+    /// Patterns with no diagnostic value that must never leave the device.
+    /// Mirrors `backend/app/log_redaction.py`; keep the two in sync.
+    ///
+    /// Account UUIDs are deliberately NOT redacted — they are pseudonymous and are the
+    /// primary handle for correlating a crash with a backend trace. They are disclosed
+    /// in the privacy policy instead.
+    private static let redactionRules: [(NSRegularExpression, String)] = {
+        let patterns: [(String, String)] = [
+            // Secret query params: ?apikey=… &token=… &password=…
+            (#"(?i)([?&](?:api[_-]?key|token|access[_-]?token|secret|password|key)=)[^&\s'"]+"#, "$1***"),
+            // Bearer tokens
+            (#"(?i)\b(bearer\s+)[A-Za-z0-9._\-]{20,}"#, "$1***"),
+            // Bare JWTs
+            (#"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"#, "***"),
+            // Email addresses
+            (#"(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b"#, "***@***"),
+        ]
+        return patterns.compactMap { pattern, template in
+            guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+            return (re, template)
+        }
+    }()
+
+    /// Apply every redaction rule to a free-text string.
+    static func redact(_ text: String) -> String {
+        var out = text
+        for (re, template) in redactionRules {
+            out = re.stringByReplacingMatches(
+                in: out,
+                range: NSRange(out.startIndex..., in: out),
+                withTemplate: template
+            )
+        }
+        return out
+    }
 }
 
 /// Starts error monitoring as early as possible in the app lifecycle. Safe to
@@ -73,12 +111,44 @@ func startErrorMonitoring() {
         // (needs dSYMs uploaded for Release/TestFlight builds — see the dSYM step).
         options.attachStacktrace = true
 
-        // Defence-in-depth: strip an Authorization header if one ever rides along
-        // on an attached request (parallels the backend's secret redaction).
+        // Redact on the way out. This previously scrubbed ONLY the Authorization
+        // header, which left the real exposure open: breadcrumbs, exception messages
+        // and log messages are free text, so a crash inside chat or auth code could
+        // carry the user's typed message or their email address off-device. Mirrors
+        // backend/app/log_redaction.py.
         options.beforeSend = { event in
             if event.request?.headers?["Authorization"] != nil {
                 event.request?.headers?["Authorization"] = "[redacted]"
             }
+            if let url = event.request?.url {
+                event.request?.url = MonitoringConfig.redact(url)
+            }
+
+            // `SentryMessage.formatted` is get-only, so swap the whole object.
+            if let formatted = event.message?.formatted {
+                event.message = SentryMessage(formatted: MonitoringConfig.redact(formatted))
+            }
+
+            for exception in event.exceptions ?? [] {
+                if let value = exception.value {
+                    exception.value = MonitoringConfig.redact(value)
+                }
+            }
+
+            for crumb in event.breadcrumbs ?? [] {
+                if let message = crumb.message {
+                    crumb.message = MonitoringConfig.redact(message)
+                }
+                // Breadcrumb `data` is an arbitrary dictionary — most commonly a network
+                // breadcrumb's url/body. Redact string values; drop anything else, since
+                // we can't inspect it safely.
+                if let data = crumb.data {
+                    crumb.data = data.mapValues { value -> Any in
+                        (value as? String).map(MonitoringConfig.redact) ?? value
+                    }
+                }
+            }
+
             return event
         }
     }

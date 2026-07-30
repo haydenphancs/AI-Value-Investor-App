@@ -6,6 +6,7 @@ Frontend: GET /users/me, GET /users/me/credits, PATCH /users/me
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 import logging
+from typing import Optional
 
 from app.api.error_response import ErrorCode, make_error_response
 from app.database import get_supabase
@@ -199,34 +200,137 @@ async def update_profile(
     )
 
 
+# User-keyed tables with NO foreign key to public.users, so the auth.users cascade does
+# NOT reach them. Each omits the FK deliberately (the shared guest id has to be able to
+# write them), which means account deletion has to clear them explicitly.
+#   user_learn_progress  — migrations/067, "no FK so the shared guest id works"
+#   user_book_progress   — migrations/066, same
+#   chat_usage_budget    — migrations/096, same
+#   credit_transactions  — migrations/100, described as an append-only audit ledger
+#
+# credit_transactions IS deleted rather than anonymised: the privacy policy promises
+# deletion, credits are internal accounting rather than a payment record, and Apple holds
+# the actual purchase records independently. Revisit if real billing history ever needs to
+# survive deletion for tax or dispute reasons — and if it does, say so in the policy.
+_UNLINKED_USER_TABLES: tuple[str, ...] = (
+    "user_learn_progress",
+    "user_book_progress",
+    "chat_usage_budget",
+    "credit_transactions",
+)
+
+_RESEARCH_PDF_BUCKET = "research-pdfs"
+
+
+def _purge_unlinked_rows(supabase: Client, user_id: str) -> dict[str, str]:
+    """Delete the un-FK'd user rows the cascade misses. Best-effort per table: one
+    failure must not abandon the rest of the purge, but every failure is reported."""
+    failures: dict[str, str] = {}
+    for table in _UNLINKED_USER_TABLES:
+        try:
+            supabase.table(table).delete().eq("user_id", user_id).execute()
+        except Exception as e:  # noqa: BLE001 — recorded and surfaced below
+            failures[table] = f"{type(e).__name__}: {e}"
+            logger.error(
+                "Account deletion: failed to purge %s for user=%s: %s: %s",
+                table, user_id, type(e).__name__, e,
+            )
+    return failures
+
+
+def _purge_research_pdfs(supabase: Client, user_id: str) -> Optional[str]:
+    """Delete the user's generated report PDFs from Storage.
+
+    `storage.objects` has no FK to auth.users, and nothing in the app ever deleted these,
+    so PDFs — with the user's UUID in the object path — survived account deletion
+    indefinitely. Path convention is set by pdf_report_service: reports/<user_id>/<id>.pdf
+    """
+    prefix = f"reports/{user_id}"
+    try:
+        bucket = supabase.storage.from_(_RESEARCH_PDF_BUCKET)
+        entries = bucket.list(prefix) or []
+        names = [e["name"] for e in entries if isinstance(e, dict) and e.get("name")]
+        if not names:
+            return None
+        bucket.remove([f"{prefix}/{name}" for name in names])
+        logger.info(
+            "Account deletion: removed %d report PDF(s) for user=%s", len(names), user_id
+        )
+        return None
+    except Exception as e:  # noqa: BLE001 — recorded and surfaced below
+        logger.error(
+            "Account deletion: failed to purge report PDFs for user=%s: %s: %s",
+            user_id, type(e).__name__, e,
+        )
+        return f"{type(e).__name__}: {e}"
+
+
 @router.delete("/me")
 async def delete_account(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Permanently delete the CALLER'S OWN account.
+    """Permanently delete the CALLER'S OWN account and all of their data.
 
-    Deletes the auth.users row via the Supabase admin API; `public.users.id`
-    references `auth.users(id) ON DELETE CASCADE`, and every user-scoped table
-    (user_credits, subscriptions, watchlist_items, portfolios, research_reports,
-    user_settings, device_tokens, …) references `public.users(id) ON DELETE
-    CASCADE`, so this removes all of the user's data in one call. Auth-only
-    (`get_current_user` 401s guests); the extra guard is defense-in-depth.
+    Three steps, in this order:
+
+    1. Storage — remove `research-pdfs/reports/<user_id>/*`. Done FIRST because the
+       object path is the only remaining handle on those files; if the auth row went
+       first and step 3 then failed, the PDFs would be orphaned with no way to find them.
+    2. Un-FK'd tables — `_UNLINKED_USER_TABLES`. These have no foreign key to
+       `public.users`, so the cascade in step 3 does not reach them.
+    3. `auth.users` — cascades to `public.users` and every FK-linked child table
+       (user_credits, subscriptions, watchlist_items, portfolios, research_reports,
+       user_settings, device_tokens, whale_follows, chat_sessions → chat_messages, …).
+
+    The previous implementation did step 3 only, and its docstring claimed that removed
+    "all of the user's data in one call". It did not: four tables and every generated PDF
+    survived. Promising deletion and not delivering it is both an App Review 5.1.1 problem
+    and a straightforwardly false statement to the user.
+
+    Partial failure is reported as 500 with the identity row left INTACT, so the caller
+    can retry and reach the remaining data. Deleting the auth row first would strand it.
+
+    Auth-only (`get_current_user` 401s guests); the guest guard is defense-in-depth —
+    guest data is shared across installs and must never be deletable by one caller.
     """
     user_id = user["id"]
     if user_id == GUEST_USER_ID:
         raise HTTPException(status_code=403, detail="Cannot delete the guest account.")
+
+    failures: dict[str, str] = {}
+
+    # 1. Storage objects (before the identity row disappears).
+    pdf_error = _purge_research_pdfs(supabase, user_id)
+    if pdf_error:
+        failures[f"storage:{_RESEARCH_PDF_BUCKET}"] = pdf_error
+
+    # 2. Tables the cascade cannot reach.
+    failures.update(_purge_unlinked_rows(supabase, user_id))
+
+    if failures:
+        logger.error(
+            "Account deletion aborted for user=%s — auth row kept so a retry can "
+            "still reach the remaining data. Failed targets: %s",
+            user_id, ", ".join(sorted(failures)),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Couldn't fully delete your account. Please try again.",
+        )
+
+    # 3. Identity row + every FK-linked child table.
     try:
-        # Cascades auth.users -> public.users -> all user-scoped child tables.
         supabase.auth.admin.delete_user(user_id)
     except Exception as e:
         logger.error(
-            "Account deletion failed for user=%s: %s: %s",
+            "Account deletion failed at the auth step for user=%s: %s: %s",
             user_id, type(e).__name__, e,
         )
         raise HTTPException(
             status_code=500,
             detail="Couldn't delete your account. Please try again.",
         )
-    logger.info("Account deleted for user=%s", user_id)
+
+    logger.info("Account deleted for user=%s (storage + unlinked rows + cascade)", user_id)
     return {"deleted": True}

@@ -16,7 +16,7 @@ guest id) — NOT `chat_sessions.user_id`. See `dependencies.chat_identity_key`.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -124,6 +124,48 @@ class ChatBudgetService:
                 "add_chat_tokens failed for bucket=%s (%s: %s) — spend not recorded",
                 bucket_key, type(e).__name__, e,
             )
+
+    # Rows older than this are deleted by the sweep below. Only TODAY's row is ever
+    # read (`_budget_day()`), so anything past the window is pure accumulation. Kept
+    # slightly wider than a day so a timezone edge or a clock skew can't delete a row
+    # that is still live.
+    RETENTION_DAYS = 7
+
+    def cleanup_old_budget_rows(self) -> int:
+        """Delete `chat_usage_budget` rows older than `RETENTION_DAYS`.
+
+        Migration 096 documented this sweep — "a per-day cleanup sweep deletes by
+        budget_day" — and added `idx_chat_usage_budget_day` to support it, but the sweep
+        itself was never written. The table therefore grew one row per user per active
+        day, forever, keyed by user id: an unbounded store of per-user activity dates
+        with no retention bound and no purpose once the day has passed.
+
+        Returns the number of rows deleted (0 on failure — best-effort, never raises,
+        because a failed sweep must not take down the caller's background loop).
+        """
+        cutoff = (
+            datetime.now(_BUDGET_TZ).date() - timedelta(days=self.RETENTION_DAYS)
+        ).isoformat()
+        try:
+            result = (
+                self.supabase.table("chat_usage_budget")
+                .delete()
+                .lt("budget_day", cutoff)
+                .execute()
+            )
+            deleted = len(result.data or [])
+            if deleted:
+                logger.info(
+                    "chat_usage_budget sweep: deleted %d row(s) older than %s",
+                    deleted, cutoff,
+                )
+            return deleted
+        except Exception as e:
+            logger.warning(
+                "chat_usage_budget sweep failed (cutoff=%s): %s: %s",
+                cutoff, type(e).__name__, e,
+            )
+            return 0
 
 
 _chat_budget_service: "ChatBudgetService | None" = None

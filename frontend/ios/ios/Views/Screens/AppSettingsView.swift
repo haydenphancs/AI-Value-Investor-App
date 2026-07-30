@@ -28,6 +28,11 @@ struct AppSettingsView: View {
     @State private var showRestoreInfo = false
     @State private var cacheSize = "Calculating..."
 
+    /// Third-party AI processing consent. 5.1.1(ii)/5.1.2 require an accessible way to
+    /// withdraw consent, so it is surfaced here rather than only at the first-send gate.
+    @ObservedObject private var aiConsent = AIConsentStore.shared
+    @State private var showWithdrawAIConsentConfirmation = false
+
     var body: some View {
         ZStack {
             AppColors.background.ignoresSafeArea()
@@ -70,6 +75,12 @@ struct AppSettingsView: View {
             Button("Clear", role: .destructive) { clearCache() }
         } message: {
             Text("This will clear cached images and data. Your account, settings, and saved research will not be affected.")
+        }
+        .alert("Withdraw AI Chat Permission", isPresented: $showWithdrawAIConsentConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Withdraw", role: .destructive) { aiConsent.withdraw() }
+        } message: {
+            Text("Cay AI chat will stop working until you allow it again. Everything else in Caydex keeps working. Conversations you've already saved are not deleted — you can remove those individually from chat history.")
         }
         .alert("Restore Purchases", isPresented: $showRestoreInfo) {
             Button("OK", role: .cancel) {}
@@ -186,8 +197,39 @@ struct AppSettingsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
+
+            // AI processing consent — shown only once granted; before that the first-send
+            // gate is the surface. Withdrawing stops chat until it's granted again.
+            if aiConsent.hasConsented {
+                Button(action: { showWithdrawAIConsentConfirmation = true }) {
+                    HStack {
+                        settingsLabel(
+                            title: "AI Chat Data Permission",
+                            subtitle: aiConsent.grantedAt
+                                .map { "Allowed \(Self.consentDateFormatter.string(from: $0))" }
+                                ?? "Allowed"
+                        )
+                        Spacer()
+                        Text("Withdraw")
+                            .font(AppTypography.bodySmallEmphasis)
+                            .foregroundColor(AppColors.bearish)
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.md)
+                    .background(AppColors.cardBackground)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
         }
     }
+
+    private static let consentDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .none
+        return f
+    }()
 
     // MARK: - About
 

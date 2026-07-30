@@ -30,7 +30,7 @@
 <body>
   <div class="wrap">
     <h1>Privacy Policy</h1>
-    <p class="updated">Last updated: July 27, 2026</p>
+    <p class="updated">Last updated: July 29, 2026</p>
 
     <p>This Privacy Policy explains how Caydex (&ldquo;we,&rdquo; &ldquo;us,&rdquo; or &ldquo;our&rdquo;)
       collects, uses, and shares information when you use the Caydex mobile application and related services
@@ -41,8 +41,16 @@
       display name you provide.</p>
     <p><strong>Usage information:</strong> content you create or request in the App, such as watchlists,
       portfolios, generated research reports, saved items, chat messages, and preferences.</p>
-    <p><strong>Device information:</strong> a push notification token (if you enable notifications), app
-      version, device type, and general technical/log data used for reliability and security.</p>
+    <p><strong>Holdings you enter:</strong> if you use Portfolio Insights, the share counts or position
+      values you type in. These are self-reported by you &mdash; we never connect to a brokerage and never see
+      your actual account.</p>
+    <p><strong>Device information:</strong> app version, device type, and general technical/log data used for
+      reliability and security. A push notification token if you enable notifications.</p>
+    <p><strong>An install identifier:</strong> a random identifier we generate on first launch and store in
+      your device&rsquo;s keychain. We send it with requests to apply fair-usage limits and to keep your
+      learning progress before you sign in. It is not derived from your device or Apple ID, is not shared with
+      advertisers, and is not used to track you across other apps or websites. Because it lives in the keychain
+      it can persist if you delete and reinstall the App; signing in supersedes it.</p>
     <p>We do not ask for or store your brokerage credentials, bank account numbers, or trading account access.
       Payment is handled by the Apple App Store; we do not receive your full payment card details.</p>
 
@@ -54,19 +62,30 @@
       service.</p>
 
     <h2>3. AI Processing</h2>
-    <p>When you request AI analysis or use Cay AI chat, your query and relevant context are processed by our AI
-      systems and by third-party artificial-intelligence and machine-learning service providers acting on our
-      behalf to generate a response. We instruct these providers to process the data only to provide the
-      service.</p>
-    <p>Do not submit sensitive personal information you do not want processed this way. AI output is generated
-      automatically and may be inaccurate.</p>
+    <p>Cay AI chat sends what you type to a third-party AI provider for processing. We ask for your explicit
+      permission before this happens for the first time, and chat does not work until you give it. You can
+      withdraw that permission at any time in Settings &rarr; General &bull; AI Chat Data Permission; chat then
+      stops working until you allow it again, and the rest of the App is unaffected.</p>
+    <p><strong>What is sent for chat:</strong> your message, the recent messages in that conversation, and
+      market data for whatever you are viewing so the answer is relevant. <strong>What is NOT sent:</strong>
+      your name, email, account identifier, watchlist, portfolio, or holdings.</p>
+    <p>Generated research reports are produced from public market data. They contain no content you have typed
+      and no information about you.</p>
+    <p>Our AI provider processes this data on our behalf to return a response, and is instructed not to use it
+      for their own purposes. Do not submit sensitive personal information you would not want processed this
+      way. AI output is generated automatically and may be inaccurate.</p>
 
     <h2>4. Service Providers</h2>
-    <p>We rely on trusted third parties to run the App, including: cloud hosting and database infrastructure
-      providers; market and financial data providers; third-party AI/LLM providers; analytics and
-      error-monitoring providers; and Apple, for in-app purchases and push notification delivery.</p>
+    <p>We rely on the following providers to run the App: <strong>Supabase</strong> (database,
+      authentication, and file storage); <strong>Railway</strong> (application hosting);
+      <strong>Google</strong> (the AI processing described above); <strong>Sentry</strong> (error and crash
+      monitoring); and <strong>Apple</strong> (in-app purchases and push notification delivery).</p>
+    <p>Market and financial data flows the other way &mdash; we request it from data providers using a ticker
+      symbol, and we do not send them anything about you. Those providers are listed in the App under
+      Profile &rarr; Data Sources.</p>
     <p>These providers may process your information only as needed to perform services for us and are bound by
-      confidentiality and data-protection obligations.</p>
+      confidentiality and data-protection obligations. Our servers and these providers are located in the
+      United States.</p>
 
     <h2>5. How We Share Information</h2>
     <p>We do not sell your personal information. We share information only with the service providers described
@@ -74,10 +93,19 @@
       connection with a business transfer (such as a merger or acquisition), subject to this Policy.</p>
 
     <h2>6. Data Retention</h2>
-    <p>We retain your information for as long as your account is active or as needed to provide the App, comply
-      with legal obligations, resolve disputes, and enforce our agreements. When you delete your account, we
-      delete or de-identify your personal information within a reasonable period, except where retention is
-      required by law.</p>
+    <p>Content you create &mdash; chat conversations, generated research reports, watchlists, holdings,
+      learning progress, and bookmarks &mdash; is kept until you delete it or delete your account. We do not
+      expire it on a timer, so that your saved research stays available. You can delete individual
+      conversations and reports at any time.</p>
+    <p>Short-lived operational records are cleared automatically: fair-usage counters are deleted after 7 days,
+      and cached market data expires on its own schedule.</p>
+    <p>Deleting your account removes your account record and everything linked to it: chat conversations and
+      messages, research reports and their generated PDF files, watchlists, portfolios and holdings, saved
+      items, followed entities, settings, learning progress, notification tokens, credit balance, and credit
+      history. This happens immediately, not on a delay. Error-monitoring records may persist for a short
+      retention period at our monitoring provider; these contain diagnostic information and a pseudonymous
+      account identifier, not your name or email.</p>
+    <p>You can delete your account in the App under Profile &rarr; Settings &rarr; Delete Account.</p>
 
     <h2>7. Security</h2>
     <p>We use administrative, technical, and organizational measures designed to protect your information,

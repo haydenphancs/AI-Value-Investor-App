@@ -227,6 +227,17 @@ async def _run_news_pre_warmer():
             service = get_news_cache_service()
             await service.pre_warm_popular_tickers(top_n=20)
             await service.cleanup_expired_cache()
+
+            # Retention sweep for chat_usage_budget. Migration 096 documented this
+            # sweep and indexed for it, but it was never implemented, so the table
+            # accumulated one row per user per active day indefinitely. Piggy-backed
+            # on this 2-hourly loop rather than adding another task: it is a cheap
+            # single DELETE and does not need its own cadence.
+            from app.services.chat_budget_service import get_chat_budget_service
+
+            await asyncio.to_thread(
+                get_chat_budget_service().cleanup_old_budget_rows
+            )
         except Exception as e:
             logger.error(f"News pre-warmer failed: {e}", exc_info=True)
 

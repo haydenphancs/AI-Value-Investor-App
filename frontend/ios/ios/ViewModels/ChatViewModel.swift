@@ -89,6 +89,62 @@ class ChatViewModel: ObservableObject {
     @Published var currentContextType: ChatContextType?
     @Published private(set) var currentReferenceId: String?
 
+    // MARK: - Third-party AI consent (App Review 5.1.2(i))
+
+    /// A send that was held back pending consent, captured so it can be replayed verbatim.
+    ///
+    /// BOTH entry points have to be captured. `sendMessage` is NOT a single funnel:
+    /// `startNewConversation(firstMessage:)` creates the session and sends directly
+    /// without re-entering `sendMessage`, and it is the primary path (Deep Research,
+    /// AI Analyst, report chat, suggestion chips). Gating only `sendMessage` would leave
+    /// the gate bypassed on almost every real entry point.
+    struct PendingChatSend {
+        let message: String
+        /// true → replay via startNewConversation, false → replay via sendMessage.
+        let startsNewConversation: Bool
+        let stockId: String?
+        let context: String?
+        let contextType: ChatContextType?
+        let referenceId: String?
+    }
+
+    /// Set when a send is blocked awaiting consent; the view presents the consent sheet.
+    @Published var needsAIConsent: Bool = false
+    private var pendingConsentSend: PendingChatSend?
+
+    /// Consent granted → replay the held send exactly as it was issued.
+    func grantAIConsentAndResume() {
+        AIConsentStore.shared.grant()
+        needsAIConsent = false
+        guard let pending = pendingConsentSend else { return }
+        pendingConsentSend = nil
+        if pending.startsNewConversation {
+            startNewConversation(
+                firstMessage: pending.message,
+                stockId: pending.stockId,
+                context: pending.context,
+                contextType: pending.contextType,
+                referenceId: pending.referenceId
+            )
+        } else {
+            sendMessage(pending.message)
+        }
+    }
+
+    /// Consent declined → discard the held send. Nothing was transmitted.
+    func declineAIConsent() {
+        needsAIConsent = false
+        pendingConsentSend = nil
+    }
+
+    /// Records a blocked send. Returns true when the caller must stop.
+    private func holdForConsent(_ pending: PendingChatSend) -> Bool {
+        guard !AIConsentStore.shared.hasConsented else { return false }
+        pendingConsentSend = pending
+        needsAIConsent = true
+        return true
+    }
+
     // MARK: - Line-by-line reveal buffer
     //
     // Gemini streams a FEW LARGE chunks (not per-token), so appending each chunk verbatim makes
@@ -129,6 +185,15 @@ class ChatViewModel: ObservableObject {
         // from creating a duplicate backend session and overwriting `messages`. isAITyping is reset
         // by resetConversation()/loadConversation(), so a genuine new chat from a settled state passes.
         guard !isAITyping else { return }
+
+        // Third-party AI consent gate (App Review 5.1.2(i)). Placed AFTER the in-flight
+        // guard but BEFORE any state mutation or network call, so a held send leaves the
+        // conversation exactly as it was.
+        if holdForConsent(PendingChatSend(
+            message: firstMessage, startsNewConversation: true,
+            stockId: stockId, context: context,
+            contextType: contextType, referenceId: referenceId
+        )) { return }
 
         errorMessage = nil
         currentStockId = stockId
@@ -193,6 +258,13 @@ class ChatViewModel: ObservableObject {
     /// Send a message in the current conversation.
     func sendMessage(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        // Third-party AI consent gate (App Review 5.1.2(i)). Note startNewConversation
+        // carries its own gate — this is not a funnel.
+        if holdForConsent(PendingChatSend(
+            message: text, startsNewConversation: false,
+            stockId: nil, context: nil, contextType: nil, referenceId: nil
+        )) { return }
 
         // One message in flight at a time. `isAITyping` is true both while the AI is replying AND
         // during the createSession round-trip of a freshly seeded conversation (when currentSessionId

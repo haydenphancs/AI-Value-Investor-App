@@ -85,6 +85,21 @@ struct AIChatScreen: View {
                                 }
                         )
                 }
+
+                // Third-party AI consent gate (App Review 5.1.2(i)). Rendered as a sibling
+                // layer INSIDE this ZStack rather than a nested .fullScreenCover/.sheet:
+                // AIChatScreen is itself presented as a fullScreenCover, and nesting
+                // presentations from here is exactly the failure this file already
+                // documents at the top. The pending message is held in the ViewModel and
+                // replayed on Allow; nothing has been transmitted at this point.
+                if viewModel.needsAIConsent {
+                    AIDataConsentView(
+                        onAllow: { viewModel.grantAIConsentAndResume() },
+                        onDecline: { viewModel.declineAIConsent() }
+                    )
+                    .transition(.opacity)
+                    .zIndex(500)
+                }
             }
             .animation(.easeInOut(duration: 0.15), value: showingHistory)
         }

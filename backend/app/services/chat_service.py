@@ -23,7 +23,7 @@ from app.integrations.gemini import get_gemini_client
 from app.integrations.fmp import get_fmp_client
 from app.config import settings
 from app.schemas.chat import StockChartWidget, HistoricalDataPoint
-from app.services.agents.persona_config import IDENTITY_RULE
+from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
 from app.services.asset_class import detect_asset_class
 from app.services.chat_security import cap_prompt, neutralize_fences
 
@@ -1260,9 +1260,12 @@ class ChatService:
             "they truly add value. Never write long, multi-section essays or ## headings. Do NOT dump "
             "everything you know — answer the specific question. Only expand into full detail if the "
             "user explicitly asks for more. Use plain, conversational language. "
-            "NEVER give a personal buy/sell/hold directive (don't say 'you should buy/sell') — "
-            "explain the tradeoffs and let the user decide. Keep the required "
+            "Keep the required "
             "'educational, not financial advice' note to a single short line at the end."
+            # Shared with every report persona (persona_config.ADVICE_BOUNDARY) so the
+            # two surfaces cannot drift. Supersedes the inline buy/sell line that used
+            # to sit here, and additionally covers suitability ("right for me?").
+            + ADVICE_BOUNDARY
         )
 
         # Add asset-specific persona

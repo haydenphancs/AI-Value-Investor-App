@@ -62,6 +62,11 @@ struct TickerDetailSnapshotsSection: View {
             AIDeepResearchButton(title: "AI Deep Research") {
                 onDeepResearchTap?()
             }
+
+            // Disclaimer — the star ratings above are AI-derived verdicts on a
+            // specific security, so this section carries the notice itself rather
+            // than relying on the screen that hosts it.
+            AnalysisDisclaimerText()
         }
         .padding(AppSpacing.lg)
         .background(

@@ -165,7 +165,37 @@ struct TickerReportView: View {
                 // Breathing room so the close-date line isn't kissing the
                 // separator / next section below.
                 .padding(.bottom, AppSpacing.md)
+
+            // Age warning for older snapshots. The date line above is easy to skim
+            // past; this states the consequence.
+            if let (days, severity) = stalenessInfo(report) {
+                StaleDataBanner(daysOld: days, severity: severity)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.bottom, AppSpacing.md)
+            }
         }
+    }
+
+    /// Soft warning past a week, strong past a month. A week avoids firing on a
+    /// Friday close read on Monday, or across a long holiday weekend.
+    private static let stalenessCautionDays = 7
+    private static let stalenessStrongDays = 30
+
+    /// Age of the report's data in whole days, with a severity — or nil when it is
+    /// fresh, undated, or the date is in the future (a clock skew must not render a
+    /// negative age).
+    private func stalenessInfo(_ report: TickerReportData) -> (Int, StaleDataBanner.Severity)? {
+        guard let iso = report.priceCloseDate,
+              let date = Self.isoDateParser.date(from: iso) else { return nil }
+        let cal = Self.utcCalendar
+        let from = cal.startOfDay(for: date)
+        let to = cal.startOfDay(for: Date())
+        guard let days = cal.dateComponents([.day], from: from, to: to).day, days > 0 else {
+            return nil
+        }
+        if days >= Self.stalenessStrongDays { return (days, .strong) }
+        if days >= Self.stalenessCautionDays { return (days, .caution) }
+        return nil
     }
 
     /// Header date label, formatted RENDER-TIME from the report's actual
@@ -212,6 +242,13 @@ struct TickerReportView: View {
                 maxScore: report.qualityRating.maxScore,
                 label: report.qualityRating.label
             )
+
+            // Sits WITH the verdict, above the fold. The full disclaimer section is
+            // still at the bottom of the report, but it is below the score, the
+            // summary, the thesis, every Deep Dive module and the critical factors —
+            // so a user can read the whole verdict without ever scrolling to it.
+            InlineDisclaimerNotice()
+                .padding(.horizontal, AppSpacing.lg)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.sm)

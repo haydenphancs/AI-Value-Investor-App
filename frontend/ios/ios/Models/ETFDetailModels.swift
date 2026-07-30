@@ -241,7 +241,11 @@ struct ETFAISuggestion: Identifiable {
         ETFAISuggestion(text: "What does this ETF track?"),
         ETFAISuggestion(text: "Top holdings breakdown"),
         ETFAISuggestion(text: "Expense ratio comparison"),
-        ETFAISuggestion(text: "Is this ETF right for me?")
+        // Was "Is this ETF right for me?" — a suitability question the app cannot
+        // answer (it collects no risk tolerance, horizon, or goals) and shouldn't,
+        // since answering it as a personal recommendation is advisory activity.
+        // Reworded to the answerable version of the same user intent.
+        ETFAISuggestion(text: "Who is this ETF designed for?")
     ]
 }
 

@@ -67,6 +67,16 @@ struct PortfolioInsightsSection: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                // Disclaimer — this is the one score computed from the user's OWN
+                // holdings, so it is the surface most likely to read as personal
+                // advice. It must say plainly that it isn't.
+                AnalysisDisclaimerText(
+                    text: "Data Disclaimer: A diversification measure of the holdings you entered — "
+                        + "not personalized investment advice or a recommendation to buy or sell. "
+                        + "For educational purposes only."
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal, AppSpacing.lg)
         } else if enteredHoldingsCount > 0

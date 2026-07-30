@@ -8,7 +8,12 @@ These tests assert both user-facing surfaces derive from the one exported consta
 
 from __future__ import annotations
 
-from app.services.agents.persona_config import IDENTITY_RULE, PersonaConfig, _IDENTITY_RULE
+from app.services.agents.persona_config import (
+    ADVICE_BOUNDARY,
+    IDENTITY_RULE,
+    PersonaConfig,
+    _IDENTITY_RULE,
+)
 from app.services.chat_service import ChatService
 
 
@@ -39,6 +44,50 @@ def test_chat_and_persona_share_identical_rule_text():
     p = PersonaConfig(key="k", agent_tag="t", display_name="d", system_prompt="x")
     # The exact same rule text appears on both surfaces → no drift possible.
     assert IDENTITY_RULE in instr and IDENTITY_RULE in p.system_prompt
+
+
+# ── Advice boundary: single source, unconditional, covers suitability ─────────
+#
+# The buy/sell line used to live INSIDE PersonaConfig._bias_block(), which returns ""
+# early when a persona sets none of the structured style fields — so such a persona
+# shipped with no compliance instruction at all. It is now appended unconditionally.
+# Nothing previously addressed suitability, while the app itself shipped "Should I
+# buy?" and "Is this ETF right for me?" prompts.
+
+
+def test_advice_boundary_covers_directives_and_suitability():
+    low = ADVICE_BOUNDARY.lower()
+    assert "never tell the user to buy, sell, or hold" in low
+    assert "suitability" in low
+    assert "risk tolerance" in low
+    assert "not a registered investment adviser" in low
+
+
+def test_every_persona_prompt_carries_the_advice_boundary():
+    from app.services.agents.persona_config import PERSONA_KEYS, get_persona_config
+
+    for key in PERSONA_KEYS:
+        prompt = get_persona_config(key).system_prompt
+        assert ADVICE_BOUNDARY in prompt, f"{key} is missing the advice boundary"
+
+
+def test_advice_boundary_applies_even_with_no_structured_style_fields():
+    """The regression this guards: a bare persona used to get NO compliance text."""
+    bare = PersonaConfig(
+        key="bare", agent_tag="bare", display_name="Bare",
+        system_prompt="Philosophy only, no score_rules/bull_priority/etc.",
+    )
+    assert bare._bias_block() == "", "precondition: no structured fields → empty block"
+    assert ADVICE_BOUNDARY in bare.system_prompt
+
+
+def test_chat_shares_the_same_advice_boundary_text():
+    svc = ChatService.__new__(ChatService)
+    instr = svc._build_system_instruction("NORMAL", None)
+    assert ADVICE_BOUNDARY in instr
+    # The old inline wording must be gone (it would signal a re-forked copy that can
+    # drift from the persona surface).
+    assert "explain the tradeoffs and let the user decide" not in instr
 
 
 # ── Attribution values must not name the provider ─────────────────────────────

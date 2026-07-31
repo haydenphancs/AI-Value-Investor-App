@@ -64,16 +64,20 @@ struct TickerDetailHeader: View {
                 }
                 .buttonStyle(PlainButtonStyle())
 
-                // Notification bell
-                Button(action: {
-                    onNotificationTapped?()
-                }) {
-                    Image(systemName: "bell")
-                        .font(AppTypography.iconMedium)
-                        .foregroundColor(AppColors.textPrimary)
-                        .frame(width: 40, height: 40)
+                // Notification bell — rendered ONLY when a handler exists. Price
+                // alerts aren't built yet, so all five detail screens pass nil and the
+                // bell is hidden. A visible control that does nothing reads as a bug
+                // (and is an App Review 2.1 risk); the repo already handles the six
+                // ticker-analysis "Detail" buttons the same way.
+                if let onNotificationTapped {
+                    Button(action: onNotificationTapped) {
+                        Image(systemName: "bell")
+                            .font(AppTypography.iconMedium)
+                            .foregroundColor(AppColors.textPrimary)
+                            .frame(width: 40, height: 40)
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
-                .buttonStyle(PlainButtonStyle())
 
                 // Favorite star
                 Button(action: {

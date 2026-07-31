@@ -15,6 +15,8 @@ import uuid
 
 import pytest
 
+from fastapi import HTTPException
+
 from app.dependencies import GUEST_USER_ID, guest_user_id_for
 
 
@@ -90,3 +92,63 @@ def test_other_features_keep_the_seeded_shared_guest():
     from app.api.v1.endpoints import research
 
     assert "get_learn_identity" not in inspect.getsource(research)
+
+
+# ── rate-limit bucketing ─────────────────────────────────────────────────────
+#
+# `RateLimitChecker` used to bucket EVERY unauthenticated caller under the single
+# key `guest:{GUEST_USER_ID}`. That is the worst of both worlds: no per-attacker
+# protection (one key, one shared budget) AND real guests 429ing each other on a
+# busy day. These pin the per-install split without breaking already-shipped
+# clients that send no header.
+
+@pytest.mark.asyncio
+async def test_rate_limit_buckets_guests_per_install():
+    from app.core.security import rate_limiter
+    from app.dependencies import RateLimitChecker
+
+    rate_limiter._requests.clear()
+    checker = RateLimitChecker(max_requests=2, window_seconds=60)
+
+    # Install A burns its whole window.
+    await checker(user_id=None, x_guest_id="install-A")
+    await checker(user_id=None, x_guest_id="install-A")
+    with pytest.raises(HTTPException) as exc:
+        await checker(user_id=None, x_guest_id="install-A")
+    assert exc.value.status_code == 429
+
+    # Install B is unaffected — the bug this replaces would have 429'd it too.
+    await checker(user_id=None, x_guest_id="install-B")
+    await checker(user_id=None, x_guest_id="install-B")
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_headerless_clients_share_the_legacy_bucket():
+    """Back-compat: shipped app versions that send no X-Guest-Id must keep
+    working, landing on the shared GUEST_USER_ID key exactly as before."""
+    from app.core.security import rate_limiter
+    from app.dependencies import RateLimitChecker, GUEST_USER_ID
+
+    rate_limiter._requests.clear()
+    checker = RateLimitChecker(max_requests=1, window_seconds=60)
+
+    await checker(user_id=None, x_guest_id=None)
+    with pytest.raises(HTTPException):
+        await checker(user_id=None, x_guest_id=None)
+
+    assert f"guest:{GUEST_USER_ID}" in rate_limiter._requests
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_authenticated_user_ignores_the_guest_header():
+    """A signed-in caller must never be bucketed by a client-supplied header —
+    otherwise rotating X-Guest-Id would grant unlimited windows."""
+    from app.core.security import rate_limiter
+    from app.dependencies import RateLimitChecker
+
+    rate_limiter._requests.clear()
+    checker = RateLimitChecker(max_requests=1, window_seconds=60)
+
+    await checker(user_id="real-user", x_guest_id="install-A")
+    with pytest.raises(HTTPException):
+        await checker(user_id="real-user", x_guest_id="install-B")

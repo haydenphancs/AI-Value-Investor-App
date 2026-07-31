@@ -421,10 +421,6 @@ class CommodityDetailViewModel: ObservableObject {
 
     // MARK: - User Actions
 
-    func handleNotificationTap() {
-        print("Notification settings for \(commoditySymbol)")
-    }
-
     func handleRelatedCommodityTap(_ commodity: RelatedTicker) {
         pendingTickerNavigation = commodity.symbol
     }

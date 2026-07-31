@@ -214,10 +214,6 @@ class IndexDetailViewModel: ObservableObject {
         let ticker: String
     }
 
-    func handleNotificationTap() {
-        print("🔔 [IndexDetailVM] Notification settings for \(indexSymbol)")
-    }
-
     func handleWebsiteTap() {
         guard let website = indexData?.indexProfile.website,
               let url = URL(string: "https://\(website)") else { return }

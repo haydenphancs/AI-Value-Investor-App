@@ -238,6 +238,17 @@ async def _run_news_pre_warmer():
             await asyncio.to_thread(
                 get_chat_budget_service().cleanup_old_budget_rows
             )
+
+            # Same for guest_report_budget (migration 106) — one row per INSTALL per
+            # month, and installs are never cleaned up otherwise, so without this the
+            # table grows without bound as installs churn.
+            from app.services.guest_report_budget_service import (
+                get_guest_report_budget_service,
+            )
+
+            await asyncio.to_thread(
+                get_guest_report_budget_service().sweep_expired
+            )
         except Exception as e:
             logger.error(f"News pre-warmer failed: {e}", exc_info=True)
 
@@ -848,13 +859,36 @@ async def health():
 
 @app.get("/health/pdf", tags=["Root"])
 async def health_pdf():
-    """Verify the WeasyPrint native stack (cairo/pango) loaded. Returns 503 when it can't,
-    so a misconfigured image fails the Railway deploy gate instead of the first user PDF."""
-    try:
-        import weasyprint  # noqa: F401 — lazy import; just probing the native libs
+    """Verify the PDF stack end-to-end. Returns 503 when it can't render, so a
+    misconfigured image fails the Railway deploy gate instead of the first user PDF.
 
-        return {"status": "healthy", "weasyprint": weasyprint.__version__}
+    Importing weasyprint already probes the native libs (cairo/pango load at import
+    time), but that alone can NOT catch a weasyprint/pydyf version mismatch — that
+    fails inside `write_pdf`, e.g. the pre-0.11 `transform()` API break the pin in
+    requirements.txt guards against. So this actually renders a one-line document.
+    Cheap (a few ms, no I/O) and it exercises the exact call path the report PDF uses.
+    """
+    try:
+        import io
+
+        import weasyprint
+
+        buf = io.BytesIO()
+        weasyprint.HTML(string="<p>ok</p>").write_pdf(buf)
+        data = buf.getvalue()
+        if not data.startswith(b"%PDF-"):
+            raise RuntimeError(f"renderer produced {len(data)} bytes, not a PDF")
+
+        import pydyf
+
+        return {
+            "status": "healthy",
+            "weasyprint": weasyprint.__version__,
+            "pydyf": getattr(pydyf, "__version__", "unknown"),
+            "rendered_bytes": len(data),
+        }
     except Exception as e:
+        logger.error("PDF healthcheck FAILED: %s: %s", type(e).__name__, e, exc_info=True)
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"status": "degraded", "error": f"{type(e).__name__}: {e}"},

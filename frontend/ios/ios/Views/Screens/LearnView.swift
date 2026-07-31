@@ -26,6 +26,7 @@ struct LearnContentView: View {
     @State private var showingMoneyMovesDetail = false
     @State private var showingBookLibrary = false
     @State private var showProfile = false
+    @State private var showPaywall = false
     @State private var showSearch = false
     @State private var selectedMoneyMoveArticle: MoneyMoveArticle?
     @State private var selectedLibraryBook: LibraryBook?
@@ -82,6 +83,10 @@ struct LearnContentView: View {
         .fullScreenCover(item: $selectedLibraryBook) { book in
             BookDetailView(book: book)
                 .environmentObject(audioManager)
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView()
+                .environment(\.appState, appState)
         }
         .fullScreenCover(isPresented: $showProfile) {
             ProfileView()
@@ -203,10 +208,12 @@ struct LearnContentView: View {
             )
         }
 
-        // Credits Balance Section
-        if let balance = viewModel.creditBalance {
+        // Credits Balance Section — the REAL balance from AppState (the documented
+        // single source of truth), not a hardcoded one. Hidden entirely when unknown
+        // rather than showing a number the user doesn't have.
+        if let credits = appState.user.credits {
             LearnCreditsSection(
-                balance: balance,
+                balance: CreditBalance.from(credits),
                 onAddCredits: handleAddCredits
             )
         }
@@ -330,7 +337,7 @@ struct LearnContentView: View {
     }
 
     private func handleAddCredits() {
-        viewModel.addCredits()
+        showPaywall = true
     }
 
     // MARK: - Helpers

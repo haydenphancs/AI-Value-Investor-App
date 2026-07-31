@@ -358,10 +358,6 @@ class ETFDetailViewModel: ObservableObject {
         let ticker: String
     }
 
-    func handleNotificationTap() {
-        print("[ETFDetailVM] Notification settings for \(etfSymbol)")
-    }
-
     func handleWebsiteTap() {
         guard let website = etfData?.etfProfile.website,
               !website.isEmpty,

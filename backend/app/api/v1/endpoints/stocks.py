@@ -929,6 +929,10 @@ async def get_stock_news(
 async def enrich_stock_news(
     ticker: str,
     body: Dict[str, Any],
+    # Throttled: an unauthenticated caller could otherwise trigger up to
+    # MAX_ENRICH_ARTICLE_IDS paid Gemini enrichments per request, unbounded.
+    # Per-install for guests (X-Guest-Id); mirrors updates.py's enrich route.
+    _rate: None = StandardRateLimit,
 ):
     """
     AI-enrich specific news articles on demand.

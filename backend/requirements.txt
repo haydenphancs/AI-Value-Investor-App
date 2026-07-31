@@ -48,6 +48,15 @@ ta>=0.11.0
 # libs are provisioned in backend/Dockerfile for Railway. pydyf is pinned: WeasyPrint
 # 62.3 calls pydyf's pre-0.11 transform() API, but an unpinned install pulls pydyf
 # 0.12.x which changed it (AttributeError: 'super' object has no attribute 'transform').
+#
+# 2026-07-30: a dev venv had drifted to 69.0/0.12.1 (a newer self-consistent pair).
+# DELIBERATELY NOT bumped, and the venv was pulled back to match this file. Reason:
+# WeasyPrint cannot render on macOS without the native libs, so the PDF render test
+# SKIPS locally ("WeasyPrint native libs unavailable on this host") — meaning 62.3 in
+# this Dockerfile image is the only engine that has ever rendered a real PDF. Bumping
+# would ship an engine no one can validate before it reaches users.
+# `GET /health/pdf` now performs an actual one-line render (not just an import), so a
+# mismatched pair fails the Railway deploy gate rather than the first user's report.
 weasyprint==62.3
 pydyf==0.10.0
 jinja2>=3.1.4

@@ -65,7 +65,9 @@ struct TickerDetailView: View {
                 TickerDetailHeader(
                     onBackTapped: handleBackTapped,
                     onSearchTapped: handleSearchTapped,
-                    onNotificationTapped: viewModel.handleNotificationTap,
+                    // nil until price alerts ship — hides the bell rather than
+                    // showing a control whose handler was a print().
+                    onNotificationTapped: nil,
                     onFavoriteTapped: { viewModel.toggleFavorite() },
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
@@ -129,6 +131,12 @@ struct TickerDetailView: View {
                                 previousClose: viewModel.stockQuote?.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
+                        } else if let errorMessage = viewModel.errorMessage {
+                            DetailLoadFailureCard(
+                                message: errorMessage,
+                                isRetrying: viewModel.isLoading,
+                                onRetry: { viewModel.loadTickerData() }
+                            )
                         } else {
                             DetailHeaderChartSkeleton()
                                 .padding(.top, AppSpacing.sm)

@@ -250,12 +250,20 @@ class RateLimitChecker:
     async def __call__(
         self,
         user_id: Optional[str] = Depends(get_optional_user_id),  # TEMP: guest fallback
+        x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     ):
-        # TEMP: while research/credits endpoints accept the GUEST_USER_ID,
-        # the rate limit must not 401 on missing auth. Bucket all
-        # unauthenticated callers together under "guest" so a single
-        # abusive guest can't drown out everyone else.
-        key = user_id or f"guest:{GUEST_USER_ID}"
+        # While research/credits endpoints accept the GUEST_USER_ID, the rate
+        # limit must not 401 on missing auth. Unauthenticated callers bucket
+        # PER-INSTALL off the X-Guest-Id header (same derivation chat uses), not
+        # under one shared "guest" key — a single key gives zero per-attacker
+        # protection AND makes real guests 429 each other. Clients that send no
+        # header still land on the shared GUEST_USER_ID, so already-shipped app
+        # versions are unaffected.
+        #
+        # The key space is now caller-influenced, which is safe: `rate_limiter`
+        # self-bounds at _MAX_TRACKED with idle-drop + FIFO eviction
+        # (core/security.py, pinned by tests/test_rate_limiter_bound.py).
+        key = user_id or f"guest:{guest_user_id_for(x_guest_id)}"
         if not rate_limiter.is_allowed(key, self.max_requests, self.window_seconds):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -269,8 +277,8 @@ StandardRateLimit = Depends(RateLimitChecker(60, 60))
 
 # ── Chat abuse / cost bucketing (OWASP LLM10 — denial-of-wallet) ─────────────
 
-def chat_identity_key(user: dict, x_guest_id: Optional[str]) -> str:
-    """The rate-limit + daily-budget bucket key for a chat caller.
+def identity_key(user: dict, x_guest_id: Optional[str]) -> str:
+    """The rate-limit + daily-budget bucket key for a caller.
 
     A real signed-in account keys off its own user id. An unauthenticated caller
     (the shared ``GUEST_USER_ID``) keys off a PER-INSTALL id derived from the
@@ -288,12 +296,22 @@ def chat_identity_key(user: dict, x_guest_id: Optional[str]) -> str:
     return guest_user_id_for(x_guest_id)
 
 
-class ChatRateLimitChecker:
-    """Per-user (per-install for guests) sliding-window rate limit for the chat
-    send + stream endpoints. Both endpoints share the ``chat:<key>`` bucket so a
-    caller can't dodge the limit by alternating endpoints."""
+# Historical name — chat was the first caller. Kept so existing imports and the
+# docs that reference it keep working.
+chat_identity_key = identity_key
 
-    def __init__(self, max_requests: int, window_seconds: int = 60):
+
+class IdentityRateLimitChecker:
+    """Per-user (per-install for guests) sliding-window rate limit.
+
+    ``bucket`` namespaces the counter so unrelated surfaces don't share a
+    window — but every endpoint using the SAME bucket does share one, which is
+    deliberate: the two chat endpoints must not let a caller dodge the limit by
+    alternating between them.
+    """
+
+    def __init__(self, bucket: str, max_requests: int, window_seconds: int = 60):
+        self.bucket = bucket
         self.max_requests = max_requests
         self.window_seconds = window_seconds
 
@@ -302,7 +320,7 @@ class ChatRateLimitChecker:
         user: dict = Depends(get_current_user_or_guest),
         x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     ) -> None:
-        key = f"chat:{chat_identity_key(user, x_guest_id)}"
+        key = f"{self.bucket}:{identity_key(user, x_guest_id)}"
         if not rate_limiter.is_allowed(key, self.max_requests, self.window_seconds):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -311,4 +329,14 @@ class ChatRateLimitChecker:
             )
 
 
-ChatRateLimit = Depends(ChatRateLimitChecker(settings.CHAT_RATE_LIMIT_PER_MINUTE, 60))
+ChatRateLimit = Depends(
+    IdentityRateLimitChecker("chat", settings.CHAT_RATE_LIMIT_PER_MINUTE, 60)
+)
+
+# A report generation is ~20x the cost of a chat turn (~17 Gemini + ~20 FMP calls
+# on a cache miss), so its window is far tighter than chat's. This is the ONLY
+# per-caller control on GET /stocks/{ticker}/report — it was previously
+# completely ungated.
+ReportRateLimit = Depends(
+    IdentityRateLimitChecker("report", settings.REPORT_RATE_LIMIT_PER_MINUTE, 60)
+)

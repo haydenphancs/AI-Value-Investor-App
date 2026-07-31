@@ -364,10 +364,6 @@ class CryptoDetailViewModel: ObservableObject {
         let ticker: String
     }
 
-    func handleNotificationTap() {
-        print("Notification settings for \(cryptoSymbol)")
-    }
-
     func handleWebsiteTap() {
         guard let website = cryptoData?.cryptoProfile.website,
               let url = URL(string: "https://\(website)") else { return }

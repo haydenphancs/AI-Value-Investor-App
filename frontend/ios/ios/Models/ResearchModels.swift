@@ -273,9 +273,13 @@ struct CreditBalance {
         "Renews \(ResearchFormatters.mediumDateFormatter.string(from: renewalDate))"
     }
 
+    /// PREVIEW ONLY. No shipping code path may fall back to this — a fabricated
+    /// balance shown as if real is worse than showing none (it contradicted the user's
+    /// actual balance on two other tabs). Both `LearnView` and `ResearchViewModel` now
+    /// render nothing until a real balance arrives.
     static let mock = CreditBalance(
         credits: 47,
-        renewalDate: Calendar.current.date(from: DateComponents(year: 2025, month: 1, day: 1)) ?? Date()
+        renewalDate: Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
     )
 }
 
@@ -711,18 +715,37 @@ extension AnalysisReport {
 extension CreditBalance {
     /// Map backend credits response to CreditBalance.
     static func from(_ response: BackendCreditsResponse) -> CreditBalance {
-        let renewalDate: Date = {
-            guard let resetsAt = response.resetsAt else {
-                return Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
-            }
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let d = formatter.date(from: resetsAt) { return d }
-            formatter.formatOptions = [.withInternetDateTime]
-            return formatter.date(from: resetsAt) ?? Date()
-        }()
+        CreditBalance(
+            credits: response.remaining,
+            renewalDate: Self.parseResetDate(response.resetsAt)
+        )
+    }
 
-        return CreditBalance(credits: response.remaining, renewalDate: renewalDate)
+    /// Map `AppState.user.credits` — the app-wide single source of truth — to the
+    /// display model. Lets any screen render the SAME balance without issuing its own
+    /// `/users/me/credits` request (the Learn tab previously hardcoded a fabricated
+    /// one instead, which then disagreed with Research and Profile).
+    static func from(_ info: CreditInfo) -> CreditBalance {
+        CreditBalance(
+            credits: info.remaining,
+            renewalDate: Self.parseResetDate(info.resetsAt)
+        )
+    }
+
+    /// Shared ISO-8601 parsing for the reset timestamp. The backend emits it with and
+    /// without fractional seconds depending on the row, so both are attempted; an
+    /// unparseable or absent value falls back to one month out rather than to `Date()`
+    /// (which would render as "Renews today" forever).
+    static func parseResetDate(_ resetsAt: String?) -> Date {
+        guard let resetsAt else {
+            return Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = formatter.date(from: resetsAt) { return d }
+        formatter.formatOptions = [.withInternetDateTime]
+        if let d = formatter.date(from: resetsAt) { return d }
+        return Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
     }
 }
 

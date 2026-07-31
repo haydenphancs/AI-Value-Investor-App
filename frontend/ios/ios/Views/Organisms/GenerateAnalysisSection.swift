@@ -9,7 +9,9 @@ import SwiftUI
 
 struct GenerateAnalysisSection: View {
     let cost: AnalysisCost
-    let remainingCredits: Int
+    /// nil = balance not loaded / failed to load. The badge is hidden rather than
+    /// showing a number the user doesn't actually have.
+    let remainingCredits: Int?
     var isEnabled: Bool = true
     var isLoading: Bool = false
     var onGenerate: (() -> Void)?
@@ -24,8 +26,10 @@ struct GenerateAnalysisSection: View {
                 onTap: onGenerate
             )
 
-            // Credits remaining
-            CreditsBadge(credits: remainingCredits, style: .compact)
+            // Credits remaining — omitted entirely when unknown.
+            if let remainingCredits {
+                CreditsBadge(credits: remainingCredits, style: .compact)
+            }
         }
         .padding(.horizontal, AppSpacing.lg)
         

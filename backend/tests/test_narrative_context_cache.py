@@ -294,3 +294,119 @@ async def test_nullable_job_empty_text_applies_none_not_fallback():
     assert len(gemini.inline_prompts) == 1             # no cache → inline path
     assert captured["v"] is None                       # nullable empty → None
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Call-site regression: BOTH report paths must FORWARD `evidence`.
+#
+# Every test above passes `evidence=` explicitly, so they structurally cannot
+# catch a CALLER that omits it — which is exactly the bug this pins. Dropping the
+# 4th argument leaves `use_cache` False and every narrative call silently
+# re-sends the full evidence blob inline at full token price: no error, no log,
+# just a bigger bill on the primary paid surface.
+#
+# Identity is asserted, not truthiness. `run_narrative_jobs` does
+# `job.prompt.replace(evidence, _EVIDENCE_POINTER)`, so a different-but-truthy
+# string would create a cache and then fail every substitution — producing
+# cached-path calls that still carry the full inline evidence.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SENTINEL_EVIDENCE = "SENTINEL EVIDENCE — must reach run_narrative_jobs verbatim."
+
+
+def _evidence_spy():
+    """Returns (spy, calls). `evidence` defaults to "" exactly as the real
+    signature does, so a 3-argument caller records "" and fails the assertion."""
+    calls: list[dict] = []
+
+    async def _spy(jobs, gemini, persona, evidence="", *a, **kw):
+        calls.append({"evidence": evidence, "persona": persona})
+
+    return _spy, calls
+
+
+async def _noop(*a, **kw):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_path_forwards_evidence(monkeypatch):
+    """`/stocks/{ticker}/report` (the direct, paid path) must hoist evidence."""
+    import app.services.ticker_report_service as trs
+
+    spy, calls = _evidence_spy()
+    monkeypatch.setattr(trs, "run_narrative_jobs", spy)
+    monkeypatch.setattr(trs, "build_financial_context", lambda out: _SENTINEL_EVIDENCE)
+    monkeypatch.setattr(trs, "build_narrative_jobs", lambda persona, ev, rep: [])
+    monkeypatch.setattr(trs, "synthesize_core_thesis", _noop)
+    monkeypatch.setattr(trs, "synthesize_critical_factors", _noop)
+    monkeypatch.setattr(trs, "upsert_cached_report", _noop)
+
+    # Build the service without __init__ so no FMP/Gemini/Supabase client is
+    # constructed; the pipeline below never touches the real ones.
+    svc = object.__new__(trs.TickerReportService)
+    svc.gemini = object()
+
+    class _FakeCollector:
+        async def collect(self, ticker, persona_key):
+            return object()
+
+        def assemble_report(self, out, shell):
+            return {}
+
+    svc.collector = _FakeCollector()
+
+    async def _fake_stage_a(out, persona, evidence):
+        return {}
+
+    monkeypatch.setattr(svc, "_generate_stage_a", _fake_stage_a)
+
+    await svc.generate_fresh_report("AAPL", "warren_buffett")
+
+    assert len(calls) == 1
+    assert calls[0]["evidence"] == _SENTINEL_EVIDENCE, (
+        "ticker_report_service dropped `evidence` — Stage-B context caching is "
+        "silently disabled and all N narrative calls bill at full inline price."
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_agent_path_forwards_evidence(monkeypatch):
+    """`/research/generate` must too — pinned in the same test so the two
+    paths can never drift apart again."""
+    import app.services.agents.research_agent as ra
+
+    spy, calls = _evidence_spy()
+    monkeypatch.setattr(ra, "run_narrative_jobs", spy)
+    monkeypatch.setattr(ra, "build_financial_context", lambda out: _SENTINEL_EVIDENCE)
+    monkeypatch.setattr(ra, "build_narrative_jobs", lambda persona, ev, rep: [])
+    monkeypatch.setattr(ra, "synthesize_core_thesis", _noop)
+    monkeypatch.setattr(ra, "synthesize_critical_factors", _noop)
+
+    agent = object.__new__(ra.ResearchAgent)
+    agent.persona = get_persona_config("warren_buffett")
+    agent.gemini = object()
+    agent.research_findings = ""
+
+    class _FakeCollector:
+        async def collect(self, ticker, persona_key):
+            return object()
+
+        def assemble_report(self, out, shell):
+            return {}
+
+    agent.collector = _FakeCollector()
+
+    async def _fake_agentic(out, evidence):
+        return ""
+
+    async def _fake_stage_a(out, evidence, research_text):
+        return {}
+
+    monkeypatch.setattr(agent, "_agentic_research", _fake_agentic)
+    monkeypatch.setattr(agent, "_generate_stage_a", _fake_stage_a)
+
+    await agent.run("AAPL")
+
+    assert len(calls) == 1
+    assert calls[0]["evidence"] == _SENTINEL_EVIDENCE

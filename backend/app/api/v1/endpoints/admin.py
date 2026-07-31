@@ -48,22 +48,12 @@ def _authorize_admin(
     raise HTTPException(status_code=403, detail="Admin access required")
 
 
-@router.get("/auth-debug")
-async def auth_debug(
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-):
-    """Public diagnostic: confirms whether ADMIN_TOKEN env var is loaded
-    on the server and whether the token in the request matches. Does NOT
-    reveal either value.
-    """
-    server = settings.ADMIN_TOKEN
-    return {
-        "server_token_configured": server is not None and len(server) > 0,
-        "server_token_length": len(server) if server else 0,
-        "header_token_provided": x_admin_token is not None,
-        "header_token_length": len(x_admin_token) if x_admin_token else 0,
-        "match": bool(server and x_admin_token and server == x_admin_token),
-    }
+# NOTE: `GET /admin/auth-debug` was removed (2026-07-30). It was public and
+# returned both `server_token_length` and `"match": server == x_admin_token` —
+# an exact length disclosure plus an unthrottled equality ORACLE on
+# ADMIN_TOKEN, callable by anyone. Nothing is lost: every other route here
+# already authorizes, so a legitimate token-holder can simply call one and read
+# the 200-vs-403, and `_authorize_admin` logs the same diagnosis server-side.
 
 
 @router.post("/refresh-sector-benchmarks")

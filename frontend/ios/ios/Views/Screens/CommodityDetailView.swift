@@ -59,7 +59,9 @@ struct CommodityDetailView: View {
                 TickerDetailHeader(
                     onBackTapped: handleBackTapped,
                     onSearchTapped: handleSearchTapped,
-                    onNotificationTapped: viewModel.handleNotificationTap,
+                    // nil until price alerts ship — hides the bell rather than
+                    // showing a control whose handler was a print().
+                    onNotificationTapped: nil,
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
@@ -95,6 +97,16 @@ struct CommodityDetailView: View {
                                 previousClose: commodityData.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
+                        } else if let errorMessage = viewModel.errorMessage {
+                            // The ViewModel has been writing this message all along and
+                            // nothing rendered it: on failure the screen fell through to
+                            // a skeleton that never resolved, so the user sat on a
+                            // permanent shimmer with no error and no retry.
+                            DetailLoadFailureCard(
+                                message: errorMessage,
+                                isRetrying: viewModel.isLoading,
+                                onRetry: { viewModel.loadCommodityData() }
+                            )
                         } else {
                             DetailHeaderChartSkeleton()
                                 .padding(.top, AppSpacing.sm)

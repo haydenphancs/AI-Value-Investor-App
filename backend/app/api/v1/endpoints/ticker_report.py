@@ -41,6 +41,12 @@ from app.dependencies import (
     get_current_user_or_guest,
     GUEST_USER_ID,
     ChatRateLimit,
+    ReportRateLimit,
+    identity_key,
+)
+from app.services.guest_report_budget_service import (
+    GuestReportBudgetUnavailable,
+    get_guest_report_budget_service,
 )
 from app.schemas.ticker_report import TickerReportResponse
 from app.services.credit_service import CreditService, CreditServiceUnavailable
@@ -70,26 +76,46 @@ VALID_PERSONAS = PERSONA_KEYS
 # that pre-date the dedicated `ticker_report_cache` table).
 LEGACY_CACHE_TTL_HOURS = 24
 
+# Global in-flight counter for BILLABLE generations on this endpoint. The handler
+# is synchronous (it awaits the pipeline to completion), so a plain int on the
+# single event loop is an exact concurrency gauge — no lock needed, since the
+# check and the increment below have no `await` between them.
+_INFLIGHT_REPORTS = 0
+
 
 @router.get("/{ticker}/report")
 async def get_ticker_report(
     ticker: str,
     persona: str = Query("warren_buffett", description="Investor persona key"),
     user: dict = Depends(get_current_user_or_guest),  # for the fresh-generation charge
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    _rate: None = ReportRateLimit,
 ):
     """
     Generate a comprehensive ticker report.
 
     Billing: a cache HIT is free; a cache MISS runs the full AI pipeline and costs
     `CreditService.DEEP_RESEARCH_COST` credits, charged upfront and refunded on ANY
-    non-delivery (generation error, schema drift, or client disconnect). Guests
-    resolve to the shared guest balance, so this has no real billing effect until
-    real accounts are enabled.
+    non-delivery (generation error, schema drift, or client disconnect).
+
+    Guests are metered PER INSTALL, not by credits: the credit RPCs early-return on
+    the shared guest sentinel (migration 101), because debiting it would deplete one
+    pool for every signed-out user at once. Instead a signed-out caller claims
+    against `GUEST_REPORT_MONTHLY_LIMIT` in `guest_report_budget` (migration 106),
+    keyed off the `X-Guest-Id`-derived uuid, and gets the claim RELEASED on the same
+    non-delivery paths that refund an authenticated user. Two in-process controls
+    bound the blast radius even when Supabase is unreachable:
+      * `ReportRateLimit` — a per-INSTALL window, so one abusive install cannot
+        spend anyone else's allowance.
+      * `REPORT_GET_MAX_INFLIGHT` — a global admission gate returning 409
+        SYSTEM_BUSY past a safe backlog.
 
     Cache strategy: a recent completed `research_reports` row (legacy) AND the
     dedicated `ticker_report_cache` (24h close-aligned) are both checked here — so
-    the charge fires strictly on a genuine generation, never on a cache hit.
+    the charge and the admission gate fire strictly on a genuine generation, never
+    on a cache hit.
     """
+    global _INFLIGHT_REPORTS
     ticker = ticker.upper().strip()
 
     if not ticker or len(ticker) > 10:
@@ -135,44 +161,109 @@ async def get_ticker_report(
         result, err = _validate_report(cached, ticker, persona)
         return err if err is not None else result
 
-    # ── BILLABLE PATH: cache miss = a fresh AI generation. Authenticated users are
-    #    charged upfront via the unified gate (reset-if-due + atomic debit + ledger,
-    #    one round-trip); guests are a credit no-op (the shared pool would deplete for
-    #    everyone — migration 101) and are governed by rate limits. Refund on ANY
-    #    non-delivery via the finally below. Synchronous endpoint → the refund fires at
-    #    most once, so the non-idempotent refund RPC is safe without the is_refunded CAS.
+    # ── ADMISSION GATE: shed load past a safe backlog. Placement is load-bearing
+    #    on three counts:
+    #      1. AFTER both free cache paths — shedding a cache hit would turn a
+    #         capacity blip into a total outage on already-generated reports.
+    #      2. BEFORE the precharge — a rejected request must never burn credits
+    #         (the invariant test_research_concurrency_cap pins for the other path).
+    #      3. Released in the `finally` below, which also runs on CancelledError.
+    #         A leaked slot permanently bricks the endpoint after N disconnects.
+    cap = settings.REPORT_GET_MAX_INFLIGHT
+    if cap and _INFLIGHT_REPORTS >= cap:
+        logger.warning(
+            "Report admission REJECTED for %s/%s — %d in flight (cap %d)",
+            ticker, persona, _INFLIGHT_REPORTS, cap,
+        )
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=409,
+            message=f"{_INFLIGHT_REPORTS} report generations already in flight (cap {cap})",
+            details={"ticker": ticker, "persona": persona, "step": "admission"},
+        )
+    _INFLIGHT_REPORTS += 1
+
+    # Everything from here on lives inside the try, so the slot is released on
+    # EVERY exit — including the two credit early-returns below, which would
+    # otherwise leak a slot per failure and permanently brick the endpoint.
     is_guest = user["id"] == GUEST_USER_ID
     credit_service = CreditService()
-    if not is_guest:
-        try:
-            new_remaining = credit_service.precharge(
-                user["id"], CreditService.DEEP_RESEARCH_COST,
-                reason="report_charge", ref_id=f"{ticker}:{persona}",
-            )
-        except CreditServiceUnavailable:
-            # Transient Supabase/RPC failure — retryable SYSTEM_BUSY (never
-            # INSUFFICIENT_CREDITS: a DB blip must not tell a paying user they're broke).
-            return make_error_response(
-                ErrorCode.SYSTEM_BUSY,
-                status_code=409,
-                message="spend_credits RPC unavailable (transient)",
-                details={"user_id": user["id"], "ticker": ticker, "step": "credit_charge"},
-            )
-        if new_remaining is None:
-            return make_error_response(
-                ErrorCode.INSUFFICIENT_CREDITS,
-                message=(
-                    f"User has fewer than {CreditService.DEEP_RESEARCH_COST} "
-                    f"credits remaining"
-                ),
-                details={
-                    "user_id": user["id"],
-                    "required": CreditService.DEEP_RESEARCH_COST,
-                },
-            )
-
+    charged = False
+    guest_bucket: Optional[str] = None  # set once a guest claim actually succeeds
+    guest_period: Optional[str] = None  # the period that claim landed in
     delivered = False
     try:
+        # ── BILLABLE PATH: cache miss = a fresh AI generation. Authenticated users
+        #    are charged upfront via the unified gate (reset-if-due + atomic debit +
+        #    ledger, one round-trip); guests are a credit no-op (the shared pool would
+        #    deplete for everyone — migration 101) and are bounded by ReportRateLimit
+        #    + the admission gate above instead. Refund on ANY non-delivery via the
+        #    finally below. Synchronous endpoint → the refund fires at most once, so
+        #    the non-idempotent refund RPC is safe without the is_refunded CAS.
+        if not is_guest:
+            try:
+                new_remaining = credit_service.precharge(
+                    user["id"], CreditService.DEEP_RESEARCH_COST,
+                    reason="report_charge", ref_id=f"{ticker}:{persona}",
+                )
+            except CreditServiceUnavailable:
+                # Transient Supabase/RPC failure — retryable SYSTEM_BUSY (never
+                # INSUFFICIENT_CREDITS: a DB blip must not tell a paying user
+                # they're broke). Nothing was debited, so `charged` stays False.
+                return make_error_response(
+                    ErrorCode.SYSTEM_BUSY,
+                    status_code=409,
+                    message="spend_credits RPC unavailable (transient)",
+                    details={"user_id": user["id"], "ticker": ticker, "step": "credit_charge"},
+                )
+            if new_remaining is None:
+                return make_error_response(
+                    ErrorCode.INSUFFICIENT_CREDITS,
+                    message=(
+                        f"User has fewer than {CreditService.DEEP_RESEARCH_COST} "
+                        f"credits remaining"
+                    ),
+                    details={
+                        "user_id": user["id"],
+                        "required": CreditService.DEEP_RESEARCH_COST,
+                    },
+                )
+            charged = True
+        else:
+            # ── GUEST: claim against the per-INSTALL monthly allowance.
+            #    FAIL OPEN if the RPC round-trip breaks — a Supabase blip must not
+            #    wall a user out of the headline feature, and ReportRateLimit +
+            #    REPORT_GET_MAX_INFLIGHT still bound the damage without any DB.
+            bucket = identity_key(user, x_guest_id)
+            budget = get_guest_report_budget_service()
+            # Captured BEFORE the claim: a generation that starts at 23:5x ET on the
+            # last day of a month and fails after midnight must release against the
+            # month it claimed from, not the new one.
+            guest_period = budget.current_period()
+            try:
+                claimed = budget.try_claim_report(bucket)
+            except GuestReportBudgetUnavailable:
+                logger.warning(
+                    "Guest report budget unavailable for bucket=%s — failing OPEN "
+                    "(rate limit + admission cap still apply)", bucket,
+                )
+                claimed = 0  # 0 => proceed, but nothing to release later
+            if claimed == -1:
+                return make_error_response(
+                    ErrorCode.INSUFFICIENT_CREDITS,
+                    message=(
+                        "Guest install reached its free report allowance "
+                        f"({settings.GUEST_REPORT_MONTHLY_LIMIT}/month)"
+                    ),
+                    details={
+                        "guest": True,
+                        "limit": settings.GUEST_REPORT_MONTHLY_LIMIT,
+                        "ticker": ticker,
+                    },
+                )
+            if claimed > 0:
+                guest_bucket = bucket
+
         service = TickerReportService()
         report = await service.generate_fresh_report(ticker, persona)
 
@@ -202,7 +293,10 @@ async def get_ticker_report(
             e, ticker=ticker, persona=persona, step="report_generation",
         )
     finally:
-        if not is_guest and not delivered:
+        _INFLIGHT_REPORTS -= 1
+        # `charged`, not `not is_guest`: a precharge that never succeeded must not
+        # be "refunded" (that would CREDIT a user who was never debited).
+        if charged and not delivered:
             # Non-delivery: generation error, schema drift, or a client disconnect
             # / CancelledError (a BaseException that `except` misses, but `finally`
             # always runs). Refund the charge. This is the ONLY backstop — unlike
@@ -213,6 +307,11 @@ async def get_ticker_report(
                 user["id"], CreditService.DEEP_RESEARCH_COST,
                 reason="report_refund", ref_id=f"{ticker}:{persona}",
             )
+        # Same symmetry for guests: `guest_bucket` is set ONLY when a claim really
+        # succeeded, so a cap-reached or fail-open path releases nothing (releasing
+        # an unclaimed slot would hand out a free extra report).
+        if guest_bucket and not delivered:
+            get_guest_report_budget_service().release_report(guest_bucket, guest_period)
 
 
 def _validate_report(report: dict, ticker: str, persona: str):

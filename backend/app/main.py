@@ -249,6 +249,12 @@ async def _run_news_pre_warmer():
             await asyncio.to_thread(
                 get_guest_report_budget_service().sweep_expired
             )
+
+            # And analytics_events (migration 107) — the highest-volume of the three.
+            # These are aggregate inputs, not a system of record, so they age out.
+            from app.services.analytics_service import get_analytics_service
+
+            await asyncio.to_thread(get_analytics_service().sweep_expired)
         except Exception as e:
             logger.error(f"News pre-warmer failed: {e}", exc_info=True)
 

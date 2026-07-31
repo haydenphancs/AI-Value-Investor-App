@@ -466,6 +466,10 @@ class ResearchViewModel: ObservableObject {
                 for try await progress in stream {
                     switch progress {
                     case .started(let taskId):
+                        Analytics.shared.track(.reportRequested, [
+                            "ticker": .string(ticker),
+                            "persona": .string(personaKey),
+                        ])
                         print("🔬 ResearchVM: Research started — report ID: \(taskId)")
                         startedId = taskId
                         self.inFlightReportIds.insert(taskId)
@@ -492,6 +496,10 @@ class ResearchViewModel: ObservableObject {
                         }
 
                     case .completed(let report):
+                        Analytics.shared.track(.reportCompleted, [
+                            "ticker": .string(ticker),
+                            "persona": .string(personaKey),
+                        ])
                         print("✅ ResearchVM: Research complete for \(ticker) — \(report.title ?? "Untitled")")
                         if let id = startedId {
                             self.inFlightReportIds.remove(id)
@@ -502,6 +510,11 @@ class ResearchViewModel: ObservableObject {
                         await self.loadCredits()
 
                     case .failed(let appError):
+                        // `code` only — never the message, which can carry backend text.
+                        Analytics.shared.track(.reportFailed, [
+                            "ticker": .string(ticker),
+                            "reason": .string(appError.analyticsCode),
+                        ])
                         if let id = startedId {
                             self.inFlightReportIds.remove(id)
                             self.liveProgress[id] = nil

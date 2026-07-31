@@ -66,6 +66,8 @@ final class MoneyMovesProgressStore: ObservableObject {
     func markCompleted(slug: String) {
         let s = slug.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty, !completed.contains(s) else { return }
+        // Inside the idempotence guard: once per article ever, not per re-open.
+        Analytics.shared.track(.lessonCompleted, ["kind": .string("money_move")])
         completed.insert(s)
         pendingUncompleted.remove(s)   // re-completing supersedes any pending un-completion tombstone
         bumpLocalVersion()             // invalidates any response already in flight

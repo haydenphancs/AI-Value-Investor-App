@@ -418,6 +418,8 @@ final class AudioManager: ObservableObject {
 
     /// Play a new episode
     func play(_ episode: AudioEpisode) {
+        // Kind only — episode titles are high-cardinality authored content.
+        Analytics.shared.track(.audioPlayed, ["kind": .string(episode.category.rawValue)])
         // Add current episode to history if exists
         if let current = currentEpisode {
             addToHistory(current)

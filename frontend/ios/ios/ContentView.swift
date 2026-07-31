@@ -60,6 +60,10 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .onChange(of: selectedTab) { oldValue, newValue in
+            // Which tabs actually get used. `HomeTab` is a fixed 5-case enum, so this
+            // is a low-cardinality dimension, not free text.
+            Analytics.shared.track(.screenView, ["tab": .string(newValue.rawValue)])
+
             // Clear the research ticker when leaving research tab
             if oldValue == .research && newValue != .research {
                 researchTickerSymbol = nil

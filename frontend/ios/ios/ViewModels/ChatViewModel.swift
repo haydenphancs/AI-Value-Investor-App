@@ -257,6 +257,11 @@ class ChatViewModel: ObservableObject {
 
     /// Send a message in the current conversation.
     func sendMessage(_ text: String) {
+        // Count only — the message body is user-typed text and must NEVER become
+        // an analytics prop. `contextType` is a fixed enum, so it is safe.
+        Analytics.shared.track(.chatSent, [
+            "context": .string(currentContextType?.rawValue ?? "none"),
+        ])
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         // Third-party AI consent gate (App Review 5.1.2(i)). Note startNewConversation

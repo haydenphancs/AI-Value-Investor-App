@@ -319,3 +319,31 @@ enum APIError: Error, @unchecked Sendable {
     case networkError(Error)
     case unknown(message: String)
 }
+
+// MARK: - Analytics
+
+extension AppError {
+    /// A stable, low-cardinality code for analytics dimensions.
+    ///
+    /// Deliberately NOT `message`: user-facing copy is long, changes with wording
+    /// tweaks (silently splitting a metric in two), and — for `.apiError` — can carry
+    /// backend-supplied text. Analytics props are for dimensions, never free text.
+    var analyticsCode: String {
+        switch self {
+        case .noConnection:        return "no_connection"
+        case .timeout:             return "timeout"
+        case .serverError:         return "server_error"
+        case .unauthorized:        return "unauthorized"
+        case .tokenExpired:        return "token_expired"
+        case .forbidden:           return "forbidden"
+        case .insufficientCredits: return "insufficient_credits"
+        case .notFound:            return "not_found"
+        case .validationFailed:    return "validation_failed"
+        case .rateLimited:         return "rate_limited"
+        // The backend's ErrorCode enum is already a stable machine-readable
+        // vocabulary, so it is safe as a dimension. The message is not.
+        case .apiError(let code, _): return code
+        case .unknown:             return "unknown"
+        }
+    }
+}

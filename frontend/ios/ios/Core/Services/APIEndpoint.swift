@@ -31,6 +31,11 @@ enum HTTPMethod: String, Sendable {
 /// Add new endpoints here as the app grows.
 enum APIEndpoint: Sendable {
 
+    // MARK: - Analytics
+    /// Batched product-analytics events. Fire-and-forget; the backend always
+    /// returns 200 (see backend/app/api/v1/endpoints/analytics.py).
+    case trackEvents(AnalyticsBatchRequest)
+
     // MARK: - Auth
     case signIn(email: String, password: String)
     case signUp(email: String, password: String, displayName: String)
@@ -218,6 +223,10 @@ enum APIEndpoint: Sendable {
 
     nonisolated var path: String {
         switch self {
+        // Analytics
+        case .trackEvents:
+            return "/api/v1/events"
+
         // Auth
         case .signIn:
             return "/api/v1/auth/login"
@@ -490,7 +499,8 @@ enum APIEndpoint: Sendable {
 
     nonisolated var method: HTTPMethod {
         switch self {
-        case .signIn, .signUp, .refreshToken, .signOut,
+        case .trackEvents,
+             .signIn, .signUp, .refreshToken, .signOut,
              .forgotPassword, .resetPassword, .changePassword,
              .resendConfirmation, .oauthSignIn, .sessionExchange, .verifyPurchase,
              .addToWatchlist, .generateResearch, .rateReport,
@@ -610,6 +620,9 @@ enum APIEndpoint: Sendable {
 
     nonisolated var body: (any Encodable & Sendable)? {
         switch self {
+        case .trackEvents(let batch):
+            return batch
+
         case .signIn(let email, let password):
             return SignInRequest(email: email, password: password)
 

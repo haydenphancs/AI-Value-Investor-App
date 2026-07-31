@@ -73,6 +73,7 @@ final class PaywallViewModel: ObservableObject {
     }
 
     func purchase(tier: String) async {
+        Analytics.shared.track(.paywallPurchaseStarted, ["tier": .string(tier)])
         errorMessage = nil
         restoreMessage = nil
         isPendingApproval = false
@@ -88,6 +89,7 @@ final class PaywallViewModel: ObservableObject {
         do {
             switch try await store.purchase(product) {
             case .success(let appliedTier):
+                Analytics.shared.track(.purchaseCompleted, ["tier": .string(appliedTier)])
                 purchasedTier = appliedTier
             case .cancelled:
                 break   // user dismissed the sheet — not an error

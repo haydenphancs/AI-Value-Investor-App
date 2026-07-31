@@ -300,6 +300,17 @@ class TickerDetailViewModel: ObservableObject {
                     group.addTask { await self.fetchStockDetail(ticker) }
                     group.addTask { await self.fetchStockQuote(ticker) }
                 }
+                // If BOTH fallback sources also came back empty there is no real
+                // data to render — building a TickerDetailData anyway would paint a
+                // page of zeros as though they were this company's actual numbers.
+                // Surface the failure instead. (`errorMessage` was previously a dead
+                // property: the only write in this file was `= nil`.)
+                if self.stockDetail == nil && self.stockQuote == nil {
+                    self.errorMessage = AppError.from(error).message
+                    print("⚠️ TickerDetailVM: fallback yielded NO data for \(ticker) — surfacing error")
+                    self.isLoading = false
+                    return
+                }
                 self.tickerData = self.buildTickerDetailData()
                 print("📊 TickerDetailVM: Built fallback TickerDetailData for \(ticker)")
                 print("📊 Fallback data sources: stockDetail=\(self.stockDetail != nil), stockQuote=\(self.stockQuote != nil)")
@@ -956,10 +967,6 @@ class TickerDetailViewModel: ObservableObject {
     /// Lightweight DTO for decoding watchlist items (only need ticker field)
     private struct WatchlistItemDTO: Codable {
         let ticker: String
-    }
-
-    func handleNotificationTap() {
-        print("Notification settings for \(tickerSymbol)")
     }
 
     func handleWebsiteTap() {

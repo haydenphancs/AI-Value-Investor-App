@@ -150,7 +150,7 @@ struct ResearchContentView: View {
                 // Generate Analysis Section
                 GenerateAnalysisSection(
                     cost: viewModel.analysisCost,
-                    remainingCredits: viewModel.creditBalance.credits,
+                    remainingCredits: viewModel.creditBalance?.credits,
                     isEnabled: viewModel.canStartNewGeneration,
                     isLoading: viewModel.isAtConcurrencyCap,
                     onGenerate: handleGenerateAnalysis
@@ -160,11 +160,13 @@ struct ResearchContentView: View {
                 WhatYouGetSection(features: viewModel.features)
 
                 // Credits Balance Card
-                CreditsBalanceCard(
-                    balance: viewModel.creditBalance,
-                    onAddCredits: handleAddCredits
-                )
-                .padding(.horizontal, AppSpacing.lg)
+                if let balance = viewModel.creditBalance {
+                    CreditsBalanceCard(
+                        balance: balance,
+                        onAddCredits: handleAddCredits
+                    )
+                    .padding(.horizontal, AppSpacing.lg)
+                }
 
                 // Bottom padding for tab bar
                 Spacer()
@@ -194,7 +196,9 @@ struct ResearchContentView: View {
                     onRetryTapped: handleRetryTapped,
                     onToggleSelect: handleToggleSelect,
                     onToggleSelectingMode: handleToggleSelectingMode,
-                    onTogglePersonaTag: { viewModel.togglePersonaTag($0) }
+                    onTogglePersonaTag: { viewModel.togglePersonaTag($0) },
+                    // First-run CTA: send them to the tab that can actually make one.
+                    onGenerateFirst: { viewModel.selectedTab = .research }
                 )
                 .padding(.top, AppSpacing.sm)
 

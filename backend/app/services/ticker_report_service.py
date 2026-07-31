@@ -169,9 +169,37 @@ LENGTH: 2-4 sentences, total under 90 words."""
         free path, this method is the billable "real AI work" path. Callers that
         don't care about billing should use `generate_ticker_report`, which
         checks the cache first and only falls through to this.
+
+        Runs under the SAME global agent semaphore + same-(ticker, persona) dedup
+        that `/research/generate` uses. Without it, "everyone opens AAPL after
+        earnings" spawned one full Gemini pipeline PER REQUEST on this path while
+        the deep path collapsed the identical herd to one.
+        `ticker_data_cache._INFLIGHT` only dedups the persona-neutral FMP
+        collection by ticker — not the per-persona Gemini work, which is the
+        expensive part (Stage A + 14 Stage-B narratives + 2 synthesis calls).
+
+        The dedup namespace is `"direct"`, NOT the deep path's: the two pipelines
+        produce different reports for the same (ticker, persona), so sharing a
+        namespace would hand a deep-research caller a shallow report.
         """
         ticker = ticker.upper().strip()
 
+        # Function-local import: research_service does not import this module, and
+        # this keeps that one-directional. Mirrors research.py / chat.py.
+        from app.services.research_service import run_agent_deduped
+
+        return await run_agent_deduped(
+            ticker, persona_key,
+            lambda: self._generate_uncontended(ticker, persona_key),
+            key_prefix="direct",
+        )
+
+    async def _generate_uncontended(
+        self, ticker: str, persona_key: str
+    ) -> Dict[str, Any]:
+        """The actual pipeline. Only ever runs as a dedup LEADER holding a
+        semaphore slot — followers get a deep copy of this result, so the cache
+        upsert at the end fires exactly once per real generation."""
         # 2. Collect real data
         out = await self.collector.collect(ticker, persona_key)
         persona = get_persona_config(persona_key)
@@ -190,7 +218,11 @@ LENGTH: 2-4 sentences, total under 90 words."""
         #    `report`, so concurrent execution is safe.
         jobs = build_narrative_jobs(persona, evidence, report)
         await asyncio.gather(
-            run_narrative_jobs(jobs, self.gemini, persona),
+            # Pass `evidence` so Stage B can hoist it into a single Gemini
+            # context cache shared across all N parallel narrative calls.
+            # Omitting it leaves `use_cache` False and every call re-sends the
+            # full evidence blob inline at full token price.
+            run_narrative_jobs(jobs, self.gemini, persona, evidence),
             synthesize_core_thesis(report, persona, self.gemini, evidence),
         )
 

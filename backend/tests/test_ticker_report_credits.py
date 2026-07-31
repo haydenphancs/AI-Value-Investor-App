@@ -83,13 +83,27 @@ def _install_fakes(
     FakeCreditService.refund_ledgered = refund_ledgered
     monkeypatch.setattr(tr, "CreditService", FakeCreditService)
 
+    # Guests now claim against the per-install monthly budget (migration 106).
+    # Stub it so this file's guest test never reaches live Supabase.
+    class _FakeGuestBudget:
+        def current_period(self):
+            return "2026-07-01"
+
+        def try_claim_report(self, bucket):
+            return 1
+
+        def release_report(self, bucket, period):
+            pass
+
+    monkeypatch.setattr(tr, "get_guest_report_budget_service", lambda: _FakeGuestBudget())
+
     return FakeCreditService, fake_service
 
 
 @pytest.mark.asyncio
 async def test_cache_hit_is_free(monkeypatch):
     credit, service = _install_fakes(monkeypatch, cached={"ok": True})
-    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER, x_guest_id=None)
     credit.precharge.assert_not_called()
     credit.refund_ledgered.assert_not_called()
     service.generate_fresh_report.assert_not_called()
@@ -104,7 +118,7 @@ async def test_legacy_cache_hit_is_free(monkeypatch):
         return payload
     monkeypatch.setattr(tr, "patch_wall_street_consensus_live", _noop_ws)
     monkeypatch.setattr(tr, "patch_legacy_price_action", lambda p: p)
-    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER, x_guest_id=None)
     credit.precharge.assert_not_called()
     service.generate_fresh_report.assert_not_called()
 
@@ -114,7 +128,7 @@ async def test_miss_success_charges_once_no_refund(monkeypatch):
     credit, service = _install_fakes(
         monkeypatch, cached=None, generate_return={"ok": True}, charge_return=100
     )
-    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER, x_guest_id=None)
     credit.precharge.assert_called_once()
     service.generate_fresh_report.assert_awaited_once()
     credit.refund_ledgered.assert_not_called()
@@ -126,7 +140,7 @@ async def test_miss_generation_failure_refunds_once(monkeypatch):
         monkeypatch, cached=None, generate_raises=RuntimeError("gemini down"),
         charge_return=100,
     )
-    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER, x_guest_id=None)
     credit.precharge.assert_called_once()
     credit.refund_ledgered.assert_called_once()
 
@@ -137,7 +151,7 @@ async def test_ticker_not_found_refunds(monkeypatch):
         monkeypatch, cached=None, generate_raises=ValueError("no profile"),
         charge_return=100,
     )
-    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER, x_guest_id=None)
     credit.precharge.assert_called_once()
     credit.refund_ledgered.assert_called_once()
 
@@ -148,7 +162,7 @@ async def test_schema_drift_refunds(monkeypatch):
         monkeypatch, cached=None, generate_return={"bad": True},
         validate_ok=False, charge_return=100,
     )
-    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER, x_guest_id=None)
     credit.precharge.assert_called_once()
     credit.refund_ledgered.assert_called_once()
 
@@ -156,7 +170,7 @@ async def test_schema_drift_refunds(monkeypatch):
 @pytest.mark.asyncio
 async def test_insufficient_credits_does_not_generate(monkeypatch):
     credit, service = _install_fakes(monkeypatch, cached=None, charge_return=None)
-    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER, x_guest_id=None)
     credit.precharge.assert_called_once()
     service.generate_fresh_report.assert_not_called()
     credit.refund_ledgered.assert_not_called()
@@ -165,7 +179,7 @@ async def test_insufficient_credits_does_not_generate(monkeypatch):
 @pytest.mark.asyncio
 async def test_charge_unavailable_is_retryable_no_generate(monkeypatch):
     credit, service = _install_fakes(monkeypatch, cached=None, charge_raises=True)
-    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER)
+    await tr.get_ticker_report("AAPL", "warren_buffett", user=USER, x_guest_id=None)
     credit.precharge.assert_called_once()
     service.generate_fresh_report.assert_not_called()
     credit.refund_ledgered.assert_not_called()
@@ -176,7 +190,7 @@ async def test_guest_is_not_charged(monkeypatch):
     # The shared guest sentinel is a credit no-op: no precharge, no refund — but the
     # report is still generated (guests are governed by rate limits, not credits).
     credit, service = _install_fakes(monkeypatch, cached=None, generate_return={"ok": True})
-    await tr.get_ticker_report("AAPL", "warren_buffett", user={"id": GUEST_USER_ID})
+    await tr.get_ticker_report("AAPL", "warren_buffett", user={"id": GUEST_USER_ID}, x_guest_id=None)
     credit.precharge.assert_not_called()
     credit.refund_ledgered.assert_not_called()
     service.generate_fresh_report.assert_awaited_once()

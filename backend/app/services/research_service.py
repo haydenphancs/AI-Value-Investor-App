@@ -78,7 +78,7 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
 
 
 async def _run_agent_deduped(
-    ticker: str, persona_key: str, run_callable, on_started=None
+    ticker: str, persona_key: str, run_callable, on_started=None, key_prefix: str = ""
 ):
     """Run the agent pipeline under the global semaphore, sharing ONE execution
     across concurrent same-(ticker, persona) callers.
@@ -95,8 +95,19 @@ async def _run_agent_deduped(
     slot — i.e. when real agent work begins, NOT while queued — so the caller can
     stamp processing_started_at and the reconciliation sweep can age the report
     off work-start rather than enqueue time.
+
+    `key_prefix` namespaces the dedup key. This is a CORRECTNESS requirement, not
+    a nicety: the deep `/research/generate` pipeline and the shallower direct
+    `/stocks/{ticker}/report` pipeline produce DIFFERENT reports for the same
+    (ticker, persona). Sharing one namespace would let a deep-research caller
+    attach to a direct-path leader and receive the shallow report while being
+    charged DEEP_RESEARCH_COST and having it stamped into research_reports.
+    The deep path passes "" and keeps its historical key format byte-for-byte,
+    so its dedup behaviour is provably unchanged; the direct path passes "direct".
     """
     key = f"{ticker.upper().strip()}::{persona_key}"
+    if key_prefix:
+        key = f"{key_prefix}::{key}"
 
     inflight = _AGENT_INFLIGHT.get(key)
     if inflight is not None:
@@ -569,3 +580,13 @@ class ResearchService:
             return "Medium"
         else:
             return "Low"
+
+
+# Public alias for the direct report path (`ticker_report_service`), which needs
+# the same semaphore + dedup but must NOT share this module's dedup namespace —
+# it passes key_prefix="direct". Imported function-locally there to keep the
+# dependency one-directional. Deliberately an alias rather than an extraction:
+# tests/test_agent_dedup_concurrency.py patches `research_service._AGENT_SEMAPHORE`
+# on this module object, and a re-export from a new module would silently break
+# that isolation.
+run_agent_deduped = _run_agent_deduped

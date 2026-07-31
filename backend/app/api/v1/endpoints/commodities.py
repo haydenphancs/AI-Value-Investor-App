@@ -9,6 +9,8 @@ Frontend:
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
+
+from app.dependencies import StandardRateLimit
 from typing import Optional, Dict, Any
 import logging
 import re
@@ -115,6 +117,10 @@ async def get_commodity_news(
 async def enrich_commodity_news(
     symbol: str,
     body: Dict[str, Any],
+    # Throttled: an unauthenticated caller could otherwise trigger up to
+    # MAX_ENRICH_ARTICLE_IDS paid Gemini enrichments per request, unbounded.
+    # Per-install for guests (X-Guest-Id); mirrors updates.py's enrich route.
+    _rate: None = StandardRateLimit,
 ):
     """
     AI-enrich specific commodity news articles on demand.

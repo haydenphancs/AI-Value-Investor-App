@@ -544,6 +544,40 @@ User Action: "Generate Analysis"
 
 ## 5. Agent Orchestration Pattern
 
+> **Implementation status (updated 2026-07-30): BOTH report paths now share one
+> set of concurrency guards.** There are two pipelines that run Gemini agent work:
+> the async `/research/generate` (deep, fire-and-forget + polling, described
+> below) and the synchronous `GET /stocks/{ticker}/report` (direct, shallower).
+> The direct path previously bypassed the guards entirely — an earnings-day herd
+> on one ticker spawned a full Gemini pipeline **per request** there, while the
+> identical herd on the deep path collapsed to one. It now routes through the same
+> `research_service._run_agent_deduped`:
+>
+> | Guard | Scope | Effect |
+> |---|---|---|
+> | `_AGENT_SEMAPHORE` | process-wide, `MAX_CONCURRENT_AGENT_RUNS` (8) | pins total Gemini/FMP load to the API tier; followers hold no slot |
+> | `_AGENT_INFLIGHT` | per `(key_prefix, ticker, persona)` | concurrent same-key callers share ONE run; followers get a deep copy |
+> | `REPORT_GET_MAX_INFLIGHT` (24) | direct path only | admission gate → `409 SYSTEM_BUSY` past a safe backlog |
+> | `ReportRateLimit` (3/min) | per user, **per install** for guests | the only per-caller control on the direct path |
+>
+> **`key_prefix` is a correctness requirement, not a nicety.** The two pipelines
+> produce *different* reports for the same `(ticker, persona)`. The direct path
+> passes `"direct"`; the deep path passes `""` and keeps its historical key format
+> byte-for-byte. Sharing one namespace would let a deep-research caller attach to a
+> direct-path leader and receive the shallow report — while being charged
+> `DEEP_RESEARCH_COST` and having it written to `research_reports` as a deep
+> analysis. Pinned by `tests/test_agent_dedup_concurrency.py`.
+>
+> Admission-gate placement on the direct path is also load-bearing: **after** both
+> free cache paths (shedding a cache hit turns a capacity blip into an outage on
+> already-generated reports), **before** the credit precharge (a rejected request
+> must never burn credits), and released in a `finally` that also runs on
+> `CancelledError` (a leaked slot is permanent). Pinned by
+> `tests/test_ticker_report_admission.py`.
+>
+> `caydex-report-architecture.svg` predates this and understates the direct path's
+> protections — re-export it when that diagram is next touched.
+
 ### 5.1 The Challenge
 
 Deep Research reports take ~30 seconds to generate. HTTP requests shouldn't block for this long because:

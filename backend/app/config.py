@@ -153,6 +153,32 @@ class Settings(BaseSettings):
     # safe backlog. Set 0 to disable the gate.
     MAX_GLOBAL_INFLIGHT_REPORTS: int = 150
 
+    # ── GET /stocks/{ticker}/report admission ─────────────────────────────────
+    # The synchronous direct path, which until now had NO per-caller limit and no
+    # admission gate at all. A cache MISS there costs ~17 Gemini + ~20 FMP calls,
+    # and the cache is keyed (ticker, persona) so looping tickers never hits it —
+    # an unauthenticated loop could burn the whole upstream budget.
+    #
+    # Per-caller window (per-install for guests). A report is ~20x a chat turn, so
+    # this sits far below CHAT_RATE_LIMIT_PER_MINUTE.
+    REPORT_RATE_LIMIT_PER_MINUTE: int = 3
+    # Global in-flight backstop for that endpoint. Unlike MAX_GLOBAL_INFLIGHT_REPORTS
+    # (which counts DB rows for the fire-and-forget /research/generate path), the
+    # direct path is synchronous, so a simple in-process counter IS the true
+    # concurrency gauge. Over this → 409 SYSTEM_BUSY. Set 0 to disable.
+    REPORT_GET_MAX_INFLIGHT: int = 24
+
+    # Free AI reports per INSTALL per month for signed-out users (migration 106).
+    # Guests can't be metered by user_credits — that table is FK-bound to
+    # public.users and a per-install id has no users row — so they get their own
+    # durable budget keyed off the X-Guest-Id-derived uuid.
+    #
+    # Deliberately BELOW the signed-in Free tier (50 credits = 2 reports/month) so
+    # creating an account is an upgrade. It was previously unlimited, which made
+    # signing in a strict downgrade and gave users no reason to register.
+    # Set 0 to require sign-in for any report generation.
+    GUEST_REPORT_MONTHLY_LIMIT: int = 1
+
     # Unified credit pricing (approved 2026-07-26; see migration 100 + the pricing
     # plan). One credit == one "Ask Cay AI" chat turn. A full report is ~20x a chat
     # turn by token/$ weight, so it costs 20 credits. Tier monthly allocations live

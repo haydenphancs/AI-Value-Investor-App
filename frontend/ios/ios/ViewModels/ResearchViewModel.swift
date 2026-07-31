@@ -18,7 +18,10 @@ class ResearchViewModel: ObservableObject {
     @Published var personas: [AnalysisPersona] = AnalysisPersona.allCases
     @Published var selectedPersona: AnalysisPersona = AnalysisPersona.settingsDefault
     @Published var features: [AnalysisFeature] = AnalysisFeature.allFeatures
-    @Published var creditBalance: CreditBalance = .mock
+    /// Optional on purpose: nil = "not loaded yet / couldn't load". It used to
+    /// default to a hardcoded 47-credit mock and STAY there when the fetch failed,
+    /// so every user saw a fabricated balance that contradicted their real one.
+    @Published var creditBalance: CreditBalance?
     @Published var trendingAnalyses: [TrendingAnalysis] = TrendingAnalysis.mockTrending
     @Published var analysisCost: AnalysisCost = .standard
     @Published var isLoading: Bool = false
@@ -249,8 +252,9 @@ class ResearchViewModel: ObservableObject {
             print("✅ ResearchVM: Credits loaded — \(backendCredits.remaining) remaining of \(backendCredits.total)")
             self.creditBalance = CreditBalance.from(backendCredits)
         } catch {
-            print("⚠️ ResearchVM: Failed to load credits — \(error). Using mock data.")
-            // Keep existing (mock) value
+            // Leave `creditBalance` nil rather than inventing a number — the UI hides
+            // the badge/card instead of showing a balance the user doesn't have.
+            print("⚠️ ResearchVM: Failed to load credits — \(error). Leaving balance unknown.")
         }
     }
 
@@ -404,7 +408,7 @@ class ResearchViewModel: ObservableObject {
     }
 
     func generateAnalysis() {
-        print("🔬 ResearchVM: generateAnalysis() tapped — searchText='\(searchText)', persona=\(selectedPersona.backendKey), credits=\(creditBalance.credits)")
+        print("🔬 ResearchVM: generateAnalysis() tapped — searchText='\(searchText)', persona=\(selectedPersona.backendKey), credits=\(creditBalance?.credits.description ?? "unknown")")
 
         // Bounded concurrency: a user may run up to `maxConcurrentGenerations`
         // reports at once (e.g. 4 personas on one ticker, or 1 persona on 4
@@ -424,8 +428,11 @@ class ResearchViewModel: ObservableObject {
             error = "Please select a ticker first."
             return
         }
-        guard creditBalance.credits >= analysisCost.credits else {
-            print("⚠️ ResearchVM: bailed — insufficient credits (\(creditBalance.credits) < \(analysisCost.credits)).")
+        // Unknown balance (nil) does NOT block: the backend charges atomically and
+        // returns 402 INSUFFICIENT_CREDITS, which is the real authority. Blocking on a
+        // balance we failed to fetch would lock a paying user out of the feature.
+        if let balance = creditBalance, balance.credits < analysisCost.credits {
+            print("⚠️ ResearchVM: bailed — insufficient credits (\(balance.credits) < \(analysisCost.credits)).")
             error = "Insufficient credits"
             return
         }
@@ -712,7 +719,7 @@ class ResearchViewModel: ObservableObject {
 
     // MARK: - Computed Properties
     var canGenerateAnalysis: Bool {
-        !searchText.isEmpty && creditBalance.credits >= analysisCost.credits
+        !searchText.isEmpty && (creditBalance?.credits ?? analysisCost.credits) >= analysisCost.credits
     }
 
     /// Number of reports this session currently has in flight.

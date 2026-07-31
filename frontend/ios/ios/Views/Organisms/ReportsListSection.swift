@@ -25,6 +25,8 @@ struct ReportsListSection: View {
     /// Enter selection mode (when idle) or exit + clear (when selecting).
     var onToggleSelectingMode: (() -> Void)?
     var onTogglePersonaTag: ((AnalysisPersona) -> Void)?
+    /// Tapped from the first-run zero-state. When nil the CTA is hidden.
+    var onGenerateFirst: (() -> Void)?
 
     @State private var showSortMenu = false
 
@@ -38,6 +40,11 @@ struct ReportsListSection: View {
 
             if sections.isEmpty && !searchText.isEmpty {
                 emptySearchState
+            } else if sections.isEmpty {
+                // First run: no reports AND no active search. Without this branch a
+                // brand-new user's first visit to the paid feature was a completely
+                // blank screen under a sort/filter bar.
+                emptyFirstRunState
             } else {
                 list
             }
@@ -246,6 +253,40 @@ struct ReportsListSection: View {
                 }
             }
         }
+    }
+
+    private var emptyFirstRunState: some View {
+        VStack(spacing: AppSpacing.md) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 40))
+                .foregroundColor(AppColors.textMuted)
+
+            Text("No analyses yet")
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text("Pick a ticker and an analyst on the Research tab, and your report will show up here.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xl)
+
+            if let onGenerateFirst {
+                Button(action: onGenerateFirst) {
+                    Text("Generate your first analysis")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, AppSpacing.xl)
+                        .padding(.vertical, AppSpacing.md)
+                        .background(AppColors.primaryBlue)
+                        .cornerRadius(AppCornerRadius.medium)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .padding(.top, AppSpacing.xs)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, AppSpacing.xxxl)
     }
 
     private var emptySearchState: some View {

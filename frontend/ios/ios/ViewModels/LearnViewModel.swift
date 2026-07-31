@@ -18,7 +18,10 @@ class LearnViewModel: ObservableObject {
     @Published var moneyMoves: [MoneyMove] = []
     @Published var books: [EducationBook] = []
     @Published var discussions: [CommunityDiscussion] = []
-    @Published var creditBalance: CreditBalance?
+    // NOTE: no `creditBalance` here on purpose. This used to be hardcoded to
+    // `47 credits, renews Jan 1 2025` — a fabricated balance shown to every user
+    // that contradicted the real one on Research and Profile. The Learn screen now
+    // reads `appState.user.credits`, the documented single source of truth.
     @Published var isLoading: Bool = false
     @Published var error: String?
     @Published var searchText: String = ""
@@ -85,7 +88,6 @@ class LearnViewModel: ObservableObject {
             self?.loadMoneyMoves()
             self?.loadBooks()
             self?.loadDiscussions()
-            self?.loadCreditBalance()
             self?.isLoading = false
         }
     }
@@ -204,12 +206,6 @@ class LearnViewModel: ObservableObject {
         discussions = CommunityDiscussion.sampleData
     }
 
-    private func loadCreditBalance() {
-        creditBalance = CreditBalance(
-            credits: 47,
-            renewalDate: Calendar.current.date(from: DateComponents(year: 2025, month: 1, day: 1)) ?? Date()
-        )
-    }
 
     // MARK: - Actions
     func selectTab(_ tab: LearnTab) {
@@ -236,7 +232,4 @@ class LearnViewModel: ObservableObject {
         print("Open discussion by: \(discussion.authorName)")
     }
 
-    func addCredits() {
-        print("Add credits tapped")
-    }
 }

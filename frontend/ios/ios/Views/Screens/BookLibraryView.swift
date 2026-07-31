@@ -14,6 +14,10 @@ struct BookLibraryView: View {
     @ObservedObject private var bookmarks = BookmarkStore.shared
     @State private var books: [LibraryBook] = []
     @State private var selectedBook: LibraryBook?
+    /// Own VM so "Ask the Author Agent" here doesn't clobber the resumable Wiser
+    /// Chat-tab conversation — same reasoning as LearnView.bookChatViewModel.
+    @StateObject private var bookChatViewModel = ChatViewModel()
+    @State private var showBookChat = false
 
     private var orderedBooks: [LibraryBook] {
         books.sorted { $0.curriculumOrder < $1.curriculumOrder }
@@ -134,6 +138,7 @@ struct BookLibraryView: View {
             BookDetailView(book: book)
                 .environmentObject(audioManager)
         }
+        .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)
     }
 
     private func loadBooks() {
@@ -147,12 +152,22 @@ struct BookLibraryView: View {
         selectedBook = book
     }
 
+    /// "Ask the Author Agent" — mirrors LearnView.handleChatWithBook, which already
+    /// did the real thing. Only this full-library screen was left as a `print()`.
     private func handleChatWithBook(_ book: LibraryBook) {
-        print("Chat with book: \(book.title)")
+        bookChatViewModel.startNewConversation(
+            firstMessage: "Tell me about \"\(book.title)\" by \(book.author).",
+            context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas.",
+            contextType: .book
+        )
+        showBookChat = true
     }
 
+    /// "Review" (mastered books only) — reopens the book so the user can re-read the
+    /// cores. There is no separate review flow to route to, and a button that does
+    /// nothing is worse than one that does the obvious thing.
     private func handleReview(_ book: LibraryBook) {
-        print("Review book: \(book.title)")
+        selectedBook = book
     }
 }
 

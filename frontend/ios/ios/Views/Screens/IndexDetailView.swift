@@ -56,7 +56,9 @@ struct IndexDetailView: View {
                 TickerDetailHeader(
                     onBackTapped: handleBackTapped,
                     onSearchTapped: handleSearchTapped,
-                    onNotificationTapped: viewModel.handleNotificationTap,
+                    // nil until price alerts ship — hides the bell rather than
+                    // showing a control whose handler was a print().
+                    onNotificationTapped: nil,
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,

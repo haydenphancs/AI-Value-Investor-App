@@ -316,3 +316,125 @@ async def test_inflight_cleared_after_completion():
     assert r2 == {"done": 2}
     assert calls == 1
     assert svc._AGENT_INFLIGHT == {}
+
+
+# ── key_prefix namespacing ───────────────────────────────────────────────────
+#
+# The direct `/stocks/{ticker}/report` path now shares this semaphore + dedup, but
+# it produces a DIFFERENT (shallower) report than `/research/generate` for the
+# same (ticker, persona). If both used one namespace, a deep-research caller could
+# attach to a direct-path leader and be handed the shallow report — while being
+# charged DEEP_RESEARCH_COST and having it written into research_reports as a
+# deep analysis. That is silent data corruption on a paid path, so it gets a test.
+
+
+@pytest.mark.asyncio
+async def test_prefixed_and_unprefixed_keys_do_not_share_a_leader():
+    _reset(4)
+    ran: list[str] = []
+
+    async def _deep():
+        ran.append("deep")
+        await asyncio.sleep(0.02)
+        return {"depth": "deep"}
+
+    async def _direct():
+        ran.append("direct")
+        await asyncio.sleep(0.02)
+        return {"depth": "direct"}
+
+    deep, direct = await asyncio.wait_for(
+        asyncio.gather(
+            _run_agent_deduped("AAPL", "warren_buffett", _deep),
+            _run_agent_deduped("AAPL", "warren_buffett", _direct, key_prefix="direct"),
+        ),
+        timeout=2,
+    )
+
+    # Both pipelines actually ran — neither became a follower of the other.
+    assert sorted(ran) == ["deep", "direct"]
+    assert deep == {"depth": "deep"}
+    assert direct == {"depth": "direct"}
+
+
+@pytest.mark.asyncio
+async def test_same_prefix_still_dedups():
+    """Namespacing must not disable dedup WITHIN the direct path — that's the
+    whole point of routing it through here."""
+    _reset(4)
+    runs = 0
+
+    async def _run():
+        nonlocal runs
+        runs += 1
+        await asyncio.sleep(0.02)
+        return {"n": runs}
+
+    results = await asyncio.wait_for(
+        asyncio.gather(*[
+            _run_agent_deduped("AAPL", "warren_buffett", _run, key_prefix="direct")
+            for _ in range(5)
+        ]),
+        timeout=2,
+    )
+
+    assert runs == 1, "5 concurrent direct-path callers should collapse to ONE run"
+    assert all(r == {"n": 1} for r in results)
+    # Followers get independent deep copies, not the leader's object.
+    assert len({id(r) for r in results}) == 5
+
+
+@pytest.mark.asyncio
+async def test_deep_path_key_format_is_unchanged():
+    """Back-compat guard: the historical (no-prefix) key must stay byte-identical
+    so the deep path's dedup behaviour is provably untouched by this change."""
+    _reset(1)
+    gate = asyncio.Event()
+
+    async def _blocked():
+        await gate.wait()
+        return {}
+
+    task = asyncio.create_task(_run_agent_deduped("AAPL", "warren_buffett", _blocked))
+    await asyncio.sleep(0.01)
+    assert "AAPL::warren_buffett" in svc._AGENT_INFLIGHT
+    gate.set()
+    await asyncio.wait_for(task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_direct_path_routes_through_the_semaphore():
+    """Regression guard for the whole point of 0.2b: if generate_fresh_report ever
+    stops calling run_agent_deduped, an earnings-day herd silently goes back to
+    one full Gemini pipeline per request."""
+    import app.services.ticker_report_service as trs
+
+    _reset(4)
+    seen: dict = {}
+
+    async def _spy(ticker, persona_key, run_callable, on_started=None, key_prefix=""):
+        seen["ticker"] = ticker
+        seen["persona"] = persona_key
+        seen["prefix"] = key_prefix
+        return await run_callable()
+
+    import app.services.research_service as rsvc
+    original = rsvc.run_agent_deduped
+    rsvc.run_agent_deduped = _spy
+    try:
+        service = object.__new__(trs.TickerReportService)
+
+        async def _fake_pipeline(ticker, persona_key):
+            return {"ok": True}
+
+        service._generate_uncontended = _fake_pipeline
+        result = await service.generate_fresh_report("aapl", "warren_buffett")
+    finally:
+        rsvc.run_agent_deduped = original
+
+    assert result == {"ok": True}
+    assert seen["ticker"] == "AAPL"
+    assert seen["prefix"] == "direct", (
+        "the direct path must use its OWN dedup namespace — sharing the deep "
+        "path's would hand /research/generate callers a shallow report"
+    )

@@ -61,8 +61,13 @@ struct WhaleProfileView: View {
                         // Sentiment Summary
                         WhaleSentimentSummary(summary: profile.sentimentSummary)
 
-                        // Pro Upgrade Footer
-                        WhaleProUpgradeFooter()
+                        // NOTE: a "See All Holdings - Upgrade to Pro" footer used to sit
+                        // here with an empty action. Removed rather than wired to the
+                        // paywall: holdings are NOT Pro-gated. They're truncated to 10
+                        // for everyone and the existing "Top Ten" control
+                        // (viewMoreHoldings) already reveals the rest for free — so the
+                        // footer advertised a feature that does not exist, and pointing
+                        // it at a paywall would have sold one.
 
                         // Bottom spacing
                         Spacer().frame(height: 40)
@@ -990,26 +995,6 @@ struct WhaleSentimentSummary: View {
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
                 .stroke(AppColors.primaryBlue.opacity(0.3), lineWidth: 1)
         )
-    }
-}
-
-// MARK: - Pro Upgrade Footer
-struct WhaleProUpgradeFooter: View {
-    var body: some View {
-        Button {
-            // Handle upgrade action
-        } label: {
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "lock.fill")
-                    .font(AppTypography.iconXS)
-
-                Text("See All Holdings - Upgrade to Pro")
-                    .font(AppTypography.bodySmall)
-            }
-            .foregroundColor(AppColors.textSecondary)
-        }
-        .buttonStyle(.plain)
-        .padding(.vertical, AppSpacing.lg)
     }
 }
 

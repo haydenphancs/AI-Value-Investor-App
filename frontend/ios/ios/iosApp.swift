@@ -50,9 +50,16 @@ struct iosApp: App {
         Task { @MainActor in
             StoreKitService.shared.startObservingTransactions()
         }
+
+        // Product analytics. `app_open` per cold launch is the denominator for every
+        // activation and retention number — without it none of the others can be
+        // read as a rate.
+        Analytics.shared.track(.appOpen)
     }
 
     // MARK: - Body
+
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -60,6 +67,10 @@ struct iosApp: App {
                 .environment(appState)
                 .environment(\.appState, appState)
                 .preferredColorScheme(.dark)
+                .onChange(of: scenePhase) { _, phase in
+                    // Buffered events would otherwise be lost when iOS suspends us.
+                    if phase == .background { Analytics.shared.flushNow() }
+                }
                 .task {
                     guard !isConfigured else { return }
                     isConfigured = true

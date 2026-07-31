@@ -340,3 +340,9 @@ ChatRateLimit = Depends(
 ReportRateLimit = Depends(
     IdentityRateLimitChecker("report", settings.REPORT_RATE_LIMIT_PER_MINUTE, 60)
 )
+
+# Analytics gets its OWN bucket. Sharing StandardRateLimit's window would let a burst
+# of telemetry flushes 429 the user's REAL requests — instrumentation degrading the
+# product is precisely what the analytics module forbids. Generous, because a batch is
+# one cheap insert, and lossy by design if it's ever hit.
+AnalyticsRateLimit = Depends(IdentityRateLimitChecker("analytics", 30, 60))

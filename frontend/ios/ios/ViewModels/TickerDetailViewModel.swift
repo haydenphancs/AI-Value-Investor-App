@@ -934,6 +934,7 @@ class TickerDetailViewModel: ObservableObject {
                     try await APIClient.shared.request(
                         endpoint: .addToWatchlist(stockId: tickerSymbol)
                     )
+                    Analytics.shared.track(.watchlistAdded, ["ticker": .string(tickerSymbol)])
                     print("✅ TickerDetailVM: Added \(tickerSymbol) to watchlist")
                 }
             } catch {

@@ -48,6 +48,11 @@ final class JourneyProgressStore: ObservableObject {
     /// Record a finished lesson. Idempotent; persists locally and pushes to the backend.
     func markCompleted(_ title: String) {
         guard !completedTitles.contains(title) else { return }
+        // Inside the idempotence guard on purpose: fires once per lesson ever, not
+        // once per re-open, so the metric is "lessons finished" not "screens seen".
+        // Count only — the lesson TITLE is authored content, not a user input, but
+        // it is still high-cardinality, so only the kind is recorded.
+        Analytics.shared.track(.lessonCompleted, ["kind": .string("journey")])
         completedTitles.insert(title)
         persistLocal()
         Task { await self.pushCompletion(title) }

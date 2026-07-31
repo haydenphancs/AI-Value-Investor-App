@@ -136,9 +136,29 @@ You apply these manually. Review first, as you prefer.
       without this a reset leaves stolen tokens valid for up to 7 days. Safe to apply any
       time; NULL means "no restriction", so existing sessions are unaffected
 
+- [ ] **106_guest_report_budget.sql** — new table + `claim_guest_report` /
+      `release_guest_report` RPCs. This is what stops signed-out users generating
+      **unlimited** free AI reports (~17 Gemini + ~20 FMP calls each). Reviewed by the
+      migration reviewer: idempotent, RLS + service-role-only, REVOKE-before-GRANT.
+      **Safe to apply any time, and safe NOT to apply yet** — until it exists the RPC
+      call fails and the endpoint deliberately fails OPEN, with the per-install rate
+      limit (3/min) and the 409 admission cap still enforcing a ceiling. Applying it
+      turns on the monthly allowance (`GUEST_REPORT_MONTHLY_LIMIT`, default **1**)
+
+- [ ] **107_analytics_events.sql** — the product-analytics table. Same fail-open shape
+      as 106: until it exists the ingest endpoint returns 200 and logs a warning, so
+      nothing breaks — but **you record no analytics at all**, which is the whole point
+      of it. Apply this one before launch or you'll be flying blind on day 1
+
 No rush window on 103: the iOS app decodes old labels, new labels, and backend keys, so it's
 correct either way. 105 is additive and non-breaking, but password recovery is only fully
 effective once it's applied.
+
+**Tune the guest allowance after launch.** `GUEST_REPORT_MONTHLY_LIMIT = 1` in
+`backend/app/config.py` is a deliberate starting point: it delivers the "wow" report
+without an account while making sign-up a strict upgrade (2/month + chat + saved
+reports + watchlist). It was previously unlimited, which made signing in a *downgrade*.
+Raise it if signups look too gated; set it to 0 to require sign-in for any report.
 
 ---
 

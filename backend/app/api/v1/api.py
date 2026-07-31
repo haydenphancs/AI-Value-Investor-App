@@ -25,6 +25,7 @@ from app.api.v1.endpoints import (
     live_price,
     learn,
     updates,
+    analytics,
 )
 
 api_router = APIRouter()
@@ -55,3 +56,6 @@ api_router.include_router(whales.router, prefix="/whales", tags=["Whales"])
 api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])
 api_router.include_router(learn.router, prefix="/learn", tags=["Learn"])
 api_router.include_router(live_price.router, tags=["Live Price"])
+# First-party product analytics ingest (POST /events). Bounded + rate-limited;
+# see app/api/v1/endpoints/analytics.py for why it always returns 200.
+api_router.include_router(analytics.router, tags=["Analytics"])

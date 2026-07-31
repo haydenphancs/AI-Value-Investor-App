@@ -106,7 +106,10 @@ struct PaywallView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .task { await viewModel.load() }
+        .task {
+            Analytics.shared.track(.paywallShown)
+            await viewModel.load()
+        }
     }
 
     // MARK: - Header

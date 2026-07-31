@@ -131,8 +131,132 @@ You apply these manually. Review first, as you prefer.
       the app reads it any more). Adds `expires_at` + a cleanup function so it can't
       re-accumulate. A one-line archive command is in the header if you'd rather keep the rows
 
+- [ ] **105_password_changed_at.sql** — adds one nullable column to `public.users`. Needed
+      for password reset to actually evict a thief's session: the app mints its own JWTs, so
+      without this a reset leaves stolen tokens valid for up to 7 days. Safe to apply any
+      time; NULL means "no restriction", so existing sessions are unaffected
+
 No rush window on 103: the iOS app decodes old labels, new labels, and backend keys, so it's
-correct either way.
+correct either way. 105 is additive and non-breaking, but password recovery is only fully
+effective once it's applied.
+
+---
+
+## 5b. Supabase dashboard setup 🔴 REQUIRED — nothing here is code
+
+Six settings, all in the Supabase dashboard for project `gutlnhsjxrkxvrbqbbqq`. Auth is now
+built against these, so the app's sign-in flows do not work until they're done. Roughly
+20 minutes total, plus a Google Cloud detour.
+
+### (a) Put the reset CODE in the password-reset email
+
+**Authentication → Emails → Reset Password**
+
+Password recovery asks the user for a **6-digit code**. Supabase — not your backend — sends
+that email, from a template you control. The default template contains only
+`{{ .ConfirmationURL }}`, which renders a *link* and no number. So today a user would get an
+email with a link, while the app asks for a code that isn't in it. Dead end, and nothing in
+the app can detect or work around it.
+
+- [ ] Edit the template body to include `{{ .Token }}`:
+
+```
+Hi,
+
+Use this code to reset your Caydex password:
+
+{{ .Token }}
+
+Enter it in the app along with your new password. The code expires shortly.
+If you didn't request this, you can ignore this email.
+```
+
+### (b) Turn ON email confirmation
+
+**Authentication → Sign In / Providers → Email → "Confirm email"**
+
+- [ ] Enable it
+
+This is what makes the chosen policy (option A) real. With it OFF, `/register` still returns a
+usable session and the backend says so honestly via `confirmation_required: false` — but
+anyone can then hold an account on an address they don't own. With it ON, signup returns no
+tokens and the user must confirm first.
+
+While you're on that screen, check the **Confirm signup** template is sensible — that's the
+email new users get, and the app's "Resend confirmation email" button re-sends exactly it.
+
+### (c) Configure real SMTP
+
+**Project Settings → Authentication → SMTP Settings**
+
+- [ ] Point it at a real provider
+
+Supabase's built-in mailer is a *shared* development convenience, rate-limited to a handful
+of messages per hour on the free tier. Two consequences if you leave it: a burst of signups
+or resets silently stops sending, and mail from a shared Supabase sender is much more likely
+to land in spam — which, for a confirmation-gated signup, means users simply can't get in.
+
+Resend, Postmark, and Amazon SES all have usable free tiers. You'll add DNS records for
+SPF/DKIM on `caydexinvest.com` as part of setup; that's what keeps you out of spam.
+
+- [ ] Also raise **Authentication → Rate limits** for email sends once real SMTP is in
+
+### (d) Enable Sign in with Apple
+
+**Authentication → Sign In / Providers → Apple**
+
+- [ ] Enable the provider
+- [ ] Add `com.phan.caydex` to the authorized client IDs
+
+For a native iOS-only Sign in with Apple, the bundle ID is the audience — you do **not** need
+a Services ID or a private key, which is the setup most guides describe (that's for web).
+
+Also, on the Apple side:
+
+- [ ] Apple Developer portal → Identifiers → `com.phan.caydex` → enable the **Sign in with
+      Apple** capability. The entitlement is already in the project; this is the matching
+      server-side switch. Without it, the button errors at runtime.
+
+### (e) Enable Google
+
+**Authentication → Sign In / Providers → Google**
+
+First, in **Google Cloud Console**:
+
+- [ ] Create a project (or reuse one) → APIs & Services → Credentials
+- [ ] Create an **OAuth client ID** of type **Web application** (yes, Web — the flow goes
+      through Supabase, not the device)
+- [ ] Add this to its Authorized redirect URIs:
+      `https://gutlnhsjxrkxvrbqbbqq.supabase.co/auth/v1/callback`
+- [ ] Complete the OAuth consent screen (app name, support email, logo)
+
+Then back in Supabase:
+
+- [ ] Paste the Client ID and Client Secret into the Google provider, and enable it
+
+### (f) Allow the app's callback URL
+
+**Authentication → URL Configuration → Redirect URLs**
+
+- [ ] Add `caydex://auth-callback`
+
+This is the custom scheme the app listens on after Google consent. It's already registered in
+`Info.plist`; Supabase refuses to redirect to URLs that aren't on this allow-list, so without
+it Google sign-in ends on an error page.
+
+### How to check it all works
+
+Once (a)–(f) are done, from a simulator or device:
+
+1. **Sign up** with a real address → you should get no session and a "Confirm your email"
+   screen. Check the inbox, click the link, then sign in.
+2. **Sign in before confirming** → a specific "Please confirm your email address first"
+   message, not "incorrect password".
+3. **Forgot password** → the email must contain a 6-digit number. If it contains only a link,
+   step (a) isn't saved.
+4. **Continue with Apple** → native sheet, then straight into the app (no confirmation step —
+   Apple's address is already verified).
+5. **Continue with Google** → web sheet, then straight into the app.
 
 ---
 

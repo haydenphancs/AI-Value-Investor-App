@@ -198,6 +198,27 @@ struct AppSettingsView: View {
             }
             .buttonStyle(PlainButtonStyle())
 
+            // Change password — signed-in only. Guests have no password to change, and
+            // recovery for signed-out users lives on the sign-in screen instead.
+            if appState.auth.status == .authenticated {
+                NavigationLink {
+                    ChangePasswordView()
+                } label: {
+                    HStack {
+                        settingsLabel(title: "Change Password", subtitle: "Update your account password")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(AppTypography.iconXS)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.md)
+                    .background(AppColors.cardBackground)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+
             // AI processing consent — shown only once granted; before that the first-send
             // gate is the surface. Withdrawing stops chat until it's granted again.
             if aiConsent.hasConsented {

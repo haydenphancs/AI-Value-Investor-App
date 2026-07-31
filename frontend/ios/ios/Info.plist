@@ -8,5 +8,26 @@
 	</array>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Caydex uses Face ID to lock the app so only you can open it.</string>
+	<!-- OAuth callback for Google sign-in. Supabase redirects here after consent;
+	     ASWebAuthenticationSession matches on this scheme. Must also be added to the
+	     Supabase dashboard's redirect allow-list (Authentication -> URL Configuration)
+	     as caydex://auth-callback -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.phan.caydex.oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>caydex</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Public Supabase project URL, used only to build the OAuth authorize URL.
+	     Not a secret: the anon key is deliberately NOT shipped in the app. -->
+	<key>SupabaseURL</key>
+	<string>https://gutlnhsjxrkxvrbqbbqq.supabase.co</string>
 </dict>
 </plist>

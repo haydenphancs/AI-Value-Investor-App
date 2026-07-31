@@ -80,9 +80,19 @@ class ErrorCode(str, Enum):
     # so 409 lets the structured user_message surface.
     CHAT_DAILY_LIMIT_REACHED = "CHAT_DAILY_LIMIT_REACHED"
 
+    # ── Auth ──────────────────────────────────────────────────────────
+    # Sign-in blocked because the address has not been confirmed yet. Distinct from a
+    # generic 401 so the client can offer "resend confirmation" instead of implying the
+    # password was wrong.
+    EMAIL_NOT_CONFIRMED = "EMAIL_NOT_CONFIRMED"
+
 
 # Default user-facing copy per code. Endpoints can override per-call.
 _USER_MESSAGES: Dict[ErrorCode, str] = {
+    ErrorCode.EMAIL_NOT_CONFIRMED: (
+        "Please confirm your email address first. Check your inbox for the "
+        "confirmation link \u2014 including your spam folder."
+    ),
     ErrorCode.TICKER_NOT_FOUND: (
         "We couldn't find that ticker symbol. Check the spelling and try again."
     ),
@@ -146,6 +156,7 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
 
 # Suggested user action per code (optional, shown as a button label / hint).
 _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
+    ErrorCode.EMAIL_NOT_CONFIRMED: "confirm_email",
     ErrorCode.TICKER_NOT_FOUND: "check_symbol",
     ErrorCode.FMP_RATE_LIMITED: "retry_later",
     ErrorCode.FMP_UNAVAILABLE: "retry_later",
@@ -163,6 +174,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
 
 # Default HTTP status per code (endpoints may override).
 _DEFAULT_STATUS: Dict[ErrorCode, int] = {
+    ErrorCode.EMAIL_NOT_CONFIRMED: 403,
     ErrorCode.TICKER_NOT_FOUND: 404,
     ErrorCode.INVALID_PERSONA: 400,
     ErrorCode.INVALID_INPUT: 400,

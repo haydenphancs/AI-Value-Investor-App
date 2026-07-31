@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Sign in with Apple. REQUIRED by App Review 4.8 once Google Sign-In ships:
+	     an app offering a third-party/social login must also offer a login service
+	     that limits collection to name + email, lets the user keep their address
+	     private, and does not track them for advertising. -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
 	<key>aps-environment</key>
 	<string>development</string>
 </dict>

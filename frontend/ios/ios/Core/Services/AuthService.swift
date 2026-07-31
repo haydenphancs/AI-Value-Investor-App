@@ -35,6 +35,36 @@ struct AuthResponse: Decodable, Sendable {
     }
 }
 
+/// Mirrors the backend `SignUpResponse`. Email confirmation is REQUIRED, so registration
+/// normally returns `confirmationRequired = true` and NO tokens.
+///
+/// Every token field is Optional for exactly the reason the comment above describes: the
+/// previous DTO required them, and decoding a token-less registration response against it
+/// would throw `DecodingError` on every signup.
+struct SignUpResponseDTO: Decodable, Sendable {
+    let confirmationRequired: Bool
+    let message: String
+    let accessToken: String?
+    let refreshToken: String?
+    let userId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case confirmationRequired = "confirmation_required"
+        case message
+        case accessToken = "access_token"
+        case refreshToken = "refresh_token"
+        case userId = "user_id"
+    }
+}
+
+/// What actually happened when the user registered.
+enum SignUpOutcome: Sendable {
+    /// Account created; the address must be confirmed before it can be used.
+    case needsEmailConfirmation(message: String)
+    /// Confirmation is disabled project-side, so a usable session exists.
+    case signedIn(UserProfile)
+}
+
 // MARK: - Auth Service
 
 /// Handles authentication and token management
@@ -86,20 +116,70 @@ final class AuthService {
     }
 
     /// Sign up with email and password.
-    /// Same flow as `signIn`: store tokens → arm client → fetch `/users/me`.
-    func signUp(email: String, password: String, displayName: String) async throws -> UserProfile {
+    ///
+    /// Returns `.needsEmailConfirmation` in the normal case — the account exists but has no
+    /// session until the address is confirmed. Only when the Supabase project has email
+    /// confirmation disabled does this come back `.signedIn`.
+    func signUp(
+        email: String, password: String, displayName: String
+    ) async throws -> SignUpOutcome {
         let response = try await apiClient.request(
             endpoint: .signUp(email: email, password: password, displayName: displayName),
-            responseType: AuthResponse.self
+            responseType: SignUpResponseDTO.self
         )
 
-        // Store tokens
+        // Guard on the tokens, not just the flag: a `confirmationRequired == false` response
+        // that somehow arrived without tokens must not be treated as a live session.
+        guard !response.confirmationRequired,
+              let accessToken = response.accessToken,
+              let refreshToken = response.refreshToken else {
+            return .needsEmailConfirmation(message: response.message)
+        }
+
+        saveTokens(accessToken: accessToken, refreshToken: refreshToken)
+        sessionEpoch += 1
+        await apiClient.setAuthToken(accessToken)
+        return .signedIn(try await fetchCurrentUser())
+    }
+
+    /// Re-send the signup confirmation email. Fire-and-forget by design: the backend never
+    /// reveals whether the address needs confirming, so there is nothing to branch on.
+    func resendConfirmation(email: String) async throws {
+        _ = try await apiClient.request(
+            endpoint: .resendConfirmation(email: email),
+            responseType: MessageResponse.self
+        )
+    }
+
+    /// Sign in with a native provider identity token (Sign in with Apple).
+    ///
+    /// The token is verified by Supabase against Apple's public keys — the client is not
+    /// trusted. `displayName` is passed through because Apple supplies the name only on the
+    /// very first authorization.
+    func signInWithProvider(
+        provider: String, idToken: String, nonce: String?, displayName: String?
+    ) async throws -> UserProfile {
+        let response = try await apiClient.request(
+            endpoint: .oauthSignIn(
+                provider: provider, idToken: idToken, nonce: nonce, displayName: displayName
+            ),
+            responseType: AuthResponse.self
+        )
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
-        sessionEpoch += 1   // new session — invalidate any in-flight older-session refresh
-
-        // Update API client
+        sessionEpoch += 1
         await apiClient.setAuthToken(response.accessToken)
+        return try await fetchCurrentUser()
+    }
 
+    /// Exchange a Supabase-issued access token for app tokens (web OAuth flow, e.g. Google).
+    func exchangeSupabaseSession(accessToken supabaseToken: String) async throws -> UserProfile {
+        let response = try await apiClient.request(
+            endpoint: .sessionExchange(supabaseAccessToken: supabaseToken),
+            responseType: AuthResponse.self
+        )
+        saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
+        sessionEpoch += 1
+        await apiClient.setAuthToken(response.accessToken)
         return try await fetchCurrentUser()
     }
 

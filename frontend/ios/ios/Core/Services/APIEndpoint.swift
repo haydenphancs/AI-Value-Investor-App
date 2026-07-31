@@ -36,6 +36,18 @@ enum APIEndpoint: Sendable {
     case signUp(email: String, password: String, displayName: String)
     case refreshToken(refreshToken: String)
     case signOut
+    /// Start a password reset — sends a one-time code to the address.
+    case forgotPassword(email: String)
+    /// Finish a password reset with the emailed code.
+    case resetPassword(email: String, code: String, newPassword: String)
+    /// Change the password of a signed-in user (requires the current one).
+    case changePassword(currentPassword: String, newPassword: String)
+    /// Re-send the signup confirmation email.
+    case resendConfirmation(email: String)
+    /// Native social sign-in with a provider identity token (Sign in with Apple).
+    case oauthSignIn(provider: String, idToken: String, nonce: String?, displayName: String?)
+    /// Exchange a Supabase access token for app tokens (web OAuth flow, e.g. Google).
+    case sessionExchange(supabaseAccessToken: String)
 
     // MARK: - User
     case getCurrentUser
@@ -212,6 +224,18 @@ enum APIEndpoint: Sendable {
             return "/api/v1/auth/refresh"
         case .signOut:
             return "/api/v1/auth/logout"
+        case .forgotPassword:
+            return "/api/v1/auth/forgot-password"
+        case .resetPassword:
+            return "/api/v1/auth/reset-password"
+        case .changePassword:
+            return "/api/v1/auth/change-password"
+        case .resendConfirmation:
+            return "/api/v1/auth/resend-confirmation"
+        case .oauthSignIn:
+            return "/api/v1/auth/oauth"
+        case .sessionExchange:
+            return "/api/v1/auth/session-exchange"
 
         // User
         case .getCurrentUser:
@@ -462,6 +486,8 @@ enum APIEndpoint: Sendable {
     nonisolated var method: HTTPMethod {
         switch self {
         case .signIn, .signUp, .refreshToken, .signOut,
+             .forgotPassword, .resetPassword, .changePassword,
+             .resendConfirmation, .oauthSignIn, .sessionExchange,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage, .streamChatMessage,
              .chatWithTickerReport, .completeLearnItem, .addBookBookmark,
@@ -588,6 +614,28 @@ enum APIEndpoint: Sendable {
         case .refreshToken(let refreshToken):
             return RefreshTokenRequest(refreshToken: refreshToken)
 
+        case .forgotPassword(let email):
+            return ForgotPasswordRequest(email: email)
+
+        case .resetPassword(let email, let code, let newPassword):
+            return ResetPasswordRequest(email: email, code: code, newPassword: newPassword)
+
+        case .changePassword(let currentPassword, let newPassword):
+            return ChangePasswordRequest(
+                currentPassword: currentPassword, newPassword: newPassword
+            )
+
+        case .resendConfirmation(let email):
+            return ResendConfirmationRequest(email: email)
+
+        case .oauthSignIn(let provider, let idToken, let nonce, let displayName):
+            return OAuthSignInRequest(
+                provider: provider, idToken: idToken, nonce: nonce, displayName: displayName
+            )
+
+        case .sessionExchange(let supabaseAccessToken):
+            return SessionExchangeRequest(supabaseAccessToken: supabaseAccessToken)
+
         case .updateProfile(let displayName, let avatarUrl):
             return UpdateProfileRequest(displayName: displayName, avatarUrl: avatarUrl)
 
@@ -679,8 +727,12 @@ enum APIEndpoint: Sendable {
     /// interceptor skips these so a failed login/refresh surfaces instead of looping.
     nonisolated var isAuthEndpoint: Bool {
         switch self {
-        case .signIn, .signUp, .refreshToken, .signOut:
+        case .signIn, .signUp, .refreshToken, .signOut,
+             .forgotPassword, .resetPassword,
+             .resendConfirmation, .oauthSignIn, .sessionExchange:
             return true
+        // .changePassword is deliberately NOT here: it is an authenticated request, so it
+        // should still get the 401 -> refresh -> retry interceptor.
         default:
             return false
         }
@@ -692,6 +744,13 @@ enum APIEndpoint: Sendable {
         switch self {
         // Auth endpoints
         case .signIn, .signUp, .refreshToken:
+            return false
+        // Password recovery happens when the user CANNOT sign in, so it must be
+        // reachable without a token. changePassword falls through to requiring auth.
+        case .forgotPassword, .resetPassword:
+            return false
+        // Social sign-in and confirmation resend happen BEFORE a session exists.
+        case .resendConfirmation, .oauthSignIn, .sessionExchange:
             return false
         // Public tier catalog — the paywall must render for guests too.
         case .getPlanCatalog:
@@ -785,6 +844,43 @@ nonisolated struct SignUpRequest: Encodable, Sendable {
 
 nonisolated struct RefreshTokenRequest: Encodable, Sendable {
     let refreshToken: String
+}
+
+// Password recovery. Property names are camelCase; the encoder's convertToSnakeCase maps
+// them to the backend's `new_password` / `current_password`.
+nonisolated struct ForgotPasswordRequest: Encodable, Sendable {
+    let email: String
+}
+
+nonisolated struct ResetPasswordRequest: Encodable, Sendable {
+    let email: String
+    let code: String
+    let newPassword: String
+}
+
+nonisolated struct ChangePasswordRequest: Encodable, Sendable {
+    let currentPassword: String
+    let newPassword: String
+}
+
+nonisolated struct ResendConfirmationRequest: Encodable, Sendable {
+    let email: String
+}
+
+nonisolated struct OAuthSignInRequest: Encodable, Sendable {
+    let provider: String
+    let idToken: String
+    let nonce: String?
+    let displayName: String?
+}
+
+nonisolated struct SessionExchangeRequest: Encodable, Sendable {
+    let supabaseAccessToken: String
+}
+
+/// Generic `{ "message": "..." }` acknowledgement returned by the password endpoints.
+nonisolated struct MessageResponse: Decodable, Sendable {
+    let message: String
 }
 
 nonisolated struct UpdateProfileRequest: Encodable, Sendable {

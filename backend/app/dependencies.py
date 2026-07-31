@@ -4,6 +4,7 @@ Auth, rate limiting, and utility dependencies.
 """
 
 from typing import Optional
+from datetime import datetime, timezone
 import uuid
 from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -51,15 +52,64 @@ async def get_current_user_id(
     )
 
 
+def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
+    """401 when `token` predates `user_row["password_changed_at"]`.
+
+    The app mints its own JWTs and validates them on signature + expiry alone, so without
+    this a password reset would leave a thief's tokens working (migration 105). The `iat`
+    claim already present in every token is the comparison point.
+
+    Fails OPEN on anything unexpected — a parse quirk must not lock out a legitimate user.
+    """
+    changed_at = user_row.get("password_changed_at")
+    if not changed_at:
+        return
+    try:
+        payload = decode_token(token)
+        issued_at = payload.get("iat") if payload else None
+        if issued_at is None:
+            return  # Supabase-issued token, or a token without iat — not our concern here.
+        changed_dt = datetime.fromisoformat(str(changed_at).replace("Z", "+00:00"))
+        if changed_dt.tzinfo is None:
+            changed_dt = changed_dt.replace(tzinfo=timezone.utc)
+        issued_dt = datetime.fromtimestamp(float(issued_at), tz=timezone.utc)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(
+            "password_changed_at comparison failed (%s: %s) — allowing the token",
+            type(e).__name__, e,
+        )
+        return
+
+    if issued_dt < changed_dt:
+        logger.info(
+            "Rejecting token for user=%s: issued %s, password changed %s",
+            user_row.get("id"), issued_dt.isoformat(), changed_dt.isoformat(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your password was changed. Please sign in again.",
+        )
+
+
 async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     user_id: str = Depends(get_current_user_id),
     supabase: Client = Depends(get_supabase)
 ) -> dict:
-    """Get current user record from DB."""
+    """Get current user record from DB.
+
+    Also enforces password-change token invalidation: a token minted before the account's
+    last password change is rejected here. Free to check — the `select("*")` below already
+    returns `password_changed_at` (migration 105), so there is no extra round-trip.
+    """
     try:
         result = supabase.table("users").select("*").eq("id", user_id).single().execute()
         if not result.data:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        _reject_if_password_changed_since_issue(credentials.credentials, result.data)
         return result.data
     except HTTPException:
         raise

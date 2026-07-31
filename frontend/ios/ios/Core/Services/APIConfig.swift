@@ -55,6 +55,24 @@ enum APIConfig: Sendable {
         return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
     }
 
+    // MARK: - OAuth (Google via the Supabase web redirect)
+
+    /// Supabase project URL, used ONLY to build the OAuth authorize URL for the web flow.
+    ///
+    /// This is a public project URL, not a secret — the anon key is deliberately NOT in the
+    /// app (all data traffic goes through our own backend). Read from Info.plist so it isn't
+    /// hardcoded in two places.
+    nonisolated static var supabaseURL: String? {
+        (Bundle.main.object(forInfoDictionaryKey: "SupabaseURL") as? String)?
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "/$", with: "", options: .regularExpression)
+    }
+
+    /// Custom URL scheme Supabase redirects back to after Google consent. Must match the
+    /// CFBundleURLSchemes entry in Info.plist AND the redirect URL allow-list in the
+    /// Supabase dashboard (Authentication → URL Configuration).
+    nonisolated static let oauthCallbackScheme = "caydex"
+
     // MARK: - Timeouts
 
     /// Default request timeout (seconds)

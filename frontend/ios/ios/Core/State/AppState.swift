@@ -224,12 +224,57 @@ final class AppState {
     }
 
     /// Sign up. Throws on failure so the SignInView can render the error inline.
-    func signUp(email: String, password: String, displayName: String) async throws {
+    ///
+    /// Returns the outcome because email confirmation is REQUIRED: the normal result is
+    /// `.needsEmailConfirmation`, where the account exists but there is no session yet, so
+    /// auth status must stay `.unauthenticated`. Treating that as a successful sign-in would
+    /// drop the user into an app with no working token.
+    @discardableResult
+    func signUp(
+        email: String, password: String, displayName: String
+    ) async throws -> SignUpOutcome {
         auth.status = .loading
         do {
-            applyProfile(try await authService.signUp(
+            let outcome = try await authService.signUp(
                 email: email, password: password, displayName: displayName
-            ))
+            )
+            switch outcome {
+            case .needsEmailConfirmation:
+                auth.status = .unauthenticated
+            case .signedIn(let profile):
+                applyProfile(profile)
+                auth.status = .authenticated
+                await onAuthenticated()
+            }
+            return outcome
+        } catch {
+            auth.status = .unauthenticated
+            throw error
+        }
+    }
+
+    /// Re-send the signup confirmation email.
+    func resendConfirmation(email: String) async throws {
+        try await authService.resendConfirmation(email: email)
+    }
+
+    /// Complete a social sign-in from a provider handshake.
+    ///
+    /// Both provider paths converge here. Not subject to the email-confirmation gate: Apple
+    /// and Google supply an already-verified address.
+    func completeSocialSignIn(_ result: SocialSignInResult) async throws {
+        auth.status = .loading
+        do {
+            let profile: UserProfile
+            switch result {
+            case let .identityToken(provider, token, nonce, displayName):
+                profile = try await authService.signInWithProvider(
+                    provider: provider, idToken: token, nonce: nonce, displayName: displayName
+                )
+            case let .supabaseSession(accessToken):
+                profile = try await authService.exchangeSupabaseSession(accessToken: accessToken)
+            }
+            applyProfile(profile)
             auth.status = .authenticated
             await onAuthenticated()
         } catch {

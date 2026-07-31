@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import AuthenticationServices
 
 struct SignInView: View {
     @Environment(AppState.self) private var appState
@@ -18,6 +19,11 @@ struct SignInView: View {
     @State private var displayName: String = ""
     @State private var errorMessage: String?
     @State private var isSubmitting = false
+    @State private var showForgotPassword = false
+    /// Set after a signup that needs email confirmation — the view then shows a
+    /// terminal "check your inbox" state instead of pretending the user is signed in.
+    @State private var pendingConfirmationMessage: String?
+    @State private var didResendConfirmation = false
 
     enum Mode { case signIn, signUp }
 
@@ -91,6 +97,22 @@ struct SignInView: View {
                     .disabled(!canSubmit || isSubmitting)
                     .padding(.top, 8)
 
+                    socialSignInSection
+
+                    // Recovery. Sign-in only: on the sign-up form there is no account to
+                    // recover yet, and it would just be noise.
+                    if mode == .signIn {
+                        Button {
+                            showForgotPassword = true
+                        } label: {
+                            Text("Forgot password?")
+                                .font(AppTypography.bodySmall)
+                                .foregroundColor(AppColors.primaryBlue)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 4)
+                    }
+
                     Button(action: toggleMode) {
                         Text(mode == .signIn
                              ? "No account? Create one"
@@ -104,6 +126,168 @@ struct SignInView: View {
                     Spacer(minLength: 40)
                 }
                 .padding(.horizontal, 24)
+            }
+        }
+        .sheet(isPresented: $showForgotPassword) {
+            // Carry the typed email over so the user doesn't retype it.
+            ForgotPasswordView(initialEmail: email)
+        }
+        .overlay {
+            if let message = pendingConfirmationMessage {
+                confirmationPrompt(message)
+            }
+        }
+    }
+
+    // MARK: - Social sign-in
+
+    /// Sign in with Apple + Google.
+    ///
+    /// Both are here because App Review 4.8 requires it: offering Google obliges us to also
+    /// offer a login service that limits collection to name and email and lets the user keep
+    /// their address private. Sign in with Apple satisfies that, so they ship together.
+    @ViewBuilder
+    private var socialSignInSection: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Rectangle().fill(AppColors.textMuted.opacity(0.3)).frame(height: 1)
+                Text("or")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                Rectangle().fill(AppColors.textMuted.opacity(0.3)).frame(height: 1)
+            }
+            .padding(.vertical, 4)
+
+            SignInWithAppleButton(.continue) { request in
+                // Nonce is generated and hashed by the service; the raw value goes to the
+                // backend so Supabase can verify the pairing.
+                let prepared = SocialSignInService.shared.makeAppleRequest()
+                request.requestedScopes = prepared.requestedScopes
+                request.nonce = prepared.nonce
+            } onCompletion: { result in
+                handleApple(result)
+            }
+            .signInWithAppleButtonStyle(.white)
+            .frame(height: 48)
+            .cornerRadius(AppCornerRadius.medium)
+            .disabled(isSubmitting)
+
+            Button(action: signInWithGoogle) {
+                HStack(spacing: 8) {
+                    Image(systemName: "globe")
+                        .font(AppTypography.iconSmall)
+                    Text("Continue with Google")
+                        .font(AppTypography.bodyEmphasis)
+                }
+                .foregroundColor(AppColors.textPrimary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .background(AppColors.cardBackground)
+                .cornerRadius(AppCornerRadius.medium)
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                        .stroke(AppColors.textMuted.opacity(0.3), lineWidth: 1)
+                )
+            }
+            .disabled(isSubmitting)
+        }
+    }
+
+    // MARK: - Email confirmation prompt
+
+    @ViewBuilder
+    private func confirmationPrompt(_ message: String) -> some View {
+        ZStack {
+            AppColors.background.ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Image(systemName: "envelope.badge.fill")
+                    .font(AppTypography.iconHero)
+                    .foregroundColor(AppColors.primaryBlue)
+
+                Text("Confirm your email")
+                    .font(AppTypography.titleLarge)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Text(message)
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(email)
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+
+                Button {
+                    pendingConfirmationMessage = nil
+                    mode = .signIn
+                    password = ""
+                } label: {
+                    Text("Back to Sign In")
+                        .font(AppTypography.bodyEmphasis)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(AppColors.primaryBlue)
+                        .cornerRadius(AppCornerRadius.medium)
+                }
+                .padding(.top, 8)
+
+                // Without this, a lost or spam-filtered confirmation email leaves the
+                // account permanently unusable with no way forward.
+                Button(action: resendConfirmation) {
+                    Text(didResendConfirmation ? "Confirmation email sent" : "Resend confirmation email")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(didResendConfirmation ? AppColors.textMuted : AppColors.primaryBlue)
+                }
+                .disabled(didResendConfirmation || isSubmitting)
+            }
+            .padding(.horizontal, 32)
+        }
+    }
+
+    // MARK: - Social actions
+
+    private func handleApple(_ result: Result<ASAuthorization, Error>) {
+        errorMessage = nil
+        Task {
+            do {
+                let handshake = try SocialSignInService.shared.handleAppleCompletion(result)
+                isSubmitting = true
+                defer { isSubmitting = false }
+                try await appState.completeSocialSignIn(handshake)
+            } catch SocialSignInError.cancelled {
+                // User backed out — not an error.
+            } catch {
+                errorMessage = friendlyError(error)
+            }
+        }
+    }
+
+    private func signInWithGoogle() {
+        errorMessage = nil
+        Task {
+            do {
+                let handshake = try await SocialSignInService.shared.signInWithGoogle()
+                isSubmitting = true
+                defer { isSubmitting = false }
+                try await appState.completeSocialSignIn(handshake)
+            } catch SocialSignInError.cancelled {
+                // User backed out — not an error.
+            } catch {
+                errorMessage = friendlyError(error)
+            }
+        }
+    }
+
+    private func resendConfirmation() {
+        Task {
+            do {
+                try await appState.resendConfirmation(email: email)
+                didResendConfirmation = true
+            } catch {
+                errorMessage = friendlyError(error)
             }
         }
     }
@@ -130,9 +314,14 @@ struct SignInView: View {
                 case .signIn:
                     try await appState.signIn(email: email, password: password)
                 case .signUp:
-                    try await appState.signUp(
+                    let outcome = try await appState.signUp(
                         email: email, password: password, displayName: displayName
                     )
+                    // Confirmation required is the NORMAL path — there is no session yet,
+                    // so show the inbox prompt rather than dismissing as if signed in.
+                    if case .needsEmailConfirmation(let message) = outcome {
+                        pendingConfirmationMessage = message
+                    }
                 }
             } catch {
                 errorMessage = friendlyError(error)

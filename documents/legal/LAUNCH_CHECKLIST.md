@@ -3,33 +3,73 @@
 Everything only you can do. Code-side work is tracked separately in the plan file
 (`~/.claude/plans/clever-baking-eclipse.md`).
 
-Ordered by **when to start**, not by importance. Item 1 is the critical path and gates
-submission — start it before anything else, then work the rest while it runs.
+Ordered by **when to start**, not by importance.
+
+**Nothing here is on a multi-week critical path.** An earlier version of this file claimed
+LLC formation was a launch blocker; §1 records why that was wrong. You can ship on your
+existing Individual Apple account, so the whole list is workable in days rather than weeks.
 
 ---
 
-## 1. Entity formation → Apple organization enrollment 🔴 CRITICAL PATH
+## 1. Entity formation — NOT REQUIRED to publish ⚠️ CORRECTED
 
-**Why:** App Review guideline 5.1.1(ix) requires apps in "highly regulated fields (such as
-banking and financial services…)" to be submitted by a legal entity, **not an individual
-developer**. Developer-forum records show stock-research apps rejected on exactly this
-clause, with Apple requiring the account be "enrolled in the Apple Developer Program as an
-organization." Your account is enrolled as an individual (`com.phan.caydex`).
+**An earlier version of this checklist said an LLC was a launch blocker on the critical
+path. That was wrong.** Recording the correction and the evidence, because it changes the
+timeline substantially.
 
-**Why it's first:** this is weeks of calendar time you cannot compress, and it gates
-*submission* — not just review.
+**You can ship on your existing Individual account.**
 
-- [ ] Register an LLC (or equivalent) in your state
-- [ ] Get an EIN from the IRS (free, online, usually same-day)
-- [ ] Request a **D-U-N-S number** from Dun & Bradstreet (free via Apple's D-U-N-S lookup;
-      allow 5–14 business days)
-- [ ] Either enrol a new Apple Developer account as an organization, or contact Apple
-      Developer Support to convert the existing individual account
-- [ ] Confirm the legal entity name matches across LLC registration, D-U-N-S, and Apple
+Why the original claim was wrong:
 
-**Note:** you may be able to argue the exemption — Caydex is information/education, holds no
-client funds, connects to no brokerage, executes no trades. That argument sometimes
-succeeds. It is not reliable enough to bet a launch date on, which is why this is item 1.
+1. **Apple's enrolment requirements contain no app-type restrictions.**
+   `developer.apple.com/help/account/membership/program-enrollment/` lists what Individual
+   vs Organization enrolment needs, and there is no mention of regulated industries,
+   finance, or restrictions on what an individual account may publish. The distinction is
+   seller name + legal-entity status. Nothing gates a finance app to an org account.
+2. **5.1.1(ix) lives in the App Review Guidelines, not the enrolment rules.** It is a
+   review-time judgement, not an enrolment gate. Conflating the two was the core error.
+3. **The clause is narrower than it looks.** It reads: apps that "provide services in
+   highly regulated fields … should be submitted by a legal entity **that provides the
+   services**." That targets front-ends for regulated providers — a bank, a broker, a
+   crypto exchange. The same reading holds for health apps: the trigger is providing
+   medical advice/services, not publishing information about medicine. Caydex provides no
+   regulated service, holds no funds, connects to no brokerage, executes no trades.
+4. **Empirically, finance-category research and tracker apps ship under individual
+   accounts.** Live examples with a personal name as seller (the signature of an Individual
+   account): *Portfolio Tracker: Finance Bay* (Arkadiusz Szczepkowicz), *Portfolio X –
+   Stock Tracker* (Popa Alexandru), *Portfolio – Monitor Stocks* (Raphael Odermatt).
+5. **The forum rejection that drove the original claim was a different kind of app.** That
+   developer was subject to SEBI/AMFI rules in India — mutual-fund *distribution*, an
+   actually regulated financial service.
+
+**Trade-off of staying Individual:** your personal legal name appears as the App Store
+seller instead of "Caydex". Cosmetic.
+
+### The one residual review risk
+
+Caydex emits its **own** `Strong Buy`/`Strong Sell` rating on named securities via the
+Technical Meter (`schemas/technical_analysis.py`). Pure trackers and news apps do not do
+that, and it is the feature most likely to read as advice rather than information. If a
+5.1.1(ix) or 3.1.5-adjacent rejection ever arrives, that is the likeliest hook — and
+softening or removing that meter is far cheaper than forming a company. It is already
+disclaimer-covered.
+
+### Why an LLC may still be worth doing — on your own timeline
+
+Not for Apple. For **liability**: you are about to take recurring payments from strangers
+for financial-adjacent content, and as an individual your personal assets are exposed if
+someone claims they relied on the app and lost money. That is a real business decision, not
+a launch blocker, and it is worth 30 minutes with a CPA or attorney. Not legal or tax
+advice.
+
+If you do decide to convert later, it is straightforward and non-destructive: Apple's
+migration path keeps the **Apple ID, Team ID (`WG697LVCS9`), certificates, and existing
+apps** intact — only the seller name changes. Sequence: register the LLC → EIN (IRS, free,
+~10 min) → D-U-N-S (free via Apple's D&B lookup; the long pole) → wait ~2 business days →
+submit `developer.apple.com/contact/request/migrate-individual-account`. Roughly 2–5 weeks,
+mostly waiting on D-U-N-S. Apple requires the D-U-N-S registered to the legal entity — no
+DBAs or trade names.
+
 
 ---
 
@@ -115,7 +155,7 @@ Get it in writing.
 
 ## 7. App Store Connect record
 
-Blocked on item 1 (organization enrolment).
+No longer blocked — your existing Individual account can create this record (see §1).
 
 - [ ] Create the app record → note the numeric app ID (nothing in the app needs it today,
       but IAP setup does)
@@ -172,5 +212,5 @@ Three items I can prepare materials for but shouldn't be the final word on:
    from the user's own holdings
 2. **Book study guides** — whether chapter-mapped guides to 10 in-copyright books are
    sufficiently transformative, even written in your own words
-3. **Guideline 5.1.1(ix)** — whether Caydex counts as "providing services in a highly
-   regulated field," which determines whether item 1 is strictly required or merely prudent
+3. **Whether an LLC is worth forming** — a liability question, not an Apple one (§1).
+   Worth a CPA/attorney conversation on your own timeline, independent of launch

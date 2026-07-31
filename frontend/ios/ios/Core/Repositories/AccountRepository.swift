@@ -18,6 +18,7 @@ import Foundation
 
 protocol AccountRepositoryProtocol: Sendable {
     func fetchProfile() async throws -> UserProfile
+    func updateProfile(displayName: String?, avatarUrl: String?) async throws -> UserProfile
     func fetchCredits() async throws -> CreditInfo
     func fetchPlanCatalog() async throws -> PlanCatalog
     func fetchSubscription() async throws -> SubscriptionDTO
@@ -40,6 +41,17 @@ final class AccountRepository: AccountRepositoryProtocol {
 
     func fetchProfile() async throws -> UserProfile {
         try await apiClient.request(endpoint: .getCurrentUser, responseType: UserProfile.self)
+    }
+
+    /// PATCH /users/me. The endpoint and its `UpdateProfileRequest` schema already
+    /// existed on both sides; nothing called them, so there was no way to change a
+    /// display name from the app. Returns the updated profile so the caller can adopt
+    /// server state rather than guessing what was saved.
+    func updateProfile(displayName: String?, avatarUrl: String?) async throws -> UserProfile {
+        try await apiClient.request(
+            endpoint: .updateProfile(displayName: displayName, avatarUrl: avatarUrl),
+            responseType: UserProfile.self
+        )
     }
 
     func fetchCredits() async throws -> CreditInfo {

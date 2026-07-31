@@ -15,6 +15,8 @@ struct ProfileView: View {
     @StateObject private var viewModel = ProfileViewModel()
     /// Presents the sign-in sheet (guest-first: sign-in is optional and offered here).
     @State private var showSignIn = false
+    /// Working copy for the display-name editor, so cancelling leaves the profile alone.
+    @State private var editedName = ""
     /// Presents the upgrade / plan paywall (from the Upgrade card + Add Credits).
     @State private var showPaywall = false
 
@@ -80,6 +82,15 @@ struct ProfileView: View {
                 .environment(appState)
                 .preferredColorScheme(.dark)
         }
+        .alert("Display Name", isPresented: $viewModel.isEditingName) {
+            TextField("Your name", text: $editedName)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { viewModel.saveDisplayName(editedName) }
+        } message: {
+            Text("This is the name shown on your profile.")
+        }
         .sheet(isPresented: $showPaywall) {
             PaywallView()
                 .environment(\.appState, appState)
@@ -113,9 +124,23 @@ struct ProfileView: View {
                 if viewModel.isAuthenticated {
                     // Signed in: real name / email / tier / member-since.
                     VStack(spacing: AppSpacing.xs) {
-                        Text(viewModel.displayName)
-                            .font(AppTypography.titleCompact)
-                            .foregroundColor(AppColors.textPrimary)
+                        // Tap the name to rename. PATCH /users/me existed on both sides
+                        // but nothing called it, so the name was read-only in the app.
+                        Button {
+                            editedName = viewModel.displayName
+                            viewModel.isEditingName = true
+                        } label: {
+                            HStack(spacing: AppSpacing.xs) {
+                                Text(viewModel.displayName)
+                                    .font(AppTypography.titleCompact)
+                                    .foregroundColor(AppColors.textPrimary)
+                                Image(systemName: "pencil")
+                                    .font(AppTypography.iconXS)
+                                    .foregroundColor(AppColors.textMuted)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Edit display name. Currently \(viewModel.displayName)")
 
                         Text(viewModel.email)
                             .font(AppTypography.bodySmall)
@@ -262,68 +287,33 @@ struct ProfileView: View {
             ProfileSectionHeader(title: "Settings & Preferences", icon: "gearshape.fill")
 
             VStack(spacing: 0) {
-                // Appearance Picker
-                VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    HStack(spacing: AppSpacing.md) {
-                        Image(systemName: "eye")
-                            .font(AppTypography.iconDefault)
-                            .foregroundColor(AppColors.textSecondary)
-                            .frame(width: 28, height: 28)
+                // APPEARANCE PICKER REMOVED (v1 ships dark-only).
+                //
+                // 332 view files hard-code `.preferredColorScheme(.dark)`, so choosing
+                // "Light" or "System" changed the stored preference and nothing else —
+                // the app stayed dark. A control that visibly does nothing is worse than
+                // no control. `AppearanceManager` and `AppearanceMode` are left in place;
+                // re-add this picker once the forced-dark sweep is done.
+                //
+                // NOTE: the divider that used to follow the picker was removed with it —
+                // left in place it drew a stray line across the top of the card.
 
-                        Text("Appearance")
-                            .font(AppTypography.body)
-                            .foregroundColor(AppColors.textPrimary)
+                // Notifications — hidden until a delivery pipeline exists. Every toggle
+                // in there currently writes a preference that nothing reads
+                // (`push_service.send_to_user` has zero callers). See FeatureFlags.
+                if FeatureFlags.notificationPreferencesEnabled {
+                    NavigationLink {
+                        NotificationsSettingsView()
+                    } label: {
+                        ProfileSettingsRowContent(
+                            icon: "bell.badge.fill",
+                            iconColor: AppColors.textSecondary,
+                            title: "Notifications"
+                        )
                     }
 
-                    HStack(spacing: 2) {
-                        ForEach(AppearanceMode.allCases) { mode in
-                            Button {
-                                viewModel.appearanceMode = mode
-                            } label: {
-                                HStack(spacing: AppSpacing.xs) {
-                                    Image(systemName: mode.icon)
-                                        .font(AppTypography.iconXS)
-                                    Text(mode.rawValue)
-                                        .font(AppTypography.caption)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, AppSpacing.xs)
-                                .background(
-                                    Capsule()
-                                        .fill(viewModel.appearanceMode == mode
-                                              ? AppColors.textMuted.opacity(0.3)
-                                              : Color.clear)
-                                )
-                                .foregroundColor(viewModel.appearanceMode == mode
-                                                 ? AppColors.textPrimary
-                                                 : AppColors.textMuted)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                        }
-                    }
-                    .padding(2)
-                    .background(
-                        Capsule()
-                            .fill(AppColors.textMuted.opacity(0.1))
-                    )
+                    settingsRowDivider
                 }
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.vertical, AppSpacing.md)
-
-                settingsRowDivider
-
-                // Notifications
-                NavigationLink {
-                    NotificationsSettingsView()
-                } label: {
-                    ProfileSettingsRowContent(
-                        icon: "bell.badge.fill",
-                        iconColor: AppColors.textSecondary,
-                        title: "Notifications"
-                    )
-                }
-
-                settingsRowDivider
 
                 // General Settings
                 NavigationLink {

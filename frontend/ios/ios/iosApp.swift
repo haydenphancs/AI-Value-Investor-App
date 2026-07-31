@@ -39,6 +39,17 @@ struct iosApp: App {
 
         // Configure appearance
         configureAppearance()
+
+        // Observe StoreKit transactions from LAUNCH, not from when the paywall opens.
+        // Apple delivers renewals, Ask-to-Buy approvals, and purchases that completed while
+        // the app was closed through `Transaction.updates`. Starting the listener later
+        // means those are never seen, and a renewal silently fails to apply.
+        //
+        // Also the redelivery path: a transaction whose backend verification failed is left
+        // unfinished, and Apple re-offers it here on the next launch.
+        Task { @MainActor in
+            StoreKitService.shared.startObservingTransactions()
+        }
     }
 
     // MARK: - Body

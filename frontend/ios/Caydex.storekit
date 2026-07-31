@@ -1,0 +1,58 @@
+{
+  "identifier" : "CAYDEX-LOCAL-STOREKIT",
+  "nonRenewingSubscriptions" : [ ],
+  "products" : [ ],
+  "settings" : {
+    "_askToBuyEnabled" : false,
+    "_billingIssuesEnabled" : false,
+    "_storeKitErrors" : [ ]
+  },
+  "subscriptionGroups" : [ {
+    "id" : "21582934",
+    "localizations" : [ ],
+    "name" : "Caydex Membership",
+    "subscriptions" : [ {
+      "adHocOffers" : [ ],
+      "codeOffers" : [ ],
+      "displayPrice" : "14.99",
+      "familyShareable" : false,
+      "groupNumber" : 2,
+      "internalID" : "6740001001",
+      "introductoryOffer" : null,
+      "localizations" : [ {
+        "description" : "1,200 credits a month for AI reports and Cay AI chat.",
+        "displayName" : "Pro",
+        "locale" : "en_US"
+      } ],
+      "productID" : "com.phan.caydex.pro.monthly",
+      "recurringSubscriptionPeriod" : "P1M",
+      "referenceName" : "Caydex Pro Monthly",
+      "subscriptionGroupID" : "21582934",
+      "type" : "RecurringSubscription",
+      "winbackOffers" : [ ]
+    }, {
+      "adHocOffers" : [ ],
+      "codeOffers" : [ ],
+      "displayPrice" : "39.99",
+      "familyShareable" : false,
+      "groupNumber" : 1,
+      "internalID" : "6740001002",
+      "introductoryOffer" : null,
+      "localizations" : [ {
+        "description" : "4,000 credits a month for AI reports and Cay AI chat.",
+        "displayName" : "Max",
+        "locale" : "en_US"
+      } ],
+      "productID" : "com.phan.caydex.max.monthly",
+      "recurringSubscriptionPeriod" : "P1M",
+      "referenceName" : "Caydex Max Monthly",
+      "subscriptionGroupID" : "21582934",
+      "type" : "RecurringSubscription",
+      "winbackOffers" : [ ]
+    } ]
+  } ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}

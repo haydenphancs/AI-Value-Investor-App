@@ -25,6 +25,7 @@ protocol AccountRepositoryProtocol: Sendable {
     func fetchSettings() async throws -> [String: PreferenceValue]
     func updateSettings(_ preferences: [String: PreferenceValue]) async throws -> [String: PreferenceValue]
     func registerDevice(token: String, environment: String?) async throws -> Bool
+    func verifyPurchase(signedTransaction: String) async throws -> String
 }
 
 // MARK: - Live implementation
@@ -41,6 +42,19 @@ final class AccountRepository: AccountRepositoryProtocol {
 
     func fetchProfile() async throws -> UserProfile {
         try await apiClient.request(endpoint: .getCurrentUser, responseType: UserProfile.self)
+    }
+
+    /// POST /billing/verify — hand an Apple-signed transaction to the server and return the
+    /// tier it applied.
+    ///
+    /// Only the signed blob is sent. The tier comes back from the server's verification of
+    /// Apple's signature, so the client never asserts what it bought.
+    func verifyPurchase(signedTransaction: String) async throws -> String {
+        let response = try await apiClient.request(
+            endpoint: .verifyPurchase(signedTransaction: signedTransaction),
+            responseType: VerifyPurchaseResponse.self
+        )
+        return response.tier
     }
 
     /// PATCH /users/me. The endpoint and its `UpdateProfileRequest` schema already

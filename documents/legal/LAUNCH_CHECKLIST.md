@@ -318,6 +318,26 @@ subscriber keeps their paid tier forever — the client only ever reports *purch
 - [ ] `IAP_APP_APPLE_ID=<numeric app id>`
 - [ ] `IAP_ROOT_CERT_DIR=certs/apple` (default; set it if you put them elsewhere)
 
+### Testing it locally, before App Store Connect exists
+
+A StoreKit configuration file (`frontend/ios/Caydex.storekit`) defines both subscriptions
+locally, and the Debug scheme now points at it. So the full purchase flow — sheet, receipt,
+backend verification, credits — works on the simulator with **no App Store Connect products
+and no sandbox account**.
+
+One catch: **it only applies when you launch from Xcode (⌘R).** `simctl launch` doesn't read
+the scheme, and `xcodebuild` has no run action, so I could not exercise the purchase flow
+from the command line. Everything below is compile-verified and unit-tested; the purchase
+sheet itself needs your ⌘R.
+
+- [ ] Open the project in Xcode, ⌘R, open the paywall, tap **Choose Pro**
+- [ ] Confirm the sheet appears, the purchase completes, and credits update to 1200
+- [ ] Set `IAP_ENVIRONMENT=Xcode` on your local backend (`LocalTesting` also works) — with
+      `Production`/`Sandbox` the backend correctly refuses to verify an Xcode-signed receipt
+- [ ] In Xcode's **Debug → StoreKit** menu you can also force failures, Ask to Buy, refunds,
+      and renewals — worth walking through the refund case, since that's what the webhook
+      handles
+
 ### The test matrix worth actually running
 
 Once sandbox is live, on a real device with a sandbox tester signed in:

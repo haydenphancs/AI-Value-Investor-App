@@ -15,7 +15,25 @@ struct PaywallView: View {
     @Environment(\.appState) private var appState
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel = PaywallViewModel()
-    @State private var showComingSoon = false
+    /// Observed so the CTA reflects `isPurchasing` — the ViewModel holds the service, and
+    /// changes on a nested ObservableObject don't propagate through it automatically.
+    @ObservedObject private var store = StoreKitService.shared
+
+    /// Alerts keyed off optional state, so dismissing clears the value rather than leaving
+    /// a stale flag that re-presents.
+    private var purchaseSucceeded: Binding<Bool> {
+        Binding(
+            get: { viewModel.purchasedTier != nil },
+            set: { if !$0 { viewModel.purchasedTier = nil } }
+        )
+    }
+
+    private var restoreFinished: Binding<Bool> {
+        Binding(
+            get: { viewModel.restoreMessage != nil },
+            set: { if !$0 { viewModel.restoreMessage = nil } }
+        )
+    }
 
     private var currentTier: UserTier {
         appState.user.tier
@@ -69,10 +87,22 @@ struct PaywallView: View {
             }
             .toolbarBackground(AppColors.background, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
-            .alert("Coming Soon", isPresented: $showComingSoon) {
+            .alert("You're all set", isPresented: purchaseSucceeded) {
+                Button("Done", role: .cancel) { dismiss() }
+            } message: {
+                Text("Your subscription is active and your credits have been added.")
+            }
+            .alert("Waiting for approval", isPresented: $viewModel.isPendingApproval) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text("In-app upgrades will be available in an upcoming release. Thanks for your patience!")
+                // Ask to Buy / SCA. Apple delivers the transaction later via
+                // Transaction.updates, so it applies on its own — no action needed.
+                Text("This purchase needs approval before it completes. Once approved, your subscription will be applied automatically.")
+            }
+            .alert("Restore Purchases", isPresented: restoreFinished) {
+                Button("OK", role: .cancel) { viewModel.restoreMessage = nil }
+            } message: {
+                Text(viewModel.restoreMessage ?? "")
             }
         }
         .preferredColorScheme(.dark)
@@ -172,8 +202,12 @@ struct PaywallView: View {
             // The free tier is never a purchasable "upgrade" target.
             EmptyView()
         } else {
-            Button(action: { showComingSoon = true }) {
-                Text("Choose \(plan.displayName)")
+            Button {
+                Task { await viewModel.purchase(tier: plan.tier) }
+            } label: {
+                Text(viewModel.store.isPurchasing
+                     ? "Processing\u{2026}"
+                     : "Choose \(plan.displayName)")
                     .font(AppTypography.bodyEmphasis)
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
@@ -189,6 +223,7 @@ struct PaywallView: View {
                     )
             }
             .buttonStyle(PlainButtonStyle())
+            .disabled(viewModel.store.isPurchasing)
         }
     }
 
@@ -221,6 +256,19 @@ struct PaywallView: View {
 
     private var legalLinks: some View {
         VStack(spacing: AppSpacing.xs) {
+            // Restore is REQUIRED by guideline 3.1.1 ("make sure you have a restore
+            // mechanism for any restorable in-app purchases"), and it's what a user
+            // reinstalling or switching devices reaches for first.
+            Button {
+                Task { await viewModel.restore() }
+            } label: {
+                Text("Restore Purchases")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.primaryBlue)
+            }
+            .disabled(store.isPurchasing)
+            .padding(.bottom, AppSpacing.xs)
+
             HStack(spacing: AppSpacing.xs) {
                 NavigationLink {
                     TermsOfUseView()

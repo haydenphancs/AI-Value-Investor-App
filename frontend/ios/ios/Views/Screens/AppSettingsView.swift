@@ -25,7 +25,8 @@ struct AppSettingsView: View {
 
     @State private var showDeleteConfirmation = false
     @State private var showClearCacheConfirmation = false
-    @State private var showRestoreInfo = false
+    @State private var isRestoring = false
+    @State private var restoreMessage: String?
     @State private var cacheSize = "Calculating..."
 
     /// Third-party AI processing consent. 5.1.1(ii)/5.1.2 require an accessible way to
@@ -82,10 +83,10 @@ struct AppSettingsView: View {
         } message: {
             Text("Cay AI chat will stop working until you allow it again. Everything else in Caydex keeps working. Conversations you've already saved are not deleted — you can remove those individually from chat history.")
         }
-        .alert("Restore Purchases", isPresented: $showRestoreInfo) {
-            Button("OK", role: .cancel) {}
+        .alert("Restore Purchases", isPresented: restoreFinished) {
+            Button("OK", role: .cancel) { restoreMessage = nil }
         } message: {
-            Text("In-app purchases aren't available yet. Once they ship, this will restore any subscription tied to your Apple ID.")
+            Text(restoreMessage ?? "")
         }
         .alert("Delete Account", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
@@ -152,7 +153,19 @@ struct AppSettingsView: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            Button(action: { showRestoreInfo = true }) {
+            Button {
+                Task {
+                    isRestoring = true
+                    let count = await StoreKitService.shared.restorePurchases()
+                    isRestoring = false
+                    // Distinguish the two outcomes: "nothing to restore" is the common case
+                    // for someone who never subscribed, and a generic success there just
+                    // confuses them.
+                    restoreMessage = count > 0
+                        ? "Restored your subscription."
+                        : "No previous purchases found for this Apple Account."
+                }
+            } label: {
                 actionRow(title: "Restore Purchases",
                           subtitle: "Recover a subscription on this Apple ID",
                           systemImage: "arrow.clockwise")
@@ -243,6 +256,13 @@ struct AppSettingsView: View {
                 .buttonStyle(PlainButtonStyle())
             }
         }
+    }
+
+    private var restoreFinished: Binding<Bool> {
+        Binding(
+            get: { restoreMessage != nil },
+            set: { if !$0 { restoreMessage = nil } }
+        )
     }
 
     private static let consentDateFormatter: DateFormatter = {

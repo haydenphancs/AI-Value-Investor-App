@@ -68,3 +68,27 @@ struct SubscriptionDTO: Codable, Sendable, Equatable {
         case store
     }
 }
+
+
+// MARK: - Purchase verification
+
+/// Response from `POST /billing/verify` — the entitlement state after the server verified
+/// an Apple-signed transaction.
+struct VerifyPurchaseResponse: Codable, Sendable, Equatable {
+    /// The WINNING tier across all of the user's subscriptions, not just this transaction's,
+    /// so replaying an old Pro receipt can't appear to demote a Max subscriber.
+    let tier: String
+    let status: String
+    let currentPeriodEnd: String?
+    /// True when this transaction had already been applied (StoreKit replays on launch,
+    /// restore re-submits). Informational, not an error.
+    let wasReplay: Bool
+
+    var userTier: UserTier { UserTier(rawValue: tier) ?? .free }
+
+    enum CodingKeys: String, CodingKey {
+        case tier, status
+        case currentPeriodEnd = "current_period_end"
+        case wasReplay = "was_replay"
+    }
+}

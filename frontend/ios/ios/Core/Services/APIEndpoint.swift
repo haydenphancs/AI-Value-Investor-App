@@ -61,6 +61,9 @@ enum APIEndpoint: Sendable {
     case getMySettings                                     // synced preference blob
     case updateMySettings(preferences: [String: PreferenceValue])
     case registerDevice(token: String, platform: String, environment: String?)
+    /// Submit an Apple-signed StoreKit 2 transaction for server-side verification.
+    /// The signed blob is the ONLY thing sent — the tier is derived server-side.
+    case verifyPurchase(signedTransaction: String)
 
     // MARK: - Stocks
     case searchStocks(query: String, limit: Int)
@@ -248,6 +251,8 @@ enum APIEndpoint: Sendable {
         // Billing / Subscription / Settings / Devices
         case .getPlanCatalog:
             return "/api/v1/billing/plans"
+        case .verifyPurchase:
+            return "/api/v1/billing/verify"
         case .getMySubscription:
             return "/api/v1/users/me/subscription"
         case .getMySettings, .updateMySettings:
@@ -487,7 +492,7 @@ enum APIEndpoint: Sendable {
         switch self {
         case .signIn, .signUp, .refreshToken, .signOut,
              .forgotPassword, .resetPassword, .changePassword,
-             .resendConfirmation, .oauthSignIn, .sessionExchange,
+             .resendConfirmation, .oauthSignIn, .sessionExchange, .verifyPurchase,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage, .streamChatMessage,
              .chatWithTickerReport, .completeLearnItem, .addBookBookmark,
@@ -635,6 +640,9 @@ enum APIEndpoint: Sendable {
 
         case .sessionExchange(let supabaseAccessToken):
             return SessionExchangeRequest(supabaseAccessToken: supabaseAccessToken)
+
+        case .verifyPurchase(let signedTransaction):
+            return VerifyPurchaseRequestBody(signedTransaction: signedTransaction)
 
         case .updateProfile(let displayName, let avatarUrl):
             return UpdateProfileRequest(displayName: displayName, avatarUrl: avatarUrl)
@@ -876,6 +884,12 @@ nonisolated struct OAuthSignInRequest: Encodable, Sendable {
 
 nonisolated struct SessionExchangeRequest: Encodable, Sendable {
     let supabaseAccessToken: String
+}
+
+/// POST /billing/verify body. Only the signed blob — deliberately NOT a product id or
+/// tier, so the client cannot influence what it gets entitled to.
+nonisolated struct VerifyPurchaseRequestBody: Encodable, Sendable {
+    let signedTransaction: String
 }
 
 /// Generic `{ "message": "..." }` acknowledgement returned by the password endpoints.

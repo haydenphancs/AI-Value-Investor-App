@@ -277,6 +277,61 @@ Get it in writing.
 
 ---
 
+## 6b. In-app purchase setup (Phase 8) 🔴 REQUIRED before you can charge
+
+The code is done and tested against a local StoreKit configuration. These six items make it
+work against real Apple infrastructure.
+
+### App Store Connect
+
+- [ ] Create two **auto-renewable subscriptions** in a subscription group. The product IDs
+      must match exactly, or a real purchase verifies and then fails to map to a plan:
+      - `com.phan.caydex.pro.monthly` — $14.99/month
+      - `com.phan.caydex.max.monthly` — $39.99/month
+- [ ] Fill in the localised display name, description, and a review screenshot for each
+      (Apple rejects subscriptions with incomplete metadata)
+- [ ] Note the app's numeric **Apple ID** (App Information) → set `IAP_APP_APPLE_ID`
+- [ ] Create a **Sandbox tester** account (Users and Access → Sandbox)
+
+### Apple root certificates
+
+- [ ] Download Apple's public root CAs from https://www.apple.com/certificateauthority/
+      (you want **AppleRootCA-G3.cer**) and place them in `backend/certs/apple/`
+- [ ] Deploy them with the app on Railway
+
+Verification **fails closed** without these: with `IAP_ENVIRONMENT=Sandbox` or `Production`
+and no certificates, the endpoint returns 503 rather than accepting anything. That is
+deliberate — no trust anchor must never silently mean "trust everything" on a payment path.
+
+### Server notifications
+
+- [ ] App Store Connect → App Information → **App Store Server Notifications**, set the
+      Production and Sandbox URLs to:
+      `https://<your-railway-host>/api/v1/billing/app-store-notifications`
+
+Without this, cancellations, refunds, and failed renewals never reach you and a lapsed
+subscriber keeps their paid tier forever — the client only ever reports *purchases*.
+
+### Railway environment
+
+- [ ] `IAP_ENVIRONMENT=Sandbox` while testing, then `Production` at launch
+- [ ] `IAP_APP_APPLE_ID=<numeric app id>`
+- [ ] `IAP_ROOT_CERT_DIR=certs/apple` (default; set it if you put them elsewhere)
+
+### The test matrix worth actually running
+
+Once sandbox is live, on a real device with a sandbox tester signed in:
+
+1. Buy Pro → tier becomes `pro`, credits become 1200
+2. Upgrade to Max → tier becomes `premium`, credits 4000
+3. Cancel → access persists until `current_period_end`, then drops to free
+4. Request a refund → the REFUND notification should drop the tier immediately
+5. Restore Purchases on a second device → tier restored, credits **not** double-granted
+6. Kill and relaunch the app repeatedly → `Transaction.updates` replays, and credits must
+   NOT increase (this is the one users would farm if it were wrong)
+
+---
+
 ## 7. App Store Connect record
 
 No longer blocked — your existing Individual account can create this record (see §1).

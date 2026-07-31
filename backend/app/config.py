@@ -162,6 +162,31 @@ class Settings(BaseSettings):
     CHAT_CREDIT_COST: int = 1
     REPORT_CREDIT_COST: int = 20
 
+    # ── In-app purchase (StoreKit 2 / App Store Server) ────────────────────────
+    # Entitlement comes from Apple-signed transactions, verified locally against
+    # Apple's certificate chain — the client is never trusted to say what it bought.
+    IAP_BUNDLE_ID: str = "com.phan.caydex"
+    # One of: "Production" | "Sandbox" | "Xcode" | "LocalTesting".
+    #   Xcode / LocalTesting     → a StoreKit configuration file. Root-cert validation is
+    #                              skipped by Apple's library, so local testing needs no certs.
+    #   Sandbox / Production     → REQUIRES Apple's root certificates (see
+    #                              IAP_ROOT_CERT_DIR) or verification fails closed.
+    IAP_ENVIRONMENT: str = "LocalTesting"
+    # Numeric App Store app id (App Store Connect → App Information → Apple ID).
+    # Required for Production verification; unknown until the ASC record exists.
+    IAP_APP_APPLE_ID: Optional[int] = None
+    # Directory holding Apple's PUBLIC root CA certificates (AppleRootCA-G3.cer etc.),
+    # downloadable from https://www.apple.com/certificateauthority/. Not committed —
+    # they are Apple infrastructure, not our secret, but also not ours to redistribute.
+    IAP_ROOT_CERT_DIR: str = "certs/apple"
+    # StoreKit product id → tier. The product ids must match App Store Connect exactly.
+    # Kept in config rather than the DB so a typo can't silently grant the wrong tier.
+    IAP_PRODUCT_PRO_MONTHLY: str = "com.phan.caydex.pro.monthly"
+    IAP_PRODUCT_MAX_MONTHLY: str = "com.phan.caydex.max.monthly"
+    # Shared secret Apple echoes in App Store Server Notifications, if configured. When set,
+    # the webhook additionally requires it — defence in depth on top of JWS verification.
+    IAP_WEBHOOK_SHARED_SECRET: Optional[str] = None
+
     # ── APNs push notifications (token-based auth via a .p8 key) ───────────────
     # All optional: with any unset, push is simply disabled (PushService.enabled
     # is False) and registration still records device tokens for later. NEVER

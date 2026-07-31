@@ -9,10 +9,23 @@ renders for signed-out users too.
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from app.api.error_response import ErrorCode, make_error_response
 from app.config import settings
-from app.schemas.subscription import PlanResponse, PlanCatalogResponse
+from app.dependencies import GUEST_USER_ID, get_current_user
+from app.integrations.app_store import (
+    AppStoreNotConfigured,
+    AppStoreVerificationFailed,
+    extract_transaction_from_notification,
+    verify_notification,
+    verify_signed_transaction,
+)
+from app.schemas.subscription import (
+    PlanResponse, PlanCatalogResponse,
+    VerifyPurchaseRequest, VerifyPurchaseResponse,
+)
+from app.services.iap_service import IAPError, UnknownProduct, get_iap_service
 from app.services.subscription_service import SubscriptionService
 
 logger = logging.getLogger(__name__)
@@ -30,3 +43,154 @@ async def get_plans():
         report_cost=settings.REPORT_CREDIT_COST,
         chat_cost=settings.CHAT_CREDIT_COST,
     )
+
+
+@router.post("/verify", response_model=VerifyPurchaseResponse)
+async def verify_purchase(
+    request: VerifyPurchaseRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Verify an Apple-signed StoreKit 2 transaction and apply the entitlement.
+
+    This is the trust boundary for paid access. The client sends the JWS Apple gave it; we
+    verify Apple's signature and certificate chain, and only then grant a tier. Nothing the
+    client asserts about what it bought is used — the tier comes from the *verified*
+    payload's `productId`.
+
+    Idempotent by design. StoreKit replays `Transaction.updates` on every launch, restore
+    re-submits, and the webhook can arrive for the same purchase, so this is called far more
+    often than a purchase happens. Entitlement is keyed on `originalTransactionId`, and
+    credits come from the monthly allocation rather than per-delivery, so a replay cannot
+    mint credits.
+
+    Guests are rejected: entitlement has to attach to a real account, and the shared guest
+    id would grant a tier to every signed-out install at once.
+    """
+    user_id = user["id"]
+    if user_id == GUEST_USER_ID:
+        return make_error_response(
+            ErrorCode.UNAUTHORIZED,
+            status_code=401,
+            message="Purchases require a signed-in account",
+            user_message="Please sign in before completing your purchase.",
+        )
+
+    # 1. Verify with Apple's chain. Never trust the client's own description of the purchase.
+    try:
+        payload = verify_signed_transaction(request.signed_transaction)
+    except AppStoreNotConfigured as e:
+        # OUR misconfiguration, not a bad receipt. 503 so the client retries rather than
+        # telling the user their legitimate purchase was invalid.
+        logger.error("IAP verification unavailable: %s", e)
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=503,
+            message="Purchase verification is temporarily unavailable",
+            user_message=(
+                "We couldn't confirm your purchase just now. It's safe — reopen the app "
+                "shortly and it will be applied."
+            ),
+        )
+    except AppStoreVerificationFailed as e:
+        # Hostile or corrupt input. The reason is logged, never returned — an error that
+        # explains why it rejected you is an oracle for forging one that passes.
+        logger.warning("IAP verification rejected for user=%s: %s", user_id, e)
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=400,
+            message="Transaction could not be verified",
+            user_message=(
+                "We couldn't verify that purchase with Apple. If you were charged, "
+                "contact support and we'll sort it out."
+            ),
+        )
+
+    # 2. Apply the entitlement.
+    try:
+        result = get_iap_service().apply_transaction(user_id, payload)
+    except UnknownProduct as e:
+        # Verified but unmapped: a REAL purchase we can't price. The user paid, so this is
+        # ours to fix — loud log, honest message, no silent free tier.
+        logger.error("IAP verified but unmapped product for user=%s: %s", user_id, e)
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=400,
+            message=f"Unmapped product: {payload.get('productId')}",
+            user_message=(
+                "That purchase went through but we couldn't match it to a plan. "
+                "Contact support and we'll apply it."
+            ),
+        )
+    except IAPError as e:
+        logger.error("IAP entitlement failed for user=%s: %s", user_id, e)
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=503,
+            message="Could not apply the entitlement",
+            user_message=(
+                "Your purchase was verified but we couldn't apply it yet. Reopen the app "
+                "shortly and it will be applied."
+            ),
+        )
+
+    return VerifyPurchaseResponse(
+        tier=result["winning_tier"],
+        status=result["status"],
+        current_period_end=result["current_period_end"],
+        was_replay=result["was_replay"],
+    )
+
+
+@router.post("/app-store-notifications")
+async def app_store_notifications(
+    request: Request,
+):
+    """App Store Server Notifications V2 webhook.
+
+    Without this, a cancellation, refund, or failed renewal never reaches us and a lapsed
+    subscriber keeps their tier indefinitely — the client only ever tells us about
+    *purchases*.
+
+    Unauthenticated by necessity (Apple calls it), but not untrusted: the payload is a JWS
+    verified against Apple's certificate chain exactly like a client transaction, and the
+    inner transaction is verified separately rather than trusted via the envelope.
+
+    Always answers 200 once the signature checks out. Apple retries non-2xx for days, so
+    returning an error for something we've decided to ignore (an unmapped product, a
+    transaction we have no user for) would just generate retries forever. What happened is
+    recorded in `outcome` and the logs.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Malformed body")
+
+    signed_payload = (body or {}).get("signedPayload")
+    if not signed_payload:
+        raise HTTPException(status_code=400, detail="Missing signedPayload")
+
+    try:
+        notification = verify_notification(signed_payload)
+    except AppStoreNotConfigured as e:
+        # 503 is right here: Apple SHOULD retry, because the fault is ours and transient.
+        logger.error("IAP webhook verification unavailable: %s", e)
+        raise HTTPException(status_code=503, detail="Verification unavailable")
+    except AppStoreVerificationFailed as e:
+        # 400, not 503 — a payload that fails Apple's own signature check will never verify,
+        # so inviting retries is pointless.
+        logger.warning("IAP webhook rejected an unverifiable payload: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    try:
+        transaction = extract_transaction_from_notification(notification)
+    except AppStoreVerificationFailed as e:
+        logger.warning("IAP webhook: inner transaction failed verification: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    try:
+        outcome, _user_id = get_iap_service().apply_notification(notification, transaction)
+    except IAPError:
+        # Transient (DB) failure — let Apple retry.
+        raise HTTPException(status_code=503, detail="Could not apply notification")
+
+    return {"received": True, "outcome": outcome}

@@ -11,6 +11,14 @@ supabase==2.16.0
 
 # Security
 python-jose[cryptography]==3.3.0
+
+# Apple's official App Store Server library — verifies StoreKit 2 signed transactions
+# and Server Notification V2 payloads against Apple's certificate chain. Used instead of
+# hand-rolling JWS + x5c validation: a bespoke chain validator on a PAYMENT path is where
+# 'written carefully' is weaker than 'written by the vendor'.
+# NOTE: install with cryptography PINNED. Left unconstrained the resolver bumps
+# cryptography 46 -> 49, which python-jose (JWT signing) and WeasyPrint (PDF) both sit on.
+app-store-server-library==3.1.2
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.18
 

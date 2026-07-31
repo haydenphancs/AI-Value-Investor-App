@@ -135,6 +135,27 @@ struct RootView: View {
     /// DisclaimerAcknowledgementView for why this exists.
     @AppStorage("has_acknowledged_disclaimers") private var hasAcknowledgedDisclaimers = false
 
+    /// Destinations for the global error toast's action button.
+    @State private var showPaywallFromError = false
+    @State private var showSignInFromError = false
+
+    /// Route the toast's action button to somewhere useful, then clear the error so the
+    /// toast doesn't sit on top of the sheet it just opened.
+    private func handleErrorAction(_ action: ErrorAction) {
+        switch action {
+        case .upgrade:
+            appState.clearError()
+            showPaywallFromError = true
+        case .signIn:
+            appState.clearError()
+            showSignInFromError = true
+        case .retry, .waitAndRetry, .waitForConnection, .goBack, .fixInput, .contactSupport:
+            // No global destination: retry/back are owned by whichever screen raised the
+            // error, and the rest are acknowledgements. Dismiss is the honest behaviour.
+            appState.clearError()
+        }
+    }
+
     var body: some View {
         Group {
             switch appState.auth.status {
@@ -156,10 +177,26 @@ struct RootView: View {
         .overlay {
             // Global error toast
             if let error = appState.currentError {
-                ErrorToastView(error: error) {
-                    appState.clearError()
-                }
+                ErrorToastView(
+                    error: error,
+                    onDismiss: { appState.clearError() },
+                    onAction: { handleErrorAction($0) }
+                )
             }
+        }
+        // The toast's action button used to call onDismiss for EVERY action, so the
+        // "Upgrade" button on an INSUFFICIENT_CREDITS error (402, action: "upgrade")
+        // just closed the toast — the one moment a user is most ready to pay. Same for
+        // "Sign In" on a 401. Both now actually go somewhere.
+        .sheet(isPresented: $showPaywallFromError) {
+            PaywallView()
+                .environment(\.appState, appState)
+                .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $showSignInFromError) {
+            SignInView()
+                .environment(appState)
+                .preferredColorScheme(.dark)
         }
         .overlay {
             // Global toast messages
@@ -217,6 +254,9 @@ struct SplashView: View {
 struct ErrorToastView: View {
     let error: AppError
     let onDismiss: () -> Void
+    /// Invoked by the action button. Separate from `onDismiss` so an actionable error
+    /// (Upgrade, Sign In) can route somewhere instead of silently closing.
+    var onAction: ((ErrorAction) -> Void)? = nil
 
     var body: some View {
         VStack {
@@ -244,7 +284,13 @@ struct ErrorToastView: View {
                     .foregroundColor(AppColors.textSecondary)
 
                 if error.suggestedAction != .fixInput {
-                    Button(action: onDismiss) {
+                    Button {
+                        if let onAction {
+                            onAction(error.suggestedAction)
+                        } else {
+                            onDismiss()
+                        }
+                    } label: {
                         Text(error.suggestedAction.buttonTitle)
                             .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.primaryBlue)

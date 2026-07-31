@@ -138,4 +138,33 @@ enum FeatureFlags: Sendable {
         return false
         #endif
     }
+
+    // MARK: - Built but not yet honest to ship
+    //
+    // The rule: if a control is visible, it must do what it says. A toggle that stores a
+    // preference nothing reads is worse than an absent toggle — it tells the user
+    // something is happening when nothing is. These hide such controls until the backing
+    // behaviour exists, without deleting UI that will need re-enabling.
+
+    /// Notification preference toggles (13 of them, in `NotificationsSettingsView`).
+    ///
+    /// FALSE because there is no delivery pipeline: `push_service.send_to_user` exists on
+    /// the backend but has **zero callers**, so every toggle writes a preference nothing
+    /// ever reads. Permission prompting and APNs token registration both already work —
+    /// the gap is purely that nothing sends.
+    ///
+    /// Flip to `true` when: at least one real event calls `send_to_user`, the APNs `.p8`
+    /// key + Push capability are configured, and `APNS_*` env vars are set on Railway.
+    /// The `aps-environment` entitlement is already wired per-configuration
+    /// (Debug → development, Release → production).
+    nonisolated static let notificationPreferencesEnabled = false
+
+    /// Appearance mode picker (Light / Dark / System).
+    ///
+    /// FALSE because 332 view files hard-code `.preferredColorScheme(.dark)`, so selecting
+    /// Light or System changed the stored preference and nothing visible.
+    /// `AppearanceManager` and `AppearanceMode` remain in place.
+    ///
+    /// Flip to `true` when the forced-dark sweep is done and the app honours the selection.
+    nonisolated static let appearanceModeEnabled = false
 }

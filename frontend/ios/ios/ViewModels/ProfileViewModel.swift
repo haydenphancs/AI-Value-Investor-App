@@ -42,6 +42,9 @@ class ProfileViewModel: BaseViewModel {
     @Published var showDeleteConfirmation: Bool = false
     @Published var showSignOutConfirmation: Bool = false
     @Published var isDeleting: Bool = false
+    /// Display-name editing (see `saveDisplayName`).
+    @Published var isEditingName: Bool = false
+    @Published var isSavingName: Bool = false
 
     // MARK: - Credit Usage
 
@@ -150,6 +153,29 @@ class ProfileViewModel: BaseViewModel {
             try await self?.apiClient.request(endpoint: .deleteAccount)
             self?.isDeleting = false
             self?.appState?.signOut()
+        }
+    }
+
+    /// Save a new display name. `PATCH /users/me` and its schema already existed on both
+    /// sides but nothing called them, so there was no way to change your name in the app.
+    ///
+    /// Adopts the SERVER's returned profile rather than the local string, so any
+    /// normalisation or truncation the backend applies is what the UI shows.
+    func saveDisplayName(_ newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != appState?.user.profile?.displayName else {
+            isEditingName = false
+            return
+        }
+        isSavingName = true
+        performTask("updateProfile", showLoading: false) { [weak self] in
+            defer { self?.isSavingName = false }
+            let updated = try await AccountRepository.shared.updateProfile(
+                displayName: trimmed,
+                avatarUrl: nil
+            )
+            self?.appState?.user.profile = updated
+            self?.isEditingName = false
         }
     }
 

@@ -150,6 +150,17 @@ You apply these manually. Review first, as you prefer.
       nothing breaks — but **you record no analytics at all**, which is the whole point
       of it. Apply this one before launch or you'll be flying blind on day 1
 
+- [ ] **108_watchlist_guest_partition.sql** — 🔴 **MUST be applied in the SAME release as
+      the code**, not before or after. It drops two `ON DELETE CASCADE` foreign keys
+      (`watchlist_items`, `portfolios`) so signed-out users stop sharing ONE watchlist
+      between them. Account deletion relied on those cascades, so `users.py` now purges
+      both tables explicitly — apply the migration without that code and deleting an
+      account silently leaves the user's watchlist and portfolios behind.
+      Two consequences to expect rather than debug: every existing guest install's
+      watchlist renders **empty** after deploy (4 pre-launch test rows become
+      unreachable — that shared list was wrong data anyway), and it is **not
+      practically reversible** once guest rows exist.
+
 No rush window on 103: the iOS app decodes old labels, new labels, and backend keys, so it's
 correct either way. 105 is additive and non-breaking, but password recovery is only fully
 effective once it's applied.

@@ -242,6 +242,38 @@ async def get_learn_identity(
     }
 
 
+async def get_watchlist_identity(
+    authorization: Optional[str] = Header(None),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    supabase: Client = Depends(get_supabase),
+) -> dict:
+    """Identity for the WATCHLIST routes: a real account, else a PER-INSTALL guest.
+
+    Same shape and same reason as :func:`get_learn_identity`. Before migration 108,
+    every signed-out user wrote `watchlist_items` under the shared ``GUEST_USER_ID``,
+    so one guest adding a ticker put it on EVERY other guest's Tracking tab and either
+    could delete the other's. That is the identical defect `guest_user_id_for` was
+    introduced to fix for Learn progress; it just was never extended here.
+
+    Safe only because migration 108 dropped ``watchlist_items_user_id_fkey`` — a
+    synthetic per-install uuid has no ``public.users`` row. That FK was ON DELETE
+    CASCADE, so account deletion now clears the table explicitly via
+    ``_UNLINKED_USER_TABLES`` in the users endpoint.
+
+    Still deliberately scoped rather than replacing ``get_current_user_or_guest``
+    everywhere: research / credits / portfolios hang off the seeded GUEST_USER_ID row
+    (which owns real credits), and pointing those at a synthetic id would break them.
+    """
+    user = await get_current_user_or_guest(authorization, supabase)
+    if user.get("id") != GUEST_USER_ID:
+        return user  # a real signed-in account always wins
+    return {
+        "id": guest_user_id_for(x_guest_id),
+        "email": "guest@local",
+        "tier": "free",
+    }
+
+
 class RateLimitChecker:
     def __init__(self, max_requests: int = 60, window_seconds: int = 60):
         self.max_requests = max_requests

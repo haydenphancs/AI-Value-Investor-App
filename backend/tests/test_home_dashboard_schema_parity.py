@@ -46,7 +46,13 @@ import time as _time
 # The exact snake_case keys the iOS `MarketPulseItemDTO.CodingKeys` expects.
 _ITEM_KEYS = {"symbol", "name", "type", "price", "change_percent", "previous_close", "spark"}
 # The exact snake_case keys the iOS `HomeDashboardResponseDTO.CodingKeys` expects.
-_RESPONSE_KEYS = {"market_status_text", "market_is_open", "pulse", "scanners", "signals", "themes"}
+_RESPONSE_KEYS = {
+    "market_status_text", "market_is_open", "pulse", "scanners", "signals",
+    "themes",
+    # The one USER-SCOPED section (migration 108 / Phase 4). Every key above is
+    # identical for every caller; this one is not.
+    "watchlist",
+}
 
 
 def test_market_pulse_item_keys_match_ios_dto():

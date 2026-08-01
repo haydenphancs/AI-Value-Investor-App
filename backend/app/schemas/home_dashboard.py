@@ -176,3 +176,14 @@ class HomeDashboardResponse(BaseModel):
     # Additive + defaulted (same rationale): a failed/absent themes build
     # degrades to an empty list; old clients ignore the field.
     themes: ThemesGroupResponse = ThemesGroupResponse()
+    # The signed-in / per-install user's own watchlist, newest-added first. THE ONLY
+    # user-scoped section on this screen — everything above is identical for every
+    # caller, which is why a day-1 user and a 40-ticker power user used to see a
+    # byte-identical Home.
+    #
+    # Optional + defaulted so already-shipped builds keep decoding, and so an empty
+    # watchlist is represented honestly (iOS hides the section rather than rendering a
+    # header over nothing). Reuses MarketPulseItemResponse because it is exactly the
+    # right shape and iOS already decodes it — `spark` is empty here, as the pulse
+    # tiles already permit, since per-ticker intraday series would cost one call each.
+    watchlist: List[MarketPulseItemResponse] = []

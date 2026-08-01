@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
 from app.services.asset_class import trades_extended_hours
@@ -149,6 +150,13 @@ _FLOAT_TTL_SECONDS = 86_400                 # 24h in-mem float cache (float move
 # batch-quote fan-out over the deduped union of every active theme's tickers.
 _THEMES_CACHE_TTL_SECONDS = 600             # 10 min — editorial rows + intraday % move slowly
 _THEMES_CACHE_KEY = "themes"
+# The user's own watchlist strip: one Supabase read + one batch quote, so it is the
+# fastest section here. Tighter timeout than the others because it must never be
+# what makes Home feel slow.
+_WATCHLIST_BUILD_TIMEOUT_SECONDS = 5
+# A glanceable strip, not the Tracking tab. Bounds the batch-quote fan-out too.
+_WATCHLIST_MAX_TILES = 12
+
 _THEMES_BUILD_TIMEOUT_SECONDS = 8           # never let a cold themes build block the dashboard
 _THEMES_TABLE = "trending_themes"
 _THEMES_MAX_ROWS = 50                        # sane ceiling on active theme cards
@@ -614,7 +622,9 @@ class HomeDashboardService:
 
     # ── Public API ────────────────────────────────────────────────────
 
-    async def get_dashboard(self) -> HomeDashboardResponse:
+    async def get_dashboard(
+        self, user_id: Optional[str] = None
+    ) -> HomeDashboardResponse:
         """Aggregate the dashboard.
 
         Market status is computed FRESH each call (cheap datetime math, never
@@ -634,11 +644,15 @@ class HomeDashboardService:
         # from THIS module (same pattern the pre-warmer uses in main.py).
         from app.services.signals_service import get_signals_service
 
-        pulse, scanners, signals, themes = await asyncio.gather(
+        pulse, scanners, signals, themes, watchlist = await asyncio.gather(
             self._get_pulse_guarded(),
             self._get_scanners_guarded(),
             get_signals_service().get_signals_guarded(),
             self._get_themes_guarded(),
+            # The one user-scoped branch. Guarded and degrading exactly like its
+            # siblings, so a slow or failed watchlist read costs this section only —
+            # never the whole screen.
+            self._get_watchlist_guarded(user_id),
         )
         status_text, is_open = _market_status()
         return HomeDashboardResponse(
@@ -648,7 +662,107 @@ class HomeDashboardService:
             scanners=scanners,
             signals=signals,
             themes=themes,
+            watchlist=watchlist,
         )
+
+    # ── Your Watchlist (user-scoped) ──────────────────────────────────
+
+    async def _get_watchlist_guarded(
+        self, user_id: Optional[str]
+    ) -> List[MarketPulseItemResponse]:
+        """The caller's own watchlist tiles, or [] for an anonymous/failed read.
+
+        DELIBERATELY NOT CACHED. Every other section on this screen uses a
+        CLASS-LEVEL cache shared by all callers; keying one of those by user is how
+        you end up serving one person's holdings to another, and this codebase has
+        already been burned by exactly that class of bug. The cost is one Supabase
+        read plus one batch-quote fan-out, both bounded and both behind the timeout
+        below — cheap enough not to be worth the risk.
+        """
+        # The SHARED guest sentinel is not a user. Its rows are the pre-migration-108
+        # pool that every signed-out install used to write into, so rendering them
+        # would put strangers' tickers on an anonymous caller's Home — the very leak
+        # 108 closes. The real client always sends X-Guest-Id, so this only affects
+        # header-less callers, and for them "no section" is the honest answer.
+        from app.dependencies import GUEST_USER_ID
+
+        if not user_id or user_id == GUEST_USER_ID:
+            return []
+        try:
+            return await asyncio.wait_for(
+                self._build_watchlist(user_id),
+                _WATCHLIST_BUILD_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            # Degrade to "no section" rather than surfacing an error: Home is still a
+            # complete screen without it. Logged so a persistently broken read is
+            # greppable instead of silently looking like "user has no tickers".
+            logger.warning(
+                "Home watchlist strip unavailable for user=%s: %s: %s",
+                user_id, type(exc).__name__, exc,
+            )
+            return []
+
+    async def _build_watchlist(self, user_id: str) -> List[MarketPulseItemResponse]:
+        """Newest-added tickers + one batch quote. No sparkline: a per-ticker
+        intraday series is one FMP call each, which would turn the most-visited
+        screen into N+1 calls for a section that is a glanceable strip."""
+        def _read() -> List[Dict[str, Any]]:
+            return (
+                get_supabase().table("watchlist_items")
+                .select("ticker, company_name, asset_type, added_at")
+                .eq("user_id", user_id)
+                .order("added_at", desc=True)
+                .limit(_WATCHLIST_MAX_TILES)
+                .execute()
+                .data
+                or []
+            )
+
+        rows = await asyncio.to_thread(_read)
+        symbols = list(dict.fromkeys(
+            str(r["ticker"]).upper() for r in rows if r.get("ticker")
+        ))
+        if not symbols:
+            return []
+
+        quotes: Dict[str, Dict[str, Any]] = {}
+        try:
+            for q in await self.fmp.get_batch_quotes_bulk(symbols):
+                sym = q.get("symbol")
+                if sym:
+                    quotes[str(sym).upper()] = q
+        except Exception as exc:
+            # A tile with no quote is dropped below rather than shown at 0.00 — a
+            # fabricated price on the user's OWN holdings is worse than no tile.
+            logger.warning(
+                "Home watchlist quotes failed for user=%s: %s: %s",
+                user_id, type(exc).__name__, exc,
+            )
+
+        by_ticker = {str(r["ticker"]).upper(): r for r in rows if r.get("ticker")}
+        tiles: List[MarketPulseItemResponse] = []
+        for sym in symbols:
+            q = quotes.get(sym)
+            if not q:
+                continue
+            price = _finite_float(q.get("price"))
+            change = _parse_pct(q.get("changePercentage"))
+            if price is None or change is None:
+                # FMP emits NaN/Infinity for thin or just-listed symbols; those
+                # serialize to invalid JSON under allow_nan=False and 500 the screen.
+                continue
+            row = by_ticker.get(sym, {})
+            tiles.append(MarketPulseItemResponse(
+                symbol=sym,
+                name=row.get("company_name") or sym,
+                type=(row.get("asset_type") or "stock"),
+                price=price,
+                change_percent=change,
+                previous_close=_finite_float(q.get("previousClose")),
+                spark=[],
+            ))
+        return tiles
 
     # ── Market Pulse (cache-aside) ────────────────────────────────────
 

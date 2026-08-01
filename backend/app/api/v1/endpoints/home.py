@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends
 from typing import Optional
 import logging
 
-from app.dependencies import get_optional_user_id
+from app.dependencies import get_optional_user_id, get_watchlist_identity
 from app.services.home_service import HomeService
 from app.services.home_dashboard_service import get_home_dashboard_service
 from app.services.signals_service import get_signals_service
@@ -52,20 +52,32 @@ async def get_home_feed(
 
 
 @router.get("/dashboard", response_model=HomeDashboardResponse)
-async def get_home_dashboard():
+async def get_home_dashboard(
+    # The WATCHLIST identity (a real account, else a per-INSTALL guest — migration
+    # 108), not the shared guest sentinel: the strip must resolve to the same
+    # partition the watchlist routes write, or a guest would see another install's
+    # tickers on the app's most-visited screen.
+    #
+    # The legacy `/home/feed` above has always taken a user; the redesigned dashboard
+    # dropped it, which is why a day-1 user and a 40-ticker power user saw a
+    # byte-identical Home.
+    user: dict = Depends(get_watchlist_identity),
+):
     """
     Aggregated Caydex Home dashboard — single request for the redesigned
     `HomeDashboardView` (distinct from the legacy `/home/feed`).
 
     Today this returns the market-status header and the top "Market Pulse"
     strip (major indices + Bitcoin + commodities), each with a live quote and
-    a daily-close sparkline. Public (no auth). Degrades gracefully — a failed
-    symbol is dropped rather than failing the whole strip; only an unexpected
-    failure surfaces a structured error.
+    a daily-close sparkline, PLUS the caller's own watchlist strip — the one
+    user-scoped section on this screen. Auth-optional: an anonymous caller simply
+    gets an empty `watchlist`. Degrades gracefully — a failed symbol is dropped
+    rather than failing the whole strip, and a failed watchlist read costs that
+    section only; only an unexpected failure surfaces a structured error.
     """
     try:
         service = get_home_dashboard_service()
-        return await service.get_dashboard()
+        return await service.get_dashboard(user_id=user.get("id"))
     except Exception as e:
         logger.error(
             "Home dashboard failed: %s: %s", type(e).__name__, e, exc_info=True

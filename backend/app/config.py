@@ -223,6 +223,17 @@ class Settings(BaseSettings):
     APNS_BUNDLE_ID: str = "com.phan.caydex"    # apns-topic
     # "production" → api.push.apple.com ; "sandbox" → api.sandbox.push.apple.com
     APNS_ENV: str = "sandbox"
+    # Per-user daily ceiling on ALERTS, across every ticker.
+    #
+    # The dedup key is per (user, ticker, day), which stops the SAME alert repeating
+    # but does nothing about VOLUME: in a market-wide selloff, ten watchlist tickers
+    # each crossing the Unusual threshold means ten separate notifications in one
+    # afternoon. That is the classic way an app teaches people to disable its
+    # notifications — and once disabled, iOS never re-prompts.
+    #
+    # Deliberately low. A user who genuinely wants every move has the Updates tab;
+    # push is for the handful worth an interruption.
+    PUSH_MAX_ALERTS_PER_USER_PER_DAY: int = 3
 
     # Gemini quota (429) handling. Instead of skipping retries on a rate-limit
     # error, back off and retry a bounded number of times — paired with the

@@ -373,6 +373,7 @@ class InsightSweeper:
         decision: "Decision",
         card: Dict[str, Any],
         now: datetime,
+        quote: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Push a fresh insight to the people watching this ticker.
 
@@ -389,6 +390,18 @@ class InsightSweeper:
         a failed sweep.
         """
         if decision.price_band not in _CATALYST_TIERS:
+            return
+        # The move must be measurable IN THE CURRENT QUOTE. When the quote is
+        # unusable, `decision.price_band` carries a STALE σ-tier (last_price_band),
+        # so without this a ticker that moved 9% yesterday and has no quote today
+        # would interrupt someone about a move that isn't happening — and the dedup
+        # key is per DAY, so it would land as a genuinely new alert.
+        #
+        # `_maybe_price_move` guards the paid catalyst the same way (see its
+        # "STALE σ-tier" comment). Notifying is a louder action than fetching an
+        # explanation, so it gets at least the same gate.
+        cp = finite((quote or {}).get("changePercentage"))
+        if cp is None or round(cp, 2) == 0.0:
             return
         try:
             from app.services.push_dispatch_service import (
@@ -855,7 +868,10 @@ class InsightSweeper:
                 # modes: `_notify_watchers` never raises, and a push problem must not
                 # mark a successfully generated card as failed.
                 if card is not None and not is_market:
-                    await self._notify_watchers(scope, decision, card, now)
+                    await self._notify_watchers(
+                        scope, decision, card, now,
+                        quote=quotes_by_symbol.get(scope),
+                    )
 
                 return card is not None
 

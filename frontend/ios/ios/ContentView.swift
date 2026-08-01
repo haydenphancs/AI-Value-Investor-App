@@ -61,7 +61,9 @@ struct ContentView: View {
                 .environment(\.isActiveTab, selectedTab == .wiser)
         }
         .preferredColorScheme(.dark)
-        .onChange(of: appState.pendingPushTicker) { _, ticker in
+        .onChange(of: appState.pendingPushTicker, initial: true) { _, ticker in
+            // `initial: true` for the same reason as HomeDashboardView: a cold launch
+            // from a tap sets this before either view exists.
             // Bring Home forward FIRST. Tabs are opacity-mounted, so without this the
             // ticker cover would present over a tab the user isn't looking at.
             // HomeDashboardView consumes and clears the value.

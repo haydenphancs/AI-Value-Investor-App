@@ -156,6 +156,7 @@ struct RootView: View {
     /// One-time first-run disclaimer acknowledgement. See
     /// DisclaimerAcknowledgementView for why this exists.
     @AppStorage("has_acknowledged_disclaimers") private var hasAcknowledgedDisclaimers = false
+    @AppStorage("has_completed_onboarding") private var hasCompletedOnboarding = false
 
     /// Destinations for the global error toast's action button.
     @State private var showPaywallFromError = false
@@ -236,6 +237,21 @@ struct RootView: View {
                 DisclaimerAcknowledgementView()
                     .transition(.opacity)
                     .zIndex(900)
+            }
+        }
+        .overlay {
+            // First-run onboarding, STRICTLY AFTER the disclaimer — legal first, then
+            // product. Same z-band (below the App Lock cover) and the same guard
+            // against showing over the splash while auth resolves.
+            //
+            // Its only job is capturing a few tickers: a populated watchlist is what
+            // makes Updates, the personalized Home strip, and push relevant at all.
+            // Skippable on every page.
+            if hasAcknowledgedDisclaimers, !hasCompletedOnboarding,
+               appState.auth.status != .unknown, appState.auth.status != .loading {
+                OnboardingView()
+                    .transition(.opacity)
+                    .zIndex(890)
             }
         }
         .overlay {

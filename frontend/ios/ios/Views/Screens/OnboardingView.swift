@@ -160,6 +160,10 @@ struct OnboardingView: View {
                 .padding(.horizontal, AppSpacing.lg)
 
             ScrollView(showsIndicators: false) {
+                // VStack is REQUIRED, not stylistic: a ScrollView's ViewBuilder does
+                // not stack multiple children, so the chips and the search button
+                // rendered ON TOP of each other.
+                VStack(alignment: .leading, spacing: 0) {
                 FlowChips(
                     items: viewModel.allChips,
                     isSelected: { viewModel.isSelected($0.symbol) },
@@ -179,6 +183,9 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(PlainButtonStyle())
                 .padding(.top, AppSpacing.lg)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, AppSpacing.lg)
+                }
             }
         }
     }

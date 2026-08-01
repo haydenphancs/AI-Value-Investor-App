@@ -108,9 +108,16 @@ struct HomeDashboardView: View {
                 .environment(\.appState, appState)
                 .preferredColorScheme(.dark)
         }
-        .onChange(of: appState.pendingPushTicker) {
-            // Consume the notification tap: open the ticker, then CLEAR it so the
-            // same tap can't re-present after the sheet is dismissed.
+        .onChange(of: appState.pendingPushTicker, initial: true) {
+            // `initial: true` is load-bearing, not cosmetic. On a COLD launch from a
+            // notification tap, AppDelegate sets pendingPushTicker before this view
+            // has ever rendered — and a plain .onChange only fires on a CHANGE after
+            // first render, so the tap was silently dropped in exactly the scenario
+            // the tap handler exists for. Warm-foreground taps worked, which is why
+            // it would have survived manual testing.
+            //
+            // Consume the tap: open the ticker, then CLEAR it so the same tap can't
+            // re-present after the sheet is dismissed.
             guard let ticker = appState.pendingPushTicker, !ticker.isEmpty else { return }
             // Only the symbol and type matter — TickerDetailView loads everything
             // else. The placeholder numbers are never rendered; the cover switches on

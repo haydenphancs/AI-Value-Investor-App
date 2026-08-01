@@ -18,7 +18,20 @@ final class PushNotificationManager {
 
     private let repository: AccountRepositoryProtocol
     private weak var appState: AppState?
-    private var pendingToken: String?
+    /// Token captured before sign-in. PERSISTED, not just in memory: a guest who
+    /// grants permission during onboarding gets their token here, and an in-memory
+    /// stash died with the process — so signing in a day later registered nothing.
+    private var pendingToken: String? {
+        get { UserDefaults.standard.string(forKey: Self.pendingTokenKey) }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(newValue, forKey: Self.pendingTokenKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.pendingTokenKey)
+            }
+        }
+    }
+    private static let pendingTokenKey = "pending_apns_device_token"
 
     private init(repository: AccountRepositoryProtocol = AccountRepository.shared) {
         self.repository = repository

@@ -265,3 +265,135 @@ def test_an_unrelated_db_error_refuses_the_claim():
     """Fails SAFE: if we can't prove the alert is unsent, don't send it. A duplicate
     buzz is worse than a missed one."""
     assert _claim_service(RuntimeError("connection reset")).claim_send("u1", "k") is False
+
+
+# ── the sweeper gate (adversarial review, 2026-08-01) ────────────────────────
+#
+# `decision.price_band` carries a STALE σ-tier when the current quote is unusable
+# (it falls back to `last_price_band`). The paid-catalyst path already guards against
+# that; the notify path did not, so a ticker that moved 9% yesterday and has no quote
+# today would interrupt someone about a move that isn't happening — and because the
+# dedup key is per DAY, it would land as a genuinely new alert rather than a duplicate.
+
+class _Decision:
+    def __init__(self, band):
+        self.price_band = band
+        self.inputset_id = ""
+        self.reason = "test"
+
+
+def _sweeper():
+    from app.services.updates_insight_sweeper import InsightSweeper
+
+    return object.__new__(InsightSweeper)
+
+
+@pytest.mark.asyncio
+async def test_no_push_when_the_current_quote_is_missing(monkeypatch):
+    from app.services.updates_materiality import TIER_EXTREME
+    import app.services.push_dispatch_service as pds
+
+    calls = []
+
+    class _Spy:
+        async def notify_watchers(self, **kw):
+            calls.append(kw)
+            return 1
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
+
+    await _sweeper()._notify_watchers(
+        "NVDA", _Decision(TIER_EXTREME), {"headline": "NVDA fell hard"},
+        None, quote=None,      # no quote this cycle → the band is stale
+    )
+    assert calls == [], "alerted on a stale tier with no live quote"
+
+
+@pytest.mark.asyncio
+async def test_no_push_when_the_move_rounds_to_zero(monkeypatch):
+    from app.services.updates_materiality import TIER_EXTREME
+    import app.services.push_dispatch_service as pds
+
+    calls = []
+
+    class _Spy:
+        async def notify_watchers(self, **kw):
+            calls.append(kw)
+            return 1
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
+
+    await _sweeper()._notify_watchers(
+        "NVDA", _Decision(TIER_EXTREME), {"headline": "h"},
+        None, quote={"changePercentage": 0.001},
+    )
+    assert calls == [], "alerted on a move that rounds to 0.00%"
+
+
+@pytest.mark.asyncio
+async def test_a_real_move_with_a_live_quote_does_push(monkeypatch):
+    from app.services.updates_materiality import TIER_EXTREME
+    import app.services.push_dispatch_service as pds
+
+    calls = []
+
+    class _Spy:
+        async def notify_watchers(self, **kw):
+            calls.append(kw)
+            return 1
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
+
+    await _sweeper()._notify_watchers(
+        "NVDA", _Decision(TIER_EXTREME), {"headline": "NVDA fell 9% on guidance"},
+        None, quote={"changePercentage": -9.2},
+    )
+    assert len(calls) == 1
+    assert calls[0]["ticker"] == "NVDA"
+    assert calls[0]["data"]["ticker"] == "NVDA"   # the tap handler needs this
+    assert "move:NVDA:" in calls[0]["dedup_key"]
+
+
+@pytest.mark.asyncio
+async def test_a_routine_drift_never_pushes(monkeypatch):
+    """Only Unusual/Extreme earns an interruption. A 0.4% drift already regenerates a
+    card; notifying on those would train users to ignore the app within a week."""
+    import app.services.push_dispatch_service as pds
+
+    calls = []
+
+    class _Spy:
+        async def notify_watchers(self, **kw):
+            calls.append(kw)
+            return 1
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
+
+    await _sweeper()._notify_watchers(
+        "NVDA", _Decision("typical"), {"headline": "h"},
+        None, quote={"changePercentage": 0.4},
+    )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_headline_never_pushes(monkeypatch):
+    """Silence beats a notification that says nothing — the card is on the Updates
+    tab either way."""
+    from app.services.updates_materiality import TIER_EXTREME
+    import app.services.push_dispatch_service as pds
+
+    calls = []
+
+    class _Spy:
+        async def notify_watchers(self, **kw):
+            calls.append(kw)
+            return 1
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
+
+    await _sweeper()._notify_watchers(
+        "NVDA", _Decision(TIER_EXTREME), {"headline": "   "},
+        None, quote={"changePercentage": -9.0},
+    )
+    assert calls == []

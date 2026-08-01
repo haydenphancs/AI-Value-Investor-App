@@ -18,6 +18,24 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+
+        // Re-register on EVERY launch when already authorized. Apple requires this —
+        // the device token can change (restore from backup, reinstall, OS update) and
+        // is only re-delivered in response to a registration call.
+        //
+        // Without it, `registerForRemoteNotifications()` ran in exactly one place: the
+        // grant branch of `requestAuthorization()` during onboarding. A guest who
+        // granted there had their token parked in memory, and it died with the
+        // process — so iOS reported notifications as authorized while the backend
+        // never held a token, forever. Adversarial review caught this; it made push
+        // silently unreachable for the app's own default (guest-first) path.
+        Task { @MainActor in
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            if settings.authorizationStatus == .authorized
+                || settings.authorizationStatus == .provisional {
+                UIApplication.shared.registerForRemoteNotifications()
+            }
+        }
         return true
     }
 

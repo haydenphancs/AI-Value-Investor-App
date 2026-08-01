@@ -46,6 +46,12 @@ final class PushNotificationManager {
         }
     }
 
+    /// A notification was TAPPED. Hands the target to AppState; the Home tab
+    /// consumes it and presents the ticker.
+    func handleTap(ticker: String) {
+        appState?.pendingPushTicker = ticker.uppercased()
+    }
+
     /// Called by the AppDelegate with the raw APNs token.
     func didRegister(deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()

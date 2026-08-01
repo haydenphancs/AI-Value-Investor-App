@@ -108,6 +108,23 @@ struct HomeDashboardView: View {
                 .environment(\.appState, appState)
                 .preferredColorScheme(.dark)
         }
+        .onChange(of: appState.pendingPushTicker) {
+            // Consume the notification tap: open the ticker, then CLEAR it so the
+            // same tap can't re-present after the sheet is dismissed.
+            guard let ticker = appState.pendingPushTicker, !ticker.isEmpty else { return }
+            // Only the symbol and type matter — TickerDetailView loads everything
+            // else. The placeholder numbers are never rendered; the cover switches on
+            // `type` and the detail screen fetches by symbol.
+            selectedTicker = MarketTicker(
+                name: ticker,
+                symbol: ticker,
+                type: .stock,
+                price: 0,
+                changePercent: 0,
+                sparklineData: []
+            )
+            appState.pendingPushTicker = nil
+        }
         .fullScreenCover(item: $selectedTicker) { ticker in
             NavigationStack {
                 Group {

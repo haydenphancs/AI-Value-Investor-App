@@ -254,15 +254,29 @@ _NOT_USER_OWNED: set[str] = set()
 
 
 def _tables_with_user_id_column() -> set[str]:
-    """Every public table declaring a `user_id` column, from the schema snapshot."""
-    sql = _SCHEMA.read_text()
+    """Every public table declaring a `user_id` column.
+
+    Reads the schema snapshot AND the migrations folder. The snapshot is regenerated
+    only every few migrations (see .claude/rules/database.md), so it legitimately lags
+    — a table created by a migration that has not been snapshotted yet is still real,
+    and treating it as unknown made this guard fail on correct code.
+    """
+    sources = [_SCHEMA.read_text()]
+    migrations = _SCHEMA.parent / "migrations"
+    if migrations.is_dir():
+        sources.extend(f.read_text() for f in migrations.glob("*.sql"))
+
     found = set()
-    for m in re.finditer(
-        r"CREATE TABLE public\.(\w+)\s*\((.*?)\n\);", sql, re.DOTALL
-    ):
-        name, body = m.group(1), m.group(2)
-        if re.search(r"^\s*user_id\s", body, re.MULTILINE):
-            found.add(name)
+    for sql in sources:
+        # `CREATE TABLE public.x (` in the snapshot; `CREATE TABLE IF NOT EXISTS x (`
+        # in migrations.
+        for m in re.finditer(
+            r"CREATE TABLE (?:IF NOT EXISTS )?(?:public\.)?(\w+)\s*\((.*?)\n\);",
+            sql, re.DOTALL | re.IGNORECASE,
+        ):
+            name, body = m.group(1), m.group(2)
+            if re.search(r"^\s*user_id\s", body, re.MULTILINE):
+                found.add(name)
     return found
 
 

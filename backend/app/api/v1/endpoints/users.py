@@ -316,6 +316,7 @@ _UNLINKED_USER_TABLES: tuple[str, ...] = (
     "credit_transactions",
     "watchlist_items",
     "portfolios",   # migrations/108, same dropped cascade
+    "push_send_log",  # migrations/109, no FK by design
 )
 
 # Same purge, different column. `analytics_events.identity_key` holds the real user id

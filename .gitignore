@@ -134,6 +134,16 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Signing keys and certificates. `.p8` in particular is the APNs auth key: it is
+# downloadable from Apple exactly ONCE, never expires, and grants push for every app
+# on the team — so a commit is both unrecoverable and high-impact. The backend reads
+# it from the APNS_AUTH_KEY env var (contents, not a path) precisely so it never has
+# to live in the repo.
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+
 # Environments
 .env
 .envrc

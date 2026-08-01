@@ -367,6 +367,56 @@ class InsightSweeper:
                 len(scopes), type(e).__name__, e,
             )
 
+    async def _notify_watchers(
+        self,
+        scope: str,
+        decision: "Decision",
+        card: Dict[str, Any],
+        now: datetime,
+    ) -> None:
+        """Push a fresh insight to the people watching this ticker.
+
+        Gated on the SAME materiality tiers that trigger the grounded "why it moved"
+        catalyst (`_CATALYST_TIERS`). That is deliberate: a routine 0.4% drift already
+        regenerates a card, and notifying on those would train users to ignore the app
+        within a week. Only Unusual/Extreme earns an interruption.
+
+        Dedup is per (user, ticker, ET trading date), so revisiting a scope later the
+        same day — a re-trip, a retry, a second Railway instance — cannot buzz anyone
+        twice.
+
+        Never raises. A push failure must not turn a successfully generated card into
+        a failed sweep.
+        """
+        if decision.price_band not in _CATALYST_TIERS:
+            return
+        try:
+            from app.services.push_dispatch_service import (
+                get_push_dispatch_service,
+                trading_date_et,
+            )
+
+            headline = (card.get("headline") or "").strip()
+            if not headline:
+                # No honest body to send. Silence beats a notification that says
+                # nothing — the card is still on the Updates tab either way.
+                return
+
+            await get_push_dispatch_service().notify_watchers(
+                ticker=scope,
+                title=scope,
+                body=headline[:180],
+                dedup_key=f"move:{scope}:{trading_date_et()}",
+                preference_key="notify_watchlist_changes",
+                # Routes the tap straight to this ticker (AppDelegate → deep link).
+                data={"kind": "ticker_move", "ticker": scope},
+            )
+        except Exception as e:
+            logger.warning(
+                "Push notify failed for %s (%s: %s) — card was still generated",
+                scope, type(e).__name__, e,
+            )
+
     def _release_claim(self, scope: str, now: datetime, reason: str) -> None:
         """Give the claim back without recording a generation.
 
@@ -796,6 +846,17 @@ class InsightSweeper:
                             card is not None, error,
                         )
                     )
+                # A fresh card for a WATCHED ticker that moved materially is the one
+                # thing in this app worth interrupting someone for. Everything the
+                # alert needs was just computed — the tier, the move, the grounded
+                # "why" — so notifying costs one reverse lookup, not another pipeline.
+                #
+                # Deliberately NOT awaited into the sweep's critical path failure
+                # modes: `_notify_watchers` never raises, and a push problem must not
+                # mark a successfully generated card as failed.
+                if card is not None and not is_market:
+                    await self._notify_watchers(scope, decision, card, now)
+
                 return card is not None
 
         if admitted:

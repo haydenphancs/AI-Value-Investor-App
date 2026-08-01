@@ -9,7 +9,7 @@ from supabase import Client
 import logging
 
 from app.database import get_supabase
-from app.dependencies import get_current_user_or_guest
+from app.dependencies import get_watchlist_identity
 from app.integrations.fmp import get_fmp_client
 from app.services.tracking_service import invalidate_feed_cache
 from app.schemas.watchlist import (
@@ -25,7 +25,7 @@ router = APIRouter()
 
 @router.get("")
 async def get_watchlist(
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Get current user's watchlist."""
@@ -50,7 +50,7 @@ async def get_watchlist(
 @router.post("", status_code=201)
 async def add_to_watchlist(
     request: AddToWatchlistRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Add a stock to user's watchlist. Fetches company info from FMP."""
@@ -119,7 +119,7 @@ async def add_to_watchlist(
 @router.delete("")
 async def remove_from_watchlist(
     request: RemoveFromWatchlistRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Remove a stock from user's watchlist."""

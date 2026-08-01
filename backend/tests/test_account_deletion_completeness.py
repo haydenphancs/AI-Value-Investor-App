@@ -117,16 +117,43 @@ async def test_deletes_every_unlinked_table():
     sb = FakeSupabase()
     assert await _delete(sb) == {"deleted": True}
     deleted = {t for kind, t, *_ in sb.log if kind == "table.delete"}
-    assert deleted == set(users_ep._UNLINKED_USER_TABLES)
+    expected = (
+        set(users_ep._UNLINKED_USER_TABLES)
+        | set(users_ep._UNLINKED_IDENTITY_TABLES)
+    )
+    assert deleted == expected
 
 
 @pytest.mark.asyncio
 async def test_scopes_every_delete_to_this_user():
+    """Every purge must be scoped to THIS user, on whichever column that table uses
+    to hold the id. `analytics_events` keys on `identity_key`; everything else on
+    `user_id`. An unscoped delete here would wipe the table for every user."""
     sb = FakeSupabase()
     await _delete(sb)
     for kind, table, col, val in [e for e in sb.log if e[0] == "table.delete"]:
-        assert col == "user_id", f"{table} filtered on {col!r}, not user_id"
+        expected_col = (
+            "identity_key"
+            if table in users_ep._UNLINKED_IDENTITY_TABLES
+            else "user_id"
+        )
+        assert col == expected_col, f"{table} filtered on {col!r}, not {expected_col}"
         assert val == _USER_ID, f"{table} filtered on the wrong id: {val!r}"
+
+
+def test_watchlist_is_purged_explicitly_now_that_its_cascade_is_gone():
+    """Migration 108 drops watchlist_items_user_id_fkey (ON DELETE CASCADE) so guests
+    can be partitioned per install. Removing a deleted user's watchlist therefore
+    becomes THIS list's responsibility — if it fell off, a deleted account would keep
+    its watchlist: the incomplete-deletion bug the launch prep already fixed once, and
+    a privacy-policy violation."""
+    assert "watchlist_items" in users_ep._UNLINKED_USER_TABLES
+
+
+def test_analytics_history_is_purged_on_account_deletion():
+    """`analytics_events.identity_key` IS the user id for a signed-in user, so their
+    behavioural history would otherwise survive account deletion."""
+    assert "analytics_events" in users_ep._UNLINKED_IDENTITY_TABLES
 
 
 @pytest.mark.asyncio
@@ -191,7 +218,11 @@ async def test_one_failing_table_does_not_abandon_the_others():
     with pytest.raises(HTTPException):
         await _delete(sb)
     attempted = {t for kind, t, *_ in sb.log if kind == "table.delete"}
-    assert attempted == set(users_ep._UNLINKED_USER_TABLES) - {"chat_usage_budget"}
+    all_purged = (
+        set(users_ep._UNLINKED_USER_TABLES)
+        | set(users_ep._UNLINKED_IDENTITY_TABLES)
+    )
+    assert attempted == all_purged - {"chat_usage_budget"}
 
 
 @pytest.mark.asyncio

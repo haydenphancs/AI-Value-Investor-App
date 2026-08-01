@@ -29,7 +29,7 @@ from app.api.error_response import (
     make_error_response,
 )
 from app.database import get_supabase
-from app.dependencies import get_current_user_or_guest
+from app.dependencies import get_watchlist_identity
 from app.integrations.fmp import get_fmp_client
 from app.schemas.tracking import (
     TrackingFeedResponse,
@@ -52,7 +52,7 @@ router = APIRouter()
 
 @router.get("/assets", response_model=TrackingFeedResponse)
 async def get_tracking_assets(
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
 ):
     """Get enriched watchlist with real-time prices, sparklines, and alerts.
 
@@ -77,7 +77,7 @@ async def get_tracking_assets(
 
 @router.get("/holdings", response_model=List[PortfolioHoldingResponse])
 async def get_holdings(
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
 ):
     """Get current user's portfolio holdings.
 
@@ -92,7 +92,7 @@ async def get_holdings(
 @router.post("/holdings", response_model=PortfolioHoldingResponse)
 async def add_holding(
     request: AddHoldingRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Add or upsert a portfolio holding on the user's watchlist.
@@ -205,7 +205,7 @@ async def add_holding(
 async def update_holding(
     ticker: str,
     request: UpdateHoldingRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Update shares / market_value / asset_type on an existing watchlist row."""
@@ -258,7 +258,7 @@ async def update_holding(
 @router.delete("/holdings/{ticker}")
 async def delete_holding(
     ticker: str,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Clear holding values on a watchlist row.
@@ -281,7 +281,7 @@ async def delete_holding(
 @router.put("/assets/holdings")
 async def bulk_update_holdings(
     items: List[BulkHoldingUpdateItem],
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Update shares / market_value across many watchlist rows in a single call.
@@ -354,7 +354,7 @@ def _row_to_holding(row: dict) -> PortfolioHoldingResponse:
     response_model=Optional[PortfolioInsightsResponse],
 )
 async def get_portfolio_insights(
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
 ):
     """Server-computed Portfolio Insights — diversification score, sector
     breakdown, and sub-scores. Returns ``null`` when the user has fewer than

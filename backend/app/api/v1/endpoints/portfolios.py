@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from supabase import Client
 
 from app.database import get_supabase
-from app.dependencies import get_current_user_or_guest
+from app.dependencies import get_watchlist_identity
 from app.schemas.tracking import PortfolioInsightsResponse
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import invalidate_feed_cache
@@ -262,7 +262,7 @@ def _name_taken(
 
 @router.get("", response_model=PortfolioListResponse)
 async def list_portfolios(
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """List the user's portfolios (with items + per-portfolio holdings).
@@ -280,7 +280,7 @@ async def list_portfolios(
 @router.post("", response_model=PortfolioResponse)
 async def create_portfolio(
     request: CreatePortfolioRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     name = _normalize_name(request.name)
@@ -316,7 +316,7 @@ async def create_portfolio(
 @router.put("/reorder")
 async def reorder_portfolios(
     request: ReorderPortfoliosRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Bulk-update sort_order from the order of the supplied portfolio_ids."""
@@ -348,7 +348,7 @@ async def reorder_portfolios(
 async def rename_portfolio(
     portfolio_id: str,
     request: RenamePortfolioRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     name = _normalize_name(request.name)
@@ -376,7 +376,7 @@ async def rename_portfolio(
 @router.delete("/{portfolio_id}")
 async def delete_portfolio(
     portfolio_id: str,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     _get_portfolio_or_404(supabase, user["id"], portfolio_id)
@@ -408,7 +408,7 @@ async def delete_portfolio(
 async def set_portfolio_tickers(
     portfolio_id: str,
     request: SetTickersRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Replace the portfolio's ticker membership.
@@ -509,7 +509,7 @@ async def set_portfolio_tickers(
 async def set_portfolio_holdings(
     portfolio_id: str,
     request: SetPortfolioHoldingsRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Bulk-update shares / market_value for tickers within a portfolio.
@@ -561,7 +561,7 @@ async def set_portfolio_holdings(
 )
 async def get_portfolio_insights(
     portfolio_id: str,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
     """Server-computed Portfolio Insights for ONE portfolio — the 0..100

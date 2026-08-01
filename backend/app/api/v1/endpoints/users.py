@@ -3,7 +3,9 @@ User Endpoints
 Frontend: GET /users/me, GET /users/me/credits, PATCH /users/me
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+import asyncio
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 from supabase import Client
 import logging
 from typing import Optional
@@ -173,6 +175,93 @@ async def register_device(
     return DeviceRegisterResponse(registered=ok)
 
 
+@router.post("/me/claim-guest-data")
+async def claim_guest_data(
+    user: dict = Depends(get_current_user),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    supabase: Client = Depends(get_supabase),
+):
+    """Move this install's GUEST watchlist + portfolios onto the signed-in account.
+
+    Without this, the guest-first funnel loses its own work: a user adds tickers
+    during first-run onboarding, creates an account, and their watchlist is empty —
+    because migration 108 partitions guests by install and a real account keys off
+    its user id instead. Signing in would actively cost them data, which is the
+    opposite of the intended upgrade.
+
+    Idempotent: rows already moved simply aren't there the second time, and tickers
+    the account ALREADY holds are skipped rather than colliding with
+    `watchlist_items UNIQUE(user_id, ticker)`.
+
+    Best-effort: partial success is reported, never raised. A failed claim must not
+    block sign-in — the user is already authenticated by the time this runs.
+    """
+    from app.dependencies import GUEST_USER_ID, guest_user_id_for
+
+    bucket = guest_user_id_for(x_guest_id)
+
+    # HARD GUARD. `guest_user_id_for(None)` returns the shared sentinel, and the
+    # legacy pre-migration-108 rows still live there. Claiming that bucket would pull
+    # OTHER people's tickers into this account — the exact cross-user leak migration
+    # 108 exists to close. Only a real per-install bucket is ever claimable.
+    if not x_guest_id or bucket == GUEST_USER_ID:
+        return {"claimed": {"watchlist_items": 0, "portfolios": 0}, "skipped": "no per-install guest id"}
+
+    user_id = user["id"]
+    claimed = {"watchlist_items": 0, "portfolios": 0}
+
+    def _claim() -> None:
+        # ── watchlist: skip tickers the account already holds ──────────────
+        guest_rows = (
+            supabase.table("watchlist_items").select("id,ticker")
+            .eq("user_id", bucket).execute().data or []
+        )
+        if guest_rows:
+            owned = {
+                r["ticker"] for r in (
+                    supabase.table("watchlist_items").select("ticker")
+                    .eq("user_id", user_id).execute().data or []
+                )
+            }
+            movable = [r["id"] for r in guest_rows if r.get("ticker") not in owned]
+            if movable:
+                supabase.table("watchlist_items").update({"user_id": user_id}) \
+                    .in_("id", movable).execute()
+                claimed["watchlist_items"] = len(movable)
+            # Duplicates are dropped, not left orphaned on a bucket nothing reads.
+            dupes = [r["id"] for r in guest_rows if r.get("ticker") in owned]
+            if dupes:
+                supabase.table("watchlist_items").delete().in_("id", dupes).execute()
+
+        # ── portfolios: no unique constraint on name, so move them all. Their
+        #    portfolio_items ride along (FK is to portfolios.id, not to the user).
+        pf = (
+            supabase.table("portfolios").select("id")
+            .eq("user_id", bucket).execute().data or []
+        )
+        if pf:
+            supabase.table("portfolios").update({"user_id": user_id}) \
+                .in_("id", [r["id"] for r in pf]).execute()
+            claimed["portfolios"] = len(pf)
+
+    try:
+        await asyncio.to_thread(_claim)
+    except Exception as e:
+        logger.error(
+            "Guest-data claim failed for user=%s bucket=%s: %s: %s",
+            user_id, bucket, type(e).__name__, e, exc_info=True,
+        )
+        # Never fatal: the user IS signed in. Report honestly instead of 500ing.
+        return {"claimed": claimed, "error": f"{type(e).__name__}"}
+
+    if claimed["watchlist_items"] or claimed["portfolios"]:
+        logger.info(
+            "Guest-data claim for user=%s: %d watchlist row(s), %d portfolio(s)",
+            user_id, claimed["watchlist_items"], claimed["portfolios"],
+        )
+    return {"claimed": claimed}
+
+
 @router.patch("/me", response_model=UserResponse)
 async def update_profile(
     request: UpdateProfileRequest,
@@ -207,6 +296,14 @@ async def update_profile(
 #   user_book_progress   — migrations/066, same
 #   chat_usage_budget    — migrations/096, same
 #   credit_transactions  — migrations/100, described as an append-only audit ledger
+#   watchlist_items      — migrations/108. These two USED to cascade; the FKs were
+#   portfolios             dropped so guests could be partitioned per install.
+#                          Deletion is now this list's job, and forgetting it would
+#                          silently leave a deleted user's data behind. Deleting a
+#                          `portfolios` row still cascades to `portfolio_items`,
+#                          which FKs to portfolios(id) rather than to users.
+#   analytics_events     — migrations/107. Keyed on `identity_key`, not `user_id`, so it
+#                          is purged separately below (the column name differs).
 #
 # credit_transactions IS deleted rather than anonymised: the privacy policy promises
 # deletion, credits are internal accounting rather than a payment record, and Apple holds
@@ -217,6 +314,15 @@ _UNLINKED_USER_TABLES: tuple[str, ...] = (
     "user_book_progress",
     "chat_usage_budget",
     "credit_transactions",
+    "watchlist_items",
+    "portfolios",   # migrations/108, same dropped cascade
+)
+
+# Same purge, different column. `analytics_events.identity_key` holds the real user id
+# for a signed-in user, so their behavioural history would otherwise survive account
+# deletion — which the privacy policy promises it does not.
+_UNLINKED_IDENTITY_TABLES: tuple[str, ...] = (
+    "analytics_events",
 )
 
 _RESEARCH_PDF_BUCKET = "research-pdfs"
@@ -226,9 +332,12 @@ def _purge_unlinked_rows(supabase: Client, user_id: str) -> dict[str, str]:
     """Delete the un-FK'd user rows the cascade misses. Best-effort per table: one
     failure must not abandon the rest of the purge, but every failure is reported."""
     failures: dict[str, str] = {}
-    for table in _UNLINKED_USER_TABLES:
+    for table, column in (
+        [(t, "user_id") for t in _UNLINKED_USER_TABLES]
+        + [(t, "identity_key") for t in _UNLINKED_IDENTITY_TABLES]
+    ):
         try:
-            supabase.table(table).delete().eq("user_id", user_id).execute()
+            supabase.table(table).delete().eq(column, user_id).execute()
         except Exception as e:  # noqa: BLE001 — recorded and surfaced below
             failures[table] = f"{type(e).__name__}: {e}"
             logger.error(
@@ -280,7 +389,7 @@ async def delete_account(
     2. Un-FK'd tables — `_UNLINKED_USER_TABLES`. These have no foreign key to
        `public.users`, so the cascade in step 3 does not reach them.
     3. `auth.users` — cascades to `public.users` and every FK-linked child table
-       (user_credits, subscriptions, watchlist_items, portfolios, research_reports,
+       (user_credits, subscriptions, research_reports,
        user_settings, device_tokens, whale_follows, chat_sessions → chat_messages, …).
 
     The previous implementation did step 3 only, and its docstring claimed that removed

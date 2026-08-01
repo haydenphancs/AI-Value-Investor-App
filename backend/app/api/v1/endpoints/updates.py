@@ -27,7 +27,11 @@ from app.api.error_response import (
     make_error_response,
 )
 from app.database import get_supabase
-from app.dependencies import StandardRateLimit, get_current_user_or_guest
+from app.dependencies import (
+    StandardRateLimit,
+    get_current_user_or_guest,
+    get_watchlist_identity,
+)
 from app.integrations.fmp import get_fmp_client
 from app.schemas.updates import (
     AIInsightCardResponse,
@@ -71,7 +75,11 @@ def _valid_scope(scope: str) -> bool:
 
 @router.get("/tabs", response_model=UpdatesTabsResponse)
 async def get_updates_tabs(
-    user: dict = Depends(get_current_user_or_guest),
+    # Watchlist identity, not the shared guest sentinel: these pills ARE the user's
+    # watchlist, so they must resolve to the same per-install partition the watchlist
+    # routes write (migration 108). Reading the shared bucket here would show a guest
+    # someone else's tickers — and hide their own.
+    user: dict = Depends(get_watchlist_identity),
 ):
     """Filter pills for the Updates tab bar: 'Market' plus the user's watchlist.
 

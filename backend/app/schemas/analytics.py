@@ -50,6 +50,11 @@ ALLOWED_EVENTS: frozenset[str] = frozenset({
     "watchlist_added",
     "lesson_completed",
     "audio_played",
+    # First-run funnel. `onboarding_completed` carries the ticker count, which is
+    # THE activation number for this app: a populated watchlist is what makes
+    # Updates, the personalized Home strip, and (later) push relevant at all.
+    "onboarding_completed",
+    "onboarding_skipped",
 })
 
 

@@ -47,6 +47,11 @@ enum AnalyticsEventName: String {
     case watchlistAdded = "watchlist_added"
     case lessonCompleted = "lesson_completed"
     case audioPlayed = "audio_played"
+    /// First-run funnel. `onboardingCompleted` carries `count` — the activation
+    /// metric, since a populated watchlist is what makes Updates, the Home strip,
+    /// and push relevant at all.
+    case onboardingCompleted = "onboarding_completed"
+    case onboardingSkipped = "onboarding_skipped"
 }
 
 /// A single buffered event. `props` is deliberately `[String: AnalyticsValue]` rather

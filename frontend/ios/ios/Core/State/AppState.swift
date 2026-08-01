@@ -77,6 +77,14 @@ final class AppState {
     /// Toast message to display
     var toastMessage: ToastMessage?
 
+    /// Ticker a notification tap wants opened, consumed by the Home tab.
+    ///
+    /// A tapped push used to land wherever the user happened to be — the alert said
+    /// "NVDA moved 8%" and then showed you the Wiser tab. Routed through AppState
+    /// rather than a new navigation stack so it reuses the ticker presentation Home
+    /// already owns. Cleared by whoever consumes it, so one tap opens one screen.
+    var pendingPushTicker: String?
+
     // MARK: - Services (Injected)
 
     private(set) var apiClient: APIClient!

@@ -161,6 +161,13 @@ You apply these manually. Review first, as you prefer.
       unreachable — that shared list was wrong data anyway), and it is **not
       practically reversible** once guest rows exist.
 
+- [ ] **109_push_send_log.sql** — the delivery-dedup claim table. Apply this **before**
+      the APNs key starts producing real sends, not after: without it there is nothing
+      stopping the same alert going out twice to the same person (a sweeper re-trip, a
+      retry, or two overlapping Railway instances during a deploy). A duplicate push
+      can't be taken back, so this one is worth applying early even though push is
+      otherwise inert. Additive and non-breaking.
+
 No rush window on 103: the iOS app decodes old labels, new labels, and backend keys, so it's
 correct either way. 105 is additive and non-breaking, but password recovery is only fully
 effective once it's applied.
@@ -425,9 +432,19 @@ a meaningful saving in item 9.
 
 ## 9. Later phases (not yet)
 
-- **APNs** (Phase 9): `.p8` key, Push capability on the App ID, `APNS_*` env on Railway.
-  Bundle `com.phan.caydex`, team `WG697LVCS9`. The entitlements are now correctly wired
-  per-configuration, so this will work when you get there
+- **APNs** — ✅ key created (`7YPQRK276L`) and the five `APNS_*` variables are set on
+  Railway. The code path is built: the insight sweeper alerts watchers of a ticker that
+  moved materially, deduped per user per ticker per trading day.
+  Still outstanding:
+  - [ ] **Push Notifications capability** on `com.phan.caydex` in the developer portal.
+        Without it the app can't register and no device token is ever issued
+  - [ ] A **real iPhone** for the first end-to-end delivery — push does not work in the
+        Simulator, so everything to date is unit-tested against a stub
+  - [ ] Flip `APNS_ENV` from `sandbox` to `production` at launch. A device token is only
+        valid in the environment that issued it, and Debug/Release builds already
+        declare different `aps-environment` values
+  - [ ] Keep a copy of the `.p8` in your password manager — Apple allows exactly one
+        download, and the file currently exists only at `BIGDATA/myApp/`
 - **IAP products** (Phase 8): Pro $14.99, Max $39.99, plus a sandbox tester account
 - **Screenshots** (Phase 10): I can capture these from the simulator when the UI is final
 

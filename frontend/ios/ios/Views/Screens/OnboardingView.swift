@@ -226,6 +226,19 @@ struct OnboardingView: View {
         } else {
             viewModel.trackCompleted()
         }
+
+        // Ask for notifications HERE, and only if they actually picked something.
+        // This is the one moment the request is self-explanatory — they've just told
+        // us which tickers they care about, so "we'll tell you when these move" needs
+        // no justification. Asking on cold launch, before the app has done anything
+        // for them, is how you get denied permanently (iOS only ever prompts once).
+        //
+        // Skipped or empty → don't ask. There is nothing to notify them about yet, and
+        // a wasted prompt is a permanent one.
+        if !skipped, !viewModel.selected.isEmpty {
+            PushNotificationManager.shared.requestAuthorization()
+        }
+
         hasCompletedOnboarding = true
     }
 }

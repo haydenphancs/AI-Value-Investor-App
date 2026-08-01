@@ -255,6 +255,12 @@ async def _run_news_pre_warmer():
             from app.services.analytics_service import get_analytics_service
 
             await asyncio.to_thread(get_analytics_service().sweep_expired)
+
+            # And push_send_log (migration 109) — one row per delivered push; the
+            # dedup horizon is a single trading day, so anything old is pure history.
+            from app.services.push_dispatch_service import get_push_dispatch_service
+
+            await asyncio.to_thread(get_push_dispatch_service().sweep_expired)
         except Exception as e:
             logger.error(f"News pre-warmer failed: {e}", exc_info=True)
 

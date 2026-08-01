@@ -8,6 +8,8 @@
 import SwiftUI
 
 struct ContentView: View {
+    // Needed to observe a notification tap (pendingPushTicker) and bring Home forward.
+    @Environment(AppState.self) private var appState
     @State private var selectedTab: HomeTab = .home
     @State private var researchTickerSymbol: String? = nil
     @State private var researchSubTab: ResearchTab = .research
@@ -59,6 +61,12 @@ struct ContentView: View {
                 .environment(\.isActiveTab, selectedTab == .wiser)
         }
         .preferredColorScheme(.dark)
+        .onChange(of: appState.pendingPushTicker) { _, ticker in
+            // Bring Home forward FIRST. Tabs are opacity-mounted, so without this the
+            // ticker cover would present over a tab the user isn't looking at.
+            // HomeDashboardView consumes and clears the value.
+            if ticker != nil { selectedTab = .home }
+        }
         .onChange(of: selectedTab) { oldValue, newValue in
             // Which tabs actually get used. `HomeTab` is a fixed 5-case enum, so this
             // is a low-cardinality dimension, not free text.

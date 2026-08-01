@@ -48,4 +48,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     ) async -> UNNotificationPresentationOptions {
         [.banner, .badge, .sound]
     }
+
+    // The TAP. Without this, a notification that says "NVDA moved 8%" opened the app
+    // to whatever tab was last used — the alert's whole promise, unfulfilled at the
+    // moment of highest intent.
+    //
+    // The payload keys are set by the backend push dispatcher
+    // (`push_dispatch_service` → `data={"kind": ..., "ticker": ...}`).
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let info = response.notification.request.content.userInfo
+        guard let ticker = info["ticker"] as? String,
+              !ticker.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        await MainActor.run {
+            PushNotificationManager.shared.handleTap(ticker: ticker)
+        }
+    }
 }

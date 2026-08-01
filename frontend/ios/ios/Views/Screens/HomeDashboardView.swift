@@ -168,6 +168,18 @@ struct HomeDashboardView: View {
                     )
                     .padding(.top, AppSpacing.sm)
 
+                    // Directly under Market Pulse: the user's own tickers are the
+                    // most relevant thing on the screen, and putting them below three
+                    // global sections buried the only personalized content. Hidden
+                    // when empty (a new user, or a degraded read) rather than
+                    // rendering a header over nothing.
+                    if !data.watchlist.isEmpty {
+                        YourWatchlistSection(
+                            items: data.watchlist,
+                            onTap: openPulse
+                        )
+                    }
+
                     if !data.scanners.isEmpty {
                         DailyScannersSection(
                             scanners: data.scanners,

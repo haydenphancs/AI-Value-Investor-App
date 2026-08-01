@@ -190,6 +190,10 @@ struct HomeDashboardData {
     let scanners: [DailyScanner]
     let signals: [ExclusiveSignal]
     let themes: [TrendingTheme]
+    /// The user's OWN watchlist — the only user-scoped section on Home. Empty for an
+    /// anonymous caller, and empty when the backend read degraded; either way the
+    /// view hides the section rather than rendering a header over nothing.
+    let watchlist: [MarketPulseItem]
 }
 
 // MARK: - Live wire models (DTOs)
@@ -211,6 +215,11 @@ struct HomeDashboardResponseDTO: Decodable {
     let signals: SignalGroupsDTO?
     /// Optional for the same reason — a backend that predates themes decodes nil.
     let themes: ThemesGroupDTO?
+    /// The caller's OWN watchlist — the one user-scoped section on Home. Optional for
+    /// the same reason as the others, and empty for an anonymous caller. Reuses the
+    /// pulse tile shape; `spark` is always empty here (a per-ticker intraday series
+    /// would be one API call each on the most-visited screen).
+    let watchlist: [MarketPulseItemDTO]?
 
     enum CodingKeys: String, CodingKey {
         case marketStatusText = "market_status_text"
@@ -219,6 +228,7 @@ struct HomeDashboardResponseDTO: Decodable {
         case scanners
         case signals
         case themes
+        case watchlist
     }
 }
 

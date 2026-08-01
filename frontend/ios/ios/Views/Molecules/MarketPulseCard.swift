@@ -31,12 +31,21 @@ struct MarketPulseCard: View {
 
                 // Dual-tone sparkline with a dashed previous-close reference
                 // line — green above / red below — matching the Holdings cards.
-                SparklineView(
-                    data: item.spark,
-                    isPositive: item.isPositive,
-                    referencePrice: item.previousClose
-                )
-                .frame(height: 22)
+                //
+                // COLLAPSED when there's no series, rather than reserving 22pt of
+                // empty space. Two callers rely on this: Market Pulse when the
+                // intraday series is briefly unavailable, and the Your Watchlist
+                // strip, which never fetches one (a per-ticker series would be one
+                // API call each on the most-visited screen). Reserving the gap made
+                // those tiles look like a failed render.
+                if !item.spark.isEmpty {
+                    SparklineView(
+                        data: item.spark,
+                        isPositive: item.isPositive,
+                        referencePrice: item.previousClose
+                    )
+                    .frame(height: 22)
+                }
 
                 Text(item.changeText)
                     .font(AppTypography.dataSmall)

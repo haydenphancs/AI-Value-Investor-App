@@ -58,7 +58,11 @@ final class HomeRepository: HomeRepositoryProtocol {
             pulse: dto.pulse.map(mapPulse),
             scanners: mapScanners(dto.scanners),
             signals: mapSignals(dto.signals),
-            themes: mapThemes(dto.themes)
+            themes: mapThemes(dto.themes),
+            // Same tile shape as the pulse strip, so the same mapper. `spark` arrives
+            // empty by design (a per-ticker intraday series would be one call each on
+            // the most-visited screen), which the card already handles.
+            watchlist: (dto.watchlist ?? []).map(mapPulse)
         )
     }
 
@@ -384,7 +388,10 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             pulse: Self.pulse,
             scanners: [Self.movers, Self.heavyTraffic, Self.skepticalMoney],
             signals: Self.signals,
-            themes: Self.themes
+            themes: Self.themes,
+            // Mock/preview only — the live path fills this from the signed-in or
+            // per-install watchlist.
+            watchlist: Array(Self.pulse.prefix(3))
         )
     }
 

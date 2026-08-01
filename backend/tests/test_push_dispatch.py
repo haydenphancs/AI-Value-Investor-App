@@ -34,7 +34,8 @@ class _FakePush:
 
 
 def _service(*, watchers=None, prefs=None, claim=True, push=None,
-             watchers_raise=False, prefs_raise=False, claim_raise=None):
+             watchers_raise=False, prefs_raise=False, claim_raise=None,
+             sent_today=0):
     svc = object.__new__(PushDispatchService)
     svc._push = push or _FakePush()
     svc.supabase = None
@@ -60,6 +61,9 @@ def _service(*, watchers=None, prefs=None, claim=True, push=None,
     svc.watchers_of = _watchers_of
     svc.preference_enabled = _pref
     svc.claim_send = _claim
+    svc.alerts_sent_today = lambda user_id: (
+        sent_today.get(user_id, 0) if isinstance(sent_today, dict) else sent_today
+    )
     return svc
 
 
@@ -397,3 +401,79 @@ async def test_an_empty_headline_never_pushes(monkeypatch):
         None, quote={"changePercentage": -9.0},
     )
     assert calls == []
+
+
+# ── per-user daily volume cap ────────────────────────────────────────────────
+#
+# The dedup key stops the SAME alert repeating. It does nothing about VOLUME: in a
+# market-wide selloff, ten watchlist tickers each crossing the Unusual threshold means
+# ten notifications in one afternoon — the classic way an app gets its notifications
+# switched off, after which iOS never re-prompts.
+
+@pytest.mark.asyncio
+async def test_a_user_at_the_daily_cap_is_not_alerted(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PUSH_MAX_ALERTS_PER_USER_PER_DAY", 3)
+    push = _FakePush()
+    svc = _service(watchers=["u1"], sent_today=3, push=push)
+    assert await _notify(svc) == 0
+    assert push.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_capped_user_does_not_burn_the_dedup_slot(monkeypatch):
+    """Checked BEFORE the claim on purpose: a suppressed alert must not consume this
+    ticker's dedup key, or the user silently loses tomorrow's alert for it too."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PUSH_MAX_ALERTS_PER_USER_PER_DAY", 1)
+    svc = _service(watchers=["u1"], sent_today=5)
+    await _notify(svc)
+    assert svc.claimed == []
+
+
+@pytest.mark.asyncio
+async def test_the_cap_is_per_user_not_global(monkeypatch):
+    """One heavy user hitting their ceiling must not silence everyone else."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PUSH_MAX_ALERTS_PER_USER_PER_DAY", 2)
+    push = _FakePush()
+    svc = _service(watchers=["heavy", "quiet"],
+                   sent_today={"heavy": 9, "quiet": 0}, push=push)
+    await _notify(svc)
+    assert [s[0] for s in push.sent] == ["quiet"]
+
+
+@pytest.mark.asyncio
+async def test_a_user_under_the_cap_still_gets_alerted(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PUSH_MAX_ALERTS_PER_USER_PER_DAY", 3)
+    push = _FakePush()
+    svc = _service(watchers=["u1"], sent_today=2, push=push)
+    assert await _notify(svc) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_zero_cap_disables_the_check(monkeypatch):
+    """0 = no volume ceiling, matching the other `set 0 to disable` knobs."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PUSH_MAX_ALERTS_PER_USER_PER_DAY", 0)
+    push = _FakePush()
+    svc = _service(watchers=["u1"], sent_today=999, push=push)
+    assert await _notify(svc) == 1
+
+
+def test_a_failed_count_read_fails_open():
+    """A DB blip silencing someone's alerts is worse and far harder to diagnose than
+    one extra notification — and the per-ticker dedup still prevents real repeats."""
+    class _Boom:
+        def table(self, name):
+            raise RuntimeError("db down")
+
+    svc = object.__new__(PushDispatchService)
+    svc.supabase = _Boom()
+    assert svc.alerts_sent_today("u1") == 0

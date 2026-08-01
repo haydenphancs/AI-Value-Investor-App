@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from app.config import settings
 from app.database import get_supabase
 from app.services.push_service import PushService
 
@@ -35,6 +36,10 @@ _ET = ZoneInfo("America/New_York")
 # skipped is LOGGED, never silently dropped — a truncated fan-out that looked complete
 # would read as "push works" while most users got nothing.
 MAX_RECIPIENTS_PER_SCOPE = 500
+
+# Upper bound on the daily-count probe. Only the comparison against the cap
+# matters, so there is no reason to pull more rows than could change it.
+_DAILY_COUNT_PROBE = 50
 
 
 def trading_date_et() -> str:
@@ -158,6 +163,44 @@ class PushDispatchService:
             )
             return False
 
+    # ── how many already ─────────────────────────────────────────────
+
+    def alerts_sent_today(self, user_id: str) -> int:
+        """How many alerts this user has already received today (ET).
+
+        Reads `push_send_log`, which is already the record of what was delivered —
+        no second counter to keep in sync. The PK is (user_id, dedup_key), so the
+        user_id prefix is indexed, and the row count per user is small.
+
+        Counts by `sent_at`, not by parsing the dedup key: the key's shape is the
+        caller's business and will change as more alert kinds are added, but "when
+        did we buzz them" is stable.
+        """
+        try:
+            start = datetime.now(_ET).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
+            rows = (
+                self.supabase.table("push_send_log")
+                .select("dedup_key")
+                .eq("user_id", user_id)
+                .gte("sent_at", start)
+                .limit(_DAILY_COUNT_PROBE)
+                .execute()
+                .data
+                or []
+            )
+            return len(rows)
+        except Exception as e:
+            # Fail OPEN (0 = "none yet"). A DB blip silencing someone's alerts is a
+            # worse, harder-to-diagnose failure than one extra notification, and the
+            # per-ticker dedup still prevents actual repeats.
+            logger.warning(
+                "push: daily-count read failed for user=%s (%s: %s) — not capping",
+                user_id, type(e).__name__, e,
+            )
+            return 0
+
     # ── send ─────────────────────────────────────────────────────────
 
     async def notify_watchers(
@@ -196,12 +239,30 @@ class PushDispatchService:
             return 0
 
         sent = 0
+        capped = 0
         for user_id in users:
             try:
                 if not await asyncio.to_thread(
                     self.preference_enabled, user_id, preference_key
                 ):
                     continue
+                # Per-user DAILY volume cap, across every ticker. The dedup key
+                # stops the same alert repeating; it does nothing about volume, and
+                # in a market-wide selloff ten watchlist tickers each crossing the
+                # Unusual threshold means ten notifications in one afternoon. That is
+                # how an app teaches people to turn its notifications off — and iOS
+                # never re-prompts once they do.
+                #
+                # Checked BEFORE the claim so a suppressed alert doesn't burn the
+                # dedup slot: the user should still be able to receive that ticker's
+                # alert tomorrow.
+                cap = settings.PUSH_MAX_ALERTS_PER_USER_PER_DAY
+                if cap > 0:
+                    already = await asyncio.to_thread(self.alerts_sent_today, user_id)
+                    if already >= cap:
+                        capped += 1
+                        continue
+
                 if not await asyncio.to_thread(self.claim_send, user_id, dedup_key):
                     continue
                 accepted = await self.push.send_to_user(
@@ -216,10 +277,12 @@ class PushDispatchService:
                     user_id, type(e).__name__, e,
                 )
 
-        if sent:
+        if sent or capped:
+            # `capped` is logged explicitly — a silent cap reads as "push is broken"
+            # when someone asks why they didn't get an alert they expected.
             logger.info(
-                "push: alerted %d/%d watcher(s) of %s (key=%s)",
-                sent, len(users), ticker, dedup_key,
+                "push: alerted %d/%d watcher(s) of %s (key=%s; %d over daily cap)",
+                sent, len(users), ticker, dedup_key, capped,
             )
         return sent
 

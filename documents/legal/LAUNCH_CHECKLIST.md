@@ -243,8 +243,8 @@ SPF/DKIM on `caydexinvest.com` as part of setup; that's what keeps you out of sp
 
 **Authentication → Sign In / Providers → Apple**
 
-- [ ] Enable the provider
-- [ ] Add `com.phan.caydex` to the authorized client IDs
+- [x] Enable the provider
+- [x] Add `com.phan.caydex` to the authorized client IDs
 
 For a native iOS-only Sign in with Apple, the bundle ID is the audience — you do **not** need
 a Services ID or a private key, which is the setup most guides describe (that's for web).
@@ -261,22 +261,43 @@ Also, on the Apple side:
 
 First, in **Google Cloud Console**:
 
-- [ ] Create a project (or reuse one) → APIs & Services → Credentials
-- [ ] Create an **OAuth client ID** of type **Web application** (yes, Web — the flow goes
+- [x] Create a project (or reuse one) → APIs & Services → Credentials
+- [x] Create an **OAuth client ID** of type **Web application** (yes, Web — the flow goes
       through Supabase, not the device)
-- [ ] Add this to its Authorized redirect URIs:
+- [x] Add this to its Authorized redirect URIs:
       `https://gutlnhsjxrkxvrbqbbqq.supabase.co/auth/v1/callback`
-- [ ] Complete the OAuth consent screen (app name, support email, logo)
+- [x] Complete the OAuth consent screen (app name, support email, logo)
 
 Then back in Supabase:
 
-- [ ] Paste the Client ID and Client Secret into the Google provider, and enable it
+- [x] Paste the Client ID and Client Secret into the Google provider, and enable it
+
+- [ ] 🔴 **Publish the OAuth consent screen** (Google Cloud → OAuth consent screen →
+      **Publish app**, moving it from *Testing* to *In production*). Free, and for the
+      `email` / `profile` / `openid` scopes this app uses it needs no verification review.
+      **Skip it and Google sign-in works for you and fails for everyone else**: Testing mode
+      allows only individually allow-listed accounts (max 100) and expires refresh tokens
+      after 7 days. It looks exactly like an app bug and only shows up after release.
+
+**Cost: none.** The Cloud project, the OAuth client, the consent screen, and Supabase social
+providers are all free; no billing account is needed. Google's paid verification (the
+five-figure third-party security assessment) applies to *restricted* scopes such as Gmail or
+Drive — not to basic sign-in. Supabase bills on monthly active users, not on how many
+providers you enable, and a user signing in with Google instead of a password is the same
+single MAU.
+
+**Verify without opening the app** — probes Supabase directly and tells you which step is
+missing (a disabled provider and a non-allow-listed redirect look identical from the app):
+
+```bash
+./backend/scripts/verify_social_signin.sh
+```
 
 ### (f) Allow the app's callback URL
 
 **Authentication → URL Configuration → Redirect URLs**
 
-- [ ] Add `caydex://auth-callback`
+- [x] Add `caydex://auth-callback`
 
 This is the custom scheme the app listens on after Google consent. It's already registered in
 `Info.plist`; Supabase refuses to redirect to URLs that aren't on this allow-list, so without

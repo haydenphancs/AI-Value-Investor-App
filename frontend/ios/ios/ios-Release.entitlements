@@ -11,9 +11,24 @@
 
   The backend already records which environment a token belongs to
   (`device_tokens.environment`) and routes accordingly, so the two sides agree.
+
+  EVERY OTHER ENTITLEMENT MUST BE DUPLICATED HERE. Splitting the files means this one is not
+  a delta over ios.entitlements — it REPLACES it for Release. `com.apple.developer.applesignin`
+  was lost in that split, so Sign in with Apple worked in Debug and was absent from every
+  TestFlight and App Store build: the capability fails at runtime in exactly the builds a
+  developer cannot easily test, and Guideline 4.8 REQUIRES it once Google Sign-In ships.
+  Add new capabilities to BOTH files.
 -->
 <plist version="1.0">
 <dict>
+	<!-- Sign in with Apple. REQUIRED by App Review 4.8 once Google Sign-In ships:
+	     an app offering a third-party/social login must also offer a login service
+	     that limits collection to name + email, lets the user keep their address
+	     private, and does not track them for advertising. Mirrors ios.entitlements. -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
 	<key>aps-environment</key>
 	<string>production</string>
 </dict>

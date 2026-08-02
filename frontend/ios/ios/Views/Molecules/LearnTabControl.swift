@@ -58,5 +58,4 @@ struct LearnTabControl: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

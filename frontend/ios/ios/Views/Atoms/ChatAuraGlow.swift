@@ -60,5 +60,4 @@ struct ChatAuraGlow: View {
         AppColors.background.ignoresSafeArea()
         ChatAuraGlow().ignoresSafeArea()
     }
-    .preferredColorScheme(.dark)
 }

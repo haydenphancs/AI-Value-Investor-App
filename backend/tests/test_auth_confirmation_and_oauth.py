@@ -94,6 +94,7 @@ class _FakeQuery:
     def __init__(self, log, table, row, fail):
         self._log, self._table, self._row, self._fail = log, table, row, fail
         self._update = None
+        self._shape = "single"   # PostgREST: single() -> object, limit()/plain -> list
 
     def select(self, *_a, **_k):
         return self
@@ -106,6 +107,18 @@ class _FakeQuery:
         return self
 
     def single(self):
+        self._shape = "single"
+        return self
+
+    def limit(self, *_a, **_k):
+        # `sign_in` reads public.users with limit(1) rather than single(): single() RAISES
+        # (PostgREST 406 / PGRST116) on zero rows instead of returning empty, which made the
+        # missing-row fallback dead code and 500'd a correct password.
+        #
+        # The SHAPE differs too, and modelling that matters: PostgREST returns a LIST for a
+        # plain/limited select and a bare OBJECT for single(). A fake that always returned the
+        # object would let `data[0]` pass here and KeyError in production.
+        self._shape = "list"
         return self
 
     def execute(self):
@@ -114,7 +127,8 @@ class _FakeQuery:
             return type("R", (), {"data": [self._update]})()
         if "lookup" in self._fail:
             raise RuntimeError("lookup failed")
-        return type("R", (), {"data": self._row})()
+        data = self._row if self._shape == "single" else ([self._row] if self._row else [])
+        return type("R", (), {"data": data})()
 
 
 class FakeSupabase:

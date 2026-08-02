@@ -64,5 +64,4 @@ struct StarRatingView: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

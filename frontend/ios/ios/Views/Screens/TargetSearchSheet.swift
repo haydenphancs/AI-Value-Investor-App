@@ -62,7 +62,6 @@ struct TargetSearchSheet: View {
                 scheduleSearch(for: newValue)
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     // MARK: - Content
@@ -237,5 +236,4 @@ struct TargetSearchSheet: View {
 
 #Preview {
     TargetSearchSheet { _ in }
-        .preferredColorScheme(.dark)
 }

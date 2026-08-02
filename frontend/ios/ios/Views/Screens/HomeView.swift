@@ -84,7 +84,6 @@ struct HomeContentView: View {
             }
             .fullScreenCover(item: $selectedNewsArticle) { article in
                 NewsDetailView(article: article)
-                    .preferredColorScheme(.dark)
             }
             .fullScreenCover(item: $selectedMarketTicker) { ticker in
                 NavigationStack {
@@ -104,7 +103,6 @@ struct HomeContentView: View {
                     }
                     .navigationBarHidden(true)
                 }
-                .preferredColorScheme(.dark)
             }
         }
     }
@@ -179,5 +177,4 @@ struct LoadingOverlay: View {
 
 #Preview {
     HomeView()
-        .preferredColorScheme(.dark)
 }

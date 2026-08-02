@@ -45,5 +45,4 @@ struct InputOptionButton: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

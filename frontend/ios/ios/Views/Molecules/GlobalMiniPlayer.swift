@@ -271,5 +271,4 @@ struct GlobalMiniPlayer: View {
     .onAppear {
         AudioManager.shared.play(.sampleMoneyMoves)
     }
-    .preferredColorScheme(.dark)
 }

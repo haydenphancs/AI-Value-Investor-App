@@ -148,12 +148,10 @@ struct DisclaimerAcknowledgementView: View {
                         }
                     }
             }
-            .preferredColorScheme(.dark)
         }
     }
 }
 
 #Preview {
     DisclaimerAcknowledgementView()
-        .preferredColorScheme(.dark)
 }

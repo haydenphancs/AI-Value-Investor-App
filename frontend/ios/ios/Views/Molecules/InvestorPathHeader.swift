@@ -71,5 +71,4 @@ struct InvestorJourneyHeader: View {
         Spacer()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

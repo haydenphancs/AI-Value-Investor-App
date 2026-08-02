@@ -126,5 +126,4 @@ struct ReportForecastChart: View {
     ReportForecastChart(forecast: TickerReportData.sampleOracle.revenueForecast)
         .padding()
         .background(AppColors.cardBackground)
-        .preferredColorScheme(.dark)
 }

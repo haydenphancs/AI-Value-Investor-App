@@ -35,5 +35,4 @@ struct TrendingAnalysesSection: View {
         TrendingAnalysesSection(analyses: TrendingAnalysis.mockTrending)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -42,5 +42,4 @@ struct TickerHoldersContent: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

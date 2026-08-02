@@ -222,5 +222,4 @@ struct WaveLayer: Shape {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

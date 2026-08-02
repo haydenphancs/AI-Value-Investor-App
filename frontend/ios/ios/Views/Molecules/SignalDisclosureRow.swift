@@ -97,10 +97,10 @@ struct SignalDisclosureRow: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .background(Color.white.opacity(0.03))
+        .background(AppColors.textPrimary.opacity(0.03))
         .overlay(
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                .stroke(AppColors.textPrimary.opacity(0.05), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         // Swallow taps that land ON the row (gaps between leader rows, padding)
@@ -136,7 +136,7 @@ struct SignalDisclosureRow: View {
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 8)
-            .background(Color.white.opacity(0.03))
+            .background(AppColors.textPrimary.opacity(0.03))
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .contentShape(Rectangle())
         }
@@ -165,6 +165,6 @@ private struct SignalDisclosureRowPreviewHost: View {
             }
         }
         .padding()
-        .background(Color(hex: "1B2233"))
+        .background(Color(lightHex: "F5F7FC", darkHex: "1B2233"))
     }
 }

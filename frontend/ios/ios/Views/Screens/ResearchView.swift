@@ -286,5 +286,4 @@ struct ResearchContentView: View {
 // MARK: - Preview
 #Preview {
     ResearchContentView()
-        .preferredColorScheme(.dark)
 }

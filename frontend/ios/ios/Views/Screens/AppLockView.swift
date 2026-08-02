@@ -67,5 +67,4 @@ struct AppLockView: View {
 
 #Preview {
     AppLockView()
-        .preferredColorScheme(.dark)
 }

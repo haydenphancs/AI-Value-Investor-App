@@ -56,7 +56,6 @@ struct SignalTickerDetailView: View {
                 TickerDetailView(tickerSymbol: ticker.symbol)
                     .navigationBarHidden(true)
             }
-            .preferredColorScheme(.dark)
         }
     }
 

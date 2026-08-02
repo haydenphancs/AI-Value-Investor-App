@@ -55,5 +55,4 @@ struct YourWatchlistSection: View {
 #Preview {
     YourWatchlistSection(items: MockHomeRepository.pulse)
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

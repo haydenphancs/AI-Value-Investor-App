@@ -92,7 +92,6 @@ struct TrackingContentView: View {
             }
             .sheet(isPresented: $viewModel.showPortfolioConfigSheet) {
                 PortfolioConfigSheet(viewModel: viewModel)
-                    .preferredColorScheme(.dark)
             }
             .sheet(isPresented: $viewModel.showNewPortfolioSheet) {
                 NewPortfolioSheet(viewModel: viewModel)
@@ -127,7 +126,6 @@ struct TrackingContentView: View {
                 ProfileView()
                     .environment(appState)
                     .environment(\.appState, appState)
-                    .preferredColorScheme(.dark)
             }
             .sheet(isPresented: $showSearch) {
                 TickerLiveSearchSheet(
@@ -141,7 +139,6 @@ struct TrackingContentView: View {
                     isInWatchlist: { ticker in viewModel.isOnWatchlist(ticker) },
                     onAddToWatchlist: { result in viewModel.addTickerFromSearch(result) }
                 )
-                .preferredColorScheme(.dark)
             }
         }
     }
@@ -220,7 +217,6 @@ struct TrackingContentViewWithBinding: View {
             }
             .sheet(isPresented: $viewModel.showPortfolioConfigSheet) {
                 PortfolioConfigSheet(viewModel: viewModel)
-                    .preferredColorScheme(.dark)
             }
             .sheet(isPresented: $viewModel.showNewPortfolioSheet) {
                 NewPortfolioSheet(viewModel: viewModel)
@@ -261,7 +257,6 @@ struct TrackingContentViewWithBinding: View {
                 ProfileView()
                     .environment(appState)
                     .environment(\.appState, appState)
-                    .preferredColorScheme(.dark)
             }
             .sheet(isPresented: $showSearch) {
                 TickerLiveSearchSheet(
@@ -275,7 +270,6 @@ struct TrackingContentViewWithBinding: View {
                     isInWatchlist: { ticker in viewModel.isOnWatchlist(ticker) },
                     onAddToWatchlist: { result in viewModel.addTickerFromSearch(result) }
                 )
-                .preferredColorScheme(.dark)
             }
         }
     }
@@ -1108,7 +1102,6 @@ struct SortOptionsSheet: View {
             .background(AppColors.background)
             .navigationTitle("Sort By")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
@@ -1120,7 +1113,6 @@ struct SortOptionsSheet: View {
             }
         }
         .presentationDetents([.medium])
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -1421,5 +1413,4 @@ private struct PortfolioConfigRowView: View {
 // MARK: - Preview
 #Preview {
     TrackingContentView()
-        .preferredColorScheme(.dark)
 }

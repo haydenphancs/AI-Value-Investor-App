@@ -116,5 +116,4 @@ struct TickerNewsContent: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

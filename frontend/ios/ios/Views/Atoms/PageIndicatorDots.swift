@@ -30,5 +30,4 @@ struct PageIndicatorDots: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

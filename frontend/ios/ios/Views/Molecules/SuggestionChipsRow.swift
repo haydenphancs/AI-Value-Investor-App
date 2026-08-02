@@ -41,5 +41,4 @@ struct SuggestionChipsRow: View {
     SuggestionChipsRow(chips: SuggestionChip.sampleData)
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

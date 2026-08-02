@@ -137,7 +137,6 @@ struct SectorIndustryInfoSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -203,7 +202,6 @@ struct MetricExplanation: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }
 
 #Preview("Info Sheet") {

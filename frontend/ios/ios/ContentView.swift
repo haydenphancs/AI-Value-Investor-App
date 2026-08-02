@@ -60,7 +60,6 @@ struct ContentView: View {
                 .allowsHitTesting(selectedTab == .wiser)
                 .environment(\.isActiveTab, selectedTab == .wiser)
         }
-        .preferredColorScheme(.dark)
         .onChange(of: appState.pendingPushTicker, initial: true) { _, ticker in
             // `initial: true` for the same reason as HomeDashboardView: a cold launch
             // from a tap sets this before either view exists.
@@ -190,17 +189,14 @@ struct HomeViewWithBinding: View {
             ProfileView()
                 .environment(appState)
                 .environment(\.appState, appState)
-                .preferredColorScheme(.dark)
         }
         .fullScreenCover(item: $selectedNewsArticle) { article in
             NewsDetailView(article: article)
-                .preferredColorScheme(.dark)
         }
         .fullScreenCover(item: $selectedReportTicker) { nav in
             NavigationStack {
                 TickerReportView(ticker: nav.ticker)
             }
-            .preferredColorScheme(.dark)
         }
         .fullScreenCover(item: $selectedMarketTicker) { ticker in
             NavigationStack {
@@ -220,7 +216,6 @@ struct HomeViewWithBinding: View {
                 }
                 .navigationBarHidden(true)
             }
-            .preferredColorScheme(.dark)
         }
         .fullScreenCover(item: $selectedTrendingAnalysis) { analysis in
             NavigationStack {
@@ -229,7 +224,6 @@ struct HomeViewWithBinding: View {
                     selectedTab = .research
                 }
             }
-            .preferredColorScheme(.dark)
         }
     }
 
@@ -302,13 +296,11 @@ struct ResearchViewWithBinding: View {
             NavigationStack {
                 TickerReportView(report: report)
             }
-            .preferredColorScheme(.dark)
         }
         .fullScreenCover(isPresented: $showProfile) {
             ProfileView()
                 .environment(appState)
                 .environment(\.appState, appState)
-                .preferredColorScheme(.dark)
         }
         .fullScreenCover(item: $selectedTrendingAnalysis) { analysis in
             NavigationStack {
@@ -316,7 +308,6 @@ struct ResearchViewWithBinding: View {
                     viewModel.searchText = ticker
                 }
             }
-            .preferredColorScheme(.dark)
         }
         .sheet(isPresented: $viewModel.showCreditsSheet) {
             PaywallView()

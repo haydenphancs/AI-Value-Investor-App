@@ -63,5 +63,4 @@ struct MoneyMovesSection: View {
         .padding(.top, AppSpacing.md)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -100,10 +100,32 @@ final class AuthService {
     /// Stores the tokens, arms the API client, then fetches the canonical profile
     /// from `GET /users/me` (the token body does not carry the user object).
     func signIn(email: String, password: String) async throws -> UserProfile {
-        let response = try await apiClient.request(
-            endpoint: .signIn(email: email, password: password),
-            responseType: AuthResponse.self
-        )
+        let response: AuthResponse
+        do {
+            response = try await apiClient.request(
+                endpoint: .signIn(email: email, password: password),
+                responseType: AuthResponse.self
+            )
+        } catch APIError.businessError(let code, let message) where code == "EMAIL_NOT_CONFIRMED" {
+            // A DEAD END until now. The backend correctly distinguishes "unconfirmed" from
+            // "wrong password" — but the sign-in screen only renders `errorMessage`, and there
+            // is no resend affordance anywhere on it. A user whose confirmation email expired,
+            // went to spam, or was opened on another device was told to confirm their address
+            // with no way to obtain a new link, and with the correct password in hand. The
+            // account is unreachable.
+            //
+            // Close the loop here rather than in the view (SignInView is off-limits): the
+            // password already verified, so re-sending is safe and is what the user would tap
+            // if the button existed. Backend rate limits (`resend:ip:` 5/hr + `resend:email:`)
+            // cap it, so a retry loop cannot become a mail-bomb.
+            let resent = (try? await resendConfirmation(email: email)) != nil
+            throw APIError.businessError(
+                code: code,
+                message: resent
+                    ? "\(message) We've just sent you a fresh confirmation link — check your inbox, then sign in again."
+                    : message
+            )
+        }
 
         // Store tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
@@ -198,13 +220,36 @@ final class AuthService {
         sessionEpoch += 1
         let epoch = sessionEpoch
 
-        // Best-effort backend logout with the current token.
+        // Clear the DURABLE credential FIRST, before the awaited network call.
+        //
+        // The Keychain write used to sit after `await apiClient.request(.signOut)`. On a dead
+        // connection that request hangs for the full 30s timeout, and if the user force-quits
+        // in that window — which is exactly what people do when an app looks stuck — the line
+        // never runs. Both Keychain items are `AfterFirstUnlockThisDeviceOnly`, so they
+        // survive the kill, and the next launch's `restoreAuthState()` finds a stored token
+        // and silently signs the "signed-out" user back in. The UI already showed them as
+        // signed out before this function was even called.
+        //
+        // Ordering is safe: the logout request below is best-effort and its outcome changes
+        // nothing locally, and the in-memory APIClient token dies with the process anyway.
+        // The epoch guard still protects a fast re-sign-in — a newer session will have written
+        // its own tokens after this point, and we must not clear those.
+        if epoch == sessionEpoch {
+            clearToken()
+        }
+
+        // Detach the APNs token BEFORE the session ends — the call is authenticated, so it has
+        // to run while the token is still armed. Otherwise `device_tokens` keeps mapping this
+        // device to the account being signed out and the sweeper keeps pushing its alerts here.
+        await PushNotificationManager.shared.unregisterCurrentDevice()
+
+        // Best-effort backend logout. Fired with the token still armed on the APIClient so the
+        // server can see who is logging out.
         try? await apiClient.request(endpoint: .signOut)
 
-        // Only clear if no NEWER session started during the logout round-trip — a
+        // Only disarm if no NEWER session started during the logout round-trip — a
         // quick re-sign-in bumps the epoch and its fresh tokens must survive.
         guard epoch == sessionEpoch else { return }
-        clearToken()
         await apiClient.setAuthToken(nil)
     }
 

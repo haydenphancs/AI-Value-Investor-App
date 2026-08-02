@@ -34,5 +34,4 @@ struct FeatureIcon: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

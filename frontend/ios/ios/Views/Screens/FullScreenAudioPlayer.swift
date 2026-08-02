@@ -143,7 +143,7 @@ struct FullScreenAudioPlayer: View {
         VStack(spacing: AppSpacing.lg) {
             // Drag indicator
             Capsule()
-                .fill(Color.white.opacity(0.3))
+                .fill(AppColors.textPrimary.opacity(0.3))
                 .frame(width: 36, height: 5)
                 .padding(.top, AppSpacing.md)
 
@@ -409,7 +409,7 @@ struct AudioProgressSlider: View {
             ZStack(alignment: .leading) {
                 // Track background
                 Capsule()
-                    .fill(Color.white.opacity(0.2))
+                    .fill(AppColors.textPrimary.opacity(0.2))
                     .frame(height: 3)
 
                 // Progress fill
@@ -485,7 +485,6 @@ struct PlaybackSpeedSheet: View {
             }
         }
         .presentationDragIndicator(.visible)
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -529,7 +528,6 @@ struct SleepTimerSheet: View {
             }
         }
         .presentationDragIndicator(.visible)
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -564,7 +562,6 @@ struct AudioQueueSheet: View {
             }
         }
         .presentationDragIndicator(.visible)
-        .preferredColorScheme(.dark)
     }
 
     private var emptyQueueView: some View {
@@ -630,5 +627,4 @@ struct AudioQueueSheet: View {
         .onAppear {
             AudioManager.shared.play(.sampleMoneyMoves)
         }
-        .preferredColorScheme(.dark)
 }

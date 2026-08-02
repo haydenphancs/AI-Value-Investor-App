@@ -95,5 +95,4 @@ struct CryptoMarketStatusBadge: View {
     }
     .padding(.vertical)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

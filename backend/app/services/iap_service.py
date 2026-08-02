@@ -91,6 +91,37 @@ def _ms_to_dt(value: Any) -> Optional[datetime]:
         return None
 
 
+def _status_for_notification(notification_type: str, subtype: str) -> Optional[str]:
+    """Subscription status implied by an App Store Server Notification, or None to derive it.
+
+    The notification carries state the transaction alone cannot express. The costly case is
+    `DID_FAIL_TO_RENEW` with subtype `GRACE_PERIOD`: the attached transaction's `expiresDate`
+    has already passed, so `status_for_transaction` reads it as "expired" and the customer is
+    demoted to free — while Apple explicitly keeps them entitled and is still retrying billing.
+    A paying customer loses access for a failed card retry that Apple expects to succeed.
+
+    `subtype` was already parsed and then never used. Returning None means "no better
+    information than the payload", which is the correct answer for the client-verify path.
+    """
+    ntype = (notification_type or "").upper()
+    stype = (subtype or "").upper()
+
+    if ntype in {"REFUND", "REVOKE"}:
+        return "revoked"
+    if ntype == "EXPIRED":
+        return "expired"
+    if ntype in {"SUBSCRIBED", "DID_RENEW", "OFFER_REDEEMED"}:
+        return "active"
+    if ntype == "DID_FAIL_TO_RENEW":
+        # GRACE_PERIOD → still entitled. No subtype → the grace period is over or was never
+        # granted, so fall back to deriving from the payload rather than guessing entitlement.
+        return "grace_period" if stype == "GRACE_PERIOD" else None
+    if ntype == "DID_CHANGE_RENEWAL_STATUS":
+        # Auto-renew turned on/off changes nothing about the CURRENT period's entitlement.
+        return None
+    return None
+
+
 def status_for_transaction(payload: Dict[str, Any]) -> str:
     """Derive a subscription status from a verified transaction.
 
@@ -113,7 +144,7 @@ class IAPService:
     # ── Entitlement application ───────────────────────────────────────────────
 
     def apply_transaction(
-        self, user_id: str, payload: Dict[str, Any]
+        self, user_id: str, payload: Dict[str, Any], *, status_override: Optional[str] = None
     ) -> Dict[str, Any]:
         """Record a verified transaction and reconcile the user's entitlement.
 
@@ -125,7 +156,12 @@ class IAPService:
         this delivery was new or a replay.
         """
         tier = tier_for_product(payload.get("productId"))
-        status = status_for_transaction(payload)
+        # An App Store Server Notification knows things the transaction alone does not: a
+        # DID_FAIL_TO_RENEW/GRACE_PERIOD carries a transaction whose expiresDate has already
+        # passed, so deriving status from the payload reads it as "expired" — exactly when
+        # Apple says the customer IS still entitled. The webhook passes the subtype's meaning
+        # in here; the client-verify path leaves it None and derives as before.
+        status = status_override or status_for_transaction(payload)
         original_txn_id = str(
             payload.get("originalTransactionId") or payload.get("transactionId")
         )
@@ -146,7 +182,7 @@ class IAPService:
         try:
             existing = (
                 self.supabase.table("subscriptions")
-                .select("id, status, current_period_end")
+                .select("id, user_id, status, current_period_end")
                 .eq("original_transaction_id", original_txn_id)
                 .limit(1)
                 .execute()
@@ -158,6 +194,54 @@ class IAPService:
                 original_txn_id, user_id, type(e).__name__, e,
             )
             raise IAPError("could not read existing subscription") from e
+
+        # "Replay" means specifically: we have seen THIS transaction before. Captured now,
+        # before the owner-fallback below can also set `prior` — otherwise a genuinely new
+        # re-subscribe would be reported to the client as a replay.
+        txn_replay = bool(prior)
+
+        # REFUSE A CROSS-ACCOUNT REBIND. The lookup above matches on the transaction alone,
+        # while `row` carries `user_id` — so submitting a transaction that already belongs to
+        # someone else used to UPDATE their row's user_id, silently MOVING the entitlement:
+        # the original owner drops to free at the next reconcile and the submitter is granted
+        # the tier and its credit allocation. `subscriptions_user_id_key` does not catch it,
+        # because the recipient had no row of their own. An Apple-signed transaction proves a
+        # purchase happened, never who is entitled to it, so ownership is decided here.
+        if prior and prior.get("user_id") and prior["user_id"] != user_id:
+            logger.error(
+                "IAP: txn=%s is already bound to user=%s — refusing to rebind to user=%s",
+                original_txn_id, prior["user_id"], user_id,
+            )
+            raise IAPError("this purchase is already linked to another account")
+
+        # A user holds AT MOST ONE subscriptions row (`subscriptions_user_id_key UNIQUE
+        # (user_id)`). So when the transaction is new to us but the user already has a row —
+        # a re-subscribe after a lapse, or a move to a different subscription group, both of
+        # which mint a fresh originalTransactionId — an INSERT violates that constraint and
+        # the whole apply fails with 503. The user has already been charged by Apple at that
+        # point. Update their existing row instead.
+        if not prior:
+            try:
+                by_user = (
+                    self.supabase.table("subscriptions")
+                    .select("id, user_id, status, current_period_end")
+                    .eq("user_id", user_id)
+                    .limit(1)
+                    .execute()
+                )
+                owned = (by_user.data or [None])[0]
+            except Exception as e:
+                logger.error(
+                    "IAP: subscriptions owner lookup failed for user=%s: %s: %s",
+                    user_id, type(e).__name__, e,
+                )
+                raise IAPError("could not read existing subscription") from e
+            if owned:
+                logger.info(
+                    "IAP: new txn=%s for user=%s replaces existing subscription row %s",
+                    original_txn_id, user_id, owned["id"],
+                )
+                prior = owned
 
         try:
             if prior:
@@ -178,7 +262,7 @@ class IAPService:
         logger.info(
             "IAP applied: user=%s txn=%s product=%s tier=%s status=%s winning=%s replay=%s",
             user_id, original_txn_id, payload.get("productId"), tier, status,
-            winning_tier, bool(prior),
+            winning_tier, txn_replay,
         )
         return {
             "tier": tier,
@@ -186,7 +270,7 @@ class IAPService:
             "winning_tier": winning_tier,
             "original_transaction_id": original_txn_id,
             "current_period_end": row["current_period_end"],
-            "was_replay": bool(prior),
+            "was_replay": txn_replay,
         }
 
     # ── Tier reconciliation ───────────────────────────────────────────────────
@@ -219,8 +303,13 @@ class IAPService:
         for row in rows:
             if (row.get("status") or "").lower() not in _ENTITLING_STATUSES:
                 continue
+            row_status = (row.get("status") or "").lower()
+            # `grace_period` and `billing_retry` mean precisely "the paid period HAS ended and
+            # the customer is still entitled while Apple retries billing". Applying the
+            # period-end filter to them dropped the row a second time and demoted a customer
+            # Apple considers active — the exact demotion this method exists to prevent.
             end = row.get("current_period_end")
-            if end:
+            if end and row_status not in {"grace_period", "billing_retry"}:
                 try:
                     end_dt = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
                     if end_dt.tzinfo is None:
@@ -333,8 +422,10 @@ class IAPService:
             )
             return "ignored_unknown_transaction", None
 
+        status_override = _status_for_notification(notification_type, subtype)
+
         try:
-            self.apply_transaction(user_id, transaction)
+            self.apply_transaction(user_id, transaction, status_override=status_override)
         except UnknownProduct as e:
             logger.error("IAP webhook: %s", e)
             return "ignored_unknown_product", user_id

@@ -73,5 +73,4 @@ struct NewsDetailMetaRow: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

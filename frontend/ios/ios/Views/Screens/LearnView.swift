@@ -92,11 +92,9 @@ struct LearnContentView: View {
             ProfileView()
                 .environment(appState)
                 .environment(\.appState, appState)
-                .preferredColorScheme(.dark)
         }
         .fullScreenCover(isPresented: $showSearch) {
             SearchView()
-                .preferredColorScheme(.dark)
         }
         .navigationBarHidden(true)
         .task {
@@ -473,5 +471,4 @@ struct LearnView: View {
 #Preview {
     LearnView()
         .environmentObject(AudioManager.shared)
-        .preferredColorScheme(.dark)
 }

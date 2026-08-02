@@ -111,5 +111,4 @@ struct NewsDetailHeroImage: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

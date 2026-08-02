@@ -127,7 +127,17 @@ def main():
 
     rows = []
     for lesson in lessons:
-        key = lesson_key(lesson["cards"])
+        # Prefer the AUTHORED slug. The row id is `uuid5(NS, key)`, and deriving that key from
+        # the first card's `audioClip` tied a lesson's database identity to an audio filename:
+        # renaming a clip (or reordering cards so a different one is first) minted a NEW id, so
+        # the upsert INSERTED a second row instead of updating. `lessons` has no UNIQUE on
+        # title, so both survive, `GET /learn/journey` returns 28 lessons with two "Mr. Market",
+        # and — since `_fetch_rows` issues no ORDER BY — which one the reader gets is decided by
+        # PostgREST's physical row order. A lesson silently reverts to its old content.
+        #
+        # Every authored slug is set to today's derived key, so existing ids are preserved
+        # exactly and this migrates with zero orphans.
+        key = (lesson.get("slug") or "").strip() or lesson_key(lesson["cards"])
         print(f"[{lesson['level']}/{lesson['sortOrder']}] {lesson['title']} ({key})")
         story = build_story_content(sb, lesson)
         rows.append({
@@ -145,6 +155,23 @@ def main():
         print(f"\n[dry-run] built {len(rows)} lesson rows; no writes performed.")
         print(json.dumps(rows[0]["story_content"], indent=2)[:800])
         return
+
+    # Refuse to half-publish. Two lessons sharing a key (a blank slug AND a blank audioClip,
+    # or a copy-pasted slug) collapse to one id; Postgres then aborts the whole upsert with
+    # SQLSTATE 21000 ("ON CONFLICT DO UPDATE command cannot affect row a second time"), which
+    # says nothing about WHICH lessons collided. Name them instead.
+    ids = [r["id"] for r in rows]
+    if len(set(ids)) != len(ids):
+        seen: dict[str, str] = {}
+        collisions = []
+        for row in rows:
+            if row["id"] in seen:
+                collisions.append(f"{seen[row['id']]!r} + {row['title']!r}")
+            seen[row["id"]] = row["title"]
+        raise SystemExit(
+            "seed_journey: lessons share a derived id — give each a distinct `slug` in "
+            f"journey_lessons.json. Collisions: {'; '.join(collisions)}"
+        )
 
     sb.table("lessons").upsert(rows, on_conflict="id").execute()
     print(f"\nUpserted {len(rows)} lessons into public.lessons.")

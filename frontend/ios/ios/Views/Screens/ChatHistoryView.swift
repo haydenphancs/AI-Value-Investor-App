@@ -106,5 +106,4 @@ struct ChatHistoryView: View {
 
         ChatHistoryView()
     }
-    .preferredColorScheme(.dark)
 }

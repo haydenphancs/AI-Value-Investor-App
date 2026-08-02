@@ -499,6 +499,48 @@ struct LessonStoryContent: Identifiable {
     let cards: [LessonTopicCard]
 
     var totalCards: Int { cards.count }
+
+    /// Explicit init that makes `cards` NON-EMPTY BY CONSTRUCTION.
+    ///
+    /// `LessonTopicCardView` reads `storyContent.cards[currentIndex]` with a raw subscript. That
+    /// is safe only while every producer happens to return at least one card — an invariant held
+    /// by hand, in two other files (`JourneyContentStore.cards(forLessonTitled:)` returns `nil`
+    /// rather than `[]`, and `InvestorPathViewModel.generateCardsForLesson` always emits a title
+    /// card). Either could regress, and the symptom is an index-out-of-range CRASH the moment a
+    /// lesson opens, on content that is served from Supabase and therefore changeable without an
+    /// app update.
+    ///
+    /// Enforcing it here instead removes the crash for every present and future caller, and needs
+    /// no change to the view. Signature is identical to the memberwise init this replaces (`id` was
+    /// already excluded from it, being a `let` with an initial value), so existing call sites and
+    /// previews compile unchanged.
+    init(
+        lessonLabel: String,
+        lessonNumber: Int,
+        totalLessonsInLevel: Int,
+        estimatedMinutes: Int,
+        cards: [LessonTopicCard]
+    ) {
+        self.lessonLabel = lessonLabel
+        self.lessonNumber = lessonNumber
+        self.totalLessonsInLevel = totalLessonsInLevel
+        self.estimatedMinutes = estimatedMinutes
+        if cards.isEmpty {
+            print("⚠️ [LessonStoryContent] '\(lessonLabel)' built with ZERO cards — substituting a placeholder to avoid an out-of-range crash in LessonTopicCardView. Check the lessons row / card decode for this lesson.")
+            self.cards = [Self.emptyContentPlaceholderCard]
+        } else {
+            self.cards = cards
+        }
+    }
+
+    /// Shown only when a lesson genuinely arrives with no cards. Honest about the failure rather
+    /// than pretending to be content — it must never read as a real, authored lesson.
+    private static var emptyContentPlaceholderCard: LessonTopicCard {
+        .titleCard(
+            title: "Lesson unavailable",
+            subtitle: [HighlightedTextSegment("This lesson couldn't be loaded. Please try again later.")]
+        )
+    }
 }
 
 // MARK: - Lesson Topic Card Builders

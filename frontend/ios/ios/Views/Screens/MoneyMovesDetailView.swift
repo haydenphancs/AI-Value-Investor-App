@@ -468,5 +468,4 @@ private struct MoneyMovesCategorySectionHeader: View {
 #Preview {
     MoneyMovesDetailView()
         .environmentObject(AudioManager.shared)
-        .preferredColorScheme(.dark)
 }

@@ -53,7 +53,11 @@ class _Query:
         self._filters = {}
         self._op = "select"
         self._payload = None
-        self._order = None
+        # LIST, not a single tuple: PostgREST accumulates chained `.order(...)` calls into a
+        # composite ORDER BY. The fake used to overwrite, so when learn.py added the
+        # `.order("item_key")` tiebreak after `.order("completed_at", desc=True)` the fake
+        # silently sorted by item_key ALONE — reporting a bug in correct production code.
+        self._order: list[tuple[str, bool]] = []
 
     def select(self, *_cols):
         self._op = "select"
@@ -64,7 +68,7 @@ class _Query:
         return self
 
     def order(self, col, desc=False):
-        self._order = (col, desc)
+        self._order.append((col, desc))
         return self
 
     def upsert(self, payload, on_conflict=None, ignore_duplicates=False):
@@ -90,8 +94,9 @@ class _FakeTable:
     def _run(self, q):
         matched = [r for r in self.rows if all(r.get(k) == v for k, v in q._filters.items())]
         if q._op == "select":
-            if q._order:
-                col, desc = q._order
+            # Apply the ORDER BY keys least-significant first; Python's sort is stable, so the
+            # result is a true composite ordering (matching Postgres) rather than last-key-wins.
+            for col, desc in reversed(q._order):
                 matched = sorted(matched, key=lambda r: r.get(col), reverse=desc)
             return _Result([dict(r) for r in matched])
         if q._op == "upsert":

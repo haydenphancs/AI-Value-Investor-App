@@ -105,7 +105,6 @@ struct PaywallView: View {
                 Text(viewModel.restoreMessage ?? "")
             }
         }
-        .preferredColorScheme(.dark)
         .task {
             Analytics.shared.track(.paywallShown)
             await viewModel.load()
@@ -302,5 +301,4 @@ struct PaywallView: View {
 #Preview {
     PaywallView()
         .environment(\.appState, AppState())
-        .preferredColorScheme(.dark)
 }

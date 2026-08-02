@@ -20,6 +20,14 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    # `attrs` ships as a transitive dependency of app-store-server-library, whose models are
+    # all `@define(slots=True)`. Imported defensively so a packaging change degrades to the
+    # old __dict__ path rather than breaking import of the whole integration.
+    import attr
+except ImportError:  # pragma: no cover - attrs is present wherever the Apple library is
+    attr = None  # type: ignore[assignment]
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -153,10 +161,32 @@ def reset_verifier_cache() -> None:
 
 
 def _to_dict(decoded: Any) -> Dict[str, Any]:
-    """Flatten a library model into a plain dict (integration layer returns plain types)."""
+    """Flatten a library model into a plain dict (integration layer returns plain types).
+
+    Reads **attrs fields**, not ``__dict__``. Apple's models (`JWSTransactionDecodedPayload`
+    and friends) are `attrs @define` classes, i.e. `slots=True`: all 42 fields live in
+    `__slots__`, and the instance's `__dict__` — inherited from the non-slotted base
+    `AttrsRawValueAware` — is present but **permanently empty**, even after assignment.
+
+    So the previous `__dict__` flattening returned `{}` for every successfully verified
+    transaction. It cleared the `isinstance(raw, dict)` guard (an empty dict IS a dict), and
+    the caller then raised `AppStoreVerificationFailed("missing transactionId")` — meaning
+    Apple's signature check passed and the purchase was rejected anyway. `POST /billing/verify`
+    answered 400 for EVERY real purchase: the user is charged by Apple and receives nothing.
+
+    This survived 35 IAP tests because they all feed plain dicts, never a real library model —
+    which is exactly why `test_iap_payload_flattening.py` now asserts against the real class.
+    """
     if decoded is None:
         return {}
-    raw = getattr(decoded, "__dict__", None)
+
+    raw: Any
+    if attr is not None and attr.has(type(decoded)):
+        raw = {f.name: getattr(decoded, f.name, None) for f in attr.fields(type(decoded))}
+    else:
+        # Non-attrs model (or attrs unavailable): fall back to the old behaviour.
+        raw = getattr(decoded, "__dict__", None)
+
     if not isinstance(raw, dict):
         return {}
     out: Dict[str, Any] = {}

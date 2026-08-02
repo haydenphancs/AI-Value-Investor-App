@@ -38,5 +38,4 @@ struct TickerDetailRelatedSection: View {
     TickerDetailRelatedSection(relatedTickers: RelatedTicker.sampleData)
         .padding(.vertical)
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

@@ -200,5 +200,4 @@ struct ReportMoatRadarChart: View {
     )
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

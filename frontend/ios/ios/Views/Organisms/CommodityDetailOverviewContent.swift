@@ -47,5 +47,4 @@ struct CommodityDetailOverviewContent: View {
         CommodityDetailOverviewContent(commodityData: CommodityDetailData.sampleGold)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -14,7 +14,7 @@ iOS sends camelCase via .convertToSnakeCase encoder → backend receives snake_c
 Backend returns snake_case → iOS decodes via .convertFromSnakeCase decoder.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
 from supabase import Client
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,9 +30,14 @@ from app.api.error_response import (
 from app.database import get_supabase
 from app.dependencies import (
     get_current_user,
-    get_current_user_or_guest,  # TEMP: guest fallback while login UI not built
+    get_research_identity,
     GUEST_USER_ID,
+    identity_key,
     StandardRateLimit,
+)
+from app.services.guest_report_budget_service import (
+    GuestReportBudgetUnavailable,
+    get_guest_report_budget_service,
 )
 from app.schemas.research import (
     GenerateResearchRequest,
@@ -66,8 +71,9 @@ router = APIRouter()
 @router.post("/generate", response_model=ResearchGenerationResponse)
 async def generate_research_report(
     request: GenerateResearchRequest,
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     _rate_limit=StandardRateLimit,
 ):
     """
@@ -156,8 +162,65 @@ async def generate_research_report(
     # one round-trip (migration 101). NULL → INSUFFICIENT_CREDITS (no row mutated, no
     # race window) → 402. Authenticated users only; guests are a credit no-op (the shared
     # pool would deplete for everyone) and are governed by the concurrency caps above.
-    is_guest = user["id"] == GUEST_USER_ID
+    # A per-install id never equals the shared sentinel, so the old comparison would have
+    # silently classified every guest as a signed-in user and sent them into precharge
+    # against a user_credits row that does not exist (402 "insufficient credits").
+    is_guest = bool(user.get("is_guest", user["id"] == GUEST_USER_ID))
+    # Set when a guest allowance has actually been consumed, so any path that fails to deliver
+    # a report can hand it back. GUEST_REPORT_MONTHLY_LIMIT is 1, so without this the first
+    # transient failure destroys a guest's ENTIRE monthly allowance and they get nothing for it.
+    guest_claim_to_release: Optional[tuple[str, str]] = None
     credit_service = CreditService()
+
+    if is_guest:
+        # ── GUEST: claim against the per-INSTALL monthly allowance (migration 106).
+        #
+        # This path used to be metered by NOTHING. `if not is_guest: precharge(...)` skipped the
+        # credit charge for guests, and the only other gate was `StandardRateLimit` at 60/min —
+        # on the single most expensive operation in the product (Stage A's 4-round FMP tool
+        # calling plus ~15 Stage-B narratives: roughly 17 Gemini + 20 FMP calls per run). One
+        # signed-out install could therefore start a full agent run every second, indefinitely,
+        # for free, just by cycling tickers so neither ticker_report_cache nor the
+        # (ticker, persona) dedup could absorb it.
+        #
+        # It also inverted the funnel exactly as `GET /stocks/{ticker}/report` did before its
+        # own fix: signing in took you from UNLIMITED deep research to a metered allowance. The
+        # same budget service backs both, so a guest's free report is one allowance across the
+        # whole product rather than one per endpoint.
+        #
+        # FAILS OPEN, deliberately and consistently with the report path: a Supabase blip must
+        # not wall users out of the headline feature, and the rate limit plus the concurrency
+        # caps above still bound the damage with no database at all.
+        guest_bucket_key = identity_key(user, x_guest_id)
+        budget = get_guest_report_budget_service()
+        # Captured BEFORE the claim: a generation started at 23:5x ET on the last day of a month
+        # and released after midnight must credit back the month it claimed FROM, not the new one.
+        guest_period = budget.current_period()
+        try:
+            claimed = budget.try_claim_report(guest_bucket_key)
+        except GuestReportBudgetUnavailable:
+            logger.warning(
+                "Guest research budget unavailable for bucket=%s — failing OPEN "
+                "(rate limit + concurrency caps still apply)", guest_bucket_key,
+            )
+            claimed = 0
+        # Only a real claim is releasable; a fail-open (0) took nothing.
+        if claimed > 0:
+            guest_claim_to_release = (guest_bucket_key, guest_period)
+        if claimed == -1:
+            return make_error_response(
+                ErrorCode.INSUFFICIENT_CREDITS,
+                message=(
+                    "Guest install reached its free report allowance "
+                    f"({settings.GUEST_REPORT_MONTHLY_LIMIT}/month)"
+                ),
+                details={
+                    "guest": True,
+                    "limit": settings.GUEST_REPORT_MONTHLY_LIMIT,
+                    "ticker": request.stock_id.upper(),
+                },
+            )
+
     if not is_guest:
         try:
             new_remaining = credit_service.precharge(
@@ -242,6 +305,15 @@ async def generate_research_report(
         # so this is the only backstop: if the best-effort refund ALSO fails we
         # log a greppable REFUND LEAK marker with everything a human needs to
         # correct it manually (mirrors claim_and_mark_failed's leak path).
+        if guest_claim_to_release:
+            # Mirrors ticker_report.py's finally-block release: nothing was delivered, so the
+            # allowance goes back. Best-effort by design — `release_report` never raises.
+            bucket_key, period = guest_claim_to_release
+            get_guest_report_budget_service().release_report(bucket_key, period)
+            logger.info(
+                "Released guest report allowance for bucket=%s period=%s after insert failure",
+                bucket_key, period,
+            )
         if not is_guest:
             refunded = credit_service.refund_ledgered(
                 user["id"], CreditService.DEEP_RESEARCH_COST,
@@ -283,7 +355,7 @@ async def generate_research_report(
 @router.get("/reports/{report_id}/status", response_model=ResearchStatusResponse)
 async def get_research_status(
     report_id: str,
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
 ):
     """Poll report generation status (frontend calls every ~3s).
@@ -356,7 +428,7 @@ def _split_structured_error(
 @router.get("/reports/{report_id}", response_model=ResearchReportDetail)
 async def get_research_report(
     report_id: str,
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
 ):
     """Fetch the full research report. RLS enforced via user_id check."""
@@ -380,7 +452,7 @@ async def get_research_report(
 @router.get("/reports/{report_id}/ticker-report")
 async def get_research_ticker_report(
     report_id: str,
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
 ):
     """
@@ -439,7 +511,7 @@ async def get_research_ticker_report(
 @router.get("/reports/{report_id}/pdf")
 async def get_research_report_pdf(
     report_id: str,
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
 ):
     """Stream the detailed-analysis PDF for a completed report.
@@ -489,7 +561,7 @@ async def get_research_report_pdf(
 @router.post("/reports/{report_id}/pdf/regenerate")
 async def regenerate_research_report_pdf(
     report_id: str,
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
 ):
     """Generate (or re-generate) the PDF inline. Backfills reports created
@@ -533,7 +605,7 @@ async def regenerate_research_report_pdf(
 @router.get("/reports")
 async def get_my_reports(
     limit: int = Query(20, le=100),
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
 ):
     """Get current user's research reports (lightweight list).
@@ -569,7 +641,7 @@ async def get_my_reports(
 async def rate_report(
     report_id: str,
     request: RateReportRequest,
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
 ):
     """Rate a research report (1-5 stars with optional feedback)."""
@@ -590,7 +662,7 @@ async def rate_report(
 @router.delete("/reports/{report_id}")
 async def delete_report(
     report_id: str,
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    user: dict = Depends(get_research_identity),  # per-INSTALL guest partition (migration 110)
     supabase: Client = Depends(get_supabase),
 ):
     """Soft-delete a research report (sets status = 'deleted')."""

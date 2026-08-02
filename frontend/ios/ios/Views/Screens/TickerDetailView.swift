@@ -197,7 +197,6 @@ struct TickerDetailView: View {
             // area shows a shimmer skeleton (see the content gate above) until the
             // fast core, then the full overview, arrives.
         }
-        .preferredColorScheme(.dark)
         .navigationBarHidden(true)
         // Audio collapses to the top status island while this stock screen is open, keeping the
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
@@ -269,7 +268,6 @@ struct TickerDetailView: View {
                     showSearch = false
                 }
             )
-            .preferredColorScheme(.dark)
         }
         .navigationDestination(item: $selectedSearchResult) { selection in
             AssetDetailRouter(selection: selection)

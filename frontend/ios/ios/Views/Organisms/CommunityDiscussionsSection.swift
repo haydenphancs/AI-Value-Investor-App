@@ -56,5 +56,4 @@ struct CommunityDiscussionsSection: View {
         CommunityDiscussionsSection(discussions: CommunityDiscussion.sampleData)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

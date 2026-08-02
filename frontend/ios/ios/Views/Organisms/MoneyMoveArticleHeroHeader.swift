@@ -232,5 +232,4 @@ struct GrainyTextureOverlay: View {
     .background(AppColors.background)
     .ignoresSafeArea()
     .environmentObject(AudioManager.shared)
-    .preferredColorScheme(.dark)
 }

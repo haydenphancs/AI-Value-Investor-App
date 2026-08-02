@@ -81,5 +81,4 @@ struct NewsDetailHeader: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -143,7 +143,6 @@ struct EarningsInfoSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     // MARK: - Helper Views

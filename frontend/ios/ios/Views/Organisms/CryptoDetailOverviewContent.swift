@@ -59,5 +59,4 @@ struct CryptoDetailOverviewContent: View {
         CryptoDetailOverviewContent(cryptoData: CryptoDetailData.sampleEthereum)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -414,5 +414,4 @@ struct TickerReportView: View {
     NavigationStack {
         TickerReportView(preloadedReport: .sampleOracle)
     }
-    .preferredColorScheme(.dark)
 }

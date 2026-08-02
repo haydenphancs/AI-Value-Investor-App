@@ -38,5 +38,4 @@ struct ChartUnavailableView: View {
         AppColors.background.ignoresSafeArea()
         ChartUnavailableView(message: "Margin data isn't available for this company.")
     }
-    .preferredColorScheme(.dark)
 }

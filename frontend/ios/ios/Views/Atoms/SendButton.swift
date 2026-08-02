@@ -37,5 +37,4 @@ struct SendButton: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

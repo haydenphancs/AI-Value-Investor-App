@@ -84,14 +84,53 @@ final class BookProgressStore: ObservableObject {
         Task { await self.pushCompletion(k) }
     }
 
+    /// The last playhead sample this store acted on: which book, where it landed, and the
+    /// `AudioManager.seekEpoch` in force at the time. A step is "listened through" only when it
+    /// continues THAT sample — same book, starts where the last one ended, no seek in between.
+    private var lastSample: (order: Int, to: Double, seekEpoch: UInt64)?
+
     /// During continuous audio playback, auto-complete each core once the playhead crosses out of
-    /// it (into the next core, or near the end for the last). Ignores seeks / large jumps so
-    /// skipping ahead never marks cores the learner didn't actually listen through. Idempotent;
-    /// returns the cores newly completed by this step (for a one-shot success haptic).
+    /// it (into the next core, or near the end for the last). Idempotent; returns the cores newly
+    /// completed by this step (for a one-shot success haptic).
+    ///
+    /// Continuity is decided by `AudioManager.seekEpoch`, NOT by the size of the step. The old
+    /// `to - from < 2.0` guard used step size as a proxy for "didn't seek", which threw away real
+    /// playback: the periodic time observer coalesces ticks when the app is backgrounded or
+    /// recovering from a stall, so any boundary inside one of those long-but-genuine steps was
+    /// never completed — a fully-listened book ended up "mastered" with holes in its timeline.
+    ///
+    /// Called every tick by BOTH `BookDetailView` and `BookCoreDetailView` when they are on screen
+    /// together. That is harmless: the first call does the work and the second sees a sample that
+    /// no longer continues `lastSample`, so it no-ops (and completion is idempotent regardless).
     @discardableResult
     func markListenedThrough(order: Int, from: Double, to: Double,
-                             coreStarts: [Int: Int], totalSeconds: Int) -> [Int] {
-        guard to > from, to - from < 2.0 else { return [] }   // continuous playback only
+                             coreStarts: [Int: Int], totalSeconds: Int,
+                             seekEpoch: UInt64) -> [Int] {
+        let previous = lastSample
+        lastSample = (order, to, seekEpoch)
+
+        guard to > from else { return [] }
+
+        let isContinuous: Bool
+        if let previous, previous.order == order {
+            // A scrub / skip / core-jump moved the playhead somewhere the listener never heard.
+            if previous.seekEpoch != seekEpoch {
+                isContinuous = false
+            } else {
+                // Continues the last sample we acted on. (The duplicate call from the second
+                // observing view lands here with a `from` that no longer matches, so it no-ops —
+                // and completion is idempotent anyway.)
+                isContinuous = abs(previous.to - from) < 0.01
+            }
+        } else {
+            // Nothing to continue yet: the first tick after this view appeared, or a switch to
+            // another book. Fall back to the old small-step heuristic for THAT tick only —
+            // without it, a core boundary landing inside the very first observed interval would
+            // never complete, which is the same missing-badge symptom this method prevents.
+            // A step under 2s cannot skip past a whole core.
+            isContinuous = (to - from) < 2.0
+        }
+        guard isContinuous else { return [] }
         let ordered = coreStarts.sorted { $0.value < $1.value }.map(\.key)
         var newly: [Int] = []
         for (i, core) in ordered.enumerated() {
@@ -108,7 +147,9 @@ final class BookProgressStore: ObservableObject {
         return newly
     }
 
-    /// Clear all progress (debug / "reset" affordances). Local only.
+    /// Clear all progress (debug / "reset" affordances, and SIGN-OUT — see `AppState.signOut`,
+    /// which bumps `LearnIdentityEpoch` first so an in-flight hydrate can't refill this with the
+    /// previous account's cores). Local only.
     func reset() {
         guard !completed.isEmpty else { return }
         completed.removeAll()
@@ -120,11 +161,19 @@ final class BookProgressStore: ObservableObject {
     /// Pull the server's completed set, union it in, and push back anything the server is missing.
     /// Call when the Library opens.
     func hydrate() async {
+        let epoch = LearnIdentityEpoch.current
         do {
             let resp = try await apiClient.request(
                 endpoint: .getLearnProgress(contentType: Self.contentType),
                 responseType: LearnProgressResponse.self
             )
+            // The account changed while this was in flight (sign-out / switch). These keys belong
+            // to the PREVIOUS user — merging them would show their finished cores to the new one,
+            // and pushUnsynced would then write them into the new account. Drop it.
+            guard epoch == LearnIdentityEpoch.current else {
+                print("[BookProgressStore] discarded a hydrate from a previous identity")
+                return
+            }
             merge(resp)
             await pushUnsynced(remote: Set(resp.keys))
         } catch {

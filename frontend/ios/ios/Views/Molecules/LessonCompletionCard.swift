@@ -177,5 +177,4 @@ struct LessonCompletionCard: View {
             ctaButtonTitle: "Analyze a Stock"
         )
     }
-    .preferredColorScheme(.dark)
 }

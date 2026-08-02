@@ -195,5 +195,4 @@ struct ReportFutureForecastSection: View {
     ReportFutureForecastSection(forecast: TickerReportData.sampleOracle.revenueForecast, ticker: "ORCL")
         .padding()
         .background(AppColors.cardBackground)
-        .preferredColorScheme(.dark)
 }

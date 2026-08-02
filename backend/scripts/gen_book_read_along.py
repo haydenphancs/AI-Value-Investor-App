@@ -51,11 +51,18 @@ def split_sentences(text: str) -> list[str]:
 
 
 def narrated_blocks(sections):
-    """(is_heading, text) for each narrated block — every section except the action plan."""
+    """(is_heading, text) for each narrated block — the sections BEFORE the action plan.
+
+    TRUNCATES at the first "Action Plan" heading; it does not skip it. The narration itself stops
+    there (the action plan is never spoken), so everything after that heading has no audio to align
+    to. `continue` kept emitting those later blocks, which shifted every one of them by a position
+    against the 1:1 index `BookCoreDetailView` pairs blocks with — so the wrong sentence lit up (or
+    none did) for the rest of the core.
+    """
     out = []
     for kind, text in sections:
         if kind == "heading" and re.search(r"action\s+plan", text, re.I):
-            continue
+            break
         t = gba.strip_markup(text)
         if t:
             out.append((kind == "heading", t))

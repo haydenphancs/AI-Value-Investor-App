@@ -147,5 +147,4 @@ struct DisclaimerCard: View {
     NavigationStack {
         DisclaimersView()
     }
-    .preferredColorScheme(.dark)
 }

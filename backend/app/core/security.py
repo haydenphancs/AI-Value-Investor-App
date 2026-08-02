@@ -291,3 +291,41 @@ class RateLimiter:
 
 # Global rate limiter instance
 rate_limiter = RateLimiter()
+
+
+def trusted_client_ip(req: Any) -> str:
+    """The client address as observed by OUR edge — never one the caller chose.
+
+    `request.client.host` is NOT trustworthy here. Both `railway.toml` and the Dockerfile
+    start uvicorn with `--proxy-headers --forwarded-allow-ips='*'`, which sets
+    `ProxyHeadersMiddleware.always_trust`, and in that mode uvicorn rewrites
+    `scope["client"]` to the **leftmost** `X-Forwarded-For` entry. The leftmost entry is
+    whatever the caller sent before Railway's edge appended the real peer address — i.e. it
+    is attacker-controlled.
+
+    Every per-IP auth limiter keyed off that value, so rotating one header per request gave a
+    brand-new bucket every time and the limits never fired: unlimited password guesses against
+    a known address on `/auth/login`, unlimited Supabase confirmation emails to an arbitrary
+    address on `/auth/register`, and a bypass of the anonymous WebSocket connection cap.
+
+    The RIGHTMOST entry is the one our own edge appended, so that is the only part of the
+    header a caller cannot forge. `--forwarded-allow-ips='*'` stays as-is — it is there so
+    logs and `.client.host` reflect the real client, and this helper is what the security
+    controls key on instead.
+
+    Chain depth note: this assumes exactly one trusted proxy in front of the app (Railway's
+    edge). If another is ever added, drop that many entries from the right instead of taking
+    just the last.
+    """
+    try:
+        forwarded = req.headers.get("x-forwarded-for")
+    except Exception:  # pragma: no cover - defensive; a Request always has headers
+        forwarded = None
+
+    if forwarded:
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
+
+    client = getattr(req, "client", None)
+    return getattr(client, "host", None) or "unknown"

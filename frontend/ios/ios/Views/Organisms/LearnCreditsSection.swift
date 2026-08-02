@@ -23,5 +23,4 @@ struct LearnCreditsSection: View {
         Spacer()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

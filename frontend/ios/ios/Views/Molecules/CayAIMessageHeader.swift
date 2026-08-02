@@ -23,5 +23,4 @@ struct CayAIMessageHeader: View {
     CayAIMessageHeader()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

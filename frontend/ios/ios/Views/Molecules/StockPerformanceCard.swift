@@ -103,5 +103,4 @@ private struct StatItem: View {
     )
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -3,6 +3,7 @@
   "lessons": [
     {
       "title": "Compound Interest",
+      "slug": "compound_interest",
       "level": "foundation",
       "sortOrder": 1,
       "estimatedMinutes": 3,
@@ -1339,6 +1340,7 @@
     },
     {
       "title": "Stock vs. Business",
+      "slug": "stock_vs_business",
       "level": "foundation",
       "sortOrder": 2,
       "estimatedMinutes": 4,
@@ -2645,6 +2647,7 @@
     },
     {
       "title": "Mr. Market",
+      "slug": "mr_market",
       "level": "foundation",
       "sortOrder": 3,
       "estimatedMinutes": 5,
@@ -3851,6 +3854,7 @@
     },
     {
       "title": "Risk and Reward are Linked",
+      "slug": "risk_reward",
       "level": "foundation",
       "sortOrder": 4,
       "estimatedMinutes": 4,
@@ -5239,6 +5243,7 @@
     },
     {
       "title": "Bitcoin: Digital Gold?",
+      "slug": "bitcoin_digital_gold",
       "level": "foundation",
       "sortOrder": 5,
       "estimatedMinutes": 4,
@@ -6652,6 +6657,7 @@
     },
     {
       "title": "ETFs 101",
+      "slug": "etfs_101",
       "level": "foundation",
       "sortOrder": 6,
       "estimatedMinutes": 3,
@@ -7990,6 +7996,7 @@
     },
     {
       "title": "The Inflation Thief",
+      "slug": "inflation_thief",
       "level": "foundation",
       "sortOrder": 7,
       "estimatedMinutes": 3,
@@ -9390,6 +9397,7 @@
     },
     {
       "title": "Key Statistics",
+      "slug": "key_statistics",
       "level": "analysis",
       "sortOrder": 1,
       "estimatedMinutes": 5,
@@ -10790,6 +10798,7 @@
     },
     {
       "title": "The Income Statement",
+      "slug": "income_statement",
       "level": "analysis",
       "sortOrder": 2,
       "estimatedMinutes": 8,
@@ -12120,6 +12129,7 @@
     },
     {
       "title": "The Balance Sheet",
+      "slug": "balance_sheet",
       "level": "analysis",
       "sortOrder": 3,
       "estimatedMinutes": 6,
@@ -13405,6 +13415,7 @@
     },
     {
       "title": "Cash Flow is King",
+      "slug": "cash_flow",
       "level": "analysis",
       "sortOrder": 4,
       "estimatedMinutes": 5,
@@ -14680,6 +14691,7 @@
     },
     {
       "title": "Economic Moats",
+      "slug": "economic_moats",
       "level": "analysis",
       "sortOrder": 5,
       "estimatedMinutes": 4,
@@ -15970,6 +15982,7 @@
     },
     {
       "title": "Tokenomics 101",
+      "slug": "tokenomics",
       "level": "analysis",
       "sortOrder": 6,
       "estimatedMinutes": 4,
@@ -17330,6 +17343,7 @@
     },
     {
       "title": "Red Flags",
+      "slug": "red_flags",
       "level": "analysis",
       "sortOrder": 7,
       "estimatedMinutes": 4,
@@ -18540,6 +18554,7 @@
     },
     {
       "title": "The Buffett Way",
+      "slug": "buffett_way",
       "level": "strategies",
       "sortOrder": 1,
       "estimatedMinutes": 7,
@@ -19750,6 +19765,7 @@
     },
     {
       "title": "The Lynch Way",
+      "slug": "lynch_way",
       "level": "strategies",
       "sortOrder": 2,
       "estimatedMinutes": 6,
@@ -21010,6 +21026,7 @@
     },
     {
       "title": "The Cathie Wood Way",
+      "slug": "cathie_wood_way",
       "level": "strategies",
       "sortOrder": 3,
       "estimatedMinutes": 5,
@@ -22290,6 +22307,7 @@
     },
     {
       "title": "Whale Watching",
+      "slug": "whale_watching",
       "level": "strategies",
       "sortOrder": 4,
       "estimatedMinutes": 4,
@@ -23455,6 +23473,7 @@
     },
     {
       "title": "Portfolio Gardening",
+      "slug": "portfolio_gardening",
       "level": "strategies",
       "sortOrder": 5,
       "estimatedMinutes": 5,
@@ -24645,6 +24664,7 @@
     },
     {
       "title": "The Power of Discipline",
+      "slug": "power_of_discipline",
       "level": "strategies",
       "sortOrder": 6,
       "estimatedMinutes": 5,
@@ -25805,6 +25825,7 @@
     },
     {
       "title": "Common Investing Mistakes",
+      "slug": "common_mistakes",
       "level": "strategies",
       "sortOrder": 7,
       "estimatedMinutes": 5,
@@ -26975,6 +26996,7 @@
     },
     {
       "title": "The FOMO Cycle",
+      "slug": "fomo_cycle",
       "level": "mastery",
       "sortOrder": 1,
       "estimatedMinutes": 6,
@@ -28235,6 +28257,7 @@
     },
     {
       "title": "Second-Order Thinking",
+      "slug": "second_order_thinking",
       "level": "mastery",
       "sortOrder": 2,
       "estimatedMinutes": 4,
@@ -29425,6 +29448,7 @@
     },
     {
       "title": "Risk vs. Uncertainty",
+      "slug": "risk_vs_uncertainty",
       "level": "mastery",
       "sortOrder": 3,
       "estimatedMinutes": 5,
@@ -30590,6 +30614,7 @@
     },
     {
       "title": "The Art of Selling",
+      "slug": "art_of_selling",
       "level": "mastery",
       "sortOrder": 4,
       "estimatedMinutes": 4,
@@ -31795,6 +31820,7 @@
     },
     {
       "title": "Inversion Thinking",
+      "slug": "inversion",
       "level": "mastery",
       "sortOrder": 5,
       "estimatedMinutes": 5,
@@ -32990,6 +33016,7 @@
     },
     {
       "title": "AI and Beyond",
+      "slug": "ai_and_beyond",
       "level": "mastery",
       "sortOrder": 6,
       "estimatedMinutes": 5,

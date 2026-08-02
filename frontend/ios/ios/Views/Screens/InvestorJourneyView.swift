@@ -167,5 +167,4 @@ struct InvestorJourneyView: View {
 
 #Preview {
     InvestorJourneyView()
-        .preferredColorScheme(.dark)
 }

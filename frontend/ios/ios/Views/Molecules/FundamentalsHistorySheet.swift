@@ -439,5 +439,4 @@ struct FundamentalsHistorySheet: View {
         qualitySentiment: "positive"
     )
     FundamentalsHistorySheet(card: card)
-        .preferredColorScheme(.dark)
 }

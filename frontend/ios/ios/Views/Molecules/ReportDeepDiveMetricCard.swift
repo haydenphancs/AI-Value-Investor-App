@@ -130,5 +130,4 @@ struct ReportDeepDiveMetricCard: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -131,6 +131,25 @@ class ProfileViewModel: BaseViewModel {
 
     // MARK: - Activity Stats
 
+    // MARK: - Activity Stats
+    //
+    // DEAD CODE — deliberately left as-is, and documented rather than "fixed".
+    //
+    // Both of these read arrays that are declared, defaulted to `[]`, and NEVER ASSIGNED anywhere
+    // in the app: `AppState.research.reports` and `AppState.watchlist.stocks`, whose element types
+    // (`ResearchReportSummary`, `WatchlistStock`) are not constructed in a single file. So both
+    // computeds are hardcoded 0.
+    //
+    // They are also read by NO view — not by the current ProfileView, and not by the one at HEAD.
+    // So there is no user-visible wrong number here; nothing renders them. Wiring them to real
+    // fetches would add two network calls per Profile open for values nobody displays, which is
+    // strictly worse than the dead code.
+    //
+    // The right resolution is deletion (these two, plus the two unused arrays and their two unused
+    // model types) — held back only because `AppState`/`ProfileView` are in the middle of an
+    // in-flight edit. If an activity-stats row IS planned, the counts want
+    // `GET /watchlist` and `GET /research/reports`, and this is the place to put them.
+
     var totalReports: Int {
         appState?.research.reports.count ?? 0
     }

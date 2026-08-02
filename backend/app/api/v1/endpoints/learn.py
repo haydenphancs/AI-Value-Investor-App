@@ -224,7 +224,12 @@ async def get_book_bookmarks(
             .select("item_key")
             .eq("user_id", user_id)
             .eq("content_type", BOOKMARK_CONTENT_TYPE)
+            # `item_key` breaks ties DETERMINISTICALLY. `completed_at` defaults to now() and two
+            # bookmarks saved in quick succession can share a timestamp, leaving their relative
+            # order up to Postgres — so the list (and with it the Book Library hero shortcut, which
+            # opens `bookmarkedTitles.first`) could point at a different book on each request.
             .order("completed_at", desc=True)
+            .order("item_key", desc=False)
             .execute()
         )
 

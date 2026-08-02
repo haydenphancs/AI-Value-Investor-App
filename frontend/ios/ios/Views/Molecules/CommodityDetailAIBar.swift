@@ -46,5 +46,4 @@ struct CommodityDetailAIBar: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

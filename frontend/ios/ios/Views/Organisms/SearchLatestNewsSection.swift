@@ -40,5 +40,4 @@ struct SearchLatestNewsSection: View {
         SearchLatestNewsSection(items: SearchNewsItem.sampleData)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

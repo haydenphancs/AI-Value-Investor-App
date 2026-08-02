@@ -26,5 +26,4 @@ struct UpdatesHeader: View {
         Spacer()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

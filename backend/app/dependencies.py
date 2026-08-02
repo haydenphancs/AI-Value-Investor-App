@@ -12,12 +12,43 @@ from supabase import Client
 import logging
 
 from app.database import get_supabase
+from jose import JWTError
+
 from app.core.security import decode_token, verify_supabase_token, rate_limiter
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 security = HTTPBearer()
+
+
+def _decode_access_token(token: str) -> dict:
+    """`decode_token`, but refuses a REFRESH token presented as an access credential.
+
+    Both token kinds are signed with the same `SECRET_KEY` and differ only by a `"type"` claim
+    (`create_access_token` stamps `"access"`, `create_refresh_token` stamps `"refresh"` —
+    core/security.py). `decode_token` verifies signature and expiry and returns the payload
+    either way, and nothing downstream looked at `type`. So the refresh token — which the client
+    holds precisely because it is meant to be exchange-only — worked as a Bearer credential on
+    every authenticated route.
+
+    Two things that made this worse than a curiosity:
+      * refresh tokens live `REFRESH_TOKEN_EXPIRE_MINUTES` (7 days) against the access token's
+        24 hours, so it silently widens the window of any leaked credential, and
+      * `POST /auth/refresh` is the one place that checks `password_changed_at`, so a refresh
+        token used directly as an access token skipped the eviction check entirely.
+
+    Raises `JWTError` (same as `decode_token`) so every existing call site's `except` behaves
+    unchanged: the caller falls through to the Supabase-token path and then to 401/guest.
+    """
+    payload = decode_token(token)
+    if isinstance(payload, dict) and payload.get("type") == "refresh":
+        logger.warning(
+            "refresh token presented as an access credential (sub=%s) — rejected",
+            payload.get("sub"),
+        )
+        raise JWTError("refresh token is not valid as an access credential")
+    return payload
 
 
 async def get_current_user_id(
@@ -28,7 +59,7 @@ async def get_current_user_id(
 
     # Try custom JWT first
     try:
-        payload = decode_token(token)
+        payload = _decode_access_token(token)
         user_id = payload.get("sub")
         if user_id:
             return user_id
@@ -65,7 +96,7 @@ def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
     if not changed_at:
         return
     try:
-        payload = decode_token(token)
+        payload = _decode_access_token(token)
         issued_at = payload.get("iat") if payload else None
         if issued_at is None:
             return  # Supabase-issued token, or a token without iat — not our concern here.
@@ -105,12 +136,31 @@ async def get_current_user(
     returns `password_changed_at` (migration 105), so there is no extra round-trip.
     """
     try:
-        result = supabase.table("users").select("*").eq("id", user_id).single().execute()
-        if not result.data:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        # limit(1), NOT single(). PostgREST answers `single()` on zero rows with a 406 /
+        # PGRST116, which postgrest-py raises as APIError — an ordinary exception that the
+        # `except Exception` below turns into a **500 "Error fetching user data"**. The
+        # intended 404 was therefore unreachable, and more importantly a 500 is not an auth
+        # error: iOS `AppError.isAuthError` covers only unauthorized/tokenExpired/forbidden,
+        # so the client keeps a token that can never resolve and retries forever instead of
+        # signing the user out. Same idiom already used by get_current_user_or_guest below.
+        result = supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
+        rows = result.data or []
+        if not rows:
+            # 401, not 404: the token is valid but names an account that no longer exists
+            # (deleted, or a signup whose trigger never seeded public.users). The client must
+            # drop the credential, and only an auth error makes it do that.
+            logger.warning(
+                "Valid token for user=%s but no public.users row — treating as unauthenticated",
+                user_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Your session is no longer valid. Please sign in again.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-        _reject_if_password_changed_since_issue(credentials.credentials, result.data)
-        return result.data
+        _reject_if_password_changed_since_issue(credentials.credentials, rows[0])
+        return rows[0]
     except HTTPException:
         raise
     except Exception as e:
@@ -126,7 +176,7 @@ async def get_optional_user_id(
         return None
     token = authorization.replace("Bearer ", "")
     try:
-        payload = decode_token(token)
+        payload = _decode_access_token(token)
         return payload.get("sub")
     except Exception:
         try:
@@ -152,7 +202,7 @@ async def get_current_user_or_guest(
         token = authorization.replace("Bearer ", "")
         user_id = None
         try:
-            payload = decode_token(token)
+            payload = _decode_access_token(token)
             user_id = payload.get("sub")
         except Exception:
             try:
@@ -180,9 +230,27 @@ async def get_current_user_or_guest(
                 )
             rows = result.data or []
             if rows:
+                # Same password-change eviction `get_current_user` applies (migration 105).
+                # It was missing here, and THIS is the dependency most authenticated routes
+                # actually use — directly (chat, reports, research, analytics) and indirectly
+                # via get_watchlist_identity / get_learn_identity. So a stolen access token kept
+                # reading and writing the victim's data for the rest of its 24-hour life after
+                # the victim reset their password; only POST /auth/refresh turned the thief away.
+                # Free to check: the select("*") above already returned password_changed_at.
+                _reject_if_password_changed_since_issue(token, rows[0])
                 return rows[0]
             # Valid token but no public.users row (rare — the signup trigger seeds it).
             # Fall through to guest as before rather than 500 a first-launch edge.
+            #
+            # LOG IT. This is a silent privilege DEMOTION: the caller proved a valid token and
+            # is nonetheless served the shared guest sentinel — guest credits, guest watchlist,
+            # someone else's data — with a 200. Undiagnosable from logs without this line, and
+            # CLAUDE.md requires an intentionally non-fatal degradation to say so.
+            logger.warning(
+                "Valid token for user=%s resolved NO public.users row — serving the shared "
+                "guest identity instead (check the signup trigger for this account)",
+                user_id,
+            )
 
     return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
 
@@ -218,6 +286,39 @@ def guest_user_id_for(install_id: Optional[str]) -> str:
     return str(uuid.uuid5(_GUEST_NAMESPACE, cleaned))
 
 
+async def get_identity_only_user(
+    authorization: Optional[str] = Header(None),
+) -> dict:
+    """Caller identity from the TOKEN ALONE — no database read, cannot raise.
+
+    For fire-and-forget instrumentation. `get_current_user_or_guest` reads `public.users` and
+    deliberately raises 503 when that read fails, so a signed-in user's request is never
+    silently served the guest's data. Correct for data endpoints — and wrong for analytics,
+    which promises in its own module docstring that it "can never break the app": the iOS
+    `Analytics` actor removes events from its buffer BEFORE the request and does not re-queue
+    on failure, so a 503 here silently destroys the batch. A Supabase blip would blind the
+    telemetry that exists to detect Supabase blips.
+
+    Only `identity_key()` is needed downstream, and for an authenticated caller that is just
+    the token's `sub` — which is already in hand without touching the database.
+    """
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "")
+        user_id = None
+        try:
+            payload = _decode_access_token(token)
+            user_id = payload.get("sub")
+        except Exception:
+            try:
+                payload = verify_supabase_token(token)
+                user_id = payload.get("sub") if payload else None
+            except Exception:
+                pass
+        if user_id:
+            return {"id": user_id, "email": "", "tier": "free"}
+    return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
+
+
 async def get_learn_identity(
     authorization: Optional[str] = Header(None),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
@@ -239,6 +340,38 @@ async def get_learn_identity(
         "id": guest_user_id_for(x_guest_id),
         "email": "guest@local",
         "tier": "free",
+    }
+
+
+async def get_research_identity(
+    authorization: Optional[str] = Header(None),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    supabase: Client = Depends(get_supabase),
+) -> dict:
+    """Identity for the RESEARCH routes: a real account, else a PER-INSTALL guest.
+
+    Same shape and same reason as :func:`get_watchlist_identity`. Before migration 110 every
+    signed-out user wrote `research_reports` under the shared ``GUEST_USER_ID``, and
+    ``GET /research/reports`` filters on that column — so one guest's Reports tab listed every
+    other guest's reports (ticker, executive summary, score, fair value), and either could open,
+    rate, or delete the other's. The ticker someone researches discloses intent, so this is a
+    cross-user data leak, not just untidy state.
+
+    Safe only because migration 110 dropped ``research_reports_user_id_fkey`` — a synthetic
+    per-install uuid has no ``public.users`` row. That FK was ON DELETE CASCADE, so account
+    deletion now clears the table explicitly via ``_UNLINKED_USER_TABLES`` in the users endpoint.
+
+    Callers must ALSO stop using ``user["id"] == GUEST_USER_ID`` as their guest test — a
+    per-install id never equals the sentinel. Use ``user.get("is_guest")``.
+    """
+    user = await get_current_user_or_guest(authorization, supabase)
+    if user.get("id") != GUEST_USER_ID:
+        return {**user, "is_guest": False}   # a real signed-in account always wins
+    return {
+        "id": guest_user_id_for(x_guest_id),
+        "email": "guest@local",
+        "tier": "free",
+        "is_guest": True,
     }
 
 
@@ -377,4 +510,27 @@ ReportRateLimit = Depends(
 # of telemetry flushes 429 the user's REAL requests — instrumentation degrading the
 # product is precisely what the analytics module forbids. Generous, because a batch is
 # one cheap insert, and lossy by design if it's ever hit.
-AnalyticsRateLimit = Depends(IdentityRateLimitChecker("analytics", 30, 60))
+class IdentityOnlyRateLimitChecker(IdentityRateLimitChecker):
+    """`IdentityRateLimitChecker` that resolves identity WITHOUT a database read.
+
+    The base class depends on `get_current_user_or_guest`, which raises 503 when the
+    `public.users` read fails — so a limiter attached to a fire-and-forget endpoint could
+    itself break the very "always 200" promise that endpoint makes, before the handler ever
+    ran. Analytics uses this variant; the data endpoints keep the strict one.
+    """
+
+    async def __call__(  # type: ignore[override]
+        self,
+        user: dict = Depends(get_identity_only_user),
+        x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    ) -> None:
+        key = f"{self.bucket}:{identity_key(user, x_guest_id)}"
+        if not rate_limiter.is_allowed(key, self.max_requests, self.window_seconds):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many requests. Please slow down.",
+                headers={"Retry-After": str(self.window_seconds)},
+            )
+
+
+AnalyticsRateLimit = Depends(IdentityOnlyRateLimitChecker("analytics", 30, 60))

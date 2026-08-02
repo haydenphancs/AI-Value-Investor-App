@@ -49,5 +49,4 @@ struct IndexDetailOverviewContent: View {
         IndexDetailOverviewContent(indexData: IndexDetailData.sampleSP500)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

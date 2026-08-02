@@ -112,5 +112,4 @@ struct SearchNewsCard: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

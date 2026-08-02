@@ -46,5 +46,4 @@ struct ETFDetailAIBar: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

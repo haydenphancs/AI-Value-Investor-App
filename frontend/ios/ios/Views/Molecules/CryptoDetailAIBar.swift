@@ -46,5 +46,4 @@ struct CryptoDetailAIBar: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

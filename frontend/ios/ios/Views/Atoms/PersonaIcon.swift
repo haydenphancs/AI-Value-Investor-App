@@ -41,5 +41,4 @@ struct PersonaIcon: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

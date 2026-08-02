@@ -57,5 +57,4 @@ struct JourneyStepIndicator: View {
     }
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

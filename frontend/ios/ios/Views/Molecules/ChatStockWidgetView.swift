@@ -247,5 +247,4 @@ private struct WidgetStatItem: View {
             .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -100,14 +100,12 @@ struct SearchView: View {
         )
         .fullScreenCover(item: $selectedNewsArticle) { article in
             NewsDetailView(article: article)
-                .preferredColorScheme(.dark)
         }
         .fullScreenCover(item: $viewModel.selectedSearchSelection) { selection in
             NavigationStack {
                 AssetDetailRouter(selection: selection)
                     .navigationBarHidden(true)
             }
-            .preferredColorScheme(.dark)
         }
         // Item-based cover (via .aiChatCover) presents reliably even though SearchView is
         // itself presented as a sheet/cover from the tabs.
@@ -229,5 +227,4 @@ struct SearchView: View {
 
 #Preview {
     SearchView()
-        .preferredColorScheme(.dark)
 }

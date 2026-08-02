@@ -32,5 +32,4 @@ struct LearnerCountBadge: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

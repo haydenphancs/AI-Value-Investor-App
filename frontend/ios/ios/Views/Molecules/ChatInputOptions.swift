@@ -28,5 +28,4 @@ struct ChatInputOptions: View {
     ChatInputOptions()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

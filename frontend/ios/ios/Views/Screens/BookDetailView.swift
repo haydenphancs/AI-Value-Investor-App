@@ -185,7 +185,8 @@ struct BookDetailView: View {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 newly = progress.markListenedThrough(
                     order: book.curriculumOrder, from: oldTime, to: newTime,
-                    coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds)
+                    coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds,
+                    seekEpoch: audioManager.seekEpoch)
             }
             if !newly.isEmpty {
                 Haptics.success()
@@ -1019,5 +1020,4 @@ private extension Array {
 
     BookDetailView(book: LibraryBook.sampleData[0])
         .environmentObject(audioManager)
-        .preferredColorScheme(.dark)
 }

@@ -57,6 +57,34 @@ final class SettingsSyncManager {
         "playback_speed",
     ]
 
+    /// Drop this device's synced preferences because the session that owned them ended.
+    ///
+    /// These keys are DEVICE-GLOBAL — none carries a user id — and `hydrate()` only ever
+    /// overwrites a key the server actually returns. So after user A signed out, every
+    /// preference A had set stayed in UserDefaults, and user B signing in on the same device
+    /// inherited them: A's default persona, A's playback speed, A's appearance choice, and A's
+    /// notification opt-ins. B never chose any of it, and the notification toggles are the
+    /// sharp edge — B could be silently opted INTO alerts, or out of ones they expected.
+    ///
+    /// Worse, it was durable rather than cosmetic: the next `push()` writes those values up as
+    /// B's own preferences, so A's settings become B's on every one of B's devices.
+    ///
+    /// Mirrors `AppState.discardLearnDataForEndedSession()`, and costs a signed-in user
+    /// nothing — their real values are on the server and `hydrate()` restores them at the next
+    /// sign-in. Removing the keys (rather than writing defaults) lets each screen fall back to
+    /// its own declared default.
+    func clearLocalForEndedSession() {
+        for key in Self.boolKeys + Self.stringKeys + Self.doubleKeys {
+            defaults.removeObject(forKey: key)
+        }
+        // The appearance override is applied to the window, not just stored, so re-apply the
+        // now-default value or the previous user's Light/Dark choice stays on screen.
+        AppearanceManager.applyStored()
+        // Same signal the hydrate path posts, so any open settings screen re-reads its
+        // @AppStorage-backed rows instead of showing the previous account's values.
+        NotificationCenter.default.post(name: .caydexSettingsHydrated, object: nil)
+    }
+
     private init(repository: AccountRepositoryProtocol = AccountRepository.shared) {
         self.repository = repository
     }
@@ -74,12 +102,26 @@ final class SettingsSyncManager {
     /// richer server settings on a fresh install / new session.
     func hydrate() {
         guard isAuthenticated else { return }
+        guard !isHydrating else { return }   // a bounce between settings screens must not storm
+        isHydrating = true
         hasHydrated = false   // re-gate for this (possibly new) session
         Task {
+            defer { isHydrating = false }
             do {
                 let prefs = try await repository.fetchSettings()
                 apply(prefs)
+                // Re-assert anything the user changed WHILE the hydrate was gated, so the
+                // server blob does not silently revert their choice. Local wins here because
+                // it is strictly newer than the response now being applied.
+                if let deferred = pendingBlob {
+                    pendingBlob = nil
+                    applyLocalOverrides(deferred)
+                }
                 hasHydrated = true   // safe to push now (server state is known)
+                if deferredPushPending {
+                    deferredPushPending = false
+                    push()
+                }
             } catch {
                 // Leave hasHydrated false so push() stays gated — we don't know the
                 // server state, so pushing would risk a clobber. A later hydrate retries.
@@ -90,10 +132,35 @@ final class SettingsSyncManager {
         }
     }
 
+    /// Local snapshot captured while `push()` was gated on an un-hydrated session. Held so the
+    /// change survives to the next successful hydrate instead of being dropped.
+    private var pendingBlob: [String: PreferenceValue]?
+    /// A push was requested while gated; fire it once the hydrate lands.
+    private var deferredPushPending = false
+    /// In-flight guard so repeated `push()` calls can't launch a hydrate storm while offline.
+    private var isHydrating = false
+
     /// Push current UserDefaults values to the backend (best-effort, authed only).
     /// No-ops until the first successful `hydrate()` (see `hasHydrated`).
     func push() {
-        guard isAuthenticated, hasHydrated else { return }
+        guard isAuthenticated else { return }
+        guard hasHydrated else {
+            // DEFER, don't discard. This gate exists so a partial local snapshot can't clobber
+            // richer server settings — correct — but it used to `return` and lose the change
+            // entirely. On a launch where the hydrate failed (offline, 5xx), every settings
+            // change the user made for the rest of that session was silently dropped: nothing
+            // was PUT, and the next successful hydrate then overwrote their local values with
+            // the stale server blob. The toggle they flipped simply flipped back.
+            //
+            // Hold the snapshot, retry the hydrate, and re-assert these keys over the response.
+            pendingBlob = currentBlob()
+            deferredPushPending = true
+            #if DEBUG
+            print("ℹ️ [Settings] push deferred (not hydrated) — retrying hydrate")
+            #endif
+            hydrate()
+            return
+        }
         let blob = currentBlob()
         Task {
             do {
@@ -137,5 +204,13 @@ final class SettingsSyncManager {
         AppearanceManager.applyStored()
         // Let open screens refresh from the store (e.g. the appearance picker).
         NotificationCenter.default.post(name: .caydexSettingsHydrated, object: nil)
+    }
+
+    /// Re-assert values the user changed while `push()` was gated, on top of a just-applied
+    /// server blob. Same write path as `apply`, but semantically the opposite direction: these
+    /// are strictly NEWER than the response, so local wins.
+    private func applyLocalOverrides(_ blob: [String: PreferenceValue]) {
+        guard !blob.isEmpty else { return }
+        apply(blob)
     }
 }

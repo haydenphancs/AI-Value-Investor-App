@@ -175,13 +175,34 @@ async def register_device(
     return DeviceRegisterResponse(registered=ok)
 
 
+@router.delete("/me/devices", response_model=DeviceRegisterResponse)
+async def unregister_device(
+    request: DeviceRegisterRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Detach an APNs device token on sign-out.
+
+    Without this the token stays bound to the account that registered it: `device_tokens.token`
+    is UNIQUE and only a NEW registration re-binds it, but a signed-out client has no session
+    to register with. The device keeps receiving the previous account's watchlist alerts —
+    on a phone that is showing the signed-out guest UI, and to someone who may not be them.
+
+    Auth-only and scoped to the caller, so a token that has already re-bound to another account
+    cannot be detached by a stale client.
+    """
+    ok = UserSettingsService().unregister_device(user_id=user["id"], token=request.token)
+    # `registered` reports the token's state AFTER the call, reusing the same response model:
+    # a successful detach leaves it unregistered (False); a failure leaves it registered (True).
+    return DeviceRegisterResponse(registered=not ok)
+
+
 @router.post("/me/claim-guest-data")
 async def claim_guest_data(
     user: dict = Depends(get_current_user),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     supabase: Client = Depends(get_supabase),
 ):
-    """Move this install's GUEST watchlist + portfolios onto the signed-in account.
+    """Move this install's GUEST watchlist + portfolios + Learn progress onto the signed-in account.
 
     Without this, the guest-first funnel loses its own work: a user adds tickers
     during first-run onboarding, creates an account, and their watchlist is empty —
@@ -189,9 +210,16 @@ async def claim_guest_data(
     its user id instead. Signing in would actively cost them data, which is the
     opposite of the intended upgrade.
 
-    Idempotent: rows already moved simply aren't there the second time, and tickers
+    The same argument applies to Learn: `get_learn_identity` partitions guests per
+    install too, so a guest who completed lessons/articles/cores and bookmarked books
+    would sign in to a Learn tab reading zero. `user_learn_progress` covers all four
+    content types (book_core / journey_lesson / money_move / book_bookmark) and its
+    `user_id` is a bare uuid with no FK, so the rows can simply be re-pointed.
+
+    Idempotent: rows already moved simply aren't there the second time, and keys
     the account ALREADY holds are skipped rather than colliding with
-    `watchlist_items UNIQUE(user_id, ticker)`.
+    `watchlist_items UNIQUE(user_id, ticker)` /
+    `user_learn_progress UNIQUE(user_id, content_type, item_key)`.
 
     Best-effort: partial success is reported, never raised. A failed claim must not
     block sign-in — the user is already authenticated by the time this runs.
@@ -205,10 +233,13 @@ async def claim_guest_data(
     # OTHER people's tickers into this account — the exact cross-user leak migration
     # 108 exists to close. Only a real per-install bucket is ever claimable.
     if not x_guest_id or bucket == GUEST_USER_ID:
-        return {"claimed": {"watchlist_items": 0, "portfolios": 0}, "skipped": "no per-install guest id"}
+        return {
+            "claimed": {"watchlist_items": 0, "portfolios": 0, "learn_progress": 0, "research_reports": 0},
+            "skipped": "no per-install guest id",
+        }
 
     user_id = user["id"]
-    claimed = {"watchlist_items": 0, "portfolios": 0}
+    claimed = {"watchlist_items": 0, "portfolios": 0, "learn_progress": 0, "research_reports": 0}
 
     def _claim() -> None:
         # ── watchlist: skip tickers the account already holds ──────────────
@@ -244,6 +275,60 @@ async def claim_guest_data(
                 .in_("id", [r["id"] for r in pf]).execute()
             claimed["portfolios"] = len(pf)
 
+        # ── Learn progress: completions AND book bookmarks live in one table,
+        #    discriminated by content_type. Dedupe on (content_type, item_key) —
+        #    UNIQUE(user_id, content_type, item_key) means re-pointing a row the
+        #    account already holds would raise, so those are dropped instead.
+        #    The account's own row is the keeper: it may carry an earlier
+        #    completed_at, and for bookmarks that timestamp is the sort key.
+        guest_learn = (
+            supabase.table("user_learn_progress").select("id,content_type,item_key")
+            .eq("user_id", bucket).execute().data or []
+        )
+        if guest_learn:
+            owned_keys = {
+                (r["content_type"], r["item_key"]) for r in (
+                    supabase.table("user_learn_progress").select("content_type,item_key")
+                    .eq("user_id", user_id).execute().data or []
+                )
+            }
+            movable, dupes = [], []
+            for r in guest_learn:
+                key = (r.get("content_type"), r.get("item_key"))
+                (dupes if key in owned_keys else movable).append(r["id"])
+            if movable:
+                supabase.table("user_learn_progress").update({"user_id": user_id}) \
+                    .in_("id", movable).execute()
+                claimed["learn_progress"] = len(movable)
+            # Same as the watchlist: don't strand duplicates on a bucket nothing reads.
+            if dupes:
+                supabase.table("user_learn_progress").delete().in_("id", dupes).execute()
+
+        # ── research reports: move them wholesale ──────────────────────────
+        #    Migration 110 partitions these per install too, so without this a guest who
+        #    generated a report and THEN signed up would find their Reports tab empty —
+        #    having spent their one free guest report to get there. No unique constraint
+        #    to collide with (the id is a uuid), so every row moves.
+        guest_reports = (
+            supabase.table("research_reports").select("id")
+            .eq("user_id", bucket).execute().data or []
+        )
+        if guest_reports:
+            # Reset the PDF alongside the move. `pdf_path` is stamped at generation time as
+            # `reports/<user_id>/<report_id>.pdf` with the id the report had THEN — the guest
+            # bucket. Re-pointing user_id without clearing it leaves the object under a prefix
+            # `_purge_research_pdfs` never lists, so account deletion would orphan it forever
+            # (and with the row gone, the path is the only handle that existed). The PDF is
+            # derived data: clearing it makes the app regenerate on demand from the frozen
+            # report, which is cheap and keeps the deletion promise honest.
+            supabase.table("research_reports").update({
+                "user_id": user_id,
+                "pdf_path": None,
+                "pdf_status": "pending",
+                "pdf_generated_at": None,
+            }).in_("id", [r["id"] for r in guest_reports]).execute()
+            claimed["research_reports"] = len(guest_reports)
+
     try:
         await asyncio.to_thread(_claim)
     except Exception as e:
@@ -254,10 +339,13 @@ async def claim_guest_data(
         # Never fatal: the user IS signed in. Report honestly instead of 500ing.
         return {"claimed": claimed, "error": f"{type(e).__name__}"}
 
-    if claimed["watchlist_items"] or claimed["portfolios"]:
+    if any(claimed.values()):
+        # Report EVERY counter: a claim that moved only reports used to log nothing at all.
         logger.info(
-            "Guest-data claim for user=%s: %d watchlist row(s), %d portfolio(s)",
+            "Guest-data claim for user=%s: %d watchlist row(s), %d portfolio(s), "
+            "%d learn-progress row(s), %d research report(s)",
             user_id, claimed["watchlist_items"], claimed["portfolios"],
+            claimed["learn_progress"], claimed["research_reports"],
         )
     return {"claimed": claimed}
 
@@ -317,6 +405,11 @@ _UNLINKED_USER_TABLES: tuple[str, ...] = (
     "watchlist_items",
     "portfolios",   # migrations/108, same dropped cascade
     "push_send_log",  # migrations/109, no FK by design
+    # migrations/110 dropped research_reports_user_id_fkey (ON DELETE CASCADE) so guests can be
+    # partitioned per install. That cascade WAS the account-deletion path for this table, so
+    # without this entry a deleted account's research reports — ticker, thesis, fair value —
+    # would survive, which the privacy policy says they do not.
+    "research_reports",
 )
 
 # Same purge, different column. `analytics_events.identity_key` holds the real user id
@@ -390,7 +483,7 @@ async def delete_account(
     2. Un-FK'd tables — `_UNLINKED_USER_TABLES`. These have no foreign key to
        `public.users`, so the cascade in step 3 does not reach them.
     3. `auth.users` — cascades to `public.users` and every FK-linked child table
-       (user_credits, subscriptions, research_reports,
+       (user_credits, subscriptions,
        user_settings, device_tokens, whale_follows, chat_sessions → chat_messages, …).
 
     The previous implementation did step 3 only, and its docstring claimed that removed

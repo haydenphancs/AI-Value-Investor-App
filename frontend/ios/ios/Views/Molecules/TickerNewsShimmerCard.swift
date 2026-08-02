@@ -83,5 +83,4 @@ struct TickerNewsShimmerCard: View {
         .padding(.vertical, AppSpacing.md)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

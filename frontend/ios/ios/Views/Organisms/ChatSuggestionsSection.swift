@@ -25,5 +25,4 @@ struct ChatSuggestionsSection: View {
         ChatSuggestionsSection(suggestions: SuggestionChip.sampleData)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

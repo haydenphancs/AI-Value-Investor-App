@@ -471,7 +471,6 @@ private struct ShortInterestTrendChart: View {
     return ReportHiddenMarketSignalsSection(data: model)
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }
 
 #Preview("Snapshot only — no series") {
@@ -486,5 +485,4 @@ private struct ShortInterestTrendChart: View {
     return ReportHiddenMarketSignalsSection(data: model)
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

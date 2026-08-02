@@ -29,6 +29,19 @@ struct iosApp: App {
     /// APNs remote-notification callbacks (device token registration).
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    /// The persisted appearance choice (System / Dark / Light), read reactively.
+    /// Drives a single root-level `.preferredColorScheme` so the correct scheme is
+    /// applied from frame 0 (no cold-launch flash) and updates instantly when the
+    /// user changes it. `AppearanceManager` still applies the window-level override
+    /// (the robust path across sheets/covers); both read this same key, so they
+    /// always agree. Defaults to Dark — the shipped look — until the user opts in.
+    @AppStorage(AppearanceManager.storageKey) private var appearanceModeRaw = AppearanceMode.dark.rawValue
+
+    /// Resolved SwiftUI color scheme for the root modifier (`nil` = follow System).
+    private var preferredColorScheme: ColorScheme? {
+        (AppearanceMode(rawValue: appearanceModeRaw) ?? .dark).colorScheme
+    }
+
     // MARK: - Initialization
 
     init() {
@@ -66,7 +79,7 @@ struct iosApp: App {
             RootView()
                 .environment(appState)
                 .environment(\.appState, appState)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(preferredColorScheme)
                 .onChange(of: scenePhase) { _, phase in
                     // Buffered events would otherwise be lost when iOS suspends us.
                     if phase == .background { Analytics.shared.flushNow() }
@@ -214,12 +227,10 @@ struct RootView: View {
         .sheet(isPresented: $showPaywallFromError) {
             PaywallView()
                 .environment(\.appState, appState)
-                .preferredColorScheme(.dark)
         }
         .sheet(isPresented: $showSignInFromError) {
             SignInView()
                 .environment(appState)
-                .preferredColorScheme(.dark)
         }
         .overlay {
             // Global toast messages

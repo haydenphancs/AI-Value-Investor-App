@@ -41,5 +41,4 @@ struct ReportCriticalFactorsSection: View {
 #Preview {
     ReportCriticalFactorsSection(factors: TickerReportData.sampleOracle.criticalFactors)
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

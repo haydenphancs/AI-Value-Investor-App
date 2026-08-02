@@ -19,5 +19,4 @@ struct ReportWallStreetSection: View {
     ReportWallStreetSection(consensus: TickerReportData.sampleOracle.wallStreetConsensus)
         .padding()
         .background(AppColors.cardBackground)
-        .preferredColorScheme(.dark)
 }

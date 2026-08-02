@@ -69,5 +69,4 @@ struct IndexDetailTabButton: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

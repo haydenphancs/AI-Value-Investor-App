@@ -253,5 +253,4 @@ struct NotificationToggleRow: View {
     NavigationStack {
         NotificationsSettingsView()
     }
-    .preferredColorScheme(.dark)
 }

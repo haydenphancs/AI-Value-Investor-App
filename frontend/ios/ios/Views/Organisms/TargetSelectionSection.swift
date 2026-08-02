@@ -135,5 +135,4 @@ struct TargetSelectionSection: View {
     }
     .padding(.top, AppSpacing.lg)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

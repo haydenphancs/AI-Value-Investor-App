@@ -89,6 +89,26 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class PasswordChangedResponse(BaseModel):
+    """Acknowledgement for `POST /auth/change-password`, WITH replacement credentials.
+
+    Changing a password stamps `users.password_changed_at`, and every token minted before that
+    instant is then rejected (migration 105) — including the one the caller just used. So the
+    request that changed the password logged the caller out of their own session: the very next
+    authenticated call 401'd, and the app dropped them to the signed-out state seconds after a
+    successful password change, which reads as "the change failed".
+
+    These tokens are minted AFTER the stamp, so `iat >= password_changed_at` and this session
+    survives while every OTHER device is still evicted — which is the entire point of the
+    feature. Additive fields, so an older client that ignores them still decodes this fine.
+    """
+
+    message: str
+    access_token: str
+    refresh_token: str
+    user_id: str
+
+
 class SignUpResponse(BaseModel):
     """Result of /auth/register.
 

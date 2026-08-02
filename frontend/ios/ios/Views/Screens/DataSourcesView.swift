@@ -159,5 +159,4 @@ struct DataSourcesView: View {
 
 #Preview {
     NavigationStack { DataSourcesView() }
-        .preferredColorScheme(.dark)
 }

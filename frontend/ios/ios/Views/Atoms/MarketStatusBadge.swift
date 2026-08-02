@@ -82,5 +82,4 @@ struct MarketStatusBadge: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

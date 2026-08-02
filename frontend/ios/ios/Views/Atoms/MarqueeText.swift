@@ -137,5 +137,4 @@ struct MarqueeText: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

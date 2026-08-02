@@ -38,11 +38,15 @@ class JourneyContentService:
     # In-memory cache (content is near-static; refresh hourly).
     _cache: Optional[tuple[float, JourneyResponse]] = None
     _TTL_SECONDS = 3600
+    # An EMPTY load is cached for seconds, not the full hour — see the matching note in
+    # money_moves_content_service: a reseed window (or an all-rows-malformed load) would
+    # otherwise pin every client to the bundled fallback for an hour after the table recovered.
+    _EMPTY_TTL_SECONDS = 30
     _inflight: Optional[asyncio.Future] = None
 
     async def get_journey(self) -> JourneyResponse:
         cached = JourneyContentService._cache
-        if cached and time.time() - cached[0] < self._TTL_SECONDS:
+        if cached and time.time() - cached[0] < self._ttl_for(cached[1]):
             return cached[1]
 
         # Dedup concurrent refreshes (thundering-herd guard). SHIELDED: awaiting the shared future
@@ -59,6 +63,19 @@ class JourneyContentService:
         JourneyContentService._inflight = future
         try:
             response = await self._load()
+            # An empty load must never REPLACE a good journey: prefer the stale-but-real one and
+            # retry on the next request.
+            if not response.lessons and cached and cached[1].lessons:
+                logger.warning(
+                    "journey: load returned 0 lessons — keeping the previous cache of %d "
+                    "and retrying on the next request",
+                    len(cached[1].lessons),
+                )
+                if not future.done():
+                    future.set_result(cached[1])
+                return cached[1]
+            if not response.lessons:
+                logger.warning("journey: load returned 0 lessons and no prior cache to keep")
             JourneyContentService._cache = (time.time(), response)
             if not future.done():
                 future.set_result(response)
@@ -90,6 +107,11 @@ class JourneyContentService:
             raise
         finally:
             JourneyContentService._inflight = None
+
+    @classmethod
+    def _ttl_for(cls, response: JourneyResponse) -> int:
+        """Full TTL for a real journey; a short one for an empty result so it self-heals."""
+        return cls._TTL_SECONDS if response.lessons else cls._EMPTY_TTL_SECONDS
 
     async def _load(self) -> JourneyResponse:
         rows = await asyncio.to_thread(self._fetch_rows)

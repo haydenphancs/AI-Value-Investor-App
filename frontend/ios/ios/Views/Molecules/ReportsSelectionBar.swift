@@ -60,5 +60,4 @@ struct ReportsSelectionBar: View {
         ReportsSelectionBar(selectedCount: 1, isDeleting: true)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

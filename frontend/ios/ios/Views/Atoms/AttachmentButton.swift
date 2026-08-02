@@ -32,5 +32,4 @@ struct AttachmentButton: View {
     AttachmentButton()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

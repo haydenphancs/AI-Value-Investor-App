@@ -47,5 +47,4 @@ struct ReportChatBar: View {
             .padding(.bottom, AppSpacing.lg)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

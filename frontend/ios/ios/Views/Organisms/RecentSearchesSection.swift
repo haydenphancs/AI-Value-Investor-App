@@ -78,5 +78,4 @@ struct RecentSearchesSection: View {
         }
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -66,5 +66,4 @@ struct SelectableReportRow: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

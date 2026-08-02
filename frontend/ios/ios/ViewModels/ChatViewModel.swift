@@ -597,8 +597,39 @@ class ChatViewModel: ObservableObject {
                 switch event.event {
                 case "thinking":
                     // Synthesized progress stage → grow the active thinking card.
+                    //
+                    // NOTE: the backend does not currently emit `thinking` — kept because it is
+                    // the generic shape, and because `routing` / `tool_step` below feed the same
+                    // sink. The two events the backend ACTUALLY sends were unhandled, so this
+                    // branch never ran and `ChatThinking.stages` was empty for every message.
                     guard let stage = Self.decodeThinkingStage(event.data), !stage.isEmpty else { continue }
                     appendThinkingStage(id: ensureBubble(), stage: stage)
+
+                case "routing":
+                    // Which specialist(s) the router picked — the first real progress the user
+                    // can see, and the reason the thinking card exists.
+                    struct Routing: Decodable { let labels: [String]?; let mode: String? }
+                    guard
+                        let data = event.data.data(using: .utf8),
+                        let routing = try? JSONDecoder().decode(Routing.self, from: data),
+                        let labels = routing.labels, !labels.isEmpty
+                    else { continue }
+                    appendThinkingStage(
+                        id: ensureBubble(),
+                        stage: labels.count == 1
+                            ? "Consulting \(labels[0])"
+                            : "Consulting \(labels.joined(separator: ", "))"
+                    )
+
+                case "tool_step":
+                    // A real tool call completing — genuine progress, not a synthesized label.
+                    struct ToolStep: Decodable { let name: String? }
+                    guard
+                        let data = event.data.data(using: .utf8),
+                        let step = try? JSONDecoder().decode(ToolStep.self, from: data),
+                        let name = step.name, !name.isEmpty
+                    else { continue }
+                    appendThinkingStage(id: ensureBubble(), stage: Self.thinkingLabel(forTool: name))
 
                 case "sources":
                     // Grounded-context source pills for the thinking card.
@@ -751,6 +782,21 @@ class ChatViewModel: ObservableObject {
     // MARK: - Streaming helpers (thinking card + line-by-line reveal)
 
     /// Append a synthesized thinking stage to the (active) assistant bubble.
+    /// Human-readable label for a backend tool name. Falls back to a de-snake-cased form so a
+    /// newly added tool still reads sensibly instead of showing a raw identifier.
+    static func thinkingLabel(forTool name: String) -> String {
+        switch name {
+        case "get_stock_quote", "get_quote":      return "Checking the latest price"
+        case "get_company_profile":               return "Reading the company profile"
+        case "get_financials", "get_income_statement": return "Pulling the financials"
+        case "get_ticker_report":                 return "Reading the research report"
+        case "search_news":                       return "Scanning recent news"
+        default:
+            let words = name.replacingOccurrences(of: "_", with: " ")
+            return words.prefix(1).uppercased() + words.dropFirst()
+        }
+    }
+
     private func appendThinkingStage(id: UUID, stage: String) {
         guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
         var stages = messages[idx].thinking?.stages ?? []

@@ -59,6 +59,12 @@ enum APIEndpoint: Sendable {
     case getUserCredits
     case updateProfile(displayName: String?, avatarUrl: String?)
     case deleteAccount
+    /// Move this install's guest watchlist + portfolios onto the account that just signed in.
+    /// Migration 108 partitions guests per install, so without this call the guest-first funnel
+    /// silently costs the user their work: they add tickers during onboarding, create an account,
+    /// and land on an empty watchlist. The install id travels in the `X-Guest-Id` header that
+    /// `APIClient` already attaches to every request — no parameters needed here.
+    case claimGuestData
 
     // MARK: - Billing / Subscription / Settings / Devices
     case getPlanCatalog                                    // public tier catalog (guest-safe)
@@ -66,6 +72,10 @@ enum APIEndpoint: Sendable {
     case getMySettings                                     // synced preference blob
     case updateMySettings(preferences: [String: PreferenceValue])
     case registerDevice(token: String, platform: String, environment: String?)
+    /// Detach this device's APNs token on sign-out. Without it the token stays bound to the
+    /// account that registered it (`device_tokens.token` is UNIQUE and only a NEW registration
+    /// re-binds it), so a signed-out phone keeps receiving the previous account's alerts.
+    case unregisterDevice(token: String)
     /// Submit an Apple-signed StoreKit 2 transaction for server-side verification.
     /// The signed blob is the ONLY thing sent — the tier is derived server-side.
     case verifyPurchase(signedTransaction: String)
@@ -256,6 +266,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me/credits"
         case .updateProfile, .deleteAccount:
             return "/api/v1/users/me"
+        case .claimGuestData:
+            return "/api/v1/users/me/claim-guest-data"
 
         // Billing / Subscription / Settings / Devices
         case .getPlanCatalog:
@@ -266,7 +278,7 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me/subscription"
         case .getMySettings, .updateMySettings:
             return "/api/v1/users/me/settings"
-        case .registerDevice:
+        case .registerDevice, .unregisterDevice:
             return "/api/v1/users/me/devices"
 
         // Stocks
@@ -510,7 +522,8 @@ enum APIEndpoint: Sendable {
              .enrichETFNews,
              .enrichUpdatesNews,
              .createPortfolio, .regenerateResearchReportPDF,
-             .prewarmReportCollection:
+             .prewarmReportCollection,
+             .claimGuestData:
             return .POST
 
         case .updateProfile, .updateChatSession:
@@ -526,7 +539,7 @@ enum APIEndpoint: Sendable {
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
              .unfollowWhale, .deletePortfolio, .removeBookBookmark, .uncompleteLearnItem,
-             .deleteAccount:
+             .deleteAccount, .unregisterDevice:
             return .DELETE
 
         default:
@@ -665,6 +678,10 @@ enum APIEndpoint: Sendable {
 
         case .registerDevice(let token, let platform, let environment):
             return DeviceRegisterRequestBody(token: token, platform: platform, environment: environment)
+
+        case .unregisterDevice(let token):
+            // Same body shape; the backend reads only `token` and scopes the delete to the caller.
+            return DeviceRegisterRequestBody(token: token, platform: "ios", environment: nil)
 
         case .addToWatchlist(let stockId):
             return AddToWatchlistRequest(stockId: stockId)

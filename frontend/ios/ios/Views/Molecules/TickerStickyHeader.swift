@@ -93,5 +93,4 @@ struct TickerStickyHeader: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

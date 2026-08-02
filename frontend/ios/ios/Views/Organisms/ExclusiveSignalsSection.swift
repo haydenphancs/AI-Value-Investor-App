@@ -57,7 +57,11 @@ struct ExclusiveSignalsSection: View {
         .padding(16)
         .background(
             LinearGradient(
-                colors: [Color(hex: "1B2233"), Color(hex: "161B29")],
+                // Premium banner. Adaptive so the (now theme-aware) text inside stays
+                // readable in Light: a soft blue-tinted light gradient in Light, the
+                // original deep navy in Dark.
+                colors: [Color(lightHex: "FFFFFF", darkHex: "1B2233"),
+                         Color(lightHex: "EEF2FA", darkHex: "161B29")],
                 startPoint: .top, endPoint: .bottom
             )
         )

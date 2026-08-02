@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, Header
 
 from app.dependencies import (
     AnalyticsRateLimit,
-    get_current_user_or_guest,
+    get_identity_only_user,
     identity_key,
 )
 from app.schemas.analytics import AnalyticsBatchRequest, AnalyticsBatchResponse
@@ -39,7 +39,11 @@ router = APIRouter()
 @router.post("/events", response_model=AnalyticsBatchResponse)
 async def ingest_events(
     body: AnalyticsBatchRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    # Token-only identity: `get_current_user_or_guest` reads public.users and raises 503
+    # when that fails, which would destroy the batch (the iOS Analytics actor drops
+    # events from its buffer BEFORE the request and never re-queues). Only identity_key
+    # is needed here, and for an authed caller that is just the token's `sub`.
+    user: dict = Depends(get_identity_only_user),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     x_app_version: Optional[str] = Header(None, alias="X-App-Version"),
     x_platform: Optional[str] = Header(None, alias="X-Platform"),

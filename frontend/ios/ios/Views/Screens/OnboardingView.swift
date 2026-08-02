@@ -53,13 +53,11 @@ struct OnboardingView: View {
                 footer
             }
         }
-        .preferredColorScheme(.dark)
         .sheet(isPresented: $viewModel.showSearch) {
             // Reuses the existing company search rather than building a second one.
             TargetSearchSheet { result in
                 viewModel.addFromSearch(symbol: result.ticker, name: result.companyName)
             }
-            .preferredColorScheme(.dark)
         }
     }
 

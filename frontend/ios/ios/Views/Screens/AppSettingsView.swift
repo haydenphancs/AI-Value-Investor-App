@@ -513,5 +513,4 @@ struct SettingsToggleRow: View {
         AppSettingsView()
             .environment(\.appState, AppState())
     }
-    .preferredColorScheme(.dark)
 }

@@ -69,5 +69,4 @@ struct CommodityDetailTabButton: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

@@ -53,5 +53,4 @@ struct CryptoDetailKeyStatsSection: View {
         CryptoDetailKeyStatsSection(statisticsGroups: CryptoKeyStatisticsGroup.sampleETH)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

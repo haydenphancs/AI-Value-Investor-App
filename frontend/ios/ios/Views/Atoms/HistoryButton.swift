@@ -26,5 +26,4 @@ struct HistoryButton: View {
     HistoryButton()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

@@ -53,5 +53,4 @@ struct ETFDetailKeyStatsSection: View {
         ETFDetailKeyStatsSection(statisticsGroups: ETFKeyStatisticsGroup.sampleSPY)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

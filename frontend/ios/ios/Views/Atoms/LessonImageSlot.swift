@@ -67,5 +67,4 @@ struct LessonImageSlot: View {
             LessonImageSlot(imageName: "journey_missing")    // placeholder (asset absent)
         }
     }
-    .preferredColorScheme(.dark)
 }

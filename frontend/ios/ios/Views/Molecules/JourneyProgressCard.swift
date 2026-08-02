@@ -93,5 +93,4 @@ struct JourneyProgressCard: View {
     JourneyProgressCard(track: JourneyTrack.sampleBeginner)
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

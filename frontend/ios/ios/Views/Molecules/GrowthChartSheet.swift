@@ -298,5 +298,4 @@ struct GrowthChartSheet: View {
             ?? TickerReportData.sampleOracle.fundamentalMetrics[0],
         growthData: GrowthSectionData.sampleData
     )
-    .preferredColorScheme(.dark)
 }

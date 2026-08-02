@@ -73,11 +73,47 @@ private struct JourneyAPIResponse: Decodable {
 private struct JourneyAPILesson: Decodable {
     let title: String              // required: it's the stable lesson key; a title-less lesson is dropped
     let storyContent: JourneyAPIStory?
+    // Catalog metadata. The backend has always sent these (schemas/journey.py) and the decoder
+    // always threw them away, so the Learn tab's structure came exclusively from the hardcoded
+    // `InvestorJourneyData.sampleData`: a lesson seeded to Supabase was fetched, decoded, cached —
+    // and never displayed, because no level owned it. Every field is lenient; a row missing one
+    // still contributes its cards.
+    let level: String?
+    let description: String?
+    let durationMinutes: Int?
+    let category: String?
+    let sortOrder: Int?
 
     enum CodingKeys: String, CodingKey {
         case title
         case storyContent = "story_content"
+        case level
+        case description
+        case durationMinutes = "duration_minutes"
+        case category
+        case sortOrder = "sort_order"
     }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decode(String.self, forKey: .title)
+        storyContent = (try? c.decodeIfPresent(JourneyAPIStory.self, forKey: .storyContent)) ?? nil
+        level = (try? c.decodeIfPresent(String.self, forKey: .level)) ?? nil
+        description = (try? c.decodeIfPresent(String.self, forKey: .description)) ?? nil
+        durationMinutes = (try? c.decodeIfPresent(Int.self, forKey: .durationMinutes)) ?? nil
+        category = (try? c.decodeIfPresent(String.self, forKey: .category)) ?? nil
+        sortOrder = (try? c.decodeIfPresent(Int.self, forKey: .sortOrder)) ?? nil
+    }
+}
+
+/// One server-authored catalog entry, in the shape the journey builder needs.
+struct JourneyCatalogEntry: Sendable {
+    let title: String
+    let description: String
+    let level: JourneyLevel
+    let durationMinutes: Int
+    let category: LessonCategory
+    let sortOrder: Int
 }
 
 private struct JourneyAPIStory: Decodable {
@@ -258,6 +294,35 @@ final class JourneyContentStore {
         prefetchTask = nil
     }
 
+    /// Server-authored lesson catalog, ordered. Empty until a successful fetch, which is the
+    /// signal for the journey builder to fall back to the bundled `InvestorJourneyData`.
+    private(set) var remoteCatalog: [JourneyCatalogEntry] = []
+
+    /// Map one API lesson onto a catalog entry. Returns nil only when the level is unusable —
+    /// without a level there is no place in the journey to put it.
+    private static func catalogEntry(from lesson: JourneyAPILesson) -> JourneyCatalogEntry? {
+        guard let level = journeyLevel(from: lesson.level) else { return nil }
+        return JourneyCatalogEntry(
+            title: lesson.title,
+            description: lesson.description ?? "",
+            level: level,
+            // 0 would render "0 min"; let the caller substitute a content-derived estimate.
+            durationMinutes: max(0, lesson.durationMinutes ?? 0),
+            category: (lesson.category ?? "").lowercased() == "crypto" ? .crypto : .standard,
+            sortOrder: lesson.sortOrder ?? 0
+        )
+    }
+
+    private static func journeyLevel(from raw: String?) -> JourneyLevel? {
+        switch (raw ?? "").lowercased() {
+        case "foundation": return .foundation
+        case "analysis": return .analysis
+        case "strategies": return .strategies
+        case "mastery": return .mastery
+        default: return nil
+        }
+    }
+
     private func loadRemote() async {
         do {
             let response = try await APIClient.shared.request(
@@ -267,7 +332,12 @@ final class JourneyContentStore {
             // Build into a fresh map and swap: a retry after a partial/failed attempt must not
             // inherit stale lessons from it.
             var loaded: [String: [LessonTopicCard]] = [:]
+            var catalog: [JourneyCatalogEntry] = []
             for lesson in response.lessons {
+                // Capture the catalog entry even when the lesson has no usable cards: a row can
+                // legitimately be published metadata-first, and the journey should still show it
+                // (it falls back to generated cards) rather than silently omitting the lesson.
+                if let entry = Self.catalogEntry(from: lesson) { catalog.append(entry) }
                 // Skip nil OR empty card lists — an empty remote array must not shadow the
                 // bundled/generated fallback (would crash on cards[0] when the lesson opens).
                 guard let story = lesson.storyContent, !story.cards.isEmpty else { continue }
@@ -285,6 +355,11 @@ final class JourneyContentStore {
                 }
             }
             remoteByTitle = loaded
+            // Ordered the way the journey renders: by level, then the server's sort_order, then
+            // title so ties are deterministic across launches (Swift's sort is not stable).
+            remoteCatalog = catalog.sorted {
+                ($0.level.rawValue, $0.sortOrder, $0.title) < ($1.level.rawValue, $1.sortOrder, $1.title)
+            }
             // Latch ONLY on content that actually landed. A successful-but-empty response (cold
             // backend cache degraded to `lessons: []`, every lesson dropped on decode) used to latch
             // the flag anyway and freeze the whole session on text-only bundled lessons with no

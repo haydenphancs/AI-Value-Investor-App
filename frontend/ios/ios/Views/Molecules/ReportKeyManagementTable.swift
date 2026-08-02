@@ -176,5 +176,4 @@ struct ReportKeyManagementTable: View {
     ReportKeyManagementTable(management: TickerReportData.sampleOracle.keyManagement)
         .padding()
         .background(AppColors.cardBackground)
-        .preferredColorScheme(.dark)
 }

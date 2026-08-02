@@ -52,5 +52,4 @@ struct GenerateAnalysisSection: View {
     }
     .padding(.vertical)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

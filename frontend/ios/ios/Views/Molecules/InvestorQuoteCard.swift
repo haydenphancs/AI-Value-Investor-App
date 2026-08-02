@@ -49,5 +49,4 @@ struct InvestorQuoteCard: View {
     InvestorQuoteCard(quote: .buffettQuote)
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

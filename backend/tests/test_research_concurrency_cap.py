@@ -81,7 +81,7 @@ async def test_at_cap_rejects_before_charging(monkeypatch):
     credit = _patch_credit_service(monkeypatch, precharge_return=99)
 
     resp = await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=supabase, x_guest_id=None, _rate_limit=None,
     )
 
     assert resp.status_code == 409
@@ -101,7 +101,7 @@ async def test_under_cap_proceeds_to_charge(monkeypatch):
     credit = _patch_credit_service(monkeypatch, precharge_return=None)
 
     resp = await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=supabase, x_guest_id=None, _rate_limit=None,
     )
 
     credit.precharge.assert_called_once()                     # cap gate passed through
@@ -123,7 +123,7 @@ async def test_transient_charge_failure_returns_system_busy_not_insufficient(mon
     credit.precharge.side_effect = CreditServiceUnavailable("supabase down")
 
     resp = await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=supabase, x_guest_id=None, _rate_limit=None,
     )
 
     credit.precharge.assert_called_once()                     # reached the charge
@@ -154,7 +154,7 @@ async def test_cap_query_scopes_to_inflight_statuses(monkeypatch):
     _patch_credit_service(monkeypatch, precharge_return=None)
 
     await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=sb, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=sb, x_guest_id=None, _rate_limit=None,
     )
 
     assert query_holder["statuses"] == ["pending", "processing"]
@@ -186,7 +186,7 @@ async def test_inflight_queries_scoped_to_current_close_cycle(monkeypatch):
     _patch_credit_service(monkeypatch, precharge_return=None)  # short-circuit after charge
 
     await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=sb, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=sb, x_guest_id=None, _rate_limit=None,
     )
 
     cycle = current_close_cycle_start().isoformat()
@@ -206,7 +206,7 @@ async def test_global_admission_rejects_before_charging(monkeypatch):
     credit = _patch_credit_service(monkeypatch, precharge_return=99)
 
     resp = await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=supabase, x_guest_id=None, _rate_limit=None,
     )
 
     assert resp.status_code == 409
@@ -224,7 +224,7 @@ async def test_global_cap_exactly_at_rejects(monkeypatch):
     credit = _patch_credit_service(monkeypatch, precharge_return=99)
 
     resp = await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=supabase, x_guest_id=None, _rate_limit=None,
     )
 
     assert resp.status_code == 409
@@ -243,7 +243,7 @@ async def test_global_cap_under_by_one_passes_gate(monkeypatch):
     credit = _patch_credit_service(monkeypatch, precharge_return=None)
 
     resp = await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=supabase, x_guest_id=None, _rate_limit=None,
     )
 
     credit.precharge.assert_called_once()                     # global gate passed
@@ -265,7 +265,7 @@ async def test_global_gate_disabled_skips_query(monkeypatch):
     credit = _patch_credit_service(monkeypatch, precharge_return=None)
 
     resp = await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=supabase, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=supabase, x_guest_id=None, _rate_limit=None,
     )
 
     credit.precharge.assert_called_once()                     # reached the charge
@@ -317,7 +317,7 @@ async def test_global_query_has_no_user_filter(monkeypatch):
     _patch_credit_service(monkeypatch, precharge_return=None)
 
     await research.generate_research_report(
-        request=_req(), user={"id": "user-1"}, supabase=sb, _rate_limit=None,
+        request=_req(), user={"id": "user-1"}, supabase=sb, x_guest_id=None, _rate_limit=None,
     )
 
     # The per-user query added exactly one eq filter: user_id.

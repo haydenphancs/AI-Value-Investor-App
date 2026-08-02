@@ -167,7 +167,6 @@ private struct WaveformBar: View {
         AudioManager.shared.load(.sampleMoneyMoves)
         AudioManager.shared.resume()
     }
-    .preferredColorScheme(.dark)
 }
 
 #Preview("Paused State") {
@@ -186,5 +185,4 @@ private struct WaveformBar: View {
     .onAppear {
         AudioManager.shared.load(.sampleMoneyMoves)
     }
-    .preferredColorScheme(.dark)
 }

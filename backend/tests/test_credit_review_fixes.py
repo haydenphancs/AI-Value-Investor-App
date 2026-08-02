@@ -68,7 +68,7 @@ async def test_research_insert_raise_refunds_precharge(monkeypatch):
     _stub_fmp(monkeypatch)
     resp = await research.generate_research_report(
         request=_req(), user={"id": "authed-1"},
-        supabase=_generate_supabase_insert_raises(), _rate_limit=None,
+        supabase=_generate_supabase_insert_raises(), x_guest_id=None, _rate_limit=None,
     )
     assert json.loads(resp.body)["error_code"] == ErrorCode.REPORT_GENERATION_FAILED.value
     credit.precharge.assert_called_once()
@@ -80,9 +80,22 @@ async def test_research_guest_insert_raise_no_refund(monkeypatch):
     # Guests are never charged → nothing to refund even when the insert raises.
     credit = _credit_mock(monkeypatch, research)
     _stub_fmp(monkeypatch)
+    # Let the guest through the per-install monthly allowance so this test still exercises
+    # its actual subject (insert failure → no refund). Stubbed explicitly rather than relying
+    # on the ambient state of the module-level budget singleton, which other tests mutate.
+    monkeypatch.setattr(
+        research, "get_guest_report_budget_service",
+        lambda: type("B", (), {
+            "try_claim_report": staticmethod(lambda _b: 1),
+            "current_period": staticmethod(lambda: "2026-08-01"),
+            # Insert failure must hand the allowance BACK — with a limit of 1, not releasing
+            # destroys the guest's whole month for a transient error.
+            "release_report": staticmethod(lambda _b, _p: 0),
+        })(),
+    )
     resp = await research.generate_research_report(
         request=_req(), user={"id": GUEST_USER_ID},
-        supabase=_generate_supabase_insert_raises(), _rate_limit=None,
+        supabase=_generate_supabase_insert_raises(), x_guest_id=None, _rate_limit=None,
     )
     assert json.loads(resp.body)["error_code"] == ErrorCode.REPORT_GENERATION_FAILED.value
     credit.precharge.assert_not_called()

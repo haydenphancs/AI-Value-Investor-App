@@ -29,7 +29,7 @@ struct TrendingThemeTile: View {
             .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                    .stroke(AppColors.textPrimary.opacity(0.05), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)

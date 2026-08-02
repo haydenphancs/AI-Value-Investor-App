@@ -62,5 +62,4 @@ struct ChatHistoryList: View {
 
         ChatHistoryList(groups: ChatHistoryItem.sampleGroups)
     }
-    .preferredColorScheme(.dark)
 }

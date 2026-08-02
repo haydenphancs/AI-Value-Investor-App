@@ -127,5 +127,4 @@ struct ArticleCommentCard: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

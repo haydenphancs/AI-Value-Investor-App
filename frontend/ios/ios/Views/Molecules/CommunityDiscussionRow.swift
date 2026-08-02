@@ -102,5 +102,4 @@ struct CommunityDiscussionRow: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

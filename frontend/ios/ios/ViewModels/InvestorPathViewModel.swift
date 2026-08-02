@@ -317,10 +317,41 @@ class InvestorJourneyViewModel: ObservableObject {
     /// Single source of truth for the screen: the static lesson catalog overlaid with real
     /// per-lesson durations (computed from content) and completion status (from persistence).
     /// Exactly one not-yet-completed lesson is flagged `.upNext` — the global next lesson.
+    /// The lesson catalog to render: the SERVER's when it has one, the bundled set otherwise.
+    ///
+    /// The journey's structure used to come exclusively from the hardcoded
+    /// `InvestorJourneyData.sampleData`, while `JourneyContentStore` only ever contributed card
+    /// bodies keyed by title. So a lesson seeded to Supabase — through the documented
+    /// author → generate → align → seed pipeline — was fetched, decoded, and cached, and then
+    /// never appeared: no level owned it. Journey content could not ship without an app update,
+    /// which is exactly the property `.claude/rules/learn-content.md` says must hold (and which
+    /// Money Moves already has).
+    ///
+    /// Bundled remains the offline fallback, same as Money Moves: an empty remote catalog (first
+    /// launch, offline, a failed fetch) renders the shipped journey unchanged.
+    private func catalogLevels() -> [LevelProgress] {
+        let remote = JourneyContentStore.shared.remoteCatalog
+        guard !remote.isEmpty else { return InvestorJourneyData.sampleData.levels }
+
+        // Preserve the declared level order rather than whatever the server happened to send.
+        return JourneyLevel.allCases.compactMap { level in
+            let lessons = remote.filter { $0.level == level }.map { entry in
+                Lesson(
+                    title: entry.title,
+                    description: entry.description,
+                    durationMinutes: entry.durationMinutes,
+                    status: .notStarted,   // real status is assigned by the caller
+                    category: entry.category
+                )
+            }
+            return lessons.isEmpty ? nil : LevelProgress(level: level, lessons: lessons)
+        }
+    }
+
     private func buildJourneyData() -> InvestorJourneyData {
         var assignedUpNext = false
         let completedSet = progress.completedTitles
-        let builtLevels: [LevelProgress] = InvestorJourneyData.sampleData.levels.map { base in
+        let builtLevels: [LevelProgress] = catalogLevels().map { base in
             let lessons: [Lesson] = base.lessons.map { lesson in
                 let status: LessonStatus
                 if completedSet.contains(lesson.title) {
@@ -331,8 +362,14 @@ class InvestorJourneyViewModel: ObservableObject {
                 } else {
                     status = .notStarted
                 }
-                let minutes = JourneyContentStore.shared.estimatedMinutes(forLessonTitled: lesson.title)
-                    ?? lesson.durationMinutes
+                // Content-derived estimate wins; then the catalog's own figure. Floored at 1 so a
+                // server row that omits `duration_minutes` renders "1 min" rather than "0 min" —
+                // the remote catalog can supply 0, the bundled one never does.
+                let minutes = max(
+                    1,
+                    JourneyContentStore.shared.estimatedMinutes(forLessonTitled: lesson.title)
+                        ?? lesson.durationMinutes
+                )
                 return Lesson(
                     title: lesson.title,
                     description: lesson.description,

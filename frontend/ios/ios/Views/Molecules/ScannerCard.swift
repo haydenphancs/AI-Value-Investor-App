@@ -232,7 +232,7 @@ struct ScannerCard: View {
             .foregroundColor(AppColors.primaryBlue)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 9)
-            .background(Color(hex: "14171F"))
+            .background(Color(lightHex: "EEF1F6", darkHex: "14171F"))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)

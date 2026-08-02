@@ -26,5 +26,4 @@ struct ClearAllButton: View {
     ClearAllButton()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

@@ -54,5 +54,4 @@ struct LevelProgressBar: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

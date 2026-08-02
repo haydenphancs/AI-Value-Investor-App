@@ -746,7 +746,6 @@ struct ReportConsensusBar: View {
     ReportConsensusBar(consensus: TickerReportData.sampleOracle.wallStreetConsensus)
         .padding()
         .background(AppColors.cardBackground)
-        .preferredColorScheme(.dark)
 }
 
 #Preview("No analyst coverage") {
@@ -774,5 +773,4 @@ struct ReportConsensusBar: View {
     ))
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

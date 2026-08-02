@@ -270,3 +270,49 @@ def test_content_types_are_the_three_learn_features():
     # Bookmarks deliberately live under their own content_type so they can be REMOVED without
     # the append-only /progress routes being able to "complete" one.
     assert BOOKMARK_CONTENT_TYPE not in LEARN_CONTENT_TYPES
+
+
+# ── bookmark ordering must be a TOTAL order ───────────────────────────
+#
+# The list is "most recent first" and the Book Library hero shortcut opens
+# `bookmarkedTitles.first` (BookmarkStore.swift). `completed_at` defaults to now(), so two
+# bookmarks saved in quick succession can share a timestamp — and ordering by it ALONE leaves
+# their relative order up to Postgres, so the hero card could open a different book on each
+# request. `item_key` is unique per (user, content_type), which makes the order total.
+
+
+class _OrderRecordingQuery(_FakeQuery):
+    def order(self, column, **kwargs):
+        self._table.orders.append((column, kwargs.get("desc", False)))
+        return self
+
+
+class _OrderRecordingSupabase(_FakeSupabase):
+    def __init__(self, rows=None):
+        super().__init__(rows=rows)
+        self.orders = []
+
+    def table(self, _name):
+        return _OrderRecordingQuery(self, self.rows, self.raises)
+
+
+def test_bookmarks_are_ordered_by_recency_then_a_deterministic_tiebreak():
+    sb = _OrderRecordingSupabase(rows=[{"item_key": "A Random Walk"}, {"item_key": "Common Stocks"}])
+
+    _run(get_book_bookmarks(user=USER, supabase=sb))
+
+    assert sb.orders[0] == ("completed_at", True), "most-recent-first is the primary sort"
+    assert ("item_key", False) in sb.orders[1:], (
+        "equal completed_at values must be broken deterministically, or the Book Library hero "
+        "shortcut can point at a different book on each request"
+    )
+
+
+def test_bookmark_ordering_is_requested_from_postgres_not_left_to_row_order():
+    """Two clauses, in that order — asserting the shape rather than a specific row list, since
+    the ordering itself is the database's job."""
+    sb = _OrderRecordingSupabase(rows=[])
+
+    _run(get_book_bookmarks(user=USER, supabase=sb))
+
+    assert len(sb.orders) >= 2, f"expected a total order, got {sb.orders}"

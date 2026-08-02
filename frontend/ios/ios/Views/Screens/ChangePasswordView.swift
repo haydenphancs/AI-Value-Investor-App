@@ -181,5 +181,4 @@ struct ChangePasswordView: View {
 
 #Preview {
     NavigationStack { ChangePasswordView() }
-        .preferredColorScheme(.dark)
 }

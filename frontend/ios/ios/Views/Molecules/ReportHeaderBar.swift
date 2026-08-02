@@ -112,5 +112,4 @@ struct ReportHeaderBar: View {
         onDelete: {}
     )
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

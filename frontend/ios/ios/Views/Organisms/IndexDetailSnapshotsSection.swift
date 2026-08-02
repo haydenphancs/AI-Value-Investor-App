@@ -556,7 +556,6 @@ struct IndexSnapshotsInfoSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -568,5 +567,4 @@ struct IndexSnapshotsInfoSheet: View {
             .padding(.horizontal, AppSpacing.lg)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

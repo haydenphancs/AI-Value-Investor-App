@@ -219,5 +219,4 @@ private struct SnapshotAxisData: Identifiable {
     SnapshotRadarChart(snapshots: SnapshotItem.sampleData)
         .padding()
         .background(AppColors.cardBackground)
-        .preferredColorScheme(.dark)
 }

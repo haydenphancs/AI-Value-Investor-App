@@ -112,11 +112,20 @@ final class MoneyMovesProgressStore: ObservableObject {
 
     func hydrate() async {
         let token = localVersion
+        let epoch = LearnIdentityEpoch.current
         do {
             let resp = try await apiClient.request(
                 endpoint: .getLearnProgress(contentType: Self.contentType),
                 responseType: LearnProgressResponse.self
             )
+            // The ACCOUNT changed while this was in flight (sign-out / switch). `localVersion`
+            // cannot see that — each account starts from its own local state — so check the
+            // identity epoch too, or the previous user's slugs get merged in and then pushed
+            // into the new account.
+            guard epoch == LearnIdentityEpoch.current else {
+                print("[MoneyMovesProgressStore] discarded a hydrate from a previous identity")
+                return
+            }
             // A local write (un-mark, or a DELETE confirming and retiring its tombstone) landed
             // while this GET was in flight, so the response describes a PRE-write server state.
             // Merging it would flip the article back to "Completed" — with the tombstone already

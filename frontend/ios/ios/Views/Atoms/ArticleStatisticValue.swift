@@ -71,5 +71,4 @@ struct ArticleStatisticValue: View {
     }
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

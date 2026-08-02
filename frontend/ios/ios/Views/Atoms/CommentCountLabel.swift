@@ -40,5 +40,4 @@ struct CommentCountLabel: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -143,5 +143,4 @@ struct TermsOfUseView: View {
     NavigationStack {
         TermsOfUseView()
     }
-    .preferredColorScheme(.dark)
 }

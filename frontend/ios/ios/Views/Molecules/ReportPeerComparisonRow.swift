@@ -90,5 +90,4 @@ struct ReportPeerComparisonRow: View {
     }
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

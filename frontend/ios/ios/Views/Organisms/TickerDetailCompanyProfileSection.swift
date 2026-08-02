@@ -145,5 +145,4 @@ struct TickerDetailCompanyProfileSection: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

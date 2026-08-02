@@ -217,5 +217,4 @@ struct PerformanceBenchmarkRow: View {
         TickerDetailPerformanceSection(periods: PerformancePeriod.sampleData)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

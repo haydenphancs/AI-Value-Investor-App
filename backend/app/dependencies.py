@@ -113,7 +113,20 @@ def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
         )
         return
 
-    if issued_dt < changed_dt:
+    # Compare at WHOLE-SECOND granularity, because that is all `iat` has.
+    #
+    # JWTs carry `iat` as an integer POSIX timestamp, while `password_changed_at` is written
+    # with microsecond precision. A token minted immediately after the stamp therefore floors
+    # BELOW it — e.g. stamp 12:00:00.604382, iat 12:00:00 — and a naive `<` rejects a
+    # credential that is genuinely newer than the change. That defeated the replacement tokens
+    # `POST /auth/change-password` hands back (they are minted in the same second as the stamp,
+    # so they were rejected ~100% of the time), and it could also 401 a legitimate user who
+    # signed in again within the same second as their own reset.
+    #
+    # Flooring the stamp costs at most a one-second window: a token issued during the same
+    # wall-clock second as the change survives. Anything from any earlier second is still
+    # evicted, which is the property this control exists to provide.
+    if issued_dt < changed_dt.replace(microsecond=0):
         logger.info(
             "Rejecting token for user=%s: issued %s, password changed %s",
             user_row.get("id"), issued_dt.isoformat(), changed_dt.isoformat(),

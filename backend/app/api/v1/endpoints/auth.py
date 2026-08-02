@@ -61,7 +61,11 @@ def is_token_stale_after_password_change(
             changed_dt = changed_dt.replace(tzinfo=timezone.utc)
         # `iat` is a POSIX timestamp (int or float).
         issued_dt = datetime.fromtimestamp(float(issued_at), tz=timezone.utc)
-        return issued_dt < changed_dt
+        # Whole-second comparison — `iat` has no sub-second resolution, while
+        # `password_changed_at` is stamped with microseconds, so a token minted in the same
+        # second as the change floors below it and would be rejected despite being newer.
+        # Mirrors dependencies._reject_if_password_changed_since_issue; see the note there.
+        return issued_dt < changed_dt.replace(microsecond=0)
     except Exception as e:
         logger.warning(
             "password_changed_at check failed for user=%s (%s: %s) — allowing the token",

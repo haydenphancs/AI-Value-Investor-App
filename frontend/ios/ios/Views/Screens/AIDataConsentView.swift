@@ -134,5 +134,4 @@ struct AIDataConsentView: View {
 
 #Preview {
     AIDataConsentView(onAllow: {}, onDecline: {})
-        .preferredColorScheme(.dark)
 }

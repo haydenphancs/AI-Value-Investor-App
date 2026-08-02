@@ -120,5 +120,4 @@ struct SearchResultRow: View {
     }
     .padding(.horizontal, AppSpacing.lg)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

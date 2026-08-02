@@ -90,5 +90,4 @@ struct LessonCard: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -106,7 +106,6 @@ struct HomeDashboardView: View {
             ProfileView()
                 .environment(appState)
                 .environment(\.appState, appState)
-                .preferredColorScheme(.dark)
         }
         .onChange(of: appState.pendingPushTicker, initial: true) {
             // `initial: true` is load-bearing, not cosmetic. On a COLD launch from a
@@ -150,19 +149,16 @@ struct HomeDashboardView: View {
                 }
                 .navigationBarHidden(true)
             }
-            .preferredColorScheme(.dark)
         }
         .fullScreenCover(item: $signalDetailTarget) { target in
             NavigationStack {
                 SignalTickerDetailView(kind: target.kind, ticker: target.symbol)
             }
-            .preferredColorScheme(.dark)
         }
         .fullScreenCover(item: $themeDetailTarget) { target in
             NavigationStack {
                 ThemeDetailView(slug: target.slug)
             }
-            .preferredColorScheme(.dark)
         }
     }
 
@@ -357,5 +353,4 @@ private struct ThemeDetailTarget: Identifiable {
     HomeDashboardView(selectedTab: .constant(.home), repository: MockHomeRepository())
         .environment(AppState())
         .environmentObject(AudioManager.shared)
-        .preferredColorScheme(.dark)
 }

@@ -58,5 +58,4 @@ struct ETFDetailOverviewContent: View {
         ETFDetailOverviewContent(etfData: ETFDetailData.sampleSPY)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

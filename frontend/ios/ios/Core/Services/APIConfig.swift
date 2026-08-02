@@ -179,10 +179,10 @@ enum FeatureFlags: Sendable {
 
     /// Appearance mode picker (Light / Dark / System).
     ///
-    /// FALSE because 332 view files hard-code `.preferredColorScheme(.dark)`, so selecting
-    /// Light or System changed the stored preference and nothing visible.
-    /// `AppearanceManager` and `AppearanceMode` remain in place.
-    ///
-    /// Flip to `true` when the forced-dark sweep is done and the app honours the selection.
-    nonisolated static let appearanceModeEnabled = false
+    /// TRUE: the forced-dark sweep is done — the per-view `.preferredColorScheme(.dark)`
+    /// modifiers were removed and `AppColors` surface/text tokens are now adaptive
+    /// (see Theme/AppTheme.swift), so selecting Light or System actually re-themes the app.
+    /// Appearance is applied by a reactive root `.preferredColorScheme` (iosApp) plus the
+    /// `AppearanceManager` window override (robust across sheets/covers).
+    nonisolated static let appearanceModeEnabled = true
 }

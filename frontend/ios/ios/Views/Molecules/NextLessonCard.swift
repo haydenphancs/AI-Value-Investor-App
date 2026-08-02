@@ -69,5 +69,4 @@ struct NextLessonCard: View {
     NextLessonCard(lesson: NextLesson.sampleData)
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

@@ -197,7 +197,22 @@ class Settings(BaseSettings):
     #                              skipped by Apple's library, so local testing needs no certs.
     #   Sandbox / Production     → REQUIRES Apple's root certificates (see
     #                              IAP_ROOT_CERT_DIR) or verification fails closed.
-    IAP_ENVIRONMENT: str = "LocalTesting"
+    #
+    # DEFAULTS TO PRODUCTION, and that default is a security control, not a convenience.
+    # In XCODE / LOCAL_TESTING, Apple's library does NOT verify the signature at all —
+    # `SignedDataVerifier._decode_signed_object` calls
+    # `jwt.decode(signed_obj, options={"verify_signature": False})` and returns immediately.
+    # So with a local environment configured, `POST /billing/verify` accepts ANY unsigned JWT
+    # as a genuine Apple transaction: forge {"productId": "com.phan.caydex.max.monthly", ...},
+    # post it, receive the Max tier and 4000 credits, for free, forever.
+    #
+    # This previously defaulted to "LocalTesting", so a deploy that simply forgot to set the
+    # variable — it is an unchecked item on the launch checklist — would have shipped exactly
+    # that. Defaulting to Production inverts the failure: an unconfigured deploy has no root
+    # certificates, `_load_root_certificates` raises AppStoreNotConfigured, and the endpoint
+    # returns 503 instead of granting free subscriptions. Local work sets IAP_ENVIRONMENT=Xcode
+    # explicitly (see the launch checklist §6b), which is the correct place for that knowledge.
+    IAP_ENVIRONMENT: str = "Production"
     # Numeric App Store app id (App Store Connect → App Information → Apple ID).
     # Required for Production verification; unknown until the ASC record exists.
     IAP_APP_APPLE_ID: Optional[int] = None

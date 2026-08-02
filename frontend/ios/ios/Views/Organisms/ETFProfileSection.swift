@@ -138,5 +138,4 @@ struct ETFProfileSection: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

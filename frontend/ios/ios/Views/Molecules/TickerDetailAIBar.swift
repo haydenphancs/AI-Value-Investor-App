@@ -46,5 +46,4 @@ struct TickerDetailAIBar: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

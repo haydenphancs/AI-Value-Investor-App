@@ -430,5 +430,4 @@ private struct ChartIntervalAnchorKey: PreferenceKey {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

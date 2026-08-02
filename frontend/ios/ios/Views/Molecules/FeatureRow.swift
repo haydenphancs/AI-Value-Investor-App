@@ -49,5 +49,4 @@ struct FeatureRow: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

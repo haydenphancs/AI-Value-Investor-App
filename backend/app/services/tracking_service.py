@@ -64,6 +64,19 @@ class WatchlistUnavailableError(Exception):
 _feed_cache: Dict[str, Tuple[float, Any]] = {}
 FEED_CACHE_TTL = 30  # 30 seconds per-user
 
+# Hard cap on the number of cached feeds.
+#
+# The key space became caller-influenced with migration 108: guests are keyed per INSTALL
+# (uuid5 of the X-Guest-Id header), so anyone can mint unlimited distinct keys just by varying
+# that header. Each entry holds a full TrackingFeedResponse — every asset with quote, sparkline
+# floats, and the earnings/whale/analyst/insider alert lists — and entries were only ever
+# removed on a READ that found them expired. A key never read again was never freed, so the
+# dict grew without bound for the life of the process: a slow OOM on a 512 MB Railway dyno,
+# reachable by anyone with curl.
+#
+# The TTL is what keeps data fresh; this cap is what keeps the process alive.
+_FEED_CACHE_MAX_ENTRIES = 500
+
 _sparkline_cache: Dict[str, Tuple[float, List[float]]] = {}
 SPARKLINE_CACHE_TTL = 300  # 5 minutes per-ticker
 
@@ -80,7 +93,27 @@ def _feed_cache_get(user_id: str) -> Optional[TrackingFeedResponse]:
 
 
 def _feed_cache_set(user_id: str, value: TrackingFeedResponse) -> None:
+    # Move-to-end on write so the dict head is the least-recently-written, then evict from the
+    # head past the cap. Mirrors `stock_overview_service._cache_set`. Expired entries are also
+    # swept opportunistically here, because eviction on read alone never reclaims a key that
+    # is never read again — which is every abandoned guest install.
+    _feed_cache.pop(user_id, None)
     _feed_cache[user_id] = (_time.monotonic(), value)
+
+    if len(_feed_cache) > _FEED_CACHE_MAX_ENTRIES:
+        now = _time.monotonic()
+        stale = [k for k, (ts, _v) in _feed_cache.items() if now - ts > FEED_CACHE_TTL]
+        for key in stale:
+            _feed_cache.pop(key, None)
+        # Still over after dropping the expired ones → evict oldest-written first.
+        if len(_feed_cache) > _FEED_CACHE_MAX_ENTRIES:
+            overflow = len(_feed_cache) - _FEED_CACHE_MAX_ENTRIES
+            for key in list(_feed_cache.keys())[:overflow]:
+                _feed_cache.pop(key, None)
+            logger.warning(
+                "[Tracking] feed cache at cap (%d) — evicted %d least-recently-written entries",
+                _FEED_CACHE_MAX_ENTRIES, overflow,
+            )
 
 
 def invalidate_feed_cache(user_id: str) -> None:

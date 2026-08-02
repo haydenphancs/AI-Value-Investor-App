@@ -25,5 +25,4 @@ struct TimeAgoLabel: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

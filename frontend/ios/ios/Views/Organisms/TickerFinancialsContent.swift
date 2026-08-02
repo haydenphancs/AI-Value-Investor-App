@@ -137,5 +137,4 @@ struct TickerFinancialsContent: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

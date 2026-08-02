@@ -72,5 +72,4 @@ struct ArticleTagPill: View {
     }
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

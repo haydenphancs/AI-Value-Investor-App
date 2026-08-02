@@ -48,7 +48,6 @@ struct NewPortfolioSheet: View {
             }
             .navigationTitle("New Portfolio")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -62,7 +61,6 @@ struct NewPortfolioSheet: View {
             }
         }
         .presentationDetents([.medium])
-        .preferredColorScheme(.dark)
         .onAppear { nameFocused = true }
     }
 
@@ -101,5 +99,4 @@ struct NewPortfolioSheet: View {
 
 #Preview {
     NewPortfolioSheet(viewModel: TrackingViewModel())
-        .preferredColorScheme(.dark)
 }

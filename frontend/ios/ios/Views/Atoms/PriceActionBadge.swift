@@ -56,5 +56,4 @@ struct PriceActionBadge: View {
     }
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

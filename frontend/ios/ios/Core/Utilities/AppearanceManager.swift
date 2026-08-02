@@ -5,13 +5,18 @@
 //  Applies + persists the user's appearance choice (System / Dark / Light) by
 //  setting `overrideUserInterfaceStyle` on every connected window scene — the
 //  robust way to theme across fullScreenCovers/sheets (unlike `.preferredColorScheme`,
-//  which only affects one view subtree).
+//  which does not reliably reach content presented outside the view tree).
 //
-//  NOTE: the app currently hard-codes `.preferredColorScheme(.dark)` in ~387 views,
-//  which locally override this window setting. So today the effective look stays dark
-//  regardless of the choice; the selection still persists + syncs. Removing those
-//  forced-dark modifiers app-wide (so Light/System fully render) is a tracked
-//  follow-up. Default is `.dark` to preserve the current look.
+//  STATUS (light-mode sweep done): the per-view `.preferredColorScheme(.dark)` and
+//  `.toolbarColorScheme(.dark)` modifiers that used to pin every screen dark have been
+//  removed, and `AppColors` surface/text tokens are now adaptive (see Theme/AppTheme.swift),
+//  so Light and System actually re-theme the app. Appearance is driven two ways that always
+//  agree because both read `storageKey`:
+//    1. a reactive root `.preferredColorScheme` in `iosApp` (correct from frame 0 — no
+//       cold-launch flash — and updates instantly on change), and
+//    2. this window-level override (reliable across sheets / fullScreenCovers, and what
+//       remote settings-sync re-applies on hydrate).
+//  Default is `.dark` to preserve the shipped look until the user opts into Light/System.
 //
 
 import SwiftUI

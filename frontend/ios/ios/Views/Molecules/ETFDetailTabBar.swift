@@ -69,5 +69,4 @@ struct ETFDetailTabButton: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

@@ -356,6 +356,15 @@ subscriber keeps their paid tier forever — the client only ever reports *purch
 - [ ] `IAP_APP_APPLE_ID=<numeric app id>`
 - [ ] `IAP_ROOT_CERT_DIR=certs/apple` (default; set it if you put them elsewhere)
 
+> **The default changed (2026-08-01), and it matters.** `IAP_ENVIRONMENT` used to default to
+> `LocalTesting`. In `LocalTesting`/`Xcode`, Apple's library **skips signature verification
+> entirely** — so a deploy that simply forgot this variable would have accepted any forged,
+> unsigned JWT as a real purchase and handed out Max tier + 4000 credits for free. It now
+> defaults to **`Production`**, so an unconfigured deploy fails closed (503, "no root
+> certificates") instead. Consequence for you: **local work must now set
+> `IAP_ENVIRONMENT=Xcode` explicitly** — it is no longer the default. Guarded by
+> `backend/tests/test_iap_environment_fails_closed.py`.
+
 ### Testing it locally, before App Store Connect exists
 
 A StoreKit configuration file (`frontend/ios/Caydex.storekit`) defines both subscriptions
@@ -370,7 +379,8 @@ sheet itself needs your ⌘R.
 
 - [ ] Open the project in Xcode, ⌘R, open the paywall, tap **Choose Pro**
 - [ ] Confirm the sheet appears, the purchase completes, and credits update to 1200
-- [ ] Set `IAP_ENVIRONMENT=Xcode` on your local backend (`LocalTesting` also works) — with
+- [ ] Set `IAP_ENVIRONMENT=Xcode` on your local backend (`LocalTesting` also works) — **now
+      required, not optional**, since the default is `Production` (see the box above). With
       `Production`/`Sandbox` the backend correctly refuses to verify an Xcode-signed receipt
 - [ ] In Xcode's **Debug → StoreKit** menu you can also force failures, Ask to Buy, refunds,
       and renewals — worth walking through the refund case, since that's what the webhook

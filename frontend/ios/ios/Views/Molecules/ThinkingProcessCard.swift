@@ -44,7 +44,7 @@ struct ThinkingProcessCard: View {
             }
         }
         .padding(10)
-        .background(Color.white.opacity(0.035))
+        .background(AppColors.textPrimary.opacity(0.035))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(AppColors.primaryBlue.opacity(thinking.isActive ? 0.28 : 0.10), lineWidth: 1)
@@ -160,5 +160,4 @@ struct ThinkingProcessCard: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

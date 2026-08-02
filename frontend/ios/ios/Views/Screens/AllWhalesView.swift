@@ -355,5 +355,4 @@ struct AllWhalesCategorySection: View {
     NavigationStack {
         AllWhalesView(viewModel: TrackingViewModel())
     }
-    .preferredColorScheme(.dark)
 }

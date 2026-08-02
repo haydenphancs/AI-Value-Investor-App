@@ -91,3 +91,54 @@ struct UserSettingsDTO: Decodable, Sendable {
 struct DeviceRegisterResult: Codable, Sendable {
     let registered: Bool
 }
+
+// MARK: - Guest-data claim response
+
+/// Result of `POST /users/me/claim-guest-data`.
+///
+/// The backend answers with one of three shapes, all of which must decode:
+///   `{"claimed": {...}}`                      — normal
+///   `{"claimed": {...}, "skipped": "..."}`    — no per-install guest id, nothing to claim
+///   `{"claimed": {...}, "error": "..."}`      — partial failure, reported rather than raised
+/// `claimed` and both counts are always present, so they are non-optional here; `skipped` and
+/// `error` are mutually exclusive extras.
+///
+/// `APIClient` deliberately does NOT set `.convertFromSnakeCase` (see APIClient.swift), so the
+/// `watchlist_items` mapping has to be spelled out — without it this decodes as a throw, on the
+/// sign-in path.
+struct ClaimGuestDataResult: Codable, Sendable {
+    struct Counts: Codable, Sendable {
+        let watchlistItems: Int
+        let portfolios: Int
+        /// Learn completions + book bookmarks (one `user_learn_progress` table, four
+        /// content types). OPTIONAL on purpose: this key was added to the endpoint after the
+        /// first version of this DTO shipped, and the backend deploys independently of the
+        /// app — a Railway rollback would omit it, and a non-optional `Int` would then throw
+        /// on decode, on the sign-in path.
+        let learnProgress: Int?
+        /// Deep-research reports (migration 110 partitions these per install too). Optional for
+        /// the same reason as `learnProgress`: the key was added after this DTO shipped and the
+        /// backend deploys independently, so a rollback must not turn into a decode throw on
+        /// the sign-in path.
+        let researchReports: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case watchlistItems = "watchlist_items"
+            case portfolios
+            case learnProgress = "learn_progress"
+            case researchReports = "research_reports"
+        }
+    }
+
+    let claimed: Counts
+    let skipped: String?
+    let error: String?
+
+    /// Whether anything actually moved — the only bit callers care about.
+    var didClaimAnything: Bool {
+        claimed.watchlistItems > 0
+            || claimed.portfolios > 0
+            || (claimed.learnProgress ?? 0) > 0
+            || (claimed.researchReports ?? 0) > 0
+    }
+}

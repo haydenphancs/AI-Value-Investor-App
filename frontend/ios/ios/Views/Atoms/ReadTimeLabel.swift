@@ -48,5 +48,4 @@ struct ReadTimeLabel: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

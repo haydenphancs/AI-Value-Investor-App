@@ -217,5 +217,4 @@ private struct PointBar: View {
             .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

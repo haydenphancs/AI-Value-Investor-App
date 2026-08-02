@@ -169,11 +169,9 @@ struct UpdatesView: View {
                 ProfileView()
                     .environment(appState)
                     .environment(\.appState, appState)
-                    .preferredColorScheme(.dark)
             }
             .fullScreenCover(isPresented: $showSearch) {
                 SearchView()
-                    .preferredColorScheme(.dark)
             }
             // Publisher articles open here, in-app, instead of pushing a
             // separate detail screen.
@@ -396,7 +394,6 @@ struct ManageAssetsSheet: View {
             }
             .navigationTitle("Your Tickers")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
@@ -408,7 +405,6 @@ struct ManageAssetsSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .preferredColorScheme(.dark)
         .sheet(isPresented: $showTickerSearch) {
             TickerSearchSheet { ticker in
                 onAddTicker?(ticker)
@@ -559,7 +555,6 @@ struct TickerSearchSheet: View {
             }
             .navigationTitle("Add Ticker")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -569,7 +564,6 @@ struct TickerSearchSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -610,10 +604,11 @@ struct NewsFilterSheet: View {
             //
             // Without all three, `List` keeps its default grouped material,
             // which on a sheet is translucent — so the news timeline showed
-            // through the filter sheet as a blur. `.preferredColorScheme(.dark)`
-            // and `.toolbarColorScheme(.dark, …)` complete it: the sheet is
-            // presented outside the app's own view tree, so it does not inherit
-            // the dark scheme from the screen that presented it.
+            // through the filter sheet as a blur. The opaque `AppColors.background`
+            // layer completes it. (The old `.preferredColorScheme(.dark)` /
+            // `.toolbarColorScheme(.dark)` here were removed in the light-mode
+            // sweep — the sheet now follows the app appearance via the window
+            // override in AppearanceManager, so it themes correctly in Light too.)
             ZStack {
                 AppColors.background
                     .ignoresSafeArea()
@@ -698,7 +693,6 @@ struct NewsFilterSheet: View {
             }
             .navigationTitle("Filters")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -718,7 +712,6 @@ struct NewsFilterSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .preferredColorScheme(.dark)
         .onAppear {
             selectedSources = Set(filterOptions.sources)
             selectedSentiments = Set(filterOptions.sentiments)

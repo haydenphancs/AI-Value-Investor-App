@@ -74,5 +74,4 @@ struct ChatInputBar: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

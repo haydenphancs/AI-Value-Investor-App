@@ -27,5 +27,4 @@ struct ReportCoreThesisSection: View {
 #Preview {
     ReportCoreThesisSection(thesis: TickerReportData.sampleOracle.coreThesis)
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

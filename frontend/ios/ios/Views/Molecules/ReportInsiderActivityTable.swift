@@ -245,5 +245,4 @@ struct ReportInsiderActivityTable: View {
     ReportInsiderActivityTable(insiderData: TickerReportData.sampleOracle.insiderData)
         .padding()
         .background(AppColors.cardBackground)
-        .preferredColorScheme(.dark)
 }

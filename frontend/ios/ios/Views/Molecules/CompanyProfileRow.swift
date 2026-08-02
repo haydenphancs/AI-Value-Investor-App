@@ -41,5 +41,4 @@ struct CompanyProfileRow: View {
     .cornerRadius(AppCornerRadius.large)
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -42,5 +42,4 @@ struct SearchBooksSection: View {
         SearchBooksSection(books: SearchBookItem.sampleData)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -62,7 +62,7 @@ struct ScannerLeaderboardRow: View {
             .contentShape(Rectangle())
             .overlay(alignment: .top) {
                 Rectangle()
-                    .fill(Color.white.opacity(0.05))
+                    .fill(AppColors.textPrimary.opacity(0.05))
                     .frame(height: 1)
             }
         }

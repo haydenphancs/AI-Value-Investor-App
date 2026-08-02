@@ -1003,5 +1003,4 @@ struct WhaleSentimentSummary: View {
     NavigationStack {
         WhaleProfileView(whaleId: "warren-buffett")
     }
-    .preferredColorScheme(.dark)
 }

@@ -163,7 +163,6 @@ struct ETFDetailView: View {
             // No blocking LoadingOverlay — it covered the header + ate the back tap.
             // The price+chart area shows a shimmer skeleton until data loads.
         }
-        .preferredColorScheme(.dark)
         .navigationBarHidden(true)
         // Audio collapses to the top status island while this asset screen is open, keeping the
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
@@ -217,7 +216,6 @@ struct ETFDetailView: View {
         }
         .fullScreenCover(isPresented: $showSearch) {
             SearchView()
-                .preferredColorScheme(.dark)
         }
     }
 

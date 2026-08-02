@@ -54,5 +54,4 @@ struct DetailHeaderChartSkeleton: View {
         AppColors.background.ignoresSafeArea()
         DetailHeaderChartSkeleton()
     }
-    .preferredColorScheme(.dark)
 }

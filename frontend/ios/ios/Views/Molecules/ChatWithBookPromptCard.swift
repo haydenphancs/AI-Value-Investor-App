@@ -65,5 +65,4 @@ struct ChatWithBookPromptCard: View {
     ChatWithBookPromptCard()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

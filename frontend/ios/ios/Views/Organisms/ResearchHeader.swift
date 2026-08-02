@@ -73,5 +73,4 @@ struct ResearchHeader: View {
     }
     .environment(AppState())
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

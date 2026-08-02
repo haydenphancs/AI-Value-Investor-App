@@ -81,5 +81,4 @@ struct InvestorJourneyStudyScheduleSection: View {
         Spacer()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

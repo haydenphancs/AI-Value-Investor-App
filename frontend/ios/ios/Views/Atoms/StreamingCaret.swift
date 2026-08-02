@@ -28,5 +28,4 @@ struct StreamingCaret: View {
     StreamingCaret()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

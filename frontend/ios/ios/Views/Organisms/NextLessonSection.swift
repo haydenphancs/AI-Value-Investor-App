@@ -23,5 +23,4 @@ struct NextLessonSection: View {
         Spacer()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

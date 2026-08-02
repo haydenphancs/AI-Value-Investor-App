@@ -63,5 +63,4 @@ struct AIBooksSection: View {
         AIBooksSection(books: EducationBook.sampleData)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

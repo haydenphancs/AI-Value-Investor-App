@@ -102,5 +102,4 @@ struct TickerAnalysisContent: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

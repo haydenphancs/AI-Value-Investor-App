@@ -45,5 +45,4 @@ struct TabPill: View {
     .cornerRadius(AppCornerRadius.pill)
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

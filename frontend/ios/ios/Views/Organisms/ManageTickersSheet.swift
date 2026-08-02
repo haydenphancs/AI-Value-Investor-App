@@ -59,7 +59,6 @@ struct ManageTickersSheet: View {
             }
             .navigationTitle(activePortfolio?.name ?? "Manage Tickers")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
@@ -67,7 +66,6 @@ struct ManageTickersSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     // MARK: - List
@@ -166,5 +164,4 @@ struct ManageTickersSheet: View {
 
 #Preview {
     ManageTickersSheet(viewModel: TrackingViewModel())
-        .preferredColorScheme(.dark)
 }

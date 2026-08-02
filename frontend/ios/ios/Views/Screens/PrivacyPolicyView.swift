@@ -123,5 +123,4 @@ struct PrivacyPolicyView: View {
     NavigationStack {
         PrivacyPolicyView()
     }
-    .preferredColorScheme(.dark)
 }

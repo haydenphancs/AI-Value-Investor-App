@@ -166,5 +166,4 @@ struct ReportRevenueEngineSection: View {
         .padding()
     }
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

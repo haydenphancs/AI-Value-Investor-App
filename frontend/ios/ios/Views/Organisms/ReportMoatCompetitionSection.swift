@@ -367,5 +367,4 @@ struct ReportMoatCompetitionSection: View {
         .padding()
     }
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

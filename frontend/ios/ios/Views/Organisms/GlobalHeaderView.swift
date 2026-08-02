@@ -120,7 +120,6 @@ struct CaydexSloganView: View {
                 Spacer()
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -132,7 +131,6 @@ struct CaydexSloganView: View {
     }
     .environment(AppState())
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }
 
 #Preview("Slogan") {

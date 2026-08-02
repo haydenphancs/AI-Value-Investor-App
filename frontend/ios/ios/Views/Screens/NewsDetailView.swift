@@ -83,7 +83,6 @@ struct NewsDetailView: View {
                     .padding(.bottom, AppSpacing.xxl)
             }
         }
-        .preferredColorScheme(.dark)
         .navigationBarHidden(true)
         // Keep the audio player visible above this fullScreenCover (bottom mini player; content is
         // inset so the fixed "Read Full Story" button isn't covered).

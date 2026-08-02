@@ -48,7 +48,6 @@ struct PersonasSheet: View {
             .toolbarBackground(AppColors.background, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
-        .preferredColorScheme(.dark)
     }
 
     // MARK: - Subviews
@@ -107,5 +106,4 @@ struct PersonasSheet: View {
         personas: AnalysisPersona.allCases,
         selectedPersona: .constant(.warrenBuffett)
     )
-    .preferredColorScheme(.dark)
 }

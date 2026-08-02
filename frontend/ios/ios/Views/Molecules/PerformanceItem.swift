@@ -56,5 +56,4 @@ struct PerformanceItem: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

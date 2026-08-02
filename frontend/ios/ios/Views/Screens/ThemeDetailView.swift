@@ -35,7 +35,6 @@ struct ThemeDetailView: View {
                 TickerDetailView(tickerSymbol: ticker.symbol)
                     .navigationBarHidden(true)
             }
-            .preferredColorScheme(.dark)
         }
     }
 
@@ -145,7 +144,7 @@ struct ThemeDetailView: View {
                 }
                 if pair.offset < companies.count - 1 {
                     Rectangle()
-                        .fill(Color.white.opacity(0.06))
+                        .fill(AppColors.textPrimary.opacity(0.06))
                         .frame(height: 1)
                         .padding(.leading, 68)   // align under the text, past the logo
                 }
@@ -208,5 +207,4 @@ struct ThemeDetailView: View {
     NavigationStack {
         ThemeDetailView(slug: "silicon-rush")
     }
-    .preferredColorScheme(.dark)
 }

@@ -113,11 +113,17 @@ struct BookCoreDetailView: View {
     }
 
     /// SECTION index of the block currently being read (drives auto-scroll), if any.
+    ///
+    /// Takes the LOWEST matching section rather than `.first`: `readAlongBySection` is a
+    /// Dictionary, whose iteration order is unspecified, and spans are allowed to overlap
+    /// (`ReadAlongSentence` deliberately tolerates out-of-order/degenerate timings instead of
+    /// rejecting them). With `.first`, two blocks matching the same instant could each win on
+    /// different ticks and the view would oscillate between them mid-sentence.
     private var activeReadAlongSection: Int? {
         guard let t = readAlongActiveTime else { return nil }
-        return readAlongBySection.first { _, block in
-            block.sentences.contains { t >= $0.start && t < $0.end }
-        }?.key
+        return readAlongBySection
+            .filter { _, block in block.sentences.contains { t >= $0.start && t < $0.end } }
+            .keys.min()
     }
 
     private var isCurrentCoreCompleted: Bool {
@@ -359,7 +365,8 @@ struct BookCoreDetailView: View {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             newly = progress.markListenedThrough(
                 order: book.curriculumOrder, from: old, to: new,
-                coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds)
+                coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds,
+                seekEpoch: audioManager.seekEpoch)
         }
         if !newly.isEmpty {
             Haptics.success()
@@ -1072,5 +1079,4 @@ private struct CoreCompletionButton: View {
         book: LibraryBook.sampleData[0]
     )
     .environmentObject(audioManager)
-    .preferredColorScheme(.dark)
 }

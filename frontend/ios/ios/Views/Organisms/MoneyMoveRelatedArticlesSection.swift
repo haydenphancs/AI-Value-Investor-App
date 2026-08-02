@@ -72,5 +72,4 @@ struct MoneyMoveRelatedArticlesSection: View {
     )
     .padding(.vertical)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

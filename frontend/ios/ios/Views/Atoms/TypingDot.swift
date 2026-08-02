@@ -35,5 +35,4 @@ struct TypingDot: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

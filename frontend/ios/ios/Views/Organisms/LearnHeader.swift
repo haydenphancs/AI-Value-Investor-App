@@ -47,5 +47,4 @@ struct LearnHeader: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

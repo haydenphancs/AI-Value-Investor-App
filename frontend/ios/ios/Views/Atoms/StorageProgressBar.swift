@@ -47,5 +47,4 @@ struct StorageProgressBar: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

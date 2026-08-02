@@ -24,7 +24,7 @@ struct MoversToggle: View {
             segment(.losers, "Losers", active: AppColors.bearish)
         }
         .padding(3)
-        .background(Color(hex: "14171F"))
+        .background(Color(lightHex: "E7EAF0", darkHex: "14171F"))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         // Keep the toggle at its intrinsic width so a long card title can't
         // squeeze the labels onto a second line ("Gaine\nrs").

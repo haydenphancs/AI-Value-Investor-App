@@ -68,5 +68,4 @@ struct KeyStatisticsCard: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

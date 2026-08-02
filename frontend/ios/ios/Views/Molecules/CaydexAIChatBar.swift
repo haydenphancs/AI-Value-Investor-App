@@ -156,5 +156,4 @@ struct CaydexAISuggestionChip: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

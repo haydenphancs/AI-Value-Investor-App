@@ -323,5 +323,4 @@ struct ReportsListSection: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

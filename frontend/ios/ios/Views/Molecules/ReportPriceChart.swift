@@ -99,5 +99,4 @@ struct ReportPriceChart: View {
     ReportPriceChart(points: points, stats: stats)
         .padding()
         .background(AppColors.cardBackground)
-        .preferredColorScheme(.dark)
 }

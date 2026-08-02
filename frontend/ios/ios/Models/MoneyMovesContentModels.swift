@@ -328,6 +328,18 @@ struct ArticleHighlightDTO: Decodable {
     let title: String
     let description: String
 
+    // Coerced like the parent article (see `flexibleString`): the backend serves the authored
+    // `content` blob VERBATIM, so a Studio/programmatic row can carry a number where a string is
+    // expected. With the synthesized decode that threw, and `lenientArray` then dropped this whole
+    // highlight from the article — content silently missing rather than merely mis-typed.
+    private enum CodingKeys: String, CodingKey { case icon, title, description }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        icon = c.flexibleString(forKey: .icon) ?? ""
+        title = c.flexibleString(forKey: .title) ?? ""
+        description = c.flexibleString(forKey: .description) ?? ""
+    }
+
     func toHighlight() -> ArticleHighlight {
         ArticleHighlight(icon: icon, title: title, description: description)
     }
@@ -459,6 +471,17 @@ struct ArticleStatisticDTO: Decodable {
     let trend: String?
     let trendValue: String?
 
+    // `value` is the field most likely to be authored as a NUMBER (`"value": 180`) — it renders a
+    // figure. Coerce rather than throw, or the whole stat tile disappears from the article.
+    private enum CodingKeys: String, CodingKey { case value, label, trend, trendValue }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        value = c.flexibleString(forKey: .value) ?? ""
+        label = c.flexibleString(forKey: .label) ?? ""
+        trend = c.flexibleString(forKey: .trend)
+        trendValue = c.flexibleString(forKey: .trendValue)
+    }
+
     func toStatistic() -> ArticleStatistic {
         ArticleStatistic(
             value: value,
@@ -486,6 +509,22 @@ struct ArticleCommentDTO: Decodable {
     let isVerified: Bool?
     let hoursAgo: Int?
 
+    // Counts authored as strings (`"likeCount": "47"`) are the common slip here; the Optionals
+    // do NOT save us, because `decodeIfPresent(Int.self)` still throws on a type mismatch and the
+    // comment is then dropped whole.
+    private enum CodingKeys: String, CodingKey {
+        case authorName, content, likeCount, replyCount, isVerified, hoursAgo
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        authorName = c.flexibleString(forKey: .authorName) ?? ""
+        content = c.flexibleString(forKey: .content) ?? ""
+        likeCount = c.flexibleInt(forKey: .likeCount)
+        replyCount = c.flexibleInt(forKey: .replyCount)
+        isVerified = (try? c.decodeIfPresent(Bool.self, forKey: .isVerified)) ?? nil
+        hoursAgo = c.flexibleInt(forKey: .hoursAgo)
+    }
+
     func toComment() -> ArticleComment {
         let posted = Calendar.current.date(
             byAdding: .hour, value: -(hoursAgo ?? 3), to: Date()
@@ -509,6 +548,22 @@ struct RelatedArticleDTO: Decodable {
     let readTimeMinutes: Int
     let viewCount: String
     let gradientColors: [String]
+
+    // Mirrors the PARENT article's handling of the very same fields (`readTimeMinutes` via
+    // `flexibleInt`, `viewCount` via `flexibleString`) — they were coerced there and strict here,
+    // so an authoring slip that the article itself survived still deleted its related-article card.
+    private enum CodingKeys: String, CodingKey {
+        case title, subtitle, category, readTimeMinutes, viewCount, gradientColors
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = c.flexibleString(forKey: .title) ?? ""
+        subtitle = c.flexibleString(forKey: .subtitle) ?? ""
+        category = c.flexibleString(forKey: .category) ?? ""
+        readTimeMinutes = c.flexibleInt(forKey: .readTimeMinutes) ?? 0
+        viewCount = c.flexibleString(forKey: .viewCount) ?? "0"
+        gradientColors = c.flexibleStringArray(forKey: .gradientColors) ?? []
+    }
 
     func toRelated() -> RelatedArticle {
         RelatedArticle(

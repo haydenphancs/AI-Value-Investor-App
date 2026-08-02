@@ -211,5 +211,4 @@ struct TrendingAnalysisDetailView: View {
     NavigationStack {
         TrendingAnalysisDetailView(analysis: TrendingAnalysis.mockTrending[0])
     }
-    .preferredColorScheme(.dark)
 }

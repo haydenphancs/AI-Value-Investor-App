@@ -219,7 +219,7 @@ struct LessonTopicCardView: View {
             }) {
                 ZStack {
                     Circle()
-                        .fill(Color.white.opacity(0.1))
+                        .fill(AppColors.textPrimary.opacity(0.1))
                         .frame(width: 44, height: 44)
 
                     Image(systemName: voiceManager.isPlaying ? "pause.fill" : "play.fill")
@@ -376,5 +376,4 @@ struct LessonTopicCardView: View {
             print("CTA tapped: \(destination)")
         }
     )
-    .preferredColorScheme(.dark)
 }

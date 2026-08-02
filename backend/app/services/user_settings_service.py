@@ -133,3 +133,30 @@ class UserSettingsService:
                 user_id, type(e).__name__, e,
             )
             return False
+
+    def unregister_device(self, user_id: str, token: str) -> bool:
+        """Detach an APNs token from this user.
+
+        Sign-out used to leave the `token → user_id` row in place. `device_tokens.token` is
+        UNIQUE, so the binding only ever moved when a NEW registration re-bound it — and after
+        signing out the client has no session, so it never registers. The device therefore kept
+        receiving the PREVIOUS account's watchlist alerts: a phone showing the signed-out guest
+        UI buzzing with someone else's tickers, which also discloses what they follow.
+
+        Scoped by user_id AND token deliberately: a stale client must never be able to unbind a
+        token that has already re-bound to somebody else.
+        """
+        token = (token or "").strip()
+        if not token:
+            logger.warning("unregister_device called with an empty token for user=%s", user_id)
+            return False
+        try:
+            self.supabase.table("device_tokens").delete() \
+                .eq("token", token).eq("user_id", user_id).execute()
+            return True
+        except Exception as e:
+            logger.error(
+                "device_tokens delete failed for user=%s (%s: %s)",
+                user_id, type(e).__name__, e,
+            )
+            return False

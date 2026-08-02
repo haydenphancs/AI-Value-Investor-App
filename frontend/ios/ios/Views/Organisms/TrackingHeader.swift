@@ -48,5 +48,4 @@ struct TrackingHeader: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

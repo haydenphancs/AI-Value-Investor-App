@@ -32,5 +32,4 @@ struct WhatYouGetSection: View {
         WhatYouGetSection(features: AnalysisFeature.allFeatures)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

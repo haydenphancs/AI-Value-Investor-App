@@ -246,7 +246,6 @@ struct SnapshotsInfoSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -380,7 +379,6 @@ struct ProTipCard: View {
         TickerDetailSnapshotsSection(snapshots: SnapshotItem.sampleData)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }
 #Preview("Info Sheet") {
     SnapshotsInfoSheet()

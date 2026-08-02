@@ -52,5 +52,4 @@ struct PersonaSelectionSection: View {
         )
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

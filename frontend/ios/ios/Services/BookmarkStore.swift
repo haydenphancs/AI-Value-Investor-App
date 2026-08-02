@@ -102,6 +102,27 @@ final class BookmarkStore: ObservableObject {
         }
     }
 
+    /// Drop every bookmark this device holds locally.
+    ///
+    /// Called on SIGN-OUT (see `AppState.signOut`). These bookmarks are device-global — the
+    /// defaults keys carry no user id — so leaving them in place let the next account to sign in
+    /// on this device union them into its own view AND, via `pushUnsynced`, POST them into that
+    /// account server-side. Clearing costs a signed-in user nothing: `hydrate()` refills from
+    /// their own rows on the next Learn open.
+    ///
+    /// Tombstones and reconcile pins are cleared too — they describe the PREVIOUS account's
+    /// server state, so applying them to the next one would suppress or reorder its real
+    /// bookmarks.
+    func reset() {
+        guard !bookmarkedTitles.isEmpty || !pendingRemovals.isEmpty || !reconciledTitles.isEmpty
+        else { return }
+        bookmarkedTitles.removeAll()
+        pendingRemovals.removeAll()
+        reconciledTitles.removeAll()
+        bumpLocalVersion()   // any hydrate/push already in flight must not re-fill what was cleared
+        persistLocal()
+    }
+
     /// Called for every local write, so an in-flight request can tell its snapshot went stale.
     private func bumpLocalVersion() { localVersion &+= 1 }
 
@@ -110,11 +131,20 @@ final class BookmarkStore: ObservableObject {
     /// Pull the server's bookmarks and merge them in. Call when the Library / Learn screen opens.
     func hydrate() async {
         let token = localVersion
+        let epoch = LearnIdentityEpoch.current
         do {
             let resp = try await apiClient.request(
                 endpoint: .getBookBookmarks,
                 responseType: BookmarkListResponse.self
             )
+            // The ACCOUNT changed while this was in flight (sign-out / switch). `localVersion`
+            // cannot see that — each account starts from its own local state — so check the
+            // identity epoch too, or the previous user's saved books get merged in and then
+            // pushed into the new account.
+            guard epoch == LearnIdentityEpoch.current else {
+                print("[BookmarkStore] discarded a hydrate from a previous identity")
+                return
+            }
             // A local write (un-bookmark, or a DELETE confirming and retiring its tombstone) landed
             // while this GET was in flight, so the response describes a PRE-write server state.
             // Merging it would put back what the user just removed — with the tombstone already
@@ -157,8 +187,14 @@ final class BookmarkStore: ObservableObject {
             // Bounded, and the bound can't strand anything: each pushed title leaves `unsyncedAdds`
             // once the server has it, so successive hydrates drain the backlog deterministically.
             for key in unsyncedAdds.reversed().prefix(Self.maxReconcilePushes) {
-                reconciledTitles.insert(key)   // its server timestamp is now an artifact — see merge
-                await pushAdd(key)
+                // Pin only on CONFIRMED success. It used to be inserted unconditionally, before
+                // the await — so an offline reconcile marked the title "reconciled" permanently
+                // even though the server never received it. `merge` then suppressed its real
+                // ordering forever, and because the pin is keyed by title with no expiry, the
+                // Book Library hero card kept showing the wrong book until the app was deleted.
+                if await pushAdd(key) {
+                    reconciledTitles.insert(key)   // its server timestamp is now an artifact — see merge
+                }
             }
             persistLocal()
         }
@@ -192,7 +228,12 @@ final class BookmarkStore: ObservableObject {
         if count <= 1 { inFlightPushes.removeValue(forKey: key) } else { inFlightPushes[key] = count - 1 }
     }
 
-    private func pushAdd(_ key: String) async {
+    /// - Returns: true when the server confirmed the add. Callers use this to decide whether
+    ///   the title's server timestamp is now a reconcile ARTIFACT (see `reconciledTitles`);
+    ///   pinning one whose push failed marks it as reconciled forever without ever having
+    ///   reached the server.
+    @discardableResult
+    private func pushAdd(_ key: String) async -> Bool {
         let token = localVersion
         beginPush(key)
         defer { endPush(key) }
@@ -203,14 +244,16 @@ final class BookmarkStore: ObservableObject {
             )
             // Same stale-snapshot guard as hydrate: a toggle that landed while this POST was in
             // flight makes the echoed list a pre-write view of the server.
-            guard token == localVersion else { return }
+            guard token == localVersion else { return false }
             merge(resp.bookmarks)
+            return true
         } catch {
             // Non-fatal: stays in the local cache and `pushUnsynced` retries on the next hydrate.
             let appError = AppError.from(error)
             if !appError.isExpectedOffline {
                 print("[BookmarkStore] add failed for \(key) [\(appError.title)]: \(appError.message)")
             }
+            return false
         }
     }
 

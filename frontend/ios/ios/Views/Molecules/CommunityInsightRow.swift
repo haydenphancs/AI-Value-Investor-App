@@ -110,5 +110,4 @@ struct CommunityInsightRow: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

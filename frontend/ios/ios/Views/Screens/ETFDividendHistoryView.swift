@@ -141,7 +141,6 @@ struct ETFDividendHistoryView: View {
             }
         }
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
         .onAppear {
             // Show preloaded data immediately
             dividends = preloadedDividends

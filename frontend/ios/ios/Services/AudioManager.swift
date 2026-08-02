@@ -71,6 +71,15 @@ final class AudioManager: ObservableObject {
         playbackState == .playing
     }
 
+    /// True while WE hold the shared `.playback` session — including states where `isPlaying`
+    /// deliberately reports false: `.loading` (a freshly started remote clip still buffering)
+    /// and `.paused` (which holds the session on purpose so resume is instant).
+    ///
+    /// `AIVoiceManager`'s deferred teardown must test THIS, not `isPlaying`: a Journey lesson
+    /// closing 1.2s before a Money Moves clip finishes buffering would otherwise deactivate the
+    /// session out from under it, killing audio that had already started.
+    var ownsAudioSession: Bool { isSessionActive }
+
     /// Drives whether `GlobalAudioOverlay` mounts the mini/compact player at all.
     ///
     /// `.error` is deliberately treated as active even though `PlaybackState.isActive` excludes it:
@@ -146,6 +155,17 @@ final class AudioManager: ObservableObject {
     // pre-seek ticks so the scrubber doesn't flick backward after a scrub. Cleared on seek completion.
     private var pendingSeekTarget: TimeInterval?
 
+    /// Bumped on every playhead move the listener did NOT listen through — a scrub, a ±15s skip,
+    /// or the jump `play(_:startAt:)` makes to a core's start.
+    ///
+    /// `BookProgressStore.markListenedThrough` auto-completes cores the playhead crosses, and it
+    /// has to tell "played through this boundary" from "jumped over it". It used to infer that
+    /// from the SIZE of the step (`to - from < 2.0`), which silently mis-classified a long but
+    /// perfectly real advance — the periodic observer coalesces ticks when the app is backgrounded
+    /// or recovering from a stall — so those cores were never marked and a fully-listened book
+    /// showed "mastered" with holes. An explicit signal can't be fooled by tick timing.
+    private(set) var seekEpoch: UInt64 = 0
+
     // MARK: - Initialization
     private init() {
         configureAudioSession()
@@ -173,6 +193,14 @@ final class AudioManager: ObservableObject {
     /// Re-asserts category+mode because `AIVoiceManager` drives Journey narration on the same shared
     /// session; whichever engine speaks last would otherwise leave its own mode in place.
     private func activateAudioSession() {
+        // Reverse of `AIVoiceManager.pauseForExternalAudio`: silence Journey narration before we
+        // take the shared session. This lives HERE, not at the call sites, because it was
+        // previously done only in `play(_:startAt:)` (the book path) — so a Money Moves "Listen"
+        // (`play(_:)`) or the mini-player's play button (`resume()`) started ON TOP of a lesson
+        // that was still speaking, and the user heard two voices at once. Every path that takes
+        // the session now yields it first; the two managers own separate AVPlayers, so nothing
+        // else stops the other one.
+        AIVoiceManager.shared.stop()
         do {
             try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.allowBluetoothA2DP, .allowAirPlay])
             try audioSession.setActive(true)
@@ -457,11 +485,8 @@ final class AudioManager: ObservableObject {
     /// Play an episode starting at a time offset. Used for one-file book narration that jumps to a
     /// core's start. Seeks BEFORE playing so the listener doesn't hear a moment of audio from 0:00.
     func play(_ episode: AudioEpisode, startAt: TimeInterval) {
-        // Reverse of AIVoiceManager.pauseForExternalAudio: silence Journey
-        // narration before taking the shared session, so a book or Money Moves
-        // clip can never start on top of a lesson already speaking.
-        AIVoiceManager.shared.stop()
-
+        // (Journey narration is silenced in `activateAudioSession()`, which every path that
+        // takes the shared session goes through — see the note there.)
         if let current = currentEpisode {
             addToHistory(current)
         }
@@ -536,8 +561,16 @@ final class AudioManager: ObservableObject {
     /// when something is actually playing, so this is safe to call
     /// unconditionally on every Journey playback entry point.
     func pauseForExternalAudio() {
-        guard playbackState == .playing else { return }
-        print("🔇 AudioManager: yielding the audio session to Journey narration")
+        // `.loading` is ALSO the buffering/stall state, not just "pre-play" — a freshly
+        // started remote clip sits in `.loading` for as long as the network takes, with the
+        // AVPlayer already holding the session and a requested rate of 1.0. Guarding on
+        // `.playing` alone meant that during that window this yielded NOTHING: starting a
+        // Journey lesson while a Money Moves article was still buffering left both streams
+        // audible on the same non-mixable session, with both read-along highlights tracking
+        // the wrong audio and no visible control to stop the other one. That is the exact
+        // failure this method was introduced to prevent, surviving in its most likely window.
+        guard playbackState == .playing || playbackState == .loading else { return }
+        print("🔇 AudioManager: yielding the audio session to Journey narration (state=\(playbackState))")
         pause()
     }
 
@@ -605,6 +638,7 @@ final class AudioManager: ObservableObject {
     /// Seek to specific time
     func seek(to time: TimeInterval) {
         let clamped = max(0, min(time, duration))
+        seekEpoch &+= 1   // this playhead move was NOT listened through — see `seekEpoch`
         currentTime = clamped
         if let player {
             // Suppress stale post-seek ticks until the player actually reaches the target.
@@ -680,8 +714,15 @@ final class AudioManager: ObservableObject {
             }
         } else if playbackState == .playing {
             // Simulated fallback: re-arm the timer at the new interval.
+            //
+            // Pass the SETTLED value through. `$playbackSpeed` is an @Published publisher, so
+            // it fires from `willSet` — the stored property still holds the OLD speed while
+            // this runs. `startPlaybackTimer()` reads `self.playbackSpeed` to compute its
+            // interval, so re-arming without the argument rebuilt the timer at the previous
+            // speed: on a book with no generated narration (the simulated path), changing to
+            // 1.5x left the scrubber advancing at 1.0x until something else restarted it.
             stopPlaybackTimer()
-            startPlaybackTimer()
+            startPlaybackTimer(speed: speed)
         }
     }
 
@@ -844,6 +885,7 @@ final class AudioManager: ObservableObject {
     /// `currentTime = 0`, and a book-core jump visibly flashes the WRONG core before snapping back.
     private func seekPreparedPlayer(to time: TimeInterval) {
         guard let player, time > 0 else { return }
+        seekEpoch &+= 1   // jumping into a core is not "listened through" either
         pendingSeekTarget = time
         player.seek(to: CMTime(seconds: time, preferredTimescale: 600)) { [weak self] finished in
             Task { @MainActor [weak self] in
@@ -918,10 +960,13 @@ final class AudioManager: ObservableObject {
 
     // MARK: - Playback Timer (Simulation)
 
-    private func startPlaybackTimer() {
+    /// - Parameter speed: the speed to arm at. Pass it explicitly when calling from a
+    ///   `@Published` observer — the publisher fires in `willSet`, so `self.playbackSpeed` is
+    ///   still the PREVIOUS value at that point and reading it here arms the wrong interval.
+    private func startPlaybackTimer(speed: PlaybackSpeed? = nil) {
         stopPlaybackTimer()
 
-        let interval = 1.0 / playbackSpeed.rawValue
+        let interval = 1.0 / (speed ?? playbackSpeed).rawValue
         playbackTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor [weak self] in

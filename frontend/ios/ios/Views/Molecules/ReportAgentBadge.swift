@@ -22,5 +22,4 @@ struct ReportAgentBadge: View {
     ReportAgentBadge(agent: .buffett)
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

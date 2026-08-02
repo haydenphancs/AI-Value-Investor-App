@@ -52,5 +52,4 @@ struct TickerDetailKeyStatsSection: View {
         TickerDetailKeyStatsSection(statisticsGroups: KeyStatisticsGroup.sampleData)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

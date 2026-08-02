@@ -15,11 +15,22 @@
 --
 --     if user.password_changed_at and token.iat < user.password_changed_at: reject
 --
--- Enforced in two places (see app/dependencies.py and app/api/v1/endpoints/auth.py):
+-- Enforced in THREE places (see app/dependencies.py and app/api/v1/endpoints/auth.py):
 --   * `get_current_user` — already does `select("*")` on public.users, so the check costs
---     nothing extra. Covers every endpoint that resolves a full user row.
+--     nothing extra.
+--   * `get_current_user_or_guest` — same check, same free `select("*")`. This is the
+--     dependency MOST authenticated routes actually use (chat, ticker reports, research,
+--     analytics, users/me/credits) plus everything reached via `get_watchlist_identity` and
+--     `get_learn_identity` (watchlist, portfolios, home, learn, updates).
 --   * `POST /auth/refresh` — blocks minting NEW access tokens from a pre-reset refresh
 --     token, which is what actually caps an attacker's window.
+--
+-- CORRECTION (2026-08-01): this header previously listed only the first and third, and
+-- claimed `get_current_user` "covers every endpoint that resolves a full user row". That was
+-- false — `get_current_user_or_guest` resolves a full user row and did NOT check, so a stolen
+-- access token kept reading and writing the victim's data, and spending their credits, for
+-- its full 24h life after a reset. Added in app/dependencies.py; regression test at
+-- backend/tests/test_access_token_guards.py. No DDL change; comment only.
 --
 -- Known, accepted limitation: endpoints that use the decode-only `get_current_user_id`
 -- (no DB round-trip) will still accept an unexpired pre-reset ACCESS token until it

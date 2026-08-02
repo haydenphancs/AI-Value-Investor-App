@@ -107,5 +107,4 @@ struct StaleDataBanner: View {
         }
         .padding()
     }
-    .preferredColorScheme(.dark)
 }

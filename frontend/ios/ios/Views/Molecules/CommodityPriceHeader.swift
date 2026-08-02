@@ -114,5 +114,4 @@ struct CommodityMarketStatusBadge: View {
     }
     .padding(.vertical)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

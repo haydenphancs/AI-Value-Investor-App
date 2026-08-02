@@ -45,7 +45,6 @@ struct EditPortfolioSheet: View {
             }
             .navigationTitle("Edit Portfolios")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar(content: editToolbar)
             .alert(
                 "Delete portfolio?",
@@ -62,7 +61,6 @@ struct EditPortfolioSheet: View {
                 Text("\(portfolio.name) will be removed. The tickers stay on your master watchlist.")
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     // MARK: - Portfolio list
@@ -263,7 +261,6 @@ private struct PortfolioDetailEditor: View {
         }
         .navigationTitle(portfolio.name)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
     private func saveName() {
@@ -328,5 +325,4 @@ private extension Array {
 
 #Preview {
     EditPortfolioSheet(viewModel: TrackingViewModel())
-        .preferredColorScheme(.dark)
 }

@@ -101,5 +101,4 @@ struct ReportInsiderSection: View {
     )
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

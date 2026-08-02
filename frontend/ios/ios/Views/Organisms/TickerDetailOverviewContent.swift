@@ -56,5 +56,4 @@ struct TickerDetailOverviewContent: View {
         TickerDetailOverviewContent(tickerData: TickerDetailData.sampleApple)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

@@ -89,5 +89,4 @@ struct LearnCreditsCard: View {
     LearnCreditsCard(balance: CreditBalance.mock)
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

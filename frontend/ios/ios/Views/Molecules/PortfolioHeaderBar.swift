@@ -261,7 +261,7 @@ private struct PortfolioMenuRow: View {
 private struct PortfolioMenuDivider: View {
     var body: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.08))
+            .fill(AppColors.textPrimary.opacity(0.08))
             .frame(height: 0.5)
             .padding(.vertical, AppSpacing.xs)
     }
@@ -271,5 +271,4 @@ private struct PortfolioMenuDivider: View {
     PortfolioHeaderBar(viewModel: TrackingViewModel(), activeMenu: .constant(nil))
         .padding(.vertical)
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

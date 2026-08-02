@@ -71,5 +71,4 @@ struct AcknowledgementsView: View {
 
 #Preview {
     NavigationStack { AcknowledgementsView() }
-        .preferredColorScheme(.dark)
 }

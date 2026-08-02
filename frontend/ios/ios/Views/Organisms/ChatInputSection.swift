@@ -50,5 +50,4 @@ struct ChatInputSection: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

@@ -55,5 +55,4 @@ struct CommunityInsightsSection: View {
         CommunityInsightsSection(insights: CommunityInsight.mockInsights)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

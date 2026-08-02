@@ -79,7 +79,6 @@ struct ForgotPasswordView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     // MARK: - Steps

@@ -114,5 +114,4 @@ struct RelatedMoneyMoveCard: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

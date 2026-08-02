@@ -53,5 +53,4 @@ struct AllRecentTradesView: View {
     NavigationStack {
         AllRecentTradesView(viewModel: TrackingViewModel())
     }
-    .preferredColorScheme(.dark)
 }

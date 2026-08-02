@@ -76,11 +76,9 @@ struct ProfileView: View {
                 viewModel.loadData()
             }
         }
-        .preferredColorScheme(.dark)
         .sheet(isPresented: $showSignIn) {
             SignInView()
                 .environment(appState)
-                .preferredColorScheme(.dark)
         }
         .alert("Display Name", isPresented: $viewModel.isEditingName) {
             TextField("Your name", text: $editedName)
@@ -94,7 +92,6 @@ struct ProfileView: View {
         .sheet(isPresented: $showPaywall) {
             PaywallView()
                 .environment(\.appState, appState)
-                .preferredColorScheme(.dark)
         }
         .onChange(of: appState.auth.status) { _, newStatus in
             // Auth just succeeded from the sheet → dismiss it and refresh
@@ -287,16 +284,59 @@ struct ProfileView: View {
             ProfileSectionHeader(title: "Settings & Preferences", icon: "gearshape.fill")
 
             VStack(spacing: 0) {
-                // APPEARANCE PICKER REMOVED (v1 ships dark-only).
-                //
-                // 332 view files hard-code `.preferredColorScheme(.dark)`, so choosing
-                // "Light" or "System" changed the stored preference and nothing else —
-                // the app stayed dark. A control that visibly does nothing is worse than
-                // no control. `AppearanceManager` and `AppearanceMode` are left in place;
-                // re-add this picker once the forced-dark sweep is done.
-                //
-                // NOTE: the divider that used to follow the picker was removed with it —
-                // left in place it drew a stray line across the top of the card.
+                // Appearance Picker — restored now the forced-dark sweep is done
+                // (per-view `.preferredColorScheme(.dark)` removed + adaptive AppColors).
+                // Gated on the flag so it can be killed instantly if a regression appears.
+                if FeatureFlags.appearanceModeEnabled {
+                    VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                        HStack(spacing: AppSpacing.md) {
+                            Image(systemName: "eye")
+                                .font(AppTypography.iconDefault)
+                                .foregroundColor(AppColors.textSecondary)
+                                .frame(width: 28, height: 28)
+
+                            Text("Appearance")
+                                .font(AppTypography.body)
+                                .foregroundColor(AppColors.textPrimary)
+                        }
+
+                        HStack(spacing: 2) {
+                            ForEach(AppearanceMode.allCases) { mode in
+                                Button {
+                                    viewModel.appearanceMode = mode
+                                } label: {
+                                    HStack(spacing: AppSpacing.xs) {
+                                        Image(systemName: mode.icon)
+                                            .font(AppTypography.iconXS)
+                                        Text(mode.rawValue)
+                                            .font(AppTypography.caption)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, AppSpacing.xs)
+                                    .background(
+                                        Capsule()
+                                            .fill(viewModel.appearanceMode == mode
+                                                  ? AppColors.textMuted.opacity(0.3)
+                                                  : Color.clear)
+                                    )
+                                    .foregroundColor(viewModel.appearanceMode == mode
+                                                     ? AppColors.textPrimary
+                                                     : AppColors.textMuted)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            }
+                        }
+                        .padding(2)
+                        .background(
+                            Capsule()
+                                .fill(AppColors.textMuted.opacity(0.1))
+                        )
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.md)
+
+                    settingsRowDivider
+                }
 
                 // Notifications — hidden until a delivery pipeline exists. Every toggle
                 // in there currently writes a preference that nothing reads

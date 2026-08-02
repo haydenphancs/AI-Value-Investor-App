@@ -13,14 +13,14 @@ from app.database import get_supabase
 from app.dependencies import get_current_user_id
 from app.core.security import (
     create_access_token, create_refresh_token, decode_token, rate_limiter,
-    verify_supabase_token,
+    trusted_client_ip, verify_supabase_token,
 )
 from app.api.error_response import ErrorCode, make_error_response
 from app.schemas.auth import (
     SignInRequest, SignUpRequest, RefreshTokenRequest,
     TokenResponse, AuthUserResponse,
     ForgotPasswordRequest, ResetPasswordRequest, ChangePasswordRequest,
-    MessageResponse, SignUpResponse, ResendConfirmationRequest,
+    MessageResponse, PasswordChangedResponse, SignUpResponse, ResendConfirmationRequest,
     OAuthSignInRequest, SessionExchangeRequest,
 )
 
@@ -96,8 +96,19 @@ async def sign_in(
     supabase: Client = Depends(get_supabase),
 ):
     """Sign in via Supabase Auth, return app tokens."""
-    client_ip = req.client.host if req.client else "unknown"
-    if not rate_limiter.is_allowed(f"login:{client_ip}", max_requests=10, window_seconds=60):
+    client_ip = trusted_client_ip(req)
+    # TWO limiters, both must pass — mirroring the forgot/reset pair below.
+    # IP alone was the whole control, and IP alone is never enough on a credential endpoint:
+    # an attacker with a pool of addresses (or one spoofed header before this was keyed off a
+    # trusted source) gets the full per-IP budget against a single victim account. The
+    # per-EMAIL window caps guesses against one address no matter where they come from, which
+    # is the property that actually protects the account.
+    email_key = (request.email or "").strip().lower()
+    ip_ok = rate_limiter.is_allowed(f"login:ip:{client_ip}", max_requests=10, window_seconds=60)
+    email_ok = rate_limiter.is_allowed(
+        f"login:email:{email_key}", max_requests=10, window_seconds=900
+    )
+    if not (ip_ok and email_ok):
         raise HTTPException(
             status_code=429,
             detail="Too many login attempts. Please try again later.",
@@ -127,12 +138,23 @@ async def sign_in(
                 message="Email address not confirmed",
             )
 
-        # Fetch app-level user row (created by DB trigger on auth.users insert)
+        # Fetch app-level user row (created by DB trigger on auth.users insert).
+        # limit(1), NOT single(): the `if db_user.data else` fallback below only runs if this
+        # read RETURNS empty — and `single()` never returns empty, it RAISES (PostgREST 406 /
+        # PGRST116 → postgrest APIError) when the row is missing. So the fallback was dead
+        # code, and a user whose signup trigger had not seeded public.users got a 500 on a
+        # correct password instead of the intended graceful degradation to the auth id.
         db_user = supabase.table("users").select("id, email").eq(
             "id", str(user.id)
-        ).single().execute()
+        ).limit(1).execute()
 
-        user_id = db_user.data["id"] if db_user.data else str(user.id)
+        db_rows = db_user.data or []
+        if not db_rows:
+            logger.warning(
+                "Sign-in for auth user=%s has no public.users row — falling back to the auth id",
+                user.id,
+            )
+        user_id = db_rows[0]["id"] if db_rows else str(user.id)
 
         access_token = create_access_token(data={"sub": user_id, "email": user.email})
         refresh_token = create_refresh_token(data={"sub": user_id, "email": user.email})
@@ -181,8 +203,17 @@ async def sign_up(
     With it off, this degrades to the old immediate-session behaviour, which is why the
     response is explicit about which happened.
     """
-    client_ip = req.client.host if req.client else "unknown"
-    if not rate_limiter.is_allowed(f"register:{client_ip}", max_requests=5, window_seconds=60):
+    client_ip = trusted_client_ip(req)
+    # Per-EMAIL as well as per-IP: every attempt makes Supabase send a confirmation email to
+    # the address in the body, so an unbounded-per-address endpoint is a mail-bomb aimed at
+    # whoever the attacker names — and it burns the project's mail quota, which is what stops
+    # legitimate signups from arriving at all.
+    email_key = (request.email or "").strip().lower()
+    ip_ok = rate_limiter.is_allowed(f"register:ip:{client_ip}", max_requests=5, window_seconds=60)
+    email_ok = rate_limiter.is_allowed(
+        f"register:email:{email_key}", max_requests=5, window_seconds=3600
+    )
+    if not (ip_ok and email_ok):
         raise HTTPException(
             status_code=429,
             detail="Too many registration attempts. Please try again later.",
@@ -306,7 +337,7 @@ async def resend_confirmation(
     whether the address is registered or already confirmed, and it is limited on both the IP
     and the address because it sends mail.
     """
-    client_ip = req.client.host if req.client else "unknown"
+    client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
     ip_ok = rate_limiter.is_allowed(f"resend:ip:{client_ip}", max_requests=5, window_seconds=3600)
@@ -395,7 +426,7 @@ async def oauth_sign_in(
     supabase: Client = Depends(get_supabase),
 ):
     """Sign in with a native provider identity token (Sign in with Apple)."""
-    client_ip = req.client.host if req.client else "unknown"
+    client_ip = trusted_client_ip(req)
     if not rate_limiter.is_allowed(f"oauth:{client_ip}", max_requests=20, window_seconds=60):
         raise HTTPException(
             status_code=429,
@@ -443,7 +474,7 @@ async def session_exchange(
     The Supabase JWT is verified by signature via `verify_supabase_token` — the `sub` claim
     is only trusted after that check passes.
     """
-    client_ip = req.client.host if req.client else "unknown"
+    client_ip = trusted_client_ip(req)
     if not rate_limiter.is_allowed(f"exchange:{client_ip}", max_requests=20, window_seconds=60):
         raise HTTPException(
             status_code=429,
@@ -517,7 +548,7 @@ async def forgot_password(
     distributed caller email-bomb one victim, and per-email alone lets one host enumerate
     many addresses.
     """
-    client_ip = req.client.host if req.client else "unknown"
+    client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
     # 5/hour per IP, 3/hour per address. Deliberately tight — this endpoint sends mail.
@@ -560,7 +591,7 @@ async def reset_password(
     already hold (migration 105) — the reason someone resets a password is often that
     somebody else has their session.
     """
-    client_ip = req.client.host if req.client else "unknown"
+    client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
     ip_ok = rate_limiter.is_allowed(f"reset:ip:{client_ip}", max_requests=10, window_seconds=3600)
@@ -617,7 +648,7 @@ async def reset_password(
     )
 
 
-@router.post("/change-password", response_model=MessageResponse)
+@router.post("/change-password", response_model=PasswordChangedResponse)
 async def change_password(
     request: ChangePasswordRequest,
     user_id: str = Depends(get_current_user_id),
@@ -675,6 +706,14 @@ async def change_password(
     _mark_password_changed(supabase, user_id)
     logger.info("Password changed for user=%s", user_id)
 
-    return MessageResponse(
-        message="Your password has been changed. Other devices will need to sign in again."
+    # Re-issue THIS caller's credentials, minted after the stamp above so `iat >=
+    # password_changed_at`. Without this the request that changed the password evicted its own
+    # session: the next authenticated call 401'd and the app signed the user out seconds after
+    # telling them the change succeeded. Every OTHER device is still evicted, which is the point.
+    tokens = _issue_app_tokens_for(user_id, email)
+    return PasswordChangedResponse(
+        message="Your password has been changed. Other devices will need to sign in again.",
+        access_token=tokens.access_token,
+        refresh_token=tokens.refresh_token,
+        user_id=user_id,
     )

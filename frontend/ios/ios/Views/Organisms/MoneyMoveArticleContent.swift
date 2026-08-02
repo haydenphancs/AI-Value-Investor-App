@@ -97,5 +97,4 @@ struct MoneyMoveArticleContent: View {
         MoneyMoveArticleContent(article: MoneyMoveArticle.sampleDigitalFinance)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

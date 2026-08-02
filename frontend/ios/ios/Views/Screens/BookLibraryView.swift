@@ -436,5 +436,4 @@ private struct ProgressCardGrainyOverlay: View {
 #Preview {
     BookLibraryView()
         .environmentObject(AudioManager.shared)
-        .preferredColorScheme(.dark)
 }

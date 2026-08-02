@@ -25,5 +25,4 @@ struct MessageTimestamp: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

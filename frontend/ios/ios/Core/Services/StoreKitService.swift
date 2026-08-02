@@ -29,6 +29,13 @@ import Combine
 import Foundation
 import StoreKit
 
+extension Notification.Name {
+    /// Posted after the backend has RECORDED a verified transaction, so the app can adopt the
+    /// new tier and credit balance without waiting for a relaunch. Fired for interactive
+    /// purchases and for `Transaction.updates` replays (restores, Ask-to-Buy, renewals) alike.
+    static let caydexEntitlementChanged = Notification.Name("caydexEntitlementChanged")
+}
+
 @MainActor
 final class StoreKitService: ObservableObject {
     static let shared = StoreKitService()
@@ -219,6 +226,26 @@ final class StoreKitService: ObservableObject {
 
             // Recorded server-side — now safe to tell Apple we've handled it.
             await transaction.finish()
+
+            // Adopt the new entitlement IN THIS SESSION.
+            //
+            // The backend has the tier and the credits; the app did not. Nothing re-read them
+            // after a purchase: none of the five paywall presentations passes an `onDismiss`,
+            // `PaywallView` has no `.onDisappear`, and `ProfileView.onAppear` does not re-fire
+            // when a sheet above it closes. So a user paid, the sheet dismissed, and the app
+            // still showed Free with the old credit balance — and `canGenerateResearch` still
+            // gated them — until the next cold launch. The most likely reaction to that is a
+            // refund request, or a second purchase.
+            //
+            // Placed here rather than in `PaywallViewModel` deliberately: this is the single
+            // funnel for BOTH an interactive purchase and the `Transaction.updates` replay
+            // (restores, Ask-to-Buy approvals, renewals), so a fix in the paywall would miss
+            // every non-interactive grant.
+            //
+            // Announced rather than called: `StoreKitService` holds no `AppState` reference, and
+            // injecting one would mean changing `configure(...)` in iosApp.swift. `AppState`
+            // subscribes to this in its own initialiser.
+            NotificationCenter.default.post(name: .caydexEntitlementChanged, object: nil)
             return tier
         }
     }

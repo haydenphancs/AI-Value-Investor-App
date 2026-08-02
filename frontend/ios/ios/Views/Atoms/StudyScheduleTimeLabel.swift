@@ -26,5 +26,4 @@ struct StudyScheduleTimeLabel: View {
     }
     .padding()
     .background(AppColors.cardBackground)
-    .preferredColorScheme(.dark)
 }

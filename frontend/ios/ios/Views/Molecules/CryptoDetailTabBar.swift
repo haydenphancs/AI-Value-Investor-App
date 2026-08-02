@@ -69,5 +69,4 @@ struct CryptoDetailTabButton: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

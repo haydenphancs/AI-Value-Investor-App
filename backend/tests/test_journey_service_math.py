@@ -121,3 +121,63 @@ async def test_defaults_applied_for_optional_columns():
     assert lesson.category == "standard"       # NOT-NULL default mirrored in the schema
     assert lesson.duration_minutes is None      # genuinely absent
     assert lesson.sort_order == 0
+
+
+# ---------------------------------------------------------------------------
+# An EMPTY load must not latch for the full hour.
+#
+# Mirrors the guard in MoneyMovesContentService: only exceptions were kept out of the cache, so a
+# successful-but-empty `_load()` (a reseed window with the rows briefly gone, or every row skipped
+# as malformed) was cached for the full 3600s TTL — every client saw an empty Investor Journey and
+# fell back to the bundled copy for up to an hour after the table recovered.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_empty_load_does_not_replace_a_good_cached_journey():
+    JourneyContentService._cache = None
+    JourneyContentService._inflight = None
+
+    svc = _service_with_rows([_row("Compounding Basics", story={"cards": [{"type": "title"}]})])
+    first = await svc.get_journey()
+    assert len(first.lessons) == 1
+
+    JourneyContentService._cache = (0.0, first)   # expire it
+    svc._fetch_rows = lambda: []                  # the reseed window
+    during_reseed = await svc.get_journey()
+
+    assert len(during_reseed.lessons) == 1, "must keep serving the real journey, not an empty one"
+    assert JourneyContentService._cache[1].lessons, "the good cache must not be overwritten"
+
+    # The next request (rows back) serves fresh content — no hour-long lockout.
+    JourneyContentService._cache = (0.0, during_reseed)
+    svc._fetch_rows = lambda: [
+        _row("Compounding Basics", story={"cards": [{"type": "title"}]}),
+        _row("Margin of Safety", sort_order=1, story={"cards": [{"type": "content"}]}),
+    ]
+    recovered = await svc.get_journey()
+    assert len(recovered.lessons) == 2
+
+    JourneyContentService._cache = None
+
+
+@pytest.mark.asyncio
+async def test_empty_journey_with_no_prior_cache_uses_the_short_ttl():
+    JourneyContentService._cache = None
+    JourneyContentService._inflight = None
+    svc = _service_with_rows([])
+
+    resp = await svc.get_journey()
+    assert resp.lessons == []
+    assert JourneyContentService._ttl_for(resp) == JourneyContentService._EMPTY_TTL_SECONDS
+    assert (JourneyContentService._EMPTY_TTL_SECONDS
+            < JourneyContentService._TTL_SECONDS), "an empty journey must not hold for the full hour"
+
+    JourneyContentService._cache = None
+
+
+@pytest.mark.asyncio
+async def test_a_real_journey_still_gets_the_full_ttl():
+    svc = _service_with_rows([_row("Compounding Basics", story={"cards": [{"type": "title"}]})])
+    resp = await svc._load()
+    assert JourneyContentService._ttl_for(resp) == JourneyContentService._TTL_SECONDS

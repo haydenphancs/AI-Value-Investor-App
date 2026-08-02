@@ -57,5 +57,4 @@ struct MoneyMoveArticleKeyHighlights: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

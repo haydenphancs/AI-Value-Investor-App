@@ -46,5 +46,4 @@ struct AIDeepResearchButton: View {
     AIDeepResearchButton()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

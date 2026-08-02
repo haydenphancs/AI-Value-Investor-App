@@ -77,5 +77,4 @@ struct ArticleCalloutBox: View {
     }
     .padding()
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

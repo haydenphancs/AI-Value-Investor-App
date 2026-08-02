@@ -58,7 +58,9 @@ final class JourneyProgressStore: ObservableObject {
         Task { await self.pushCompletion(title) }
     }
 
-    /// Clear all progress (debug / "reset journey" affordances). Local only.
+    /// Clear all progress (debug / "reset journey" affordances, and SIGN-OUT — see
+    /// `AppState.signOut`, which bumps `LearnIdentityEpoch` first so an in-flight hydrate
+    /// can't refill this with the previous account's lessons). Local only.
     func reset() {
         guard !completedTitles.isEmpty else { return }
         completedTitles.removeAll()
@@ -69,11 +71,19 @@ final class JourneyProgressStore: ObservableObject {
 
     /// Pull the server's completed set and union it in. Call when the Learn surface opens.
     func hydrate() async {
+        let epoch = LearnIdentityEpoch.current
         do {
             let resp = try await apiClient.request(
                 endpoint: .getLearnProgress(contentType: Self.contentType),
                 responseType: LearnProgressResponse.self
             )
+            // The account changed while this was in flight (sign-out / switch). These keys belong
+            // to the PREVIOUS user — merging them would show their lessons to the new one, and
+            // pushUnsynced would then write them into the new account. Drop it.
+            guard epoch == LearnIdentityEpoch.current else {
+                print("[JourneyProgressStore] discarded a hydrate from a previous identity")
+                return
+            }
             merge(resp)
             await pushUnsynced(remote: Set(resp.keys))
         } catch {

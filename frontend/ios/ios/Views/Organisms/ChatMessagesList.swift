@@ -105,5 +105,4 @@ struct ChatMessageRow: View {
 
         ChatMessagesList(messages: RichChatMessage.sampleConversation)
     }
-    .preferredColorScheme(.dark)
 }

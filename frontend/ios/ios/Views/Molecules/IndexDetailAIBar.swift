@@ -46,5 +46,4 @@ struct IndexDetailAIBar: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

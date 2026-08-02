@@ -52,7 +52,7 @@ struct MoneyMoveArticleSectionContent: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(Color(hex: "171B26"))
+        .background(AppColors.background)
     }
 
     /// Read-along timings for the block at `index` (nil when none / not yet aligned).
@@ -317,5 +317,4 @@ struct ArticleChartView: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

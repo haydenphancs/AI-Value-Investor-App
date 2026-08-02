@@ -171,5 +171,4 @@ private struct MarkdownInline: View {
         .padding()
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

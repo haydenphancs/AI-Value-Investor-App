@@ -115,5 +115,4 @@ struct ArticleActionBar: View {
     }
     .background(AppColors.background)
     .environmentObject(AudioManager.shared)
-    .preferredColorScheme(.dark)
 }

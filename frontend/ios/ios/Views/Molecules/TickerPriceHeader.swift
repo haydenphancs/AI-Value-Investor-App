@@ -97,5 +97,4 @@ struct TickerPriceHeader: View {
     }
     .padding(.vertical)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

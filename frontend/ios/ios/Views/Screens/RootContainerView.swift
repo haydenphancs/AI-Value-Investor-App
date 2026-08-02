@@ -60,7 +60,6 @@ struct RootContainerView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: audioManager.showFullScreenPlayer)
-        .preferredColorScheme(.dark)
     }
 }
 

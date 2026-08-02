@@ -225,5 +225,4 @@ struct ReadingHighlightSegmentedText: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

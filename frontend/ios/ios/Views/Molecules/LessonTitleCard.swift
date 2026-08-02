@@ -69,5 +69,4 @@ struct LessonTitleCard: View {
             isReading: true
         )
     }
-    .preferredColorScheme(.dark)
 }

@@ -38,19 +38,19 @@ struct LessonStoryProgressBar: View {
         ZStack(alignment: .leading) {
             // Background track
             RoundedRectangle(cornerRadius: cornerRadius)
-                .fill(Color.white.opacity(0.3))
+                .fill(AppColors.textPrimary.opacity(0.3))
                 .frame(width: width, height: segmentHeight)
 
             // Filled portion
             if index < currentIndex {
                 // Completed segments
                 RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill(Color.white)
+                    .fill(AppColors.textPrimary)
                     .frame(width: width, height: segmentHeight)
             } else if index == currentIndex {
                 // Current segment with progress
                 RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill(Color.white)
+                    .fill(AppColors.textPrimary)
                     .frame(width: width * currentProgress, height: segmentHeight)
             }
             // Future segments remain empty (just background)
@@ -79,5 +79,4 @@ struct LessonStoryProgressBar: View {
     }
     .padding(.vertical, 50)
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

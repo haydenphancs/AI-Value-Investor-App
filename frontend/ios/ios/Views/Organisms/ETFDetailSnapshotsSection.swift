@@ -892,7 +892,6 @@ struct ETFSnapshotsInfoSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -903,7 +902,6 @@ struct ETFSnapshotsInfoSheet: View {
         ETFDetailSnapshotsSection(etfData: ETFDetailData.sampleSPY)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }
 
 #Preview("Info Sheet") {

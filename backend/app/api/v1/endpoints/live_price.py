@@ -9,7 +9,7 @@ import re
 from collections import defaultdict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
-from app.core.security import decode_token, verify_supabase_token
+from app.core.security import decode_token, trusted_client_ip, verify_supabase_token
 from app.services.live_price_manager import get_live_price_manager
 from app.utils.market_hours import is_market_active
 
@@ -93,7 +93,10 @@ async def live_price_ws(
         user_id = None
 
     # Enforce per-user/IP connection limit
-    conn_key = user_id or (websocket.client.host if websocket.client else "unknown")
+    # Anonymous cap keys off the address OUR edge observed, not the leftmost X-Forwarded-For
+    # entry uvicorn puts in `websocket.client` under --forwarded-allow-ips='*' (caller-supplied,
+    # so rotating it gave every connection a fresh bucket and voided this cap entirely).
+    conn_key = user_id or trusted_client_ip(websocket)
     if _active_connections[conn_key] >= _MAX_CONNECTIONS_PER_KEY:
         await websocket.close(code=1008, reason="Too many connections")
         return

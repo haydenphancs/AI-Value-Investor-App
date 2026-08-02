@@ -62,7 +62,6 @@ struct InlineDisclaimerNotice: View {
                         }
                     }
             }
-            .preferredColorScheme(.dark)
         }
     }
 }
@@ -81,5 +80,4 @@ struct InlineDisclaimerNotice: View {
         }
         .padding()
     }
-    .preferredColorScheme(.dark)
 }

@@ -638,7 +638,7 @@ private struct ChatMenuRow: View {
 private struct ChatMenuDivider: View {
     var body: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.08))
+            .fill(AppColors.textPrimary.opacity(0.08))
             .frame(height: 0.5)
             .padding(.vertical, AppSpacing.xxs)
     }
@@ -665,7 +665,6 @@ private struct AIChatCoverModifier: ViewModifier {
         content
             .fullScreenCover(item: $token) { _ in
                 AIChatScreen(viewModel: viewModel)
-                    .preferredColorScheme(.dark)
             }
             .onChange(of: isPresented) { _, present in
                 // Create a stable token on present (don't replace an existing one — that would
@@ -694,5 +693,4 @@ extension View {
 
 #Preview {
     AIChatScreen(viewModel: ChatViewModel())
-        .preferredColorScheme(.dark)
 }

@@ -100,5 +100,4 @@ struct ReportDeepDiveSection<Content: View>: View {
         }
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }

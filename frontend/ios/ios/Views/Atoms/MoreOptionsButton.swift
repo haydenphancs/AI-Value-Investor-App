@@ -28,5 +28,4 @@ struct MoreOptionsButton: View {
     MoreOptionsButton()
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

@@ -246,7 +246,6 @@ struct CryptoSnapshotsInfoSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -255,7 +254,6 @@ struct CryptoSnapshotsInfoSheet: View {
         CryptoDetailSnapshotsSection(snapshots: CryptoSnapshotItem.sampleETH)
     }
     .background(AppColors.background)
-    .preferredColorScheme(.dark)
 }
 
 #Preview("Info Sheet") {

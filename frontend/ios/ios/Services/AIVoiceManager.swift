@@ -113,7 +113,14 @@ class AIVoiceManager: NSObject, ObservableObject {
             guard let self, !self.isPlaying, !self.isSessionActive else { return }
             // AudioManager drives book / Money Moves playback on this SAME session (it calls our
             // stop() to take over). Releasing it out from under that engine would cut its audio off.
-            guard !AudioManager.shared.isPlaying else { return }
+            //
+            // Test OWNERSHIP, not `isPlaying`. `isPlaying` is `playbackState == .playing`, which
+            // is false while a freshly started remote clip is still BUFFERING (`.loading`) and
+            // also false while paused — a state AudioManager holds the session through on
+            // purpose. Closing a Journey lesson 1.2s before a Money Moves clip finished
+            // buffering therefore deactivated the session under it and killed audio the user had
+            // just started. Strictly more conservative: this can only ever SKIP a release.
+            guard !AudioManager.shared.isPlaying, !AudioManager.shared.ownsAudioSession else { return }
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
             } catch {
@@ -237,6 +244,23 @@ class AIVoiceManager: NSObject, ObservableObject {
         wordRanges = calculateWordRanges(for: text)
         // Use the aligned timings only if they line up 1:1 with the tokenized words (they're built
         // from strip_markup(text).split(), the same tokenization as wordRanges); otherwise ignore.
+        // Mismatched timings are WORSE than none — every word after the divergence highlights on
+        // the wrong syllable — and salvaging a prefix would be guessing where the aligner drifted.
+        //
+        // But the discard used to be SILENT, which made this the hardest possible bug to see: the
+        // lesson still plays, still highlights, just fractionally off, and nothing anywhere says
+        // the aligned data was thrown away. The two tokenizations agree only by hand, in two
+        // languages (backend `_forced_align.strip_markup` vs `JourneyContentStore.spoken(from:)`),
+        // with nothing enforcing it — so ANY new markup token on either side lands here.
+        if let aligned = readAlong, aligned.count != wordRanges.count {
+            if aligned.isEmpty {
+                // Distinct cause: the aligner produced nothing at all. That is an upstream
+                // pipeline failure (missing/failed alignment run), not tokenization drift.
+                print("⚠️ [AIVoiceManager] read-along EMPTY for clip '\(name)' — alignment never ran or failed upstream; falling back to estimated timing")
+            } else {
+                print("⚠️ [AIVoiceManager] read-along DISCARDED for clip '\(name)': \(aligned.count) timings vs \(wordRanges.count) tokenized words — backend/iOS tokenization drift; falling back to estimated timing. text=\"\(text.prefix(80))\"")
+            }
+        }
         readAlongWords = (readAlong?.count == wordRanges.count) ? readAlong : nil
         currentWordIndex = 0
         currentWordRange = NSRange(location: 0, length: 0)
@@ -451,6 +475,15 @@ class AIVoiceManager: NSObject, ObservableObject {
             guard let range = text.range(of: word, range: searchStart..<text.endIndex) else { continue }
             ranges.append(NSRange(range, in: text))
             searchStart = range.upperBound
+        }
+
+        // This `continue` is itself a source of the count mismatch that discards aligned
+        // read-along upstream: a token the forward scan can't relocate is dropped, so `ranges`
+        // comes back SHORTER than `words` and the 1:1 check in `playClip` fails for a reason that
+        // has nothing to do with the backend. Without this line the two causes are
+        // indistinguishable in a bug report.
+        if ranges.count != words.count {
+            print("⚠️ [AIVoiceManager] tokenization lost \(words.count - ranges.count) of \(words.count) word(s) while locating ranges — read-along will fall back to estimated timing. text=\"\(text.prefix(80))\"")
         }
 
         return ranges

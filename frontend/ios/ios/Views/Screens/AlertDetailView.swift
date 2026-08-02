@@ -274,5 +274,4 @@ struct AlertDetailView: View {
     NavigationStack {
         AlertDetailView(alert: AppAlert.sampleData[0])
     }
-    .preferredColorScheme(.dark)
 }

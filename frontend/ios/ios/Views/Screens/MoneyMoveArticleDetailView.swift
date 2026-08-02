@@ -169,7 +169,6 @@ struct MoneyMoveArticleDetailView: View {
         .globalAudioOverlay(token: compactToken)
         .navigationBarHidden(true)
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
-        .preferredColorScheme(.dark)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         .onAppear {
@@ -203,12 +202,12 @@ struct MoneyMoveArticleDetailView: View {
                     Text("Back")
                         .font(AppTypography.body)
                 }
-                .foregroundColor(.white)
+                .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)
                 .background(
                     Capsule()
-                        .fill(Color.white.opacity(0.15))
+                        .fill(AppColors.textPrimary.opacity(0.15))
                 )
             }
             .buttonStyle(PlainButtonStyle())
@@ -216,7 +215,7 @@ struct MoneyMoveArticleDetailView: View {
             // Title
             Text(article.title)
                 .font(AppTypography.bodyEmphasis)
-                .foregroundColor(.white)
+                .foregroundColor(AppColors.textPrimary)
                 .lineLimit(1)
 
             Spacer(minLength: AppSpacing.sm)
@@ -225,11 +224,11 @@ struct MoneyMoveArticleDetailView: View {
             Button(action: handleShareTapped) {
                 Image(systemName: "square.and.arrow.up")
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textPrimary)
                     .frame(width: 36, height: 36)
                     .background(
                         Circle()
-                            .fill(Color.white.opacity(0.15))
+                            .fill(AppColors.textPrimary.opacity(0.15))
                     )
             }
             .buttonStyle(PlainButtonStyle())

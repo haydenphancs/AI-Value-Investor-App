@@ -69,5 +69,4 @@ struct TickerDetailTabButton: View {
     }
 
     return PreviewWrapper()
-        .preferredColorScheme(.dark)
 }

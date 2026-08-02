@@ -115,5 +115,4 @@ struct ReportScoreGauge: View {
     ReportScoreGauge(score: 82, maxScore: 100, label: "Strong Quality Business")
         .padding()
         .background(AppColors.background)
-        .preferredColorScheme(.dark)
 }

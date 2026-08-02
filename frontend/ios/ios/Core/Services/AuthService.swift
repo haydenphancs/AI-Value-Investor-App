@@ -166,6 +166,46 @@ final class AuthService {
 
     /// Re-send the signup confirmation email. Fire-and-forget by design: the backend never
     /// reveals whether the address needs confirming, so there is nothing to branch on.
+    /// Change the signed-in user's password AND adopt the credentials the server hands back.
+    ///
+    /// Lives here rather than in the view because it is a session transition, not a form submit:
+    /// the server stamps `users.password_changed_at`, which invalidates every token issued
+    /// before that moment — including the one this call was authenticated with. The response
+    /// carries replacements minted after the stamp; adopting them is what keeps THIS device
+    /// signed in while every other device is correctly evicted.
+    ///
+    /// The view previously decoded this as `MessageResponse` and discarded the tokens (Swift
+    /// ignores unknown keys, so it failed silently), which meant a successful password change
+    /// signed the user out on the next request.
+    @discardableResult
+    func changePassword(currentPassword: String, newPassword: String) async throws -> String {
+        let response = try await apiClient.request(
+            endpoint: .changePassword(
+                currentPassword: currentPassword, newPassword: newPassword
+            ),
+            responseType: PasswordChangedResponse.self
+        )
+
+        // Adopt only if the server actually rotated. An older backend (the app ships separately
+        // from Railway) returns just a message; there is nothing to adopt and the pre-existing
+        // behaviour — the session dies and the user signs in again — still applies. Reporting a
+        // failure for a password change that SUCCEEDED would be worse than that.
+        guard let access = response.accessToken, let refresh = response.refreshToken else {
+            #if DEBUG
+            print("ℹ️ [Auth] change-password returned no replacement tokens (older backend); this session will end")
+            #endif
+            return response.message
+        }
+
+        // Same order as signIn: persist, invalidate any in-flight older-session refresh, then
+        // arm the client. Bumping the epoch matters here too — a refresh already in flight was
+        // started with the now-dead token and must not overwrite these.
+        saveTokens(accessToken: access, refreshToken: refresh)
+        sessionEpoch += 1
+        await apiClient.setAuthToken(access)
+        return response.message
+    }
+
     func resendConfirmation(email: String) async throws {
         _ = try await apiClient.request(
             endpoint: .resendConfirmation(email: email),

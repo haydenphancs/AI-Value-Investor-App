@@ -927,6 +927,38 @@ nonisolated struct MessageResponse: Decodable, Sendable {
     let message: String
 }
 
+/// `POST /auth/change-password` — acknowledgement WITH replacement credentials.
+///
+/// Changing a password stamps `users.password_changed_at` server-side, after which every token
+/// minted before that instant is rejected — including the one this app is holding, the one it
+/// just used to make this very request. Without adopting these, the next call 401s, the refresh
+/// interceptor's own staleness check rejects that too, and the user is signed out seconds after
+/// being told the change succeeded.
+///
+/// The tokens are minted AFTER the stamp, so this device survives while every OTHER device is
+/// still evicted — which is the entire point of the feature.
+/// The credentials are OPTIONAL, and that is load-bearing rather than defensive vagueness.
+/// The app and the backend deploy independently: a build carrying this type can run against a
+/// Railway instance that predates it and still returns a bare `{"message": ...}`. Declaring the
+/// tokens as required would make that decode THROW — after the password had already been
+/// changed — so the user would see an error for an operation that succeeded, and be signed out
+/// anyway. Absent tokens simply mean "this server can't rotate yet"; the caller keeps the old
+/// behaviour instead of failing.
+nonisolated struct PasswordChangedResponse: Decodable, Sendable {
+    let message: String
+    let accessToken: String?
+    let refreshToken: String?
+    let userId: String?
+
+    // APIClient does not set `.convertFromSnakeCase`, so these are mapped by hand.
+    enum CodingKeys: String, CodingKey {
+        case message
+        case accessToken = "access_token"
+        case refreshToken = "refresh_token"
+        case userId = "user_id"
+    }
+}
+
 nonisolated struct UpdateProfileRequest: Encodable, Sendable {
     let displayName: String?
     let avatarUrl: String?

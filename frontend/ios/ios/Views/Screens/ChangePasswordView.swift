@@ -12,6 +12,7 @@
 import SwiftUI
 
 struct ChangePasswordView: View {
+    @Environment(\.appState) private var appState
     @Environment(\.dismiss) private var dismiss
 
     @State private var currentPassword = ""
@@ -143,12 +144,15 @@ struct ChangePasswordView: View {
         Task {
             defer { isSubmitting = false }
             do {
-                _ = try await APIClient.shared.request(
-                    endpoint: .changePassword(
-                        currentPassword: currentPassword,
-                        newPassword: newPassword
-                    ),
-                    responseType: MessageResponse.self
+                // Through AuthService, NOT APIClient directly: the server invalidates every
+                // token issued before this change — including the one authenticating this very
+                // request — and returns replacements. AuthService adopts them, which is what
+                // keeps THIS device signed in while other devices are correctly evicted.
+                // Decoding it here as a bare MessageResponse silently dropped those tokens and
+                // signed the user out on their next request.
+                try await appState.authService.changePassword(
+                    currentPassword: currentPassword,
+                    newPassword: newPassword
                 )
                 // Clear the secrets from memory as soon as they're no longer needed.
                 currentPassword = ""

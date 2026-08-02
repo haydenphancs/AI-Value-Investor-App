@@ -11,7 +11,7 @@ import logging
 from typing import Optional
 
 from app.api.error_response import ErrorCode, make_error_response
-from app.database import get_supabase
+from app.database import get_auth_client, get_supabase
 from app.dependencies import (
     get_current_user,
     get_current_user_or_guest,  # TEMP: guest fallback
@@ -472,6 +472,7 @@ def _purge_research_pdfs(supabase: Client, user_id: str) -> Optional[str]:
 async def delete_account(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Permanently delete the CALLER'S OWN account and all of their data.
 
@@ -524,7 +525,13 @@ async def delete_account(
 
     # 3. Identity row + every FK-linked child table.
     try:
-        supabase.auth.admin.delete_user(user_id)
+        # Isolated auth client. `admin.*` does not emit SIGNED_IN today, so this is not the
+        # demotion path — but keeping ALL `auth.*` off the service-role singleton makes the
+        # invariant simple, greppable, and testable (see test_supabase_client_isolation.py).
+        # Falls back to `supabase` when this handler is called directly (the suite's idiom);
+        # see auth._auth_of for the same accommodation.
+        client = auth_client if hasattr(auth_client, "auth") else supabase
+        client.auth.admin.delete_user(user_id)
     except Exception as e:
         logger.error(
             "Account deletion failed at the auth step for user=%s: %s: %s",

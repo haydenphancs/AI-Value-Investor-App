@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.database import get_supabase
+from app.database import get_auth_client, get_supabase
 from app.dependencies import get_current_user_id
 from app.core.security import (
     create_access_token, create_refresh_token, decode_token, rate_limiter,
@@ -27,6 +27,25 @@ from app.schemas.auth import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _auth_of(auth_client, supabase: Client) -> Client:
+    """The client to run `auth.*` on.
+
+    Normally the isolated one FastAPI injects (`get_auth_client`), which is what keeps the
+    service-role singleton from being demoted — see `database.get_auth_client` for what the
+    SDK does to a client after a successful sign-in.
+
+    Falls back to `supabase` when `auth_client` was not injected, i.e. when a handler is
+    invoked DIRECTLY as a Python function. That is this suite's standard idiom (there is no
+    TestClient anywhere in backend/tests), so the fallback keeps ~44 existing call sites
+    working without each having to hand in a second fake. In that case both names point at
+    the same fake, which is exactly what those tests want to assert against.
+
+    The isolation itself is pinned separately, at the source level, by
+    tests/test_supabase_client_isolation.py — it does not depend on this fallback.
+    """
+    return auth_client if hasattr(auth_client, "auth") else supabase
 
 
 def is_token_stale_after_password_change(
@@ -98,6 +117,7 @@ async def sign_in(
     request: SignInRequest,
     req: Request,
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Sign in via Supabase Auth, return app tokens."""
     client_ip = trusted_client_ip(req)
@@ -119,7 +139,7 @@ async def sign_in(
             headers={"Retry-After": "60"},
         )
     try:
-        auth_response = supabase.auth.sign_in_with_password({
+        auth_response = _auth_of(auth_client, supabase).auth.sign_in_with_password({
             "email": request.email,
             "password": request.password,
         })
@@ -188,6 +208,7 @@ async def sign_up(
     request: SignUpRequest,
     req: Request,
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Register via Supabase Auth.
 
@@ -224,7 +245,7 @@ async def sign_up(
             headers={"Retry-After": "60"},
         )
     try:
-        auth_response = supabase.auth.sign_up({
+        auth_response = _auth_of(auth_client, supabase).auth.sign_up({
             "email": request.email,
             "password": request.password,
             "options": {
@@ -279,6 +300,7 @@ async def sign_up(
 async def refresh_token(
     request: RefreshTokenRequest,
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Refresh access token using refresh token."""
     try:
@@ -330,6 +352,7 @@ async def resend_confirmation(
     request: ResendConfirmationRequest,
     req: Request,
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Re-send the signup confirmation email.
 
@@ -354,7 +377,7 @@ async def resend_confirmation(
         )
 
     try:
-        supabase.auth.resend({"type": "signup", "email": email_key})
+        _auth_of(auth_client, supabase).auth.resend({"type": "signup", "email": email_key})
         logger.info("Confirmation email resend requested")
     except Exception as e:
         # Unknown address, already-confirmed address, and provider errors must all look
@@ -428,6 +451,7 @@ async def oauth_sign_in(
     request: OAuthSignInRequest,
     req: Request,
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Sign in with a native provider identity token (Sign in with Apple)."""
     client_ip = trusted_client_ip(req)
@@ -443,7 +467,7 @@ async def oauth_sign_in(
         credentials["nonce"] = request.nonce
 
     try:
-        result = supabase.auth.sign_in_with_id_token(credentials)
+        result = _auth_of(auth_client, supabase).auth.sign_in_with_id_token(credentials)
     except Exception as e:
         # Includes a bad signature, a wrong audience, an expired token, and a nonce
         # mismatch. Deliberately not echoed to the client.
@@ -472,6 +496,7 @@ async def session_exchange(
     request: SessionExchangeRequest,
     req: Request,
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Exchange a Supabase access token for app tokens (web OAuth flow, e.g. Google).
 
@@ -540,6 +565,7 @@ async def forgot_password(
     request: ForgotPasswordRequest,
     req: Request,
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Send a password-reset code.
 
@@ -567,7 +593,7 @@ async def forgot_password(
         )
 
     try:
-        supabase.auth.reset_password_for_email(email_key)
+        _auth_of(auth_client, supabase).auth.reset_password_for_email(email_key)
         logger.info("Password reset requested for a registered-or-not address")
     except Exception as e:
         # Never surface this. A provider error and an unknown address must be
@@ -585,6 +611,7 @@ async def reset_password(
     request: ResetPasswordRequest,
     req: Request,
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Complete a reset with the emailed code, then set the new password.
 
@@ -609,7 +636,7 @@ async def reset_password(
 
     # 1. Verify the OTP. This is what proves control of the mailbox.
     try:
-        verified = supabase.auth.verify_otp({
+        verified = _auth_of(auth_client, supabase).auth.verify_otp({
             "email": email_key,
             "token": request.code,
             "type": "recovery",
@@ -632,7 +659,7 @@ async def reset_password(
     # 2. Set the new password with the admin API. Using admin rather than the session from
     #    verify_otp keeps this independent of SDK session state on a shared client.
     try:
-        supabase.auth.admin.update_user_by_id(user_id, {"password": request.new_password})
+        _auth_of(auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
     except Exception as e:
         logger.error(
             "Password update failed after a VERIFIED reset code for user=%s: %s: %s",
@@ -657,6 +684,7 @@ async def change_password(
     request: ChangePasswordRequest,
     user_id: str = Depends(get_current_user_id),
     supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
 ):
     """Change the password of a signed-in user.
 
@@ -687,7 +715,7 @@ async def change_password(
 
     # Verify the current password.
     try:
-        supabase.auth.sign_in_with_password({
+        _auth_of(auth_client, supabase).auth.sign_in_with_password({
             "email": email,
             "password": request.current_password,
         })
@@ -696,7 +724,7 @@ async def change_password(
         raise HTTPException(status_code=401, detail="Your current password is incorrect.")
 
     try:
-        supabase.auth.admin.update_user_by_id(user_id, {"password": request.new_password})
+        _auth_of(auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
     except Exception as e:
         logger.error(
             "change-password: update failed for user=%s: %s: %s",

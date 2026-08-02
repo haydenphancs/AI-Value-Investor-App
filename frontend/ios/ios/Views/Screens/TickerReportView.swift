@@ -2,7 +2,7 @@
 //  TickerReportView.swift
 //  ios
 //
-//  Screen: Full stock report view (Buffett Agent style analysis)
+//  Screen: Full stock report view (persona-styled analysis)
 //  Combines all report organisms into a scrollable report layout
 //
 
@@ -242,13 +242,6 @@ struct TickerReportView: View {
                 maxScore: report.qualityRating.maxScore,
                 label: report.qualityRating.label
             )
-
-            // Sits WITH the verdict, above the fold. The full disclaimer section is
-            // still at the bottom of the report, but it is below the score, the
-            // summary, the thesis, every Deep Dive module and the critical factors —
-            // so a user can read the whole verdict without ever scrolling to it.
-            InlineDisclaimerNotice()
-                .padding(.horizontal, AppSpacing.lg)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.sm)
@@ -403,6 +396,12 @@ struct TickerReportView: View {
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
                 .lineSpacing(3)
+
+            // Tap-through to the full DisclaimersView, which previously hung off the
+            // short notice under the score. `disclaimerText` already says the same
+            // thing in full ("educational purposes only … not financial advice"), so
+            // only the link comes down here — no repeated sentence.
+            InlineDisclaimerNotice(text: "", linkLabel: "Details")
         }
         .padding(.horizontal, AppSpacing.lg)
     }

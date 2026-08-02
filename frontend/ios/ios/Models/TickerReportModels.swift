@@ -2,7 +2,7 @@
 //  TickerReportModels.swift
 //  ios
 //
-//  Data models for the Ticker Report (Buffett Agent) screen
+//  Data models for the Ticker Report screen (persona-styled analysis)
 //
 
 import Foundation
@@ -17,12 +17,37 @@ struct ReportTickerNavigation: Identifiable {
 
 // MARK: - Report Agent Persona
 
+/// The persona a report was generated under.
+///
+/// The raw value is the backend `agent` CODE (`schemas/ticker_report.py`:
+/// "buffett" | "wood" | "lynch" | "ackman" | "burry"), not display copy — it used to
+/// be the badge string itself, which is how this surface kept printing real surnames
+/// after the personas were renamed to style names. Display goes through `badgeLabel`.
+///
+/// `shortName` mirrors the backend `PersonaConfig.agent_label_text` and
+/// `AnalysisPersona.shortName`; keep the three in sync.
 enum ReportAgentPersona: String, CaseIterable {
-    case buffett = "ANALYZED BY BUFFETT AGENT"
-    case wood = "ANALYZED BY WOOD AGENT"
-    case lynch = "ANALYZED BY LYNCH AGENT"
-    case ackman = "ANALYZED BY ACKMAN AGENT"
-    case burry = "ANALYZED BY BURRY AGENT"
+    case buffett
+    case wood
+    case lynch
+    case ackman
+    case burry
+
+    /// Style word for this persona, e.g. "Quality".
+    var shortName: String {
+        switch self {
+        case .buffett: return "Quality"
+        case .wood:    return "Disruption"
+        case .lynch:   return "GARP"
+        case .ackman:  return "Activist"
+        case .burry:   return "Contrarian"
+        }
+    }
+
+    /// Badge copy shown above the score, e.g. "ANALYZED BY QUALITY AGENT".
+    var badgeLabel: String {
+        "ANALYZED BY \(shortName.uppercased()) AGENT"
+    }
 
     var starRating: Double {
         switch self {

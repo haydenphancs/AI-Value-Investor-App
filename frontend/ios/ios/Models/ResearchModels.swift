@@ -83,6 +83,22 @@ struct AnalysisPersona: Identifiable, Hashable {
         }
     }
 
+    /// The display name split for the two-line persona card, with the leading article
+    /// dropped: "The Quality Compounder" → ("Quality", "Compounder"); "The Everyday
+    /// Growth Hunter" → ("Everyday Growth", "Hunter").
+    ///
+    /// PersonaCard used to split `name` itself into first-word / last-word, which read
+    /// correctly while names were real people ("Warren" / "Buffett") and became
+    /// "The" / "Compounder" once the personas were renamed to style names.
+    var cardNameLines: (top: String, bottom: String) {
+        var words = name.split(separator: " ").map(String.init)
+        if words.count > 1, words[0].caseInsensitiveCompare("the") == .orderedSame {
+            words.removeFirst()
+        }
+        guard let last = words.last else { return ("", name) }
+        return (words.dropLast().joined(separator: " "), last)
+    }
+
     /// Lens word for the persona-aware headline label ("Strong <lens> Profile").
     /// Mirrors ReportAgentPersona.lensWord — keep the two in sync.
     var lensWord: String {

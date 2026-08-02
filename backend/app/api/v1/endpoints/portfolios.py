@@ -223,6 +223,69 @@ def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
             supabase.table("portfolio_items").insert(item_rows).execute()
 
 
+def _backfill_lone_empty_portfolio(supabase: Client, user_id: str, portfolios):
+    """Repair the one-shot-seed race: a lone EMPTY portfolio next to a non-empty watchlist.
+
+    `_seed_default_portfolio` populates "Holdings" from the watchlist, but it runs on the FIRST
+    `GET /portfolios` — and `ContentView` mounts every tab at launch, so `TrackingViewModel.init`
+    fires that GET seconds before first-run onboarding writes a single ticker. The seed therefore
+    reads an empty watchlist, creates the portfolio with zero items, and the `if not portfolios:`
+    guard means it can never run again. Nothing else reconciles the two tables, so the user ends
+    up with tickers on their watchlist (visible in Updates) and a permanently empty Assets tab —
+    exactly the "No tickers yet" state, unfixable except by re-adding each ticker by hand.
+
+    Deliberately NARROW: only when the user has EXACTLY ONE portfolio and it holds zero items.
+    A user who owns several portfolios, or who deliberately emptied one of several, is left
+    alone. The single-empty-portfolio-with-a-non-empty-watchlist state is not something a user
+    can reach on purpose — the only way to empty your lone portfolio is to remove every ticker,
+    which removes it from the watchlist too.
+    """
+    if len(portfolios) != 1:
+        return portfolios
+    only = portfolios[0]
+    if getattr(only, "tickers", None):
+        return portfolios
+
+    try:
+        seed_rows = (
+            supabase.table("watchlist_items")
+            .select("ticker,added_at,shares,market_value")
+            .eq("user_id", user_id)
+            .order("added_at", desc=True)
+            .execute()
+            .data
+            or []
+        )
+        item_rows = [
+            {
+                "portfolio_id": only.id,
+                "ticker": (r["ticker"] or "").upper(),
+                "position": i,
+                "shares": r.get("shares"),
+                "market_value": r.get("market_value"),
+            }
+            for i, r in enumerate(seed_rows)
+            if r.get("ticker")
+        ]
+        if not item_rows:
+            return portfolios
+        supabase.table("portfolio_items").upsert(
+            item_rows, on_conflict="portfolio_id,ticker", ignore_duplicates=True
+        ).execute()
+        logger.info(
+            "Backfilled %d watchlist ticker(s) into empty portfolio %s for user=%s",
+            len(item_rows), only.id, user_id,
+        )
+        return _fetch_user_portfolios(supabase, user_id)
+    except Exception as e:
+        # Best-effort repair: never fail the list because the heal didn't work.
+        logger.warning(
+            "Portfolio backfill failed for user=%s (%s: %s) — serving portfolios as-is",
+            user_id, type(e).__name__, e,
+        )
+        return portfolios
+
+
 def _get_portfolio_or_404(supabase: Client, user_id: str, portfolio_id: str) -> dict:
     """Fetch a portfolio row scoped to user_id; raise 404 if missing."""
     result = (
@@ -274,6 +337,8 @@ async def list_portfolios(
     if not portfolios:
         _seed_default_portfolio(supabase, user["id"])
         portfolios = _fetch_user_portfolios(supabase, user["id"])
+    else:
+        portfolios = _backfill_lone_empty_portfolio(supabase, user["id"], portfolios)
     return PortfolioListResponse(portfolios=portfolios)
 
 

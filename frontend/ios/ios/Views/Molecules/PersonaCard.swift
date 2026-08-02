@@ -16,6 +16,10 @@ struct PersonaCard: View {
     private let cardWidth: CGFloat = 100
     private let cardHeight: CGFloat = 120
 
+    /// Two-line name for the card. Computed on the model so the "drop the article,
+    /// last word on its own line" rule lives in one place.
+    private var nameLines: (top: String, bottom: String) { persona.cardNameLines }
+
     var body: some View {
         Button(action: {
             onTap?()
@@ -30,17 +34,23 @@ struct PersonaCard: View {
 
                 // Name (split into two lines)
                 VStack(spacing: 0) {
-                    Text(persona.rawValue.components(separatedBy: " ").first ?? "")
-                        .font(AppTypography.labelSmall)
-                        .fontWeight(.semibold)
-                        .foregroundColor(AppColors.textPrimary)
-                        .lineLimit(1)
+                    // Omitted for a one-word name, so the card doesn't reserve a line
+                    // for an empty string.
+                    if !nameLines.top.isEmpty {
+                        Text(nameLines.top)
+                            .font(AppTypography.labelSmall)
+                            .fontWeight(.semibold)
+                            .foregroundColor(AppColors.textPrimary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
 
-                    Text(persona.rawValue.components(separatedBy: " ").last ?? "")
+                    Text(nameLines.bottom)
                         .font(AppTypography.labelSmall)
                         .fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
 
                 // Tagline - fixed height area

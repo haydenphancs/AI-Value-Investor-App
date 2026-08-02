@@ -17,6 +17,11 @@ import SwiftUI
 
 struct InlineDisclaimerNotice: View {
     /// Short line shown inline. Keep it to one line where possible.
+    ///
+    /// Pass `""` for a LINK-ONLY notice (icon + link, no prose). That is for a host
+    /// that already prints the disclaimer wording itself — the report's bottom
+    /// Disclaimer section — where repeating the sentence would say the same thing
+    /// twice and only the tap-through to the full text is still missing.
     let text: String
     /// Trailing tappable affordance that opens the full disclaimers.
     let linkLabel: String
@@ -38,8 +43,10 @@ struct InlineDisclaimerNotice: View {
             HStack(spacing: AppSpacing.xxs) {
                 Image(systemName: "info.circle")
                     .font(AppTypography.iconTiny)
-                Text(text)
-                    .font(AppTypography.caption)
+                if !text.isEmpty {
+                    Text(text)
+                        .font(AppTypography.caption)
+                }
                 Text(linkLabel)
                     .font(AppTypography.captionEmphasis)
                     .underline()
@@ -49,7 +56,13 @@ struct InlineDisclaimerNotice: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(text). Tap for full disclaimers.")
+        // Link-only (empty `text`) would otherwise announce as ". Tap for full
+        // disclaimers." — a leading pause and no subject.
+        .accessibilityLabel(
+            text.isEmpty
+                ? "\(linkLabel). Tap for full disclaimers."
+                : "\(text). Tap for full disclaimers."
+        )
         .sheet(isPresented: $showDisclaimers) {
             // DisclaimersView is push-only (no nav stack, no dismiss of its own),
             // so wrap it and supply a Done button when presenting as a sheet.

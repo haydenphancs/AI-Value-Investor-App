@@ -10,9 +10,12 @@ import SwiftUI
 struct AnalysisDescriptionCard: View {
     let persona: AnalysisPersona
 
+    /// "Quality Style Analysis". Keyed on the persona's STYLE word, not the last word
+    /// of the display name — that derivation dated from the real-surname names and
+    /// had been reading "Compounder Style Analysis" / "Seeker Style Analysis" since
+    /// the rename.
     private var styleTitle: String {
-        let lastName = persona.rawValue.components(separatedBy: " ").last ?? ""
-        return "\(lastName) Style Analysis"
+        "\(persona.shortName) Style Analysis"
     }
 
     var body: some View {

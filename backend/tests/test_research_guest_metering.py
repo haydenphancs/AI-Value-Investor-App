@@ -1,4 +1,14 @@
-"""`POST /research/generate` meters guests, and analytics can never 503.
+"""`POST /research/generate` is ACCOUNT-ONLY, and analytics can never 503.
+
+HISTORY — why this file exists. Deep research was completely unmetered for guests, then was
+metered per install against `guest_report_budget` (migration 106). That allowance keyed on
+`identity_key(user, x_guest_id)`, a UUID5 of a header the CLIENT chooses, so rotating it bought
+a fresh allowance every request and the most expensive call in the product (~17 Gemini + ~20 FMP)
+stayed effectively free. Generation now requires an account and is metered by credits, which are
+FK-bound to a real `public.users` row and cannot be rotated. The guest-allowance tests are gone
+with the branch they covered; `tests/test_research_guest_partition.py` pins the account-only rule.
+
+What remains here is the analytics carve-out, which is unchanged and load-bearing.
 
 --- 1. Deep research was completely unmetered for guests ---
 
@@ -93,78 +103,6 @@ async def _generate(monkeypatch, budget, user_id=GUEST_USER_ID, supabase=None):
         x_guest_id="install-A",
         _rate_limit=None,
     )
-
-
-@pytest.mark.asyncio
-async def test_guest_over_the_allowance_is_refused(monkeypatch):
-    """THE denial-of-wallet case: past the monthly allowance, no agent run starts."""
-    budget = _Budget(claimed=-1)
-    resp = await _generate(monkeypatch, budget)
-    body = json.loads(resp.body)
-    assert body["error_code"] == ErrorCode.INSUFFICIENT_CREDITS.value
-    assert body["details"]["guest"] is True
-    assert len(budget.calls) == 1, "the allowance must be claimed exactly once per request"
-
-
-@pytest.mark.asyncio
-async def test_the_claim_is_keyed_per_install_not_shared(monkeypatch):
-    """A shared key would let one guest exhaust the allowance for every other guest."""
-    budget = _Budget(claimed=-1)
-    await _generate(monkeypatch, budget)
-    assert budget.calls, "the guest budget was never consulted"
-    assert budget.calls[0] != GUEST_USER_ID, (
-        "claimed against the shared guest sentinel — every install would share one allowance"
-    )
-
-
-@pytest.mark.asyncio
-async def test_budget_outage_fails_OPEN(monkeypatch):
-    """Consistent with the report path: a Supabase blip must not wall users out of the
-    headline feature — the rate limit and concurrency caps still bound the damage."""
-    budget = _Budget(raises=True)
-    resp = await _generate(monkeypatch, budget)
-    body = json.loads(resp.body) if hasattr(resp, "body") else {}
-    assert body.get("error_code") != ErrorCode.INSUFFICIENT_CREDITS.value, (
-        "a budget-service outage must not be reported to the user as 'out of credits'"
-    )
-
-
-@pytest.mark.asyncio
-async def test_signed_in_users_do_not_touch_the_guest_budget(monkeypatch):
-    """The guest allowance is for guests; an account is metered by credits."""
-    budget = _Budget(claimed=1)
-    from unittest.mock import MagicMock
-
-    credit = MagicMock()
-    credit.precharge.return_value = 100
-    # Replace the CLASS, not just the instance: the handler reads the class attribute
-    # `CreditService.DEEP_RESEARCH_COST` as well as calling `CreditService()`.
-    credit_cls = MagicMock(return_value=credit)
-    credit_cls.DEEP_RESEARCH_COST = 20
-    monkeypatch.setattr(research, "CreditService", credit_cls)
-
-    await _generate(monkeypatch, budget, user_id="real-user-1")
-    assert budget.calls == [], "a signed-in user consumed the guest allowance"
-    credit.precharge.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_persona_validation_still_precedes_any_claim(monkeypatch):
-    """A caller error must never burn the allowance."""
-    budget = _Budget(claimed=1)
-    monkeypatch.setattr(research, "get_guest_report_budget_service", lambda: budget)
-    from app.schemas.research import GenerateResearchRequest
-    resp = await research.generate_research_report(
-        request=GenerateResearchRequest(stock_id="AAPL", investor_persona="not_a_persona"),
-        user={"id": GUEST_USER_ID}, supabase=_SB(), x_guest_id="install-A", _rate_limit=None,
-    )
-    assert json.loads(resp.body)["error_code"] == ErrorCode.INVALID_PERSONA.value
-    assert budget.calls == [], "an invalid persona consumed the guest allowance"
-
-
-# ---------------------------------------------------------------------------
-# Analytics identity
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

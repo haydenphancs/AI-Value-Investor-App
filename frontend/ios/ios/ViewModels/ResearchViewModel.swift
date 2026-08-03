@@ -67,11 +67,12 @@ class ResearchViewModel: ObservableObject {
 
     // Search results (as-you-type)
     @Published var searchResults: [StockSearchResult] = []
+    /// True when the Reports tab has nothing to show because the user is signed out —
+    /// distinct from "you have no reports yet", which needs different copy.
+    @Published var requiresSignInForReports: Bool = false
+
     @Published var isSearching: Bool = false
     @Published var showSearchResults: Bool = false
-
-    // Auth gate: set to true when user is signed in
-    @Published var showSignInPrompt: Bool = false
 
     // Sheet presentation flags
     @Published var showCreditsSheet: Bool = false
@@ -87,7 +88,6 @@ class ResearchViewModel: ObservableObject {
     private let apiClient: APIClient
     private let stockRepository: StockRepository
     private let pollingManager: TaskPollingManager
-    private var isAuthenticated: () -> Bool = { false }
     private var searchTask: Task<Void, Never>?
     private var reportsPollTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
@@ -112,11 +112,10 @@ class ResearchViewModel: ObservableObject {
     private var dismissedReportIds: Set<String> = []
 
     // MARK: - Initialization
-    init(prefilledTicker: String? = nil, apiClient: APIClient = .shared, isAuthenticated: @escaping () -> Bool = { false }) {
+    init(prefilledTicker: String? = nil, apiClient: APIClient = .shared) {
         self.apiClient = apiClient
         self.stockRepository = StockRepository(apiClient: apiClient)
         self.pollingManager = TaskPollingManager(apiClient: apiClient)
-        self.isAuthenticated = isAuthenticated
         if let ticker = prefilledTicker {
             _searchText = Published(initialValue: ticker)
         }
@@ -215,6 +214,15 @@ class ResearchViewModel: ObservableObject {
 
     /// Fetch user's research reports from GET /research/reports
     func loadReports() async {
+        // Reports belong to an account now, so a signed-out user has none to load — say that,
+        // rather than firing a request that will be refused.
+        guard AppActions.shared.isSignedIn else {
+            reports = []
+            requiresSignInForReports = true
+            return
+        }
+        requiresSignInForReports = false
+
         print("📋 ResearchVM: Loading reports from backend...")
         do {
             let backendReports: [BackendReportListItem] = try await apiClient.request(
@@ -229,12 +237,19 @@ class ResearchViewModel: ObservableObject {
             sortReports()
             applyLiveProgress()   // keep the in-flight row at the live stream %
         } catch {
-            print("⚠️ ResearchVM: Failed to load reports — \(error). Using mock data.")
+            // NEVER fabricate. This used to fall back to `AnalysisReport.mockReports` when the
+            // list was empty, which showed invented analyses — with tickers, scores and fair
+            // values — as if they were the user's own. A failed load is not a set of reports.
+            let appError = AppError.from(error)
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("load_reports"),
+                "code": .string(appError.analyticsCode),
+            ])
             if reports.isEmpty {
-                reports = AnalysisReport.mockReports
-                sortReports()
+                self.error = appError.message
             } else {
-                // Network blip — keep existing rows but still age out the stale ones.
+                // Network blip with rows already on screen — keep them but still age out the
+                // stale ones, and don't overwrite what the user is looking at.
                 applyClientSideTimeoutPass()
                 sortReports()
             }
@@ -243,6 +258,16 @@ class ResearchViewModel: ObservableObject {
 
     /// Fetch user's credit balance from GET /users/me/credits
     func loadCredits() async {
+        // A signed-out caller resolves to the shared guest sentinel, which is seeded with
+        // 100,000 credits — so the Research tab told guests they had "99,999,530 credits
+        // remaining" while the Generate button now asks them to sign in. That number was never
+        // theirs and is not spendable; leaving the balance unknown hides the badge entirely,
+        // which is the honest state.
+        guard AppActions.shared.isSignedIn else {
+            creditBalance = nil
+            return
+        }
+
         print("💳 ResearchVM: Loading credits from backend...")
         do {
             let backendCredits: BackendCreditsResponse = try await apiClient.request(
@@ -313,11 +338,6 @@ class ResearchViewModel: ObservableObject {
                 reports[idx].currentStep = lp.step
             }
         }
-    }
-
-    // MARK: - Auth Configuration
-    func setAuthCheck(_ check: @escaping () -> Bool) {
-        self.isAuthenticated = check
     }
 
     // MARK: - Search
@@ -420,7 +440,20 @@ class ResearchViewModel: ObservableObject {
             return
         }
 
-        // DEV: auth disabled — backend handles unauthenticated callers as guest.
+        // AI generation is account-only. Ask BEFORE spending anything — `APIClient` would refuse
+        // the request anyway (`authPolicy == .signInRequired`), but reaching that as an error is
+        // a worse experience than being invited to sign in.
+        //
+        // Note this is not the old `showSignInPrompt`, which was dead code that never fired and
+        // was deleted: at the time, research really was guest-capable, so gating it would have
+        // removed a working feature. What changed is the policy — the guest allowance keyed on a
+        // client-supplied `X-Guest-Id`, so rotating that header bought unlimited ~17-Gemini-call
+        // generations. Credits are FK-bound to a real account and can't be rotated; a free
+        // account gets 50 credits against a 20-credit report, so 2/month vs the guest's 1.
+        guard AppActions.shared.isSignedIn else {
+            AppActions.shared.requestSignIn(for: "generate AI analysis")
+            return
+        }
 
         let ticker = searchText.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !ticker.isEmpty else {
@@ -752,7 +785,10 @@ class ResearchViewModel: ObservableObject {
         selectedPersona.description
     }
 
+    /// "Quality Style Analysis" — the STYLE word, not the last word of the display
+    /// name (which reads "Compounder" / "Seeker" since the personas were renamed off
+    /// real surnames). Matches AnalysisDescriptionCard.styleTitle.
     var analysisStyleTitle: String {
-        "\(selectedPersona.rawValue.components(separatedBy: " ").last ?? "") Style Analysis"
+        "\(selectedPersona.shortName) Style Analysis"
     }
 }

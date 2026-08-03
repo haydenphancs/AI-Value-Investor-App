@@ -9,7 +9,11 @@ import re
 from collections import defaultdict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
-from app.core.security import decode_token, trusted_client_ip, verify_supabase_token
+from app.core.security import trusted_client_ip
+# `_user_id_from_token` applies the access-token type guard that `decode_token` alone does not.
+# The endpoint layer importing from `dependencies` (not `integrations`) is consistent with how
+# every other endpoint reaches its auth helpers.
+from app.dependencies import _user_id_from_token
 from app.services.live_price_manager import get_live_price_manager
 from app.utils.market_hours import is_market_active
 
@@ -28,29 +32,21 @@ def _validate_ws_token(token: str) -> str | None:
     Validate a JWT token for WebSocket auth.
     Returns user_id on success, None on failure.
 
-    Reuses the same token validation logic as the REST endpoints
-    (decode_token for custom JWT, verify_supabase_token for Supabase Auth).
+    Reuses the same token validation logic as the REST endpoints — `_user_id_from_token` from
+    `app.dependencies`, which tries the app-minted JWT then the Supabase-issued one.
+
+    That shared helper is the point. This function used to call `decode_token` DIRECTLY, which
+    accepts any correctly-signed token regardless of its `type` claim — so a **refresh token
+    worked as a WebSocket credential**, bypassing `_decode_access_token`'s guard entirely. That
+    guard exists because refresh tokens live 7 days against an access token's 24 hours and skip
+    the `password_changed_at` eviction check, so honouring one here handed a stolen or
+    post-password-change refresh token a live price stream for the rest of the week.
+
+    Returning None on failure is deliberate and unchanged: the caller treats an unusable token
+    as "guest", because the stream is genuinely public for crypto. There is no 401 to raise on a
+    socket that has not been accepted yet.
     """
-    # Try custom JWT first
-    try:
-        payload = decode_token(token)
-        user_id = payload.get("sub")
-        if user_id:
-            return user_id
-    except Exception:
-        pass
-
-    # Try Supabase Auth token
-    try:
-        payload = verify_supabase_token(token)
-        if payload:
-            user_id = payload.get("sub")
-            if user_id:
-                return user_id
-    except Exception:
-        pass
-
-    return None
+    return _user_id_from_token(token)
 
 
 @router.websocket("/ws/price/{ticker}")

@@ -102,6 +102,51 @@ actor APIClient {
         return newToken
     }
 
+    /// Called when a request failed for an auth reason the transports could not recover from.
+    /// Wired to `AppState` at the app root; lets the client clear a dead credential, drop to
+    /// signed-out, and kick off a session-restore attempt.
+    private var authFailureHandler: (@Sendable (AuthFailure) async -> Void)?
+
+    func setAuthFailureHandler(_ handler: @escaping @Sendable (AuthFailure) async -> Void) {
+        self.authFailureHandler = handler
+    }
+
+    /// The current access token, for the one consumer that genuinely cannot go through
+    /// `request`: the live-price WebSocket, which passes it as a `?token=` query parameter
+    /// because `URLSessionWebSocketTask` can't set headers from iOS.
+    ///
+    /// Exists so those call sites stop reading the Keychain directly. Four ViewModels did, and
+    /// the Keychain copy is deliberately NOT the same value — `restoreAuthState` disarms the
+    /// client token on a transient failure while leaving the Keychain entry intact, so a
+    /// Keychain reader authenticates as the real account while the whole UI says "guest". They
+    /// also never observed a mid-session refresh.
+    func currentAuthToken() -> String? { authToken }
+
+    /// Whether the client currently holds a credential at all.
+    nonisolated static let authTokenClearedNotification = Notification.Name("caydexAuthTokenCleared")
+
+    /// Decide what to do about an auth failure, once, in one place.
+    ///
+    /// Returns true when the caller should retry the request WITHOUT a credential. That is the
+    /// self-heal for a dead session on a guest-capable surface: rather than showing an error for
+    /// a screen that works fine signed-out, drop the dead token and render guest content.
+    private func handleUnrecoverableAuthFailure(
+        _ error: APIError, endpoint: APIEndpoint
+    ) async -> Bool {
+        if error.isSignInRequired {
+            // No credential was sent. If we nonetheless hold a stored one, the client is running
+            // tokenless when it shouldn't be — that is the self-heal trigger, not a sign-out.
+            await authFailureHandler?(.signInRequired)
+            return false
+        }
+
+        // The refresh already ran and failed: the credential is genuinely dead.
+        await authFailureHandler?(.credentialRejected)
+        authToken = nil
+
+        return endpoint.authPolicy.isUsableWithoutCredential
+    }
+
     // MARK: - Request Methods
 
     /// Make a request and decode the response
@@ -132,15 +177,31 @@ actor APIClient {
             // 401 → single-flight token refresh → retry ONCE. Skipped for the auth
             // endpoints themselves (a failed login must surface, not loop) and when
             // this call is already the post-refresh retry.
-            if case .unauthorized = error,
+            //
+            // The predicate is `triggersTokenRefresh`, NOT `if case .unauthorized`. A 401 now
+            // decodes into `.authError(code:)`, so the old pattern match would have stopped
+            // firing the moment that landed — killing token refresh app-wide, silently, with
+            // every session dying at the 24-hour mark and no test to catch it.
+            if error.triggersTokenRefresh,
                allowAuthRetry,
                tokenRefresher != nil,
-               !endpoint.isAuthEndpoint,
-               await refreshTokenSingleFlight() != nil {
-                return try await self.request(
-                    endpoint: endpoint, responseType: responseType,
-                    retryCount: retryCount, allowAuthRetry: false
-                )
+               !endpoint.isAuthEndpoint {
+                if await refreshTokenSingleFlight() != nil {
+                    return try await self.request(
+                        endpoint: endpoint, responseType: responseType,
+                        retryCount: retryCount, allowAuthRetry: false
+                    )
+                }
+                // Refresh failed: the credential is dead. On a guest-capable endpoint, retry
+                // tokenless so the screen renders guest content instead of an error.
+                if await handleUnrecoverableAuthFailure(error, endpoint: endpoint) {
+                    return try await self.request(
+                        endpoint: endpoint, responseType: responseType,
+                        retryCount: retryCount, allowAuthRetry: false
+                    )
+                }
+            } else if error.isSignInRequired, allowAuthRetry {
+                _ = await handleUnrecoverableAuthFailure(error, endpoint: endpoint)
             }
             // Retry on server errors
             if retryCount > 0, case .serverError = error {
@@ -179,13 +240,21 @@ actor APIClient {
             try validateResponse(httpResponse, data: data)
 
         } catch let apiError as APIError {
-            // 401 → single-flight refresh → retry once (see request<T> for rationale).
-            if case .unauthorized = apiError,
+            // 401 → single-flight refresh → retry once (see request<T> for the full rationale,
+            // including why this must ask `triggersTokenRefresh` rather than match
+            // `.unauthorized`).
+            if apiError.triggersTokenRefresh,
                allowAuthRetry,
                tokenRefresher != nil,
-               !endpoint.isAuthEndpoint,
-               await refreshTokenSingleFlight() != nil {
-                return try await self.request(endpoint: endpoint, allowAuthRetry: false)
+               !endpoint.isAuthEndpoint {
+                if await refreshTokenSingleFlight() != nil {
+                    return try await self.request(endpoint: endpoint, allowAuthRetry: false)
+                }
+                if await handleUnrecoverableAuthFailure(apiError, endpoint: endpoint) {
+                    return try await self.request(endpoint: endpoint, allowAuthRetry: false)
+                }
+            } else if apiError.isSignInRequired, allowAuthRetry {
+                _ = await handleUnrecoverableAuthFailure(apiError, endpoint: endpoint)
             }
             throw apiError
         } catch {
@@ -226,12 +295,18 @@ actor APIClient {
         } catch let error as APIError {
             // 401 → single-flight refresh → retry once (same as request<T>), so an
             // authed download (e.g. report PDF) survives an expired access token.
-            if case .unauthorized = error,
+            if error.triggersTokenRefresh,
                allowAuthRetry,
                tokenRefresher != nil,
-               !endpoint.isAuthEndpoint,
-               await refreshTokenSingleFlight() != nil {
-                return try await downloadData(endpoint: endpoint, retryCount: retryCount, allowAuthRetry: false)
+               !endpoint.isAuthEndpoint {
+                if await refreshTokenSingleFlight() != nil {
+                    return try await downloadData(endpoint: endpoint, retryCount: retryCount, allowAuthRetry: false)
+                }
+                if await handleUnrecoverableAuthFailure(error, endpoint: endpoint) {
+                    return try await downloadData(endpoint: endpoint, retryCount: retryCount, allowAuthRetry: false)
+                }
+            } else if error.isSignInRequired, allowAuthRetry {
+                _ = await handleUnrecoverableAuthFailure(error, endpoint: endpoint)
             }
             if retryCount > 0, case .serverError = error {
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
@@ -292,7 +367,34 @@ actor APIClient {
 
     /// Actor-isolated: build the authed request (Accept: text/event-stream) and
     /// open the byte stream, validating the status line before returning.
-    private func openStream(endpoint: APIEndpoint) async throws -> URLSession.AsyncBytes {
+    /// Open the stream, and on an auth failure do exactly what the other three transports do:
+    /// single-flight refresh, then reopen once.
+    ///
+    /// This path had NO refresh at all, so chat streaming hard-failed on an expired token while
+    /// every other request in the app silently recovered — the same session working everywhere
+    /// except the one screen the user was typing into.
+    private func openStream(endpoint: APIEndpoint, allowAuthRetry: Bool = true) async throws -> URLSession.AsyncBytes {
+        do {
+            return try await openStreamOnce(endpoint: endpoint)
+        } catch let error as APIError {
+            if error.triggersTokenRefresh,
+               allowAuthRetry,
+               tokenRefresher != nil,
+               !endpoint.isAuthEndpoint {
+                if await refreshTokenSingleFlight() != nil {
+                    return try await openStreamOnce(endpoint: endpoint)
+                }
+                if await handleUnrecoverableAuthFailure(error, endpoint: endpoint) {
+                    return try await openStreamOnce(endpoint: endpoint)
+                }
+            } else if error.isSignInRequired, allowAuthRetry {
+                _ = await handleUnrecoverableAuthFailure(error, endpoint: endpoint)
+            }
+            throw error
+        }
+    }
+
+    private func openStreamOnce(endpoint: APIEndpoint) async throws -> URLSession.AsyncBytes {
         var request = try buildRequest(for: endpoint)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
@@ -307,7 +409,22 @@ actor APIClient {
                 print("❌ SSE stream \(http.statusCode) from \(http.url?.path ?? "")")
             }
             switch http.statusCode {
-            case 401: throw APIError.unauthorized
+            case 401:
+                // `session.bytes` yields no Data, so read a bounded prefix of the body to
+                // recover the structured code. Capped so a misbehaving endpoint streaming an
+                // error body can't grow unbounded here.
+                var raw = Data()
+                for try await byte in bytes {
+                    raw.append(byte)
+                    if raw.count >= 8192 { break }
+                }
+                if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: raw) {
+                    throw APIError.authError(
+                        code: errorResponse.errorCode,
+                        message: errorResponse.userMessage
+                    )
+                }
+                throw APIError.unauthorized
             case 404: throw APIError.notFound
             case 429:
                 let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap { Int($0) } ?? 60
@@ -419,6 +536,25 @@ actor APIClient {
         request.setValue("iOS", forHTTPHeaderField: "X-Platform")
         request.setValue(Bundle.main.appVersion, forHTTPHeaderField: "X-App-Version")
 
+        // Pre-flight auth gate.
+        //
+        // `authPolicy` existed for a long time (as `requiresAuth`) and was consulted by exactly
+        // one debug `print`. So a tokenless call to a sign-in-only route went out anyway, came
+        // back refused, and — at a call site that only logged — vanished. That is the reported
+        // bug in one line: tapping Follow while signed out spent a round trip to be told 403 and
+        // then silently reverted the button.
+        //
+        // Refusing here instead means the UI can offer sign-in immediately, and it cannot be
+        // bypassed: `buildRequest` is the single funnel behind `request<T>`, `request`,
+        // `downloadData` AND `openStream`.
+        //
+        // `.guestAllowed` and `.public` are deliberately untouched — the backend resolves a
+        // signed-out caller to a per-install guest for those, and gating them on a token would
+        // delete working features for every guest.
+        if endpoint.authPolicy == .signInRequired, authToken == nil {
+            throw APIError.authRequired
+        }
+
         // Auth token — always send when available (supports optional-auth endpoints)
         if let token = authToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -447,10 +583,24 @@ actor APIClient {
             return // Success
 
         case 401:
+            // The body used to be thrown away here, which is why an auth failure could never say
+            // anything more specific than "Session Expired" — the client had no way to tell "you
+            // were never signed in" from "your token died" from "your password changed
+            // elsewhere". The backend now sends a structured `{error_code, ...}` on every 401
+            // (`auth_error` in app/api/error_response.py), so decode it.
+            if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
+                throw APIError.authError(
+                    code: errorResponse.errorCode,
+                    message: errorResponse.userMessage
+                )
+            }
+            // Legacy / non-contract 401 (an older backend, or a proxy's own response).
             throw APIError.unauthorized
 
         case 403:
-            // Check for specific error codes (Phase 3 contract)
+            // 403 no longer means "no credential" — that is a 401 now. What remains is genuine
+            // authorization failure (AUTH_FORBIDDEN, EMAIL_NOT_CONFIRMED), which `mapAPIError`
+            // routes to `.forbidden` rather than letting it look like a session problem.
             if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
                 throw APIError.businessError(
                     code: errorResponse.errorCode,
@@ -544,6 +694,24 @@ actor APIClient {
             print("   ⚠️ HTTP error \(response.statusCode) — check backend logs for details")
         }
     }
+}
+
+// MARK: - Auth Failure
+
+/// Why a request could not be authenticated, after `APIClient` exhausted its own recovery.
+///
+/// Two cases, because the correct response to each is opposite and conflating them is what made
+/// auth feel unreliable: one means "restore the session you have", the other means "the session
+/// you have is gone".
+enum AuthFailure: Sendable, Equatable {
+    /// The request went out with no credential (or was refused before being made) on a route
+    /// that needs one. If a stored credential exists, the client is running tokenless and should
+    /// try to restore — it must NOT sign anybody out.
+    case signInRequired
+
+    /// A credential was presented, rejected, and the refresh failed. This one is terminal:
+    /// clear it.
+    case credentialRejected
 }
 
 // MARK: - Server-Sent Event

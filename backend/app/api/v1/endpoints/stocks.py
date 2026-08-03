@@ -59,7 +59,7 @@ from app.services.signal_of_confidence_service import get_signal_of_confidence_s
 from app.schemas.holders import HoldersResponse
 from app.services.holders_service import get_holders_service
 from app.config import settings
-from app.dependencies import get_current_user_or_guest, StandardRateLimit
+from app.dependencies import get_current_user, StandardRateLimit
 from app.services.ticker_data_cache import warm_ticker_collection
 
 logger = logging.getLogger(__name__)
@@ -85,11 +85,17 @@ def _validate_ticker(ticker: str) -> str:
 @router.post("/{ticker}/prewarm-report")
 async def prewarm_report_collection(
     ticker: str,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_current_user),
     _rate_limit=StandardRateLimit,
 ):
     """Best-effort: warm the persona-neutral ticker_data_cache for `ticker` so a
     later Generate Analysis skips re-collecting it.
+
+    ACCOUNT-ONLY, matching the report endpoints it warms for. This fans out ~20 FMP
+    calls per ticker viewed; doing that for a caller who can no longer generate a
+    report is pure spend with nothing at the end of it. iOS stops firing it when
+    signed out (`APIEndpoint.authPolicy` refuses before the request), so this is
+    defence in depth rather than the primary gate.
 
     iOS fires this fire-and-forget when a user opens the detail view. Returns
     202 immediately; the warm runs in the background — freshness-guarded +

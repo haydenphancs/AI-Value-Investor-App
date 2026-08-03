@@ -25,6 +25,19 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     case tokenExpired
     case forbidden
 
+    /// Not signed in, on something that needs an account. `feature` is the human phrase for what
+    /// they were trying to do ("follow investors"), so the prompt reads as an invitation rather
+    /// than an error. NOT a session failure — see `isAuthError`.
+    case signInRequired(feature: String?)
+
+    /// The session is definitively over (password changed elsewhere, or the account is gone).
+    /// Carries the backend's copy so the user learns WHY rather than a generic "expired".
+    case sessionEnded(message: String)
+
+    /// Identity could not be verified right now (503 AUTH_UNAVAILABLE). Retryable, and
+    /// explicitly not a reason to sign anybody out.
+    case authUnavailable(message: String)
+
     // Business errors
     case insufficientCredits(required: Int, available: Int)
     case notFound(resource: String)
@@ -45,6 +58,9 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .unauthorized: return "unauthorized"
         case .tokenExpired: return "token_expired"
         case .forbidden: return "forbidden"
+        case .signInRequired(let f): return "sign_in_required_\(f ?? "generic")"
+        case .sessionEnded: return "session_ended"
+        case .authUnavailable: return "auth_unavailable"
         case .insufficientCredits: return "insufficient_credits"
         case .notFound(let r): return "not_found_\(r)"
         case .validationFailed: return "validation"
@@ -68,6 +84,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Session Expired"
         case .forbidden:
             return "Access Denied"
+        case .signInRequired:
+            return "Sign In Required"
+        case .sessionEnded:
+            return "Signed Out"
+        case .authUnavailable:
+            return "Couldn't Verify Account"
         case .insufficientCredits:
             return "Insufficient Credits"
         case .notFound:
@@ -95,6 +117,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Your session has expired. Please sign in again."
         case .forbidden:
             return "You don't have permission to perform this action."
+        case .signInRequired(let feature):
+            // Feature-specific copy when the call site supplied it; the generic line otherwise.
+            if let feature, !feature.isEmpty {
+                return "Sign in to \(feature)."
+            }
+            return "Sign in to use this feature."
+        case .sessionEnded(let message):
+            return message.isEmpty ? "Your session has ended. Please sign in again." : message
+        case .authUnavailable(let message):
+            return message.isEmpty
+                ? "We couldn't verify your account just now. Please try again in a moment."
+                : message
         case .insufficientCredits(let required, let available):
             // required <= 0 → the amount/balance wasn't plumbed (the backend
             // INSUFFICIENT_CREDITS path carries no required/available on businessError):
@@ -128,6 +162,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return .signIn
         case .forbidden:
             return .goBack
+        case .signInRequired, .sessionEnded:
+            return .signIn
+        case .authUnavailable:
+            return .retry
         case .insufficientCredits:
             return .upgrade
         case .notFound:
@@ -143,7 +181,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
 
     var isRetryable: Bool {
         switch self {
-        case .timeout, .serverError, .rateLimited:
+        case .timeout, .serverError, .rateLimited, .authUnavailable:
             return true
         default:
             return false
@@ -156,7 +194,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// than silently hiding just-synced content, per the no-silent-swallow rule.
     var isExpectedOffline: Bool {
         switch self {
-        case .noConnection, .timeout, .unauthorized, .tokenExpired, .forbidden:
+        // Auth failures used to be in this list, and that was the bug: all ten Learn-store
+        // catch blocks are gated on `if !appError.isExpectedOffline`, so a 401/403 on any Learn
+        // read or write produced NO output in ANY build configuration. An auth failure is not a
+        // routine offline blip — it is exactly the thing worth knowing about — so only genuine
+        // connectivity failures qualify now.
+        case .noConnection, .timeout:
             return true
         default:
             return false
@@ -168,8 +211,22 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// clear the stored token — a transient offline error must NOT sign the user out.
     var isAuthError: Bool {
         switch self {
-        case .unauthorized, .tokenExpired, .forbidden:
+        case .unauthorized, .tokenExpired, .sessionEnded:
             return true
+
+        // `.forbidden` was here, and it was dangerous. This property has exactly two callers,
+        // both in `restoreAuthState`, and one of them clears BOTH Keychain tokens and discards
+        // the device's Learn data. While a missing credential produced 403, that meant an
+        // ordinary permission wall at launch could destroy a perfectly valid session. 403 now
+        // means only "authenticated but not allowed" (AUTH_FORBIDDEN, EMAIL_NOT_CONFIRMED),
+        // which re-authenticating cannot fix, so it must not touch the session.
+        //
+        // `.signInRequired` is excluded for the mirror-image reason: no credential was sent, so
+        // there is nothing wrong with any credential we hold. It is the SELF-HEAL signal — if a
+        // Keychain token exists while we are getting this, the client is running tokenless and
+        // should restore, not sign out.
+        //
+        // `.authUnavailable` is excluded because it is transient by definition.
         default:
             return false
         }
@@ -212,6 +269,33 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return .unauthorized
         case .forbidden:
             return .forbidden
+
+        // Client-side pre-flight: a `.signInRequired` endpoint called with no token. The request
+        // was never made, so there is no backend copy to surface — the call site supplies the
+        // feature phrase via `AppState.requestSignIn(for:)`.
+        case .authRequired:
+            return .signInRequired(feature: nil)
+
+        // The six structured auth codes. Each maps to a case whose `isAuthError` /
+        // `suggestedAction` semantics match what the client must actually DO — that mapping is
+        // the whole point of having distinct codes rather than one AUTH_FAILED.
+        case .authError(let code, let message):
+            switch code {
+            case "AUTH_REQUIRED":
+                return .signInRequired(feature: nil)
+            case "AUTH_TOKEN_INVALID":
+                // The refresh already ran and failed by the time this surfaces (the interceptor
+                // owns the retry), so the session really is over.
+                return .tokenExpired
+            case "AUTH_SESSION_EXPIRED", "AUTH_ACCOUNT_NOT_FOUND":
+                return .sessionEnded(message: message)
+            case "AUTH_UNAVAILABLE":
+                return .authUnavailable(message: message)
+            default:
+                // An AUTH_* code this build doesn't know. Treat as a session failure rather than
+                // a generic error — the backend only emits these on 401.
+                return .sessionEnded(message: message)
+            }
         case .notFound:
             return .notFound(resource: "item")
         case .serverError(let code):
@@ -258,6 +342,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             // user's portfolios. Surface the backend's retry copy verbatim.
             if code == "WATCHLIST_UNAVAILABLE" {
                 return .apiError(code: code, message: message)
+            }
+            // 403 AUTH_FORBIDDEN: authenticated, just not permitted. A typed `.forbidden` rather
+            // than a generic `.apiError` so it gets "Access Denied" + `.goBack` instead of a
+            // retry button that can never succeed — and, critically, so it is NOT an auth error
+            // (re-authenticating cannot grant permission, and must not cost the session).
+            if code == "AUTH_FORBIDDEN" {
+                return .forbidden
+            }
+            // 503 AUTH_UNAVAILABLE can also arrive on the businessError path (the default arm of
+            // validateResponse handles non-401 statuses).
+            if code == "AUTH_UNAVAILABLE" {
+                return .authUnavailable(message: message)
             }
             return .apiError(code: code, message: message)
         case .decodingError:
@@ -318,6 +414,55 @@ enum APIError: Error, @unchecked Sendable {
     case decodingError(Error)
     case networkError(Error)
     case unknown(message: String)
+
+    /// Raised by `APIClient` BEFORE the request goes out, when a `.signInRequired` endpoint is
+    /// called with no token. Distinct from `.unauthorized` on purpose: nothing is wrong with the
+    /// session (there isn't one), so this must never trigger a refresh or touch the Keychain.
+    case authRequired
+
+    /// A 401 that carried the structured `{error_code, ...}` body — one of the `AUTH_*` codes.
+    /// Separate from `.businessError` so auth failures keep their identity instead of being
+    /// indistinguishable from a 404 or a credits error.
+    case authError(code: String, message: String)
+}
+
+extension APIError {
+    /// Whether this failure is worth spending a token refresh on.
+    ///
+    /// ⚠️ This predicate exists because of a trap. The refresh-and-retry interceptor is written
+    /// three times over — `request<T>`, `request` (void) and `downloadData` — and each used to
+    /// pattern-match `if case .unauthorized = error`. The moment a 401 started decoding into
+    /// `.authError` instead, those matches would stop firing and **token refresh would silently
+    /// die app-wide**: every user signed out after 24 hours with no failing test to show it.
+    /// Every interceptor now asks this instead, so the set of refreshable failures is defined
+    /// once.
+    ///
+    /// `AUTH_REQUIRED` is deliberately excluded — no credential was sent, so there is nothing to
+    /// refresh. `AUTH_ACCOUNT_NOT_FOUND` too: the account is gone and the refresh will fail for
+    /// the same reason. Both are handled by the sign-in affordance instead.
+    var triggersTokenRefresh: Bool {
+        switch self {
+        case .unauthorized:
+            return true
+        case .authError(let code, _):
+            return code == "AUTH_TOKEN_INVALID" || code == "AUTH_SESSION_EXPIRED"
+        default:
+            return false
+        }
+    }
+
+    /// True when the failure means "you are not signed in", as opposed to "your session broke".
+    /// Drives the Sign In Required affordance and must never cost the user a stored credential.
+    var isSignInRequired: Bool {
+        switch self {
+        case .authRequired:
+            return true
+        case .authError(let code, _):
+            return code == "AUTH_REQUIRED"
+        default:
+            return false
+        }
+    }
 }
 
 // MARK: - Analytics
@@ -336,6 +481,9 @@ extension AppError {
         case .unauthorized:        return "unauthorized"
         case .tokenExpired:        return "token_expired"
         case .forbidden:           return "forbidden"
+        case .signInRequired:      return "sign_in_required"
+        case .sessionEnded:        return "session_ended"
+        case .authUnavailable:     return "auth_unavailable"
         case .insufficientCredits: return "insufficient_credits"
         case .notFound:            return "not_found"
         case .validationFailed:    return "validation_failed"

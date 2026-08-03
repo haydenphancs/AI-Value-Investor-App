@@ -673,7 +673,13 @@ class TrackingViewModel: ObservableObject {
             do {
                 try await portfolioStore.removeTicker(asset.ticker)
             } catch {
-                print("[TrackingVM] ❌ Failed to remove \(asset.ticker) from portfolio: \(error)")
+                // The swipe already removed the row optimistically, so silence here left the
+                // ticker gone from the UI and still on the server — it reappeared on the next
+                // refresh with no explanation. Refresh to restore truth, and say what happened.
+                AppActions.shared.reportMutationFailure(
+                    error, action: "remove \(asset.ticker) from this portfolio"
+                )
+                await refresh()
             }
         }
     }
@@ -712,7 +718,11 @@ class TrackingViewModel: ObservableObject {
                         _ = try await portfolioStore.createPortfolio(named: "Holdings")
                         print("[TrackingVM] ✅ Created default Holdings portfolio")
                     } catch {
-                        print("[TrackingVM] ❌ Couldn't create default portfolio: \(error). Check that backend migration 037 is applied and /api/v1/portfolios is deployed.")
+                        // Without this the tap is simply a dead button: no portfolio is created,
+                        // nothing is added, and nothing is said.
+                        AppActions.shared.reportMutationFailure(
+                            error, action: "create a portfolio"
+                        )
                         return
                     }
                 }
@@ -738,7 +748,16 @@ class TrackingViewModel: ObservableObject {
                 // it in the active portfolio.
                 print("[TrackingVM] ⚠️ Watchlist add failed for \(symbol) (likely already present): \(error)")
             }
-            try? await portfolioStore.addTicker(symbol, to: portfolioId)
+            do {
+                try await portfolioStore.addTicker(symbol, to: portfolioId)
+            } catch {
+                // Was a bare `try?`. The star had already filled in optimistically, so a failure
+                // here meant the user watched it light up for a ticker that never joined the
+                // portfolio.
+                AppActions.shared.reportMutationFailure(
+                    error, action: "add \(symbol) to this portfolio"
+                )
+            }
             await refresh()
             // Real portfolio.tickers now carries the truth — drop the
             // optimistic marker so future state reads from authoritative data.
@@ -765,7 +784,12 @@ class TrackingViewModel: ObservableObject {
                 )
                 print("[TrackingVM] ✅ Removed \(asset.ticker) from watchlist + all portfolios")
             } catch {
-                print("[TrackingVM] ❌ Failed to remove \(asset.ticker) from watchlist: \(error)")
+                // The row was removed optimistically before this ran; without a signal the
+                // ticker silently returns on the next refresh.
+                AppActions.shared.reportMutationFailure(
+                    error, action: "remove \(asset.ticker) from your watchlist"
+                )
+                await refresh()
             }
         }
     }
@@ -848,6 +872,13 @@ class TrackingViewModel: ObservableObject {
     }
 
     func toggleFollowWhale(_ whale: TrendingWhale) {
+        // Ask the service FIRST. It owns the "does this need an account?" decision (and raises
+        // the sign-in prompt), and it returns false when the mutation was never started — so a
+        // signed-out tap must not reach the four optimistic list rebuilds below. Doing this
+        // after the rebuilds is what produced the reported symptom: the row animated into
+        // "Tracked Whales" and then vanished again with nothing said.
+        guard WhaleService.shared.toggleFollow(whale.id) else { return }
+
         let newFollowing = !whale.isFollowing
         // Field-by-field rebuild — every TrendingWhale field must be threaded
         // through or it silently disappears from the row (firmName vanished
@@ -884,8 +915,6 @@ class TrackingViewModel: ObservableObject {
             trackedWhales.removeAll { $0.id == whale.id }
         }
 
-        // Sync to backend via WhaleService
-        WhaleService.shared.toggleFollow(whale.id)
     }
 
     // MARK: - Follow State Sync

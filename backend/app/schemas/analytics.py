@@ -55,6 +55,12 @@ ALLOWED_EVENTS: frozenset[str] = frozenset({
     # Updates, the personalized Home strip, and (later) push relevant at all.
     "onboarding_completed",
     "onboarding_skipped",
+    # Failure telemetry. Both replace `print`/`#if DEBUG` sites that were invisible in release
+    # builds, which is how a whole class of silently-reverted user actions (whale follow, the
+    # star toggles, portfolio edits) survived unnoticed. `mutation_failed` is user-initiated,
+    # `background_sync_failed` is best-effort sync (settings, push registration, guest claim).
+    "mutation_failed",
+    "background_sync_failed",
 })
 
 
@@ -74,6 +80,9 @@ ALLOWED_PROP_KEYS: frozenset[str] = frozenset({
     "seconds",    # durations
     "count",
     "cached",
+    "action",     # mutation_failed — a fixed infinitive phrase from the call site
+    "op",         # background_sync_failed — fixed operation name
+    "code",       # both — AppError.analyticsCode, never the message
 })
 
 

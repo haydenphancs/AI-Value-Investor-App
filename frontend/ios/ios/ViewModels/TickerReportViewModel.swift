@@ -77,6 +77,16 @@ class TickerReportViewModel: ObservableObject {
     // MARK: - Data Loading
 
     func loadReport() {
+        // The direct report path runs the SAME pipeline for the same cost as
+        // /research/generate on a cache miss (~17 Gemini + ~20 FMP calls), so it carries the
+        // same account requirement. Gating only /research/generate would have made that gate
+        // cosmetic — this is the other door into the identical spend.
+        guard AppActions.shared.isSignedIn else {
+            AppActions.shared.requestSignIn(for: "view AI analysis")
+            isLoading = false
+            return
+        }
+
         isLoading = true
         error = nil
         loadAttempts += 1
@@ -263,6 +273,11 @@ class TickerReportViewModel: ObservableObject {
                 return "Your session expired. Please sign in again."
             case .forbidden:
                 return "You don't have access to this. If this seems wrong, contact support."
+            // The report endpoints are guest-capable, so neither of these should be reachable
+            // here — but routing them through `AppError` rather than inventing local copy keeps
+            // the wording identical to every other auth surface in the app.
+            case .authRequired, .authError:
+                return AppError.from(apiError).message
             case .unknown(let message):
                 return message.isEmpty
                     ? "Something went wrong. Please try again."

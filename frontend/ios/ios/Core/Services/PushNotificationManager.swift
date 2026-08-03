@@ -103,6 +103,12 @@ final class PushNotificationManager {
             _ = try await repository.unregisterDevice(token: token)
             registeredToken = nil
         } catch {
+            // Release-visible: a token that fails to detach stays bound to the account that
+            // registered it, so a signed-out phone keeps receiving the PREVIOUS account's alerts.
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("push_deregister"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
             #if DEBUG
             print("⚠️ [Push] device de-registration failed: \(AppError.from(error).message)")
             #endif
@@ -133,6 +139,12 @@ final class PushNotificationManager {
                 // Keep the token so flushPendingToken() can retry — a transient
                 // offline/5xx must not permanently drop the device registration.
                 pendingToken = token
+                // Release-visible: silently means no push notifications, ever, with nothing
+                // anywhere to explain why.
+                Analytics.shared.track(.backgroundSyncFailed, [
+                    "op": .string("push_register"),
+                    "code": .string(AppError.from(error).analyticsCode),
+                ])
                 #if DEBUG
                 print("⚠️ [Push] device registration failed: \(AppError.from(error).message)")
                 #endif

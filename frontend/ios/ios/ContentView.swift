@@ -414,7 +414,11 @@ struct ResearchViewWithBinding: View {
                     onToggleSelectingMode: handleToggleSelectingMode,
                     onTogglePersonaTag: { viewModel.togglePersonaTag($0) },
                     // First-run CTA: send them to the tab that can actually make one.
-                    onGenerateFirst: { viewModel.selectedTab = .research }
+                    onGenerateFirst: { viewModel.selectedTab = .research },
+                    // Reports are account-scoped now, so "you have none" and "you're signed
+                    // out" are different situations and get different copy + CTA.
+                    requiresSignIn: viewModel.requiresSignInForReports,
+                    onSignIn: { appState.requestSignIn(for: "see your analyses") }
                 )
                 .padding(.top, AppSpacing.sm)
 

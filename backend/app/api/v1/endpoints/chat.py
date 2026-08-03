@@ -19,10 +19,9 @@ import logging
 from app.config import settings
 from app.database import get_supabase
 from app.dependencies import (
-    get_current_user_or_guest,
+    get_chat_identity,
     ChatRateLimit,
     chat_identity_key,
-    GUEST_USER_ID,
 )
 from app.api.error_response import make_error_response, ErrorCode
 from app.services.chat_security import (
@@ -98,7 +97,8 @@ class _ChatQuota:
 
     - Authenticated user → CHAT_CREDIT_COST credits (the monthly wallet is the cap).
     - Guest → the durable per-install daily-turn budget (guests are never credit-metered:
-      the shared GUEST_USER_ID pool would deplete for ALL guests — see migration 101).
+      `user_credits` is FK-bound to `public.users`, so a per-install id has no wallet to
+      debit — see migration 101).
 
     `refund_once` hands the quota back on non-delivery and is safe to call from every
     failure site + the finally backstop: a single-coroutine `_settled` flag fires the
@@ -137,7 +137,13 @@ def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str]):
 
     Returns `(quota, None)` to proceed, or `(None, JSONResponse)` to short-circuit.
     """
-    if user["id"] == GUEST_USER_ID:
+    # `user.get("is_guest")`, NOT `user["id"] == GUEST_USER_ID`. Under migration 111 a guest
+    # resolves to a per-INSTALL uuid5 that never equals the shared sentinel, so the old
+    # comparison would have sent every guest into the credit precharge below — against a
+    # `user_credits` row that does not exist — and answered 402 "insufficient credits" for a
+    # feature that is supposed to be free for them. `get_chat_identity` documents this trap;
+    # it is the same one `get_research_identity` and `get_watchlist_identity` carry.
+    if user.get("is_guest"):
         err = _claim_chat_turn_or_error(user, x_guest_id)
         if err is not None:
             return None, err
@@ -290,7 +296,7 @@ def _row_to_message(row: dict) -> ChatMessageResponse:
 async def list_chat_sessions(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
 ):
     """List all chat sessions for the current user, newest first."""
@@ -310,7 +316,7 @@ async def list_chat_sessions(
 @router.post("/sessions", response_model=ChatSessionResponse)
 async def create_chat_session(
     request: CreateChatSessionRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
 ):
     """Create a new chat session."""
@@ -325,10 +331,42 @@ async def create_chat_session(
         "last_message_at": now_iso,
     }
 
-    result = supabase.table("chat_sessions").insert(session_data).execute()
+    try:
+        result = supabase.table("chat_sessions").insert(session_data).execute()
+    except Exception as e:
+        # supabase-py RAISES APIError on a non-2xx insert rather than returning empty `.data`,
+        # so the `if not result.data` check below never saw a rejected insert — it fell through
+        # to the global handler as a bare 500 "internal server error".
+        #
+        # There is one predictable cause worth naming: a guest `user_id` is a synthetic uuid5
+        # with no `public.users` row, which violates `chat_sessions_user_id_fkey` until
+        # migration 111 drops it. Deploying this code without applying 111 therefore breaks
+        # chat creation for every signed-out user — and a generic 500 would send whoever
+        # debugs it looking at Gemini instead of at a pending migration.
+        logger.error(
+            "chat_sessions insert failed for user=%s (is_guest=%s): %s: %s — if this is a "
+            "foreign-key violation, migration 111 (chat_sessions_guest_partition) has not "
+            "been applied yet",
+            user["id"], user.get("is_guest"), type(e).__name__, e, exc_info=True,
+        )
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=409,
+            message=f"chat_sessions insert failed: {type(e).__name__}: {str(e)[:200]}",
+            details={"step": "create_session"},
+        )
 
     if not result.data:
-        raise HTTPException(status_code=500, detail="Failed to create session")
+        logger.error(
+            "chat_sessions insert returned no rows for user=%s (is_guest=%s)",
+            user["id"], user.get("is_guest"),
+        )
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            status_code=409,
+            message="chat_sessions insert returned no rows",
+            details={"step": "create_session"},
+        )
 
     return _row_to_session(result.data[0])
 
@@ -337,7 +375,7 @@ async def create_chat_session(
 async def send_chat_message(
     session_id: str,
     request: SendChatMessageRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     _rate: None = ChatRateLimit,
@@ -538,7 +576,7 @@ async def send_chat_message(
 async def stream_chat_message(
     session_id: str,
     request: SendChatMessageRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     _rate: None = ChatRateLimit,
@@ -964,7 +1002,7 @@ async def stream_chat_message(
 @router.get("/sessions/{session_id}", response_model=ChatHistoryResponse)
 async def get_chat_history(
     session_id: str,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
 ):
     """Get chat session with full message history."""
@@ -998,7 +1036,7 @@ async def get_chat_history(
 async def update_chat_session(
     session_id: str,
     request: UpdateChatSessionRequest,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
 ):
     """Update a chat session (title, is_saved)."""
@@ -1039,7 +1077,7 @@ async def update_chat_session(
 @router.delete("/sessions/{session_id}")
 async def delete_chat_session(
     session_id: str,
-    user: dict = Depends(get_current_user_or_guest),
+    user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
 ):
     """Delete a chat session and all its messages."""

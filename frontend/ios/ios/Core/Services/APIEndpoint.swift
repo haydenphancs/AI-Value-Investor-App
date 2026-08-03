@@ -25,6 +25,37 @@ enum HTTPMethod: String, Sendable {
     case DELETE
 }
 
+// MARK: - Auth Policy
+
+/// What an endpoint needs from the caller's identity — the client-side mirror of which
+/// FastAPI dependency the route hangs off.
+///
+/// There are exactly three answers, and every endpoint must pick one (see
+/// `APIEndpoint.authPolicy`, whose switch is exhaustive on purpose).
+enum AuthPolicy: Sendable, Equatable {
+    /// The backend reads no identity. Fine to call with or without a token.
+    case `public`
+
+    /// Per-identity, but a signed-out caller is a first-class user: the backend resolves them
+    /// to a per-INSTALL guest partition off the `X-Guest-Id` header. Never gate these on a
+    /// token — doing so removes a working feature from every guest.
+    case guestAllowed
+
+    /// The backend uses strict `get_current_user` / `get_current_user_id`. A tokenless call is
+    /// refused, so the client asks for sign-in instead of making it.
+    case signInRequired
+
+    /// True when the request is still meaningful without a credential — i.e. everything except
+    /// `.signInRequired`.
+    ///
+    /// Load-bearing for the self-heal path: when a token is rejected and the refresh fails,
+    /// `APIClient` clears the credential and retries **tokenless** for these, so a dead session
+    /// degrades a guest-capable screen to guest content instead of to an error. It covers
+    /// `.public` as well as `.guestAllowed` because a public route can still 401 on a bad
+    /// token — several attach a rate limiter that resolves identity.
+    var isUsableWithoutCredential: Bool { self != .signInRequired }
+}
+
 // MARK: - API Endpoint
 
 /// Type-safe endpoint definitions.
@@ -776,65 +807,168 @@ enum APIEndpoint: Sendable {
         }
     }
 
-    // MARK: - Auth Required
+    // MARK: - Auth Policy
 
-    nonisolated var requiresAuth: Bool {
+    /// What a call to this endpoint needs from the caller's identity.
+    ///
+    /// This switch is **deliberately exhaustive — do NOT add a `default:` arm.** The predecessor
+    /// (`requiresAuth: Bool`) ended in `default: return true`, and that single line was wrong for
+    /// **27 of the 42 endpoints** it swept up: watchlist, tracking, every portfolio route, all nine
+    /// research routes, `/users/me/credits` and analytics are all guest-capable on the backend
+    /// (`get_watchlist_identity` / `get_research_identity` / `get_current_user_or_guest` /
+    /// `get_identity_only_user`), and two more were fully public. Nothing enforced the flag, so the
+    /// errors were invisible — the moment `APIClient` started honouring it, a `default: true` would
+    /// have locked every signed-out user out of features that work today.
+    ///
+    /// Exhaustiveness makes that impossible: a new endpoint does not compile until someone decides
+    /// which of the three answers applies. Pair any change here with the backend dependency on the
+    /// matching route — `tests/test_ios_auth_policy_parity.py` asserts the two agree.
+    nonisolated var authPolicy: AuthPolicy {
         switch self {
-        // Auth endpoints
-        case .signIn, .signUp, .refreshToken:
-            return false
-        // Password recovery happens when the user CANNOT sign in, so it must be
-        // reachable without a token. changePassword falls through to requiring auth.
-        case .forgotPassword, .resetPassword:
-            return false
-        // Social sign-in and confirmation resend happen BEFORE a session exists.
-        case .resendConfirmation, .oauthSignIn, .sessionExchange:
-            return false
-        // Public tier catalog — the paywall must render for guests too.
+
+        // ── Public: the backend reads no identity at all ────────────────────────────────
+
+        // Pre-session auth flows. Password recovery in particular must be reachable
+        // WITHOUT a token — it exists for people who cannot sign in.
+        case .signIn, .signUp, .refreshToken,
+             .forgotPassword, .resetPassword,
+             .resendConfirmation, .oauthSignIn, .sessionExchange:
+            return .public
+
+        // Tier catalog — the paywall has to render for guests.
         case .getPlanCatalog:
-            return false
-        // Stock/crypto/commodity endpoints are public on the backend
-        case .searchStocks, .getStock, .getStockOverview, .getStockOverviewCore, .getStockQuote, .getStockFundamentals, .getStockNews, .getStockChart,
-             .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis, .getTechnicalAnalysisDetail,
-             .getChartEvents, .getEarnings, .getGrowth, .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence, .getTickerReport, .prewarmReportCollection, .chatWithTickerReport, .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed, .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail, .getIndexDetail, .getIndexNews, .enrichIndexNews, .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getETFNews, .enrichETFNews, .getCommodityDetail, .getCommodityNews, .enrichCommodityNews:
-            return false
-        // Updates: /tabs uses OPTIONAL auth (guest watchlist when signed out);
-        // /feed and /news/enrich are fully public market data.
-        case .getUpdatesTabs, .getUpdatesFeed, .enrichUpdatesNews:
-            return false
-        // Whale list/profile/trade-groups use optional auth (token sent if available)
-        case .getWhaleList, .getWhaleProfile, .getWhaleTradeGroups, .getWhaleTradeGroupDetail:
-            return false
-        // Home feed + dashboard use optional auth on the backend (public market data)
-        case .getHomeFeed, .getHomeDashboard, .getSignalDetail, .getThemeDetail:
-            return false
-        // Journey lesson content is public
-        case .getJourney:
-            return false
-        // Money Moves article content is public
-        case .getMoneyMoves:
-            return false
-        // Learn progress uses optional auth (token sent if signed in; guests still work via cache)
-        case .getLearnProgress, .completeLearnItem, .uncompleteLearnItem:
-            return false
-        // Book bookmarks use optional auth (token sent if signed in; guests still work via cache)
-        case .getBookBookmarks, .addBookBookmark, .removeBookBookmark:
-            return false
-        // Personas are public
-        case .getPersonas:
-            return false
-        // Trending is public
-        case .getTrendingAnalyses:
-            return false
-        // Chat endpoints use optional auth (guest access)
-        case .listChatSessions, .createChatSession, .sendChatMessage, .streamChatMessage, .getChatHistory,
-             .updateChatSession, .deleteChatSession:
-            return false
-        // Everything else requires auth
-        default:
-            return true
+            return .public
+
+        // Market data. `getHoldersData` and `enrichStockNews` are here rather than under
+        // sign-in-required (where `default: true` used to put them): `/stocks/{t}/holders`
+        // and `/stocks/{t}/news/enrich` take no auth dependency at all.
+        case .searchStocks, .getStock, .getStockOverview, .getStockOverviewCore, .getStockQuote,
+             .getStockFundamentals, .getStockNews, .enrichStockNews, .getStockChart,
+             .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis,
+             .getTechnicalAnalysisDetail, .getChartEvents, .getEarnings, .getGrowth,
+             .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence,
+             .getHoldersData:
+            return .public
+
+        case .getIndexDetail, .getIndexNews, .enrichIndexNews,
+             .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed,
+             .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail,
+             .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getETFNews,
+             .enrichETFNews,
+             .getCommodityDetail, .getCommodityNews, .enrichCommodityNews:
+            return .public
+
+        // Updates: /feed and /news/enrich are plain market data (/tabs is not — see below).
+        case .getUpdatesFeed, .enrichUpdatesNews:
+            return .public
+
+        // Whale trade groups take no auth dependency (the list/profile do — see below).
+        case .getWhaleTradeGroups, .getWhaleTradeGroupDetail:
+            return .public
+
+        // Home signal + theme detail are public market data.
+        case .getSignalDetail, .getThemeDetail:
+            return .public
+
+        // Learn CONTENT is public; Learn PROGRESS is per-identity (see below).
+        case .getJourney, .getMoneyMoves:
+            return .public
+
+        case .getPersonas, .getTrendingAnalyses:
+            return .public
+
+        // ── Guest-allowed: per-identity, but a guest is a first-class caller ─────────────
+        //
+        // These resolve through `get_watchlist_identity` / `get_research_identity` /
+        // `get_learn_identity` / `get_current_user_or_guest` / `get_identity_only_user`, which
+        // partition a signed-out caller per INSTALL off the `X-Guest-Id` header that
+        // `APIClient.buildRequest` sends unconditionally. Gating any of these on a token would
+        // be a straight feature regression for the guest-first product.
+
+        case .trackEvents:
+            return .guestAllowed
+
+        case .getUserCredits:
+            return .guestAllowed
+
+        case .getWatchlist, .addToWatchlist, .removeFromWatchlist:
+            return .guestAllowed
+
+        case .getTrackingAssets, .bulkUpdateHoldings, .getPortfolioInsights:
+            return .guestAllowed
+
+        case .getPortfolios, .createPortfolio, .renamePortfolio, .deletePortfolio,
+             .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios,
+             .getPortfolioInsightsForPortfolio:
+            return .guestAllowed
+
+        case .listChatSessions, .createChatSession, .sendChatMessage, .streamChatMessage,
+             .getChatHistory, .updateChatSession, .deleteChatSession:
+            return .guestAllowed
+
+        case .getLearnProgress, .completeLearnItem, .uncompleteLearnItem,
+             .getBookBookmarks, .addBookBookmark, .removeBookBookmark:
+            return .guestAllowed
+
+        case .getUpdatesTabs, .getHomeFeed, .getHomeDashboard:
+            return .guestAllowed
+
+        case .getWhaleList, .getWhaleProfile:
+            return .guestAllowed
+
+        // ── Sign-in required: the backend uses strict `get_current_user(_id)` ────────────
+        //
+        // A tokenless call here is answered 401 AUTH_REQUIRED, so `APIClient` short-circuits it
+        // into the Sign In Required affordance instead of spending a round trip to be refused.
+
+        // Follows are account-scoped: `whale_follows.user_id` is FK-bound to `public.users`
+        // (ON DELETE CASCADE), so a per-install guest id cannot be stored there without the
+        // migration-108 treatment. Decision recorded: follow stays account-only.
+        case .followWhale, .unfollowWhale, .getWhaleActivity:
+            return .signInRequired
+
+        // AI GENERATION IS ACCOUNT-ONLY. These were `.guestAllowed`, and that was the app's one
+        // unbounded cost exposure: guest metering keys on `guest_user_id_for(X-Guest-Id)` — a
+        // UUID5 of a header the CLIENT picks — so rotating it handed out a fresh
+        // GUEST_REPORT_MONTHLY_LIMIT on every request. Each report is ~17 Gemini + ~20 FMP
+        // calls, no per-IP limit backs it up, and guest credits don't meter (the sentinel is
+        // seeded 100,000). Beyond the bill, saturating REPORT_GET_MAX_INFLIGHT (24) makes
+        // PAYING users see 409 SYSTEM_BUSY.
+        //
+        // A free account is seeded 50 credits and a report costs 20, so signing up buys 2
+        // reports/month against the guest's 1 — the taster gets bigger, and the signup ask moves
+        // to the moment someone actually wants an analysis. Browsing, watchlist, portfolios,
+        // Learn and general chat stay open (App Store 5.1.1(v)).
+        //
+        // BOTH generation paths must be listed or the gate leaks: `/research/generate` is the
+        // deep path, `GET /stocks/{t}/report` the direct one, and they cost the same on a miss.
+        case .generateResearch, .getResearchStatus, .getResearchReport, .getResearchReportPDF,
+             .regenerateResearchReportPDF, .getResearchTickerReport, .getMyReports,
+             .rateReport, .deleteReport:
+            return .signInRequired
+
+        // `prewarmReportCollection` fires ~20 FMP calls on detail view to warm the collection
+        // cache — pure waste for a caller who can no longer generate.
+        case .getTickerReport, .chatWithTickerReport, .prewarmReportCollection:
+            return .signInRequired
+
+        case .getCurrentUser, .updateProfile, .deleteAccount, .claimGuestData:
+            return .signInRequired
+
+        case .getMySubscription, .getMySettings, .updateMySettings,
+             .registerDevice, .unregisterDevice, .verifyPurchase:
+            return .signInRequired
+
+        // Both take `get_current_user_id`. Short-circuiting a tokenless `signOut` is harmless —
+        // its only caller already ignores the result — and saves a guaranteed-401 round trip.
+        case .signOut, .changePassword:
+            return .signInRequired
         }
     }
+
+    /// Kept as a thin alias so the debug logger reads naturally. Not a gate — `APIClient`
+    /// switches on `authPolicy` directly.
+    nonisolated var requiresAuth: Bool { authPolicy == .signInRequired }
 
     // MARK: - Timeout
 

@@ -52,6 +52,15 @@ enum AnalyticsEventName: String {
     /// and push relevant at all.
     case onboardingCompleted = "onboarding_completed"
     case onboardingSkipped = "onboarding_skipped"
+    /// A user-initiated write that failed and was reverted. Carries `action` (what they were
+    /// doing) and `code` (`AppError.analyticsCode`). Exists because this whole class of failure
+    /// used to be a `print` — so in production there was no way to know how often a tap on
+    /// Follow, a star, or a portfolio edit quietly did nothing.
+    case mutationFailed = "mutation_failed"
+    /// A best-effort background sync that failed (settings hydrate/push, device registration,
+    /// guest-data claim). Same rationale: these were `#if DEBUG` prints, i.e. invisible in the
+    /// builds that matter.
+    case backgroundSyncFailed = "background_sync_failed"
 }
 
 /// A single buffered event. `props` is deliberately `[String: AnalyticsValue]` rather

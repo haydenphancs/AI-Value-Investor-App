@@ -145,8 +145,18 @@ final class PortfolioStore: ObservableObject {
             copy.sortOrder = index
             reordered.append(copy)
         }
+        // Snapshot BEFORE the optimistic write. Every other optimistic mutation in this file
+        // (`addTicker`, `removeTicker`, `setTickers`) reverts on throw; this one did not, so a
+        // failed reorder left the local list in the new order and the server in the old one.
+        // The drag looked like it stuck, and the next load silently undid it.
+        let previous = portfolios
         portfolios = reordered
-        try await apiClient.request(endpoint: .reorderPortfolios(ids: ids))
+        do {
+            try await apiClient.request(endpoint: .reorderPortfolios(ids: ids))
+        } catch {
+            portfolios = previous
+            throw error
+        }
     }
 
     // MARK: - Ticker membership (optimistic)

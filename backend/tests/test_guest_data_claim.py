@@ -206,7 +206,10 @@ async def test_a_failure_PART_WAY_THROUGH_still_returns_rather_than_raises():
     res = await _claim(_FailingUpdate(store), "install-A")
 
     assert "error" in res, "a mid-claim write failure must be reported, not raised"
-    assert res["claimed"] == {"watchlist_items": 0, "portfolios": 0, "learn_progress": 0, "research_reports": 0}
+    assert res["claimed"] == {
+        "watchlist_items": 0, "portfolios": 0, "learn_progress": 0,
+        "research_reports": 0, "chat_sessions": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -219,14 +222,16 @@ async def test_response_shape_matches_the_ios_decoder(guest_id):
     sign-in path. `learn_progress` was added later; Swift ignores unknown keys, so adding a
     COUNT is safe, but dropping either original one is not.
     """
-    store = {"watchlist_items": [], "portfolios": [], "user_learn_progress": []}
+    store = {"watchlist_items": [], "portfolios": [], "user_learn_progress": [], "chat_sessions": []}
     res = await _claim(_SB(store), guest_id)
 
     assert set(res) <= {"claimed", "skipped", "error"}, "unexpected top-level key for the iOS decoder"
     assert "claimed" in res
     assert {"watchlist_items", "portfolios"} <= set(res["claimed"]), \
         "the iOS DTO declares these non-optional — never drop one"
-    assert set(res["claimed"]) == {"watchlist_items", "portfolios", "learn_progress", "research_reports"}
+    assert set(res["claimed"]) == {
+        "watchlist_items", "portfolios", "learn_progress", "research_reports", "chat_sessions",
+    }
     assert all(isinstance(v, int) for v in res["claimed"].values())
 
 
@@ -388,4 +393,7 @@ async def test_no_guest_learn_rows_is_a_clean_zero():
 
     res = await _claim(_SB(store), "install-A")
 
-    assert res["claimed"] == {"watchlist_items": 1, "portfolios": 0, "learn_progress": 0, "research_reports": 0}
+    assert res["claimed"] == {
+        "watchlist_items": 1, "portfolios": 0, "learn_progress": 0,
+        "research_reports": 0, "chat_sessions": 0,
+    }

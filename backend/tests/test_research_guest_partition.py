@@ -83,21 +83,51 @@ async def test_a_client_sending_no_install_id_still_gets_the_shared_sentinel():
     assert out["id"] == GUEST_USER_ID
 
 
-def test_every_user_scoped_research_route_uses_the_partitioned_identity():
+def test_every_research_route_now_requires_an_account():
+    """The leak this file was written for is closed by a STRONGER rule than partitioning.
+
+    Guest reports were partitioned per install (migration 110) so one guest could not read
+    another's. Generation is now account-only outright, so no guest report is ever created:
+    there is nothing to partition, and the credit system — FK-bound to a real `public.users`
+    row — replaces an allowance that keyed on a client-supplied `X-Guest-Id` and could be
+    reset by rotating the header.
+
+    The per-install machinery below is still exercised because watchlist and Learn continue to
+    use it, and because anyone holding guest reports from before this change must still be able
+    to claim them.
+    """
     src = (_REPO / "backend" / "app" / "api" / "v1" / "endpoints" / "research.py").read_text()
-    assert "get_current_user_or_guest" not in src, (
-        "a /research route still resolves the SHARED guest sentinel — that route leaks "
-        "one guest's reports to every other guest"
+    assert src.count("Depends(get_current_user)") >= 9, (
+        "a /research route no longer requires an account — AI generation costs ~17 Gemini + "
+        "~20 FMP calls per run and has no other durable meter"
     )
-    assert src.count("Depends(get_research_identity)") >= 9
+    for leaked in ("get_current_user_or_guest", "get_research_identity"):
+        assert f"Depends({leaked})" not in src, (
+            f"a /research route still resolves a guest identity via {leaked}"
+        )
 
 
-def test_the_guest_test_does_not_rely_on_the_sentinel_comparison():
-    src = (_REPO / "backend" / "app" / "api" / "v1" / "endpoints" / "research.py").read_text()
-    assert 'user.get("is_guest"' in src, (
-        "is_guest still compares against GUEST_USER_ID, which a per-install id never matches — "
-        "every guest would be treated as a paying account"
-    )
+def test_the_direct_report_path_also_requires_an_account():
+    """The gate leaks unless BOTH generation paths are covered.
+
+    `GET /stocks/{ticker}/report` runs the same pipeline for the same cost on a cache miss.
+    Leaving it guest-capable would have made the /research gate cosmetic.
+    """
+    src = (_REPO / "backend" / "app" / "api" / "v1" / "endpoints" / "ticker_report.py").read_text()
+    assert "Depends(get_current_user_or_guest)" not in src
+    assert src.count("Depends(get_current_user)") >= 2
+
+
+def test_no_ai_route_still_claims_the_guest_report_budget():
+    """`guest_report_budget` (migration 106) is vestigial now; calling it would re-open the
+    rotatable allowance."""
+    for name in ("research.py", "ticker_report.py"):
+        src = (_REPO / "backend" / "app" / "api" / "v1" / "endpoints" / name).read_text()
+        code = "\n".join(
+            l for l in src.splitlines()
+            if not l.lstrip().startswith("#")
+        )
+        assert "get_guest_report_budget_service" not in code, name
 
 
 # ---------------------------------------------------------------------------

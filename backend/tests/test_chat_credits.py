@@ -6,7 +6,7 @@ they're tested directly here — that's where the risk lives:
   * `_claim_chat_quota` — the guest-vs-authenticated branch, and the 402
     (insufficient) / 409 (transient) mapping. Authed users are charged
     CHAT_CREDIT_COST via the gate; guests use the daily-turn budget (never
-    credits — the shared GUEST_USER_ID pool would deplete for everyone).
+    credits — `user_credits` is FK-bound to `public.users`, so a per-install id has no wallet).
   * `_ChatQuota.refund_once` — the at-most-once refund guarantee the finally
     backstop AND all three stream error sites depend on (the underlying
     refund_credits RPC is NOT idempotent).
@@ -26,7 +26,10 @@ from app.dependencies import GUEST_USER_ID
 from app.services.credit_service import CreditServiceUnavailable
 
 AUTHED = {"id": "authed-user-1"}
-GUEST = {"id": GUEST_USER_ID}
+# `is_guest` is what marks a guest now, NOT the id. Migration 111 gives each install its own
+# uuid5, so `user["id"] == GUEST_USER_ID` is never true for a real guest and the old shape
+# would have sent them into the credit precharge — 402 on a feature that is free for them.
+GUEST = {"id": "1cd2b2c4-288b-5c9b-bfe1-154c70266a3f", "is_guest": True}
 
 
 def _patch_credit(monkeypatch, *, precharge_return=100, precharge_raises=False):

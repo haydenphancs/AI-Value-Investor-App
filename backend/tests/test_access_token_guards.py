@@ -166,23 +166,72 @@ def test_access_token_still_decodes():
 
 @pytest.mark.asyncio
 async def test_refresh_token_does_not_authenticate_a_request():
-    """End to end: presenting the refresh token as a Bearer credential must degrade to guest,
-    not resolve the account. It used to return the real user row."""
+    """End to end: presenting the refresh token as a Bearer credential must not resolve the
+    account. It used to return the real user row.
+
+    The rejection is now LOUD. These two tests previously asserted `user["id"] ==
+    GUEST_USER_ID` — a silent demotion to the shared guest with a 200 — and that quiet
+    fallback turned out to be the largest single source of app-wide auth unreliability: a
+    signed-in user whose token died was served the guest's watchlist, reports and credits with
+    no signal, so the client never learned to refresh. The security property under test is
+    unchanged and strictly stronger: the refresh token still cannot authenticate as the real
+    user, and now the caller is told so.
+    """
     refresh = create_refresh_token({"sub": _USER_ID})
-    user = await get_current_user_or_guest(
-        authorization=_bearer(refresh), supabase=_SB(_row(None))
-    )
-    assert user["id"] == GUEST_USER_ID, (
-        "a refresh token authenticated as the real user — it is exchange-only and lives 7 days"
-    )
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user_or_guest(
+            authorization=_bearer(refresh), supabase=_SB(_row(None))
+        )
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error_code"] == "AUTH_TOKEN_INVALID"
+    # The one thing that must never happen: resolving to the account the token names.
+    assert _USER_ID not in str(exc.value.detail)
 
 
 @pytest.mark.asyncio
-async def test_garbage_token_still_degrades_to_guest():
+async def test_garbage_token_is_rejected_not_silently_guested():
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user_or_guest(
+            authorization=_bearer("not.a.jwt"), supabase=_SB(_row(None))
+        )
+    assert exc.value.status_code == 401
+    assert exc.value.detail["error_code"] == "AUTH_TOKEN_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_a_bearer_header_with_no_credential_is_a_guest_not_a_bad_token():
+    """`Authorization: Bearer` with nothing after it is ABSENCE, not a failed credential.
+
+    The distinction decides whether the client keeps its Keychain entry: AUTH_TOKEN_INVALID
+    tells it to refresh and possibly discard, AUTH_REQUIRED tells it it was never signed in.
+    Treating an empty credential as invalid would hand a token-less caller a reason to wipe
+    a credential it does not have.
+    """
     user = await get_current_user_or_guest(
-        authorization=_bearer("not.a.jwt"), supabase=_SB(_row(None))
+        authorization="Bearer   ", supabase=_SB(_row(None))
     )
     assert user["id"] == GUEST_USER_ID
+
+
+@pytest.mark.asyncio
+async def test_a_non_bearer_scheme_is_a_guest():
+    """Basic auth is not a credential this app issues; it is not a BAD bearer token."""
+    user = await get_current_user_or_guest(
+        authorization="Basic dXNlcjpwYXNz", supabase=_SB(_row(None))
+    )
+    assert user["id"] == GUEST_USER_ID
+
+
+@pytest.mark.asyncio
+async def test_lowercase_bearer_scheme_is_honoured():
+    """RFC 7235 makes the scheme case-insensitive. The old `startswith("Bearer ")` check
+    silently treated `bearer x` as no credential at all — a signed-in caller served guest
+    data."""
+    token = create_access_token({"sub": _USER_ID, "email": "victim@example.com"})
+    user = await get_current_user_or_guest(
+        authorization=f"bearer {token}", supabase=_SB(_row(None))
+    )
+    assert user["id"] == _USER_ID
 
 
 @pytest.mark.asyncio

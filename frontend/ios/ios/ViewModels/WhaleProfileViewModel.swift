@@ -147,13 +147,17 @@ class WhaleProfileViewModel: ObservableObject {
         guard var updatedProfile = profile else { return }
         let newFollowState = !updatedProfile.isFollowing
 
+        // Ask the service first — it owns the sign-in gate and returns false when the mutation
+        // was never started, so a signed-out tap creates no optimistic state and, critically,
+        // posts no `.whaleFollowStateChanged`. That notification is consumed by
+        // `TrackingViewModel.handleFollowStateChange`, which will SYNTHESISE a whale row from
+        // it; firing it for a follow that never happened fabricates a tracked investor.
+        guard whaleService.toggleFollow(whaleId) else { return }
+
         // Optimistic UI update — in-place mutation, NOT reconstruction
         // (see updateFollowStatus).
         updatedProfile.isFollowing = newFollowState
         profile = updatedProfile
-
-        // Sync to backend via WhaleService (handles optimistic + revert)
-        whaleService.toggleFollow(whaleId)
 
         // Notify TrackingViewModel so the followed whales row stays in sync.
         // Includes the firm so a fallback-built row keeps its firm line.

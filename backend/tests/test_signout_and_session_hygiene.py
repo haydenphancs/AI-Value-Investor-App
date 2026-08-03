@@ -187,9 +187,18 @@ def test_keychain_is_cleared_before_the_awaited_logout_call():
 def test_transient_launch_failure_disarms_the_client_token():
     """The UI renders a guest; the wire identity must agree, or writes land on the real account."""
     src = _read("Core/State/AppState.swift")
-    restore = src[src.index("private func restoreAuthState()"):]
+    # `restoreAuthState()` became `performRestore(trigger:)` when restore stopped being a
+    # once-per-launch call and became re-runnable (foreground / network-restore / backoff).
+    # The invariant under test is unchanged.
+    restore = src[src.index("private func performRestore("):]
     restore = restore[: restore.index("\n    /// Fetch")]
     assert restore.count("setAuthToken(nil)") >= 2, (
         "a transient profile-fetch failure still leaves the Bearer token armed while the app "
         "presents the signed-out UI"
+    )
+    # And it must now RETRY rather than strand the session for the rest of the run — the
+    # original complaint: a valid stored credential sitting unused for a whole app run.
+    assert "scheduleRestoreBackoff()" in restore, (
+        "a transient failure no longer schedules a retry, so a token-holding user is stranded "
+        "as a guest until the next cold launch"
     )

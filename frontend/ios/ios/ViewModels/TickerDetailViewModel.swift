@@ -242,9 +242,16 @@ class TickerDetailViewModel: ObservableObject {
             // Fire-and-forget: warm the report's persona-neutral collection cache
             // for this ticker so a later Generate Analysis skips the FMP fan-out.
             // Best-effort — must never block or affect the detail view.
-            Task { [weak self] in
-                guard let self else { return }
-                try? await self.stockRepository.prewarmReportCollection(ticker: ticker)
+            //
+            // Skipped when signed out: the warm exists for a generation the caller can no
+            // longer start, and it fans out ~20 FMP calls per ticker VIEWED. `APIClient` would
+            // refuse it anyway (`.signInRequired`) and the `try?` would swallow that, but not
+            // firing at all keeps the intent explicit rather than accidental.
+            if AppActions.shared.isSignedIn {
+                Task { [weak self] in
+                    guard let self else { return }
+                    try? await self.stockRepository.prewarmReportCollection(ticker: ticker)
+                }
             }
 
             // Fast core (parallel with Phase 1): paint price + chart the instant it
@@ -367,13 +374,20 @@ class TickerDetailViewModel: ObservableObject {
     // MARK: - Live Price
 
     func connectLivePrice() {
-        let token = KeychainService.shared.get("access_token")
-        if let token = token {
-            livePriceManager.connect(ticker: tickerSymbol, authToken: token)
+        // Token comes from APIClient, not the Keychain.
+        //
+        // These two deliberately DIVERGE: on a transient restore failure `AppState` disarms the
+        // client token while leaving the Keychain entry intact, so a Keychain reader
+        // authenticates as the real account while the whole UI says "guest". A direct reader
+        // also never sees a mid-session refresh. One source of truth instead.
+        Task { [weak self] in
+            guard let self else { return }
+            let token = await APIClient.shared.currentAuthToken()
+            self.livePriceManager.connect(ticker: self.tickerSymbol, authToken: token)
+            // Inside the Task: the REST fallback's behaviour depends on whether we actually had
+            // a credential, which is only known after the actor hop.
+            self.startQuotePollFallback(hasToken: token != nil)
         }
-
-        // Fallback: if WebSocket doesn't connect within 5 seconds, start REST polling
-        startQuotePollFallback(hasToken: token != nil)
     }
 
     func disconnectLivePrice() {
@@ -938,8 +952,17 @@ class TickerDetailViewModel: ObservableObject {
                     print("✅ TickerDetailVM: Added \(tickerSymbol) to watchlist")
                 }
             } catch {
-                print("⚠️ TickerDetailVM: Watchlist toggle failed for \(tickerSymbol): \(error)")
-                isFavorite = wasInWatchlist // revert on failure
+                // Revert AND tell the user. The revert was always right; the silence was the
+                // bug — in a release build a star that fills in and empties again is
+                // indistinguishable from the app deciding the tap never happened.
+                isFavorite = wasInWatchlist
+                AppActions.shared.reportMutationFailure(
+                    error,
+                    action: wasInWatchlist
+                        ? "remove \(self.tickerSymbol) from your watchlist"
+                        : "add \(self.tickerSymbol) to your watchlist",
+                    signInFeature: "save this stock"
+                )
             }
         }
     }

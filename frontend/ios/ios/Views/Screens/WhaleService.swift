@@ -52,19 +52,31 @@ class WhaleService: ObservableObject {
 
     /// Optimistic toggle: update UI immediately, sync to backend, reconcile the
     /// local set to the authoritative server response, and revert on failure.
-    func toggleFollow(_ whaleId: String) {
+    @discardableResult
+    func toggleFollow(_ whaleId: String) -> Bool {
+        // Following is account-scoped (`whale_follows.user_id` is FK-bound to `public.users`),
+        // so a signed-out tap can only ever be refused. Ask for sign-in BEFORE creating any
+        // optimistic state: this is the reported bug's exact shape — the button used to fill
+        // in, the row used to animate into "Tracked Whales", and then both silently snapped
+        // back a moment later, which reads as a broken app rather than a missing account.
+        guard AppActions.shared.isSignedIn else {
+            AppActions.shared.requestSignIn(for: "follow investors")
+            return false
+        }
+
         let wasFollowing = followedWhaleIds.contains(whaleId)
         let newFollowing = !wasFollowing
 
-        // Optimistic UI update
+        // Optimistic update in MEMORY only. `saveFollowedWhales()` used to run here, before the
+        // request — so killing the app mid-flight left a follow the server never heard about
+        // durably on disk, and a later `/whales` load would silently undo what the user did.
+        // The @Published set still drives the snappy UI; disk now only ever records what the
+        // server confirmed.
         if newFollowing {
             followedWhaleIds.insert(whaleId)
         } else {
             followedWhaleIds.remove(whaleId)
         }
-        saveFollowedWhales()
-
-        print("[WhaleService] \(newFollowing ? "➕ Following" : "➖ Unfollowing") whale \(whaleId) (optimistic)")
 
         // Backend sync — chained AFTER any in-flight mutation for THIS whale so
         // the requests are strictly ordered and the last server response wins.
@@ -90,18 +102,24 @@ class WhaleService: ObservableObject {
                     self.followedWhaleIds.remove(whaleId)
                 }
                 self.saveFollowedWhales()
-                print("[WhaleService] ✅ Backend confirmed: isFollowing=\(response.isFollowing), followers=\(response.followersCount)")
             } catch {
-                // Revert on failure
-                print("[WhaleService] ❌ Backend follow/unfollow failed: \(error). Reverting.")
+                // Revert, and TELL THE USER. The revert was always correct; the silence was the
+                // bug — a `print` in a release build is indistinguishable from the app deciding
+                // on its own that the tap didn't happen.
                 if wasFollowing {
                     self.followedWhaleIds.insert(whaleId)
                 } else {
                     self.followedWhaleIds.remove(whaleId)
                 }
                 self.saveFollowedWhales()
+                AppActions.shared.reportMutationFailure(
+                    error,
+                    action: newFollowing ? "follow this investor" : "unfollow this investor",
+                    signInFeature: "follow investors"
+                )
             }
         }
+        return true
     }
 
     func follow(_ whaleId: String) {
@@ -144,5 +162,17 @@ class WhaleService: ObservableObject {
         if let data = try? JSONEncoder().encode(followedWhaleIds) {
             UserDefaults.standard.set(data, forKey: "followedWhaleIds")
         }
+    }
+
+    /// Drop this device's followed-whale cache because the session that owned it ended.
+    ///
+    /// `followedWhaleIds` persists under a device-global UserDefaults key with no user id in
+    /// it, and nothing used to clear it — so after A signed out and B signed in on the same
+    /// phone, B saw A's followed investors until (and unless) a `/whales` load happened to
+    /// reconcile them. Identical in shape to the Learn-store bleed, so it is cleared from the
+    /// same funnel: `AppState.discardDataForEndedSession()`.
+    func reset() {
+        followedWhaleIds = []
+        UserDefaults.standard.removeObject(forKey: "followedWhaleIds")
     }
 }

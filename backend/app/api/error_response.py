@@ -86,6 +86,35 @@ class ErrorCode(str, Enum):
     # password was wrong.
     EMAIL_NOT_CONFIRMED = "EMAIL_NOT_CONFIRMED"
 
+    # The five below are deliberately DISTINCT rather than one AUTH_FAILED, because iOS must
+    # react differently to each and only two of them may destroy a stored credential. Collapsing
+    # them is how "tapped Follow while signed out" became "your session expired" — and how a
+    # transient identity-store blip could sign a valid user out.
+    #
+    # No credential was presented at all. The caller is a guest who reached a route that needs an
+    # account. NOT a session failure: the client must show "Sign In Required" and must NOT touch
+    # the Keychain, because there is nothing wrong with any token it holds.
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    # A credential WAS presented and could not be verified (bad signature, expired, malformed,
+    # or a refresh token used as an access token). The client should refresh and retry; only if
+    # the refresh itself genuinely fails may it drop the credential.
+    AUTH_TOKEN_INVALID = "AUTH_TOKEN_INVALID"
+    # The token is well-formed and correctly signed but predates the account's last password
+    # change (migration 105). The session is over by design — re-authentication is the only path.
+    AUTH_SESSION_EXPIRED = "AUTH_SESSION_EXPIRED"
+    # Valid token naming an account with no `public.users` row (deleted, or a signup whose
+    # trigger never seeded it). Unrecoverable for this credential; the client drops it.
+    AUTH_ACCOUNT_NOT_FOUND = "AUTH_ACCOUNT_NOT_FOUND"
+    # Authenticated fine, but not permitted (admin allowlist, deleting the guest account).
+    # 403, and explicitly NOT an auth error on the client — re-authenticating cannot help, so
+    # nothing about the stored session should change.
+    AUTH_FORBIDDEN = "AUTH_FORBIDDEN"
+    # The identity store could not be READ (Supabase/PostgREST blip). Load-bearing that this is
+    # separable from "your token is bad": it is retryable and the client MUST keep its
+    # credential. Previously this surfaced as a bare 500 from `get_current_user`, which iOS does
+    # not classify as an auth error — so the client kept retrying a request that never resolved.
+    AUTH_UNAVAILABLE = "AUTH_UNAVAILABLE"
+
 
 # Default user-facing copy per code. Endpoints can override per-call.
 _USER_MESSAGES: Dict[ErrorCode, str] = {
@@ -151,6 +180,24 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.CHAT_DAILY_LIMIT_REACHED: (
         "You've reached today's chat limit. Please try again tomorrow."
     ),
+    ErrorCode.AUTH_REQUIRED: (
+        "Sign in to use this feature."
+    ),
+    ErrorCode.AUTH_TOKEN_INVALID: (
+        "Your session needs to be refreshed. Please sign in again if this keeps happening."
+    ),
+    ErrorCode.AUTH_SESSION_EXPIRED: (
+        "Your password was changed, so this session ended. Please sign in again."
+    ),
+    ErrorCode.AUTH_ACCOUNT_NOT_FOUND: (
+        "We couldn't find your account. Please sign in again."
+    ),
+    ErrorCode.AUTH_FORBIDDEN: (
+        "You don't have access to this."
+    ),
+    ErrorCode.AUTH_UNAVAILABLE: (
+        "We couldn't verify your account just now. Please try again in a moment."
+    ),
 }
 
 
@@ -169,6 +216,15 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.CHAT_MESSAGE_TOO_LONG: "fix_input",
     ErrorCode.CHAT_DAILY_LIMIT_REACHED: "retry_later",
     ErrorCode.WATCHLIST_UNAVAILABLE: "retry_later",
+    # `sign_in` maps to iOS `ErrorAction.signIn`, whose button opens SignInView.
+    ErrorCode.AUTH_REQUIRED: "sign_in",
+    ErrorCode.AUTH_TOKEN_INVALID: "sign_in",
+    ErrorCode.AUTH_SESSION_EXPIRED: "sign_in",
+    ErrorCode.AUTH_ACCOUNT_NOT_FOUND: "sign_in",
+    # Deliberately NOT sign_in: the caller is already signed in, and offering sign-in for a
+    # permission wall sends them in a circle.
+    ErrorCode.AUTH_FORBIDDEN: "contact_support",
+    ErrorCode.AUTH_UNAVAILABLE: "retry_later",
 }
 
 
@@ -208,6 +264,22 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # with an empty list (see the enum comment) and NOT 500: it is retryable and
     # the client must be able to tell "couldn't read" from "you have nothing".
     ErrorCode.WATCHLIST_UNAVAILABLE: 503,
+    # 401 for all four credential failures — NOT 403.
+    #
+    # FastAPI's `HTTPBearer(auto_error=True)` answers a MISSING or malformed Authorization
+    # header with 403 "Not authenticated" (fastapi/security/http.py). That is the defect this
+    # block exists to correct: iOS only runs its refresh-and-retry interceptor on 401, so a 403
+    # meant the client never even tried to recover — it just surfaced "Access Denied" or, at a
+    # silent call site, nothing at all.
+    ErrorCode.AUTH_REQUIRED: 401,
+    ErrorCode.AUTH_TOKEN_INVALID: 401,
+    ErrorCode.AUTH_SESSION_EXPIRED: 401,
+    ErrorCode.AUTH_ACCOUNT_NOT_FOUND: 401,
+    # 403 is correct HERE and only here: identity is established, authorization is not.
+    ErrorCode.AUTH_FORBIDDEN: 403,
+    # Same reasoning as WATCHLIST_UNAVAILABLE — retryable, and distinguishable from "your
+    # credential is bad" so the client keeps the token instead of signing the user out.
+    ErrorCode.AUTH_UNAVAILABLE: 503,
 }
 
 
@@ -274,6 +346,43 @@ def make_error_body(
         "action": action if action is not None else _DEFAULT_ACTIONS.get(code),
         "details": details or {},
     }
+
+
+def auth_error(
+    code: ErrorCode,
+    *,
+    message: str,
+    user_message: Optional[str] = None,
+    status_code: Optional[int] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> "HTTPException":
+    """An `HTTPException` whose `detail` IS the structured error body.
+
+    Auth rejections have to be raised (they happen inside a dependency, before the handler
+    exists to return a response), and a raise normally lands in FastAPI's built-in handler,
+    which renders `{"detail": ...}` — outside the `{error_code, message, user_message, action,
+    details}` contract that iOS decodes (CLAUDE.md invariant #3).
+
+    So: put the whole body in `detail` as a dict, and let the `HTTPException` handler registered
+    in `app/main.py` pass a dict detail through verbatim. Every auth raise site is then one line
+    and cannot drift from the contract.
+
+    `WWW-Authenticate: Bearer` is attached to the 401s per RFC 6750.
+
+    Imported here rather than at module top so this module stays cheap to import and free of a
+    hard FastAPI dependency for the pure-body helpers above.
+    """
+    from fastapi import HTTPException  # local: keep module import cost low
+
+    resolved_status = status_code or _DEFAULT_STATUS.get(code, 401)
+    headers = {"WWW-Authenticate": "Bearer"} if resolved_status == 401 else None
+    return HTTPException(
+        status_code=resolved_status,
+        detail=make_error_body(
+            code, message=message, user_message=user_message, details=details
+        ),
+        headers=headers,
+    )
 
 
 # ── Classifier ────────────────────────────────────────────────────────

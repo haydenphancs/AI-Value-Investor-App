@@ -70,11 +70,6 @@ struct ResearchContentView: View {
             } message: {
                 Text(viewModel.error ?? "")
             }
-            .alert("Sign In Required", isPresented: $viewModel.showSignInPrompt) {
-                Button("OK") { }
-            } message: {
-                Text("Please sign in to generate research reports.")
-            }
             .alert("Delete \(viewModel.selectedReportCount) report\(viewModel.selectedReportCount == 1 ? "" : "s")?",
                    isPresented: $viewModel.showDeleteConfirm) {
                 Button("Delete", role: .destructive) {
@@ -105,9 +100,6 @@ struct ResearchContentView: View {
                     .environment(\.appState, appState)
             }
             .onAppear {
-                viewModel.setAuthCheck { [weak appState] in
-                    appState?.auth.isAuthenticated ?? false
-                }
                 // If we land directly on the Reports tab (e.g. via deep
                 // link or preserved state), start polling immediately.
                 if viewModel.selectedTab == .reports {
@@ -198,7 +190,9 @@ struct ResearchContentView: View {
                     onToggleSelectingMode: handleToggleSelectingMode,
                     onTogglePersonaTag: { viewModel.togglePersonaTag($0) },
                     // First-run CTA: send them to the tab that can actually make one.
-                    onGenerateFirst: { viewModel.selectedTab = .research }
+                    onGenerateFirst: { viewModel.selectedTab = .research },
+                    requiresSignIn: viewModel.requiresSignInForReports,
+                    onSignIn: { appState.requestSignIn(for: "see your analyses") }
                 )
                 .padding(.top, AppSpacing.sm)
 

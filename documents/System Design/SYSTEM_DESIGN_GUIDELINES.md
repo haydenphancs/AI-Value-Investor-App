@@ -915,8 +915,27 @@ final class ResearchViewModel {
 > no-op governed by the daily-turn budget + rate limits. The `BIZ_*` enum below is
 > retained only as an illustrative sketch.
 
+> **Auth errors — IMPLEMENTED 2026-08-02.** The `AUTH_*` codes and the central exception
+> handler sketched below as "recommended" now exist, with flat string names like the rest of
+> the shipped contract. Six codes, deliberately distinct because each maps to a *different*
+> client action and only two may cost the user their stored credential:
+> `AUTH_REQUIRED` (401, no credential — never clears a token), `AUTH_TOKEN_INVALID` (401,
+> credential present but unverifiable → refresh then retry), `AUTH_SESSION_EXPIRED` (401,
+> evicted by a password change), `AUTH_ACCOUNT_NOT_FOUND` (401), `AUTH_FORBIDDEN` (403,
+> authenticated but not permitted — explicitly *not* an auth error on the client), and
+> `AUTH_UNAVAILABLE` (503, identity store transiently unreadable, retryable).
+>
+> Raised via `auth_error()` in `api/error_response.py`, which puts the contract body in
+> `HTTPException.detail`; a `StarletteHTTPException` handler in `main.py` emits a dict detail
+> verbatim and leaves a string detail as `{"detail": ...}` — narrow on purpose so the ~100
+> existing string raises are byte-identical. `HTTPBearer` is now `auto_error=False`: FastAPI's
+> default answered a **missing** credential with 403, which iOS never treats as recoverable.
+>
+> See [.claude/rules/auth.md](../../.claude/rules/auth.md) for the full invariant set.
+
 ```python
-# schemas/common.py — RECOMMENDED (not yet implemented)
+# schemas/common.py — the BIZ_*/AUTH_* numbering below is illustrative only;
+# see the note above for the codes actually shipped.
 
 class ErrorCode(str, Enum):
     """Standardized error codes for client handling."""
@@ -1435,6 +1454,32 @@ Retry-After: 60                 # Seconds to wait (on 429)
 
 ### 9.1 Authentication Flow
 
+> **Corrections to the diagram below (verified 2026-08-02).** `POST /api/v1/auth/token` does not
+> exist — the real exchange routes are `POST /auth/oauth` (native Apple identity token) and
+> `POST /auth/session-exchange` (web OAuth, e.g. Google), both minting app tokens via
+> `_issue_app_tokens_for`. The `"tier"` JWT claim shown is never emitted; tier is read from
+> `public.users`. Lifetimes are correct: access 24h, refresh 7d (rotating).
+>
+> **Step 5 is now broader than "on 401 refresh".** The client heals a session from five triggers,
+> not just a failed request: launch, foreground, network-path restored (`NetworkMonitor`), a
+> bounded backoff, and any auth failure received while a credential is stored. A *transient*
+> failure keeps the Keychain token and retries; only a genuine auth failure clears it. This
+> closes the defect where one flaky launch left a signed-in user running as a guest — with a
+> perfectly good credential in the Keychain — for the entire app run.
+>
+> **Guest identity.** A signed-out caller is not "no user": `X-Guest-Id` is hashed
+> (`guest_user_id_for`, UUID5) into a per-INSTALL identity for watchlist/portfolios (migration
+> 108), research (110) and Learn (066/067). A missing header still resolves to the shared
+> `GUEST_USER_ID` sentinel. Chat history remains on the shared sentinel — `chat_sessions.user_id`
+> is FK-bound to `public.users` — so guest chat *cost* is partitioned per install but guest chat
+> *history* is not.
+>
+> **Which surfaces require an account.** Only strict `get_current_user(_id)` routes: the
+> `/users/me` family, `/auth/logout`, `/auth/change-password`, `/billing/verify`, and whale
+> follow/unfollow/activity (`whale_follows.user_id` is FK-bound to `public.users`). Everything
+> else is guest-capable by design. The iOS mirror is `APIEndpoint.authPolicy`, and
+> `tests/test_ios_auth_policy_parity.py` fails the build if the two disagree.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                     AUTHENTICATION FLOW                                      │
@@ -1509,9 +1554,18 @@ against the LLM-specific threat classes. Controls, by layer:
 
 **Notes:** RLS is defense-in-depth (backend uses the service-role key); the effective wall is
 the in-code `.eq("user_id", user["id"])` filter on all 7 endpoints. Guest **cost/abuse** is
-isolated per install now; guest **chat-history** isolation resolves when real login ships
-(`chat_sessions.user_id` is FK-bound to `users`, so guests share `GUEST_USER_ID` today).
-Budget service fails **open** (a DB blip never walls a user out of chat).
+isolated per install, and as of **migration 111** so is guest **chat history**: `get_chat_identity`
+resolves a signed-out caller to a per-INSTALL uuid5, so one guest can no longer list, open,
+rename or delete another's conversations. (This paragraph previously recorded that gap as
+resolving "when real login ships" — it did not, and because every read path filters on
+`user_id`, a shared bucket meant a cross-user leak on the surface where people paste holdings.)
+Signing in claims the install's chats via `POST /users/me/claim-guest-data`; account deletion
+clears them through `_UNLINKED_USER_TABLES`, since the dropped FK was the cascade.
+
+Still open, deliberately: the daily-turn budget keys on the client-supplied `X-Guest-Id`, so a
+caller rotating that header resets their 60-turn allowance. A chat turn is 1 credit against a
+report's 20 (report generation is account-only — see §9.1), and the rate limit plus the Gemini
+circuit breaker bound it. Budget service fails **open** (a DB blip never walls a user out of chat).
 
 **Hardening (adversarial review, migration 097):** the spotlight fences are
 **delimiter-neutralized** (`chat_security.neutralize_fences` collapses `<<<`/`>>>` post-NFKC so a

@@ -69,7 +69,7 @@ final class SettingsSyncManager {
     /// Worse, it was durable rather than cosmetic: the next `push()` writes those values up as
     /// B's own preferences, so A's settings become B's on every one of B's devices.
     ///
-    /// Mirrors `AppState.discardLearnDataForEndedSession()`, and costs a signed-in user
+    /// Mirrors `AppState.discardDataForEndedSession()`, and costs a signed-in user
     /// nothing — their real values are on the server and `hydrate()` restores them at the next
     /// sign-in. Removing the keys (rather than writing defaults) lets each screen fall back to
     /// its own declared default.
@@ -125,6 +125,13 @@ final class SettingsSyncManager {
             } catch {
                 // Leave hasHydrated false so push() stays gated — we don't know the
                 // server state, so pushing would risk a clobber. A later hydrate retries.
+                // Release-visible: a failed hydrate leaves `hasHydrated` false, which GATES
+                // every subsequent push — so one silent failure here quietly stops the user's
+                // settings from syncing at all for the rest of the session.
+                Analytics.shared.track(.backgroundSyncFailed, [
+                    "op": .string("settings_hydrate"),
+                    "code": .string(AppError.from(error).analyticsCode),
+                ])
                 #if DEBUG
                 print("⚠️ [Settings] hydrate failed: \(AppError.from(error).message)")
                 #endif
@@ -166,6 +173,12 @@ final class SettingsSyncManager {
             do {
                 _ = try await repository.updateSettings(blob)
             } catch {
+                // Release-visible: the toggle the user just flipped is now local-only and will
+                // be overwritten by the next hydrate.
+                Analytics.shared.track(.backgroundSyncFailed, [
+                    "op": .string("settings_push"),
+                    "code": .string(AppError.from(error).analyticsCode),
+                ])
                 #if DEBUG
                 print("⚠️ [Settings] push failed: \(AppError.from(error).message)")
                 #endif

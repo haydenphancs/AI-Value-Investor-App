@@ -234,12 +234,18 @@ async def claim_guest_data(
     # 108 exists to close. Only a real per-install bucket is ever claimable.
     if not x_guest_id or bucket == GUEST_USER_ID:
         return {
-            "claimed": {"watchlist_items": 0, "portfolios": 0, "learn_progress": 0, "research_reports": 0},
+            "claimed": {
+                "watchlist_items": 0, "portfolios": 0, "learn_progress": 0,
+                "research_reports": 0, "chat_sessions": 0,
+            },
             "skipped": "no per-install guest id",
         }
 
     user_id = user["id"]
-    claimed = {"watchlist_items": 0, "portfolios": 0, "learn_progress": 0, "research_reports": 0}
+    claimed = {
+        "watchlist_items": 0, "portfolios": 0, "learn_progress": 0,
+        "research_reports": 0, "chat_sessions": 0,
+    }
 
     def _claim() -> None:
         # ── watchlist: skip tickers the account already holds ──────────────
@@ -329,6 +335,21 @@ async def claim_guest_data(
             }).in_("id", [r["id"] for r in guest_reports]).execute()
             claimed["research_reports"] = len(guest_reports)
 
+        # ── chat sessions (migration 111) ──────────────────────────────────
+        #    Same argument as reports: someone who asked Cay AI about a ticker and THEN
+        #    signed up would find their history empty. `chat_messages` rides along — it
+        #    references chat_sessions(id), not user_id, so moving the session moves the
+        #    conversation. No unique constraint to collide with (the id is a uuid).
+        guest_chats = (
+            supabase.table("chat_sessions").select("id")
+            .eq("user_id", bucket).execute().data or []
+        )
+        if guest_chats:
+            supabase.table("chat_sessions").update({"user_id": user_id}).in_(
+                "id", [c["id"] for c in guest_chats]
+            ).execute()
+            claimed["chat_sessions"] = len(guest_chats)
+
     try:
         await asyncio.to_thread(_claim)
     except Exception as e:
@@ -343,9 +364,10 @@ async def claim_guest_data(
         # Report EVERY counter: a claim that moved only reports used to log nothing at all.
         logger.info(
             "Guest-data claim for user=%s: %d watchlist row(s), %d portfolio(s), "
-            "%d learn-progress row(s), %d research report(s)",
+            "%d learn-progress row(s), %d research report(s), %d chat session(s)",
             user_id, claimed["watchlist_items"], claimed["portfolios"],
             claimed["learn_progress"], claimed["research_reports"],
+            claimed["chat_sessions"],
         )
     return {"claimed": claimed}
 
@@ -410,6 +432,11 @@ _UNLINKED_USER_TABLES: tuple[str, ...] = (
     # without this entry a deleted account's research reports — ticker, thesis, fair value —
     # would survive, which the privacy policy says they do not.
     "research_reports",
+    # migrations/111, same story for chat. `chat_messages` needs no entry: it cascades from
+    # chat_sessions(id), which this delete removes. Chat transcripts are the most sensitive
+    # rows the app stores — people paste holdings into them — so an incomplete deletion here
+    # is the worst version of that bug.
+    "chat_sessions",
 )
 
 # Same purge, different column. `analytics_events.identity_key` holds the real user id
@@ -485,7 +512,9 @@ async def delete_account(
        `public.users`, so the cascade in step 3 does not reach them.
     3. `auth.users` — cascades to `public.users` and every FK-linked child table
        (user_credits, subscriptions,
-       user_settings, device_tokens, whale_follows, chat_sessions → chat_messages, …).
+       user_settings, device_tokens, whale_follows, …). NOT chat_sessions: migration 111
+       dropped its FK, so it is purged explicitly in step 2 via _UNLINKED_USER_TABLES
+       (chat_messages still cascades from chat_sessions(id)).
 
     The previous implementation did step 3 only, and its docstring claimed that removed
     "all of the user's data in one call". It did not: four tables and every generated PDF

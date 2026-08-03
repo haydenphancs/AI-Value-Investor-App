@@ -68,8 +68,11 @@ async def verify_purchase(
     """
     user_id = user["id"]
     if user_id == GUEST_USER_ID:
+        # Was `ErrorCode.UNAUTHORIZED`, which is not a member of the enum — so this line raised
+        # AttributeError, the global Exception handler caught it, and a guest submitting a
+        # purchase got a 500 "internal server error" instead of the 401 written here.
         return make_error_response(
-            ErrorCode.UNAUTHORIZED,
+            ErrorCode.AUTH_REQUIRED,
             status_code=401,
             message="Purchases require a signed-in account",
             user_message="Please sign in before completing your purchase.",

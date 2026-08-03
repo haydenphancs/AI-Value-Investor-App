@@ -98,6 +98,9 @@ struct iosApp: App {
                     // Settings sync + push need the AppState ref before auth restore.
                     SettingsSyncManager.shared.configure(appState: appState)
                     PushNotificationManager.shared.configure(appState: appState)
+                    // Same pattern, for the singleton services that need to ask "am I signed
+                    // in?" and to surface a failed user action (WhaleService, PortfolioStore).
+                    AppActions.shared.configure(appState: appState)
 
                     // Apply the persisted appearance choice (default .dark).
                     AppearanceManager.applyStored()
@@ -119,8 +122,16 @@ struct iosApp: App {
                         }
                     }
 
+                    // Let the network layer tell AppState when it could not authenticate, so a
+                    // dead credential is cleared once, centrally — and so a request that went
+                    // out tokenless while a stored token exists kicks off a session restore
+                    // instead of just failing.
+                    await apiClient.setAuthFailureHandler { [weak appState] failure in
+                        await appState?.handleAuthFailure(failure)
+                    }
+
                     // Configure AppState with services. Token restoration runs inside
-                    // restoreAuthState() (kicked off here) and relies on the interceptor.
+                    // restoreSession() (kicked off here) and relies on the interceptor.
                     appState.configure(
                         apiClient: apiClient,
                         authService: authService
@@ -130,6 +141,11 @@ struct iosApp: App {
                     // Re-probe localhost vs Railway each time app comes to foreground.
                     // Handles: started/stopped localhost while app was backgrounded.
                     Task { await ServerEnvironmentManager.shared.resolve() }
+                    // Second healing trigger. Covers the common real-world case the network
+                    // monitor misses: the app was suspended (so no path callback fired) and the
+                    // user returns with working connectivity. No-ops unless a stored credential
+                    // is actually going unused.
+                    Task { await appState.restoreSessionIfNeeded(trigger: "foreground") }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
                     // Re-lock the app when it backgrounds (if App Lock is enabled).
@@ -199,11 +215,16 @@ struct RootView: View {
                 // Loading/splash screen
                 SplashView()
 
-            case .unauthenticated:
+            case .unauthenticated, .restoring:
                 // Guest-first BY DESIGN: the app is fully usable signed-out.
                 // Requests without a Bearer token fall back to the backend
                 // GUEST_USER_ID; sign-in is offered from the Account screen and
                 // unlocks real per-user profile / credits / tier / upgrade.
+                //
+                // `.restoring` renders the SAME container, deliberately. We hold a credential we
+                // could not validate — on the wire that is a guest, so showing guest content is
+                // honest. Sending it to SplashView instead would trade a usable app for a
+                // spinner on exactly the flaky networks where restore takes longest.
                 RootContainerView()
 
             case .authenticated:
@@ -230,6 +251,16 @@ struct RootView: View {
         }
         .sheet(isPresented: $showSignInFromError) {
             SignInView()
+                .environment(appState)
+        }
+        // The shared "this needs an account" prompt. Presented once, here, so any call site in
+        // the app can raise it via `appState.requestSignIn(for:)` without owning presentation
+        // state or a route to the navigation tree.
+        .sheet(item: Binding(
+            get: { appState.signInPrompt },
+            set: { appState.signInPrompt = $0 }
+        )) { prompt in
+            SignInRequiredSheet(feature: prompt.feature)
                 .environment(appState)
         }
         .overlay {

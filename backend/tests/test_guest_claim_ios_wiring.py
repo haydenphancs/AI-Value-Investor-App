@@ -113,7 +113,7 @@ def test_auth_transition_invokes_the_claim():
         "AppState never calls claimGuestData — signing in still strands the guest watchlist"
     )
 
-    on_auth = re.search(r"private func onAuthenticated\(\) async \{(.*?)\n    \}", src, re.DOTALL)
+    on_auth = re.search(r"private func onAuthenticated\([^)]*\) async \{(.*?)\n    \}", src, re.DOTALL)
     assert on_auth, "onAuthenticated() not found in AppState — did it get renamed?"
     assert "claimGuestData" in on_auth.group(1), (
         "the claim is not invoked from onAuthenticated(), the single funnel for every "
@@ -124,7 +124,7 @@ def test_auth_transition_invokes_the_claim():
 def test_claim_runs_before_the_credit_refresh():
     """Ordering matters: the claim moves the rows a later read would report on."""
     src = _read(_APP_STATE)
-    body = re.search(r"private func onAuthenticated\(\) async \{(.*?)\n    \}", src, re.DOTALL).group(1)
+    body = re.search(r"private func onAuthenticated\([^)]*\) async \{(.*?)\n    \}", src, re.DOTALL).group(1)
     assert body.index("claimGuestData") < body.index("refreshCredits"), (
         "claimGuestDataIfNeeded() must run before refreshCredits()"
     )

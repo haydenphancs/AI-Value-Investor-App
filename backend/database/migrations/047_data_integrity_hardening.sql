@@ -19,6 +19,20 @@
 -- replay. CHECK constraints and FK additions use NOT VALID + VALIDATE to
 -- minimize lock duration on existing rows.
 --
+-- ⚠️ SUPERSEDED IN PART — DO NOT REPLAY §3 FOR THREE TABLES. Later migrations deliberately
+-- DROP three of the foreign keys §3 adds, so that signed-out users can be partitioned per
+-- install (their `user_id` is a synthetic uuid5 with no `public.users` row):
+--
+--     watchlist_items, portfolios   → migration 108
+--     chat_sessions                 → migration 111
+--
+-- Replaying §3 would re-add those FKs and undo the partitioning; against a database that
+-- already holds guest rows it fails at VALIDATE instead. The §3 remediation note below —
+-- "delete the orphaned rows" — is WRONG for these three: those rows are real guest data
+-- (watchlists, portfolios, chat transcripts), not orphans. Account deletion for them now runs
+-- through `_UNLINKED_USER_TABLES` in `app/api/v1/endpoints/users.py`, not through a cascade.
+-- Everything else in this migration still stands.
+--
 -- ===== APPLY-TIME RISKS — read before running ==============================
 --
 -- A. AccessExclusive locks on table rewrites. Sections 1 and 2 retype columns

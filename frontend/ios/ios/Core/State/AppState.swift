@@ -77,6 +77,13 @@ final class AppState {
     /// Toast message to display
     var toastMessage: ToastMessage?
 
+    /// Pending "this needs an account" prompt, presented once at the app root.
+    ///
+    /// Held on AppState rather than per-screen so that ANY call site — a ViewModel, a
+    /// singleton service, a deeply nested row — can ask for sign-in without owning
+    /// presentation state or a path back to the navigation tree.
+    var signInPrompt: SignInPrompt?
+
     /// Ticker a notification tap wants opened, consumed by the Home tab.
     ///
     /// A tapped push used to land wherever the user happened to be — the alert said
@@ -108,6 +115,12 @@ final class AppState {
                 endpoint: .getCurrentUser, responseType: UserProfile.self
             ))
         } catch {
+            // Release-visible. A stale tier after a purchase is a paid-for entitlement the user
+            // cannot see, and a DEBUG-only print made that undiagnosable in production.
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("entitlement_refresh"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
             #if DEBUG
             print("⚠️ [AppState] entitlement profile refresh failed: \(AppError.from(error).message)")
             #endif
@@ -129,10 +142,130 @@ final class AppState {
             Task { @MainActor [weak self] in await self?.refreshEntitlement() }
         }
 
+        // Announce connectivity so a session can heal the moment the network comes back.
+        NetworkMonitor.shared.start()
+        NotificationCenter.default.addObserver(
+            forName: NetworkMonitor.didRestoreNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.isOnline = true
+                await self?.restoreSessionIfNeeded(trigger: "network-restored")
+            }
+        }
+
         // Restore auth state from keychain
         Task {
-            await restoreAuthState()
+            await restoreSession(trigger: "launch")
         }
+    }
+
+    // MARK: - Session Healing
+
+    /// Guards against concurrent restores. A foreground, a network-restore and a failed request
+    /// can all fire within the same second; without this they would race three `/users/me`
+    /// calls and three `onAuthenticated()` fan-outs.
+    private var restoreTask: Task<Void, Never>?
+
+    /// Backoff attempt counter, reset on any success or explicit sign-out.
+    private var restoreAttempt: Int = 0
+
+    /// Pending backoff retry, cancelled whenever a stronger trigger (foreground, network) fires.
+    private var restoreBackoffTask: Task<Void, Never>?
+
+    /// True when a credential is sitting in the Keychain but we are not signed in — i.e. the
+    /// app is running tokenless when it shouldn't be. This is the condition the whole
+    /// self-healing mechanism exists to resolve.
+    var hasUnusedStoredCredential: Bool {
+        guard let authService else { return false }
+        return authService.hasStoredToken && auth.status != .authenticated
+    }
+
+    /// Re-attempt a restore, but only when there is actually something to restore.
+    ///
+    /// Every trigger routes through here so the "is this worth doing" test lives in one place:
+    /// a deliberate guest (no stored token) is never disturbed, and an already-authenticated
+    /// session is never re-fetched.
+    func restoreSessionIfNeeded(trigger: String) async {
+        guard hasUnusedStoredCredential else { return }
+        await restoreSession(trigger: trigger)
+    }
+
+    /// Single-flight session restore. Concurrent callers await the in-flight attempt rather than
+    /// starting their own — the same shape as `APIClient.refreshInFlight`. `AppState` is
+    /// `@MainActor`, so this check-and-set cannot interleave.
+    func restoreSession(trigger: String) async {
+        if let inFlight = restoreTask {
+            await inFlight.value
+            return
+        }
+        let task = Task { @MainActor in
+            await self.performRestore(trigger: trigger)
+        }
+        restoreTask = task
+        await task.value
+        restoreTask = nil
+    }
+
+    /// Schedule the next bounded backoff attempt after a TRANSIENT failure.
+    ///
+    /// Bounded and capped: 2s, 8s, 30s, 120s, then every 300s. The point is that a token-holding
+    /// user is never stranded for a whole app run — which is exactly what happened before,
+    /// because restore ran once at launch and nothing ever tried again.
+    private func scheduleRestoreBackoff() {
+        restoreBackoffTask?.cancel()
+        let delays: [UInt64] = [2, 8, 30, 120, 300]
+        let seconds = delays[min(restoreAttempt, delays.count - 1)]
+        restoreAttempt += 1
+
+        restoreBackoffTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.restoreSessionIfNeeded(trigger: "backoff")
+        }
+    }
+
+    private func cancelRestoreBackoff() {
+        restoreBackoffTask?.cancel()
+        restoreBackoffTask = nil
+        restoreAttempt = 0
+    }
+
+    /// React to an auth failure the network layer could not recover from.
+    ///
+    /// Wired to `APIClient.setAuthFailureHandler` at the app root. The two cases are opposite on
+    /// purpose — see `AuthFailure`.
+    func handleAuthFailure(_ failure: AuthFailure) async {
+        switch failure {
+        case .signInRequired:
+            // A request went out tokenless on a route that needs an account. If we DO hold a
+            // credential, the client is running without it — heal rather than prompt.
+            await restoreSessionIfNeeded(trigger: "auth-required-response")
+
+        case .credentialRejected:
+            // Presented, rejected, refresh failed. The session is genuinely over.
+            guard auth.status == .authenticated || authService?.hasStoredToken == true else { return }
+            endSessionForDeadCredential()
+        }
+    }
+
+    /// Tear down a session whose credential is definitively dead.
+    ///
+    /// Mirrors `signOut()` minus the backend call (there is no usable credential to log out
+    /// with). Learn data is discarded for the same reason `restoreAuthState` discards it on a
+    /// dead refresh token: the stores are device-global, so leaving them would merge the ended
+    /// session's progress into whoever signs in next.
+    private func endSessionForDeadCredential() {
+        authService?.clearToken()
+        user = UserState()
+        auth.status = .unauthenticated
+        cancelRestoreBackoff()
+        // MUST be cleared alongside the discard below. `onAuthenticated` skips its fan-out when
+        // the resolved user matches this, so leaving the previous id here would let the SAME
+        // user sign back in and skip the re-hydrate — landing them in an app whose Learn stores
+        // we just wiped, with nothing to refill them until the next cold launch.
+        lastAuthenticatedUserId = nil
+        discardDataForEndedSession()
+        currentError = .sessionEnded(message: "")
     }
 
     // MARK: - Auth Actions
@@ -143,10 +276,18 @@ final class AppState {
     ///  - Stored token      → arm the API client, fetch `/users/me`, and go
     ///    `.authenticated`. On a 401 (expired), try ONE refresh then retry.
     ///  - Any hard failure  → drop to guest (never a login wall).
-    private func restoreAuthState() async {
+    private func performRestore(trigger: String) async {
         guard let token = authService.getStoredToken() else {
             auth.status = .unauthenticated   // guest — app still shown
+            cancelRestoreBackoff()
             return
+        }
+
+        // Mark the honest state while we work: a credential exists, we just haven't validated it
+        // yet. Previously this window was labelled `.unauthenticated`, indistinguishable from a
+        // deliberate guest, so the UI offered "Sign In" to someone who was already signed in.
+        if auth.status != .authenticated {
+            auth.status = .restoring
         }
 
         await apiClient.setAuthToken(token)
@@ -154,9 +295,11 @@ final class AppState {
         // Own the refresh decision here (allowAuthRetry:false bypasses the APIClient
         // interceptor) so a TRANSIENT failure is never mistaken for a dead session.
         do {
-            applyProfile(try await fetchCurrentUserNoRetry())
+            let profile = try await fetchCurrentUserNoRetry()
+            applyProfile(profile)
             auth.status = .authenticated
-            await onAuthenticated()
+            cancelRestoreBackoff()
+            await onAuthenticated(userId: profile.id)
             return
         } catch {
             // A non-auth error (offline / 5xx) → preserve the STORED token, run as guest.
@@ -172,7 +315,12 @@ final class AppState {
                 // account and report generation debits their real credits — and the guest
                 // per-install partition they appear to be in is not the one being written.
                 await apiClient.setAuthToken(nil)
-                auth.status = .unauthenticated
+                // `.restoring`, not `.unauthenticated`: the credential is still good as far as
+                // we know, we just could not reach the server. Labelling this as signed-out is
+                // what made a single flaky launch cost the user their whole session — the UI
+                // said "Sign In" and nothing ever tried again.
+                auth.status = .restoring
+                scheduleRestoreBackoff()
                 return
             }
             // Access token rejected → fall through to an explicit refresh.
@@ -197,23 +345,33 @@ final class AppState {
                 // Deliberately NOT done on the two transient branches above/below: those keep the
                 // token because the same user is expected back, and wiping there would throw away
                 // local progress that has not synced yet (an offline learner's work).
-                discardLearnDataForEndedSession()
+                discardDataForEndedSession()
+                auth.status = .unauthenticated
+                cancelRestoreBackoff()
+                return
             }
-            auth.status = .unauthenticated
+            // Transient refresh outage: token preserved, keep trying.
+            await apiClient.setAuthToken(nil)
+            auth.status = .restoring
+            scheduleRestoreBackoff()
             return
         }
 
         // Refresh succeeded → retry the profile once.
         do {
-            applyProfile(try await fetchCurrentUserNoRetry())
+            let profile = try await fetchCurrentUserNoRetry()
+            applyProfile(profile)
             auth.status = .authenticated
-            await onAuthenticated()
+            cancelRestoreBackoff()
+            await onAuthenticated(userId: profile.id)
         } catch {
             // Refreshed OK but the profile read still failed → transient; preserve the STORED
-            // token so the next launch can restore, but disarm the client one so the wire
-            // identity matches the guest UI we are about to present (same reasoning as above).
+            // token so a later attempt can restore, but disarm the client one so the wire
+            // identity matches the guest-equivalent UI we are about to present (same reasoning
+            // as above), and keep retrying.
             await apiClient.setAuthToken(nil)
-            auth.status = .unauthenticated
+            auth.status = .restoring
+            scheduleRestoreBackoff()
         }
     }
 
@@ -237,7 +395,26 @@ final class AppState {
 
     /// Post-authentication side effects: claim guest data, refresh credits, pull synced settings.
     /// Called from every path that transitions to `.authenticated`.
-    private func onAuthenticated() async {
+    private func onAuthenticated(userId: String? = nil) async {
+        // Fire the fan-out only on a real identity TRANSITION.
+        //
+        // Restore is now re-runnable (launch, foreground, network-restore, backoff, a failed
+        // request), so without this guard a user who bounced between Wi-Fi and cellular would
+        // re-POST the guest claim, re-hydrate settings and re-hydrate all four Learn stores on
+        // every reconnect. `claimGuestDataIfNeeded` guards concurrency but not repetition.
+        //
+        // Keyed on the user id, not a bool, so an account SWITCH still runs the fan-out.
+        if let userId, userId == lastAuthenticatedUserId {
+            return
+        }
+        // A different account on the same device: drop the previous session's device-global
+        // stores before hydrating, or `hydrate()` unions the old user's rows into the new one's
+        // view and `pushUnsynced()` writes them into the new account.
+        if let userId, let previous = lastAuthenticatedUserId, previous != userId {
+            discardDataForEndedSession()
+        }
+        lastAuthenticatedUserId = userId
+
         // FIRST — before any read of the user's data. Migration 108 partitions guest watchlists
         // per install, so a user who added tickers during onboarding and then signed up owns
         // nothing until these rows are moved. Claiming after a watchlist read would show them an
@@ -258,7 +435,7 @@ final class AppState {
     /// start at core 1, silently discarding progress the server already had. The four stores are
     /// all device-global and all hydrate the same way, so they belong here — the single funnel
     /// every path to `.authenticated` passes through, and the mirror of
-    /// `discardLearnDataForEndedSession()` on the way out.
+    /// `discardDataForEndedSession()` on the way out.
     ///
     /// Fire-and-forget and individually isolated: each store swallows its own errors, and a
     /// Learn sync must never delay or fail sign-in.
@@ -277,6 +454,10 @@ final class AppState {
     /// double-counts, which makes the log lie about what happened. `AppState` is `@MainActor`, so
     /// this check-and-set cannot interleave.
     private var isClaimingGuestData = false
+
+    /// The account whose post-auth fan-out has already run, so a repeated restore doesn't
+    /// repeat it. Cleared on sign-out and on a dead credential.
+    private var lastAuthenticatedUserId: String?
 
     /// Move this install's guest watchlist + portfolios + Learn progress onto the account that
     /// just signed in (Learn covers completions AND book bookmarks — one unified table).
@@ -313,8 +494,22 @@ final class AppState {
             }
             #endif
         } catch {
+            // The most consequential of the silent ones: this is what moves a guest's watchlist,
+            // portfolios and Learn progress onto the account they just created. Failing quietly
+            // means the user finishes onboarding, signs up, and lands on an EMPTY watchlist with
+            // no idea their work is still sitting in the guest partition. Surfaced, not just
+            // logged — it is recoverable (the claim is idempotent, so a later sign-in retries).
+            let appError = AppError.from(error)
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("claim_guest_data"),
+                "code": .string(appError.analyticsCode),
+            ])
+            showToast(
+                "We couldn't move your saved tickers to your new account. Pull to refresh, or sign in again.",
+                type: .warning
+            )
             #if DEBUG
-            print("⚠️ [AppState] claimGuestData failed: \(AppError.from(error).message)")
+            print("⚠️ [AppState] claimGuestData failed: \(appError.message)")
             #endif
         }
     }
@@ -329,6 +524,10 @@ final class AppState {
                 responseType: CreditInfo.self
             )
         } catch {
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("credits_refresh"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
             #if DEBUG
             print("⚠️ [AppState] refreshCredits failed: \(AppError.from(error).message)")
             #endif
@@ -344,8 +543,12 @@ final class AppState {
         user = UserState()
         watchlist = WatchlistState()
         research = ResearchState()
+        // Stop healing: there is deliberately nothing to restore now, and a pending backoff
+        // would otherwise fire mid-sign-out and try to resurrect the session.
+        cancelRestoreBackoff()
+        lastAuthenticatedUserId = nil
 
-        discardLearnDataForEndedSession()
+        discardDataForEndedSession()
         // Same argument, different store: the synced preference keys are device-global too, so
         // without this the next account inherits the previous user's persona, playback speed,
         // appearance, and notification opt-ins — and then pushes them up as its own.
@@ -362,7 +565,7 @@ final class AppState {
     ///
     /// Costs a signed-in user nothing: their rows are on the server, so signing back in
     /// re-hydrates everything on the next Learn open.
-    private func discardLearnDataForEndedSession() {
+    private func discardDataForEndedSession() {
         // Bump FIRST: a hydrate issued seconds ago is still in flight and would otherwise land
         // after these resets and refill the stores with the ended session's rows.
         LearnIdentityEpoch.bump()
@@ -370,6 +573,12 @@ final class AppState {
         JourneyProgressStore.shared.reset()
         MoneyMovesProgressStore.shared.reset()
         BookmarkStore.shared.reset()
+        // Followed whales belong here for exactly the same reason the four Learn stores do:
+        // `WhaleService.followedWhaleIds` persists to a device-global UserDefaults key with no
+        // user id in it, and nothing cleared it on sign-out. So account B, signing in on A's
+        // phone, saw A's followed investors — and any list the server hadn't yet reconciled
+        // stayed wrong. Same bug class, same fix, one funnel.
+        WhaleService.shared.reset()
     }
 
     /// Sign in. Throws on failure so the SignInView can render the error inline.
@@ -450,13 +659,95 @@ final class AppState {
     func handleError(_ error: Error) {
         let appError = AppError.from(error)
 
-        // Handle auth errors globally
-        if case .unauthorized = appError {
+        // Handle auth errors globally.
+        //
+        // This used to `signOut()` on ANY `.unauthorized`, which is far too blunt now that a
+        // tokenless request produces a real auth error: a guest who never signed in would be
+        // "signed out", wiping the device-global Learn stores and the synced settings with it.
+        // Sign-out is reserved for a credential we KNOW is dead; a missing one asks for
+        // sign-in, and a stored-but-unvalidated one heals.
+        switch appError {
+        case .sessionEnded:
             signOut()
+            currentError = appError
             return
+        case .unauthorized, .tokenExpired:
+            if hasUnusedStoredCredential {
+                Task { await restoreSessionIfNeeded(trigger: "handleError") }
+            } else if auth.status == .authenticated {
+                signOut()
+            }
+            currentError = appError
+            return
+        case .signInRequired:
+            // Never a sign-out: there was no session to end.
+            currentError = appError
+            return
+        default:
+            break
         }
 
         currentError = appError
+    }
+
+    /// Ask for sign-in, app-wide, with copy specific to what the user was trying to do.
+    ///
+    /// Routes through `currentError` so it reuses machinery that already exists and works:
+    /// the global overlay renders `ErrorToastView`, whose action button is driven by
+    /// `suggestedAction` — `.signInRequired` returns `.signIn`, which `RootView` already maps to
+    /// presenting `SignInView`. That path was fully built and fed from exactly one line in the
+    /// entire app.
+    ///
+    /// Report a failed USER-INITIATED mutation, visibly.
+    ///
+    /// This is the single pattern that replaces ~20 hand-rolled `print`-and-revert blocks —
+    /// whale follow, the five star toggles, portfolio edits, onboarding watchlist writes. Each
+    /// of those reverted the optimistic UI correctly and then said nothing, so from the user's
+    /// side the app simply undid what they just did.
+    ///
+    /// Routing, by kind of failure:
+    ///  * needs an account  → the sign-in prompt (actionable)
+    ///  * session died      → handled by `handleError`, which heals or ends the session
+    ///  * anything else     → a toast naming what failed
+    ///
+    /// Always logs, in every build configuration.
+    ///
+    /// - Parameters:
+    ///   - action: infinitive phrase completing "Couldn't …", e.g. "follow this investor".
+    ///   - signInFeature: phrase for the sign-in prompt if this turns out to be an auth failure.
+    func reportMutationFailure(_ error: Error, action: String, signInFeature: String? = nil) {
+        let appError = AppError.from(error)
+
+        // Unconditional, not `#if DEBUG`. A release build that says nothing is how this class of
+        // bug survived: the revert looked like a UI glitch and there was no trace anywhere.
+        Analytics.shared.track(.mutationFailed, [
+            "action": .string(action),
+            "code": .string(appError.analyticsCode),
+        ])
+
+        switch appError {
+        case .signInRequired:
+            requestSignIn(for: signInFeature ?? action)
+        case .unauthorized, .tokenExpired, .sessionEnded:
+            // Let the session logic decide between healing and ending, then still tell the user
+            // their action didn't land.
+            handleError(error)
+        default:
+            showToast("Couldn't \(action). \(appError.message)", type: .error)
+        }
+    }
+
+    /// - Parameter feature: a verb phrase completing "Sign in to …", e.g. "follow investors".
+    func requestSignIn(for feature: String?) {
+        // A stored credential going unused is not a "please sign in" situation — it is a
+        // restore that hasn't happened yet. Prompting there would ask an already-signed-in user
+        // to sign in again, which is precisely the confusion this work exists to remove.
+        if hasUnusedStoredCredential {
+            Task { await restoreSessionIfNeeded(trigger: "sign-in-requested") }
+            showToast("Reconnecting your account…", type: .info)
+            return
+        }
+        signInPrompt = SignInPrompt(feature: feature)
     }
 
     func clearError() {
@@ -492,11 +783,34 @@ final class AuthState {
     }
 }
 
+/// A pending request to sign in, raised by whatever the user was trying to do.
+/// `Identifiable` so it can drive a `.sheet(item:)` — a new prompt replaces an older one rather
+/// than being dropped by a stale boolean.
+struct SignInPrompt: Identifiable, Equatable {
+    let id = UUID()
+    /// Verb phrase completing "Sign in to …", e.g. "follow investors".
+    let feature: String?
+}
+
 enum AuthStatus: Equatable {
     case unknown
     case loading
     case authenticated
+
+    /// Deliberate guest: no stored credential. The app is fully usable; "Sign In" is the honest
+    /// affordance.
     case unauthenticated
+
+    /// A credential IS stored but hasn't been validated yet, and a restore is being retried.
+    ///
+    /// This state had no representation before, and its absence was a real bug: the two
+    /// transient-failure branches of restore labelled themselves `.unauthenticated`, so a
+    /// signed-in user who launched on a flaky network was shown the same UI as someone who had
+    /// never made an account — offered "Sign In" while holding a perfectly good token, for the
+    /// rest of the app run. On the wire this behaves exactly like a guest (the client token is
+    /// deliberately disarmed to keep the wire identity honest); the difference is that the UI
+    /// says "Reconnecting" and something is actively trying again.
+    case restoring
 }
 
 // MARK: - User State

@@ -192,8 +192,17 @@ class IndexDetailViewModel: ObservableObject {
                     print("✅ [IndexDetailVM] Added \(indexSymbol) to watchlist")
                 }
             } catch {
-                print("⚠️ [IndexDetailVM] Watchlist toggle failed for \(indexSymbol): \(error)")
-                isFavorite = wasInWatchlist // revert on failure
+                // Revert AND tell the user. The revert was always right; the silence was the
+                // bug — in a release build a star that fills in and empties again is
+                // indistinguishable from the app deciding the tap never happened.
+                isFavorite = wasInWatchlist
+                AppActions.shared.reportMutationFailure(
+                    error,
+                    action: wasInWatchlist
+                        ? "remove \(self.indexSymbol) from your watchlist"
+                        : "add \(self.indexSymbol) to your watchlist",
+                    signInFeature: "save this index"
+                )
             }
         }
     }
@@ -255,8 +264,15 @@ class IndexDetailViewModel: ObservableObject {
     // MARK: - Live Price
 
     func connectLivePrice() {
-        guard let token = KeychainService.shared.get("access_token") else { return }
-        livePriceManager.connect(ticker: indexSymbol, authToken: token)
+        // See TickerDetailViewModel.connectLivePrice for why this reads APIClient rather than
+        // the Keychain. Note the old `guard let … else { return }` meant a guest got NO live
+        // price at all and no fallback — the stream is public for these symbols, so connect
+        // regardless and let the token be nil.
+        Task { [weak self] in
+            guard let self else { return }
+            let token = await APIClient.shared.currentAuthToken()
+            self.livePriceManager.connect(ticker: self.indexSymbol, authToken: token)
+        }
     }
 
     func disconnectLivePrice() {

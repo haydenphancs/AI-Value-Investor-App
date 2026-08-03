@@ -27,6 +27,12 @@ struct ReportsListSection: View {
     var onTogglePersonaTag: ((AnalysisPersona) -> Void)?
     /// Tapped from the first-run zero-state. When nil the CTA is hidden.
     var onGenerateFirst: (() -> Void)?
+    /// True when the list is empty because the user is signed out, not because they have no
+    /// reports. Different cause, different copy, different action — "Generate your first
+    /// analysis" is a dead end for someone who needs an account first.
+    var requiresSignIn: Bool = false
+    /// Tapped from the signed-out state. When nil the CTA is hidden.
+    var onSignIn: (() -> Void)?
 
     @State private var showSortMenu = false
 
@@ -38,7 +44,9 @@ struct ReportsListSection: View {
                 searchReveal
             }
 
-            if sections.isEmpty && !searchText.isEmpty {
+            if sections.isEmpty && requiresSignIn {
+                signedOutState
+            } else if sections.isEmpty && !searchText.isEmpty {
                 emptySearchState
             } else if sections.isEmpty {
                 // First run: no reports AND no active search. Without this branch a
@@ -274,6 +282,43 @@ struct ReportsListSection: View {
             if let onGenerateFirst {
                 Button(action: onGenerateFirst) {
                     Text("Generate your first analysis")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, AppSpacing.xl)
+                        .padding(.vertical, AppSpacing.md)
+                        .background(AppColors.primaryBlue)
+                        .cornerRadius(AppCornerRadius.medium)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .padding(.top, AppSpacing.xs)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, AppSpacing.xxxl)
+    }
+
+    /// Reports live on an account, so a signed-out user genuinely has none to show. Saying
+    /// "No analyses yet" here would be a lie by omission — their reports may exist, just not
+    /// for this device.
+    private var signedOutState: some View {
+        VStack(spacing: AppSpacing.md) {
+            Image(systemName: "person.crop.circle.badge.checkmark")
+                .font(.system(size: 40))
+                .foregroundColor(AppColors.textMuted)
+
+            Text("Sign in to see your analyses")
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text("Your reports are saved to your account so they follow you across devices.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xl)
+
+            if let onSignIn {
+                Button(action: onSignIn) {
+                    Text("Sign In")
                         .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(.white)
                         .padding(.horizontal, AppSpacing.xl)

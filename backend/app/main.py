@@ -8,6 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+# Registered on the STARLETTE base class, not fastapi.HTTPException: fastapi's subclasses it,
+# so this one handler covers both, including the 404/405 Starlette itself raises for an
+# unmatched route.
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import logging
 import time
 import asyncio
@@ -836,6 +840,40 @@ async def validation_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content=content,
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Let an `HTTPException` carry the structured error body directly.
+
+    FastAPI's built-in handler always renders `{"detail": <whatever>}`. That is fine for the
+    ~100 raise sites in this codebase that pass a plain string, and wrong for auth rejections,
+    which happen inside a DEPENDENCY — there is no handler yet to `return
+    make_error_response(...)`, so raising was the only option and the contract body had nowhere
+    to go (CLAUDE.md invariant #3).
+
+    The rule here is deliberately narrow:
+      * `detail` is a dict  → it IS the body, emitted verbatim (see `auth_error`).
+      * `detail` is anything else → `{"detail": ...}`, byte-for-byte what FastAPI already did.
+
+    Narrow on purpose. A blanket "reshape every 401/403 into the contract" would have changed
+    the body of every existing raise, and `APIClient.validateResponse` already has per-status
+    behaviour keyed off those shapes — 404 and 422 in particular try the structured decode and
+    fall back to a typed error. Opting in per raise site keeps this change additive.
+
+    `headers` is forwarded so `WWW-Authenticate` and `Retry-After` survive.
+    """
+    if isinstance(exc.detail, dict):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.detail,
+            headers=getattr(exc, "headers", None),
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=getattr(exc, "headers", None),
     )
 
 

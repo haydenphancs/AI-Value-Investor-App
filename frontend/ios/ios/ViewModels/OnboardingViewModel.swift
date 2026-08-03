@@ -100,6 +100,13 @@ final class OnboardingViewModel: ObservableObject {
             // user's intent is recorded locally, and un-checking a chip they just
             // tapped because of a network blip is more confusing than a watchlist that
             // syncs late. Logged so a systematically failing write is diagnosable.
+            // Release-visible. Onboarding is where the guest watchlist is BUILT, and a
+            // silently-dropped ticker here is the difference between a populated first run and
+            // an empty one — the activation metric this screen exists to move.
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("onboarding_watchlist_add"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
             #if DEBUG
             print("⚠️ [Onboarding] add \(symbol) failed: \(error)")
             #endif
@@ -110,6 +117,10 @@ final class OnboardingViewModel: ObservableObject {
         do {
             try await apiClient.request(endpoint: .removeFromWatchlist(stockId: symbol))
         } catch {
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("onboarding_watchlist_remove"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
             #if DEBUG
             print("⚠️ [Onboarding] remove \(symbol) failed: \(error)")
             #endif

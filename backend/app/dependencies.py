@@ -6,7 +6,7 @@ Auth, rate limiting, and utility dependencies.
 from typing import Optional
 from datetime import datetime, timezone
 import uuid
-from fastapi import Depends, HTTPException, status, Header
+from fastapi import Depends, HTTPException, status, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import Client
 import logging
@@ -15,11 +15,116 @@ from app.database import get_supabase
 from jose import JWTError
 
 from app.core.security import decode_token, verify_supabase_token, rate_limiter
+from app.api.error_response import ErrorCode, auth_error
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-security = HTTPBearer()
+# `auto_error=False` is load-bearing, not a style choice.
+#
+# With the default `auto_error=True`, FastAPI answers a MISSING or malformed Authorization
+# header with **403 "Not authenticated"** (fastapi/security/http.py raises HTTP_403_FORBIDDEN
+# for both `not credentials` and a non-Bearer scheme). Two things broke because of that:
+#
+#   1. iOS runs its refresh-and-retry interceptor on 401 ONLY, so a 403 never triggered a
+#      recovery attempt — the client just surfaced "Access Denied", or at a silent call site
+#      nothing at all. That is the reported bug: tapping Follow while signed out reverted the
+#      button with no message.
+#   2. The body was FastAPI's `{"detail": ...}`, not the `{error_code, message, user_message,
+#      action, details}` contract iOS decodes (CLAUDE.md invariant #3), so even a client that
+#      wanted to react had nothing machine-readable to react to.
+#
+# Turning auto_error off makes every dependency below responsible for its own rejection, which
+# is what lets each one pick the RIGHT code — AUTH_REQUIRED (no credential) is a different
+# situation from AUTH_TOKEN_INVALID (a credential that failed), and only the latter should ever
+# cost the user their stored token.
+security = HTTPBearer(auto_error=False)
+
+
+def _route_of(request: Optional[Request]) -> str:
+    """Request path for a log line, tolerating a missing `Request`.
+
+    Every auth dependency takes `request: Request = None`. FastAPI keys injection off the
+    ANNOTATION, so it still injects the real object in production; the default exists purely so
+    the test suite can keep calling these as plain functions (its standard idiom — there is no
+    TestClient anywhere in backend/tests), and so a logging concern can never be the thing that
+    breaks an auth check.
+    """
+    try:
+        return request.url.path if request is not None else "<no-request>"
+    except Exception:  # noqa: BLE001 — a log label must never raise
+        return "<no-request>"
+
+
+def _bearer_from_header(authorization: Optional[str]) -> Optional[str]:
+    """The token out of an `Authorization` header, or None when there isn't a usable one.
+
+    Tolerates the scheme's case (`bearer` is legal per RFC 7235) and rejects a present-but-empty
+    credential — `"Bearer "` must read as "no credential", not as a token of "", which would
+    otherwise be handed to the decoders and reported as an INVALID token. That distinction
+    decides whether the client keeps its Keychain entry.
+    """
+    if not authorization:
+        return None
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
+def _user_id_from_token(token: str) -> Optional[str]:
+    """Resolve a bearer token to a user id, trying app-minted then Supabase-issued.
+
+    Returns None when neither verifier accepts it. Callers decide what that means — the strict
+    dependencies 401, the identity-only one degrades to guest.
+    """
+    try:
+        payload = _decode_access_token(token)
+        user_id = payload.get("sub")
+        if user_id:
+            return user_id
+    except Exception:
+        pass
+
+    try:
+        payload = verify_supabase_token(token)
+        if payload:
+            user_id = payload.get("sub")
+            if user_id:
+                return user_id
+    except Exception:
+        pass
+
+    return None
+
+
+def _reject_unverifiable_token(token: str, *, route: str) -> None:
+    """Raise the right 401 for a bearer token that no verifier accepted.
+
+    Splits out one case that is NOT the caller's fault: `verify_supabase_token` returns None
+    when `SUPABASE_JWT_SECRET` is unset (core/security.py logs "not configured"). Under the old
+    silent-guest behaviour that misconfiguration was invisible; now it would 401 every
+    Supabase-issued token, and reporting a config error as a bad credential would send users to
+    re-sign-in over and over while the real fault sat in the environment. So it answers
+    AUTH_UNAVAILABLE (503, retryable, credential preserved) instead.
+    """
+    if not settings.SUPABASE_JWT_SECRET:
+        logger.error(
+            "auth: token rejected on %s and SUPABASE_JWT_SECRET is NOT CONFIGURED — "
+            "reporting AUTH_UNAVAILABLE, not a bad credential; check the environment",
+            route,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"Identity verification unavailable on {route}",
+        )
+
+    logger.warning("auth: unverifiable bearer token on %s", route)
+    raise auth_error(
+        ErrorCode.AUTH_TOKEN_INVALID,
+        message=f"Bearer token failed verification on {route}",
+    )
 
 
 def _decode_access_token(token: str) -> dict:
@@ -52,35 +157,35 @@ def _decode_access_token(token: str) -> dict:
 
 
 async def get_current_user_id(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    request: Request = None,
 ) -> str:
-    """Extract and validate user ID from JWT (custom or Supabase Auth)."""
-    token = credentials.credentials
+    """Extract and validate user ID from JWT (custom or Supabase Auth).
 
-    # Try custom JWT first
-    try:
-        payload = _decode_access_token(token)
-        user_id = payload.get("sub")
-        if user_id:
-            return user_id
-    except Exception:
-        pass
+    Distinguishes the two failures that used to look identical to the client:
+      * no credential at all → **AUTH_REQUIRED**, the "you need an account for this" case. The
+        client shows a sign-in prompt and must NOT touch its Keychain.
+      * a credential that failed → **AUTH_TOKEN_INVALID**, the "refresh and retry" case.
 
-    # Try Supabase Auth token
-    try:
-        payload = verify_supabase_token(token)
-        if payload:
-            user_id = payload.get("sub")
-            if user_id:
-                return user_id
-    except Exception:
-        pass
+    Both are 401. `security` no longer auto-errors, so a missing header arrives here as None
+    rather than as FastAPI's 403 (see the `HTTPBearer` comment above).
+    """
+    route = _route_of(request)
+    token = credentials.credentials.strip() if credentials else None
 
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid authentication credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    if not token:
+        logger.info("auth: no credential presented on %s", route)
+        raise auth_error(
+            ErrorCode.AUTH_REQUIRED,
+            message=f"No authentication credential presented for {route}",
+        )
+
+    user_id = _user_id_from_token(token)
+    if user_id:
+        return user_id
+
+    _reject_unverifiable_token(token, route=route)
+    raise AssertionError("unreachable — _reject_unverifiable_token always raises")
 
 
 def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
@@ -131,16 +236,20 @@ def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
             "Rejecting token for user=%s: issued %s, password changed %s",
             user_row.get("id"), issued_dt.isoformat(), changed_dt.isoformat(),
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Your password was changed. Please sign in again.",
+        raise auth_error(
+            ErrorCode.AUTH_SESSION_EXPIRED,
+            message=(
+                f"Token issued {issued_dt.isoformat()} predates the password change at "
+                f"{changed_dt.isoformat()} for user={user_row.get('id')}"
+            ),
         )
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     user_id: str = Depends(get_current_user_id),
-    supabase: Client = Depends(get_supabase)
+    supabase: Client = Depends(get_supabase),
+    request: Request = None,
 ) -> dict:
     """Get current user record from DB.
 
@@ -163,40 +272,62 @@ async def get_current_user(
             # (deleted, or a signup whose trigger never seeded public.users). The client must
             # drop the credential, and only an auth error makes it do that.
             logger.warning(
-                "Valid token for user=%s but no public.users row — treating as unauthenticated",
-                user_id,
+                "auth: valid token for user=%s but no public.users row on %s — "
+                "treating as unauthenticated",
+                user_id, _route_of(request),
             )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your session is no longer valid. Please sign in again.",
-                headers={"WWW-Authenticate": "Bearer"},
+            raise auth_error(
+                ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
+                message=f"Token names user={user_id} with no public.users row",
             )
 
+        # `credentials` cannot be None here: get_current_user_id already raised AUTH_REQUIRED
+        # when no credential was presented, and this dependency only runs after it resolves.
         _reject_if_password_changed_since_issue(credentials.credentials, rows[0])
         return rows[0]
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching user: {e}")
-        raise HTTPException(status_code=500, detail="Error fetching user data")
+        # 503, not 500. A read failure here is transient and RETRYABLE, and the difference is
+        # load-bearing on the client: iOS does not classify a 500 as an auth error, so it kept a
+        # perfectly good token bound to a request that could never resolve and retried forever.
+        # It also has to match `get_current_user_or_guest`, which already answered 503 for this
+        # exact condition — one failure mode must not have two contracts.
+        logger.error(
+            "auth: users read failed for user=%s on %s: %s: %s",
+            user_id, _route_of(request), type(e).__name__, e, exc_info=True,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"users read failed: {type(e).__name__}: {str(e)[:200]}",
+        )
 
 
 async def get_optional_user_id(
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None),
+    request: Request = None,
 ) -> Optional[str]:
-    """Optional auth - returns user_id if token present, None otherwise."""
-    if not authorization or not authorization.startswith("Bearer "):
+    """Optional auth: the caller's user id, or None when they presented no credential.
+
+    "No credential" and "a credential that failed" are NOT the same thing, and conflating them
+    is the defect this rewrite exists to remove. Previously ANY unverifiable token returned
+    None, so a signed-in user whose access token had expired was silently served as an
+    anonymous caller with a 200 — the client had no way to learn its session had died, so it
+    never refreshed, and the user spent the rest of the run as a guest holding a good token.
+
+    Now: no header → None (guest, unchanged). Header present but unverifiable → 401
+    AUTH_TOKEN_INVALID, which is what makes the client refresh and heal.
+    """
+    token = _bearer_from_header(authorization)
+    if token is None:
         return None
-    token = authorization.replace("Bearer ", "")
-    try:
-        payload = _decode_access_token(token)
-        return payload.get("sub")
-    except Exception:
-        try:
-            payload = verify_supabase_token(token)
-            return payload.get("sub") if payload else None
-        except Exception:
-            return None
+
+    user_id = _user_id_from_token(token)
+    if user_id:
+        return user_id
+
+    _reject_unverifiable_token(token, route=_route_of(request))
+    return None  # unreachable — _reject_unverifiable_token always raises
 
 
 # TEMP: shared guest user used by research/credits endpoints while the
@@ -209,20 +340,27 @@ GUEST_USER_ID = "00000000-0000-4000-8000-00000000dead"
 async def get_current_user_or_guest(
     authorization: Optional[str] = Header(None),
     supabase: Client = Depends(get_supabase),
+    request: Request = None,
 ) -> dict:
-    """Return authenticated user if token present, otherwise a guest user dict."""
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user_id = None
-        try:
-            payload = _decode_access_token(token)
-            user_id = payload.get("sub")
-        except Exception:
-            try:
-                payload = verify_supabase_token(token)
-                user_id = payload.get("sub") if payload else None
-            except Exception:
-                pass
+    """The authenticated user, or the shared guest when NO credential was presented.
+
+    The middle case is the one that changed. A bearer token that fails verification (expired,
+    bad signature, or a refresh token used as an access token) used to fall through to the guest
+    sentinel and return **200 with the guest's data** — the single largest source of "auth is
+    unreliable app-wide". This dependency (directly or via the three `*_identity` wrappers)
+    backs ~100 routes, so a signed-in user whose token quietly died was served the guest
+    watchlist, the guest reports, and the guest credit balance, indistinguishably from being
+    signed out. Nothing on the wire told the client to refresh, so nothing ever did.
+
+    It now raises AUTH_TOKEN_INVALID for that case. Callers who legitimately have no account —
+    every real guest — send no `Authorization` header at all and are completely unaffected;
+    that path still returns the sentinel. `X-Guest-Id` continues to partition them per install.
+    """
+    token = _bearer_from_header(authorization)
+    if token is not None:
+        user_id = _user_id_from_token(token)
+        if not user_id:
+            _reject_unverifiable_token(token, route=_route_of(request))
 
         if user_id:
             # A VALID token resolved to a real user_id. A transient users-table read
@@ -234,12 +372,12 @@ async def get_current_user_or_guest(
                 result = supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
             except Exception as e:
                 logger.error(
-                    "users read failed for authenticated user=%s: %s: %s",
-                    user_id, type(e).__name__, e,
+                    "auth: users read failed for authenticated user=%s on %s: %s: %s",
+                    user_id, _route_of(request), type(e).__name__, e, exc_info=True,
                 )
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Temporarily unable to load your account. Please try again.",
+                raise auth_error(
+                    ErrorCode.AUTH_UNAVAILABLE,
+                    message=f"users read failed: {type(e).__name__}: {str(e)[:200]}",
                 )
             rows = result.data or []
             if rows:
@@ -314,21 +452,26 @@ async def get_identity_only_user(
 
     Only `identity_key()` is needed downstream, and for an authenticated caller that is just
     the token's `sub` — which is already in hand without touching the database.
+
+    ⚠️ DELIBERATE CARVE-OUT — do not "fix" this to match the others. Every sibling dependency
+    now raises AUTH_TOKEN_INVALID for an unverifiable bearer, so that a dead session announces
+    itself instead of being silently served guest data. This one must NOT, for the reason above:
+    it backs analytics, whose whole contract is that instrumentation can never break the
+    product, and whose client discards the batch on any error. A bad token here costs one
+    mis-bucketed telemetry row; raising would cost the batch. It is logged so the degradation is
+    visible, per CLAUDE.md's no-silent-degradation rule. `tests/test_auth_dependency_matrix.py`
+    pins the non-raising behaviour.
     """
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user_id = None
-        try:
-            payload = _decode_access_token(token)
-            user_id = payload.get("sub")
-        except Exception:
-            try:
-                payload = verify_supabase_token(token)
-                user_id = payload.get("sub") if payload else None
-            except Exception:
-                pass
+    token = _bearer_from_header(authorization)
+    if token is not None:
+        user_id = _user_id_from_token(token)
         if user_id:
             return {"id": user_id, "email": "", "tier": "free"}
+        logger.warning(
+            "auth: unverifiable bearer on the identity-only path — bucketing as guest rather "
+            "than raising (analytics must never break the app); telemetry for this caller is "
+            "attributed to their install, not their account",
+        )
     return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
 
 
@@ -336,6 +479,7 @@ async def get_learn_identity(
     authorization: Optional[str] = Header(None),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     supabase: Client = Depends(get_supabase),
+    request: Request = None,
 ) -> dict:
     """Identity for the LEARN routes: a real account, else a PER-INSTALL guest.
 
@@ -346,7 +490,9 @@ async def get_learn_identity(
     dependency — ``user_learn_progress.user_id`` is a bare uuid column with no
     foreign key — so it can be partitioned safely.
     """
-    user = await get_current_user_or_guest(authorization, supabase)
+    user = await get_current_user_or_guest(
+        request=request, authorization=authorization, supabase=supabase
+    )
     if user.get("id") != GUEST_USER_ID:
         return user  # a real signed-in account always wins
     return {
@@ -360,6 +506,7 @@ async def get_research_identity(
     authorization: Optional[str] = Header(None),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     supabase: Client = Depends(get_supabase),
+    request: Request = None,
 ) -> dict:
     """Identity for the RESEARCH routes: a real account, else a PER-INSTALL guest.
 
@@ -377,7 +524,49 @@ async def get_research_identity(
     Callers must ALSO stop using ``user["id"] == GUEST_USER_ID`` as their guest test — a
     per-install id never equals the sentinel. Use ``user.get("is_guest")``.
     """
-    user = await get_current_user_or_guest(authorization, supabase)
+    user = await get_current_user_or_guest(
+        request=request, authorization=authorization, supabase=supabase
+    )
+    if user.get("id") != GUEST_USER_ID:
+        return {**user, "is_guest": False}   # a real signed-in account always wins
+    return {
+        "id": guest_user_id_for(x_guest_id),
+        "email": "guest@local",
+        "tier": "free",
+        "is_guest": True,
+    }
+
+
+async def get_chat_identity(
+    authorization: Optional[str] = Header(None),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    supabase: Client = Depends(get_supabase),
+    request: Request = None,
+) -> dict:
+    """Identity for the CHAT routes: a real account, else a PER-INSTALL guest.
+
+    Same shape and same reason as :func:`get_research_identity`. Before migration 111 every
+    signed-out user wrote `chat_sessions` under the shared ``GUEST_USER_ID``, and both read
+    paths filter on that column — ``GET /chat/sessions`` and ``GET /chat/sessions/{id}`` each
+    do ``.eq("user_id", user["id"])``. So one guest's conversations were listed, readable,
+    renameable and DELETABLE by every other guest.
+
+    This was the last table where that was still true, and the worst one: chat is where people
+    paste holdings and ask personal financial questions.
+
+    Safe only because migration 111 dropped ``chat_sessions_user_id_fkey`` — a synthetic
+    per-install uuid has no ``public.users`` row. That FK was ON DELETE CASCADE, so account
+    deletion now clears the table explicitly via ``_UNLINKED_USER_TABLES``; ``chat_messages``
+    still cascades from ``chat_sessions``.
+
+    Callers must ALSO stop using ``user["id"] == GUEST_USER_ID`` as their guest test — a
+    per-install id never equals the sentinel, so that comparison silently classifies every
+    guest as a paying account and sends them into a credit precharge against a `user_credits`
+    row that does not exist (402 "insufficient credits"). Use ``user.get("is_guest")``.
+    """
+    user = await get_current_user_or_guest(
+        request=request, authorization=authorization, supabase=supabase
+    )
     if user.get("id") != GUEST_USER_ID:
         return {**user, "is_guest": False}   # a real signed-in account always wins
     return {
@@ -392,6 +581,7 @@ async def get_watchlist_identity(
     authorization: Optional[str] = Header(None),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     supabase: Client = Depends(get_supabase),
+    request: Request = None,
 ) -> dict:
     """Identity for the WATCHLIST routes: a real account, else a PER-INSTALL guest.
 
@@ -410,7 +600,9 @@ async def get_watchlist_identity(
     everywhere: research / credits / portfolios hang off the seeded GUEST_USER_ID row
     (which owns real credits), and pointing those at a synthetic id would break them.
     """
-    user = await get_current_user_or_guest(authorization, supabase)
+    user = await get_current_user_or_guest(
+        request=request, authorization=authorization, supabase=supabase
+    )
     if user.get("id") != GUEST_USER_ID:
         return user  # a real signed-in account always wins
     return {
@@ -464,9 +656,9 @@ def identity_key(user: dict, x_guest_id: Optional[str]) -> str:
     exhaust another's rate limit or daily budget.
 
     IMPORTANT: this is ONLY an abuse/cost bucket — it is NEVER written as
-    ``chat_sessions.user_id`` (that column is FK-bound to ``public.users`` and stays
-    ``GUEST_USER_ID`` for guests). Chat-history isolation between guests is a separate
-    concern that resolves when real login ships.
+    ``chat_sessions.user_id``. That column is now written from :func:`get_chat_identity`
+    instead — migration 111 dropped its FK so each guest install owns its own chat history
+    (it used to be one shared bucket that any guest could read, rename and delete).
     """
     uid = user.get("id")
     if uid and uid != GUEST_USER_ID:

@@ -1050,18 +1050,39 @@ struct AddAssetSheet: View {
                 )
                 print("[AddAsset] ✅ Added \(result.ticker) to watchlist")
                 // Watchlist add succeeded — also push the ticker into the
-                // active portfolio so the user sees it immediately. Best-
-                // effort: a sync failure here just means a refresh repairs it.
-                try? await PortfolioStore.shared.addTicker(result.ticker)
+                // active portfolio so the user sees it immediately. A failure
+                // here IS user-visible (the ticker is on the watchlist but not
+                // in the portfolio they were looking at), so it is reported
+                // rather than swallowed by a bare `try?`.
+                do {
+                    try await PortfolioStore.shared.addTicker(result.ticker)
+                } catch {
+                    AppActions.shared.reportMutationFailure(
+                        error, action: "add \(result.ticker) to this portfolio"
+                    )
+                }
                 onAssetAdded?(result.ticker)
                 onDismiss?()
             } catch {
-                print("[AddAsset] ❌ Failed to add \(result.ticker): \(error)")
                 // Most common failure: the ticker is already on the master
                 // watchlist. Either way, push it into the active portfolio —
                 // the user clearly wants it here. The store call is idempotent.
-                try? await PortfolioStore.shared.addTicker(result.ticker)
-                addError = "Failed to add \(result.ticker). It may already be in your watchlist."
+                do {
+                    try await PortfolioStore.shared.addTicker(result.ticker)
+                } catch {
+                    AppActions.shared.reportMutationFailure(
+                        error, action: "add \(result.ticker) to this portfolio"
+                    )
+                }
+                // Don't assert "already in your watchlist" for every failure — that copy
+                // actively misleads when the real cause was auth or connectivity. Use the
+                // mapped message, and keep the reassuring line only for a genuine conflict.
+                let mapped = AppError.from(error)
+                if case .apiError(let code, _) = mapped, code == "ALREADY_EXISTS" {
+                    addError = "\(result.ticker) is already in your watchlist."
+                } else {
+                    addError = "Couldn't add \(result.ticker). \(mapped.message)"
+                }
                 isAdding = false
             }
         }

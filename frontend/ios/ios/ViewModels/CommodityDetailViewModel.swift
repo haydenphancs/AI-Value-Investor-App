@@ -397,8 +397,17 @@ class CommodityDetailViewModel: ObservableObject {
                     print("✅ [CommodityDetailVM] Added \(commoditySymbol) to watchlist")
                 }
             } catch {
-                print("⚠️ [CommodityDetailVM] Watchlist toggle failed: \(error)")
+                // Revert AND tell the user. The revert was always right; the silence was the
+                // bug — in a release build a star that fills in and empties again is
+                // indistinguishable from the app deciding the tap never happened.
                 isFavorite = wasInWatchlist
+                AppActions.shared.reportMutationFailure(
+                    error,
+                    action: wasInWatchlist
+                        ? "remove \(self.commoditySymbol) from your watchlist"
+                        : "add \(self.commoditySymbol) to your watchlist",
+                    signInFeature: "save this commodity"
+                )
             }
         }
     }

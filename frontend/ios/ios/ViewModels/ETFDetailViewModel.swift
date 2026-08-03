@@ -283,8 +283,14 @@ class ETFDetailViewModel: ObservableObject {
     // MARK: - Live Price
 
     func connectLivePrice() {
-        let token = KeychainService.shared.get("access_token") ?? ""
-        livePriceManager.connect(ticker: etfSymbol, authToken: token)
+        // See TickerDetailViewModel.connectLivePrice. Also drops the `?? ""` — an empty string
+        // is not a credential, and passing one only worked because the socket manager happens to
+        // skip an empty `?token=`.
+        Task { [weak self] in
+            guard let self else { return }
+            let token = await APIClient.shared.currentAuthToken()
+            self.livePriceManager.connect(ticker: self.etfSymbol, authToken: token)
+        }
     }
 
     func disconnectLivePrice() {
@@ -336,8 +342,17 @@ class ETFDetailViewModel: ObservableObject {
                     print("✅ [ETFDetailVM] Added \(etfSymbol) to watchlist")
                 }
             } catch {
-                print("⚠️ [ETFDetailVM] Watchlist toggle failed: \(error)")
+                // Revert AND tell the user. The revert was always right; the silence was the
+                // bug — in a release build a star that fills in and empties again is
+                // indistinguishable from the app deciding the tap never happened.
                 isFavorite = wasInWatchlist
+                AppActions.shared.reportMutationFailure(
+                    error,
+                    action: wasInWatchlist
+                        ? "remove \(self.etfSymbol) from your watchlist"
+                        : "add \(self.etfSymbol) to your watchlist",
+                    signInFeature: "save this ETF"
+                )
             }
         }
     }

@@ -60,7 +60,24 @@ struct SignInView: View {
 
                     labeled("Email") {
                         TextField("", text: $email)
-                            .textContentType(.emailAddress)
+                            // `.username`, NOT `.emailAddress`, even though the value IS an
+                            // email. `.emailAddress` marks a generic email field, so iOS offers
+                            // addresses from the contact card instead of the domain-scoped saved
+                            // credential — meaning saved-password AutoFill and Automatic Strong
+                            // Passwords both degrade. It would also silently defeat passkey
+                            // AutoFill later: Apple ties `performAutoFillAssistedRequests()`
+                            // specifically to a field whose content type is `username`.
+                            //
+                            // The documented pattern for email-as-username is exactly this pair:
+                            // `.username` for the credential binding, `.emailAddress` keyboard
+                            // for the typing experience. You keep both.
+                            //
+                            // NOTE: this only becomes fully effective once the app has an
+                            // associated-domains entitlement with `webcredentials:<domain>` and
+                            // the matching AASA file is served. Neither exists yet — tracked
+                            // separately. Correct trait now, so that work is a config change
+                            // rather than a code change.
+                            .textContentType(.username)
                             .keyboardType(.emailAddress)
                             .autocapitalization(.none)
                             .autocorrectionDisabled()
@@ -267,10 +284,14 @@ struct SignInView: View {
     private func signInWithGoogle() {
         errorMessage = nil
         Task {
+            // BEFORE the await, not after. `signInWithGoogle()` is the long one — it presents
+            // the whole web flow — and setting the flag afterwards left every button enabled
+            // and spinner-less for that entire round trip, so a second tap could start a
+            // second authentication session on top of the first.
+            isSubmitting = true
+            defer { isSubmitting = false }
             do {
                 let handshake = try await SocialSignInService.shared.signInWithGoogle()
-                isSubmitting = true
-                defer { isSubmitting = false }
                 try await appState.completeSocialSignIn(handshake)
             } catch SocialSignInError.cancelled {
                 // User backed out — not an error.

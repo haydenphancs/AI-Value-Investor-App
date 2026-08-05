@@ -281,6 +281,10 @@ final class AppState {
     ///    `.authenticated`. On a 401 (expired), try ONE refresh then retry.
     ///  - Any hard failure  → drop to guest (never a login wall).
     private func performRestore(trigger: String) async {
+        // Captured BEFORE the first await. Any interactive sign-in that lands while this is
+        // suspended bumps it, and `enterRestoringWindow` then refuses to disarm a token that
+        // is no longer the one this restore was validating.
+        let generation = credentialGeneration
         guard let token = authService.getStoredToken() else {
             auth.status = .unauthenticated   // guest — app still shown
             cancelRestoreBackoff()
@@ -322,7 +326,7 @@ final class AppState {
                 // we know, we just could not reach the server. Labelling this as signed-out is
                 // what made a single flaky launch cost the user their whole session — the UI
                 // said "Sign In" and nothing ever tried again.
-                await enterRestoringWindow()
+                await enterRestoringWindow(generation: generation)
                 return
             }
             // Access token rejected → fall through to an explicit refresh.
@@ -353,7 +357,7 @@ final class AppState {
                 return
             }
             // Transient refresh outage: token preserved, keep trying.
-            await enterRestoringWindow()
+            await enterRestoringWindow(generation: generation)
             return
         }
 
@@ -369,7 +373,7 @@ final class AppState {
             // token so a later attempt can restore, but disarm the client one so the wire
             // identity matches the guest-equivalent UI we are about to present (same reasoning
             // as above), and keep retrying.
-            await enterRestoringWindow()
+            await enterRestoringWindow(generation: generation)
         }
     }
 
@@ -384,7 +388,13 @@ final class AppState {
     /// created while the app said "Reconnecting" silently vanished.
     ///
     /// Funnelled into one method so a future `.restoring` branch cannot forget to record it.
-    private func enterRestoringWindow() async {
+    private func enterRestoringWindow(generation: UInt64) async {
+        guard generation == credentialGeneration else {
+            // A newer credential was installed while this restore was in flight — the user
+            // signed in. Disarming now would strip a good token off the client while the UI
+            // says authenticated, and nothing would ever put it back.
+            return
+        }
         await apiClient.setAuthToken(nil)
         didWriteAsGuestWhileRestoring = true
         auth.status = .restoring
@@ -488,6 +498,18 @@ final class AppState {
     /// True once we have operated tokenless while still holding a credential — see
     /// `enterRestoringWindow()`. Consumed by the next successful `onAuthenticated`.
     private var didWriteAsGuestWhileRestoring = false
+
+    /// Bumped whenever a NEWER credential is installed — any interactive sign-in.
+    ///
+    /// `restoreSession` is single-flight only against ITSELF: an interactive `signIn` runs
+    /// outside `restoreTask`, so a backoff retry can be suspended mid-flight while the user
+    /// signs in on the very flaky network that scheduled it. Without this, the restore resumes,
+    /// finds its own profile read failed, and calls `setAuthToken(nil)` — stripping the good
+    /// token the sign-in just installed. The UI then says `.authenticated` with no token on the
+    /// wire, and NOTHING recovers it: every healing trigger routes through
+    /// `restoreSessionIfNeeded`, whose guard is `auth.status != .authenticated`. Terminal for
+    /// the app run, with every `.guestAllowed` write silently going to the guest partition.
+    private var credentialGeneration: UInt64 = 0
 
     /// Move this install's guest watchlist + portfolios + Learn progress onto the account that
     /// just signed in (Learn covers completions AND book bookmarks — one unified table).
@@ -624,10 +646,26 @@ final class AppState {
         PortfolioStore.shared.reset()
         // Consent is per person and must never be inherited — see the note on the method.
         AIConsentStore.shared.resetForEndedSession()
+
+        // Abandon this install's GUEST partition, and forget that we ever wrote to it.
+        //
+        // A signed-in user's writes land there during a `.restoring` window (the client token
+        // is disarmed while X-Guest-Id keeps going out). That is recoverable when the session
+        // heals — `onAuthenticated` claims the rows. It is NOT recoverable when the session
+        // ENDS: the device keeps pointing at the same bucket, so it reads the previous user's
+        // tickers straight back, and the next person to sign up on this phone has those rows
+        // CLAIMED onto their account by POST /users/me/claim-guest-data — which cannot tell an
+        // ex-user's bucket from a legitimate pre-signup one.
+        didWriteAsGuestWhileRestoring = false
+        GuestIdentity.rotateForEndedSession()
     }
 
     /// Sign in. Throws on failure so the SignInView can render the error inline.
     func signIn(email: String, password: String) async throws {
+        // A newer credential is about to be installed: invalidate any restore suspended
+        // mid-flight, and stop a scheduled backoff firing into the middle of this.
+        credentialGeneration &+= 1
+        cancelRestoreBackoff()
         // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
         // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
         // Account sheet, the SignInView presented on top of it, and the `errorMessage` the
@@ -665,6 +703,10 @@ final class AppState {
     func signUp(
         email: String, password: String, displayName: String
     ) async throws -> SignUpOutcome {
+        // A newer credential is about to be installed: invalidate any restore suspended
+        // mid-flight, and stop a scheduled backoff firing into the middle of this.
+        credentialGeneration &+= 1
+        cancelRestoreBackoff()
         // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
         // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
         // Account sheet, the SignInView presented on top of it, and the `errorMessage` the
@@ -703,6 +745,10 @@ final class AppState {
     /// Both provider paths converge here. Not subject to the email-confirmation gate: Apple
     /// and Google supply an already-verified address.
     func completeSocialSignIn(_ result: SocialSignInResult) async throws {
+        // A newer credential is about to be installed: invalidate any restore suspended
+        // mid-flight, and stop a scheduled backoff firing into the middle of this.
+        credentialGeneration &+= 1
+        cancelRestoreBackoff()
         // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
         // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
         // Account sheet, the SignInView presented on top of it, and the `errorMessage` the

@@ -68,6 +68,45 @@ enum GuestIdentity {
         return fresh
     }
 
+    /// Mint a NEW install id, abandoning the current guest partition. Called only from
+    /// `AppState.discardDataForEndedSession()`.
+    ///
+    /// WHY A SESSION END MUST NOT KEEP THE PARTITION
+    /// --------------------------------------------
+    /// A signed-in user can end up writing into this install's GUEST partition: during a
+    /// `.restoring` window the client token is deliberately disarmed while `X-Guest-Id` keeps
+    /// going out, so their watchlist adds, portfolio edits, chats and Learn progress resolve
+    /// through `guest_user_id_for(...)` server-side.
+    ///
+    /// That is recoverable while the session heals — `onAuthenticated` claims those rows. It is
+    /// NOT recoverable if the session instead ENDS. The rows stay in a bucket this install still
+    /// points at, so:
+    ///
+    ///   1. the device, now a genuine guest, reads them straight back — the Tracking tab renders
+    ///      the previous user's tickers to whoever is holding the phone; and
+    ///   2. the next person to sign up on this device has them CLAIMED onto their account by
+    ///      `POST /users/me/claim-guest-data`, durably and server-side. That endpoint cannot
+    ///      tell an ex-user's bucket from a legitimate pre-signup guest bucket — its only guard
+    ///      refuses the shared sentinel.
+    ///
+    /// Rotating severs both. The abandoned rows become unreachable by any client (RLS leaves
+    /// them service-role-only), which is the correct outcome: they belong to an account whose
+    /// session is over, not to this device.
+    ///
+    /// Deliberately NOT called for a plain guest — nothing here runs unless a session existed.
+    static func rotateForEndedSession() {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let fresh = UUID().uuidString
+        if !write(fresh) {
+            // Same degradation as `current`: keep going with a process-lifetime value rather
+            // than leave the OLD id in place, which is the outcome this exists to prevent.
+            print("⚠️ GuestIdentity: rotate failed to persist — using a session-only id")
+        }
+        cached = fresh
+    }
+
     // MARK: - Keychain
 
     private static func read() -> String? {

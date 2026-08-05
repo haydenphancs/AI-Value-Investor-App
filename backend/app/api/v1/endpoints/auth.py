@@ -131,18 +131,12 @@ async def sign_in(
     # `protected=True` on every credential limiter: it routes these keys into a pool that
     # attacker-minted identifiers cannot reach. Sharing one table with the X-Guest-Id-keyed
     # buckets let ~20k cheap requests evict this very bucket and reset the cap below.
-    ip_ok = rate_limiter.is_allowed(
-        f"login:ip:{client_ip}", max_requests=10, window_seconds=60, protected=True
+    _enforce_credential_limits(
+        (f"login:ip:{client_ip}", 10, 60),
+        (f"login:email:{email_key}", 10, 900),
+        detail="Too many login attempts. Please try again later.",
+        retry_after="60",
     )
-    email_ok = rate_limiter.is_allowed(
-        f"login:email:{email_key}", max_requests=10, window_seconds=900, protected=True
-    )
-    if not (ip_ok and email_ok):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many login attempts. Please try again later.",
-            headers={"Retry-After": "60"},
-        )
     try:
         auth_response = _auth_of(auth_client, supabase).auth.sign_in_with_password({
             "email": request.email,
@@ -267,18 +261,12 @@ async def sign_up(
     # whoever the attacker names — and it burns the project's mail quota, which is what stops
     # legitimate signups from arriving at all.
     email_key = (request.email or "").strip().lower()
-    ip_ok = rate_limiter.is_allowed(
-        f"register:ip:{client_ip}", max_requests=5, window_seconds=60, protected=True
+    _enforce_credential_limits(
+        (f"register:ip:{client_ip}", 5, 60),
+        (f"register:email:{email_key}", 5, 3600),
+        detail="Too many registration attempts. Please try again later.",
+        retry_after="60",
     )
-    email_ok = rate_limiter.is_allowed(
-        f"register:email:{email_key}", max_requests=5, window_seconds=3600, protected=True
-    )
-    if not (ip_ok and email_ok):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many registration attempts. Please try again later.",
-            headers={"Retry-After": "60"},
-        )
     try:
         auth_response = _auth_of(auth_client, supabase).auth.sign_up({
             "email": request.email,
@@ -436,18 +424,12 @@ async def resend_confirmation(
     client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
-    ip_ok = rate_limiter.is_allowed(
-        f"resend:ip:{client_ip}", max_requests=5, window_seconds=3600, protected=True
+    _enforce_credential_limits(
+        (f"resend:ip:{client_ip}", 5, 3600),
+        (f"resend:email:{email_key}", 3, 3600),
+        detail="Too many requests. Please try again later.",
+        retry_after="3600",
     )
-    email_ok = rate_limiter.is_allowed(
-        f"resend:email:{email_key}", max_requests=3, window_seconds=3600, protected=True
-    )
-    if not (ip_ok and email_ok):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many requests. Please try again later.",
-            headers={"Retry-After": "3600"},
-        )
 
     try:
         _auth_of(auth_client, supabase).auth.resend({"type": "signup", "email": email_key})
@@ -499,6 +481,42 @@ _REJECTED_CREDENTIAL_MARKERS = (
 def _is_rejected_credential(exc: Exception) -> bool:
     """True when the provider rejected the supplied password, as opposed to failing."""
     return any(marker in str(exc).lower() for marker in _REJECTED_CREDENTIAL_MARKERS)
+
+
+def _enforce_credential_limits(
+    *checks: tuple[str, int, int],
+    detail: str,
+    retry_after: str,
+) -> None:
+    """Evaluate credential limiters IN ORDER, raising 429 on the FIRST denial.
+
+    The short-circuit is a security property, not tidiness. `rate_limiter.is_allowed` INSERTS
+    and LRU-touches its key *before* deciding, so the old shape —
+
+        ip_ok    = is_allowed("login:ip:...")
+        email_ok = is_allowed("login:email:...")
+        if not (ip_ok and email_ok): raise 429
+
+    — created a `login:email:<attacker-chosen>` entry even for requests the IP limiter had
+    already refused. That reopened the eviction attack the protected pool was added to close,
+    by a different door: ~20k cheap POSTs from ONE address, each 429'd without ever reaching
+    Supabase, still inserted 20k keys, overflowed `_MAX_TRACKED_PROTECTED`, and popped the
+    victim's `login:email:` bucket off the LRU front — handing the attacker a fresh 10-guess
+    window, repeatable. The class comment in `core/security.py` claimed this cost ~33 hours;
+    with both limiters always evaluated it cost seconds. Short-circuiting makes that claim
+    true: a denied caller can no longer insert the second key at all, so filling the pool is
+    bounded by the per-IP limiter it must pass first.
+
+    Order matters. Put the limiter whose key the CALLER cannot choose (IP) first, and the one
+    keyed on caller-supplied input (email) second.
+    """
+    for key, max_requests, window_seconds in checks:
+        if not rate_limiter.is_allowed(
+            key, max_requests=max_requests, window_seconds=window_seconds, protected=True
+        ):
+            raise HTTPException(
+                status_code=429, detail=detail, headers={"Retry-After": retry_after}
+            )
 
 
 def _app_user_row_exists(supabase: Client, user_id: str) -> bool:
@@ -727,19 +745,13 @@ async def forgot_password(
     email_key = request.email.strip().lower()
 
     # 5/hour per IP, 3/hour per address. Deliberately tight — this endpoint sends mail.
-    ip_ok = rate_limiter.is_allowed(
-        f"forgot:ip:{client_ip}", max_requests=5, window_seconds=3600, protected=True
+    # Still a generic response shape, but 429 so a legitimate client can back off.
+    _enforce_credential_limits(
+        (f"forgot:ip:{client_ip}", 5, 3600),
+        (f"forgot:email:{email_key}", 3, 3600),
+        detail="Too many reset requests. Please try again later.",
+        retry_after="3600",
     )
-    email_ok = rate_limiter.is_allowed(
-        f"forgot:email:{email_key}", max_requests=3, window_seconds=3600, protected=True
-    )
-    if not (ip_ok and email_ok):
-        # Still a generic response shape, but 429 so a legitimate client can back off.
-        raise HTTPException(
-            status_code=429,
-            detail="Too many reset requests. Please try again later.",
-            headers={"Retry-After": "3600"},
-        )
 
     try:
         _auth_of(auth_client, supabase).auth.reset_password_for_email(email_key)
@@ -774,18 +786,12 @@ async def reset_password(
     client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
-    ip_ok = rate_limiter.is_allowed(
-        f"reset:ip:{client_ip}", max_requests=10, window_seconds=3600, protected=True
+    _enforce_credential_limits(
+        (f"reset:ip:{client_ip}", 10, 3600),
+        (f"reset:email:{email_key}", 10, 3600),
+        detail="Too many attempts. Please request a new code and try again later.",
+        retry_after="3600",
     )
-    email_ok = rate_limiter.is_allowed(
-        f"reset:email:{email_key}", max_requests=10, window_seconds=3600, protected=True
-    )
-    if not (ip_ok and email_ok):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many attempts. Please request a new code and try again later.",
-            headers={"Retry-After": "3600"},
-        )
 
     # 1. Verify the OTP. This is what proves control of the mailbox.
     try:
@@ -856,18 +862,12 @@ async def change_password(
     # Keyed per USER as well as per IP — the per-IP half alone would let an attacker with a
     # pool of addresses keep guessing against one account.
     client_ip = trusted_client_ip(req)
-    ip_ok = rate_limiter.is_allowed(
-        f"changepw:ip:{client_ip}", max_requests=10, window_seconds=3600, protected=True
+    _enforce_credential_limits(
+        (f"changepw:ip:{client_ip}", 10, 3600),
+        (f"changepw:user:{user_id}", 5, 900),
+        detail="Too many password change attempts. Please try again later.",
+        retry_after="900",
     )
-    user_ok = rate_limiter.is_allowed(
-        f"changepw:user:{user_id}", max_requests=5, window_seconds=900, protected=True
-    )
-    if not (ip_ok and user_ok):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many password change attempts. Please try again later.",
-            headers={"Retry-After": "900"},
-        )
 
     # Resolve the account's email — the request doesn't carry it, and it must come from
     # the token's subject rather than user input.
@@ -896,17 +896,39 @@ async def change_password(
             "email": email,
             "password": request.current_password,
         })
-    except Exception:
-        logger.info("change-password: current-password check failed for user=%s", user_id)
-        # The caller IS authenticated and their session is fine — only the field is wrong.
-        # As a bare-string 401 this reached iOS as `.unauthorized`, which shows "Your session
-        # has expired", AND set `triggersTokenRefresh`; since `.changePassword` is excluded
-        # from `isAuthEndpoint`, the client refreshed and REPLAYED the request, burning two of
-        # the five per-user attempts on a single typo. A non-session code stops both.
+    except Exception as e:
+        # CLASSIFY, exactly as /login does. This block used to map EVERY exception to
+        # "Your current password is incorrect." — so a GoTrue 429 (which this endpoint's own
+        # docstring warns about, since every call leaves from the one Railway egress IP), a
+        # Supabase 5xx, or a connect timeout all told the user a false thing about their
+        # password and pushed them toward a reset they did not need.
+        #
+        # It also cost them the lockout budget: the per-user limiter above CONSUMES its slot at
+        # check time and nothing refunds it, so five outage-induced failures locked the real
+        # owner out of password change for 15 minutes.
+        if _is_rejected_credential(e):
+            logger.info("change-password: current password did not match for user=%s", user_id)
+            # The caller IS authenticated and their session is fine — only the field is wrong.
+            # As a bare-string 401 this reached iOS as `.unauthorized`, which shows "Your
+            # session has expired", AND set `triggersTokenRefresh`; since `.changePassword` is
+            # excluded from `isAuthEndpoint`, the client refreshed and REPLAYED the request,
+            # burning two of the five per-user attempts on a single typo.
+            raise auth_error(
+                ErrorCode.AUTH_CREDENTIALS_INVALID,
+                message="current-password re-authentication failed",
+                user_message="Your current password is incorrect.",
+            )
+
+        # Ours, not theirs. Retryable, and it must reach Sentry — the old `except Exception:`
+        # bound nothing and logged at INFO with no type, no message and no stack, so during a
+        # GoTrue incident there was nothing greppable separating an outage from user typos.
+        logger.error(
+            "change-password: re-authentication failed unexpectedly for user=%s: %s: %s",
+            user_id, type(e).__name__, e, exc_info=True,
+        )
         raise auth_error(
-            ErrorCode.AUTH_CREDENTIALS_INVALID,
-            message="current-password re-authentication failed",
-            user_message="Your current password is incorrect.",
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"current-password check upstream failure: {type(e).__name__}",
         )
 
     try:

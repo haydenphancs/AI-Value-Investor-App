@@ -208,9 +208,9 @@ struct WhaleAvatarView: View {
 
     private var backgroundColor: Color {
         let colors: [Color] = [
-            Color(hex: "3B82F6"), Color(hex: "22C55E"),
-            Color(hex: "F97316"), Color(hex: "A855F7"),
-            Color(hex: "06B6D4"), Color(hex: "EF4444"),
+            AppColors.primaryBlue, AppColors.gain,
+            AppColors.alertOrange, AppColors.alertPurple,
+            AppColors.accentCyan, AppColors.loss,
         ]
         return colors[abs(name.hashValue) % colors.count]
     }
@@ -436,7 +436,7 @@ struct SectorExposureInfoSheet: View {
                     }
 
                     Divider()
-                        .background(AppColors.cardBackgroundLight)
+                        .overlay(AppColors.cardBackgroundLight)
 
                     // Why it Matters
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -471,7 +471,7 @@ struct SectorExposureInfoSheet: View {
                     }
 
                     Divider()
-                        .background(AppColors.cardBackgroundLight)
+                        .overlay(AppColors.cardBackgroundLight)
 
                     // How to Use
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -567,7 +567,7 @@ struct RecentTradesInfoSheet: View {
                     }
 
                     Divider()
-                        .background(AppColors.cardBackgroundLight)
+                        .overlay(AppColors.cardBackgroundLight)
 
                     // Why it Matters
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -598,7 +598,7 @@ struct RecentTradesInfoSheet: View {
                     }
 
                     Divider()
-                        .background(AppColors.cardBackgroundLight)
+                        .overlay(AppColors.cardBackgroundLight)
 
                     // How to Use
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -707,7 +707,7 @@ struct WhaleCurrentPicksSection: View {
 
                         if holding.id != holdings.last?.id {
                             Divider()
-                                .background(AppColors.cardBackgroundLight)
+                                .overlay(AppColors.cardBackgroundLight)
                         }
                     }
                 }
@@ -878,7 +878,7 @@ struct WhaleRecentTradesSection: View {
 
                     if group.id != tradeGroups.last?.id {
                         Divider()
-                            .background(AppColors.cardBackgroundLight)
+                            .overlay(AppColors.cardBackgroundLight)
                     }
                 }
             }

@@ -47,7 +47,7 @@ struct StarRatingView: View {
 
     private func starColor(for index: Int) -> Color {
         if rating > Double(index) {
-            return Color(hex: "F59E0B") // Gold/Amber
+            return AppColors.caution // Gold/Amber
         } else {
             return AppColors.textMuted
         }

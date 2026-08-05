@@ -78,7 +78,7 @@ struct ChatHistoryItemRow: View {
         ForEach(ChatHistoryItem.todayItems) { item in
             ChatHistoryItemRow(item: item)
             Divider()
-                .background(AppColors.cardBackgroundLight)
+                .overlay(AppColors.cardBackgroundLight)
         }
     }
     .padding(.horizontal, AppSpacing.lg)

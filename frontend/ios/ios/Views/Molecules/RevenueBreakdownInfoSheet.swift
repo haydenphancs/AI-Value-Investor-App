@@ -30,7 +30,7 @@ struct RevenueBreakdownInfoSheet: View {
                     chartExplanation
 
                     Divider()
-                        .background(AppColors.cardBackgroundLight)
+                        .overlay(AppColors.cardBackgroundLight)
 
                     // Educational content
                     ForEach(RevenueBreakdownInfoItem.educationalContent) { item in
@@ -74,7 +74,7 @@ struct RevenueBreakdownInfoSheet: View {
                 )
 
                 explanationRow(
-                    color: Color(hex: "EF4444"),
+                    color: AppColors.loss,
                     title: "Middle Bars (Waterfall)",
                     description: "Shows costs being subtracted from revenue: Cost of Sales, Operating Expenses, and Taxes."
                 )

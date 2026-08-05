@@ -248,7 +248,7 @@ struct ProfileView: View {
                                 Capsule()
                                     .fill(
                                         LinearGradient(
-                                            colors: [Color(hex: "F97316"), Color(hex: "EA580C")],
+                                            colors: [AppColors.alertOrange, AppColors.alertOrange],
                                             startPoint: .leading,
                                             endPoint: .trailing
                                         )
@@ -685,8 +685,8 @@ struct CreditInfoPill: View {
 
 struct UpgradeCard: View {
     private let gradientColors = [
-        Color(hex: "F97316"),
-        Color(hex: "EA580C")
+        AppColors.alertOrange,
+        AppColors.alertOrange
     ]
 
     var body: some View {

@@ -368,7 +368,7 @@ final class HomeRepository: HomeRepositoryProtocol {
                 changeText: t.changePercent.map { String(format: "%+.1f%%", $0) } ?? "",
                 isPositive: (t.changePercent ?? 0) >= 0,
                 imageUrl: t.imageUrl,
-                accent: Color(hex: t.accentHex)
+                accent: Color(themedHex: t.accentHex, role: .graphic, fallback: AppColors.primaryBlue)
             )
         }
     }
@@ -560,16 +560,16 @@ final class MockHomeRepository: HomeRepositoryProtocol {
 
     static let themes: [TrendingTheme] = [
         TrendingTheme(slug: "silicon-rush", title: "Silicon Rush", count: "8 stocks", changeText: "+3.4%",
-                      isPositive: true, imageUrl: nil, accent: Color(hex: "22D3EE")),
+                      isPositive: true, imageUrl: nil, accent: AppColors.accentCyan),
         TrendingTheme(slug: "modern-battlefield", title: "Modern Battlefield", count: "7 stocks", changeText: "+1.2%",
-                      isPositive: true, imageUrl: nil, accent: Color(hex: "FBBF24")),
+                      isPositive: true, imageUrl: nil, accent: AppColors.caution),
         TrendingTheme(slug: "the-new-oil", title: "The New Oil", count: "5 stocks", changeText: "-1.2%",
-                      isPositive: false, imageUrl: nil, accent: Color(hex: "FB923C")),
+                      isPositive: false, imageUrl: nil, accent: Color(themedHex: "FB923C", role: .graphic)),
         TrendingTheme(slug: "robot-workforce", title: "Robot Workforce", count: "6 stocks", changeText: "+4.2%",
-                      isPositive: true, imageUrl: nil, accent: Color(hex: "C084FC")),
+                      isPositive: true, imageUrl: nil, accent: Color(themedHex: "C084FC", role: .graphic)),
         TrendingTheme(slug: "hacking-health", title: "Hacking Human Health", count: "6 stocks", changeText: "+2.7%",
-                      isPositive: true, imageUrl: nil, accent: Color(hex: "2DD4BF")),
+                      isPositive: true, imageUrl: nil, accent: Color(lightHex: "0F766E", darkHex: "2DD4BF")),
         TrendingTheme(slug: "cyber-wars", title: "Cyber Wars", count: "6 stocks", changeText: "+5.1%",
-                      isPositive: true, imageUrl: nil, accent: Color(hex: "34D399")),
+                      isPositive: true, imageUrl: nil, accent: Color(themedHex: "34D399", role: .graphic)),
     ]
 }

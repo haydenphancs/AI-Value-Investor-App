@@ -63,7 +63,7 @@ struct ThemeDetailDTO: Decodable {
             title: title,
             subtitle: subtitle ?? "",
             imageUrl: imageUrl,
-            accent: Color(hex: accentHex),
+            accent: Color(themedHex: accentHex, role: .graphic, fallback: AppColors.primaryBlue),
             companies: constituents.map { $0.toDisplay() }
         )
     }

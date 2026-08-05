@@ -144,8 +144,12 @@ struct WhaleSectorAllocation: Identifiable, Codable {
     let percentage: Double
     let colorHex: String
 
+    /// Server-supplied, so it can be any hue at any lightness — the sample
+    /// payload alone contains #22C55E (2.28:1) and #F97316 (2.80:1), both of
+    /// which vanish against a light card. Clamped to the graphic floor while
+    /// keeping the backend's chosen hue.
     var color: Color {
-        Color(hex: colorHex)
+        Color(themedHex: colorHex, role: .graphic, fallback: AppColors.growthSectorGray)
     }
 
     var formattedPercentage: String {

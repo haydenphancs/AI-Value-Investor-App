@@ -275,6 +275,74 @@ extension AppColors {
         static let contentSurfaces = ["background", "cardBackground", "cardBackgroundLight"]
     }
 
+    /// Every STORED colour token, as a struct so `Mirror` can enumerate the
+    /// names. `ThemeContrastAudit` cross-checks this against `auditManifest`, so
+    /// a token added to `AppColors` but forgotten in the manifest fails at launch
+    /// instead of shipping unaudited.
+    ///
+    /// Add a token above → add it here → add it to `auditManifest`. The audit
+    /// tells you if you miss the third step; this struct is what makes that
+    /// possible. Computed aliases (`bullish`, `divider`, `tabBarSelected`, …)
+    /// are deliberately absent — they forward to a canonical token that is
+    /// already covered.
+    struct TokenInventory {
+        let background = AppColors.background
+        let cardBackground = AppColors.cardBackground
+        let cardBackgroundLight = AppColors.cardBackgroundLight
+        let surfaceInverse = AppColors.surfaceInverse
+        let textPrimary = AppColors.textPrimary
+        let textSecondary = AppColors.textSecondary
+        let textMuted = AppColors.textMuted
+        let textDisabled = AppColors.textDisabled
+        let textOnAccent = AppColors.textOnAccent
+        let textInverse = AppColors.textInverse
+        let gain = AppColors.gain
+        let loss = AppColors.loss
+        let caution = AppColors.caution
+        let gainGraphic = AppColors.gainGraphic
+        let lossGraphic = AppColors.lossGraphic
+        let cautionGraphic = AppColors.cautionGraphic
+        let accentGraphic = AppColors.accentGraphic
+        let primaryGraphic = AppColors.primaryGraphic
+        let primaryBlue = AppColors.primaryBlue
+        let accentCyan = AppColors.accentCyan
+        let accentYellow = AppColors.accentYellow
+        let primaryFill = AppColors.primaryFill
+        let gainFill = AppColors.gainFill
+        let lossFill = AppColors.lossFill
+        let cautionFill = AppColors.cautionFill
+        let accentCyanFill = AppColors.accentCyanFill
+        let alertOrange = AppColors.alertOrange
+        let alertPurple = AppColors.alertPurple
+        let borderSubtle = AppColors.borderSubtle
+        let border = AppColors.border
+        let borderStrong = AppColors.borderStrong
+        let shadowKey = AppColors.shadowKey
+        let shadowAmbient = AppColors.shadowAmbient
+        let scrim = AppColors.scrim
+        let tabBarBackground = AppColors.tabBarBackground
+        let chipUnselectedBackground = AppColors.chipUnselectedBackground
+        let toggleBackground = AppColors.toggleBackground
+        let toggleSelectedBackground = AppColors.toggleSelectedBackground
+        let chartGridline = AppColors.chartGridline
+        let chartCrosshair = AppColors.chartCrosshair
+        let growthBarBlue = AppColors.growthBarBlue
+        let growthYoYYellow = AppColors.growthYoYYellow
+        let growthSectorGray = AppColors.growthSectorGray
+        let profitGrossMargin = AppColors.profitGrossMargin
+        let profitOperatingMargin = AppColors.profitOperatingMargin
+        let profitFCFMargin = AppColors.profitFCFMargin
+        let profitNetMargin = AppColors.profitNetMargin
+        let profitSectorAverage = AppColors.profitSectorAverage
+        let confidenceDividends = AppColors.confidenceDividends
+        let confidenceBuybacks = AppColors.confidenceBuybacks
+        let confidenceSharesOutstanding = AppColors.confidenceSharesOutstanding
+        let aiRampStart = AppColors.aiRampStart
+        let aiRampEnd = AppColors.aiRampEnd
+    }
+
+    static let tokenInventory = TokenInventory()
+
     static let surfaceRegistry: [String: Color] = [
         "background": background,
         "cardBackground": cardBackground,
@@ -338,10 +406,38 @@ extension AppColors {
         TokenSpec("confidenceSharesOutstanding", confidenceSharesOutstanding, .graphic, on: ["background", "cardBackground"]),
 
         // Exempt by design — listed so the exemption is DOCUMENTED, not silent.
+        // `ThemeContrastAudit.auditManifestCompleteness()` requires every stored
+        // token to appear here, so "not a foreground colour" has to be stated
+        // rather than assumed. It caught all 13 entries below on its first run.
         TokenSpec("chartGridline", chartGridline, .decorative),
+        TokenSpec("chartCrosshair", chartCrosshair, .decorative),
         TokenSpec("borderSubtle", borderSubtle, .decorative),
         TokenSpec("border", border, .decorative),
         TokenSpec("borderStrong", borderStrong, .decorative),
+
+        // Shadows and scrims are alpha over an arbitrary backdrop — there is no
+        // fixed pair to measure, and they carry no information.
+        TokenSpec("shadowKey", shadowKey, .decorative),
+        TokenSpec("shadowAmbient", shadowAmbient, .decorative),
+        TokenSpec("scrim", scrim, .decorative),
+
+        // Surfaces. Deliberately floor-0: page↔card separation is a BORDER's
+        // job, not a luminance job (Apple 1.116:1, Polaris 1.129, Carbon 1.100
+        // all sit where ours does). What must pass is the TEXT on them, and
+        // every text token above names these in its `surfaces:` list.
+        TokenSpec("background", background, .surface),
+        TokenSpec("cardBackground", cardBackground, .surface),
+        TokenSpec("cardBackgroundLight", cardBackgroundLight, .surface),
+        TokenSpec("surfaceInverse", surfaceInverse, .surface),
+        TokenSpec("tabBarBackground", tabBarBackground, .surface),
+        TokenSpec("chipUnselectedBackground", chipUnselectedBackground, .surface),
+        TokenSpec("toggleBackground", toggleBackground, .surface),
+        TokenSpec("toggleSelectedBackground", toggleSelectedBackground, .surface),
+
+        // On-accent ink. Its contrast IS verified — in reverse, by every
+        // `carriesOnAccentText` fill above, which is the only direction that
+        // means anything for it.
+        TokenSpec("textOnAccent", textOnAccent, .decorative),
     ]
 }
 

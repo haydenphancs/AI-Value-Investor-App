@@ -45,7 +45,7 @@ enum ValuationLevel: String {
     var color: Color {
         switch self {
         case .bargain: return AppColors.bullish
-        case .fairValue: return Color(hex: "FBBF24")   // Yellow
+        case .fairValue: return AppColors.caution   // Yellow
         case .expensive: return AppColors.alertOrange
         case .overheated: return AppColors.bearish
         }
@@ -73,11 +73,37 @@ enum ValuationLevel: String {
         }
     }
 
-    /// Position on the gauge (0.0 – 1.0)
+    /// Position on the gauge (0.0 – 1.0).
+    ///
+    /// **Piecewise, not linear.** `ValuationTierBar` renders four EQUAL-width
+    /// segments, so each tier owns exactly one quarter of the track — but the
+    /// tiers' real P/E thresholds (18 / 24 / 30, see `from(pe:)`) are not evenly
+    /// spaced over the 10–40 display range. A linear map therefore put the
+    /// marker in the wrong segment: PE 18 landed at 0.267 when its boundary is
+    /// 0.25, and PE 31 landed at 0.70 — inside *Expensive* — while *Overheated*
+    /// was the tier highlighted. The gauge contradicted its own label.
+    ///
+    /// Mapping each tier's P/E span onto its own quarter keeps the marker and
+    /// the highlighted segment in agreement for every input, by construction.
     static func gaugePosition(pe: Double) -> Double {
-        // Clamp PE between 10 and 40 for visual range
         let clamped = min(max(pe, 10), 40)
-        return (clamped - 10) / 30.0
+        switch clamped {
+        case ..<18:    return interpolate(clamped, from: 10...18, to: 0.00...0.25)
+        case 18..<24:  return interpolate(clamped, from: 18...24, to: 0.25...0.50)
+        case 24..<30:  return interpolate(clamped, from: 24...30, to: 0.50...0.75)
+        default:       return interpolate(clamped, from: 30...40, to: 0.75...1.00)
+        }
+    }
+
+    private static func interpolate(
+        _ value: Double,
+        from source: ClosedRange<Double>,
+        to target: ClosedRange<Double>
+    ) -> Double {
+        let span = source.upperBound - source.lowerBound
+        guard span > 0 else { return target.lowerBound }
+        let t = (value - source.lowerBound) / span
+        return target.lowerBound + t * (target.upperBound - target.lowerBound)
     }
 }
 

@@ -22,12 +22,11 @@ struct HomeHeader: View {
 
 // MARK: - Logo View
 struct LogoView: View {
+    /// Thin alias over `CaydexLogoMark` — this view's clipped treatment was the
+    /// only correct one in the app, so it became the atom. Kept for its two
+    /// existing call sites (GlobalHeaderView, ResearchHeader).
     var body: some View {
-        Image("CaydexLogo")
-            .resizable()
-            .aspectRatio(contentMode: .fill)
-            .frame(width: 36, height: 36)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+        CaydexLogoMark(size: 36)
     }
 }
 

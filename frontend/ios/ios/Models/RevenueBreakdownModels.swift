@@ -120,15 +120,18 @@ struct RevenueBreakdownData {
     }
 
     var netProfitColor: Color {
-        isProfit ? AppColors.bullish : Color(hex: "8B0000") // Dark red for loss
+        isProfit ? AppColors.gain : AppColors.loss
     }
 
     // Cost items for display
     var costItems: [CostItem] {
         [
-            CostItem(name: "Cost of Sales", value: costOfSales, color: Color(hex: "EF4444")),
-            CostItem(name: "Op. Expense", value: operatingExpense, color: Color(hex: "F87171")),
-            CostItem(name: "Tax", value: tax, color: Color(hex: "FCA5A5"))
+            // A 3-step tonal ramp that stays separable in BOTH modes. The old
+            // frozen tints (#F87171 2.77:1, #FCA5A5 1.90:1) collapsed against a
+            // light card, so the bar rendered as two segments instead of three.
+            CostItem(name: "Cost of Sales", value: costOfSales, color: AppColors.loss),
+            CostItem(name: "Op. Expense", value: operatingExpense, color: AppColors.alertOrange),
+            CostItem(name: "Tax", value: tax, color: AppColors.caution)
         ]
     }
 
@@ -214,12 +217,12 @@ struct RevenueBreakdownData {
 
 // MARK: - Revenue Source Colors
 extension RevenueSource {
-    static let iPhoneColor = Color(hex: "3B82F6")      // Blue
-    static let servicesColor = Color(hex: "A855F7")    // Purple
-    static let macColor = Color(hex: "F97316")         // Orange
-    static let iPadColor = Color(hex: "06B6D4")        // Cyan
-    static let otherColor = Color(hex: "9CA3AF")       // Gray
-    static let wearablesColor = Color(hex: "FBBF24")   // Amber
+    static let iPhoneColor = AppColors.primaryBlue      // Blue
+    static let servicesColor = AppColors.alertPurple    // Purple
+    static let macColor = AppColors.alertOrange         // Orange
+    static let iPadColor = AppColors.accentCyan        // Cyan
+    static let otherColor = AppColors.growthSectorGray       // Gray
+    static let wearablesColor = AppColors.caution   // Amber
 }
 
 // MARK: - Sample Data

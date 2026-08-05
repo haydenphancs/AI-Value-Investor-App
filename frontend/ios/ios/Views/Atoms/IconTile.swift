@@ -37,7 +37,7 @@ struct IconTile: View {
                  size: 30, cornerRadius: 9, iconPointSize: 17)
         IconTile(systemName: "building.columns.fill", accent: AppColors.primaryBlue,
                  size: 40, iconPointSize: 21)
-        IconTile(systemName: "cpu.fill", accent: Color(hex: "22D3EE"),
+        IconTile(systemName: "cpu.fill", accent: AppColors.accentCyan,
                  size: 42, cornerRadius: 12, tintOpacity: 0.15, iconPointSize: 23)
     }
     .padding()

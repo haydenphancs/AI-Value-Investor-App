@@ -154,7 +154,7 @@ struct TargetSearchSheet: View {
 
                     if result.id != results.last?.id {
                         Divider()
-                            .background(AppColors.textMuted.opacity(0.2))
+                            .overlay(AppColors.textMuted.opacity(0.2))
                             .padding(.leading, AppSpacing.lg)
                     }
                 }

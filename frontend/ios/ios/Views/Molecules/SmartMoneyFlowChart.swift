@@ -200,7 +200,7 @@ struct SmartMoneyFlowChart: View {
         .chartYAxis {
             AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
                 AxisGridLine()
-                    .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                    .foregroundStyle(AppColors.chartGridline)
                 AxisValueLabel {
                     if let doubleValue = value.as(Double.self) {
                         Text(formatPriceValue(doubleValue))
@@ -259,7 +259,7 @@ struct SmartMoneyFlowChart: View {
         .chartYAxis {
             AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
                 AxisGridLine()
-                    .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                    .foregroundStyle(AppColors.chartGridline)
                 AxisValueLabel {
                     if let doubleValue = value.as(Double.self) {
                         Text(formatPriceValue(doubleValue))
@@ -324,9 +324,12 @@ struct SmartMoneyFlowChart: View {
             }
 
             // Zero line
+            // The chart's whole meaning is "above zero = buying, below = selling",
+            // so this is a reference AXIS, not a decorative gridline. At
+            // cardBackgroundLight@0.3 it composited to 1.03:1 and did not draw.
             RuleMark(y: .value("Zero", 0))
-                .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
-                .lineStyle(StrokeStyle(lineWidth: 0.5))
+                .foregroundStyle(AppColors.borderStrong)
+                .lineStyle(StrokeStyle(lineWidth: 1))
 
             // No-activity months — a thin gray dash at the zero line so an empty
             // month reads as "no trades that month", not a rendering gap.
@@ -360,7 +363,7 @@ struct SmartMoneyFlowChart: View {
                     // Explicit symmetric labels → identical across all tabs.
                     AxisMarks(position: .trailing, values: explicitVolumeAxisValues) { value in
                         AxisGridLine()
-                            .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                            .foregroundStyle(AppColors.chartGridline)
                         AxisValueLabel {
                             if let doubleValue = value.as(Double.self) {
                                 Text(formatVolumeValue(doubleValue))
@@ -376,7 +379,7 @@ struct SmartMoneyFlowChart: View {
                 } else {
                     AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
                         AxisGridLine()
-                            .foregroundStyle(AppColors.cardBackgroundLight.opacity(0.3))
+                            .foregroundStyle(AppColors.chartGridline)
                         AxisValueLabel {
                             if let doubleValue = value.as(Double.self) {
                                 Text(formatVolumeValue(doubleValue))
@@ -673,14 +676,19 @@ struct SmartMoneyFlowChart: View {
 
     /// Label drawn only on a bar that overflows the outlier-capped axis: its
     /// TRUE magnitude plus an arrow toward the clipped edge (e.g. "8.7M↓").
-    /// White for contrast against the colored bar; empty for normal bars so
-    /// every other month renders unchanged.
+    /// Empty for normal bars so every other month renders unchanged.
+    ///
+    /// Ink is `textPrimary`, NOT white. This is an `.annotation(position:.top/.bottom)`
+    /// — it is drawn OUTSIDE the column (see the call sites), so its backdrop is
+    /// the CARD, not the bar. A white label measured 1.00:1 on a light card and
+    /// rendered as blank space; the older "white for contrast against the
+    /// coloured bar" note described an overlay this never was.
     @ViewBuilder
     private func clippedBarLabel(_ value: Double, arrow: String) -> some View {
         if isClipped(value) {
             Text("\(formatVolumeLabel(value))\(arrow)")
                 .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(AppColors.textPrimary)
                 .fixedSize()
         }
     }

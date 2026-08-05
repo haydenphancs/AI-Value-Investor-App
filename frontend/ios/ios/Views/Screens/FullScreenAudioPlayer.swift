@@ -476,6 +476,11 @@ struct PlaybackSpeedSheet: View {
                 }
             }
             .listStyle(.plain)
+            // A .plain List draws on systemBackground (#000000 in dark), which
+            // left a 1.22:1 seam under the AppColors.background nav bar. Same
+            // pairing as AssetsListSection.
+            .scrollContentBackground(.hidden)
+            .background(AppColors.background)
             .navigationTitle("Playback Speed")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -519,6 +524,11 @@ struct SleepTimerSheet: View {
                 }
             }
             .listStyle(.plain)
+            // A .plain List draws on systemBackground (#000000 in dark), which
+            // left a 1.22:1 seam under the AppColors.background nav bar. Same
+            // pairing as AssetsListSection.
+            .scrollContentBackground(.hidden)
+            .background(AppColors.background)
             .navigationTitle("Sleep Timer")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -532,93 +542,6 @@ struct SleepTimerSheet: View {
 }
 
 // MARK: - Audio Queue Sheet
-struct AudioQueueSheet: View {
-    @EnvironmentObject private var audioManager: AudioManager
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VStack {
-                if audioManager.queue.isEmpty {
-                    emptyQueueView
-                } else {
-                    queueList
-                }
-            }
-            .navigationTitle("Up Next")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    if !audioManager.queue.isEmpty {
-                        Button("Clear") {
-                            audioManager.clearQueue()
-                        }
-                        .foregroundColor(AppColors.bearish)
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        .presentationDragIndicator(.visible)
-    }
-
-    private var emptyQueueView: some View {
-        VStack(spacing: AppSpacing.lg) {
-            Image(systemName: "list.bullet")
-                .font(AppTypography.iconHero).fontWeight(.light)
-                .foregroundColor(AppColors.textMuted)
-
-            Text("Your queue is empty")
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textSecondary)
-
-            Text("Add episodes from Money Moves or Books")
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var queueList: some View {
-        List {
-            ForEach(Array(audioManager.queue.enumerated()), id: \.element.id) { index, item in
-                HStack(spacing: AppSpacing.md) {
-                    AudioArtworkThumbnail(episode: item.episode, size: 48)
-
-                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                        Text(item.episode.title)
-                            .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(AppColors.textPrimary)
-                            .lineLimit(1)
-
-                        Text(item.episode.authorName)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
-                    }
-
-                    Spacer()
-
-                    Text(item.episode.formattedDuration)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                }
-                .swipeActions(edge: .trailing) {
-                    Button(role: .destructive) {
-                        audioManager.removeFromQueue(at: index)
-                    } label: {
-                        Label("Remove", systemImage: "trash")
-                    }
-                }
-            }
-            .onMove { from, to in
-                // Handle reordering
-            }
-        }
-        .listStyle(.plain)
-    }
-}
 
 // MARK: - Preview
 #Preview {

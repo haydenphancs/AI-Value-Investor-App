@@ -743,12 +743,12 @@ private struct CoreAssetCard: View {
             // Icon
             ZStack {
                 Circle()
-                    .fill(Color(hex: asset.iconColor).opacity(0.15))
+                    .fill(Color(themedHex: asset.iconColor, role: .graphic, fallback: AppColors.primaryBlue).opacity(0.15))
                     .frame(width: 44, height: 44)
 
                 Image(systemName: asset.icon)
                     .font(AppTypography.iconMedium).fontWeight(.semibold)
-                    .foregroundColor(Color(hex: asset.iconColor))
+                    .foregroundColor(Color(themedHex: asset.iconColor, role: .graphic, fallback: AppColors.primaryBlue))
             }
 
             // Content

@@ -57,7 +57,7 @@ enum AudioCategory: String, CaseIterable {
     var accentColor: Color {
         switch self {
         case .moneyMoves: return AppColors.primaryBlue
-        case .books: return Color(hex: "A855F7")
+        case .books: return AppColors.alertPurple
         case .dailyBrief: return AppColors.alertOrange
         case .podcast: return AppColors.bullish
         }

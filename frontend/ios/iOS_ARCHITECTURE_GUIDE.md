@@ -230,7 +230,10 @@ frontend/ios/
 │   │   └── AIVoiceManager.swift              # AI voice interaction
 │   │
 │   ├── Theme/
-│   │   └── AppTheme.swift                    # Colors, typography, spacing
+│   │   ├── AppTheme.swift                    # Tokens: colors, typography, spacing + auditManifest
+│   │   ├── ColorAdaptive.swift               # Color(lightHex:darkHex:), Color(themedHex:role:)
+│   │   ├── ThemeContrastAudit.swift          # DEBUG WCAG guard (runs at launch)
+│   │   └── PalettePreview.swift              # Light+dark swatch sheet with measured ratios
 │   │
 │   ├── Assets.xcassets                       # Images, app icon, colors
 │   └── Info.plist                            # App configuration
@@ -744,19 +747,50 @@ Complete screens with their own ViewModel, listed in [Navigation & Routing](#nav
 
 **File:** `Theme/AppTheme.swift`
 
-### Color System (Dark Theme)
+### Color System (adaptive — Light / Dark / System)
 
-| Token | Hex | Usage |
-|-------|-----|-------|
-| Background | `#171B26` | Main background (dark navy) |
-| Card Background | `#1E2330` | Card surfaces |
-| Primary Blue | `#3B82F6` | Primary actions |
-| Accent Cyan | `#06B6D4` | Secondary accent |
-| Bullish Green | `#22C55E` | Positive values |
-| Bearish Red | `#EF4444` | Negative values |
-| Neutral Amber | `#F59E0B` | Neutral/warning |
-| Text Primary | `#FFFFFF` | Main text |
-| Text Secondary | `#9CA3AF` | Muted text |
+**Every colour token is adaptive.** Use `Color(lightHex:darkHex:)`; never
+`Color(hex:)` outside `AppTheme.swift`. Tokens resolve per `userInterfaceStyle`
+at render time via a dynamic `UIColor` (`Theme/ColorAdaptive.swift`), so a token
+switches with no view rebuild and no `colorScheme` plumbing at call sites.
+
+Tokens carry a **role**, and picking the wrong one is the recurring bug:
+
+| Role | Floor | Tokens | Use for |
+|---|---|---|---|
+| **text** | 4.5:1 | `textPrimary/Secondary/Muted`, `gain`, `loss`, `caution`, `primaryBlue`, `accentCyan`, `alertOrange`, `alertPurple` | anything read as text or a meaningful icon |
+| **fill** | white-on ≥4.5:1 | `primaryFill`, `gainFill`, `lossFill`, `cautionFill`, `accentCyanFill` | a saturated background that `textOnAccent` sits on |
+| **graphic** | 3:1 | `gainGraphic`, `lossGraphic`, `cautionGraphic`, `accentGraphic`, `primaryGraphic` | chart strokes/bars/series — **never text** |
+
+Core values:
+
+| Token | Light | Dark |
+|-------|-------|------|
+| `background` | `#F4F5F8` | `#171B26` |
+| `cardBackground` | `#FFFFFF` | `#1E2330` |
+| `cardBackgroundLight` | `#EDF0F5` | `#252B3B` |
+| `textPrimary` | `#111827` | `#FFFFFF` |
+| `textSecondary` | `#4B5563` | `#B4BCC8` |
+| `textMuted` | `#5F6875` | `#9CA3AF` |
+| `gain` | `#0F7A3D` | `#22C55E` |
+| `loss` | `#CC1F1F` | `#F87171` |
+| `caution` | `#9A6100` | `#F59E0B` |
+| `primaryBlue` | `#2563EB` | `#60A5FA` |
+| `primaryFill` | `#2563EB` | `#2563EB` |
+| `border` / `divider` | `#101828` @14% | `#FFFFFF` @10% |
+
+A **fill token is that colour's light-mode text value used in both modes** — a
+value dark enough to read on white is dark enough to carry white ink.
+
+Cards are separated from the page by a **border, not luminance** (`#FFFFFF` on
+`#F4F5F8` is 1.09:1, and no design system separates them by luminance). Use
+`.cardSurface()` / `.cardFill()` from `Views/Modifiers/CardSurface.swift`.
+
+**Guard rails:** `ThemeContrastAudit` (DEBUG, runs at launch) asserts every token
+in `AppColors.auditManifest` clears its floor in *both* appearances and that no
+token is missing from the manifest. `frontend/ios/scripts/theme-lint.sh` enforces
+the usage rules a runtime audit cannot see. Full contract:
+[.claude/rules/ios-swiftui.md](../../.claude/rules/ios-swiftui.md).
 
 ### Typography
 
@@ -1053,8 +1087,8 @@ let data = try await stockRepository.getStock(ticker: "AAPL")
 | Networking | Actor-based `APIClient` | Thread-safe, testable |
 | Long Tasks | `AsyncThrowingStream` polling | Native Swift, cancellable |
 | Error Handling | `AppError` enum | User-friendly messages, actionable |
-| Dependencies | Zero third-party | Reduces complexity, Apple-only |
+| Dependencies | Sentry (SPM) only | Crash/error monitoring; otherwise Apple-only |
 | UI System | Atomic Design | Scalable component reuse |
 | Persistence | Server + Keychain | No local DB complexity |
-| Theme | Dark-only with token system | Consistent, maintainable |
+| Theme | Adaptive Light/Dark/System, role-based tokens + WCAG audit | Accessible, regression-guarded |
 | Backend | FastAPI + Supabase + Gemini | Python AI ecosystem |

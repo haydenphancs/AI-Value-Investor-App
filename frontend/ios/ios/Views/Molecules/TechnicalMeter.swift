@@ -185,18 +185,31 @@ struct TechnicalGaugeZones: View {
     var body: some View {
         TechnicalArc()
             .stroke(
+                // Sell → Hold → Buy ramp, all adaptive `*Graphic` tokens.
+                //
+                // This used SwiftUI SYSTEM colours and two frozen hexes, none of
+                // which adapt. The worst was `Color.yellow` (#FFCC00) at the
+                // apex: 1.51:1 on a white card, so the middle ~36° of the arc —
+                // exactly where the needle rests for a Hold signal — washed out
+                // in light mode. `#991B1B` had the mirror problem at 1.89:1 on
+                // a dark card.
+                //
+                // The track beneath is stroked at the same lineWidth and is
+                // fully occluded, so the arc's real neighbour is the CARD, not
+                // the track. Every stop therefore has to clear the 3:1 graphic
+                // bar against both card colours on its own.
                 AngularGradient(
                     stops: [
-                        .init(color: Color(hex: "991B1B"), location: 0.0),
-                        .init(color: Color(hex: "991B1B"), location: 0.12),
-                        .init(color: Color.red.opacity(0.8), location: 0.28),
-                        .init(color: Color.red.opacity(0.8), location: 0.32),
-                        .init(color: Color.yellow, location: 0.48),
-                        .init(color: Color.yellow, location: 0.52),
-                        .init(color: Color.green.opacity(0.8), location: 0.68),
-                        .init(color: Color.green.opacity(0.8), location: 0.72),
-                        .init(color: Color(hex: "15803D"), location: 0.88),
-                        .init(color: Color(hex: "15803D"), location: 1.0),
+                        .init(color: AppColors.lossGraphic, location: 0.0),
+                        .init(color: AppColors.lossGraphic, location: 0.12),
+                        .init(color: AppColors.loss, location: 0.28),
+                        .init(color: AppColors.loss, location: 0.32),
+                        .init(color: AppColors.cautionGraphic, location: 0.48),
+                        .init(color: AppColors.cautionGraphic, location: 0.52),
+                        .init(color: AppColors.gainGraphic, location: 0.68),
+                        .init(color: AppColors.gainGraphic, location: 0.72),
+                        .init(color: AppColors.gain, location: 0.88),
+                        .init(color: AppColors.gain, location: 1.0),
                     ],
                     center: UnitPoint(x: 0.5, y: 1.0),
                     startAngle: .degrees(-180),
@@ -209,26 +222,6 @@ struct TechnicalGaugeZones: View {
 }
 
 // MARK: - Technical Arc Segment Shape
-struct TechnicalArcSegment: Shape {
-    let startAngle: Double
-    let endAngle: Double
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let center = CGPoint(x: rect.midX, y: rect.maxY)
-        let radius = min(rect.width, rect.height * 2) / 2 - 12
-
-        path.addArc(
-            center: center,
-            radius: radius,
-            startAngle: .degrees(startAngle + 180),
-            endAngle: .degrees(endAngle + 180),
-            clockwise: true
-        )
-
-        return path
-    }
-}
 
 // MARK: - Technical Arc Shape
 struct TechnicalArc: Shape {

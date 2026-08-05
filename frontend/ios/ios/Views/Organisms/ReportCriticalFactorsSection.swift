@@ -24,7 +24,7 @@ struct ReportCriticalFactorsSection: View {
                     // Add divider between items (but not after the last one)
                     if index < factors.count - 1 {
                         Divider()
-                            .background(AppColors.textMuted.opacity(0.2))
+                            .overlay(AppColors.textMuted.opacity(0.2))
                             .padding(.horizontal, AppSpacing.md)
                     }
                 }

@@ -41,7 +41,7 @@ struct ChatHistoryList: View {
                             // Divider between items (not after last item in section)
                             if item.id != group.items.last?.id {
                                 Divider()
-                                    .background(AppColors.cardBackgroundLight)
+                                    .overlay(AppColors.cardBackgroundLight)
                                     .padding(.horizontal, AppSpacing.lg)
                             }
                         }

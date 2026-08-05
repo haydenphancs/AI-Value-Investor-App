@@ -12,8 +12,8 @@ struct LearnCreditsCard: View {
     var onAddCredits: (() -> Void)?
 
     private let gradientColors = [
-        Color(hex: "F97316"),
-        Color(hex: "EA580C")
+        AppColors.alertOrange,
+        AppColors.alertOrange
     ]
 
     var body: some View {
@@ -61,7 +61,7 @@ struct LearnCreditsCard: View {
                     Text("Add More Credits")
                         .font(AppTypography.bodySmallEmphasis)
                 }
-                .foregroundColor(Color(hex: "F97316"))
+                .foregroundColor(AppColors.alertOrange)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, AppSpacing.md)
                 .background(

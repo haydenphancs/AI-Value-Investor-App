@@ -454,9 +454,9 @@ extension HoldersData {
 /// Centralized colors for the Holders tab
 struct HoldersColors {
     // Shareholder breakdown colors
-    static let insiders = Color(hex: "F59E0B")       // Orange/Amber
+    static let insiders = AppColors.caution       // Orange/Amber
     static let institutions = AppColors.primaryBlue  // Blue
-    static let publicOther = Color(hex: "6B7280")    // Gray
+    static let publicOther = AppColors.growthSectorGray    // Gray
 
     // Smart money flow colors
     static let buyVolume = AppColors.bullish         // Green

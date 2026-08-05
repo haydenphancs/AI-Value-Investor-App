@@ -80,7 +80,7 @@ struct SentimentInfoSheet: View {
                 moodExplanationRow(
                     range: "31 - 70",
                     label: "Neutral",
-                    color: Color(hex: "6B7280"),
+                    color: AppColors.growthSectorGray,
                     description: "Mixed sentiment. No strong directional bias from the market."
                 )
 

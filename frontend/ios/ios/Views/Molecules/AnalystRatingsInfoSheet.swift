@@ -86,7 +86,7 @@ struct AnalystRatingsInfoSheet: View {
 
                 consensusRow(
                     label: "Buy",
-                    color: Color(hex: "4ADE80"),
+                    color: AppColors.gain,
                     description: "Analysts generally recommend purchasing the stock, expecting it to beat the market."
                 )
 
@@ -104,7 +104,7 @@ struct AnalystRatingsInfoSheet: View {
 
                 consensusRow(
                     label: "Strong Sell",
-                    color: Color(hex: "991B1B"),
+                    color: AppColors.loss,
                     description: "Strong conviction the stock will decline significantly. Analysts recommend exiting."
                 )
             }

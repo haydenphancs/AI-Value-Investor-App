@@ -126,12 +126,12 @@ enum ChatHistoryItemType: String, CaseIterable {
 
     var textColor: Color {
         switch self {
-        case .book: return Color(hex: "22C55E") // Green
-        case .concept: return Color(hex: "3B82F6") // Blue
-        case .stock: return Color(hex: "22C55E") // Green
+        case .book: return AppColors.gain // Green
+        case .concept: return AppColors.primaryBlue // Blue
+        case .stock: return AppColors.gain // Green
         case .normal: return AppColors.textSecondary
-        case .journey: return Color(hex: "F59E0B") // Amber
-        case .report: return Color(hex: "EF4444") // Red
+        case .journey: return AppColors.caution // Amber
+        case .report: return AppColors.loss // Red
         }
     }
 }

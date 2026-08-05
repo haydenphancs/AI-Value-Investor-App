@@ -65,7 +65,7 @@ struct AssetRow: View {
             AssetRow(asset: asset)
             if asset.id != TrackedAsset.sampleData.last?.id {
                 Divider()
-                    .background(AppColors.cardBackgroundLight)
+                    .overlay(AppColors.cardBackgroundLight)
             }
         }
     }

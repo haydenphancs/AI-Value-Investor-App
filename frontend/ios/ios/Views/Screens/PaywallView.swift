@@ -218,7 +218,7 @@ struct PaywallView: View {
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                             .fill(
                                 LinearGradient(
-                                    colors: [Color(hex: "F97316"), Color(hex: "EA580C")],
+                                    colors: [AppColors.alertOrange, AppColors.alertOrange],
                                     startPoint: .leading, endPoint: .trailing
                                 )
                             )

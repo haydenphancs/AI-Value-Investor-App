@@ -111,7 +111,7 @@ struct AnalysisPersona: Identifiable, Hashable {
         }
     }
 
-    var accentColor: Color { Color(hex: accentColorHex) }
+    var accentColor: Color { Color(themedHex: accentColorHex, role: .graphic, fallback: AppColors.primaryBlue) }
 
     static func == (lhs: AnalysisPersona, rhs: AnalysisPersona) -> Bool {
         lhs.key == rhs.key
@@ -247,35 +247,35 @@ struct AnalysisFeature: Identifiable {
             subtitle: "Revenue engine, fundamentals, growth metrics, and future projections",
             iconName: "icon_feature_financial",
             systemIconName: "chart.line.uptrend.xyaxis",
-            iconColor: Color(hex: "22C55E")
+            iconColor: AppColors.gain
         ),
         AnalysisFeature(
             title: "Moat & Competitive Edge",
             subtitle: "Competitive position, pricing power, and macro risks",
             iconName: "icon_feature_competitive",
             systemIconName: "shield.fill",
-            iconColor: Color(hex: "3B82F6")
+            iconColor: AppColors.primaryBlue
         ),
         AnalysisFeature(
             title: "Insider & Wall Street",
             subtitle: "Insider activity, management quality, and analyst consensus",
             iconName: "icon_feature_whales",
             systemIconName: "person.2.fill",
-            iconColor: Color(hex: "F97316")
+            iconColor: AppColors.alertOrange
         ),
         AnalysisFeature(
             title: "Hidden Market Signals",
             subtitle: "Smart money flows with congressional trading activity and short positions",
             iconName: "icon_feature_signals",
             systemIconName: "antenna.radiowaves.left.and.right",
-            iconColor: Color(hex: "14B8A6")
+            iconColor: Color(lightHex: "0F766E", darkHex: "2DD4BF")
         ),
         AnalysisFeature(
             title: "AI Chat with Report",
             subtitle: "Ask follow-up questions and get instant answers",
             iconName: "icon_feature_ai",
             systemIconName: "sparkles",
-            iconColor: Color(hex: "A855F7")
+            iconColor: AppColors.alertPurple
         )
     ]
 }
@@ -368,7 +368,7 @@ struct TrendingAnalysis: Identifiable, Hashable {
             interestPercent: 127,
             iconName: "icon_trending_ai",
             systemIconName: "brain.head.profile",
-            iconBackgroundColor: Color(hex: "3B82F6")
+            iconBackgroundColor: AppColors.primaryBlue
         ),
         TrendingAnalysis(
             title: "Clean Energy Sector",
@@ -386,7 +386,7 @@ struct TrendingAnalysis: Identifiable, Hashable {
             interestPercent: 89,
             iconName: "icon_trending_energy",
             systemIconName: "bolt.fill",
-            iconBackgroundColor: Color(hex: "22C55E")
+            iconBackgroundColor: AppColors.gain
         ),
         TrendingAnalysis(
             title: "Quantum Computing",
@@ -402,7 +402,7 @@ struct TrendingAnalysis: Identifiable, Hashable {
             interestPercent: 156,
             iconName: "icon_trending_quantum",
             systemIconName: "atom",
-            iconBackgroundColor: Color(hex: "A855F7")
+            iconBackgroundColor: AppColors.alertPurple
         )
     ]
 }
@@ -422,17 +422,17 @@ enum ReportStatus: String {
 
     var color: Color {
         switch self {
-        case .processing: return Color(hex: "3B82F6")  // Blue
-        case .failed: return Color(hex: "EF4444")       // Red
-        case .ready: return Color(hex: "22C55E")        // Green
+        case .processing: return AppColors.primaryBlue  // Blue
+        case .failed: return AppColors.loss       // Red
+        case .ready: return AppColors.gain        // Green
         }
     }
 
     var backgroundColor: Color {
         switch self {
-        case .processing: return Color(hex: "3B82F6").opacity(0.2)
-        case .failed: return Color(hex: "EF4444").opacity(0.2)
-        case .ready: return Color(hex: "22C55E").opacity(0.2)
+        case .processing: return AppColors.primaryBlue.opacity(0.2)
+        case .failed: return AppColors.loss.opacity(0.2)
+        case .ready: return AppColors.gain.opacity(0.2)
         }
     }
 }
@@ -814,7 +814,7 @@ extension TrendingAnalysis {
             interestPercent: item.interestPercent,
             iconName: "",
             systemIconName: item.systemIconName,
-            iconBackgroundColor: Color(hex: item.iconBackgroundColor)
+            iconBackgroundColor: Color(themedHex: item.iconBackgroundColor, role: .graphic, fallback: AppColors.primaryBlue)
         )
     }
 }

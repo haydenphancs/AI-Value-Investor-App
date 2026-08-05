@@ -58,10 +58,10 @@ struct RatingDistributionBar: View {
 
         VStack(spacing: AppSpacing.md) {
             RatingDistributionBar(label: "Strong Buy", count: 18, color: AppColors.bullish, maxCount: 18)
-            RatingDistributionBar(label: "Buy", count: 14, color: Color(hex: "4ADE80"), maxCount: 18)
+            RatingDistributionBar(label: "Buy", count: 14, color: AppColors.gain, maxCount: 18)
             RatingDistributionBar(label: "Hold", count: 6, color: AppColors.neutral, maxCount: 18)
             RatingDistributionBar(label: "Sell", count: 2, color: AppColors.bearish, maxCount: 18)
-            RatingDistributionBar(label: "Strong Sell", count: 0, color: Color(hex: "991B1B"), maxCount: 18)
+            RatingDistributionBar(label: "Strong Sell", count: 0, color: AppColors.loss, maxCount: 18)
         }
         .padding()
     }

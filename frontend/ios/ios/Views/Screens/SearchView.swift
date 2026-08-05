@@ -161,7 +161,7 @@ struct SearchView: View {
     private func errorBanner(message: String) -> some View {
         HStack(spacing: AppSpacing.sm) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundColor(.yellow)
+                .foregroundColor(AppColors.caution)
 
             Text(message)
                 .font(AppTypography.bodySmall)

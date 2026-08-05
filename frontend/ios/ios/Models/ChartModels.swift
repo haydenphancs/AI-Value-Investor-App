@@ -50,16 +50,23 @@ enum TechnicalIndicatorType: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// Series colour AND the settings-sheet legend swatch — one source, so the
+    /// key always matches the chart.
+    ///
+    /// These were SwiftUI SYSTEM colours, which are Apple's tints, not this
+    /// app's palette: `.orange` measured 2.02:1 on the page in light mode (the
+    /// MA(50) line was a pale thread), and the Bollinger/RSI swatches disagreed
+    /// with what their renderers actually drew.
     var defaultColor: Color {
         switch self {
-        case .ma20:           return .blue
-        case .ma50:           return .orange
-        case .ma200:          return .purple
-        case .bollingerBands: return .cyan
-        case .volume:         return .gray
-        case .rsi14:          return .yellow
-        case .macd:           return .green
-        case .stochastic:     return .pink
+        case .ma20:           return AppColors.primaryGraphic
+        case .ma50:           return AppColors.alertOrange
+        case .ma200:          return AppColors.alertPurple
+        case .bollingerBands: return AppColors.accentGraphic   // matches OverlayRenderer
+        case .volume:         return AppColors.growthSectorGray
+        case .rsi14:          return AppColors.cautionGraphic  // matches SubChartCanvas
+        case .macd:           return AppColors.gainGraphic
+        case .stochastic:     return AppColors.accentCyan
         }
     }
 }

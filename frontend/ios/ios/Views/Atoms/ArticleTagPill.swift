@@ -20,27 +20,27 @@ struct ArticleTagPill: View {
         var backgroundColor: Color {
             switch self {
             case .standard: return Color.black.opacity(0.4)
-            case .featured: return Color(hex: "F59E0B").opacity(0.2)
-            case .warning: return Color(hex: "EF4444").opacity(0.2)
-            case .success: return Color(hex: "22C55E").opacity(0.2)
+            case .featured: return AppColors.caution.opacity(0.2)
+            case .warning: return AppColors.loss.opacity(0.2)
+            case .success: return AppColors.gain.opacity(0.2)
             }
         }
 
         var borderColor: Color {
             switch self {
             case .standard: return Color.white.opacity(0.3)
-            case .featured: return Color(hex: "F59E0B").opacity(0.5)
-            case .warning: return Color(hex: "EF4444").opacity(0.5)
-            case .success: return Color(hex: "22C55E").opacity(0.5)
+            case .featured: return AppColors.caution.opacity(0.5)
+            case .warning: return AppColors.loss.opacity(0.5)
+            case .success: return AppColors.gain.opacity(0.5)
             }
         }
 
         var textColor: Color {
             switch self {
             case .standard: return .white
-            case .featured: return Color(hex: "F59E0B")
-            case .warning: return Color(hex: "EF4444")
-            case .success: return Color(hex: "22C55E")
+            case .featured: return AppColors.caution
+            case .warning: return AppColors.loss
+            case .success: return AppColors.gain
             }
         }
     }

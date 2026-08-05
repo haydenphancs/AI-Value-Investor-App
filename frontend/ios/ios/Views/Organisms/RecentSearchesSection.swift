@@ -45,7 +45,7 @@ struct RecentSearchesSection: View {
 
                         if item.id != items.last?.id {
                             Divider()
-                                .background(AppColors.cardBackgroundLight.opacity(0.5))
+                                .overlay(AppColors.cardBackgroundLight.opacity(0.5))
                         }
                     }
                 }

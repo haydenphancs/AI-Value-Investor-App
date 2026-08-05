@@ -542,6 +542,54 @@ User Action: "Generate Analysis"
 
 ---
 
+## 4b. Presentation Layer & Theming (iOS)
+
+This document previously said nothing about the presentation layer — no colour,
+no theming, no accessibility — which is how a light mode that failed WCAG across
+~2,700 call sites shipped without contradicting any written design. The section
+below states the contract; the enforceable detail lives in
+[.claude/rules/ios-swiftui.md](../../.claude/rules/ios-swiftui.md), which is the
+authority.
+
+**Appearance is user-selectable (System / Dark / Light).** One key,
+`appearance_mode`, is read by two cooperating mechanisms so they cannot
+disagree: a reactive root `.preferredColorScheme` (correct from frame 0) and
+`AppearanceManager`'s window-level `overrideUserInterfaceStyle` (reaches sheets
+and covers). It is also remote-synced with the rest of user settings.
+
+**Every colour token is adaptive**, defined once in `Theme/AppTheme.swift`. There
+is deliberately no "colour that works in both modes" — that assumption is what
+broke light mode. Tokens carry one of three ROLES with different contrast floors:
+
+| Role | Floor | For |
+|---|---|---|
+| text | 4.5:1 (WCAG 1.4.3 AA) | text and meaningful icons |
+| fill | on-accent ink ≥4.5:1 | saturated backgrounds carrying white text |
+| graphic | 3:1 (WCAG 1.4.11) | chart strokes, bars, series — never text |
+
+A **shared** token always resolves to the text-safe value. This is a deliberate
+asymmetry: a text value used as a chart stroke is merely less vivid, whereas a
+graphic value used as text fails AA — and many colours reach both roles through
+computed properties in `Models/`, where no call site exists to audit.
+
+**Server-supplied colours are clamped, not trusted.** `Color(themedHex:role:)`
+preserves the backend's hue and corrects only its lightness, per appearance,
+until the role's floor is met. Backend keeps editorial control of hue; the client
+guarantees legibility.
+
+**Elevation differs by mode.** In light a card is separated by a border (page vs
+card is ~1.09:1 — no design system separates them by luminance); in dark it is
+separated by being a lighter surface. `.cardSurface()` encapsulates both.
+
+**Two automated guards, and they cover different halves:**
+- `ThemeContrastAudit` (DEBUG, launch) resolves every token in both
+  `UITraitCollection`s and asserts its floor, plus that no token is missing from
+  the manifest. It proves the PALETTE.
+- `frontend/ios/scripts/theme-lint.sh` scans source for the rules a runtime audit
+  cannot see (frozen hexes, system colours, on-accent ink, graphic-token escape,
+  `.drawingGroup()` raster staleness, inert `Divider().background`). It proves
+  USAGE.
+
 ## 5. Agent Orchestration Pattern
 
 > **Implementation status (updated 2026-07-30): BOTH report paths now share one

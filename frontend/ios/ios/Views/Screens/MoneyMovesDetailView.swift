@@ -297,9 +297,9 @@ private struct FeaturedDeepDiveHeroCard: View {
     private var gradientColors: [Color] {
         // Always use orange gradient based on EA580C
         [
-            Color(hex: "F97316"),
-            Color(hex: "EA580C"),
-            Color(hex: "C2410C")
+            AppColors.alertOrange,
+            AppColors.alertOrange,
+            AppColors.alertOrange
         ]
     }
 

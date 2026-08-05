@@ -37,10 +37,10 @@ enum CommodityCategory: String, CaseIterable {
 
     var color: Color {
         switch self {
-        case .metals: return Color(hex: "FFD700")
-        case .energy: return Color(hex: "FF6B35")
+        case .metals: return Color(lightHex: "8F6100", darkHex: "FFD700")
+        case .energy: return Color(lightHex: "C2410C", darkHex: "FF8A5C")
         case .agriculture: return AppColors.bullish
-        case .consumables: return Color(hex: "8B4513")
+        case .consumables: return Color(lightHex: "8B4513", darkHex: "C08457")
         }
     }
 }

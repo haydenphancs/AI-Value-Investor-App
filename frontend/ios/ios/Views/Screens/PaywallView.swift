@@ -146,7 +146,7 @@ struct PaywallView: View {
                             .foregroundColor(.white)
                             .padding(.horizontal, AppSpacing.sm)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(AppColors.primaryBlue))
+                            .background(Capsule().fill(AppColors.primaryFill))
                     }
                 }
                 Spacer()
@@ -177,7 +177,7 @@ struct PaywallView: View {
         .padding(AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
                 .overlay(
                     RoundedRectangle(cornerRadius: AppCornerRadius.large)
                         .stroke(

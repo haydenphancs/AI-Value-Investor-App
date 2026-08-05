@@ -175,7 +175,7 @@ struct ProfileView: View {
                         .padding(.vertical, AppSpacing.md)
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(AppColors.primaryBlue)
+                                .fill(AppColors.primaryFill)
                         )
                     }
                     .buttonStyle(PlainButtonStyle())
@@ -261,7 +261,7 @@ struct ProfileView: View {
                 .padding(AppSpacing.lg)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                        .fill(AppColors.cardBackground)
+                        .cardFill()
                 )
 
                 // Upgrade CTA
@@ -488,7 +488,7 @@ struct ProfileView: View {
                 .padding(.vertical, AppSpacing.lg)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                        .fill(AppColors.cardBackground)
+                        .cardFill()
                 )
             }
             .buttonStyle(PlainButtonStyle())

@@ -102,7 +102,7 @@ struct OnboardingView: View {
                 .padding(.vertical, AppSpacing.md)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .fill(AppColors.primaryBlue)
+                        .fill(AppColors.primaryFill)
                 )
         }
         .buttonStyle(PlainButtonStyle())
@@ -270,7 +270,7 @@ private struct FlowChips: View {
                     .padding(.horizontal, AppSpacing.md)
                     .padding(.vertical, AppSpacing.sm)
                     .background(
-                        Capsule().fill(on ? AppColors.primaryBlue : AppColors.cardBackgroundLight)
+                        Capsule().fill(on ? AppColors.primaryFill : AppColors.cardBackgroundLight)
                     )
                 }
                 .buttonStyle(PlainButtonStyle())

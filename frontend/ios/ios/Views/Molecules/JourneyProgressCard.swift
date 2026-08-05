@@ -84,8 +84,7 @@ struct JourneyProgressCard: View {
             .buttonStyle(PlainButtonStyle())
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.extraLarge)
+        .cardSurface(cornerRadius: AppCornerRadius.extraLarge)
     }
 }
 

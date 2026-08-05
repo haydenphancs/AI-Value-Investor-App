@@ -23,8 +23,7 @@ struct KeyTakeawaysSection: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     private var sectionHeader: some View {

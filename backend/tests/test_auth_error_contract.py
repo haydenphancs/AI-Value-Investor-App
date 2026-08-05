@@ -12,6 +12,8 @@ hold for that to be safe, and both are pinned here:
 """
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -26,14 +28,11 @@ from app.api.error_response import (
 )
 from app.main import http_exception_handler
 
-_AUTH_CODES = [
-    ErrorCode.AUTH_REQUIRED,
-    ErrorCode.AUTH_TOKEN_INVALID,
-    ErrorCode.AUTH_SESSION_EXPIRED,
-    ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
-    ErrorCode.AUTH_FORBIDDEN,
-    ErrorCode.AUTH_UNAVAILABLE,
-]
+# DERIVED, not hand-listed. This used to be six literals, which meant a newly added AUTH_* code
+# was silently exempt from every test in this file — the wire-shape check, the flat-scalar
+# check, the WWW-Authenticate check and the action check all iterate this list. Deriving it
+# means a new code is covered the moment it exists.
+_AUTH_CODES = [code for code in ErrorCode if code.value.startswith("AUTH_")]
 
 # Exactly what `APIErrorResponse.init(from:)` reads (Core/Services/APIClient.swift).
 _REQUIRED_KEYS = {"error_code", "message", "user_message"}
@@ -119,9 +118,6 @@ def test_every_details_literal_in_the_app_is_flat_scalars():
     and asserts those literals are scalars, and `auth_error` never transforms `details`, so it
     is a tautology. This reads the real call sites instead.
     """
-    import re
-    from pathlib import Path
-
     app_dir = Path(__file__).resolve().parents[1] / "app"
     offenders: list[str] = []
     pattern = re.compile(r"details=\{([^{}]*)\}")
@@ -153,15 +149,83 @@ def test_401s_carry_WWW_Authenticate():
             assert not (exc.headers or {}).get("WWW-Authenticate"), code.value
 
 
-def test_sign_in_action_only_on_the_401s():
-    """`action` drives the iOS button. Offering "Sign In" on a 403 sends an already-signed-in
-    user in a circle, and on a transient 503 it blames the user for our outage."""
-    for code in _AUTH_CODES:
-        action = auth_error(code, message="m").detail["action"]
-        if _DEFAULT_STATUS[code] == 401:
-            assert action == "sign_in", f"{code.value} -> {action}"
-        else:
-            assert action != "sign_in", f"{code.value} -> {action}"
+# The button each auth code puts in front of the user. Spelled out per code rather than
+# derived from the status, because "401" does not imply "sign in": AUTH_CREDENTIALS_INVALID is
+# a 401 raised while the user is looking at the very form they just submitted, and
+# AUTH_PROVIDER_FAILED is a 401 for a handshake that may simply succeed on retry. Offering
+# "Sign In" for either is the same circle the 403 rule below was written to prevent.
+_EXPECTED_ACTIONS = {
+    # The session is over; re-authenticating is the only way forward.
+    ErrorCode.AUTH_REQUIRED: "sign_in",
+    ErrorCode.AUTH_TOKEN_INVALID: "sign_in",
+    ErrorCode.AUTH_SESSION_EXPIRED: "sign_in",
+    ErrorCode.AUTH_ACCOUNT_NOT_FOUND: "sign_in",
+    # Authenticated but not permitted — signing in again cannot help.
+    ErrorCode.AUTH_FORBIDDEN: "contact_support",
+    # Our outage, not their credential.
+    ErrorCode.AUTH_UNAVAILABLE: "retry_later",
+    # What they typed was wrong; the fix is in the field, not in a new session.
+    ErrorCode.AUTH_CREDENTIALS_INVALID: "fix_input",
+    ErrorCode.AUTH_PROVIDER_FAILED: "retry_later",
+}
+
+
+def test_every_auth_code_declares_an_expected_action():
+    """Forces a deliberate decision when an AUTH_* code is added, instead of inheriting one."""
+    missing = [c.value for c in _AUTH_CODES if c not in _EXPECTED_ACTIONS]
+    assert not missing, f"add these to _EXPECTED_ACTIONS with a reason: {missing}"
+
+
+@pytest.mark.parametrize("code", _AUTH_CODES, ids=lambda c: c.value)
+def test_auth_action_matches_the_client_affordance(code):
+    """`action` drives the iOS button, so a wrong one is a dead end for the user."""
+    assert auth_error(code, message="m").detail["action"] == _EXPECTED_ACTIONS[code]
+
+
+def test_only_session_failures_offer_sign_in():
+    """The original rule, kept: "Sign In" must appear ONLY where a new session actually helps.
+
+    Offering it on a 403 sends an already-signed-in user in a circle, on a transient 503 it
+    blames them for our outage, and on a wrong-password 401 it points at the screen they are
+    already on.
+    """
+    sign_in_codes = {c for c, a in _EXPECTED_ACTIONS.items() if a == "sign_in"}
+    for code in sign_in_codes:
+        assert _DEFAULT_STATUS[code] == 401, f"{code.value} offers sign_in but is not a 401"
+    assert ErrorCode.AUTH_CREDENTIALS_INVALID not in sign_in_codes
+    assert ErrorCode.AUTH_PROVIDER_FAILED not in sign_in_codes
+
+
+def test_auth_py_raises_no_bare_string_401s():
+    """`auth.py` must go through `auth_error(...)`, never `HTTPException(401, detail="...")`.
+
+    A string detail renders as `{"detail": ...}`, which iOS cannot decode against
+    `APIErrorResponse` — it falls back to `APIError.unauthorized`, whose copy is hardcoded to
+    "Your session has expired." Nine sites shipped that way and told users things that were
+    simply untrue: a wrong current password read as an expired session, and a failed Apple
+    sign-in read as "Email or password is incorrect" for a flow with no password in it.
+
+    Scoped to 401s on purpose — the 400/429/500 raises in this file are fine as strings, and
+    the `HTTPException` handler stays deliberately narrow for the ~100 such raises elsewhere.
+    """
+    src = (Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "endpoints" / "auth.py")
+    offenders = []
+    lines = src.read_text().splitlines()
+    for i, raw in enumerate(lines, 1):
+        # Strip trailing comments — the prose above names the retired pattern, and this suite
+        # has twice failed on its own explanation of a bug.
+        line = raw.split("#", 1)[0]
+        if "HTTPException" not in line:
+            continue
+        # The status may sit on the same line or the next one (black wraps these).
+        window = " ".join(l.split("#", 1)[0] for l in lines[i - 1:i + 2])
+        if re.search(r"status_code\s*=\s*401|HTTPException\(\s*401", window):
+            offenders.append(f"auth.py:{i}: {raw.strip()}")
+
+    assert not offenders, (
+        "use auth_error(ErrorCode.AUTH_*, ...) so iOS can decode the reason:\n  "
+        + "\n  ".join(offenders)
+    )
 
 
 # ── the handler must not disturb existing raises ─────────────────────────────

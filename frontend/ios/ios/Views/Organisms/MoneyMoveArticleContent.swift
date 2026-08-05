@@ -82,7 +82,7 @@ struct MoneyMoveArticleContent: View {
                             .strokeBorder(AppColors.bullish, lineWidth: 1.5)
                     } else {
                         RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                            .fill(AppColors.bullish)
+                            .fill(AppColors.gainFill)
                     }
                 }
             )

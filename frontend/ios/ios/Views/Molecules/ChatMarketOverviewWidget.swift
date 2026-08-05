@@ -37,8 +37,7 @@ struct ChatMarketOverviewWidget: View {
 
             Spacer().frame(height: AppSpacing.lg)
         }
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Header

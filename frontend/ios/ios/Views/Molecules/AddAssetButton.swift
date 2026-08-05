@@ -18,8 +18,7 @@ struct AddAssetButton: View {
                 .font(AppTypography.iconSmall).fontWeight(.semibold)
                 .foregroundColor(AppColors.textPrimary)
                 .padding(AppSpacing.md)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.pill)
+            .cardSurface(cornerRadius: AppCornerRadius.pill)
             .overlay(
                 RoundedRectangle(cornerRadius: AppCornerRadius.pill)
                     .stroke(AppColors.cardBackgroundLight, lineWidth: 1)

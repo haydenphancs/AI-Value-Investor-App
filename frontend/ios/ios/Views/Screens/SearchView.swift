@@ -151,8 +151,7 @@ struct SearchView: View {
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(AppSpacing.md)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.medium)
+            .cardSurface(cornerRadius: AppCornerRadius.medium)
             .padding(.horizontal, AppSpacing.lg)
         }
         .buttonStyle(PlainButtonStyle())
@@ -179,8 +178,7 @@ struct SearchView: View {
             }
         }
         .padding(AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
         .padding(.horizontal, AppSpacing.lg)
     }
 

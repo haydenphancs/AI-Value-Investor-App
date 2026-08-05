@@ -50,7 +50,7 @@ struct InstitutionalActivityRow: View {
         .padding(AppSpacing.md)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 }

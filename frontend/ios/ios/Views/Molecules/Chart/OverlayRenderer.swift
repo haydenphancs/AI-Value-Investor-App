@@ -88,11 +88,11 @@ struct BollingerBandOverlay: View {
 
             // Upper band
             bandLine(values: data.upper)
-                .stroke(Color.cyan.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                .stroke(AppColors.accentGraphic.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
 
             // Lower band
             bandLine(values: data.lower)
-                .stroke(Color.cyan.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                .stroke(AppColors.accentGraphic.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
     }
 
@@ -121,7 +121,7 @@ struct BollingerBandOverlay: View {
             }
             path.closeSubpath()
         }
-        .fill(Color.cyan.opacity(0.08))
+        .fill(AppColors.accentGraphic.opacity(0.12))
     }
 
     private func bandLine(values: [Double?]) -> Path {

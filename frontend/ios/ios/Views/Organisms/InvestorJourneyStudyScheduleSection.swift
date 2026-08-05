@@ -66,8 +66,7 @@ struct InvestorJourneyStudyScheduleSection: View {
                 .buttonStyle(PlainButtonStyle())
             }
             .padding(.vertical, AppSpacing.sm)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
             .padding(.horizontal, AppSpacing.lg)
         }
     }

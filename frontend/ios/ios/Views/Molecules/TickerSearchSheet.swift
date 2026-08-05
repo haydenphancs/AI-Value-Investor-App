@@ -143,8 +143,7 @@ struct TickerLiveSearchSheet: View {
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(AppSpacing.md)
-                .background(AppColors.cardBackground)
-                .cornerRadius(AppCornerRadius.medium)
+                .cardSurface(cornerRadius: AppCornerRadius.medium)
             }
             .buttonStyle(.plain)
 

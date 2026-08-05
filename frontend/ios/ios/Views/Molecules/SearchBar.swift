@@ -47,8 +47,7 @@ struct SearchBar: View {
         }
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .onAppear {
             // Defer focusing slightly so the sheet present animation completes
             // first — focusing too early gets swallowed by UIKit and the

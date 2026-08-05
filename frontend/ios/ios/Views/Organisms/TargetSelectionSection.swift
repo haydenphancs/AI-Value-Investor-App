@@ -59,8 +59,7 @@ struct TargetSelectionSection: View {
             }
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.md)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.medium)
+            .cardSurface(cornerRadius: AppCornerRadius.medium)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -109,8 +108,7 @@ struct TargetSelectionSection: View {
         }
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 }
 

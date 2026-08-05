@@ -47,8 +47,7 @@ struct SearchHeader: View {
                 }
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.md)
-                .background(AppColors.cardBackground)
-                .cornerRadius(AppCornerRadius.large)
+                .cardSurface(cornerRadius: AppCornerRadius.large)
             }
             .padding(.horizontal, AppSpacing.lg)
 

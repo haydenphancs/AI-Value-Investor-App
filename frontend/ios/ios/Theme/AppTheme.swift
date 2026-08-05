@@ -11,149 +11,338 @@ import SwiftUI
 //
 // APPEARANCE / LIGHT MODE
 // -----------------------
-// The theme (System / Dark / Light) is driven by `overrideUserInterfaceStyle`
-// on the window — see `Core/Utilities/AppearanceManager.swift`. For the app to
-// actually *look* different in light mode, the SURFACE and TEXT tokens below
-// resolve per `userInterfaceStyle` at render time via `Color(lightHex:darkHex:)`
-// (a dynamic `UIColor` under the hood — see the extension at the bottom of this
-// file). ACCENT / SENTIMENT / BRAND / CHART tokens are intentionally CONSTANT
-// across modes: a brand blue stays blue, gains stay green, losses stay red —
-// these read acceptably on both a dark and a light surface, matching how
-// Robinhood/Webull/Yahoo treat their semantic colors.
+// Theme (System / Dark / Light) is driven by `overrideUserInterfaceStyle` on the
+// window — see `Core/Utilities/AppearanceManager.swift`. Tokens resolve per
+// `userInterfaceStyle` at render time via `Color(lightHex:darkHex:)`, a dynamic
+// `UIColor` (see Theme/ColorAdaptive.swift).
 //
-// The default choice is Dark (AppearanceManager.current == .dark), and every
-// adaptive token's `darkHex` is the ORIGINAL value — so the shipped dark look
-// is byte-for-byte unchanged unless the user explicitly picks Light or System.
+// EVERY COLOUR TOKEN IS ADAPTIVE. There is no such thing here as a colour that
+// "works in both modes" — that premise was wrong and is what made light mode
+// unreadable. Measured on `#FFFFFF`, the old constants were: bullish #22C55E
+// 2.28:1, neutral #F59E0B 2.15:1, primaryBlue #3B82F6 3.68:1, textMuted #8A93A0
+// 3.11:1 — all below the WCAG AA floor of 4.5:1 for body text.
+//
+// THE THREE RULES
+// ---------------
+// 1. TEXT tokens clear 4.5:1 against every surface they can land on (card
+//    #FFFFFF, page #F4F5F8, nested #EDF0F5 — the nested one binds, costing about
+//    0.6 of ratio versus pure white).
+// 2. GRAPHIC tokens (`*Graphic`) clear 3.0:1 — the WCAG 1.4.11 bar for a
+//    graphical object. They exist so charts stay vivid where vividness is
+//    legitimate. Morningstar states the same rule as "never use viz colors for
+//    text"; Stripe/Atlassian/Polaris/Google Finance all ship the same split.
+// 3. The SHARED token is the TEXT-SAFE one, always. ~154 of the bullish/bearish
+//    references are indirect — computed `Color` vars in Models/ and ViewModels/
+//    whose value reaches BOTH a `Text` foreground and a chart stroke (see
+//    PriceActionViewModel.trendColor). There is no call site to audit, so the
+//    default has to be the value that is merely LESS VIVID when it lands in the
+//    wrong role, never the one that is UNREADABLE.
+//
+// ADDING A TOKEN: use `Color(lightHex:darkHex:)`, never `Color(hex:)`. Then add
+// it to `auditManifest` below with its role — `ThemeContrastAudit` will assert
+// its contrast in both modes at launch in DEBUG, and a regression trips an
+// assertion instead of shipping.
 struct AppColors {
-    // Background Colors — adaptive
+
+    // ━━━ SURFACES ━━━
+    // Light card↔page separation is only 1.09:1 and that is CORRECT — no design
+    // system separates them by luminance (Apple 1.116, Polaris 1.129, Carbon
+    // 1.100). Cards are distinguished by a BORDER, not by more grey. See
+    // `border` below and Views/Modifiers/CardSurface.swift.
     static let background = Color(lightHex: "F4F5F8", darkHex: "171B26")
     static let cardBackground = Color(lightHex: "FFFFFF", darkHex: "1E2330")
+
+    /// Nested / inset surface. ⚠️ LOCKED: this is the darkest surface in light
+    /// mode that carries text, so it sets the contrast floor for every text and
+    /// semantic token. `caution` (4.50) and `primaryBlue` (4.52) clear it by
+    /// ~0.02 — darkening this value breaks them. `ThemeContrastAudit` will say so.
     static let cardBackgroundLight = Color(lightHex: "EDF0F5", darkHex: "252B3B")
 
-    // Accent Colors — constant across modes
-    static let primaryBlue = Color(hex: "3B82F6")
-    static let accentCyan = Color(hex: "06B6D4")
-    static let accentYellow = Color(hex: "FACC15")
+    /// Inverted surface for toasts / tooltips — pair with `textInverse`.
+    static let surfaceInverse = Color(lightHex: "1E2330", darkHex: "F4F5F8")
 
-    // Sentiment Colors — constant across modes
-    static let bullish = Color(hex: "22C55E")
-    static let bearish = Color(hex: "EF4444")
-    static let neutral = Color(hex: "F59E0B")
-
-    // Text Colors — adaptive
+    // ━━━ TEXT ━━━
+    // A three-step ladder: ~17 → ~7.5 → ~5.5. `textSecondary` moved in light even
+    // though the old #5C6470 passed (5.98) — once `textMuted` rises to 5.64 the
+    // two tiers are no longer distinguishable, and a hierarchy you can't see is
+    // not a hierarchy.
     static let textPrimary = Color(lightHex: "111827", darkHex: "FFFFFF")
-    static let textSecondary = Color(lightHex: "5C6470", darkHex: "9CA3AF")
-    static let textMuted = Color(lightHex: "8A93A0", darkHex: "6B7280")
+    static let textSecondary = Color(lightHex: "4B5563", darkHex: "B4BCC8")
+    /// Dark value is #9CA3AF, not the #8A93A0 first proposed: the binding dark
+    /// surface is `chipUnselectedBackground` (#2D3548, LIGHTER than a card), on
+    /// which #8A93A0 measures 3.94:1. Muted text does render on unselected
+    /// chips, so the token had to move rather than the manifest.
+    static let textMuted = Color(lightHex: "5F6875", darkHex: "9CA3AF")
 
-    // Alert Colors — constant across modes
-    static let alertOrange = Color(hex: "F97316")
-    static let alertBlue = Color(hex: "3B82F6")
-    static let alertPurple = Color(hex: "A855F7")
+    /// Disabled / placeholder. Deliberately below 4.5:1 — WCAG 1.4.3 exempts
+    /// inactive controls. Never use for content the user must read.
+    static let textDisabled = Color(lightHex: "A9B0BB", darkHex: "4C5563")
 
-    // Card Gradient Colors — constant (brand marks)
-    static let microsoftBlue = Color(hex: "0078D4")
-    static let googleBlue = Color(hex: "4285F4")
-    static let amdRed = Color(hex: "ED1C24")
+    /// Text/icons sitting ON a saturated fill (`primaryFill`, gain/loss chips,
+    /// gradients). Constant white by design in both modes.
+    static let textOnAccent = Color(lightHex: "FFFFFF", darkHex: "FFFFFF")
 
-    // Tab Bar
+    /// Text on `surfaceInverse`.
+    static let textInverse = Color(lightHex: "FFFFFF", darkHex: "111827")
+
+    // ━━━ SENTIMENT — text-safe (the shared default, see rule 3) ━━━
+    // Light values sit in the 4.5–6.25:1 band where 7 of 9 surveyed investing
+    // apps land (Fidelity 6.25, Morningstar 5.97, Koyfin 5.96, Yahoo 5.21,
+    // Wealthfront 4.80, Schwab 4.53, Bloomberg 4.51). Robinhood's #00C805 is
+    // 2.27:1 and is not a model to copy.
+    // gain 5.42 vs loss 5.55 are matched within 0.13 so neither sentiment shouts.
+    static let gain = Color(lightHex: "0F7A3D", darkHex: "22C55E")
+    static let loss = Color(lightHex: "CC1F1F", darkHex: "F87171")
+    static let caution = Color(lightHex: "9A6100", darkHex: "F59E0B")
+
+    /// Legacy aliases. Prefer `gain` / `loss` / `caution`: hue-neutral naming
+    /// matters because CN/JP/TW markets render red as UP, and `gainGraphic`
+    /// reads as an obvious pair where `bullishGraphic` reads as a second opinion
+    /// about the market. Migrated mechanically in a later pass.
+    static var bullish: Color { gain }
+    static var bearish: Color { loss }
+    static var neutral: Color { caution }
+
+    // ━━━ SENTIMENT — graphic role (3:1 bar) ━━━
+    // Chart strokes, bars, series fills, sparklines. NOT for text.
+    // Enforced by a lint: these must not appear outside the chart layer.
+    static let gainGraphic = Color(lightHex: "16A34A", darkHex: "22C55E")
+    static let lossGraphic = Color(lightHex: "DC2626", darkHex: "EF4444")
+    static let cautionGraphic = Color(lightHex: "C2760B", darkHex: "F59E0B")
+    static let accentGraphic = Color(lightHex: "0891B2", darkHex: "06B6D4")
+    static let primaryGraphic = Color(lightHex: "3B82F6", darkHex: "3B82F6")
+
+    // ━━━ ACCENTS — text-safe ━━━
+    static let primaryBlue = Color(lightHex: "2563EB", darkHex: "60A5FA")
+    static let accentCyan = Color(lightHex: "0E7490", darkHex: "06B6D4")
+    static let accentYellow = Color(lightHex: "8F6100", darkHex: "FACC15")
+
+    // ━━━ FILLS — saturated backgrounds that WHITE TEXT sits on ━━━
+    //
+    // Buttons, selected chips, badges, destructive actions.
+    //
+    // THE RULE: a fill token is that colour's LIGHT-mode text value, used in
+    // BOTH modes. That falls straight out of the maths — a value chosen to give
+    // 4.5:1 as dark ink on white is, by definition, dark enough to give 4.5:1
+    // under white ink. One value, both jobs, no second calibration.
+    //
+    // They cannot share the text tokens, because the two roles pull in opposite
+    // directions in dark mode: text-on-a-dark-surface wants a LIGHT colour
+    // (primaryBlue #60A5FA), but white-on-that collapses to 2.24:1.
+    //
+    // These were silently broken app-wide before, in BOTH modes:
+    //   white on primaryBlue #3B82F6  = 3.68:1  (15 buttons)
+    //   white on bearish    #EF4444   = 3.35:1  (4 destructive buttons)
+    //   white on bullish    #22C55E   = 2.28:1
+    static let primaryFill = Color(lightHex: "2563EB", darkHex: "2563EB")
+    static let gainFill = Color(lightHex: "0F7A3D", darkHex: "0F7A3D")
+    static let lossFill = Color(lightHex: "CC1F1F", darkHex: "CC1F1F")
+    static let cautionFill = Color(lightHex: "9A6100", darkHex: "9A6100")
+    static let accentCyanFill = Color(lightHex: "0E7490", darkHex: "0E7490")
+
+    // ━━━ ALERTS ━━━
+    static let alertOrange = Color(lightHex: "C2410C", darkHex: "F97316")
+    static let alertPurple = Color(lightHex: "7E22CE", darkHex: "C084FC")
+    static var alertBlue: Color { primaryBlue }
+
+    // ━━━ BORDERS / DIVIDERS / ELEVATION ━━━
+    // Alpha over the ambient surface, so one token works on page, card and
+    // nested alike. This is the piece that was missing entirely — a #FFFFFF card
+    // on a #F4F5F8 page is 1.09:1 and reads as a floating blob without an edge.
+    static let borderSubtle = Color(lightHex: "101828", lightAlpha: 0.08, darkHex: "FFFFFF", darkAlpha: 0.06)
+    static let border = Color(lightHex: "101828", lightAlpha: 0.14, darkHex: "FFFFFF", darkAlpha: 0.10)
+    static let borderStrong = Color(lightHex: "101828", lightAlpha: 0.24, darkHex: "FFFFFF", darkAlpha: 0.18)
+    static var borderFocus: Color { primaryFill }
+
+    /// Hairline between rows. Same value as `borderSubtle`; named separately
+    /// because the intent differs and they may diverge later.
+    ///
+    /// ⚠️ `Divider().background(x)` does NOT set a divider's line colour —
+    /// `Divider` draws `UIColor.separator` over the top, so 38 of the 49
+    /// `Divider()` sites in this app have an inert `.background` tint. Use
+    /// `.overlay(AppColors.divider)` (see ProfileView.swift:513) or a plain
+    /// `Rectangle().fill(AppColors.divider).frame(height: 1)`.
+    static var divider: Color { borderSubtle }
+
+    /// Shadows are HUE-TINTED, not pure black, and light mode uses roughly a
+    /// tenth the ink dark mode does. Pure black at dark-mode alpha reads as a
+    /// grey smudge on a light page.
+    static let shadowKey = Color(lightHex: "101828", lightAlpha: 0.10, darkHex: "000000", darkAlpha: 0.40)
+    static let shadowAmbient = Color(lightHex: "101828", lightAlpha: 0.05, darkHex: "000000", darkAlpha: 0.24)
+
+    /// Backdrop behind sheets / modals / full-screen covers.
+    static let scrim = Color(lightHex: "101828", lightAlpha: 0.32, darkHex: "000000", darkAlpha: 0.60)
+
+    // ━━━ TAB BAR ━━━
     static let tabBarBackground = Color(lightHex: "FFFFFF", darkHex: "171B26")
-    static let tabBarSelected = Color(hex: "3B82F6")
-    static let tabBarUnselected = Color(lightHex: "8A93A0", darkHex: "6B7280")
+    static var tabBarSelected: Color { primaryBlue }
+    static var tabBarUnselected: Color { textMuted }
 
-    // Growth Chart Colors — series accents constant; control surfaces adaptive
-    static let growthBarBlue = Color(hex: "5B9CF6")
-    static let growthYoYYellow = Color(hex: "FACC15")
-    static let growthSectorGray = Color(hex: "9CA3AF")
-    static let chipSelectedBackground = Color(hex: "3B82F6")
+    // ━━━ CONTROLS ━━━
+    static var chipSelectedBackground: Color { primaryFill }
     static let chipUnselectedBackground = Color(lightHex: "E7EAF0", darkHex: "2D3548")
     static let toggleBackground = Color(lightHex: "EDF0F5", darkHex: "1E2330")
-    static let toggleSelectedBackground = Color(lightHex: "D5DAE3", darkHex: "374151")
+    /// Lightened from #D5DAE3: the old value put `textSecondary` at 4.26:1.
+    static let toggleSelectedBackground = Color(lightHex: "E2E6EE", darkHex: "374151")
 
-    // Profit Power Chart Colors
-    static let profitGrossMargin = Color(hex: "3B82F6")       // Blue - matches primaryBlue
-    static let profitOperatingMargin = Color(hex: "F97316")   // Orange
-    static let profitFCFMargin = Color(hex: "A855F7")         // Purple
-    static let profitNetMargin = Color(hex: "22C55E")         // Green - matches bullish
-    static let profitSectorAverage = Color(hex: "9CA3AF")     // Gray - matches textSecondary
+    // ━━━ CHART CHROME ━━━
+    /// Gridlines are DECORATIVE and deliberately sit below 3:1 — W3C: "not every
+    /// graphical object needs to contrast with its surroundings." Nine charting
+    /// libraries converge on rgba(0,0,0,0.06–0.12) for exactly this. Axis LABELS
+    /// are text and use `chartAxisLabel` (4.5:1), not this.
+    static let chartGridline = Color(lightHex: "101828", lightAlpha: 0.08, darkHex: "FFFFFF", darkAlpha: 0.08)
+    static let chartCrosshair = Color(lightHex: "101828", lightAlpha: 0.40, darkHex: "FFFFFF", darkAlpha: 0.40)
+    static var chartAxisLabel: Color { textMuted }
 
-    // Signal of Confidence Chart Colors
-    static let confidenceDividends = Color(hex: "3B82F6")     // Blue - matches primaryBlue
-    static let confidenceBuybacks = Color(hex: "22C55E")      // Green - matches bullish
-    static let confidenceSharesOutstanding = Color(hex: "FACC15") // Yellow - matches growthYoYYellow
+    // ━━━ CHART SERIES ━━━
+    // Every one of these failed 3:1 on white before; a palette tuned for one
+    // background does not survive the other. (IBM Carbon ships two entirely
+    // separate 14-colour data-viz palettes and shares only 1 of 14.)
+    static let growthBarBlue = Color(lightHex: "3B82F6", darkHex: "5B9CF6")
+    static let growthYoYYellow = Color(lightHex: "C2760B", darkHex: "FACC15")
+    static let growthSectorGray = Color(lightHex: "7A8494", darkHex: "9CA3AF")
+
+    static let profitGrossMargin = Color(lightHex: "2563EB", darkHex: "3B82F6")
+    static let profitOperatingMargin = Color(lightHex: "C2410C", darkHex: "F97316")
+    static let profitFCFMargin = Color(lightHex: "7E22CE", darkHex: "A855F7")
+    static let profitNetMargin = Color(lightHex: "16A34A", darkHex: "22C55E")
+    static let profitSectorAverage = Color(lightHex: "6B7280", darkHex: "9CA3AF")
+
+    static let confidenceDividends = Color(lightHex: "2563EB", darkHex: "3B82F6")
+    static let confidenceBuybacks = Color(lightHex: "16A34A", darkHex: "22C55E")
+    static let confidenceSharesOutstanding = Color(lightHex: "C2760B", darkHex: "FACC15")
+
+    // ━━━ AI MARK ━━━
+    // Was `[.indigo, .cyan]` — SwiftUI SYSTEM colours. In light, `.cyan` resolves
+    // to #32ADE6 = 2.54:1 on white, so the right half of every "✨ Insight"
+    // wordmark was unreadable. A gradient-filled `Text` has no defined WCAG
+    // method, so both stops are required to clear 4.5:1 individually.
+    ///
+    /// The dark start is #818CF8, not the #6366F1 that mirrors SwiftUI's
+    /// `.indigo`: that measured 3.51:1 on a card, so the wordmark's head was
+    /// failing in DARK too — the original bug was never light-only.
+    static let aiRampStart = Color(lightHex: "4F46E5", darkHex: "818CF8")
+    static let aiRampEnd = Color(lightHex: "0E7490", darkHex: "22D3EE")
 }
 
-// MARK: - Color Extension for Hex
-extension Color {
-    init(hex: String) {
-        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&int)
-        let a, r, g, b: UInt64
-        switch hex.count {
-        case 3: // RGB (12-bit)
-            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
-        case 6: // RGB (24-bit)
-            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
-        case 8: // ARGB (32-bit)
-            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
-        default:
-            (a, r, g, b) = (255, 0, 0, 0)
-        }
-        self.init(
-            .sRGB,
-            red: Double(r) / 255,
-            green: Double(g) / 255,
-            blue: Double(b) / 255,
-            opacity: Double(a) / 255
-        )
-    }
-}
-
-// MARK: - Adaptive (light / dark) color support
+// MARK: - Contrast audit manifest
 //
-// Backs the surface + text tokens in `AppColors`. The dynamic `UIColor` closure
-// is re-evaluated by UIKit/SwiftUI whenever the effective `userInterfaceStyle`
-// changes (including when `AppearanceManager` flips the window override), so a
-// token switches instantly with no view rebuild required.
+// The machine-readable contract `ThemeContrastAudit` checks at launch in DEBUG.
+//
+// ⚠️ This proves the PALETTE is sound, not that USAGE is. It asserts each token
+// clears its floor on the surfaces declared here; it cannot know that some view
+// renders `textMuted` on `toggleSelectedBackground`. Pair it with the greps in
+// the light-mode plan.
 
-extension UIColor {
-    /// Build a `UIColor` from a hex string (RGB / ARGB), mirroring `Color(hex:)`.
-    convenience init(hexString: String) {
-        let hex = hexString.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&int)
-        let a, r, g, b: UInt64
-        switch hex.count {
-        case 3: // RGB (12-bit)
-            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
-        case 6: // RGB (24-bit)
-            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
-        case 8: // ARGB (32-bit)
-            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
-        default:
-            (a, r, g, b) = (255, 0, 0, 0)
+extension AppColors {
+
+    enum TokenRole {
+        /// Body text — WCAG 1.4.3 AA, 4.5:1.
+        case text
+        /// ≥18pt regular / ≥14pt bold — 3:1. Used sparingly: this app's type
+        /// scale tops out at 32pt but most data sits at 10–15pt, so almost
+        /// nothing genuinely qualifies. Prefer `.text`.
+        case largeText
+        /// Graphical object — WCAG 1.4.11, 3:1.
+        case graphic
+        /// A background. Separation from other surfaces is a border's job.
+        case surface
+        /// Deliberately exempt (gridlines, disabled state, scrims).
+        case decorative
+    }
+
+    struct TokenSpec {
+        let name: String
+        let color: Color
+        let role: TokenRole
+        /// Keys into `surfaceRegistry` this token is contractually allowed on.
+        let surfaces: [String]
+        /// Set when a token is a FILL and the check runs the other way round:
+        /// assert `textOnAccent` is legible ON it.
+        let carriesOnAccentText: Bool
+
+        init(_ name: String, _ color: Color, _ role: TokenRole,
+             on surfaces: [String] = TokenSpec.contentSurfaces,
+             carriesOnAccentText: Bool = false) {
+            self.name = name
+            self.color = color
+            self.role = role
+            self.surfaces = surfaces
+            self.carriesOnAccentText = carriesOnAccentText
         }
-        self.init(
-            red: CGFloat(r) / 255,
-            green: CGFloat(g) / 255,
-            blue: CGFloat(b) / 255,
-            alpha: CGFloat(a) / 255
-        )
-    }
-}
 
-extension Color {
-    /// Adaptive token: resolves to `light` in light mode and to `dark` in dark
-    /// (and for `.unspecified`). Because the app's default appearance is Dark,
-    /// callers passing the original value as `darkHex` keep the exact shipped
-    /// look until the user chooses Light or System.
-    init(lightHex light: String, darkHex dark: String) {
-        self = Color(uiColor: UIColor { traits in
-            traits.userInterfaceStyle == .light
-                ? UIColor(hexString: light)
-                : UIColor(hexString: dark)
-        })
+        /// The three surfaces content can land on. `cardBackgroundLight` binds.
+        static let contentSurfaces = ["background", "cardBackground", "cardBackgroundLight"]
     }
+
+    static let surfaceRegistry: [String: Color] = [
+        "background": background,
+        "cardBackground": cardBackground,
+        "cardBackgroundLight": cardBackgroundLight,
+        "chipUnselectedBackground": chipUnselectedBackground,
+        "toggleBackground": toggleBackground,
+        "toggleSelectedBackground": toggleSelectedBackground,
+        "tabBarBackground": tabBarBackground,
+        "surfaceInverse": surfaceInverse,
+    ]
+
+    static let auditManifest: [TokenSpec] = [
+        // Text — every control surface included, because these do land on chips
+        // and toggles (that is how toggleSelectedBackground got caught at 4.26).
+        TokenSpec("textPrimary", textPrimary, .text,
+                  on: TokenSpec.contentSurfaces + ["chipUnselectedBackground", "toggleBackground", "toggleSelectedBackground", "tabBarBackground"]),
+        TokenSpec("textSecondary", textSecondary, .text,
+                  on: TokenSpec.contentSurfaces + ["chipUnselectedBackground", "toggleBackground", "toggleSelectedBackground"]),
+        TokenSpec("textMuted", textMuted, .text,
+                  on: TokenSpec.contentSurfaces + ["chipUnselectedBackground", "toggleBackground", "tabBarBackground"]),
+        TokenSpec("textInverse", textInverse, .text, on: ["surfaceInverse"]),
+        TokenSpec("textDisabled", textDisabled, .decorative),
+
+        // Sentiment / accents — text-safe role.
+        TokenSpec("gain", gain, .text),
+        TokenSpec("loss", loss, .text),
+        TokenSpec("caution", caution, .text),
+        TokenSpec("primaryBlue", primaryBlue, .text),
+        TokenSpec("accentCyan", accentCyan, .text),
+        TokenSpec("accentYellow", accentYellow, .text),
+        TokenSpec("alertOrange", alertOrange, .text),
+        TokenSpec("alertPurple", alertPurple, .text),
+        TokenSpec("aiRampStart", aiRampStart, .text),
+        TokenSpec("aiRampEnd", aiRampEnd, .text),
+
+        // Fills — checked in REVERSE: is on-accent text legible ON this?
+        TokenSpec("primaryFill", primaryFill, .text, on: [], carriesOnAccentText: true),
+        TokenSpec("gainFill", gainFill, .text, on: [], carriesOnAccentText: true),
+        TokenSpec("lossFill", lossFill, .text, on: [], carriesOnAccentText: true),
+        TokenSpec("cautionFill", cautionFill, .text, on: [], carriesOnAccentText: true),
+        TokenSpec("accentCyanFill", accentCyanFill, .text, on: [], carriesOnAccentText: true),
+
+        // Graphic role — 3:1.
+        TokenSpec("gainGraphic", gainGraphic, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("lossGraphic", lossGraphic, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("cautionGraphic", cautionGraphic, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("accentGraphic", accentGraphic, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("primaryGraphic", primaryGraphic, .graphic, on: ["background", "cardBackground"]),
+
+        // Chart series — 3:1.
+        TokenSpec("growthBarBlue", growthBarBlue, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("growthYoYYellow", growthYoYYellow, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("growthSectorGray", growthSectorGray, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("profitGrossMargin", profitGrossMargin, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("profitOperatingMargin", profitOperatingMargin, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("profitFCFMargin", profitFCFMargin, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("profitNetMargin", profitNetMargin, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("profitSectorAverage", profitSectorAverage, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("confidenceDividends", confidenceDividends, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("confidenceBuybacks", confidenceBuybacks, .graphic, on: ["background", "cardBackground"]),
+        TokenSpec("confidenceSharesOutstanding", confidenceSharesOutstanding, .graphic, on: ["background", "cardBackground"]),
+
+        // Exempt by design — listed so the exemption is DOCUMENTED, not silent.
+        TokenSpec("chartGridline", chartGridline, .decorative),
+        TokenSpec("borderSubtle", borderSubtle, .decorative),
+        TokenSpec("border", border, .decorative),
+        TokenSpec("borderStrong", borderStrong, .decorative),
+    ]
 }
 
 // MARK: - App Typography
@@ -267,14 +456,17 @@ struct AppCornerRadius {
 /// Shared multi-stop fills. Defined once so surfaces that are meant to match
 /// cannot drift apart when one of them is restyled.
 struct AppGradients {
-    /// The Cay-AI mark: indigo → cyan, top-leading to bottom-trailing.
+    /// The Cay-AI mark: indigo → teal, top-leading to bottom-trailing.
     ///
     /// Worn by the "Insight"/"Insights" label and by the AI-summary badge beside
     /// it. These two sit inches apart on the Updates card, so they read as one
     /// element — inlining the colours in each would let a later edit to one
     /// silently break the pairing.
+    ///
+    /// Built from `AppColors.aiRamp*` rather than SwiftUI's `.indigo`/`.cyan`:
+    /// the system colours put the tail of the wordmark at 2.54:1 in light mode.
     static let ai = LinearGradient(
-        colors: [.indigo, .cyan],
+        colors: [AppColors.aiRampStart, AppColors.aiRampEnd],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
@@ -282,16 +474,32 @@ struct AppGradients {
     /// The same ramp at badge-fill strength. Kept beside `ai` so the tint always
     /// tracks the text it sits behind.
     static let aiSubtle = LinearGradient(
-        colors: [Color.indigo.opacity(0.18), Color.cyan.opacity(0.18)],
+        colors: [AppColors.aiRampStart.opacity(0.18), AppColors.aiRampEnd.opacity(0.18)],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
 }
 
 // MARK: - App Shadows
+//
+// Elevation is NOT symmetric between modes. In light a card is lifted by a
+// shadow; in dark it is lifted by a lighter surface, and a shadow at light-mode
+// alpha is invisible against #171B26 (black at 4–15% over a dark background
+// measures ~1.01:1). Hence `shadowKey`/`shadowAmbient` carry very different
+// alphas per mode — and are hue-tinted, not pure black, so they don't read as a
+// grey smudge on a light page.
 struct AppShadows {
-    static let cardShadow = Shadow(color: Color.black.opacity(0.2), radius: 8, x: 0, y: 4)
-    static let buttonShadow = Shadow(color: Color.black.opacity(0.15), radius: 4, x: 0, y: 2)
+    /// Resting card. Pair with `AppColors.border` — in light the border does most
+    /// of the separating and the shadow only softens the edge.
+    static let card = Shadow(color: AppColors.shadowAmbient, radius: 8, x: 0, y: 2)
+    /// Lifted: buttons, floating bars, selected states.
+    static let raised = Shadow(color: AppColors.shadowKey, radius: 12, x: 0, y: 4)
+    /// Sheets, popovers, anything over a scrim.
+    static let overlay = Shadow(color: AppColors.shadowKey, radius: 24, x: 0, y: 12)
+
+    /// Legacy names retained so existing references keep resolving.
+    static var cardShadow: Shadow { card }
+    static var buttonShadow: Shadow { raised }
 }
 
 struct Shadow {
@@ -299,4 +507,13 @@ struct Shadow {
     let radius: CGFloat
     let x: CGFloat
     let y: CGFloat
+}
+
+extension View {
+    /// Apply a themed shadow. Prefer this over an inline
+    /// `.shadow(color: .black.opacity(x))` — a black shadow tuned for dark mode
+    /// reads as dirt on a light page.
+    func appShadow(_ shadow: Shadow) -> some View {
+        self.shadow(color: shadow.color, radius: shadow.radius, x: shadow.x, y: shadow.y)
+    }
 }

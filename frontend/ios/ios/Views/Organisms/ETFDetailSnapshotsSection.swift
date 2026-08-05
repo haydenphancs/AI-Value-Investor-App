@@ -49,7 +49,7 @@ struct ETFDetailSnapshotsSection: View {
         .padding(AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
         .sheet(isPresented: $showInfoSheet) {
             ETFSnapshotsInfoSheet()
@@ -725,7 +725,7 @@ struct ETFConcentrationMeter: View {
                     Circle()
                         .fill(Color.white)
                         .frame(width: 14, height: 14)
-                        .shadow(color: Color.black.opacity(0.3), radius: 2, x: 0, y: 1)
+                        .shadow(color: AppColors.shadowKey, radius: 2, x: 0, y: 1)
                         .offset(x: (meterPosition * geometry.size.width) - 7)
                 }
             }

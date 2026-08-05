@@ -859,7 +859,16 @@ async def validation_handler(request: Request, exc: RequestValidationError):
         user_message=message,
     )
     if settings.DEBUG:
-        body["details"] = {"errors": str(exc.errors())}
+        # REDACT `input` before echoing the error list. `exc.errors()` embeds the offending
+        # value, and on `/auth/login`, `/auth/register` and `/auth/change-password` that value
+        # IS the password — so a validation failure would put a plaintext credential in the
+        # response body, the terminal, and any proxy log in between. `loc` and `msg` are what
+        # make the error diagnosable; the value never was.
+        safe = [
+            {k: v for k, v in err.items() if k not in ("input", "ctx")}
+            for err in exc.errors()
+        ]
+        body["details"] = {"errors": str(safe)}
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content=body,
@@ -924,10 +933,33 @@ async def root():
 
 @app.get("/health", tags=["Root"])
 async def health():
+    """READINESS: is the app able to serve, dependencies included?
+
+    Round-trips Supabase, so it costs 300-500ms. Not used by Railway's deploy gate
+    (`railway.toml` points at `/health/pdf`) — keep it that way, because a Supabase blip
+    would otherwise make the platform kill a perfectly healthy container.
+    """
     db_ok = await check_supabase_health()
     return {
         "status": "healthy" if db_ok else "degraded",
     }
+
+
+@app.get("/health/live", tags=["Root"])
+async def health_live():
+    """LIVENESS: is a server listening on this port? Instant, zero dependencies.
+
+    Exists because the iOS `ServerEnvironmentManager` probes localhost on every launch and
+    foreground with a sub-second timeout to decide between the local backend and Railway, and
+    it was probing `/health` — which waits on Supabase. Measured at 0.34-0.52s against a 0.5s
+    timeout, so the probe was a coin flip, and losing it silently routed a DEVELOPMENT build
+    at PRODUCTION. That is the worst possible failure mode: you believe you are testing your
+    local changes and you are exercising the live service. It cost a mis-verification during
+    the session that added this.
+
+    Deliberately returns before touching anything — no DB, no cache, no settings read.
+    """
+    return {"status": "alive"}
 
 
 @app.get("/health/pdf", tags=["Root"])

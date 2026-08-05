@@ -44,8 +44,7 @@ struct RecentActivitiesTabSelector: View {
             }
         }
         .padding(AppSpacing.xs)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     private func tabForegroundColor(for tab: RecentActivitiesTab, isDisabled: Bool) -> Color {

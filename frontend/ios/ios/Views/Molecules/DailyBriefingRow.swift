@@ -44,8 +44,7 @@ struct DailyBriefingRow: View {
                 }
             }
             .padding(AppSpacing.md)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.medium)
+            .cardSurface(cornerRadius: AppCornerRadius.medium)
         }
         .buttonStyle(PlainButtonStyle())
     }

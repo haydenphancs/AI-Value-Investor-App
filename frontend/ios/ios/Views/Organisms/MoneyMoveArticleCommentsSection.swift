@@ -70,8 +70,7 @@ struct MoneyMoveArticleCommentsSection: View {
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(AppSpacing.md)
-                .background(AppColors.cardBackground)
-                .cornerRadius(AppCornerRadius.large)
+                .cardSurface(cornerRadius: AppCornerRadius.large)
             }
             .buttonStyle(PlainButtonStyle())
 
@@ -100,8 +99,7 @@ struct MoneyMoveArticleCommentsSection: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.md)
-                    .background(AppColors.cardBackground)
-                    .cornerRadius(AppCornerRadius.large)
+                    .cardSurface(cornerRadius: AppCornerRadius.large)
                 }
                 .buttonStyle(PlainButtonStyle())
             }

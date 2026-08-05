@@ -31,7 +31,7 @@ struct ReportCriticalFactorsSection: View {
             }
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
             )
         }
         .padding(.horizontal, AppSpacing.lg)

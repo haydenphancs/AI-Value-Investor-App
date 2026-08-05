@@ -45,7 +45,7 @@ struct LessonImageSlot: View {
 
     private var placeholder: some View {
         RoundedRectangle(cornerRadius: AppCornerRadius.large)
-            .fill(AppColors.cardBackground)
+            .cardFill()
             .overlay(
                 VStack(spacing: AppSpacing.sm) {
                     Image(systemName: "photo")

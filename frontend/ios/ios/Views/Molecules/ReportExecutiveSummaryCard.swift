@@ -38,7 +38,7 @@ struct ReportExecutiveSummaryCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 }

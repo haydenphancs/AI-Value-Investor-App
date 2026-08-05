@@ -47,12 +47,12 @@ struct AudioStatusIsland: View {
         .frame(height: pillHeight)
         .background(
             Capsule()
-                .fill(Color.black)
-                .shadow(color: Color.black.opacity(0.3), radius: 8, y: 4)
+                .fill(AppColors.cardBackground)
+                .shadow(color: AppColors.shadowKey, radius: 8, y: 4)
         )
         .overlay(
             Capsule()
-                .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
+                .strokeBorder(AppColors.border, lineWidth: 0.5)
         )
         .onTapGesture {
             // Tap the island to open the full now-playing screen (matches iOS Now-Playing behavior).

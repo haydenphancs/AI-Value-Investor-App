@@ -35,12 +35,12 @@ struct GenerateAnalysisButton: View {
                     .font(AppTypography.caption)
                     .opacity(0.8)
             }
-            .foregroundColor(AppColors.textPrimary)
+            .foregroundColor(AppColors.textOnAccent)
             .frame(maxWidth: .infinity)
             .padding(.vertical, AppSpacing.lg)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(isEnabled ? AppColors.primaryBlue : AppColors.textMuted)
+                    .fill(isEnabled ? AppColors.primaryFill : AppColors.textMuted)
             )
         }
         .buttonStyle(PlainButtonStyle())

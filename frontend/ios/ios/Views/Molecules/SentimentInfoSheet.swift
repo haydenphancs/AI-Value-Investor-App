@@ -57,7 +57,7 @@ struct SentimentInfoSheet: View {
         .padding(AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 
@@ -115,7 +115,7 @@ struct SentimentInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 
@@ -165,7 +165,7 @@ struct SentimentInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 
@@ -226,7 +226,7 @@ struct SentimentInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 }

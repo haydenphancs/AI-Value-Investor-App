@@ -84,7 +84,7 @@ struct RecentActivitiesInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 
@@ -166,7 +166,7 @@ struct RecentActivitiesInfoSheet: View {
             .padding(AppSpacing.lg)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
             )
         }
     }
@@ -252,7 +252,7 @@ struct RecentActivitiesInfoSheet: View {
             .padding(AppSpacing.lg)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
             )
         }
     }
@@ -282,7 +282,7 @@ struct RecentActivitiesInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
                 .overlay(
                     RoundedRectangle(cornerRadius: AppCornerRadius.large)
                         .stroke(AppColors.neutral.opacity(0.3), lineWidth: 1)
@@ -324,7 +324,7 @@ struct RecentActivitiesInfoSheet: View {
         .padding(AppSpacing.md)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 
@@ -354,7 +354,7 @@ struct RecentActivitiesInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
                 .overlay(
                     RoundedRectangle(cornerRadius: AppCornerRadius.large)
                         .stroke(AppColors.neutral.opacity(0.3), lineWidth: 1)

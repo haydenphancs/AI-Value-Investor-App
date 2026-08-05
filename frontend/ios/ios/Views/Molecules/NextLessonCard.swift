@@ -58,8 +58,7 @@ struct NextLessonCard: View {
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.extraLarge)
+            .cardSurface(cornerRadius: AppCornerRadius.extraLarge)
         }
         .buttonStyle(PlainButtonStyle())
     }

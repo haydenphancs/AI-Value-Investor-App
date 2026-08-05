@@ -80,8 +80,7 @@ struct CaydexAIChatBar: View {
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.vertical, AppSpacing.sm)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.extraLarge)
+            .cardSurface(cornerRadius: AppCornerRadius.extraLarge)
             .padding(.horizontal, AppSpacing.lg)
         }
         .padding(.bottom, AppSpacing.md)
@@ -120,7 +119,7 @@ struct CaydexAISuggestionChip: View {
                 .padding(.vertical, AppSpacing.sm)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.pill)
-                        .fill(AppColors.cardBackground)
+                        .cardFill()
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: AppCornerRadius.pill)

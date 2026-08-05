@@ -516,8 +516,7 @@ struct AIChatScreen: View {
             }
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.sm)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
             .frame(maxWidth: .infinity)
 
             // New chat — bigger icon in a smaller white box.

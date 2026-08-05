@@ -105,6 +105,12 @@ struct iosApp: App {
                     // Apply the persisted appearance choice (default .dark).
                     AppearanceManager.applyStored()
 
+                    #if DEBUG
+                    // Assert every palette token clears its WCAG floor in BOTH
+                    // appearances. Compiled out of release; ~1ms in debug.
+                    ThemeContrastAudit.run()
+                    #endif
+
                     // Enable 401 → refresh → retry BEFORE auth restore runs, so the
                     // interceptor is armed when restoreAuthState makes its first call.
                     // On an expired token the APIClient asks AuthService to refresh
@@ -158,17 +164,22 @@ struct iosApp: App {
 
     private func configureAppearance() {
         // Navigation bar appearance.
-        // Use dynamic (light/dark-aware) colors so the bar follows the window's
-        // appearance override (AppearanceManager) instead of freezing to dark.
+        // Bridged straight from the token: `AppColors.background` is a dynamic
+        // UIColor underneath, so it keeps resolving per-trait through UIKit and
+        // follows the window's appearance override (AppearanceManager).
+        //
+        // This used to re-declare F4F5F8/171B26 by hand here, which meant the
+        // nav bar silently drifted from the page behind it whenever the token
+        // changed. Read the token; never copy its hexes.
         let navAppearance = UINavigationBarAppearance()
         navAppearance.configureWithOpaqueBackground()
-        navAppearance.backgroundColor = UIColor { traits in
-            traits.userInterfaceStyle == .light
-                ? UIColor(hexString: "F4F5F8")   // AppColors.background (light)
-                : UIColor(hexString: "171B26")   // AppColors.background (dark)
-        }
-        navAppearance.titleTextAttributes = [.foregroundColor: UIColor.label]
-        navAppearance.largeTitleTextAttributes = [.foregroundColor: UIColor.label]
+        navAppearance.backgroundColor = UIColor(AppColors.background)
+
+        // Titles track the palette rather than UIColor.label, so nav copy and
+        // screen copy are the same ink.
+        let titleColor = UIColor(AppColors.textPrimary)
+        navAppearance.titleTextAttributes = [.foregroundColor: titleColor]
+        navAppearance.largeTitleTextAttributes = [.foregroundColor: titleColor]
 
         UINavigationBar.appearance().standardAppearance = navAppearance
         UINavigationBar.appearance().compactAppearance = navAppearance
@@ -378,8 +389,7 @@ struct ErrorToastView: View {
                 }
             }
             .padding()
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
             .padding(.horizontal)
             .padding(.bottom, 100) // Above tab bar
         }
@@ -407,8 +417,7 @@ struct ToastView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.pill)
+            .cardSurface(cornerRadius: AppCornerRadius.pill)
             .padding(.bottom, 100)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))

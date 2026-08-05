@@ -70,7 +70,7 @@ struct SignInRequiredSheet: View {
                         Spacer()
                     }
                     .padding(.vertical, 14)
-                    .background(AppColors.primaryBlue)
+                    .background(AppColors.primaryFill)
                     .cornerRadius(AppCornerRadius.medium)
                 }
 

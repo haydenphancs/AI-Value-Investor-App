@@ -58,7 +58,7 @@ struct TrendingAnalysisRow: View {
             .padding(AppSpacing.md)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
             )
         }
         .buttonStyle(PlainButtonStyle())

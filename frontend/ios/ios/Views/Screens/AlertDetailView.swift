@@ -105,8 +105,7 @@ struct AlertDetailView: View {
             detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Market Detail
@@ -118,8 +117,7 @@ struct AlertDetailView: View {
             detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Whale Trade Detail
@@ -249,8 +247,7 @@ struct AlertDetailView: View {
             content()
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Detail Row

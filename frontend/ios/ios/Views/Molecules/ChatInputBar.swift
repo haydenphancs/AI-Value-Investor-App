@@ -39,8 +39,7 @@ struct ChatInputBar: View {
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.vertical, AppSpacing.md)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
             .contentShape(Rectangle())
             .onTapGesture {
                 isTextFieldFocused = true

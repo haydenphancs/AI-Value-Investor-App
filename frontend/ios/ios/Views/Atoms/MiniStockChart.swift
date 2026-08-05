@@ -8,6 +8,9 @@
 import SwiftUI
 
 struct MiniStockChart: View {
+    /// Only read to bust the `.drawingGroup()` raster cache — see below.
+    @Environment(\.colorScheme) private var colorScheme
+
     let data: [Double]
     let isPositive: Bool
     var height: CGFloat = 80
@@ -73,6 +76,7 @@ struct MiniStockChart: View {
             }
             // Flatten path rendering into a single Metal texture
             .drawingGroup()
+            .id(colorScheme)
         }
         .frame(height: height)
     }

@@ -116,7 +116,7 @@ struct TickerFinancialsContent: View {
         VStack(spacing: AppSpacing.lg) {
             ForEach(0..<3, id: \.self) { _ in
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
                     .frame(height: 180)
                     .shimmer()
             }

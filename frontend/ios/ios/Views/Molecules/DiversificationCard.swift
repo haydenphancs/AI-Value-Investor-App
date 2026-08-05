@@ -44,8 +44,7 @@ struct DiversificationCard: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Overall (one bar, no number)
@@ -112,7 +111,7 @@ struct DiversificationCard: View {
                         .foregroundColor(isActive ? .white : AppColors.textSecondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.xs)
-                        .background(isActive ? AppColors.primaryBlue : Color.clear)
+                        .background(isActive ? AppColors.primaryFill : Color.clear)
                         .cornerRadius(AppCornerRadius.medium)
                 }
                 .buttonStyle(.plain)

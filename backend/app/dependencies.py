@@ -516,6 +516,21 @@ async def get_research_identity(
 ) -> dict:
     """Identity for the RESEARCH routes: a real account, else a PER-INSTALL guest.
 
+    ⚠️ **NOT WIRED TO ANY ROUTE. Do not connect one without reading this.**
+
+    All nine ``/research/*`` routes take ``Depends(get_current_user)``: AI generation is
+    account-only, because it is the most expensive call in the product (~17 Gemini + ~20 FMP
+    per run) and the guest meter it used to rely on keyed on ``X-Guest-Id`` — a header the
+    CLIENT picks — so rotating it minted a fresh allowance on every request. Credits replaced
+    that: FK-bound to a real ``public.users`` row, and therefore not rotatable. Re-pointing a
+    research route at this dependency re-opens free, unmetered AI generation.
+
+    Kept rather than deleted because migration 110's per-install partitioning is still live for
+    anyone holding reports created before the change, and because
+    ``POST /users/me/claim-guest-data`` must still be able to find them. Two source-scan tests
+    fail the build if ``Depends(get_research_identity)`` reappears in ``research.py``
+    (``test_research_guest_partition.py`` and ``test_auth_dependency_matrix.py``).
+
     Same shape and same reason as :func:`get_watchlist_identity`. Before migration 110 every
     signed-out user wrote `research_reports` under the shared ``GUEST_USER_ID``, and
     ``GET /research/reports`` filters on that column — so one guest's Reports tab listed every

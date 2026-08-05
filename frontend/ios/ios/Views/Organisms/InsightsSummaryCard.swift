@@ -191,8 +191,7 @@ struct InsightsSummaryCard: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .contentShape(Rectangle())
         .onTapGesture { if hasSources { onOpenSources?() } }
     }

@@ -101,7 +101,7 @@ struct WhaleProfileView: View {
                             .foregroundColor(.white)
                             .padding(.horizontal, AppSpacing.lg)
                             .padding(.vertical, AppSpacing.sm)
-                            .background(AppColors.primaryBlue)
+                            .background(AppColors.primaryFill)
                             .cornerRadius(AppCornerRadius.pill)
                     }
                     .buttonStyle(.plain)
@@ -400,8 +400,7 @@ struct WhaleSectorExposureSection: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .sheet(isPresented: $showInfoSheet) {
             SectorExposureInfoSheet()
                 .presentationDetents([.medium])
@@ -715,8 +714,7 @@ struct WhaleCurrentPicksSection: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 
@@ -886,8 +884,7 @@ struct WhaleRecentTradesSection: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .sheet(isPresented: $showInfoSheet) {
             RecentTradesInfoSheet()
                 .presentationDetents([.medium])

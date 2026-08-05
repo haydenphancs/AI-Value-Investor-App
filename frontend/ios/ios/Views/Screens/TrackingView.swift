@@ -647,8 +647,7 @@ struct WhaleTradeCard: View {
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(.plain)
     }
@@ -805,7 +804,7 @@ struct WhaleHeroCard: View {
                             size: 80,
                             category: whale.category
                         )
-                        .shadow(color: Color.black.opacity(0.3), radius: 8, x: 0, y: 4)
+                        .shadow(color: AppColors.shadowKey, radius: 8, x: 0, y: 4)
                         Spacer()
                     }
                     .padding(.trailing, AppSpacing.xl)
@@ -867,14 +866,13 @@ struct WhaleCard: View {
                         .foregroundColor(whale.isFollowing ? AppColors.textSecondary : .white)
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.vertical, AppSpacing.sm)
-                        .background(whale.isFollowing ? AppColors.cardBackgroundLight : AppColors.primaryBlue)
+                        .background(whale.isFollowing ? AppColors.cardBackgroundLight : AppColors.primaryFill)
                         .cornerRadius(AppCornerRadius.pill)
                 }
                 .buttonStyle(.plain)
             }
             .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(.plain)
     }
@@ -977,8 +975,7 @@ struct AddAssetSheet: View {
                                                 .foregroundColor(AppColors.primaryBlue)
                                         }
                                         .padding(AppSpacing.md)
-                                        .background(AppColors.cardBackground)
-                                        .cornerRadius(AppCornerRadius.medium)
+                                        .cardSurface(cornerRadius: AppCornerRadius.medium)
                                     }
                                     .buttonStyle(.plain)
                                 }
@@ -1283,7 +1280,7 @@ struct PortfolioConfigSheet: View {
                             .font(AppTypography.caption)
                             .foregroundColor(.white)
                             .padding(AppSpacing.md)
-                            .background(AppColors.bearish)
+                            .background(AppColors.lossFill)
                             .cornerRadius(AppCornerRadius.medium)
                             .padding(.bottom, AppSpacing.xl)
                     }
@@ -1417,8 +1414,7 @@ private struct PortfolioConfigRowView: View {
             }
         }
         .padding(AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 
     /// Routes the picker through `setInputMode` so the destination field

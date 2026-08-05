@@ -100,8 +100,7 @@ struct Top10OwnerTabSelector: View {
             }
         }
         .padding(AppSpacing.xs)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 
@@ -147,7 +146,7 @@ struct Top10InstitutionRow: View {
         .padding(AppSpacing.md)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 }
@@ -194,7 +193,7 @@ struct Top10InsiderRow: View {
         .padding(AppSpacing.md)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 }
@@ -228,7 +227,7 @@ struct Top10OwnersInfoSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
                         RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                            .fill(AppColors.cardBackground)
+                            .cardFill()
                     )
 
                     // Institutions Section
@@ -324,7 +323,7 @@ struct Top10OwnersInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 
@@ -348,7 +347,7 @@ struct Top10OwnersInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 }

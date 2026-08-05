@@ -83,8 +83,7 @@ struct InsightsDetailView: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Sources
@@ -105,8 +104,7 @@ struct InsightsDetailView: View {
                     }
                 }
             }
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
     }
 

@@ -19,12 +19,12 @@ struct TickerChip: View {
             Text(ticker.symbol)
                 .font(AppTypography.labelSmall)
                 .fontWeight(.medium)
-                .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textSecondary)
+                .foregroundColor(isSelected ? AppColors.textOnAccent : AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                        .fill(isSelected ? AppColors.primaryBlue : AppColors.cardBackgroundLight)
+                        .fill(isSelected ? AppColors.primaryFill : AppColors.cardBackgroundLight)
                 )
         }
         .buttonStyle(PlainButtonStyle())

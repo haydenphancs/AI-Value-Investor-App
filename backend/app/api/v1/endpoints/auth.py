@@ -151,7 +151,10 @@ async def sign_in(
 
         user = auth_response.user
         if not user:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            raise auth_error(
+                ErrorCode.AUTH_CREDENTIALS_INVALID,
+                message="Supabase returned no user for a non-raising sign-in",
+            )
 
         # Unconfirmed address → a DISTINCT error, not a generic 401. Telling the user
         # "invalid credentials" when their password was right and the address merely needs
@@ -204,8 +207,33 @@ async def sign_in(
                 ErrorCode.EMAIL_NOT_CONFIRMED,
                 message="Email address not confirmed",
             )
-        logger.error(f"Sign in failed: {e}", exc_info=True)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        if _is_rejected_credential(e):
+            # A wrong password is a person being human, not the application failing.
+            #
+            # This was `logger.error(..., exc_info=True)`. Sentry's LoggingIntegration turns an
+            # ERROR into an EVENT, so every single typo raised an `AuthApiError: Invalid login
+            # credentials` issue in production — noise that buries real faults, burns quota,
+            # and trains everyone to ignore the alert. INFO, and no stack trace: nothing here
+            # is unexpected. The email is deliberately not logged; the per-email rate limiter
+            # already bounds guessing, and this is a fintech backend.
+            logger.info("Sign-in rejected: credentials did not match")
+            raise auth_error(
+                ErrorCode.AUTH_CREDENTIALS_INVALID,
+                message="sign_in_with_password rejected the credentials",
+            )
+
+        # Anything else is OUR problem — a Supabase outage, a misconfiguration, a network
+        # fault. This block used to launder all of it into "your password is wrong", which
+        # sends the user off to reset a password that was never the issue and hides the
+        # incident behind a 401 nobody investigates. AUTH_UNAVAILABLE is a retryable 503, and
+        # the client is explicitly forbidden from clearing a credential on it.
+        logger.error(
+            "Sign in failed unexpectedly: %s: %s", type(e).__name__, e, exc_info=True
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"sign-in upstream failure: {type(e).__name__}",
+        )
 
 
 @router.post("/register", response_model=SignUpResponse)
@@ -326,7 +354,11 @@ async def refresh_token(
     try:
         payload = decode_token(request.refresh_token)
         if payload.get("type") != "refresh":
-            raise HTTPException(status_code=401, detail="Invalid token type")
+            # The enum comment for AUTH_TOKEN_INVALID names this case explicitly.
+            raise auth_error(
+                ErrorCode.AUTH_TOKEN_INVALID,
+                message=f"token type is {payload.get('type')!r}, expected 'refresh'",
+            )
 
         user_id = payload.get("sub")
         email = payload.get("email")
@@ -351,9 +383,12 @@ async def refresh_token(
                 "Refresh rejected for user=%s: token predates last password change",
                 user_id,
             )
-            raise HTTPException(
-                status_code=401,
-                detail="Your password was changed. Please sign in again.",
+            # AUTH_SESSION_EXPIRED is the code `dependencies.py` already raises for this
+            # exact condition; its stock copy is the same sentence. Reusing it removes the
+            # duplicate contract rather than papering over it.
+            raise auth_error(
+                ErrorCode.AUTH_SESSION_EXPIRED,
+                message="refresh token predates users.password_changed_at",
             )
 
         access_token = create_access_token(data={"sub": user_id, "email": email})
@@ -368,7 +403,10 @@ async def refresh_token(
         raise
     except Exception as e:
         logger.error(f"Token refresh failed: {e}")
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
+        raise auth_error(
+            ErrorCode.AUTH_TOKEN_INVALID,
+            message=f"refresh token could not be decoded: {type(e).__name__}",
+        )
 
 
 @router.post("/logout")
@@ -444,6 +482,23 @@ async def resend_confirmation(
 #
 # Neither path is subject to the email-confirmation gate: Apple and Google supply an
 # already-verified address, which is the whole point of using them.
+
+
+# Supabase raises a generic `AuthApiError` for everything, so there is no distinct exception
+# class to catch — the message is the only signal separating "this person typed the wrong
+# password" from "our identity provider is down". Matched loosely because the SDK's wording has
+# changed before; the fallback (treat it as an outage) is the safe direction to be wrong in.
+_REJECTED_CREDENTIAL_MARKERS = (
+    "invalid login credentials",
+    "invalid credentials",
+    "bad credentials",
+    "invalid password",
+)
+
+
+def _is_rejected_credential(exc: Exception) -> bool:
+    """True when the provider rejected the supplied password, as opposed to failing."""
+    return any(marker in str(exc).lower() for marker in _REJECTED_CREDENTIAL_MARKERS)
 
 
 def _app_user_row_exists(supabase: Client, user_id: str) -> bool:
@@ -540,14 +595,19 @@ async def oauth_sign_in(
             "OAuth sign-in failed for provider=%s: %s: %s",
             request.provider, type(e).__name__, e,
         )
-        raise HTTPException(
-            status_code=401, detail="Could not verify that sign-in. Please try again."
+        # Copy stays deliberately vague — it must not confirm whether an account exists —
+        # but the CODE is now machine-readable, and no longer collapses into the client's
+        # "Email or password is incorrect" fallback for a flow with no password in it.
+        raise auth_error(
+            ErrorCode.AUTH_PROVIDER_FAILED,
+            message=f"sign_in_with_id_token failed for provider={request.provider}",
         )
 
     user = getattr(result, "user", None)
     if not user or not getattr(user, "id", None):
-        raise HTTPException(
-            status_code=401, detail="Could not verify that sign-in. Please try again."
+        raise auth_error(
+            ErrorCode.AUTH_PROVIDER_FAILED,
+            message=f"provider={request.provider} verified but returned no user id",
         )
 
     user_id = str(user.id)
@@ -598,8 +658,9 @@ async def session_exchange(
     payload = verify_supabase_token(request.supabase_access_token)
     if not payload or not payload.get("sub"):
         logger.warning("session-exchange rejected: Supabase token failed verification")
-        raise HTTPException(
-            status_code=401, detail="Could not verify that sign-in. Please try again."
+        raise auth_error(
+            ErrorCode.AUTH_PROVIDER_FAILED,
+            message="supabase access token failed signature verification",
         )
 
     user_id = str(payload["sub"])
@@ -837,7 +898,16 @@ async def change_password(
         })
     except Exception:
         logger.info("change-password: current-password check failed for user=%s", user_id)
-        raise HTTPException(status_code=401, detail="Your current password is incorrect.")
+        # The caller IS authenticated and their session is fine — only the field is wrong.
+        # As a bare-string 401 this reached iOS as `.unauthorized`, which shows "Your session
+        # has expired", AND set `triggersTokenRefresh`; since `.changePassword` is excluded
+        # from `isAuthEndpoint`, the client refreshed and REPLAYED the request, burning two of
+        # the five per-user attempts on a single typo. A non-session code stops both.
+        raise auth_error(
+            ErrorCode.AUTH_CREDENTIALS_INVALID,
+            message="current-password re-authentication failed",
+            user_message="Your current password is incorrect.",
+        )
 
     try:
         _auth_of(auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})

@@ -28,7 +28,7 @@ struct RecentActivitiesSortSelector: View {
                             Group {
                                 if selectedSort == option {
                                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                        .fill(AppColors.cardBackground)
+                                        .cardFill()
                                 }
                             }
                         )

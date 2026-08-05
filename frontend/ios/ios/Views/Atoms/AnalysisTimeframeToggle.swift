@@ -32,8 +32,7 @@ struct AnalysisTimeframeToggle<T: RawRepresentable & CaseIterable & Equatable>: 
                 }
             }
         }
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.small)
+        .cardSurface(cornerRadius: AppCornerRadius.small)
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.small)
                 .stroke(AppColors.cardBackgroundLight, lineWidth: 1)

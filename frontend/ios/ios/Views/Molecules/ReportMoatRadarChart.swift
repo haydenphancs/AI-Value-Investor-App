@@ -9,6 +9,9 @@
 import SwiftUI
 
 struct ReportMoatRadarChart: View {
+    /// Only read to bust the `.drawingGroup()` raster cache — see below.
+    @Environment(\.colorScheme) private var colorScheme
+
     let dimensions: [MoatDimension]
 
     private let chartSize: CGFloat = 200
@@ -49,6 +52,7 @@ struct ReportMoatRadarChart: View {
         }
         .frame(width: frameSize, height: frameSize)
         .drawingGroup()
+        .id(colorScheme)
     }
 
     // MARK: - Grid

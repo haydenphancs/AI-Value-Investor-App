@@ -30,8 +30,7 @@ struct KeyStatisticsCard: View {
         }
         .padding(AppSpacing.lg)
         .frame(width: 160)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     private func valueColor(for statistic: KeyStatistic) -> Color {

@@ -152,7 +152,7 @@ struct ThemeDetailView: View {
         }
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 

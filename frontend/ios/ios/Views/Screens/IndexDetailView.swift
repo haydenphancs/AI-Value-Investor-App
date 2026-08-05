@@ -306,7 +306,7 @@ struct IndexDetailView: View {
                     )
                 } else if !viewModel.isTechnicalLoaded {
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(AppColors.cardBackground)
+                        .cardFill()
                         .frame(height: 180)
                         .shimmer()
                 }

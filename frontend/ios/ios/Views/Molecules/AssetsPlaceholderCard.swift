@@ -78,8 +78,7 @@ struct AssetsPlaceholderCard: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.xl)
         .padding(.horizontal, AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .padding(.horizontal, AppSpacing.lg)
     }
 }

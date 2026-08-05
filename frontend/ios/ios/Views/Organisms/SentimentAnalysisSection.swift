@@ -41,8 +41,7 @@ struct SentimentAnalysisSection: View {
             AnalysisDisclaimerText()
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .sheet(isPresented: $showInfoSheet) {
             SentimentInfoSheet()
         }

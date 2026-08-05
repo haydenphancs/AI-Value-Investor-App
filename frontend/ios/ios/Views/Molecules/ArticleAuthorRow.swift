@@ -58,7 +58,7 @@ struct ArticleAuthorRow: View {
                         .padding(.vertical, AppSpacing.sm)
                         .background(
                             Capsule()
-                                .fill(isFollowing ? AppColors.cardBackgroundLight : AppColors.primaryBlue)
+                                .fill(isFollowing ? AppColors.cardBackgroundLight : AppColors.primaryFill)
                         )
                 }
                 .buttonStyle(PlainButtonStyle())

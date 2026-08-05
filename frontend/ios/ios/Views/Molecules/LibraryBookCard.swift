@@ -151,8 +151,7 @@ struct LibraryBookCard: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.extraLarge)
+        .cardSurface(cornerRadius: AppCornerRadius.extraLarge)
     }
 
     private var bookCoverGradient: LinearGradient {

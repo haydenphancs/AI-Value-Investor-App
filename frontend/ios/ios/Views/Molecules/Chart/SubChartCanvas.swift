@@ -238,19 +238,19 @@ struct RSIRenderer: View {
 
             // Overbought/oversold zones
             let zoneRect = CGRect(x: 0, y: y70, width: canvasSize.width, height: y30 - y70)
-            context.fill(Path(zoneRect), with: .color(Color.yellow.opacity(0.05)))
+            context.fill(Path(zoneRect), with: .color(AppColors.cautionGraphic.opacity(0.08)))
 
             // 30 line
             var line30 = Path()
             line30.move(to: CGPoint(x: 0, y: y30))
             line30.addLine(to: CGPoint(x: canvasSize.width, y: y30))
-            context.stroke(line30, with: .color(Color.gray.opacity(0.3)), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+            context.stroke(line30, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
 
             // 70 line
             var line70 = Path()
             line70.move(to: CGPoint(x: 0, y: y70))
             line70.addLine(to: CGPoint(x: canvasSize.width, y: y70))
-            context.stroke(line70, with: .color(Color.gray.opacity(0.3)), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+            context.stroke(line70, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
 
             // RSI line
             var rsiPath = Path()
@@ -266,7 +266,7 @@ struct RSIRenderer: View {
                     rsiPath.addLine(to: CGPoint(x: x, y: y))
                 }
             }
-            context.stroke(rsiPath, with: .color(Color.yellow), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            context.stroke(rsiPath, with: .color(AppColors.cautionGraphic), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
         }
     }
 }
@@ -306,7 +306,7 @@ struct MACDRenderer: View {
             var zeroLine = Path()
             zeroLine.move(to: CGPoint(x: 0, y: midY))
             zeroLine.addLine(to: CGPoint(x: canvasSize.width, y: midY))
-            context.stroke(zeroLine, with: .color(Color.gray.opacity(0.3)), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+            context.stroke(zeroLine, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
 
             // Histogram bars
             let barWidth = max(1, canvasSize.width / CGFloat(count) * 0.5)
@@ -378,12 +378,12 @@ struct StochasticRenderer: View {
             var line20 = Path()
             line20.move(to: CGPoint(x: 0, y: y20))
             line20.addLine(to: CGPoint(x: canvasSize.width, y: y20))
-            context.stroke(line20, with: .color(Color.gray.opacity(0.3)), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+            context.stroke(line20, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
 
             var line80 = Path()
             line80.move(to: CGPoint(x: 0, y: y80))
             line80.addLine(to: CGPoint(x: canvasSize.width, y: y80))
-            context.stroke(line80, with: .color(Color.gray.opacity(0.3)), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+            context.stroke(line80, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
 
             // %K line (blue)
             drawStochLine(context: context, values: visibleK, count: count, canvasSize: canvasSize, color: .blue, lineWidth: 1.5)

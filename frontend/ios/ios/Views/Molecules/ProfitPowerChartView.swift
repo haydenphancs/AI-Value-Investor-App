@@ -370,8 +370,8 @@ struct ProfitPowerTooltipView: View {
         .padding(.vertical, AppSpacing.sm)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
-                .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+                .cardFill()
+                .shadow(color: AppColors.shadowAmbient, radius: 8, x: 0, y: 4)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)

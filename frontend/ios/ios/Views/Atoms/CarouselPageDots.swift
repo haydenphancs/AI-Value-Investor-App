@@ -32,7 +32,7 @@ struct CarouselPageDots: View {
 
     private func dot(isActive: Bool) -> some View {
         Capsule()
-            .fill(isActive ? AppColors.primaryBlue : Color(hex: "39414D"))
+            .fill(isActive ? AppColors.primaryBlue : AppColors.borderStrong)
             .frame(width: isActive ? 20 : 6, height: 6)
     }
 }

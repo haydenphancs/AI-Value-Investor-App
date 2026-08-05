@@ -126,10 +126,10 @@ struct NewsDetailView: View {
                 Text("Read full story")
                     .font(AppTypography.bodyEmphasis)
             }
-            .foregroundColor(AppColors.textPrimary)
+            .foregroundColor(AppColors.textOnAccent)
             .frame(maxWidth: .infinity)
             .padding(.vertical, AppSpacing.lg)
-            .background(AppColors.primaryBlue)
+            .background(AppColors.primaryFill)
             .cornerRadius(AppCornerRadius.large)
         }
         .buttonStyle(PlainButtonStyle())

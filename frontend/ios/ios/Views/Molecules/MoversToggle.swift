@@ -43,7 +43,7 @@ struct MoversToggle: View {
                 .foregroundColor(isActive ? active : AppColors.textMuted)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(isActive ? Color(hex: "2B3344") : Color.clear)
+                .background(isActive ? AppColors.toggleSelectedBackground : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)

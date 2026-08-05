@@ -54,7 +54,7 @@ struct TintedSparkline: View {
                             path.addLine(to: CGPoint(x: w, y: h / 2))
                         }
                         .stroke(
-                            Color.white.opacity(0.18),
+                            AppColors.chartGridline,
                             style: StrokeStyle(lineWidth: 1, dash: [4, 3])
                         )
                     }

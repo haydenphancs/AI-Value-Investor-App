@@ -63,10 +63,10 @@ struct LessonCompletionCard: View {
                 }) {
                     Text(ctaButtonTitle)
                         .font(AppTypography.headingSmall)
-                        .foregroundColor(AppColors.textPrimary)
+                        .foregroundColor(AppColors.textOnAccent)
                         .frame(maxWidth: .infinity)
                         .frame(height: 52)
-                        .background(AppColors.primaryBlue)
+                        .background(AppColors.primaryFill)
                         .cornerRadius(26)
                 }
                 .padding(.top, AppSpacing.md)
@@ -84,7 +84,7 @@ struct LessonCompletionCard: View {
             .padding(AppSpacing.xxl)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
             )
             .padding(.horizontal, AppSpacing.xl)
             .opacity(cardOpacity)
@@ -109,13 +109,13 @@ struct LessonCompletionCard: View {
 
             // Filled circle
             Circle()
-                .fill(AppColors.bullish)
+                .fill(AppColors.gainFill)
                 .frame(width: 70, height: 70)
 
             // Checkmark icon
             Image(systemName: "checkmark")
                 .font(AppTypography.iconJumbo).fontWeight(.bold)
-                .foregroundColor(AppColors.textPrimary)
+                .foregroundColor(AppColors.textOnAccent)
         }
     }
 

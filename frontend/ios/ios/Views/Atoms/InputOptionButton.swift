@@ -27,7 +27,7 @@ struct InputOptionButton: View {
             .padding(.vertical, AppSpacing.sm)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.pill)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
             )
             .overlay(
                 RoundedRectangle(cornerRadius: AppCornerRadius.pill)

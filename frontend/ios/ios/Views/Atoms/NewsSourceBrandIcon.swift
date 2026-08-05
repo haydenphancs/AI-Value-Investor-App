@@ -13,7 +13,7 @@ struct NewsSourceBrandIcon: View {
     var cornerRadius: CGFloat = 8
 
     private var brandColor: Color {
-        Color(hex: source.brandColor)
+        Color(themedHex: source.brandColor, role: .graphic, fallback: AppColors.primaryFill)
     }
 
     var body: some View {
@@ -21,18 +21,14 @@ struct NewsSourceBrandIcon: View {
             RoundedRectangle(cornerRadius: cornerRadius)
                 .fill(brandColor)
 
-            // Use custom icon if available, otherwise system icon
-            if let iconName = source.iconName {
-                Image(iconName)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: size * 0.5, height: size * 0.5)
-                    .foregroundColor(.white)
-            } else {
-                Image(systemName: "newspaper.fill")
-                    .font(.system(size: size * 0.45, weight: .semibold))
-                    .foregroundColor(.white)
-            }
+            // Always the SF Symbol. There was a `source.iconName` branch that
+            // did `Image(iconName)`, but NO such assets exist in the catalog —
+            // it rendered an empty image and the fallback below never ran, so
+            // any source with an iconName showed a blank chip. Restore the
+            // branch only alongside the actual assets.
+            Image(systemName: "newspaper.fill")
+                .font(.system(size: size * 0.45, weight: .semibold))
+                .foregroundColor(AppColors.textOnAccent)
         }
         .frame(width: size, height: size)
     }

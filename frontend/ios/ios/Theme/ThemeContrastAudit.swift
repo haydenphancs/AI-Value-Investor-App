@@ -158,6 +158,9 @@ enum ThemeContrastAudit {
             }
         }
 
+        failures.append(contentsOf: auditManifestCompleteness())
+        failures.append(contentsOf: auditHexParsing())
+
         if failures.isEmpty {
             print("✅ ThemeContrastAudit: \(AppColors.auditManifest.count) tokens pass WCAG in light + dark")
         } else {
@@ -167,6 +170,87 @@ enum ThemeContrastAudit {
                 assertionFailure("Theme contrast regression:\n"
                                  + failures.map(\.description).joined(separator: "\n"))
             }
+        }
+
+        return failures
+    }
+
+    // MARK: - Manifest completeness
+
+    /// Every colour token declared on `AppColors` must appear in `auditManifest`.
+    ///
+    /// Without this, adding a token is silently adding an UNAUDITED token — the
+    /// contrast guard would keep printing ✅ while the new value fails. Mirror
+    /// walks the type's stored properties, so it needs no maintenance as tokens
+    /// come and go.
+    ///
+    /// Computed aliases (`bullish`, `divider`, `tabBarSelected`, …) are `var`s
+    /// that forward to a canonical token, so they are intentionally exempt —
+    /// Mirror only sees stored properties, which is exactly the set that needs
+    /// auditing.
+    private static func auditManifestCompleteness() -> [Failure] {
+        let audited = Set(AppColors.auditManifest.map(\.name))
+        let declared = Mirror(reflecting: AppColors.tokenInventory)
+            .children
+            .compactMap { $0.label }
+
+        return declared
+            .filter { !audited.contains($0) }
+            .map { name in
+                Failure(style: "MANIFEST",
+                        token: name,
+                        surface: "auditManifest",
+                        measured: 0,
+                        required: 1)
+            }
+    }
+
+    // MARK: - Hex parsing
+
+    /// `UIColor(hexString:)` has a `default:` arm that yields opaque BLACK for
+    /// anything it cannot parse. A typo'd 5-character hex therefore becomes a
+    /// black token with no diagnostic anywhere — it just looks like someone
+    /// chose black. These cases pin the contract so that silent-black path
+    /// cannot widen, and prove the strict `init?(validatingHexString:)` used by
+    /// the server-colour clamp actually rejects what it claims to.
+    private static func auditHexParsing() -> [Failure] {
+        var failures: [Failure] = []
+
+        func fail(_ what: String) {
+            failures.append(Failure(style: "HEX", token: what,
+                                    surface: "parser", measured: 0, required: 1))
+        }
+
+        // Valid forms round-trip.
+        if UIColor(hexString: "FF0000").wcagContrast(against: .black) < 5 { fail("6-digit parse") }
+        if UIColor(hexString: "#FFFFFF").wcagContrast(against: .black) < 20 { fail("hash-prefixed parse") }
+        if UIColor(hexString: "FFF").wcagContrast(against: .black) < 20 { fail("3-digit shorthand") }
+
+        // The strict parser must REJECT what the lenient one silently blackens.
+        for bad in ["", "GGGGGG", "12345", "1234567", "nope"] {
+            if UIColor(validatingHexString: bad) != nil { fail("accepted invalid '\(bad)'") }
+        }
+        // …and must accept every form the lenient one does.
+        for good in ["FFF", "FF0000", "#00FF00", "80FFFFFF"] {
+            if UIColor(validatingHexString: good) == nil { fail("rejected valid '\(good)'") }
+        }
+
+        // The clamp must actually reach its floor, in both directions.
+        let lightCard = UIColor(hexString: "FFFFFF")
+        let darkCard = UIColor(hexString: "1E2330")
+        for hex in ["22D3EE", "FBBF24", "34D399", "C084FC", "FFFF00"] {
+            let base = UIColor(hexString: hex)
+            let onLight = base.clamped(toContrast: 3.0, against: lightCard, darken: true)
+            let onDark = base.clamped(toContrast: 3.0, against: darkCard, darken: false)
+            if onLight.wcagContrast(against: lightCard) < 3.0 { fail("clamp light #\(hex)") }
+            if onDark.wcagContrast(against: darkCard) < 3.0 { fail("clamp dark #\(hex)") }
+
+            // Hue must survive the clamp — that is the whole point of clamping
+            // rather than snapping to a token.
+            var h0: CGFloat = 0, h1: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            base.getHue(&h0, saturation: &s, brightness: &b, alpha: &a)
+            onLight.getHue(&h1, saturation: &s, brightness: &b, alpha: &a)
+            if s > 0.05, abs(h0 - h1) > 0.02 { fail("clamp shifted hue #\(hex)") }
         }
 
         return failures

@@ -159,7 +159,7 @@ struct ReportKeyManagementTable: View {
             }
 
             Divider()
-                .background(AppColors.textMuted.opacity(0.15))
+                .overlay(AppColors.textMuted.opacity(0.15))
         }
     }
 }

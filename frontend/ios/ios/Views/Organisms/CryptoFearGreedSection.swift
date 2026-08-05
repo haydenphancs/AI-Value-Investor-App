@@ -167,19 +167,19 @@ private struct FearGreedInfoSheet: View {
                 scaleRow(
                     range: "25 - 45",
                     label: "Fear",
-                    color: Color(hex: "E57373"),
+                    color: AppColors.loss,
                     description: "Market participants are cautious. Selling pressure is elevated but not extreme."
                 )
                 scaleRow(
                     range: "45 - 55",
                     label: "Neutral",
-                    color: Color(hex: "6B7280"),
+                    color: AppColors.growthSectorGray,
                     description: "Balanced sentiment. No strong directional bias from the market."
                 )
                 scaleRow(
                     range: "55 - 75",
                     label: "Greed",
-                    color: Color(hex: "81C784"),
+                    color: AppColors.gain,
                     description: "Market optimism is rising. Prices may be getting stretched above fundamental value."
                 )
                 scaleRow(

@@ -22,12 +22,12 @@ struct UserAvatar: View {
     private var backgroundColor: Color {
         // Generate consistent color based on name
         let colors: [Color] = [
-            Color(hex: "3B82F6"),
-            Color(hex: "22C55E"),
-            Color(hex: "F97316"),
-            Color(hex: "A855F7"),
-            Color(hex: "06B6D4"),
-            Color(hex: "EF4444")
+            AppColors.primaryBlue,
+            AppColors.gain,
+            AppColors.alertOrange,
+            AppColors.alertPurple,
+            AppColors.accentCyan,
+            AppColors.loss
         ]
         let index = abs(name.hashValue) % colors.count
         return colors[index]

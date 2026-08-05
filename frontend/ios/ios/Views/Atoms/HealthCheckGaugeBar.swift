@@ -31,7 +31,7 @@ struct HealthCheckGaugeBar: View {
             // Lower is better: green -> yellow -> red
             return [
                 AppColors.bullish,
-                Color(hex: "84CC16"),  // Lime
+                AppColors.cautionGraphic,  // Lime
                 AppColors.neutral,
                 AppColors.alertOrange,
                 AppColors.bearish
@@ -40,7 +40,7 @@ struct HealthCheckGaugeBar: View {
             // Lower is better (value): green -> yellow -> red
             return [
                 AppColors.bullish,
-                Color(hex: "84CC16"),
+                AppColors.cautionGraphic,
                 AppColors.neutral,
                 AppColors.alertOrange,
                 AppColors.bearish
@@ -51,7 +51,7 @@ struct HealthCheckGaugeBar: View {
                 AppColors.bearish,
                 AppColors.alertOrange,
                 AppColors.neutral,
-                Color(hex: "84CC16"),
+                AppColors.cautionGraphic,
                 AppColors.bullish
             ]
         case .currentRatio:
@@ -60,7 +60,7 @@ struct HealthCheckGaugeBar: View {
                 AppColors.bearish,
                 AppColors.alertOrange,
                 AppColors.neutral,
-                Color(hex: "84CC16"),
+                AppColors.cautionGraphic,
                 AppColors.bullish
             ]
         case .altmanZScore:
@@ -69,7 +69,7 @@ struct HealthCheckGaugeBar: View {
                 AppColors.bearish,
                 AppColors.alertOrange,
                 AppColors.neutral,
-                Color(hex: "84CC16"),
+                AppColors.cautionGraphic,
                 AppColors.bullish
             ]
         case .interestCoverage, .quickRatio:
@@ -78,7 +78,7 @@ struct HealthCheckGaugeBar: View {
                 AppColors.bearish,
                 AppColors.alertOrange,
                 AppColors.neutral,
-                Color(hex: "84CC16"),
+                AppColors.cautionGraphic,
                 AppColors.bullish
             ]
         }

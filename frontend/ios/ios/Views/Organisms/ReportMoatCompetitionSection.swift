@@ -17,7 +17,7 @@ struct ReportMoatCompetitionSection: View {
             marketDynamicsSection
 
             Divider()
-                .background(AppColors.cardBackgroundLight)
+                .overlay(AppColors.cardBackgroundLight)
                 .padding(.vertical, AppSpacing.sm)
 
             // Moat Rating + Legend

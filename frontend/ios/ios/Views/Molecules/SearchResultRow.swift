@@ -67,12 +67,15 @@ struct SearchResultRow: View {
             // Stock ticker badge
             ZStack {
                 RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                    .fill(tickerBackgroundColor(for: ticker))
+                    // Hairline so a brand colour that happens to match the card
+                    // still reads as a chip — Apple's #1E1E1E is 1.06:1 against
+                    // #1E2330 and was otherwise invisible in dark mode.
+                    .cardFill(tickerBackgroundColor(for: ticker))
                     .frame(width: 44, height: 44)
 
                 Text(ticker)
                     .font(AppTypography.captionEmphasis)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
             }
         }
     }
@@ -90,6 +93,11 @@ struct SearchResultRow: View {
         }
     }
 
+    /// Real brand colours, kept verbatim — these are trade dress, so they are
+    /// deliberately NOT routed through the palette. They all carry white text
+    /// and clear 4.5:1 for it. What they cannot do is separate from the card:
+    /// Apple's #1E1E1E is 1.06:1 against #1E2330, so the chip disappeared in
+    /// dark mode. The caller bounds them with a hairline instead of retinting.
     private func tickerBackgroundColor(for ticker: String) -> Color {
         switch ticker {
         case "AAPL":
@@ -115,7 +123,7 @@ struct SearchResultRow: View {
         ForEach(SearchResultItem.sampleData) { item in
             SearchResultRow(item: item)
             Divider()
-                .background(AppColors.cardBackgroundLight)
+                .overlay(AppColors.cardBackgroundLight)
         }
     }
     .padding(.horizontal, AppSpacing.lg)

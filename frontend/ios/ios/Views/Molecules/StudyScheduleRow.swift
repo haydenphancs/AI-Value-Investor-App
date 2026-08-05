@@ -80,7 +80,7 @@ struct StudyScheduleRow: View {
         )
 
         Divider()
-            .background(AppColors.cardBackgroundLight)
+            .overlay(AppColors.cardBackgroundLight)
 
         StudyScheduleRow(
             title: "Morning Session",
@@ -89,7 +89,7 @@ struct StudyScheduleRow: View {
         )
 
         Divider()
-            .background(AppColors.cardBackgroundLight)
+            .overlay(AppColors.cardBackgroundLight)
 
         StudyScheduleRow(
             title: "Review Time",

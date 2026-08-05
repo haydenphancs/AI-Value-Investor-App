@@ -175,9 +175,14 @@ struct ValuationTierBar: View {
                         }
                     }
 
+                    // Card-coloured with a ring, not white: an inactive tier is
+                    // a 0.15-alpha wash, so a white marker sat at ~1.28:1 on a
+                    // light card. This reads as a knob in both modes whatever
+                    // tier it lands on.
                     Circle()
-                        .fill(Color.white)
+                        .fill(AppColors.cardBackground)
                         .frame(width: 14, height: 14)
+                        .overlay(Circle().strokeBorder(AppColors.borderStrong, lineWidth: 1.5))
                         .shadow(color: AppColors.shadowKey, radius: 2, x: 0, y: 1)
                         .offset(x: max(0, min(width - 14, width * gaugePosition - 7)))
                 }

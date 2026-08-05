@@ -39,9 +39,9 @@ struct ArticleStatisticsGrid: View {
                         .strokeBorder(
                             LinearGradient(
                                 colors: [
-                                    Color(hex: "3B82F6").opacity(0.3),
-                                    Color(hex: "8B5CF6").opacity(0.3),
-                                    Color(hex: "06B6D4").opacity(0.3)
+                                    AppColors.primaryBlue.opacity(0.3),
+                                    AppColors.alertPurple.opacity(0.3),
+                                    AppColors.accentCyan.opacity(0.3)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing

@@ -97,7 +97,7 @@ struct PlayAudioButton: View {
         switch style {
         case .primary:
             LinearGradient(
-                colors: [AppColors.primaryBlue, Color(hex: "6366F1")],
+                colors: [AppColors.primaryBlue, AppColors.aiRampStart],
                 startPoint: .leading,
                 endPoint: .trailing
             )

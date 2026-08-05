@@ -100,7 +100,7 @@ struct InsightsDetailView: View {
                 ForEach(summary.sources) { source in
                     sourceRow(source)
                     if source.id != summary.sources.last?.id {
-                        Divider().background(AppColors.background)
+                        Divider().overlay(AppColors.divider)
                     }
                 }
             }

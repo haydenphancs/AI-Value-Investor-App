@@ -66,10 +66,7 @@ struct DisclaimerAcknowledgementView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: AppSpacing.xl) {
                         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                            Image("CaydexLogo")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 56, height: 56)
+                            CaydexLogoMark(size: 56)
 
                             Text("Before you start")
                                 .font(AppTypography.titleLarge)

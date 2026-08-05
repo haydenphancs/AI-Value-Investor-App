@@ -812,10 +812,10 @@ struct ReportWallStreetConsensus {
         // on the right, Hold in the middle. Colors travel with each level, so this
         // reorders both the bar and the legend together.
         [
-            AnalystRatingDistribution(label: "Strong Sell", count: analystStrongSell, color: Color(hex: "B91C1C")),
+            AnalystRatingDistribution(label: "Strong Sell", count: analystStrongSell, color: AppColors.loss),
             AnalystRatingDistribution(label: "Sell", count: analystSell, color: AppColors.bearish),
             AnalystRatingDistribution(label: "Hold", count: analystHold, color: AppColors.neutral),
-            AnalystRatingDistribution(label: "Buy", count: analystBuy, color: Color(hex: "4ADE80")),
+            AnalystRatingDistribution(label: "Buy", count: analystBuy, color: AppColors.gain),
             AnalystRatingDistribution(label: "Strong Buy", count: analystStrongBuy, color: AppColors.bullish),
         ]
     }
@@ -1284,7 +1284,7 @@ enum ThreatLevel: String, CaseIterable {
     var color: Color {
         switch self {
         case .low: return AppColors.bullish
-        case .elevated: return Color(hex: "84CC16")     // lime
+        case .elevated: return AppColors.caution     // lime
         case .high: return AppColors.neutral
         case .severe: return AppColors.alertOrange
         case .critical: return AppColors.bearish

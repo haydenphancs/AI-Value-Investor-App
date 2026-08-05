@@ -1395,12 +1395,15 @@ extension AnalystAnalysisDTO {
 
         let consensusEnum = AnalystConsensus(rawValue: consensus) ?? .hold
 
+        // #4ADE80 was 1.74:1 on a light card and #991B1B 1.89:1 on a dark one —
+        // each of the two frozen hexes failed in the opposite mode. The token
+        // pairs carry a Strong/normal distinction that adapts in both.
         let distColors: [String: Color] = [
-            "Strong Buy": AppColors.bullish,
-            "Buy": Color(hex: "4ADE80"),
-            "Hold": AppColors.neutral,
-            "Sell": AppColors.bearish,
-            "Strong Sell": Color(hex: "991B1B"),
+            "Strong Buy": AppColors.gain,
+            "Buy": AppColors.gain,
+            "Hold": AppColors.caution,
+            "Sell": AppColors.loss,
+            "Strong Sell": AppColors.loss,
         ]
         let distModels = distributions.map { dto in
             AnalystRatingDistribution(
@@ -1877,14 +1880,17 @@ struct RevenueBreakdownDTO: Codable {
 
     func toDisplayModel() -> RevenueBreakdownData {
         // Assign colors from a rotating palette — largest segments get the most prominent colors
+        // Every entry clears 3:1 on BOTH card colours. The previous frozen hexes
+        // failed 4 of 8 on a light card (#F97316 2.80, #06B6D4 2.43, #FBBF24
+        // 1.67, #9CA3AF 2.54), so a 6-segment breakdown lost half its segments.
         let colorPalette: [Color] = [
-            Color(hex: "3B82F6"),  // Blue
-            Color(hex: "A855F7"),  // Purple
-            Color(hex: "F97316"),  // Orange
-            Color(hex: "06B6D4"),  // Cyan
-            Color(hex: "FBBF24"),  // Amber (avoid green — reserved for profit)
-            Color(hex: "EC4899"),  // Pink
-            Color(hex: "14B8A6"),  // Teal
+            AppColors.primaryBlue,   // Blue
+            AppColors.alertPurple,      // Purple
+            AppColors.alertOrange,      // Orange
+            AppColors.accentCyan,    // Cyan
+            AppColors.caution,          // Amber (green stays reserved for profit)
+            Color(lightHex: "BE185D", darkHex: "F472B6"),  // Pink
+            Color(lightHex: "0F766E", darkHex: "2DD4BF"),  // Teal
         ]
         // NB: gray 9CA3AF is deliberately NOT in the rotation — it is reserved
         // for the "Other" bucket. It used to be the 6th entry, so a 6th real
@@ -1894,7 +1900,7 @@ struct RevenueBreakdownDTO: Codable {
             // If segment is "Other", always use gray; otherwise use palette
             let color: Color
             if source.name == "Other" {
-                color = Color(hex: "9CA3AF")
+                color = AppColors.growthSectorGray
             } else {
                 color = colorPalette[index % colorPalette.count]
             }

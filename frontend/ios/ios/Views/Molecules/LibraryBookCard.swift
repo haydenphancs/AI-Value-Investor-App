@@ -44,7 +44,7 @@ struct LibraryBookCard: View {
                     if isMastered {
                         ZStack {
                             Circle()
-                                .fill(Color(hex: "14A349"))
+                                .fill(AppColors.gain)
                                 .frame(width: 24, height: 24)
                                 
 

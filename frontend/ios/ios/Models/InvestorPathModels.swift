@@ -44,7 +44,7 @@ enum LessonCategory {
     }
 
     var badgeColor: Color {
-        return Color(hex: "F59E0B")
+        return AppColors.caution
     }
 }
 

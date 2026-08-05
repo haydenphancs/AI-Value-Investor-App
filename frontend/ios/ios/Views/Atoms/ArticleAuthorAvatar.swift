@@ -34,8 +34,8 @@ struct ArticleAuthorAvatar: View {
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color(hex: "3B82F6"),
-                                Color(hex: "8B5CF6")
+                                AppColors.primaryBlue,
+                                AppColors.alertPurple
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing

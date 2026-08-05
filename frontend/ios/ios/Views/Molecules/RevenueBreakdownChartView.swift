@@ -279,17 +279,17 @@ struct RevenueBreakdownChartView: View {
             VStack(spacing: 0) {
                 // Cost of Sales (starts at top, where revenue ends)
                 Rectangle()
-                    .fill(Color(hex: "EF4444"))
+                    .fill(AppColors.lossGraphic)
                     .frame(width: barWidth, height: costOfSalesHeight)
 
                 // Operating Expense
                 Rectangle()
-                    .fill(Color(hex: "F87171"))
+                    .fill(AppColors.alertOrange)
                     .frame(width: barWidth, height: opExpenseHeight)
 
                 // Tax
                 Rectangle()
-                    .fill(Color(hex: "FCA5A5"))
+                    .fill(AppColors.caution)
                     .frame(width: barWidth, height: taxHeight)
             }
             .clipShape(
@@ -348,7 +348,7 @@ struct RevenueBreakdownChartView: View {
 
                     VStack(spacing: 2) {
                         Rectangle()
-                            .fill(Color(hex: "8B0000"))
+                            .fill(AppColors.loss)
                             .frame(width: barWidth, height: netProfitHeight)
                             .clipShape(
                                 UnevenRoundedRectangle(
@@ -407,7 +407,7 @@ struct RevenueBreakdownChartView: View {
                     .cornerRadius(AppCornerRadius.large)
 
                 Divider()
-                    .background(AppColors.textMuted)
+                    .overlay(AppColors.textMuted)
 
                 Text("Loss-Making Company (Rivian)")
                     .foregroundColor(.white)

@@ -763,10 +763,10 @@ struct AnalystRatingDistribution: Identifiable {
 extension AnalystRatingDistribution {
     static let sampleData: [AnalystRatingDistribution] = [
         AnalystRatingDistribution(label: "Strong Buy", count: 18, color: AppColors.bullish),
-        AnalystRatingDistribution(label: "Buy", count: 14, color: Color(hex: "4ADE80")),
+        AnalystRatingDistribution(label: "Buy", count: 14, color: AppColors.gain),
         AnalystRatingDistribution(label: "Hold", count: 6, color: AppColors.neutral),
         AnalystRatingDistribution(label: "Sell", count: 2, color: AppColors.bearish),
-        AnalystRatingDistribution(label: "Strong Sell", count: 0, color: Color(hex: "991B1B"))
+        AnalystRatingDistribution(label: "Strong Sell", count: 0, color: AppColors.loss)
     ]
 }
 
@@ -1144,7 +1144,7 @@ enum MarketMoodLevel: String {
         case .bearish:
             return AppColors.bearish  // 0-30: Red (negative sentiment)
         case .neutral:
-            return Color(hex: "6B7280")  // 31-70: Grey zone
+            return AppColors.growthSectorGray  // 31-70: Grey zone
         case .bullish:
             return AppColors.bullish  // 71-100: Green (positive sentiment)
         }
@@ -1286,13 +1286,13 @@ enum TechnicalSignal: String, CaseIterable, Codable {
     var color: Color {
         switch self {
         case .strongSell:
-            return Color(hex: "991B1B")  // Dark red
+            return AppColors.loss  // Dark red
         case .sell:
             return AppColors.bearish     // Red
         case .hold:
-            return Color(hex: "F59E0B")  // Yellow
+            return AppColors.caution  // Yellow
         case .buy:
-            return Color(hex: "4ADE80")  // Light green
+            return AppColors.gain  // Light green
         case .strongBuy:
             return AppColors.bullish     // Green
         }

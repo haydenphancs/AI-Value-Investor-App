@@ -32,7 +32,7 @@ struct MovingAveragesSection: View {
 
                     if indicator.id != indicators.last?.id {
                         Divider()
-                            .background(AppColors.cardBackgroundLight)
+                            .overlay(AppColors.cardBackgroundLight)
                     }
                 }
             }
@@ -65,7 +65,7 @@ struct OscillatorsSection: View {
 
                     if indicator.id != indicators.last?.id {
                         Divider()
-                            .background(AppColors.cardBackgroundLight)
+                            .overlay(AppColors.cardBackgroundLight)
                     }
                 }
             }
@@ -89,7 +89,7 @@ struct PivotPointsSection: View {
 
                     if level.id != pivotData.levels.last?.id {
                         Divider()
-                            .background(AppColors.cardBackgroundLight)
+                            .overlay(AppColors.cardBackgroundLight)
                     }
                 }
             }
@@ -122,7 +122,7 @@ struct VolumeAnalysisSection: View {
                 }
 
                 Divider()
-                    .background(AppColors.cardBackgroundLight)
+                    .overlay(AppColors.cardBackgroundLight)
 
                 // Volume metrics
                 VolumeMetricRow(
@@ -134,7 +134,7 @@ struct VolumeAnalysisSection: View {
                 )
 
                 Divider()
-                    .background(AppColors.cardBackgroundLight)
+                    .overlay(AppColors.cardBackgroundLight)
 
                 VolumeMetricRow(
                     label: "OBV",
@@ -143,7 +143,7 @@ struct VolumeAnalysisSection: View {
                 )
 
                 Divider()
-                    .background(AppColors.cardBackgroundLight)
+                    .overlay(AppColors.cardBackgroundLight)
 
                 VolumeMetricRow(
                     label: "Money Flow Index",
@@ -200,7 +200,7 @@ struct FibonacciRetracementSection: View {
 
                     if level.id != fibData.levels.last?.id {
                         Divider()
-                            .background(AppColors.cardBackgroundLight)
+                            .overlay(AppColors.cardBackgroundLight)
                     }
                 }
             }
@@ -230,7 +230,7 @@ struct SupportResistanceSection: View {
 
                         if level.id != srData.resistanceLevels.last?.id {
                             Divider()
-                                .background(AppColors.cardBackgroundLight)
+                                .overlay(AppColors.cardBackgroundLight)
                         }
                     }
                 }
@@ -269,7 +269,7 @@ struct SupportResistanceSection: View {
 
                         if level.id != srData.supportLevels.last?.id {
                             Divider()
-                                .background(AppColors.cardBackgroundLight)
+                                .overlay(AppColors.cardBackgroundLight)
                         }
                     }
                 }

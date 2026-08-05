@@ -70,7 +70,7 @@ struct CapitalAllocationMiniChart: View {
         .chartYAxis {
             // LEFT — bar scale (% or $). Gray, with faint gridlines.
             AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
-                AxisGridLine().foregroundStyle(AppColors.cardBackgroundLight.opacity(0.5))
+                AxisGridLine().foregroundStyle(AppColors.chartGridline)
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
                         Text(leftAxisLabel(v))

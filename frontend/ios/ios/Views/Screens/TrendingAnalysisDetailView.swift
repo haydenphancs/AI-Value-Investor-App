@@ -113,7 +113,7 @@ struct TrendingAnalysisDetailView: View {
                 value: "+\(analysis.interestPercent)%",
                 label: "Interest",
                 iconName: "arrow.up.right",
-                color: Color(hex: "22C55E")
+                color: AppColors.gain
             )
         }
         .padding(.horizontal, AppSpacing.lg)

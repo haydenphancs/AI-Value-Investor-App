@@ -710,12 +710,12 @@ private struct KeyHighlightCard: View {
             // Icon
             ZStack {
                 Circle()
-                    .fill(Color(hex: highlight.iconColor).opacity(0.15))
+                    .fill(Color(themedHex: highlight.iconColor, role: .graphic, fallback: AppColors.primaryBlue).opacity(0.15))
                     .frame(width: 40, height: 40)
 
                 Image(systemName: highlight.iconName)
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
-                    .foregroundColor(Color(hex: highlight.iconColor))
+                    .foregroundColor(Color(themedHex: highlight.iconColor, role: .graphic, fallback: AppColors.primaryBlue))
             }
 
             // Content
@@ -781,9 +781,9 @@ private struct CoreChapterTimelineRow: View {
     let isCompleted: Bool
     var onTapped: (() -> Void)?
 
-    private let completedColor = Color(hex: "14B8A6") // Teal color for completed
-    private let uncompletedColor = Color(hex: "2DD4BF").opacity(0.5) // Muted color for outline
-    private let lineColor = Color(hex: "2DD4BF").opacity(0.5) // Subtle dark line
+    private let completedColor = Color(lightHex: "0F766E", darkHex: "2DD4BF") // Teal color for completed
+    private let uncompletedColor = Color(lightHex: "0F766E", darkHex: "2DD4BF").opacity(0.5) // Muted color for outline
+    private let lineColor = Color(lightHex: "0F766E", darkHex: "2DD4BF").opacity(0.5) // Subtle dark line
     private let badgeSize: CGFloat = 32
 
     var body: some View {
@@ -903,7 +903,7 @@ private struct DiscussionCard: View {
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: discussion.authorAvatarGradient.map { Color(hex: $0) },
+                                colors: discussion.authorAvatarGradient.map { Color(themedHex: $0, role: .graphic) },
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -933,7 +933,7 @@ private struct DiscussionCard: View {
                     ForEach(1...5, id: \.self) { star in
                         Image(systemName: star <= discussion.rating ? "star.fill" : "star")
                             .font(AppTypography.iconTiny)
-                            .foregroundColor(star <= discussion.rating ? Color(hex: "F59E0B") : AppColors.textMuted)
+                            .foregroundColor(star <= discussion.rating ? AppColors.caution : AppColors.textMuted)
                     }
                 }
             }

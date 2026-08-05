@@ -22,7 +22,7 @@ enum HealthCheckRating: String, CaseIterable {
         case .excellent:
             return AppColors.bullish
         case .good:
-            return Color(hex: "4ADE80")
+            return AppColors.gain
         case .mix:
             return AppColors.neutral
         case .caution:
@@ -232,7 +232,7 @@ struct HealthCheckMetric: Identifiable {
             // Lower is better: green -> lime -> yellow -> orange -> red
             gradientColors = [
                 AppColors.bullish,
-                Color(hex: "84CC16"),
+                AppColors.caution,
                 AppColors.neutral,
                 AppColors.alertOrange,
                 AppColors.bearish
@@ -243,7 +243,7 @@ struct HealthCheckMetric: Identifiable {
                 AppColors.bearish,
                 AppColors.alertOrange,
                 AppColors.neutral,
-                Color(hex: "84CC16"),
+                AppColors.caution,
                 AppColors.bullish
             ]
         }

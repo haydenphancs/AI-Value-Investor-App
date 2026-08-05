@@ -53,7 +53,7 @@ struct ReportDeepDiveMetricCard: View {
                     ForEach(0..<5, id: \.self) { index in
                         Image(systemName: index < data.starRating ? "star.fill" : "star")
                             .font(AppTypography.iconMicro)
-                            .foregroundColor(index < data.starRating ? Color(hex: "F59E0B") : AppColors.textMuted)
+                            .foregroundColor(index < data.starRating ? AppColors.caution : AppColors.textMuted)
                     }
                 }
 
@@ -69,7 +69,7 @@ struct ReportDeepDiveMetricCard: View {
             }
 
             Divider()
-                .background(AppColors.textMuted.opacity(0.2))
+                .overlay(AppColors.textMuted.opacity(0.2))
 
             // Metrics
             VStack(alignment: .leading, spacing: AppSpacing.xs) {

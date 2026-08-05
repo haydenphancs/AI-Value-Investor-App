@@ -20,7 +20,12 @@ struct TechnicalLevelIndicator: View {
 
             Text("\(level)")
                 .font(AppTypography.labelSmallEmphasis)
-                .foregroundColor(isActive ? AppColors.textPrimary : AppColors.textMuted)
+                // `textOnAccent`, not `textPrimary`: the active circle is a
+                // SATURATED FILL, so the digit needs on-accent ink. With
+                // `textPrimary` it inverted with the appearance and 4 of the 5
+                // active states failed AA in each mode — dark-navy "1" on dark
+                // red in light, white "4" on light green in dark.
+                .foregroundColor(isActive ? AppColors.textOnAccent : AppColors.textMuted)
         }
     }
 }
@@ -30,12 +35,15 @@ struct TechnicalLevelIndicatorsRow: View {
     let activeLevel: Int // 1-5
     let labels: [String]
 
+    /// `*Fill` tokens: these are saturated circles that carry `textOnAccent`
+    /// ink, which is exactly the fill role. The two frozen hexes they replace
+    /// (`#991B1B`, `#4ADE80`) did not adapt, so each broke in the opposite mode.
     private let levelColors: [Color] = [
-        Color(hex: "991B1B"), // Strong Sell - dark red
-        AppColors.bearish,    // Sell - red
-        AppColors.neutral,    // Hold - yellow
-        Color(hex: "4ADE80"), // Buy - light green
-        AppColors.bullish     // Strong Buy - green
+        AppColors.lossFill,      // Strong Sell
+        AppColors.lossFill,      // Sell
+        AppColors.cautionFill,   // Hold
+        AppColors.gainFill,      // Buy
+        AppColors.gainFill       // Strong Buy
     ]
 
     var body: some View {

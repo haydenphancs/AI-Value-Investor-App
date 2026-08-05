@@ -16,7 +16,7 @@ struct PersonaBadge: View {
             .foregroundColor(.white)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)
-            .background(Color(hex: persona.badgeColor))
+            .background(Color(themedHex: persona.badgeColor, role: .graphic, fallback: AppColors.primaryFill))
             .clipShape(Capsule())
     }
 }

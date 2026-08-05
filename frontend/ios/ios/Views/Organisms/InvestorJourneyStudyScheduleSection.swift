@@ -31,7 +31,7 @@ struct InvestorJourneyStudyScheduleSection: View {
                 .padding(.horizontal, AppSpacing.lg)
 
                 Divider()
-                    .background(AppColors.cardBackgroundLight)
+                    .overlay(AppColors.cardBackgroundLight)
                     .padding(.horizontal, AppSpacing.lg)
 
                 // Morning Session
@@ -48,7 +48,7 @@ struct InvestorJourneyStudyScheduleSection: View {
                 .buttonStyle(PlainButtonStyle())
 
                 Divider()
-                    .background(AppColors.cardBackgroundLight)
+                    .overlay(AppColors.cardBackgroundLight)
                     .padding(.horizontal, AppSpacing.lg)
 
                 // Review Time

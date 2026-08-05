@@ -32,10 +32,10 @@ enum InvestorLevel: String, CaseIterable {
 
     var color: Color {
         switch self {
-        case .foundation: return Color(hex: "22C55E")
-        case .analyst: return Color(hex: "3B82F6")
-        case .strategist: return Color(hex: "A855F7")
-        case .master: return Color(hex: "F59E0B")
+        case .foundation: return AppColors.gain
+        case .analyst: return AppColors.primaryBlue
+        case .strategist: return AppColors.alertPurple
+        case .master: return AppColors.caution
         }
     }
 
@@ -115,9 +115,9 @@ enum MoneyMoveCategory: String, CaseIterable {
     
     var iconBackgroundColor: Color {
         switch self {
-        case .blueprints: return Color(hex: "22C55E") // Green - success
-        case .valueTraps: return Color(hex: "EF4444") // Red - warning
-        case .battles: return Color(hex: "8B5CF6") // Purple - strategic
+        case .blueprints: return AppColors.gain // Green - success
+        case .valueTraps: return AppColors.loss // Red - warning
+        case .battles: return AppColors.alertPurple // Purple - strategic
         }
     }
 }
@@ -179,9 +179,9 @@ enum BookLevel: String, CaseIterable {
 
     var color: Color {
         switch self {
-        case .starter: return Color(hex: "06B6D4") // Cyan
-        case .intermediate: return Color(hex: "8B5CF6") // Purple
-        case .advanced: return Color(hex: "F59E0B") // Amber
+        case .starter: return AppColors.accentCyan // Cyan
+        case .intermediate: return AppColors.alertPurple // Purple
+        case .advanced: return AppColors.caution // Amber
         }
     }
 }

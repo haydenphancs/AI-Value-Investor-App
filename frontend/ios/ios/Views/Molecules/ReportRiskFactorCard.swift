@@ -59,7 +59,7 @@ struct ReportRiskFactorCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Divider()
-                .background(AppColors.textMuted.opacity(0.15))
+                .overlay(AppColors.textMuted.opacity(0.15))
         }
     }
 }

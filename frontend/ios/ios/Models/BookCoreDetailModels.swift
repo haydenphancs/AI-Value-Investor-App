@@ -144,19 +144,19 @@ enum CoreCalloutStyle {
 
     var backgroundColor: Color {
         switch self {
-        case .info: return Color(hex: "3B82F6").opacity(0.15)
-        case .warning: return Color(hex: "F59E0B").opacity(0.15)
-        case .success: return Color(hex: "22C55E").opacity(0.15)
-        case .insight: return Color(hex: "A855F7").opacity(0.15)
+        case .info: return AppColors.primaryBlue.opacity(0.15)
+        case .warning: return AppColors.caution.opacity(0.15)
+        case .success: return AppColors.gain.opacity(0.15)
+        case .insight: return AppColors.alertPurple.opacity(0.15)
         }
     }
 
     var iconColor: Color {
         switch self {
-        case .info: return Color(hex: "3B82F6")
-        case .warning: return Color(hex: "F59E0B")
-        case .success: return Color(hex: "22C55E")
-        case .insight: return Color(hex: "A855F7")
+        case .info: return AppColors.primaryBlue
+        case .warning: return AppColors.caution
+        case .success: return AppColors.gain
+        case .insight: return AppColors.alertPurple
         }
     }
 

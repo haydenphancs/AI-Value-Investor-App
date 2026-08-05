@@ -72,7 +72,7 @@ struct NewsDetailHeader: View {
         )
 
         Divider()
-            .background(AppColors.cardBackgroundLight)
+            .overlay(AppColors.cardBackgroundLight)
 
         // No shareable URL — the share button is absent, not inert.
         NewsDetailHeader(

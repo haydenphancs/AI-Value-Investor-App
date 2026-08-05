@@ -17,10 +17,7 @@ struct AppLockView: View {
             AppColors.background.ignoresSafeArea()
 
             VStack(spacing: AppSpacing.xl) {
-                Image("CaydexLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 96, height: 96)
+                CaydexLogoMark(size: 96)
 
                 VStack(spacing: AppSpacing.xs) {
                     Text("Caydex is locked")

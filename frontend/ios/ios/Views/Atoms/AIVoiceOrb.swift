@@ -22,10 +22,10 @@ struct AIVoiceOrb: View {
     // Gradient colors for the orb
     private let primaryGradient = LinearGradient(
         colors: [
-            Color(hex: "06B6D4"),   // Cyan
-            Color(hex: "3B82F6"),   // Blue
-            Color(hex: "8B5CF6"),   // Purple
-            Color(hex: "EC4899")    // Pink
+            AppColors.accentCyan,   // Cyan
+            AppColors.primaryBlue,   // Blue
+            AppColors.alertPurple,   // Purple
+            Color(lightHex: "BE185D", darkHex: "F472B6")    // Pink
         ],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
@@ -33,9 +33,9 @@ struct AIVoiceOrb: View {
 
     private let innerGradient = LinearGradient(
         colors: [
-            Color(hex: "06B6D4").opacity(0.8),
-            Color(hex: "3B82F6").opacity(0.6),
-            Color(hex: "EC4899").opacity(0.4)
+            AppColors.accentCyan.opacity(0.8),
+            AppColors.primaryBlue.opacity(0.6),
+            Color(lightHex: "BE185D", darkHex: "F472B6").opacity(0.4)
         ],
         startPoint: .top,
         endPoint: .bottom
@@ -48,8 +48,8 @@ struct AIVoiceOrb: View {
                 .fill(
                     RadialGradient(
                         colors: [
-                            Color(hex: "06B6D4").opacity(0.3),
-                            Color(hex: "3B82F6").opacity(0.1),
+                            AppColors.accentCyan.opacity(0.3),
+                            AppColors.primaryBlue.opacity(0.1),
                             Color.clear
                         ],
                         center: .center,
@@ -87,8 +87,8 @@ struct AIVoiceOrb: View {
                 .stroke(
                     LinearGradient(
                         colors: [
-                            Color(hex: "06B6D4").opacity(0.6 - Double(index) * 0.15),
-                            Color(hex: "EC4899").opacity(0.4 - Double(index) * 0.1)
+                            AppColors.accentCyan.opacity(0.6 - Double(index) * 0.15),
+                            Color(lightHex: "BE185D", darkHex: "F472B6").opacity(0.4 - Double(index) * 0.1)
                         ],
                         startPoint: .leading,
                         endPoint: .trailing
@@ -121,11 +121,11 @@ struct AIVoiceOrb: View {
                 .strokeBorder(
                     AngularGradient(
                         colors: [
-                            Color(hex: "06B6D4").opacity(0.5),
-                            Color(hex: "3B82F6").opacity(0.3),
-                            Color(hex: "8B5CF6").opacity(0.4),
-                            Color(hex: "EC4899").opacity(0.5),
-                            Color(hex: "06B6D4").opacity(0.5)
+                            AppColors.accentCyan.opacity(0.5),
+                            AppColors.primaryBlue.opacity(0.3),
+                            AppColors.alertPurple.opacity(0.4),
+                            Color(lightHex: "BE185D", darkHex: "F472B6").opacity(0.5),
+                            AppColors.accentCyan.opacity(0.5)
                         ],
                         center: .center,
                         startAngle: .degrees(phase * 50),

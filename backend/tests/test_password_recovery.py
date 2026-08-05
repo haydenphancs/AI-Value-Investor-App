@@ -104,6 +104,11 @@ class _FakeQuery:
     def __init__(self, log, table, row, fail):
         self._log, self._table, self._row, self._fail = log, table, row, fail
         self._update = None
+        # PostgREST returns a bare OBJECT for single() and a LIST for limit()/plain. Modelling
+        # that matters: a fake that always returned the object let `rows[0]` pass here and
+        # KeyError in production. Mirrors the same handling in
+        # tests/test_auth_confirmation_and_oauth.py.
+        self._shape = "single"
 
     def select(self, *_a, **_k):
         return self
@@ -116,12 +121,14 @@ class _FakeQuery:
         return self
 
     def single(self):
+        self._shape = "single"
         return self
 
     def limit(self, *_a, **_k):
-        # Needed by `_app_user_row_exists`. Without it the call raised AttributeError, which
-        # that helper deliberately treats as a transport blip and FAILS OPEN — so the
-        # account-existence check looked covered while never actually running.
+        # Needed by `_app_user_row_exists` and the change-password email lookup. Without it the
+        # call raised AttributeError, which the helper deliberately treats as a transport blip
+        # and FAILS OPEN — so the account-existence check looked covered while never running.
+        self._shape = "list"
         return self
 
     def execute(self):
@@ -132,7 +139,8 @@ class _FakeQuery:
             return type("R", (), {"data": [self._update]})()
         if "lookup" in self._fail:
             raise RuntimeError("lookup failed")
-        return type("R", (), {"data": self._row})()
+        data = self._row if self._shape == "single" else ([self._row] if self._row else [])
+        return type("R", (), {"data": data})()
 
 
 class FakeSupabase:
@@ -458,13 +466,34 @@ async def test_a_denied_ip_never_reaches_the_per_email_limiter():
 
 
 @pytest.mark.asyncio
-async def test_change_password_404s_when_the_account_has_no_email():
+async def test_change_password_reports_a_missing_account_on_the_error_contract():
+    """Was a bare-string 404. Now AUTH_ACCOUNT_NOT_FOUND, matching what /auth/refresh already
+    returns for the identical condition.
+
+    The string body mattered: iOS cannot decode it as `APIErrorResponse`, so it surfaced as a
+    generic `.serverError`/`.unknown` — and `.serverError` used to be auto-retried twice, so a
+    single tap burned three of the five per-user attempts without a password ever being checked.
+    """
     with pytest.raises(HTTPException) as ei:
         await auth_ep.change_password(
             ChangePasswordRequest(current_password="x", new_password=_GOOD_PASSWORD),
             _FakeRequest(), user_id=_USER_ID, supabase=FakeSupabase(row={"id": _USER_ID}),
         )
-    assert ei.value.status_code == 404
+    assert ei.value.status_code == 401
+    assert ei.value.detail["error_code"] == "AUTH_ACCOUNT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_change_password_lookup_blip_is_retryable_not_a_500():
+    """A transport fault on the email lookup must be distinguishable from "your account is
+    gone", and must not present as an undecodable 500 that the client then retries."""
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.change_password(
+            ChangePasswordRequest(current_password="x", new_password=_GOOD_PASSWORD),
+            _FakeRequest(), user_id=_USER_ID, supabase=FakeSupabase(fail=("lookup",)),
+        )
+    assert ei.value.status_code == 503
+    assert ei.value.detail["error_code"] == "AUTH_UNAVAILABLE"
 
 
 # ── 5. Session eviction on refresh ────────────────────────────────────────────

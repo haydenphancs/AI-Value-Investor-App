@@ -116,15 +116,24 @@ struct iosApp: App {
                     // On an expired token the APIClient asks AuthService to refresh
                     // (rewriting the Keychain + the client's token) and retries once.
                     await apiClient.setTokenRefresher {
-                        // Return the NEW token only on a genuine refresh success.
-                        // On ANY failure return nil — never fall back to the old
-                        // (expired) token, which would launder a transient refresh
-                        // outage into a doomed retry and a spurious sign-out.
+                        // Never fall back to the old (expired) token — that would launder a
+                        // transient outage into a doomed retry.
+                        //
+                        // But "failed" is not one thing. Returning a bare nil for ANY error
+                        // told APIClient the credential was DEAD, so a 429 from the shared
+                        // per-IP refresh limiter (a campus or carrier NAT) signed the user out
+                        // and cleared their Keychain with a valid refresh token in hand. Only a
+                        // genuine auth failure may end the session; everything else keeps it.
                         do {
                             try await authService.refreshToken()
-                            return await authService.getStoredToken()
+                            guard let token = await authService.getStoredToken() else {
+                                return .credentialRejected
+                            }
+                            return .refreshed(token)
                         } catch {
-                            return nil
+                            return AppError.from(error).isAuthError
+                                ? .credentialRejected
+                                : .transientFailure
                         }
                     }
 
@@ -328,10 +337,7 @@ struct SplashView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 20) {
-                Image("CaydexLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 160, height: 160)
+                CaydexLogoMark(size: 160)
 
                 ProgressView()
                     .tint(AppColors.primaryBlue)

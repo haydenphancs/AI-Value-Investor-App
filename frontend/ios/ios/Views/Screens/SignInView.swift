@@ -33,10 +33,7 @@ struct SignInView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Image("CaydexLogo")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 80, height: 80)
+                    CaydexLogoMark(size: 80)
                         .padding(.top, 40)
 
                     Text(mode == .signIn ? "Welcome back" : "Create account")
@@ -350,6 +347,20 @@ struct SignInView: View {
     }
 
     private func friendlyError(_ error: Error) -> String {
+        // SocialSignInError FIRST — it is not an APIError, so without this arm it fell straight
+        // past the `as? APIError` cast to the generic line at the bottom and its
+        // `errorDescription` was never read. That made the whole "surface the provider's own
+        // reason" change unobservable: Supabase with Google disabled returns
+        // `#error_description=Unsupported+provider`, the parser correctly threw
+        // `.provider("Unsupported provider…")`, and the user still saw "Sign in failed. Please
+        // try again." Same dead end for `.notConfigured("Supabase URL missing")` — a missing
+        // Info.plist key in a Release build looked identical to a wrong password.
+        //
+        // `.cancelled` deliberately has a nil description and never reaches here: the callers
+        // catch it separately as a non-error.
+        if let social = error as? SocialSignInError, let reason = social.errorDescription {
+            return reason
+        }
         if let api = error as? APIError {
             switch api {
             case .authError(_, let message):

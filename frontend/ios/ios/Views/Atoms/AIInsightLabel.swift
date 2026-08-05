@@ -31,12 +31,16 @@ struct AIInsightLabel: View {
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
             Image(systemName: "sparkles.2")
-                // Flat indigo, NOT `AppGradients.ai` — deliberate, and it is
-                // what the report sections render. A two-stop ramp across a
-                // glyph this small reads as muddy rather than as a gradient.
-                // (The report writes this as a one-colour LinearGradient, which
-                // rasterises identically.)
-                .foregroundStyle(Color.indigo)
+                // Flat, NOT `AppGradients.ai` — deliberate, and it is what the
+                // report sections render. A two-stop ramp across a glyph this
+                // small reads as muddy rather than as a gradient.
+                //
+                // `aiRampStart`, not SwiftUI's `.indigo`: the token is the head
+                // of the same ramp the text wears, so the two can't drift, and
+                // it is contrast-checked in both modes (system `.indigo` is not
+                // — its sibling `.cyan` is 2.54:1 on white, which is what made
+                // the tail of this wordmark unreadable in light).
+                .foregroundStyle(AppColors.aiRampStart)
                 .font(iconFont)
                 .fontWeight(.semibold)
 

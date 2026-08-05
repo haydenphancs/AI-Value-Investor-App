@@ -115,6 +115,29 @@ class ErrorCode(str, Enum):
     # not classify as an auth error — so the client kept retrying a request that never resolved.
     AUTH_UNAVAILABLE = "AUTH_UNAVAILABLE"
 
+    # The two below describe CREDENTIALS SUBMITTED IN A REQUEST BODY, not the state of a stored
+    # bearer token — which is what every code above is about. That distinction is the whole
+    # reason they exist. With no code for "the password you just typed is wrong", `auth.py`
+    # raised a bare-string 401, iOS failed to decode it against the contract, fell back to
+    # `APIError.unauthorized`, and showed its hardcoded "Your session has expired." So a user
+    # mistyping their current password was told their session had ended — and because
+    # `.unauthorized` sets `triggersTokenRefresh` while `.changePassword` is excluded from
+    # `isAuthEndpoint`, the client also ran a full refresh and REPLAYED the request, spending
+    # two of the five per-user attempts on one typo.
+    #
+    # NEITHER may clear a stored credential and neither may trigger a refresh: nothing is wrong
+    # with the caller's session. `triggersTokenRefresh` enumerates AUTH_TOKEN_INVALID and
+    # AUTH_SESSION_EXPIRED only, so that falls out automatically — do not add these to it.
+    #
+    # The email/password or current-password supplied does not match. 401, but the action is
+    # `fix_input`, not `sign_in`: on `/auth/login` the user is already looking at the sign-in
+    # form, and on `/auth/change-password` they are signed in — "Sign In" is a circle in both.
+    AUTH_CREDENTIALS_INVALID = "AUTH_CREDENTIALS_INVALID"
+    # An Apple/Google identity token failed verification (bad signature, wrong audience,
+    # expired, nonce mismatch). Distinct from the above so the copy can stay honest: there is no
+    # password in that flow, and the old fallback told those users to check one.
+    AUTH_PROVIDER_FAILED = "AUTH_PROVIDER_FAILED"
+
 
 # Default user-facing copy per code. Endpoints can override per-call.
 _USER_MESSAGES: Dict[ErrorCode, str] = {
@@ -198,6 +221,15 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.AUTH_UNAVAILABLE: (
         "We couldn't verify your account just now. Please try again in a moment."
     ),
+    # Deliberately does NOT say which of the two was wrong — that would be an account-existence
+    # oracle on a finance app. Endpoints override this with something more specific when the
+    # caller is already authenticated (change-password knows the email is right).
+    ErrorCode.AUTH_CREDENTIALS_INVALID: (
+        "That email or password doesn't match. Please check and try again."
+    ),
+    ErrorCode.AUTH_PROVIDER_FAILED: (
+        "We couldn't complete that sign-in. Please try again."
+    ),
 }
 
 
@@ -225,6 +257,10 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     # permission wall sends them in a circle.
     ErrorCode.AUTH_FORBIDDEN: "contact_support",
     ErrorCode.AUTH_UNAVAILABLE: "retry_later",
+    # Same reasoning as AUTH_FORBIDDEN, different circle: the user is looking at the form they
+    # just submitted, so the useful affordance is "correct the field", not "sign in".
+    ErrorCode.AUTH_CREDENTIALS_INVALID: "fix_input",
+    ErrorCode.AUTH_PROVIDER_FAILED: "retry_later",
 }
 
 
@@ -280,6 +316,11 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # Same reasoning as WATCHLIST_UNAVAILABLE — retryable, and distinguishable from "your
     # credential is bad" so the client keeps the token instead of signing the user out.
     ErrorCode.AUTH_UNAVAILABLE: 503,
+    # 401 for both: the caller is unauthenticated as far as this request is concerned. The
+    # status is what iOS keys its interceptor off; the CODE is what stops it being mistaken
+    # for a dead session.
+    ErrorCode.AUTH_CREDENTIALS_INVALID: 401,
+    ErrorCode.AUTH_PROVIDER_FAILED: 401,
 }
 
 

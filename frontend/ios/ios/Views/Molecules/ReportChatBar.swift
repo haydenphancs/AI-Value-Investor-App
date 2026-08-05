@@ -31,8 +31,8 @@ struct ReportChatBar: View {
             .padding(.vertical, AppSpacing.md)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.pill)
-                    .fill(AppColors.cardBackground)
-                    .shadow(color: .black.opacity(0.2), radius: 8, y: -2)
+                    .cardFill()
+                    .shadow(color: AppColors.shadowAmbient, radius: 8, y: -2)
             )
         }
         .buttonStyle(PlainButtonStyle())

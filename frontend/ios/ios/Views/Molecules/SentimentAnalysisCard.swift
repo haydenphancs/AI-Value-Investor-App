@@ -39,8 +39,7 @@ struct SentimentAnalysisCard: View {
                 .foregroundColor(AppColors.textMuted)
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 

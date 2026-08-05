@@ -28,13 +28,18 @@ struct PriceActionSparkline: View {
             sparklinePath(w: w, h: h, minVal: minVal, range: range)
                 .stroke(trendColor, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
 
-            // Event dot
+            // Event dot.
+            // Was a hardcoded white disc, which is invisible on a light card.
+            // It reads as a "hole punched in the line", so the fill has to be the
+            // CARD colour (not white) and it needs a ring to survive when the
+            // card and the dot are the same value.
             if let idx = eventIndex, idx >= 0, idx < data.count {
                 let pos = point(for: idx, w: w, h: h, minVal: minVal, range: range)
                 Circle()
-                    .fill(Color.white)
+                    .fill(AppColors.cardBackground)
                     .frame(width: 8, height: 8)
-                    .shadow(color: trendColor.opacity(0.8), radius: 6)
+                    .overlay(Circle().strokeBorder(trendColor, lineWidth: 2))
+                    .shadow(color: trendColor.opacity(0.5), radius: 4)
                     .position(x: pos.x, y: pos.y)
             }
         }

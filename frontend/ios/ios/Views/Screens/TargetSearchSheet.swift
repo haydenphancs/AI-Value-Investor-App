@@ -159,8 +159,7 @@ struct TargetSearchSheet: View {
                     }
                 }
             }
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
             .padding(.horizontal, AppSpacing.lg)
         }
     }

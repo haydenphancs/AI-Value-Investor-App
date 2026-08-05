@@ -83,8 +83,7 @@ struct AnalystActionCard: View {
             .padding(.trailing, AppSpacing.lg)
             .padding(.vertical, AppSpacing.lg)
         }
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 }
 

@@ -8,6 +8,9 @@
 import SwiftUI
 
 struct MainChartCanvas: View {
+    /// Only read to bust the `.drawingGroup()` raster cache — see below.
+    @Environment(\.colorScheme) private var colorScheme
+
     let pricePoints: [StockPricePoint]
     let isPositive: Bool
     let chartType: ChartType
@@ -25,7 +28,7 @@ struct MainChartCanvas: View {
     var baselineClose: Double? = nil
 
     private var lineColor: Color {
-        isPositive ? AppColors.bullish : AppColors.bearish
+        isPositive ? AppColors.gainGraphic : AppColors.lossGraphic
     }
 
     /// Indices of data points that fall outside regular market hours
@@ -171,7 +174,7 @@ struct MainChartCanvas: View {
                             path.addLine(to: CGPoint(x: size.width, y: baselineY))
                         }
                         .stroke(
-                            Color.gray.opacity(0.4),
+                            AppColors.chartGridline,
                             style: StrokeStyle(lineWidth: 0.5, dash: [4, 3])
                         )
                     }
@@ -221,6 +224,7 @@ struct MainChartCanvas: View {
                     }
                 }
                 .drawingGroup()
+                .id(colorScheme)
             } else {
                 Text("No chart data")
                     .font(AppTypography.caption)
@@ -290,7 +294,7 @@ private struct ChartEventMarkers: View {
                 let x = coord.xPosition(for: index)
                 let markerY = canvasSize.height - 14
                 drawMarker(context: context, text: "E", x: x, y: markerY,
-                           bgColor: Color.orange.opacity(0.85), textColor: .white)
+                           bgColor: AppColors.cautionFill, textColor: AppColors.textOnAccent)
             }
         }
     }

@@ -16,7 +16,12 @@
 --
 -- 🔴 SHIPS WITH THE CODE IN THE SAME RELEASE. Both halves are in this changeset:
 --    * `app/dependencies.py`        — `get_research_identity` (per-install guest id)
---    * `app/api/v1/endpoints/research.py` — every route now uses it
+--    * `app/api/v1/endpoints/research.py` — every route used it AT THE TIME OF THIS MIGRATION.
+--      ⚠️ NO LONGER TRUE (2026-08): AI generation became account-only, so all nine research
+--      routes now take `Depends(get_current_user)` and `get_research_identity` is wired to
+--      NOTHING. Do not read this line as an instruction to re-connect it — that would re-open
+--      free, unmetered guest AI generation. The partitioning below still matters for reports
+--      created before that change and for the guest-data claim.
 --    * `app/api/v1/endpoints/users.py`    — `research_reports` added to `_UNLINKED_USER_TABLES`
 --      and to the guest-data claim, because the cascade this migration drops was what deleted a
 --      user's reports on account deletion.

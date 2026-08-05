@@ -53,8 +53,7 @@ struct AnalystActionBadge: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .stroke(AppColors.cardBackgroundLight, lineWidth: 1)

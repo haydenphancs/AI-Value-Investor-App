@@ -291,6 +291,23 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 return .sessionEnded(message: message)
             case "AUTH_UNAVAILABLE":
                 return .authUnavailable(message: message)
+            case "AUTH_CREDENTIALS_INVALID":
+                // What they TYPED was wrong — the session, if any, is untouched. `.validationFailed`
+                // carries the server's own wording, is excluded from `isAuthError` (so nothing
+                // clears the Keychain) and suggests fixing the field rather than signing in.
+                //
+                // Before this code existed the backend sent a bare-string 401, which decodes to
+                // `.unauthorized` → "Your session has expired. Please sign in again." So a user
+                // mistyping their current password was told their session had ended, and because
+                // `.unauthorized` triggers a refresh while `.changePassword` is not an auth
+                // endpoint, the client refreshed and REPLAYED the request — spending two of the
+                // five per-user attempts on one typo.
+                return .validationFailed(message: message)
+            case "AUTH_PROVIDER_FAILED":
+                // Apple/Google identity verification failed. Retryable and non-destructive; the
+                // copy must never mention a password, because that flow has none — the old
+                // `.unauthorized` fallback sent these users to reset a password they may not have.
+                return .authUnavailable(message: message)
             default:
                 // An AUTH_* code this build doesn't know. Fail NON-destructively.
                 //

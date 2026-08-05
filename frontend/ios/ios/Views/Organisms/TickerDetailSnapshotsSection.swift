@@ -71,7 +71,7 @@ struct TickerDetailSnapshotsSection: View {
         .padding(AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
         .sheet(isPresented: $showInfoSheet) {
             SnapshotsInfoSheet()
@@ -287,7 +287,7 @@ struct SnapshotUsageStep: View {
             // Step number circle
             ZStack {
                 Circle()
-                    .fill(AppColors.primaryBlue)
+                    .fill(AppColors.primaryFill)
                     .frame(width: 28, height: 28)
 
                 Text("\(number)")
@@ -345,8 +345,7 @@ struct RatingExplanation: View {
         }
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 }
 
@@ -369,8 +368,7 @@ struct ProTipCard: View {
         }
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 }
 

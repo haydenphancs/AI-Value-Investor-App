@@ -3,9 +3,13 @@ Application Configuration
 Environment variables with Pydantic validation.
 """
 
+from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+
+# `backend/` — this file is `backend/app/config.py`.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -376,7 +380,17 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # ABSOLUTE, anchored to this file — not the bare ".env", which pydantic resolves
+        # against the CURRENT WORKING DIRECTORY. Start uvicorn from the repo root (which is
+        # what `--app-dir backend` invites, since it only adds to sys.path and does NOT chdir)
+        # and pydantic looked for `<repo-root>/.env`, found nothing, and failed with five
+        # "Field required" errors that read like missing secrets rather than a missing file.
+        #
+        # `source backend/.env` is not a workaround: the file has no `export` prefixes, so
+        # those assignments stay in the shell and are never inherited by the child process.
+        #
+        # Real environment variables still win over the file, so Railway is unaffected.
+        env_file=_BACKEND_DIR / ".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore"

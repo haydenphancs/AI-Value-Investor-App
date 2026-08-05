@@ -628,7 +628,16 @@ final class AppState {
 
     /// Sign in. Throws on failure so the SignInView can render the error inline.
     func signIn(email: String, password: String) async throws {
-        auth.status = .loading
+        // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
+        // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
+        // Account sheet, the SignInView presented on top of it, and the `errorMessage` the
+        // catch below is about to set. Every failed sign-in therefore dumped the user back on
+        // Home with no explanation, no matter how good the backend's error was. Found by
+        // driving the Simulator; no test could see it.
+        //
+        // Nothing is lost: `SignInView` owns `isSubmitting`, which drives the in-button
+        // spinner and disables the form. `.loading` is for app-launch/restore, not for a
+        // request made from a screen that is already on top of a rendered app.
         do {
             // Bind the profile so the id can be passed on. Calling `onAuthenticated()` with no
             // id here left `lastAuthenticatedUserId` nil after every interactive sign-in, which
@@ -639,7 +648,9 @@ final class AppState {
             auth.status = .authenticated
             await onAuthenticated(userId: profile.id)
         } catch {
-            auth.status = .unauthenticated
+            // Status untouched: the caller was already `.unauthenticated` or `.restoring`, and
+            // forcing `.unauthenticated` here would discard a `.restoring` credential that is
+            // still perfectly good.
             throw error
         }
     }
@@ -654,14 +665,23 @@ final class AppState {
     func signUp(
         email: String, password: String, displayName: String
     ) async throws -> SignUpOutcome {
-        auth.status = .loading
+        // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
+        // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
+        // Account sheet, the SignInView presented on top of it, and the `errorMessage` the
+        // catch below is about to set. Every failed sign-in therefore dumped the user back on
+        // Home with no explanation, no matter how good the backend's error was. Found by
+        // driving the Simulator; no test could see it.
+        //
+        // Nothing is lost: `SignInView` owns `isSubmitting`, which drives the in-button
+        // spinner and disables the form. `.loading` is for app-launch/restore, not for a
+        // request made from a screen that is already on top of a rendered app.
         do {
             let outcome = try await authService.signUp(
                 email: email, password: password, displayName: displayName
             )
             switch outcome {
             case .needsEmailConfirmation:
-                auth.status = .unauthenticated
+                break   // no session yet; leave the status exactly as it was
             case .signedIn(let profile):
                 applyProfile(profile)
                 auth.status = .authenticated
@@ -669,8 +689,7 @@ final class AppState {
             }
             return outcome
         } catch {
-            auth.status = .unauthenticated
-            throw error
+            throw error   // status untouched — see signIn
         }
     }
 
@@ -684,7 +703,16 @@ final class AppState {
     /// Both provider paths converge here. Not subject to the email-confirmation gate: Apple
     /// and Google supply an already-verified address.
     func completeSocialSignIn(_ result: SocialSignInResult) async throws {
-        auth.status = .loading
+        // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
+        // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
+        // Account sheet, the SignInView presented on top of it, and the `errorMessage` the
+        // catch below is about to set. Every failed sign-in therefore dumped the user back on
+        // Home with no explanation, no matter how good the backend's error was. Found by
+        // driving the Simulator; no test could see it.
+        //
+        // Nothing is lost: `SignInView` owns `isSubmitting`, which drives the in-button
+        // spinner and disables the form. `.loading` is for app-launch/restore, not for a
+        // request made from a screen that is already on top of a rendered app.
         do {
             let profile: UserProfile
             switch result {

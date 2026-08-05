@@ -40,8 +40,7 @@ struct TickerCard: View {
             }
             .padding(AppSpacing.sm)
             .frame(width: 80, height: 80)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.medium)
+            .cardSurface(cornerRadius: AppCornerRadius.medium)
         }
         .buttonStyle(PlainButtonStyle())
     }

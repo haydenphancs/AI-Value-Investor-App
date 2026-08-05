@@ -34,6 +34,14 @@ async def test_two_guest_installs_get_different_identities(monkeypatch):
     assert a["id"] != GUEST_USER_ID
     # Hashed, never the raw client-supplied string.
     assert "install-A" not in a["id"]
+    # The flag matters MORE here than anywhere: this wrapper backs 20 routes (portfolios,
+    # tracking, watchlist, home /dashboard, updates /tabs), and it shipped without it. Because
+    # a per-install uuid5 never equals the sentinel, the obvious `user["id"] == GUEST_USER_ID`
+    # test classifies every guest as a paying account — which is how a free feature ends up
+    # answering 402 against a `user_credits` row that does not exist. That trap has fired three
+    # times; `user.get("is_guest")` is the prescribed test and it must be truthy here.
+    assert a.get("is_guest") is True
+    assert b.get("is_guest") is True
 
 
 @pytest.mark.asyncio
@@ -49,6 +57,10 @@ async def test_a_signed_in_account_always_wins(monkeypatch):
 
     got = await get_watchlist_identity(None, "install-A", None)
     assert got["id"] == "real-user-1"
+    # And the flag must be present-and-false, not absent: a caller reading
+    # `user.get("is_guest")` has to be able to tell a real account apart from a wrapper that
+    # simply forgot to set it.
+    assert got.get("is_guest") is False
 
 
 @pytest.mark.asyncio

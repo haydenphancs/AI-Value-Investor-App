@@ -125,7 +125,7 @@ struct PortfolioInsightsSection: View {
                     .foregroundColor(.white)
                     .padding(.horizontal, AppSpacing.xl)
                     .padding(.vertical, AppSpacing.sm)
-                    .background(AppColors.primaryBlue)
+                    .background(AppColors.primaryFill)
                     .cornerRadius(AppCornerRadius.pill)
                 }
                 .buttonStyle(.plain)
@@ -134,8 +134,7 @@ struct PortfolioInsightsSection: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.xxl)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .padding(.horizontal, AppSpacing.lg)
     }
 
@@ -160,7 +159,7 @@ struct PortfolioInsightsSection: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, AppSpacing.xl)
                         .padding(.vertical, AppSpacing.sm)
-                        .background(AppColors.primaryBlue)
+                        .background(AppColors.primaryFill)
                         .cornerRadius(AppCornerRadius.pill)
                 }
                 .buttonStyle(.plain)
@@ -169,8 +168,7 @@ struct PortfolioInsightsSection: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.xxl)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .padding(.horizontal, AppSpacing.lg)
     }
 }

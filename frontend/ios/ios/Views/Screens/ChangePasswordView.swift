@@ -96,7 +96,7 @@ struct ChangePasswordView: View {
                     Spacer()
                 }
                 .padding(.vertical, 14)
-                .background(canSubmit ? AppColors.primaryBlue : AppColors.primaryBlue.opacity(0.4))
+                .background(canSubmit ? AppColors.primaryFill : AppColors.primaryFill.opacity(0.4))
                 .cornerRadius(AppCornerRadius.medium)
             }
             .disabled(!canSubmit || isSubmitting)
@@ -124,7 +124,7 @@ struct ChangePasswordView: View {
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
-                    .background(AppColors.primaryBlue)
+                    .background(AppColors.primaryFill)
                     .cornerRadius(AppCornerRadius.medium)
             }
             .padding(.top, 8)
@@ -176,8 +176,7 @@ struct ChangePasswordView: View {
             content()
                 .padding(.vertical, 12)
                 .padding(.horizontal, 14)
-                .background(AppColors.cardBackground)
-                .cornerRadius(AppCornerRadius.medium)
+                .cardSurface(cornerRadius: AppCornerRadius.medium)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

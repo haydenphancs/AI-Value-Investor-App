@@ -205,8 +205,7 @@ struct EarningsInfoSheet: View {
             Spacer()
         }
         .padding(AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 
     private func tipRow(icon: String, text: String) -> some View {

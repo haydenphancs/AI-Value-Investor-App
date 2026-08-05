@@ -20,6 +20,7 @@ No network / Supabase — fakes throughout, and the shared rate limiter is reset
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from fastapi import HTTPException
@@ -74,6 +75,11 @@ class _FakeAuth:
             raise RuntimeError("Email not confirmed")
         if "signin" in self._fail:
             raise RuntimeError("bad credentials")
+        # A failure that is OURS, not the caller's — deliberately worded so it does NOT match
+        # `_is_rejected_credential`, which is the only thing separating a wrong password from
+        # an identity-provider outage.
+        if "outage" in self._fail:
+            raise RuntimeError("upstream gateway timeout contacting the identity provider")
         self._log.append(("sign_in_with_password", creds["email"]))
         return type("R", (), {"user": self._user})()
 
@@ -217,6 +223,50 @@ async def test_login_still_401s_on_genuinely_bad_credentials():
             _FakeRequest(), FakeSupabase(fail=("signin",)),
         )
     assert ei.value.status_code == 401
+    assert ei.value.detail["error_code"] == ErrorCode.AUTH_CREDENTIALS_INVALID.value
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_password_is_not_logged_as_an_application_error(caplog):
+    """A typo must not become a Sentry issue.
+
+    Sentry's `LoggingIntegration` promotes an ERROR record to an EVENT, and this path used to
+    call `logger.error(..., exc_info=True)` for every rejected password — so ordinary human
+    behaviour raised `AuthApiError: Invalid login credentials` in production, burying real
+    faults and consuming quota. Observed live in Sentry, one minute after a single test
+    sign-in.
+    """
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException):
+            await auth_ep.sign_in(
+                SignInRequest(email=_EMAIL, password=_PASSWORD),
+                _FakeRequest(), FakeSupabase(fail=("signin",)),
+            )
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "a rejected password logged at ERROR — Sentry will raise an issue for every typo"
+    )
+    assert any(r.levelno == logging.INFO for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_an_upstream_outage_is_a_retryable_503_not_a_wrong_password(caplog):
+    """The inverse: OUR failure must not be laundered into "your password is wrong".
+
+    That told the user to reset a password that was never the problem, and hid the incident
+    behind a 401 nobody investigates. AUTH_UNAVAILABLE is retryable and iOS is forbidden from
+    clearing a credential on it — and this one SHOULD reach Sentry.
+    """
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.sign_in(
+                SignInRequest(email=_EMAIL, password=_PASSWORD),
+                _FakeRequest(), FakeSupabase(fail=("outage",)),
+            )
+    assert ei.value.status_code == 503
+    assert ei.value.detail["error_code"] == ErrorCode.AUTH_UNAVAILABLE.value
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "a genuine upstream failure must still reach Sentry"
+    )
 
 
 @pytest.mark.asyncio

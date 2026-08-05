@@ -249,7 +249,7 @@ struct ForgotPasswordView: View {
                 Spacer()
             }
             .padding(.vertical, 14)
-            .background(enabled ? AppColors.primaryBlue : AppColors.primaryBlue.opacity(0.4))
+            .background(enabled ? AppColors.primaryFill : AppColors.primaryFill.opacity(0.4))
             .cornerRadius(AppCornerRadius.medium)
         }
         .disabled(!enabled || isSubmitting)
@@ -266,8 +266,7 @@ struct ForgotPasswordView: View {
             content()
                 .padding(.vertical, 12)
                 .padding(.horizontal, 14)
-                .background(AppColors.cardBackground)
-                .cornerRadius(AppCornerRadius.medium)
+                .cardSurface(cornerRadius: AppCornerRadius.medium)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

@@ -79,8 +79,7 @@ struct AllWhalesView: View {
                         }
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.sm)
-                        .background(AppColors.cardBackground)
-                        .cornerRadius(AppCornerRadius.pill)
+                        .cardSurface(cornerRadius: AppCornerRadius.pill)
 
                         Button {
                             withAnimation(.easeInOut(duration: 0.25)) {
@@ -153,8 +152,7 @@ struct AllWhalesView: View {
                             .foregroundColor(AppColors.textMuted)
                             .padding(.horizontal, AppSpacing.md)
                             .padding(.vertical, AppSpacing.xs)
-                            .background(AppColors.cardBackground)
-                            .cornerRadius(AppCornerRadius.pill)
+                            .cardSurface(cornerRadius: AppCornerRadius.pill)
                         }
                         .buttonStyle(.plain)
 

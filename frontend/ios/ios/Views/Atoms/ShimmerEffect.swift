@@ -20,10 +20,15 @@ struct ShimmerModifier: ViewModifier {
         content
             .overlay(
                 GeometryReader { geometry in
+                    // The sweep must be lighter than the skeleton in dark mode
+                    // and DARKER than it in light. A hardcoded white sweep is
+                    // invisible on a light skeleton, so every loading state in
+                    // the app read as frozen. `textPrimary` inverts with the
+                    // appearance, so one value covers both.
                     LinearGradient(
                         gradient: Gradient(colors: [
                             Color.clear,
-                            Color.white.opacity(0.1),
+                            AppColors.textPrimary.opacity(0.08),
                             Color.clear
                         ]),
                         startPoint: .leading,

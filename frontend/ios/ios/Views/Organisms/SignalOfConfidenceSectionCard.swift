@@ -55,7 +55,7 @@ struct SignalOfConfidenceSectionCard: View {
         .padding(.vertical, AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
         .sheet(isPresented: $showInfoSheet) {
             SignalOfConfidenceInfoSheet()

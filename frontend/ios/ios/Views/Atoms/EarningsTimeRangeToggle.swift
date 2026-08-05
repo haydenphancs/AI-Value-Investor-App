@@ -32,8 +32,7 @@ struct EarningsTimeRangeToggle: View {
                 .buttonStyle(PlainButtonStyle())
             }
         }
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.small)
+        .cardSurface(cornerRadius: AppCornerRadius.small)
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.small)
                 .stroke(AppColors.cardBackgroundLight, lineWidth: 1)

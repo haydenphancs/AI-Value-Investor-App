@@ -87,7 +87,7 @@ struct PersonasSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
                     .overlay(
                         RoundedRectangle(cornerRadius: AppCornerRadius.large)
                             .stroke(

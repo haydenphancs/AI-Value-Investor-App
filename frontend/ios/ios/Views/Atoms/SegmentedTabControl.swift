@@ -35,8 +35,7 @@ struct SegmentedTabControl<T: Hashable & RawRepresentable>: View where T.RawValu
             }
         }
         .padding(AppSpacing.xs)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 

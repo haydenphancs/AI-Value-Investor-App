@@ -278,7 +278,7 @@ struct TickerReportView: View {
             // per-module dividers separate them inside.
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(AppColors.cardBackground)
+                    .cardFill()
             )
             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
             .padding(.horizontal, AppSpacing.lg)

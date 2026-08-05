@@ -33,7 +33,7 @@ struct ArticleStatisticsGrid: View {
         .padding(AppSpacing.xl)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
                 .overlay(
                     RoundedRectangle(cornerRadius: AppCornerRadius.large)
                         .strokeBorder(

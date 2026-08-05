@@ -54,8 +54,7 @@ struct LessonCard: View {
             }
             .padding(AppSpacing.md)
             .frame(width: 160, height: 150)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
             .opacity(cardOpacity)
         }
         .buttonStyle(PlainButtonStyle())

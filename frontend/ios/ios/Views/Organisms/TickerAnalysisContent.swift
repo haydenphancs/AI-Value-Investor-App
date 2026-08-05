@@ -82,7 +82,7 @@ struct TickerAnalysisContent: View {
 
     private func analysisSectionPlaceholder(height: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 12)
-            .fill(AppColors.cardBackground)
+            .cardFill()
             .frame(height: height)
             .shimmer()
     }

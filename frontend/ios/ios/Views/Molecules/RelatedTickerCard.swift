@@ -54,8 +54,7 @@ struct RelatedTickerCard: View {
             }
             .padding(AppSpacing.md)
             .frame(width: 100, height: 120)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.medium)
+            .cardSurface(cornerRadius: AppCornerRadius.medium)
         }
         .buttonStyle(PlainButtonStyle())
     }

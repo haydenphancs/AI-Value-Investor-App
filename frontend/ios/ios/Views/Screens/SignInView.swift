@@ -91,7 +91,7 @@ struct SignInView: View {
                             Spacer()
                         }
                         .padding(.vertical, 14)
-                        .background(canSubmit ? AppColors.primaryBlue : AppColors.primaryBlue.opacity(0.4))
+                        .background(canSubmit ? AppColors.primaryFill : AppColors.primaryFill.opacity(0.4))
                         .cornerRadius(AppCornerRadius.medium)
                     }
                     .disabled(!canSubmit || isSubmitting)
@@ -182,8 +182,7 @@ struct SignInView: View {
                 .foregroundColor(AppColors.textPrimary)
                 .frame(maxWidth: .infinity)
                 .frame(height: 48)
-                .background(AppColors.cardBackground)
-                .cornerRadius(AppCornerRadius.medium)
+                .cardSurface(cornerRadius: AppCornerRadius.medium)
                 .overlay(
                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                         .stroke(AppColors.textMuted.opacity(0.3), lineWidth: 1)
@@ -229,7 +228,7 @@ struct SignInView: View {
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
-                        .background(AppColors.primaryBlue)
+                        .background(AppColors.primaryFill)
                         .cornerRadius(AppCornerRadius.medium)
                 }
                 .padding(.top, 8)
@@ -332,8 +331,19 @@ struct SignInView: View {
     private func friendlyError(_ error: Error) -> String {
         if let api = error as? APIError {
             switch api {
+            case .authError(_, let message):
+                // A 401 carrying the structured contract — the backend's own `user_message`.
+                // MUST come before any fallback: `/auth/login`, `/auth/oauth` and
+                // `/auth/session-exchange` all return `AUTH_CREDENTIALS_INVALID` or
+                // `AUTH_PROVIDER_FAILED` now, and without this arm they fell through to
+                // `default:` and showed the useless generic line at the bottom of this function.
+                return message
             case .unauthorized:
-                return "Email or password is incorrect."
+                // Legacy shape only: a 401 whose body is not on the contract (an older backend,
+                // or a proxy's own response). It is no longer reachable from our auth routes —
+                // this used to hardcode "Email or password is incorrect", which is why a failed
+                // Apple sign-in accused the user of mistyping a password that flow never asks for.
+                return "We couldn't sign you in. Please try again."
             case .businessError(_, let message):
                 return message
             case .rateLimited:
@@ -356,8 +366,7 @@ struct SignInView: View {
             content()
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
-                .background(AppColors.cardBackground)
-                .cornerRadius(AppCornerRadius.medium)
+                .cardSurface(cornerRadius: AppCornerRadius.medium)
                 .foregroundColor(AppColors.textPrimary)
         }
     }

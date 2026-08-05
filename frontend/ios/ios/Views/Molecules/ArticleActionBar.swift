@@ -94,7 +94,7 @@ struct ArticleActionBar: View {
                 )
             }
         )
-        .shadow(color: Color.black.opacity(0.3), radius: 8, y: -4)
+        .shadow(color: AppColors.shadowKey, radius: 8, y: -4)
     }
 }
 

@@ -35,8 +35,7 @@ struct SmartMoneyTabSelector: View {
             }
         }
         .padding(AppSpacing.xs)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 

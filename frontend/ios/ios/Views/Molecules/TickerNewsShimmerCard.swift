@@ -66,8 +66,7 @@ struct TickerNewsShimmerCard: View {
             }
         }
         .padding(AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .shimmer()
     }
 }

@@ -41,8 +41,7 @@ struct ChatStockWidgetView: View {
                 .padding(.top, AppSpacing.lg)
                 .padding(.bottom, AppSpacing.lg)
         }
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Header

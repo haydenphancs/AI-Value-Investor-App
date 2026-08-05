@@ -44,7 +44,7 @@ struct AppLockView: View {
                     .padding(.vertical, AppSpacing.md)
                     .background(
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(AppColors.primaryBlue)
+                            .fill(AppColors.primaryFill)
                     )
                 }
                 .buttonStyle(PlainButtonStyle())

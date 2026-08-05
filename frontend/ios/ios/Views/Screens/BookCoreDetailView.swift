@@ -708,8 +708,7 @@ private struct CoreQuoteView: View {
             }
         }
         .padding(AppSpacing.xl)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 
@@ -766,8 +765,7 @@ private struct CoreAssetCard: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 }
 
@@ -824,8 +822,7 @@ private struct CoreActionStepCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 
@@ -859,8 +856,7 @@ private struct CoreBulletPointsView: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 
@@ -1025,7 +1021,7 @@ private struct CoreDetailMiniHeader: View {
         .padding(.vertical, AppSpacing.md)
         .background(
             AppColors.background
-                .shadow(color: Color.black.opacity(0.2), radius: 4, y: 2)
+                .shadow(color: AppColors.shadowAmbient, radius: 4, y: 2)
                 .ignoresSafeArea(edges: .top)
         )
     }
@@ -1060,7 +1056,7 @@ private struct CoreCompletionButton: View {
                             .strokeBorder(AppColors.textMuted, lineWidth: 1.5)
                     } else {
                         RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                            .fill(AppColors.primaryBlue)
+                            .fill(AppColors.primaryFill)
                     }
                 }
             )

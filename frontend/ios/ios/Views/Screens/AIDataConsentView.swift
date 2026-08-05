@@ -88,7 +88,7 @@ struct AIDataConsentView: View {
                             .padding(.vertical, AppSpacing.lg)
                             .background(
                                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                                    .fill(AppColors.primaryBlue)
+                                    .fill(AppColors.primaryFill)
                             )
                     }
                     .buttonStyle(.plain)

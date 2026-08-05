@@ -75,7 +75,7 @@ struct TradeGroupDetailView: View {
                                     .foregroundColor(.white)
                                     .padding(.horizontal, AppSpacing.lg)
                                     .padding(.vertical, AppSpacing.sm)
-                                    .background(AppColors.primaryBlue)
+                                    .background(AppColors.primaryFill)
                                     .cornerRadius(AppCornerRadius.pill)
                             }
                             .buttonStyle(.plain)
@@ -262,8 +262,7 @@ struct TradeGroupInsightsCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 
@@ -304,8 +303,7 @@ struct TradeDetailCard: View {
                 }
             }
             .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(.plain)
     }

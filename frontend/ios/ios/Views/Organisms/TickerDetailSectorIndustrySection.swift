@@ -46,7 +46,7 @@ struct TickerDetailSectorIndustrySection: View {
         .padding(AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
         .sheet(isPresented: $showInfoSheet) {
             SectorIndustryInfoSheet()
@@ -185,8 +185,7 @@ struct MetricExplanation: View {
         }
         .padding(AppSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 }
 

@@ -286,7 +286,7 @@ struct ReportsListSection: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, AppSpacing.xl)
                         .padding(.vertical, AppSpacing.md)
-                        .background(AppColors.primaryBlue)
+                        .background(AppColors.primaryFill)
                         .cornerRadius(AppCornerRadius.medium)
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -323,7 +323,7 @@ struct ReportsListSection: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, AppSpacing.xl)
                         .padding(.vertical, AppSpacing.md)
-                        .background(AppColors.primaryBlue)
+                        .background(AppColors.primaryFill)
                         .cornerRadius(AppCornerRadius.medium)
                 }
                 .buttonStyle(PlainButtonStyle())

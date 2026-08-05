@@ -43,7 +43,7 @@ struct ETFDetailKeyStatsSection: View {
         .padding(.bottom, AppSpacing.sm)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 }

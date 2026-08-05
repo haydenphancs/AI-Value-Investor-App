@@ -223,8 +223,8 @@ struct CapitalAllocationMiniChart: View {
         .padding(.vertical, AppSpacing.xs)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
-                .shadow(color: .black.opacity(0.15), radius: 6, x: 0, y: 3)
+                .cardFill()
+                .shadow(color: AppColors.shadowAmbient, radius: 6, x: 0, y: 3)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)

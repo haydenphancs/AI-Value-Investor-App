@@ -89,7 +89,7 @@ struct GlobalMiniPlayer: View {
             // Progress bar at bottom (inside capsule)
             progressBar(width: playerWidth)
         }
-        .shadow(color: Color.black.opacity(0.4), radius: 24, y: 12)
+        .shadow(color: AppColors.shadowKey, radius: 24, y: 12)
         .padding(.bottom, AppSpacing.md)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -165,7 +165,7 @@ struct GlobalMiniPlayer: View {
         }) {
             ZStack {
                 Circle()
-                    .fill(AppColors.primaryBlue)
+                    .fill(AppColors.primaryFill)
                     .frame(width: 44, height: 44)
 
                 Image(systemName: audioManager.isPlaying ? "pause.fill" : "play.fill")
@@ -192,7 +192,12 @@ struct GlobalMiniPlayer: View {
 
     // MARK: - Capsule Background
     private var capsuleBackground: some View {
-        Color(hex: "1A1F2E") // Dark navy/charcoal for solid capsule look
+        // Was a frozen dark navy (#1A1F2E). Its labels use `textPrimary`, which
+        // resolves to near-black in light mode — so the whole player went
+        // black-on-navy. It reads as a floating card, so it should BE one: an
+        // adaptive surface, with the border carrying the edge in light.
+        AppColors.cardBackground
+            .overlay(AppColors.border)
     }
 
     // MARK: - Progress Bar
@@ -202,7 +207,7 @@ struct GlobalMiniPlayer: View {
         return ZStack(alignment: .leading) {
             // Background track (subtle)
             Rectangle()
-                .fill(Color.white.opacity(0.1))
+                .fill(AppColors.borderStrong)
                 .frame(width: barWidth, height: 3)
 
             // Progress fill

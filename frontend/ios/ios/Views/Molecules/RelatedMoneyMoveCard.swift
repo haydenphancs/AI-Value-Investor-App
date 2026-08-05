@@ -79,8 +79,7 @@ struct RelatedMoneyMoveCard: View {
                 .padding(AppSpacing.md)
             }
             .frame(width: 200, height: 200)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(PlainButtonStyle())
     }

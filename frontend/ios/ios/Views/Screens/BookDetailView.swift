@@ -514,8 +514,7 @@ private struct BookDetailListenRow: View {
             }
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     private func handlePlayTapped() {
@@ -636,8 +635,7 @@ private struct BookDetailAuthorCard: View {
                 .lineSpacing(3)
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 
@@ -735,8 +733,7 @@ private struct KeyHighlightCard: View {
             Spacer(minLength: 0)
         }
         .padding(AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 }
 
@@ -948,8 +945,7 @@ private struct DiscussionCard: View {
                 .lineSpacing(3)
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 }
 
@@ -1001,7 +997,7 @@ private struct BookDetailMiniHeader: View {
         .padding(.top, AppSpacing.sm)
         .background(
             AppColors.background
-                .shadow(color: Color.black.opacity(0.2), radius: 4, y: 2)
+                .shadow(color: AppColors.shadowAmbient, radius: 4, y: 2)
                 .ignoresSafeArea(edges: .top)
         )
     }

@@ -106,8 +106,7 @@ struct InvestorJourneySection: View {
                 }
                 .padding(AppSpacing.lg)
             }
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.extraLarge)
+            .cardSurface(cornerRadius: AppCornerRadius.extraLarge)
         }
         .padding(.horizontal, AppSpacing.lg)
     }

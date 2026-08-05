@@ -22,7 +22,7 @@ struct RecentActivitiesFlowBar: View {
                 // In Flow (Green)
                 ZStack(alignment: .leading) {
                     Rectangle()
-                        .fill(AppColors.bullish)
+                        .fill(AppColors.gainFill)
 
                     Text(formattedInFlow)
                         .font(AppTypography.bodySmallEmphasis)
@@ -34,7 +34,7 @@ struct RecentActivitiesFlowBar: View {
                 // Out Flow (Red)
                 ZStack(alignment: .trailing) {
                     Rectangle()
-                        .fill(AppColors.bearish)
+                        .fill(AppColors.lossFill)
 
                     Text(formattedOutFlow)
                         .font(AppTypography.bodySmallEmphasis)

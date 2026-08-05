@@ -42,8 +42,7 @@ struct RiskFactorRow: View {
                 .padding(.leading, 36 + AppSpacing.md)
         }
         .padding(AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(cornerRadius: AppCornerRadius.medium)
     }
 }
 

@@ -37,11 +37,11 @@ struct ReportsSelectionBar: View {
                 .padding(.vertical, AppSpacing.sm)
                 .background(
                     Capsule()
-                        .fill(isEnabled ? AppColors.bearish : AppColors.bearish.opacity(0.4))
+                        .fill(isEnabled ? AppColors.lossFill : AppColors.lossFill.opacity(0.4))
                 )
                 // Subtle shadow so the floating button reads over scrolling
                 // content — there's no longer a bar behind it.
-                .shadow(color: Color.black.opacity(0.25), radius: 6, y: 2)
+                .shadow(color: AppColors.shadowKey, radius: 6, y: 2)
             }
             .buttonStyle(PlainButtonStyle())
             .disabled(!isEnabled)

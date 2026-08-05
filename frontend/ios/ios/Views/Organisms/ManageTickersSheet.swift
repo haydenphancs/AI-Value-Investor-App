@@ -51,7 +51,7 @@ struct ManageTickersSheet: View {
                             .font(AppTypography.caption)
                             .foregroundColor(.white)
                             .padding(AppSpacing.md)
-                            .background(AppColors.bearish)
+                            .background(AppColors.lossFill)
                             .cornerRadius(AppCornerRadius.medium)
                             .padding(.bottom, AppSpacing.xl)
                     }

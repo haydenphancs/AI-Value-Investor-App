@@ -459,15 +459,11 @@ struct ReportConsensusBar: View {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: "sparkles.2")
-                        .foregroundStyle(LinearGradient(
-                            colors: [.indigo],
-                            startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .foregroundStyle(AppColors.aiRampStart)
                         .font(AppTypography.iconDefault).fontWeight(.semibold)
                     Text("Insight")
                         .font(AppTypography.bodySmallEmphasis)
-                        .foregroundStyle(LinearGradient(
-                            colors: [.indigo, .cyan],
-                            startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .foregroundStyle(AppGradients.ai)
                 }
                 Text(insight)
                     .font(AppTypography.body)
@@ -593,8 +589,8 @@ struct ReportConsensusBar: View {
             .padding(.vertical, AppSpacing.sm)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(AppColors.cardBackground)
-                    .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+                    .cardFill()
+                    .shadow(color: AppColors.shadowAmbient, radius: 8, x: 0, y: 4)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)

@@ -49,21 +49,13 @@ struct ReportFutureForecastSection: View {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "sparkles.2")
                             .foregroundStyle(
-                                LinearGradient(
-                                    colors: [.indigo],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
+                                AppColors.aiRampStart
                             )
                             .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                         Text("Insight")
                             .font(AppTypography.bodySmallEmphasis)
-                            .foregroundStyle(LinearGradient(
-                                colors: [.indigo, .cyan],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ))
+                            .foregroundStyle(AppGradients.ai)
                     }
 
                     Text(insight)

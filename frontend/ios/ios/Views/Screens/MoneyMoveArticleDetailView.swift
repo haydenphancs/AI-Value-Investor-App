@@ -239,7 +239,7 @@ struct MoneyMoveArticleDetailView: View {
         .padding(.top, AppSpacing.sm)
         .padding(.bottom, AppSpacing.xs)
         .background(.ultraThinMaterial)
-        .shadow(color: Color.black.opacity(0.15), radius: 4, y: 2)
+        .shadow(color: AppColors.shadowAmbient, radius: 4, y: 2)
     }
 
     // MARK: - Reading Progress Bar

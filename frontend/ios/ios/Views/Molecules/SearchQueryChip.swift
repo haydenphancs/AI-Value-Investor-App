@@ -28,8 +28,7 @@ struct SearchQueryChip: View {
             }
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.sm)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.pill)
+            .cardSurface(cornerRadius: AppCornerRadius.pill)
         }
         .buttonStyle(PlainButtonStyle())
     }

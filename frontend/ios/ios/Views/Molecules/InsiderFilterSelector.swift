@@ -28,7 +28,7 @@ struct InsiderFilterSelector: View {
                             Group {
                                 if selectedFilter == filter {
                                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                        .fill(AppColors.cardBackground)
+                                        .cardFill()
                                 }
                             }
                         )

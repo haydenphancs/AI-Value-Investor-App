@@ -34,7 +34,7 @@ struct RevenueBreakdownSectionCard: View {
         .padding(AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
         .sheet(isPresented: $showInfoSheet) {
             RevenueBreakdownInfoSheet()

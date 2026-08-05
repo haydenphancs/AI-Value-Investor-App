@@ -56,7 +56,7 @@ struct TrendingThemeTile: View {
                                 .opacity(0.92)
                         )
                     )
-                    .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                    .shadow(color: AppColors.shadowKey, radius: 3, y: 1)
                     .padding(10)
             }
         }

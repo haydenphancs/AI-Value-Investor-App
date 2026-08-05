@@ -14,7 +14,7 @@ struct ChartGridLines: View {
         VStack(spacing: 0) {
             ForEach(0..<lineCount, id: \.self) { index in
                 Rectangle()
-                    .fill(AppColors.cardBackgroundLight.opacity(0.5))
+                    .fill(AppColors.chartGridline)
                     .frame(height: 1)
                 if index < lineCount - 1 {
                     Spacer()

@@ -176,8 +176,7 @@ struct NewsCardView: View {
                 }
             }
             .padding(AppSpacing.md)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(PlainButtonStyle())
     }

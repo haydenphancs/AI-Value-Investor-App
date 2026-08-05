@@ -95,8 +95,7 @@ struct SearchNewsCard: View {
                 .buttonStyle(PlainButtonStyle())
             }
             .padding(AppSpacing.lg)
-            .background(AppColors.cardBackground)
-            .cornerRadius(AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(PlainButtonStyle())
     }

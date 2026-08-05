@@ -347,7 +347,7 @@ struct AppSettingsView: View {
                 .padding(.vertical, AppSpacing.md)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                        .fill(AppColors.cardBackground)
+                        .cardFill()
                         .overlay(
                             RoundedRectangle(cornerRadius: AppCornerRadius.large)
                                 .stroke(AppColors.bearish.opacity(0.2), lineWidth: 1)

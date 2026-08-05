@@ -65,8 +65,7 @@ struct AnalystRatingsSection: View {
             AnalysisDisclaimerText()
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackground)
-        .cornerRadius(AppCornerRadius.large)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
         .sheet(isPresented: $showInfoSheet) {
             AnalystRatingsInfoSheet()
         }

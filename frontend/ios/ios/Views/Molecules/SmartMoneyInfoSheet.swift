@@ -65,7 +65,7 @@ struct SmartMoneyInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackground)
+                .cardFill()
                 .overlay(
                     RoundedRectangle(cornerRadius: AppCornerRadius.large)
                         .stroke(AppColors.primaryBlue.opacity(0.3), lineWidth: 1)
@@ -175,7 +175,7 @@ struct SmartMoneyInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 
@@ -241,7 +241,7 @@ struct SmartMoneyInfoSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackground)
+                .cardFill()
         )
     }
 }

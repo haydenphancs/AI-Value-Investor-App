@@ -92,7 +92,7 @@ struct SparklineView: View {
                     refLine.addLine(to: CGPoint(x: size.width, y: referenceY))
                     context.stroke(
                         refLine,
-                        with: .color(.white.opacity(0.3)),
+                        with: .color(AppColors.chartCrosshair),
                         style: StrokeStyle(lineWidth: 1, dash: [4, 3])
                     )
 

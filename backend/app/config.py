@@ -224,6 +224,13 @@ class Settings(BaseSettings):
     # downloadable from https://www.apple.com/certificateauthority/. Not committed —
     # they are Apple infrastructure, not our secret, but also not ours to redistribute.
     IAP_ROOT_CERT_DIR: str = "certs/apple"
+
+    # ── Associated domains (passkeys + Password AutoFill) ──────────────────────
+    # Served by GET /.well-known/apple-app-site-association. NEITHER IS A SECRET: both ship
+    # inside every copy of the app, and Apple has to be able to fetch them unauthenticated.
+    # Settings rather than literals so a rename or a second bundle (staging) is a config change.
+    APPLE_TEAM_ID: str = "WG697LVCS9"
+    APPLE_BUNDLE_ID: str = "com.phan.caydex"
     # StoreKit product id → tier. The product ids must match App Store Connect exactly.
     # Kept in config rather than the DB so a typo can't silently grant the wrong tier.
     IAP_PRODUCT_PRO_MONTHLY: str = "com.phan.caydex.pro.monthly"

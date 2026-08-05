@@ -137,6 +137,28 @@ def test_stale_keys_are_reclaimed_within_a_bounded_scan():
     assert len(rl._requests) <= rl._MAX_TRACKED
 
 
+def test_a_denied_check_still_inserts_its_key():
+    """The property that made the pool split insufficient on its own.
+
+    `is_allowed` inserts and LRU-touches BEFORE it decides, so even a refused call leaves a key
+    behind. That is fine in isolation — but it means a route which evaluates a second limiter
+    after the first already said no lets a caller create pool entries with requests that were
+    rejected. Pinned here so the behaviour is explicit, and so the endpoint-level short-circuit
+    (`auth.py::_enforce_credential_limits`) is understood as load-bearing rather than stylistic.
+    """
+    rl = RateLimiter()
+    for _ in range(3):
+        rl.is_allowed("k", max_requests=3, window_seconds=60, protected=True)
+    assert rl.is_allowed("k", max_requests=3, window_seconds=60, protected=True) is False
+
+    before = len(rl._protected)
+    assert rl.is_allowed("brand-new-key", max_requests=0, window_seconds=60, protected=True) is False
+    assert len(rl._protected) == before + 1, (
+        "a denied check must still be understood to insert — the endpoints short-circuit "
+        "precisely because of this"
+    )
+
+
 def test_empty_and_unicode_identifiers_do_not_crash():
     rl = RateLimiter()
     for ident in ["", " ", "\n", "🙂" * 100, "a" * 10_000, "login:email:"]:

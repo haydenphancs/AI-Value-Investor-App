@@ -21,6 +21,7 @@ reset between tests so limits from one test can't leak into another.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -34,6 +35,7 @@ from app.schemas.auth import (
     PASSWORD_MIN_LENGTH,
     RefreshTokenRequest,
     ResetPasswordRequest,
+    SignInRequest,
 )
 
 _USER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -91,6 +93,10 @@ class _FakeAuth:
     def sign_in_with_password(self, creds):
         if "signin" in self._fail:
             raise RuntimeError("bad credentials")
+        # A failure that is OURS. Worded so it does NOT match `_is_rejected_credential` —
+        # that classifier is the only thing separating a wrong password from an outage.
+        if "outage" in self._fail:
+            raise RuntimeError("upstream gateway timeout contacting the identity provider")
         self._log.append(("sign_in_with_password", creds["email"]))
 
 
@@ -385,6 +391,70 @@ async def test_change_password_is_rate_limited_per_user_across_ips():
             user_id=_USER_ID, supabase=FakeSupabase(fail=("signin",)),
         )
     assert ei.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_change_password_upstream_failure_is_503_not_a_wrong_password(caplog):
+    """An identity-provider failure must not be reported as "your password is incorrect".
+
+    This block used to map EVERY exception to that message. A GoTrue 429 — which this endpoint
+    invites, since every call leaves from the one Railway egress IP — a Supabase 5xx, or a
+    connect timeout all told the user something false about their password and sent them to a
+    reset they did not need. Worse, the per-user limiter consumes its slot at check time and
+    nothing refunds it, so five outage-induced failures locked the real owner out for 15
+    minutes. Same classification /login already does.
+    """
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.change_password(
+                ChangePasswordRequest(
+                    current_password="the-correct-one", new_password=_GOOD_PASSWORD
+                ),
+                _FakeRequest(),
+                user_id=_USER_ID,
+                supabase=FakeSupabase(fail=("outage",)),
+            )
+    assert ei.value.status_code == 503
+    assert ei.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "an upstream failure must reach Sentry — the old handler bound no exception and "
+        "logged at INFO with no type, message or stack"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_denied_ip_never_reaches_the_per_email_limiter():
+    """The short-circuit. Without it the protected pool is still evictable.
+
+    `is_allowed` inserts its key before deciding, so evaluating the email limiter after the IP
+    limiter already refused created a `login:email:<attacker-chosen>` entry per rejected
+    request. ~20k cheap POSTs from ONE address — all 429'd, none reaching Supabase — filled the
+    pool and evicted the victim's bucket, handing back a fresh 10-guess window. That defeated
+    the whole point of the separate credential pool.
+
+    Here: burn the per-IP budget (10/60s), then send 50 more with distinct emails. None of
+    those emails may appear in the pool.
+    """
+    from app.core.security import rate_limiter
+
+    for i in range(10):
+        # Consume the IP budget directly; the handler path is exercised in the loop below.
+        rate_limiter.is_allowed(
+            "login:ip:203.0.113.77", max_requests=10, window_seconds=60, protected=True
+        )
+
+    before = len(rate_limiter._protected)
+    for i in range(50):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.sign_in(
+                SignInRequest(email=f"flood{i}@example.com", password=_GOOD_PASSWORD),
+                _FakeRequest("203.0.113.77"), FakeSupabase(),
+            )
+        assert ei.value.status_code == 429
+
+    leaked = [k for k in rate_limiter._protected if k.startswith("login:email:flood")]
+    assert not leaked, f"{len(leaked)} email keys inserted by requests the IP limiter refused"
+    assert len(rate_limiter._protected) == before
 
 
 @pytest.mark.asyncio

@@ -245,6 +245,15 @@ class RateLimiter:
     #      pool with 20k distinct emails, and every one of those attempts is itself throttled by
     #      `login:ip:` (10/60s) — ~33 hours from one address, versus seconds before.
     #
+    # ⚠️ Point 2 only holds because the endpoints SHORT-CIRCUIT. `is_allowed` inserts and
+    # LRU-touches its key BEFORE deciding, so a route that evaluates a second limiter after the
+    # first has already denied still creates the second key. `auth.py` originally did exactly
+    # that (`ip_ok = ...; email_ok = ...; if not (ip_ok and email_ok)`), which meant ~20k cheap
+    # POSTs from ONE address — every one of them 429'd, never reaching Supabase — still inserted
+    # 20k keys and evicted the victim's bucket. The "~33 hours" above was false as written; it is
+    # true now that `_enforce_credential_limits` raises on the first denial. Any new paired
+    # limiter MUST go through that helper.
+    #
     # Evicting a key only resets that identifier's window (best-effort limiter, not a hard wall).
     _MAX_TRACKED = 20_000
     _MAX_TRACKED_PROTECTED = 20_000

@@ -28,6 +28,11 @@ enum SocialSignInError: LocalizedError {
     case missingIdentityToken
     case malformedCallback
     case notConfigured(String)
+    /// The provider rejected the handshake and told us why. Carried rather than collapsed into
+    /// `.malformedCallback`, because "provider disabled", "redirect URL not allow-listed" and
+    /// "user declined consent" are three different problems with three different fixes — and
+    /// all three used to render as the same shrug.
+    case provider(String)
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +44,8 @@ enum SocialSignInError: LocalizedError {
             return "That sign-in didn't complete. Please try again."
         case .notConfigured(let what):
             return "Sign-in isn't configured yet (\(what))."
+        case .provider(let reason):
+            return "That sign-in didn't complete: \(reason)"
         }
     }
 }
@@ -80,6 +87,13 @@ final class SocialSignInService: NSObject {
     func handleAppleCompletion(
         _ result: Result<ASAuthorization, Error>
     ) throws -> SocialSignInResult {
+        // Consume the nonce on EVERY outcome, not just success. It was cleared only on the
+        // success path, so a cancelled or failed authorization left the previous attempt's
+        // nonce sitting in `currentAppleNonce` — and `makeAppleRequest()` is called from
+        // SwiftUI's `onRequest` builder, which is not guaranteed to run exactly once per
+        // presentation. A one-time value that outlives its one time is not a nonce.
+        defer { currentAppleNonce = nil }
+
         switch result {
         case .failure(let error):
             if let authError = error as? ASAuthorizationError, authError.code == .canceled {
@@ -132,6 +146,9 @@ final class SocialSignInService: NSObject {
         components?.queryItems = [
             URLQueryItem(name: "provider", value: "google"),
             URLQueryItem(name: "redirect_to", value: "\(callbackScheme)://auth-callback"),
+            // Ask Google for the account chooser EXPLICITLY, instead of getting it as a
+            // side effect of throwing away the session (see the ephemeral note below).
+            URLQueryItem(name: "prompt", value: "select_account"),
         ]
         guard let authURL = components?.url else {
             throw SocialSignInError.notConfigured("could not build the authorize URL")
@@ -157,9 +174,25 @@ final class SocialSignInService: NSObject {
                 continuation.resume(returning: url)
             }
             session.presentationContextProvider = self
-            // Don't reuse Safari's cookies: otherwise the picker silently reuses whichever
-            // Google account the browser is already signed into, with no way to switch.
-            session.prefersEphemeralWebBrowserSession = true
+            // INTERIM — remove when the GoogleSignIn SDK lands (it uses this same class via
+            // AppAuth, simply without opting into ephemeral).
+            //
+            // This was `true`, to stop the picker silently reusing whichever Google account
+            // Safari was signed into. That goal is real, but ephemeral bought it by destroying
+            // the cookie jar — so EVERY sign-in became a cold, fully unauthenticated one.
+            // Google then always reached its credential step, and on an iPhone with no
+            // `google.com` passkey in iCloud Keychain (Google's passkeys usually live in Google
+            // Password Manager, which iOS can't read unless Chrome is the AutoFill provider)
+            // the only WebAuthn transport left is hybrid — a QR code asking you to scan with a
+            // second device you are not holding. iOS also can't persistently link a hybrid
+            // device, so it is a fresh QR every single time.
+            //
+            // To be precise about cause: ephemeral does NOT hide passkeys — those live in a
+            // system credential store, not "browsing data", and ASWebAuthenticationSession has
+            // full WebAuthn support. What ephemeral does is guarantee the user always reaches
+            // the screen that offers the QR. `prompt=select_account` above gets the account
+            // chooser honestly, so we can keep the session and skip that whole escalation.
+            session.prefersEphemeralWebBrowserSession = false
             self.webSession = session
             session.start()
         }
@@ -170,20 +203,42 @@ final class SocialSignInService: NSObject {
 
     /// Supabase returns tokens in the URL **fragment**, not the query string.
     private static func accessToken(from url: URL) throws -> String {
-        guard let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment
-        else {
-            throw SocialSignInError.malformedCallback
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+
+        /// Split `a=1&b=2` into a dictionary, percent-decoding values.
+        func pairs(_ raw: String?) -> [String: String] {
+            guard let raw, !raw.isEmpty else { return [:] }
+            var out: [String: String] = [:]
+            for pair in raw.split(separator: "&") {
+                let parts = pair.split(separator: "=", maxSplits: 1)
+                guard parts.count == 2 else { continue }
+                out[String(parts[0])] = String(parts[1])
+                    .replacingOccurrences(of: "+", with: " ")
+                    .removingPercentEncoding ?? String(parts[1])
+            }
+            return out
         }
-        // Parse the fragment as query pairs.
-        var parsed: [String: String] = [:]
-        for pair in fragment.split(separator: "&") {
-            let parts = pair.split(separator: "=", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-            parsed[String(parts[0])] = String(parts[1])
-                .replacingOccurrences(of: "+", with: " ")
-                .removingPercentEncoding ?? String(parts[1])
+
+        // Read BOTH halves of the URL. The implicit flow returns tokens in the fragment, but
+        // OAuth errors can arrive in either — and a PKCE-flow project returns `?code=` in the
+        // query with no fragment at all. Fragment-only parsing meant a fragment-less callback
+        // was indistinguishable from a malformed one.
+        let fragment = pairs(components?.fragment)
+        let query = pairs(components?.query)
+
+        // Surface the provider's own reason instead of discarding it. This branch used to be
+        // unreachable: any failure fell through to `.malformedCallback` → "That sign-in didn't
+        // complete. Please try again." So a disabled provider, a redirect URL that isn't
+        // allow-listed, or the user declining consent all looked identical, and the one piece
+        // of information that would have explained it was thrown away.
+        if let description = fragment["error_description"] ?? query["error_description"] {
+            throw SocialSignInError.provider(description)
         }
-        guard let token = parsed["access_token"], !token.isEmpty else {
+        if let code = fragment["error"] ?? query["error"] {
+            throw SocialSignInError.provider(code)
+        }
+
+        guard let token = fragment["access_token"], !token.isEmpty else {
             throw SocialSignInError.malformedCallback
         }
         return token

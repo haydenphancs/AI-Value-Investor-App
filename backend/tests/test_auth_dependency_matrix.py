@@ -31,6 +31,7 @@ import app.dependencies as deps
 from app.core.security import create_access_token, create_refresh_token
 from app.dependencies import (
     GUEST_USER_ID,
+    get_chat_identity,
     get_current_user,
     get_current_user_id,
     get_current_user_or_guest,
@@ -40,6 +41,17 @@ from app.dependencies import (
     get_research_identity,
     get_watchlist_identity,
 )
+
+# All four per-install wrappers. `get_chat_identity` was missing from the two parametrized
+# tests below — chat is the surface people paste holdings into, and the one migration 111 was
+# written for, so leaving it out of the matrix was the wrong omission to have.
+_IDENTITY_WRAPPERS = [
+    get_learn_identity,
+    get_research_identity,
+    get_watchlist_identity,
+    get_chat_identity,
+]
+_IDENTITY_WRAPPER_IDS = ["learn", "research", "watchlist", "chat"]
 
 _USER_ID = "11111111-2222-3333-4444-555555555555"
 
@@ -227,10 +239,7 @@ async def test_lowercase_bearer_scheme_is_a_credential():
 
 # ── the three per-install identity wrappers inherit the rejection ────────────
 
-@pytest.mark.parametrize(
-    "dep", [get_learn_identity, get_research_identity, get_watchlist_identity],
-    ids=["learn", "research", "watchlist"],
-)
+@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
 @pytest.mark.asyncio
 async def test_identity_wrappers_reject_a_bad_token(dep):
     """A bad token must NOT land in a per-install guest partition. Silently writing a
@@ -241,10 +250,7 @@ async def test_identity_wrappers_reject_a_bad_token(dep):
     assert _code(exc.value) == "AUTH_TOKEN_INVALID"
 
 
-@pytest.mark.parametrize(
-    "dep", [get_learn_identity, get_research_identity, get_watchlist_identity],
-    ids=["learn", "research", "watchlist"],
-)
+@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
 @pytest.mark.asyncio
 async def test_identity_wrappers_still_partition_real_guests(dep):
     """The guest path must be untouched — this is the whole guest-first product."""
@@ -252,6 +258,40 @@ async def test_identity_wrappers_still_partition_real_guests(dep):
     b = await dep(authorization=None, x_guest_id="install-B", supabase=_SB([]))
     assert a["id"] != b["id"]
     assert a["id"] != GUEST_USER_ID
+
+
+@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
+@pytest.mark.asyncio
+async def test_identity_wrappers_all_flag_a_guest(dep):
+    """`is_guest` must be present and TRUE on every per-install wrapper.
+
+    This is the invariant that has now failed three separate times — in research, watchlist and
+    chat. The trap: a per-install id is a uuid5 that NEVER equals `GUEST_USER_ID`, so the
+    obvious-looking `user["id"] == GUEST_USER_ID` classifies every guest as a paying account.
+    In chat that meant sending guests into a credit precharge against a `user_credits` row that
+    does not exist — a 402 "insufficient credits" on a feature that is free for them.
+
+    `user.get("is_guest")` is the prescribed test, and it only works if EVERY wrapper sets it.
+    Two of the four did not until this week, so the prescribed test read falsy on the widest
+    guest surface in the app.
+    """
+    guest = await dep(authorization=None, x_guest_id="install-A", supabase=_SB([]))
+    assert guest.get("is_guest") is True, (
+        f"{dep.__name__} does not flag a guest — `user.get('is_guest')` will read falsy and "
+        "callers following the rulebook will treat this guest as a paying account"
+    )
+
+
+@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
+@pytest.mark.asyncio
+async def test_identity_wrappers_flag_a_real_account_as_not_guest(dep):
+    """Present-and-False, not absent. A caller must be able to tell a real account apart from
+    a wrapper that simply forgot to set the key — those are the same value to `.get()`."""
+    user = await dep(
+        authorization=_bearer(_access()), x_guest_id="install-A", supabase=_SB(_row())
+    )
+    assert user["id"] == _USER_ID
+    assert user.get("is_guest") is False
 
 
 # ── the deliberate carve-out ─────────────────────────────────────────────────

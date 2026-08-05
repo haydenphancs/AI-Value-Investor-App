@@ -29,6 +29,15 @@
 	<array>
 		<string>Default</string>
 	</array>
+	<!-- Duplicated from ios.entitlements, per the warning at the top of this file: Release
+	     REPLACES Debug rather than extending it, and Sign in with Apple was already lost once
+	     in that split. Passkeys and Password AutoFill would have failed in exactly the builds
+	     hardest to test — TestFlight and App Store — with no signal. See ios.entitlements for
+	     the full reasoning and the portal prerequisite. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:caydexinvest.com</string>
+	</array>
 	<key>aps-environment</key>
 	<string>production</string>
 </dict>

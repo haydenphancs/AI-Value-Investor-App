@@ -10,6 +10,21 @@
 	<array>
 		<string>Default</string>
 	</array>
+	<!-- Associated domains. `webcredentials:` is what binds saved passwords and PASSKEYS to
+	     this app: without it a platform-passkey request errors outright, and the
+	     `.textContentType(.username)` field in SignInView has no domain to offer credentials
+	     for. Apple fetches https://caydexinvest.com/.well-known/apple-app-site-association
+	     (served by the backend) and checks it names this Team ID + bundle id.
+
+	     ⚠️ Requires the "Associated Domains" capability on the App ID in the Developer portal.
+	     Without it the build FAILS TO SIGN — that is the expected error, not a code problem.
+
+	     ⚠️ The domain is effectively permanent: changing it invalidates every passkey users
+	     have enrolled. caydexinvest.com is the committed choice. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:caydexinvest.com</string>
+	</array>
 	<key>aps-environment</key>
 	<string>development</string>
 </dict>

@@ -69,6 +69,37 @@ def test_overlong_ids_are_bounded_but_still_distinct():
     assert guest_user_id_for(a) != guest_user_id_for(b)
 
 
+def test_ids_differing_only_past_the_clamp_DO_collide():
+    """Pins the real edge of `install_id.strip()[:200]`, which the test above stops short of.
+
+    The pair above differs at index 199 — inside the window — so it survives. Two ids that are
+    identical for 200 characters and differ only afterwards resolve to the SAME partition. This
+    asserts that on purpose, so the day someone widens or removes the clamp it is a deliberate
+    decision rather than a silent behaviour change.
+
+    Accepted, not a hole: the shipping client sends a 36-char UUID minted once into the Keychain
+    (`GuestIdentity`), so no honest caller comes near 200. And a colliding pair can only be
+    produced by someone who controls BOTH ids — colliding with a stranger would require already
+    knowing their id, at which point the clamp is not what is protecting them. The clamp exists
+    to bound the rate limiter's key space against an attacker-controlled header.
+    """
+    prefix = "A" * 200
+    assert guest_user_id_for(prefix + "1") == guest_user_id_for(prefix + "2")
+    # And the shared prefix is what both resolve to — truncation, not a hash of the whole value.
+    assert guest_user_id_for(prefix + "1") == guest_user_id_for(prefix)
+
+
+def test_the_derivation_is_case_and_form_sensitive():
+    """One install must not be able to split itself into two partitions by accident.
+
+    `guest_user_id_for` only strips whitespace — it does not lowercase or NFC-normalise. So a
+    client that varied the casing of its own id between launches would silently own two separate
+    guest partitions and appear to lose its data. Harmless today because the id is a Keychain
+    UUID that is generated once and never retyped; pinned so that stays true by intent.
+    """
+    assert guest_user_id_for("Install-A") != guest_user_id_for("install-A")
+
+
 def test_learn_routes_use_the_per_install_identity():
     """Regression guard: the Learn routes must not drift back to the shared guest."""
     import inspect

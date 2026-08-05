@@ -1,5 +1,24 @@
 """Guest report budget — durable per-INSTALL monthly ceiling on free AI reports.
 
+⚠️ **DEPRECATED — `claim()` and `release()` have NO production callers.** AI report generation
+became account-only (both doors: `POST /research/generate` and `GET /stocks/{ticker}/report`),
+so the guest branches that used this were removed from `ticker_report.py` and `research.py`.
+The only live entry point is `sweep_expired`, called from the `app/main.py` lifespan to retain
+existing rows.
+
+The reason it went away is the reason not to bring it back: this meters on
+`guest_user_id_for(X-Guest-Id)`, a UUID5 of a header the CLIENT chooses, so rotating that header
+minted a fresh monthly allowance on every request — no ceiling at all on the most expensive call
+in the product. Credits replaced it precisely because they are FK-bound to a real
+`public.users` row and cannot be rotated.
+
+`GUEST_REPORT_MONTHLY_LIMIT` (`config.py`), the `claim_guest_report`/`release_guest_report` RPCs
+and the `guest_report_budget` table are transitively dead alongside the two methods below.
+`tests/test_auth_dependency_matrix.py::test_the_rotatable_guest_budget_is_no_longer_consulted`
+pins their absence. Keep the retention sweep; drop the rest when the table is retired.
+
+--- original design notes follow ---
+
 Signed-out users could generate UNLIMITED reports: `GET /stocks/{ticker}/report`
 skips the credit precharge for guests (the credit RPCs early-return on the shared
 guest sentinel — migration 101 — because debiting it would drain ONE pool for every

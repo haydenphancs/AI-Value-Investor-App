@@ -578,7 +578,12 @@ class ResearchViewModel: ObservableObject {
                     self.inFlightReportIds.remove(id)
                     self.liveProgress[id] = nil
                 }
-                self.error = error.localizedDescription
+                // `AppError.from`, not `localizedDescription`. `APIError` does not conform to
+                // `LocalizedError`, so this rendered "The operation couldn't be completed.
+                // (ios.APIError error 4.)" on the app's most expensive action — and since report
+                // generation became `.signInRequired`, the pre-flight `APIError.authRequired`
+                // throw is now a ROUTINE outcome on this exact path, not a rare one.
+                self.error = AppError.from(error).message
             }
         }
     }

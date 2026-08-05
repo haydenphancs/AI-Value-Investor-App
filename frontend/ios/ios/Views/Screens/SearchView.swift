@@ -58,8 +58,17 @@ struct SearchView: View {
                         RecentSearchesSection(
                             items: viewModel.recentSearches,
                             onClearAll: handleClearAll,
-                            onItemTapped: handleSearchItemTapped,
-                            onFollowTapped: handleFollowTapped
+                            // `onFollowTapped` deliberately not wired. Search results are all
+                            // built with `isFollowable: false`, so `SearchResultRow` never
+                            // renders the button — and the handler it used to point at only
+                            // flipped a flag in the transient `recentSearches` array: no
+                            // backend call, no sign-in gate, no failure reporting. Following
+                            // is account-scoped and `.signInRequired` on both sides
+                            // (`WhaleService.toggleFollow` is the real implementation), so
+                            // wiring the old one up would have broken three auth rules at
+                            // once. Making search return followable results is a product
+                            // decision, not a fix.
+                            onItemTapped: handleSearchItemTapped
                         )
 
                         // Latest News Section
@@ -206,10 +215,6 @@ struct SearchView: View {
 
     private func handleSearchItemTapped(_ item: SearchResultItem) {
         viewModel.selectSearchResult(item)
-    }
-
-    private func handleFollowTapped(_ item: SearchResultItem) {
-        viewModel.toggleFollow(for: item)
     }
 
     private func handleNewsItemTapped(_ item: SearchNewsItem) {

@@ -494,11 +494,17 @@ async def get_learn_identity(
         request=request, authorization=authorization, supabase=supabase
     )
     if user.get("id") != GUEST_USER_ID:
-        return user  # a real signed-in account always wins
+        return {**user, "is_guest": False}   # a real signed-in account always wins
     return {
         "id": guest_user_id_for(x_guest_id),
         "email": "guest@local",
         "tier": "free",
+        # Carried for the same reason the research and chat wrappers carry it, and it was
+        # missing here: a per-install id NEVER equals ``GUEST_USER_ID``, so the obvious test
+        # ``user["id"] == GUEST_USER_ID`` classifies every guest as a paying account. The
+        # rulebook prescribes ``user.get("is_guest")``, which read falsy on this dependency
+        # and on the watchlist one — a loaded gun for the next caller that follows the rule.
+        "is_guest": True,
     }
 
 
@@ -604,11 +610,15 @@ async def get_watchlist_identity(
         request=request, authorization=authorization, supabase=supabase
     )
     if user.get("id") != GUEST_USER_ID:
-        return user  # a real signed-in account always wins
+        return {**user, "is_guest": False}   # a real signed-in account always wins
     return {
         "id": guest_user_id_for(x_guest_id),
         "email": "guest@local",
         "tier": "free",
+        # See get_learn_identity. This wrapper backs 20 routes (portfolios, tracking,
+        # watchlist, home /dashboard, updates /tabs) — the widest guest surface in the app,
+        # and the one where a falsy ``is_guest`` would do the most damage.
+        "is_guest": True,
     }
 
 

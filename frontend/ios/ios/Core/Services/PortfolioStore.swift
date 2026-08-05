@@ -88,6 +88,21 @@ final class PortfolioStore: ObservableObject {
     /// If the persisted active id is gone (deleted on another device, first
     /// launch, etc.) fall back to the first portfolio so the UI always has a
     /// valid selection.
+    /// Drop the previous session's portfolios. Called from `AppState.discardDataForEndedSession`.
+    ///
+    /// `portfolios` is in-memory and `activePortfolioId` is a device-global UserDefaults key, so
+    /// neither was cleared when a session ended. `loadPortfolios()` degrades by keeping whatever
+    /// it already has, so the next account signing in on this phone — with the backend
+    /// unreachable, or just before its first successful load — saw the PREVIOUS user's portfolio
+    /// names in the picker, and their ticker membership driving the filtered asset and alert
+    /// lists. Same class as the Learn stores and followed whales; same funnel.
+    func reset() {
+        portfolios = []
+        activePortfolioId = nil
+        hasLoadedOnce = false
+        UserDefaults.standard.removeObject(forKey: Self.activeIdKey)
+    }
+
     private func ensureActiveSelection() {
         if let current = activePortfolioId,
            portfolios.contains(where: { $0.id == current }) {

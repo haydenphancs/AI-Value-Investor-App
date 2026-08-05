@@ -257,6 +257,10 @@ final class AppState {
     private func endSessionForDeadCredential() {
         authService?.clearToken()
         user = UserState()
+        // `signOut()` clears these two and this path did not, so a dead credential left the
+        // ended account's tickers and reports rendered under the guest UI.
+        watchlist = WatchlistState()
+        research = ResearchState()
         auth.status = .unauthenticated
         cancelRestoreBackoff()
         // MUST be cleared alongside the discard below. `onAuthenticated` skips its fan-out when
@@ -314,13 +318,11 @@ final class AppState {
                 // "Sign In" and a guest profile, yet their watchlist writes land on the real
                 // account and report generation debits their real credits — and the guest
                 // per-install partition they appear to be in is not the one being written.
-                await apiClient.setAuthToken(nil)
                 // `.restoring`, not `.unauthenticated`: the credential is still good as far as
                 // we know, we just could not reach the server. Labelling this as signed-out is
                 // what made a single flaky launch cost the user their whole session — the UI
                 // said "Sign In" and nothing ever tried again.
-                auth.status = .restoring
-                scheduleRestoreBackoff()
+                await enterRestoringWindow()
                 return
             }
             // Access token rejected → fall through to an explicit refresh.
@@ -351,9 +353,7 @@ final class AppState {
                 return
             }
             // Transient refresh outage: token preserved, keep trying.
-            await apiClient.setAuthToken(nil)
-            auth.status = .restoring
-            scheduleRestoreBackoff()
+            await enterRestoringWindow()
             return
         }
 
@@ -369,10 +369,26 @@ final class AppState {
             // token so a later attempt can restore, but disarm the client one so the wire
             // identity matches the guest-equivalent UI we are about to present (same reasoning
             // as above), and keep retrying.
-            await apiClient.setAuthToken(nil)
-            auth.status = .restoring
-            scheduleRestoreBackoff()
+            await enterRestoringWindow()
         }
+    }
+
+    /// Enter the `.restoring` window: disarm the CLIENT token, show the guest-equivalent UI
+    /// honestly, and keep retrying. The Keychain copy is deliberately kept — this is transient.
+    ///
+    /// The flag is the point. `X-Guest-Id` goes out on EVERY request unconditionally
+    /// (`APIClient.buildRequest`), so with the token disarmed every `.guestAllowed` route
+    /// resolves through `guest_user_id_for` and writes to this install's GUEST partition. Once
+    /// the session heals for the SAME user, `onAuthenticated` used to early-return before ever
+    /// reaching the claim — so the tickers, portfolio edits, chats and Learn progress the user
+    /// created while the app said "Reconnecting" silently vanished.
+    ///
+    /// Funnelled into one method so a future `.restoring` branch cannot forget to record it.
+    private func enterRestoringWindow() async {
+        await apiClient.setAuthToken(nil)
+        didWriteAsGuestWhileRestoring = true
+        auth.status = .restoring
+        scheduleRestoreBackoff()
     }
 
     /// Fetch `/users/me` WITHOUT the APIClient 401-refresh interceptor, so
@@ -405,6 +421,15 @@ final class AppState {
         //
         // Keyed on the user id, not a bool, so an account SWITCH still runs the fan-out.
         if let userId, userId == lastAuthenticatedUserId {
+            // Same account, so the rest of the fan-out is genuinely redundant — with ONE
+            // exception. If we spent time in `.restoring`, requests went out tokenless and
+            // anything the user created landed in this install's guest partition; returning
+            // here without claiming is what made those writes disappear the moment the
+            // session healed. Idempotent by construction, so this costs one indexed POST.
+            if didWriteAsGuestWhileRestoring {
+                didWriteAsGuestWhileRestoring = false
+                await claimGuestDataIfNeeded()
+            }
             return
         }
         // A different account on the same device: drop the previous session's device-global
@@ -419,6 +444,7 @@ final class AppState {
         // per install, so a user who added tickers during onboarding and then signed up owns
         // nothing until these rows are moved. Claiming after a watchlist read would show them an
         // empty list they'd have to pull-to-refresh away.
+        didWriteAsGuestWhileRestoring = false
         await claimGuestDataIfNeeded()
         await refreshCredits()
         SettingsSyncManager.shared.hydrate()
@@ -458,6 +484,10 @@ final class AppState {
     /// The account whose post-auth fan-out has already run, so a repeated restore doesn't
     /// repeat it. Cleared on sign-out and on a dead credential.
     private var lastAuthenticatedUserId: String?
+
+    /// True once we have operated tokenless while still holding a credential — see
+    /// `enterRestoringWindow()`. Consumed by the next successful `onAuthenticated`.
+    private var didWriteAsGuestWhileRestoring = false
 
     /// Move this install's guest watchlist + portfolios + Learn progress onto the account that
     /// just signed in (Learn covers completions AND book bookmarks — one unified table).
@@ -548,11 +578,9 @@ final class AppState {
         cancelRestoreBackoff()
         lastAuthenticatedUserId = nil
 
+        // One funnel. The settings clear used to be a second call here, which is precisely why
+        // the other two session-end paths missed it.
         discardDataForEndedSession()
-        // Same argument, different store: the synced preference keys are device-global too, so
-        // without this the next account inherits the previous user's persona, playback speed,
-        // appearance, and notification opt-ins — and then pushes them up as its own.
-        SettingsSyncManager.shared.clearLocalForEndedSession()
     }
 
     /// Drop this device's Learn progress + bookmarks because the session that owned them ended.
@@ -579,15 +607,37 @@ final class AppState {
         // phone, saw A's followed investors — and any list the server hadn't yet reconciled
         // stayed wrong. Same bug class, same fix, one funnel.
         WhaleService.shared.reset()
+
+        // Everything below used to sit OUTSIDE this funnel, called only from `signOut()`. That
+        // covered exactly one of the three ways a session ends — the other two (a dead access
+        // token, a dead refresh token) left all of it behind. Those are not edge cases: an
+        // expired or revoked session is the ordinary way a session dies.
+        //
+        // Synced preferences: 13 notify_* toggles plus persona, appearance, playback speed and
+        // haptics, all on device-global keys. `hydrate()` only overwrites keys the server
+        // actually returns, so the next account inherits the gaps — and its first `push()`
+        // writes the previous user's preferences up as its own, across all of their devices.
+        SettingsSyncManager.shared.clearLocalForEndedSession()
+        // APNs: without this the phone keeps receiving the ended account's watchlist alerts,
+        // and the only server-side detach requires the session that just died.
+        PushNotificationManager.shared.clearLocalRegistrationForEndedSession()
+        PortfolioStore.shared.reset()
+        // Consent is per person and must never be inherited — see the note on the method.
+        AIConsentStore.shared.resetForEndedSession()
     }
 
     /// Sign in. Throws on failure so the SignInView can render the error inline.
     func signIn(email: String, password: String) async throws {
         auth.status = .loading
         do {
-            applyProfile(try await authService.signIn(email: email, password: password))
+            // Bind the profile so the id can be passed on. Calling `onAuthenticated()` with no
+            // id here left `lastAuthenticatedUserId` nil after every interactive sign-in, which
+            // disarmed BOTH guards inside it: the account-switch discard never ran, and the
+            // next restore re-ran the whole fan-out. See `onAuthenticated` for the leak.
+            let profile = try await authService.signIn(email: email, password: password)
+            applyProfile(profile)
             auth.status = .authenticated
-            await onAuthenticated()
+            await onAuthenticated(userId: profile.id)
         } catch {
             auth.status = .unauthenticated
             throw error
@@ -615,7 +665,7 @@ final class AppState {
             case .signedIn(let profile):
                 applyProfile(profile)
                 auth.status = .authenticated
-                await onAuthenticated()
+                await onAuthenticated(userId: profile.id)
             }
             return outcome
         } catch {
@@ -647,7 +697,7 @@ final class AppState {
             }
             applyProfile(profile)
             auth.status = .authenticated
-            await onAuthenticated()
+            await onAuthenticated(userId: profile.id)
         } catch {
             auth.status = .unauthenticated
             throw error

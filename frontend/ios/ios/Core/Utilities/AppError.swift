@@ -292,9 +292,17 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             case "AUTH_UNAVAILABLE":
                 return .authUnavailable(message: message)
             default:
-                // An AUTH_* code this build doesn't know. Treat as a session failure rather than
-                // a generic error — the backend only emits these on 401.
-                return .sessionEnded(message: message)
+                // An AUTH_* code this build doesn't know. Fail NON-destructively.
+                //
+                // This used to return `.sessionEnded`, which is a member of `isAuthError`, which
+                // is what clears the Keychain in `performRestore`. So shipping a seventh auth
+                // code — AUTH_RATE_LIMITED, AUTH_MFA_REQUIRED, anything — would have signed out
+                // every user still on the previous build, permanently, the moment the backend
+                // first emitted it. Exactly three codes are allowed to destroy a credential
+                // (`.claude/rules/auth.md` §3); this arm silently widened that to "and anything
+                // new". `.authUnavailable` keeps the credential and keeps retrying, which
+                // degrades gracefully and self-corrects when the user updates.
+                return .authUnavailable(message: message)
             }
         case .notFound:
             return .notFound(resource: "item")

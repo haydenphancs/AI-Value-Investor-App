@@ -17,6 +17,7 @@ guest id) — NOT `chat_sessions.user_id`. See `dependencies.chat_identity_key`.
 
 import logging
 from datetime import datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -45,13 +46,17 @@ class ChatBudgetService:
     def __init__(self):
         self.supabase = get_supabase()
 
-    def try_claim_turn(self, bucket_key: str) -> int:
+    def try_claim_turn(self, bucket_key: str, limit: Optional[int] = None) -> int:
         """Atomically claim one chat turn for `bucket_key` today.
 
         Returns the new turn count on success, or -1 when the daily cap is reached
         (no mutation). Raises `ChatBudgetUnavailable` if the RPC round-trip fails.
+
+        `limit` defaults to the per-install fair-use cap. It is overridden for the
+        IP-derived anti-rotation bucket, which shares this table and RPC but carries a
+        much higher ceiling — see `CHAT_DAILY_TURN_LIMIT_PER_IP`.
         """
-        limit = settings.CHAT_DAILY_TURN_LIMIT
+        limit = settings.CHAT_DAILY_TURN_LIMIT if limit is None else limit
         try:
             result = self.supabase.rpc(
                 "claim_chat_turn",

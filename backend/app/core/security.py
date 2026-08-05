@@ -4,6 +4,7 @@ JWT token handling, password hashing, and authentication helpers.
 Requirements: Section 5.3 - Security Requirements
 """
 
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 from jose import JWTError, jwt
@@ -221,23 +222,50 @@ class RateLimiter:
     For production, use Redis-based rate limiting.
     """
 
-    # Memory bound. The identifier can be attacker-CONTROLLED (chat buckets off the
-    # per-install X-Guest-Id header → a distinct key per arbitrary header value). Without a
-    # cap, a flood of distinct ids would grow `_requests` unboundedly (memory-exhaustion DoS),
-    # because a key's list is trimmed to the window but the KEY itself is never evicted. When the
-    # map exceeds _MAX_TRACKED we (1) drop idle keys, then (2) FIFO-evict the oldest if still over.
+    # TWO POOLS, and the split is a security boundary — not tidiness.
+    #
+    # The general pool's identifier is attacker-CONTROLLED: chat/report/standard buckets key off
+    # `guest_user_id_for(X-Guest-Id)`, a uuid5 of a header the client picks, so one caller can
+    # mint unlimited distinct keys. The credential pool (`protected=True`) is reachable only from
+    # `api/v1/endpoints/auth.py`, whose keys are a real email or `trusted_client_ip`.
+    #
+    # Mixing them was exploitable. Eviction used to be FIFO by INSERTION order, and re-assigning
+    # an existing key preserves its position in a dict — so a long-lived `login:email:<victim>`
+    # bucket sat permanently at the front and was the FIRST thing evicted. ~20k cheap requests
+    # with a fresh X-Guest-Id each (seconds of work, and each one is *allowed* because every key
+    # gets its own budget) deleted the victim's bucket and reset the 10-per-15-minutes cap at
+    # `auth.py:132`, buying 10 more password guesses. Repeat indefinitely. That directly
+    # falsified `auth.py`'s claim that the per-email window "caps guesses against one address no
+    # matter where they come from". Same for `reset:email:` and `register:email:`.
+    #
+    # Two changes close it:
+    #   1. LRU, not FIFO-by-insertion. `move_to_end` on EVERY touch — including a DENIED one, so
+    #      a bucket actively being brute-forced is the last thing evicted, not the first.
+    #   2. Separate pools. To evict a credential bucket an attacker must now fill the credential
+    #      pool with 20k distinct emails, and every one of those attempts is itself throttled by
+    #      `login:ip:` (10/60s) — ~33 hours from one address, versus seconds before.
+    #
     # Evicting a key only resets that identifier's window (best-effort limiter, not a hard wall).
     _MAX_TRACKED = 20_000
+    _MAX_TRACKED_PROTECTED = 20_000
     _STALE_SECONDS = 3600  # a key idle this long is definitely stale for any window we use (<=60s)
+    # Bounds the stale sweep so eviction stays amortized O(1). The old sweep rebuilt the entire
+    # 20k-entry dict AND materialised `list(keys())` on EVERY allowed request once the table was
+    # full — ~40k operations on the event loop per request, app-wide, to delete typically one key.
+    # Memory was bounded; CPU was not, so 20k cheap requests bought a persistent latency tax.
+    _STALE_SCAN_BUDGET = 64
 
     def __init__(self):
-        self._requests: dict[str, list[datetime]] = {}
+        self._requests: "OrderedDict[str, list[datetime]]" = OrderedDict()
+        self._protected: "OrderedDict[str, list[datetime]]" = OrderedDict()
 
     def is_allowed(
         self,
         identifier: str,
         max_requests: int = 60,
-        window_seconds: int = 60
+        window_seconds: int = 60,
+        *,
+        protected: bool = False,
     ) -> bool:
         """
         Check if request is allowed based on rate limit.
@@ -246,6 +274,10 @@ class RateLimiter:
             identifier: Unique identifier (user_id, IP, etc.)
             max_requests: Maximum requests allowed
             window_seconds: Time window in seconds
+            protected: Route this key into the credential pool, which attacker-minted
+                identifiers cannot reach. Set it for every limiter guarding a credential
+                (sign-in, register, password reset/change, token refresh, OAuth) and for
+                nothing else — see the class comment for why the split exists.
 
         Returns:
             bool: True if request is allowed
@@ -253,40 +285,61 @@ class RateLimiter:
         now = datetime.now(timezone.utc)
         window_start = now - timedelta(seconds=window_seconds)
 
-        # Initialize or clean old requests
-        if identifier not in self._requests:
-            self._requests[identifier] = []
+        pool = self._protected if protected else self._requests
+        cap = self._MAX_TRACKED_PROTECTED if protected else self._MAX_TRACKED
 
-        # Remove old requests outside the window
-        self._requests[identifier] = [
-            req_time for req_time in self._requests[identifier]
-            if req_time > window_start
-        ]
+        times = pool.get(identifier)
+        if times is None:
+            times = []
+            pool[identifier] = times
+        # LRU touch BEFORE the limit check: a bucket under active attack is denied and would
+        # otherwise never be refreshed, so it would drift to the front and be evicted first —
+        # which is precisely the bug this ordering closes.
+        pool.move_to_end(identifier)
 
-        # Check if limit exceeded
-        if len(self._requests[identifier]) >= max_requests:
-            return False
+        # Drop timestamps outside the window (re-assignment keeps the LRU position).
+        times = [req_time for req_time in times if req_time > window_start]
+        pool[identifier] = times
 
-        # Add current request
-        self._requests[identifier].append(now)
+        allowed = len(times) < max_requests
+        if allowed:
+            times.append(now)
 
-        # Keep memory bounded against attacker-controlled identifiers (see class docstring).
-        if len(self._requests) > self._MAX_TRACKED:
-            self._evict(now)
+        # Keep memory bounded against attacker-controlled identifiers (see class comment).
+        # Checked on the denied path too, so a `max_requests=0` caller cannot grow the pool.
+        if len(pool) > cap:
+            self._evict(pool, cap, now)
 
-        return True
+        return allowed
 
-    def _evict(self, now: datetime) -> None:
-        """Bound `_requests`: drop idle keys, then FIFO-evict the oldest if still over cap."""
+    def clear(self) -> None:
+        """Drop ALL tracked windows, in every pool.
+
+        Exists for tests: the limiter is process-wide, so without a reset they poison each
+        other. Tests used to reach in and clear `_requests` directly, which silently stopped
+        covering everything the moment the credential pool was added — several auth tests
+        began failing on leaked state rather than on anything they assert. A method here
+        means a future pool is cleared automatically.
+        """
+        self._requests.clear()
+        self._protected.clear()
+
+    def _evict(self, pool: "OrderedDict[str, list[datetime]]", cap: int, now: datetime) -> None:
+        """Bound `pool` in amortized O(1): LRU order puts evictable keys at the front."""
+        # Hard cap first. `popitem(last=False)` drops the LEAST-recently-touched key, so a
+        # burst of distinct fresh ids evicts itself rather than a real user's live bucket.
+        while len(pool) > cap:
+            pool.popitem(last=False)
+        # Then opportunistically reclaim idle keys, which also accumulate at the front under
+        # LRU. Budgeted so this can never become a full-table scan on the hot path.
         cutoff = now - timedelta(seconds=self._STALE_SECONDS)
-        self._requests = {
-            k: v for k, v in self._requests.items() if v and v[-1] > cutoff
-        }
-        # A burst of DISTINCT fresh ids won't be stale — hard-cap via insertion-order FIFO.
-        overflow = len(self._requests) - self._MAX_TRACKED
-        if overflow > 0:
-            for k in list(self._requests.keys())[:overflow]:
-                del self._requests[k]
+        for _ in range(self._STALE_SCAN_BUDGET):
+            if not pool:
+                break
+            _, times = next(iter(pool.items()))
+            if times and times[-1] > cutoff:
+                break  # front is live; under LRU everything behind it is at least as live
+            pool.popitem(last=False)
 
 
 # Global rate limiter instance

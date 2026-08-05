@@ -11,7 +11,9 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Header
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request
 from fastapi.responses import StreamingResponse
 from supabase import Client
 import logging
@@ -31,6 +33,7 @@ from app.services.chat_security import (
     ensure_disclaimer,
     disclaimer_suffix,
 )
+from app.core.security import trusted_client_ip
 from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
 from app.services.credit_service import CreditService, CreditServiceUnavailable
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
@@ -52,16 +55,44 @@ sec_logger = logging.getLogger("chat.security")
 router = APIRouter()
 
 
-def _claim_chat_turn_or_error(user: dict, x_guest_id):
+# Fixed namespace for the IP-derived budget bucket. Random once, constant forever — changing
+# it hands every caller a fresh allowance.
+_IP_BUDGET_NAMESPACE = uuid.UUID("2b7f4e91-0c3d-4a86-9f52-8d1e6a04b7c3")
+
+
+def _ip_budget_bucket(req) -> str:
+    """The anti-rotation budget key: a uuid5 of the address OUR edge observed.
+
+    `chat_usage_budget.user_id` is a bare uuid column with no FK, so this needs no migration.
+
+    A one-way hash rather than the raw address, because this row outlives the request: it is
+    a pseudonymous IP derivative, it is written for guests only, and the rows are per-day.
+    """
+    return str(uuid.uuid5(_IP_BUDGET_NAMESPACE, trusted_client_ip(req)))
+
+
+def _claim_chat_turn_or_error(user: dict, x_guest_id, req=None):
     """Claim one daily chat turn for this caller's abuse/cost bucket.
 
     Returns a `JSONResponse` (409 CHAT_DAILY_LIMIT_REACHED) when the daily cap is
     reached, else None (proceed). FAILS OPEN on a budget-service transport error —
     a DB blip must never wall a user out of chat.
+
+    TWO buckets for a guest, and the second is the point. The per-install bucket keys on
+    `guest_user_id_for(X-Guest-Id)` — a uuid5 of a header the CLIENT picks — so sending a fresh
+    header minted a fresh 60-turn allowance on every request, leaving this the one AI surface
+    in the app with no effective cost ceiling (report generation went account-only; chat did
+    not). The IP bucket keys on `trusted_client_ip`, which the caller cannot forge, so rotation
+    now buys nothing. It sits far above the per-install cap so a shared network is unaffected
+    in normal use.
+
+    Signed-in callers get ONE bucket: their key is a real account id, which is not rotatable,
+    and adding an IP ceiling there would throttle a household or office sharing an address.
     """
+    service = get_chat_budget_service()
     bucket = chat_identity_key(user, x_guest_id)
     try:
-        count = get_chat_budget_service().try_claim_turn(bucket)
+        count = service.try_claim_turn(bucket)
     except ChatBudgetUnavailable as e:
         logger.warning("Chat budget unavailable for bucket=%s — failing open: %s", bucket, e)
         return None
@@ -70,6 +101,29 @@ def _claim_chat_turn_or_error(user: dict, x_guest_id):
             ErrorCode.CHAT_DAILY_LIMIT_REACHED,
             message="daily chat turn budget exhausted",
         )
+
+    if req is not None and user.get("is_guest"):
+        ip_bucket = _ip_budget_bucket(req)
+        try:
+            ip_count = service.try_claim_turn(
+                ip_bucket, limit=settings.CHAT_DAILY_TURN_LIMIT_PER_IP
+            )
+        except ChatBudgetUnavailable as e:
+            # Fail open, same as above — but say so loudly. This is the anti-abuse ceiling,
+            # so a persistent failure here means rotation is buying allowance again.
+            logger.warning(
+                "Chat IP budget unavailable for bucket=%s — failing open: %s", ip_bucket, e
+            )
+            return None
+        if ip_count == -1:
+            logger.warning(
+                "Chat IP ceiling reached for bucket=%s (limit=%s) — likely X-Guest-Id rotation",
+                ip_bucket, settings.CHAT_DAILY_TURN_LIMIT_PER_IP,
+            )
+            return make_error_response(
+                ErrorCode.CHAT_DAILY_LIMIT_REACHED,
+                message="daily chat turn budget exhausted for this network",
+            )
     return None
 
 
@@ -85,7 +139,13 @@ def _record_chat_tokens(user: dict, x_guest_id, tokens) -> None:
 
 def _refund_chat_turn(user: dict, x_guest_id) -> None:
     """Best-effort: release the daily turn claimed for this caller when generation FAILED to
-    produce a persisted answer, so a Gemini outage doesn't drain the daily cap (migration 097)."""
+    produce a persisted answer, so a Gemini outage doesn't drain the daily cap (migration 097).
+
+    Refunds the per-install bucket only, not the IP ceiling: the ceiling is an abuse bound
+    (300/day) rather than a fair-use budget, and threading the request this far to release it
+    is not worth the coupling. A sustained outage therefore erodes the ceiling for a shared
+    network over one day, which self-heals at the daily rollover.
+    """
     try:
         get_chat_budget_service().refund_turn(chat_identity_key(user, x_guest_id))
     except Exception as e:  # never let a refund failure change the error response
@@ -127,7 +187,7 @@ class _ChatQuota:
             )
 
 
-def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str]):
+def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str], req=None):
     """Reserve one chat turn's quota BEFORE any Gemini spend (pre-flight).
 
     Guests → daily-turn budget (fails open on DB blip). Authenticated users →
@@ -144,7 +204,7 @@ def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str]):
     # feature that is supposed to be free for them. `get_chat_identity` documents this trap;
     # it is the same one `get_research_identity` and `get_watchlist_identity` carry.
     if user.get("is_guest"):
-        err = _claim_chat_turn_or_error(user, x_guest_id)
+        err = _claim_chat_turn_or_error(user, x_guest_id, req)
         if err is not None:
             return None, err
         return _ChatQuota(user, x_guest_id, is_guest=True, ref_id=ref_id), None
@@ -318,6 +378,11 @@ async def create_chat_session(
     request: CreateChatSessionRequest,
     user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
+    # Was the one chat route with NO limiter. It writes a row per call, so an unthrottled
+    # caller could fill `chat_sessions` without ever sending a message — cheap for them,
+    # unbounded for us. Shares the "chat" window with the two message routes on purpose:
+    # alternating between endpoints must not buy extra budget.
+    _rate: None = ChatRateLimit,
 ):
     """Create a new chat session."""
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -375,6 +440,7 @@ async def create_chat_session(
 async def send_chat_message(
     session_id: str,
     request: SendChatMessageRequest,
+    req: Request,
     user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
@@ -412,7 +478,7 @@ async def send_chat_message(
     # Reserve this turn's quota BEFORE spending Gemini tokens: authenticated users are
     # charged CHAT_CREDIT_COST credits (pre-flight + atomic deduction → 402 if broke);
     # guests use the durable per-install daily-turn budget.
-    quota, quota_err = _claim_chat_quota(user, x_guest_id, ref_id=session_id)
+    quota, quota_err = _claim_chat_quota(user, x_guest_id, ref_id=session_id, req=req)
     if quota_err is not None:
         return quota_err
 
@@ -576,6 +642,7 @@ async def send_chat_message(
 async def stream_chat_message(
     session_id: str,
     request: SendChatMessageRequest,
+    req: Request,
     user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
@@ -620,7 +687,7 @@ async def stream_chat_message(
     # are charged CHAT_CREDIT_COST credits (→ 402 if broke), guests use the daily-turn
     # budget. Returning a clean JSON error here (not an SSE frame) mirrors the 404s above;
     # iOS surfaces INSUFFICIENT_CREDITS via its non-stream fallback decode.
-    quota, quota_err = _claim_chat_quota(user, x_guest_id, ref_id=session_id)
+    quota, quota_err = _claim_chat_quota(user, x_guest_id, ref_id=session_id, req=req)
     if quota_err is not None:
         return quota_err
 

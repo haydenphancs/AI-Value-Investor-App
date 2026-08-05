@@ -834,12 +834,35 @@ async def add_process_time(request: Request, call_next):
 # Exception handlers
 @app.exception_handler(RequestValidationError)
 async def validation_handler(request: Request, exc: RequestValidationError):
-    content = {"detail": "Invalid request data"}
+    """422s carry the FIRST validator message, on the error contract iOS decodes.
+
+    This used to replace every body with `{"detail": "Invalid request data"}`, which iOS
+    cannot decode as `APIErrorResponse` — so it surfaced the generic "Validation failed".
+    The visible cost was the password rules in `schemas/auth.py`: register with a trailing
+    space and the real reason ("Password can't start or end with a space") was discarded,
+    the sign-in screen showed "Sign in failed. Please try again.", and `canSubmit` only
+    checks length so the form re-enabled and the user could retry the same input forever
+    with no way to learn what was wrong.
+
+    Only the message is surfaced, never the raw pydantic error list: `exc.errors()` carries
+    the input value, which on these routes is a password. DEBUG keeps the full list.
+    """
+    first = (exc.errors() or [{}])[0]
+    raw = str(first.get("msg") or "").strip()
+    # Pydantic prefixes custom ValueErrors with "Value error, " — noise to a user.
+    message = raw.removeprefix("Value error, ") or "Invalid request data"
+    from app.api.error_response import ErrorCode, make_error_body
+
+    body = make_error_body(
+        ErrorCode.INVALID_INPUT,
+        message=f"request validation failed: {message}",
+        user_message=message,
+    )
     if settings.DEBUG:
-        content["errors"] = exc.errors()
+        body["details"] = {"errors": str(exc.errors())}
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content=content,
+        content=body,
     )
 
 

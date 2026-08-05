@@ -58,6 +58,14 @@ final class LivePriceWebSocketManager: ObservableObject {
         // accumulate against the backend's per-user connection cap.
         reconnectTask?.cancel()
         reconnectTask = nil
+        // Latch BEFORE the close, not after. `closeConnection()` cancels the old task, whose
+        // outstanding `receive` then completes with an error and hops back to the main actor —
+        // by which point the old code had already set `isIntentionalDisconnect = false`, so that
+        // dead task's failure handler scheduled a reconnect. One second later it opened a THIRD
+        // socket over `webSocketTask`, orphaning the one this call just created: never cancelled,
+        // never referenced again, and still counting against the backend's per-user cap.
+        // `disconnect()` sets the flag first for exactly this reason; `connect()` did not.
+        isIntentionalDisconnect = true
         closeConnection()
 
         self.ticker = ticker.uppercased()
@@ -93,6 +101,9 @@ final class LivePriceWebSocketManager: ObservableObject {
         if !authToken.isEmpty {
             components.queryItems = [URLQueryItem(name: "token", value: authToken)]
         }
+        // NOTE: the token is captured once in `connect()` and reused here on every reconnect.
+        // `refreshCurrentAuthToken()` below re-reads it from `APIClient` before each reconnect
+        // so a mid-session refresh doesn't leave this socket authenticating with a dead token.
 
         guard let url = components.url else { return }
 
@@ -201,7 +212,28 @@ final class LivePriceWebSocketManager: ObservableObject {
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self = self, !Task.isCancelled, !self.isIntentionalDisconnect else { return }
+            await self.refreshCurrentAuthToken()
             self.openConnection()
+        }
+    }
+
+    /// Re-read the access token from `APIClient` before reconnecting.
+    ///
+    /// The token was captured ONCE in `connect()` and reused for the life of the screen. If it
+    /// was refreshed in the meantime — which it will be on any screen left open past the 24-hour
+    /// access-token lifetime — every reconnect presented the dead one and was rejected, all
+    /// three attempts burned, and then nothing. The price froze silently: `isConnected` had
+    /// already gone true on the first tick, and `TickerDetailViewModel`'s REST poll returns
+    /// PERMANENTLY once that happens, so there is no fallback left to catch it. No toast, no
+    /// error, no analytics — just a stale quote until the user leaves and re-enters.
+    ///
+    /// `APIClient.currentAuthToken()` is the single source of truth (never the Keychain, which
+    /// deliberately diverges during `.restoring`). An empty token means we reconnect as an
+    /// anonymous caller, which is the correct behaviour for crypto and for a signed-out user.
+    private func refreshCurrentAuthToken() async {
+        guard !authToken.isEmpty else { return }  // was anonymous; stay anonymous
+        if let current = await APIClient.shared.currentAuthToken(), !current.isEmpty {
+            authToken = current
         }
     }
 }

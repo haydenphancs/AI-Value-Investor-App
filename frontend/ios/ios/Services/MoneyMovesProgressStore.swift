@@ -162,18 +162,31 @@ final class MoneyMovesProgressStore: ObservableObject {
         // A tombstone the server STILL has means the DELETE never landed; retry it.
         let staleTombstones = pendingUncompleted.intersection(remote)
 
+        // Identity guard on the WRITE side — see BookProgressStore.pushUnsynced. Both loops
+        // below are awaited network batches, and an account switch partway through wrote the
+        // previous user's articles into the new account.
+        let epoch = LearnIdentityEpoch.current
+
         if !unsynced.isEmpty {
             print("[MoneyMovesProgressStore] re-pushing \(unsynced.count) unsynced completion(s)")
             // Bounded, and the bound can't strand anything: sorting makes the batch deterministic
             // and each pushed slug leaves `unsynced` once the server has it, so successive hydrates
             // drain the backlog 25 at a time.
             for slug in unsynced.sorted().prefix(Self.maxReconcilePushes) {
+                guard epoch == LearnIdentityEpoch.current else {
+                    print("[MoneyMovesProgressStore] abandoned a reconcile push from a previous identity")
+                    return
+                }
                 await pushCompletion(slug)
             }
         }
         if !staleTombstones.isEmpty {
             print("[MoneyMovesProgressStore] retrying \(staleTombstones.count) unconfirmed un-completion(s)")
             for slug in staleTombstones.sorted().prefix(Self.maxReconcilePushes) {
+                guard epoch == LearnIdentityEpoch.current else {
+                    print("[MoneyMovesProgressStore] abandoned a tombstone retry from a previous identity")
+                    return
+                }
                 await pushUncompletion(slug)
             }
         }
@@ -203,6 +216,7 @@ final class MoneyMovesProgressStore: ObservableObject {
 
     private func pushCompletion(_ slug: String) async {
         let token = localVersion
+        let epoch = LearnIdentityEpoch.current
         beginPush(slug)
         defer { endPush(slug) }
         do {
@@ -210,9 +224,10 @@ final class MoneyMovesProgressStore: ObservableObject {
                 endpoint: .completeLearnItem(contentType: Self.contentType, key: slug),
                 responseType: LearnProgressResponse.self
             )
-            // Same stale-snapshot guard as hydrate: an un-mark that landed while this POST was in
-            // flight makes the echoed set a pre-write view of the server.
-            guard token == localVersion else { return }
+            // TWO guards, and they answer different questions. `localVersion` catches a local
+            // write racing this POST; it CANNOT see the account changing underneath, because
+            // each identity starts from its own local state. That is what the epoch is for.
+            guard epoch == LearnIdentityEpoch.current, token == localVersion else { return }
             merge(resp)
         } catch {
             // Non-fatal: stays in the local cache and `pushUnsynced` retries on the next hydrate.
@@ -226,6 +241,7 @@ final class MoneyMovesProgressStore: ObservableObject {
 
     private func pushUncompletion(_ slug: String) async {
         let token = localVersion
+        let epoch = LearnIdentityEpoch.current
         beginPush(slug)
         defer { endPush(slug) }
         do {
@@ -233,6 +249,9 @@ final class MoneyMovesProgressStore: ObservableObject {
                 endpoint: .uncompleteLearnItem(contentType: Self.contentType, key: slug),
                 responseType: LearnProgressResponse.self
             )
+            // Identity moved while this was in flight → the response is the previous account's
+            // row set. Bail before touching either the store or the tombstone.
+            guard epoch == LearnIdentityEpoch.current else { return }
             // Merge BEFORE retiring the tombstone: while `slug` is still tombstoned the merge cannot
             // resurrect it, and retiring the tombstone is itself a local write that would
             // invalidate this very token.

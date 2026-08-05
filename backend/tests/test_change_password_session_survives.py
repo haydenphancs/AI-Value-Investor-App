@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import pytest
 
 import app.api.v1.endpoints.auth as auth_ep
-from app.core.security import decode_token
+from app.core.security import decode_token, rate_limiter
 from app.dependencies import _reject_if_password_changed_since_issue
 from app.schemas.auth import ChangePasswordRequest
 
@@ -80,10 +80,28 @@ def store():
     return {"id": _USER_ID, "email": _EMAIL}
 
 
+@pytest.fixture(autouse=True)
+def _clear_rate_limiter():
+    """`change_password` is limited to 5 per user per 15 min, and the limiter is process-wide.
+    Every test here changes the same account's password, so without a reset the file exhausts
+    its own budget partway through and later tests fail on a 429 they never meant to exercise.
+    """
+    rate_limiter.clear()
+    yield
+
+
+class _FakeRequest:
+    """`change_password` is rate limited now, so it takes the Request to read the client IP."""
+
+    def __init__(self, ip="203.0.113.55"):
+        self.client = type("C", (), {"host": ip})()
+
+
 async def _change(store) -> object:
     return await auth_ep.change_password(
         ChangePasswordRequest(current_password="old-password-value",
                               new_password="a-different-password"),
+        _FakeRequest(),
         user_id=_USER_ID,
         supabase=_SB(store),
     )

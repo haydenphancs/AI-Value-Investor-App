@@ -140,9 +140,31 @@ ALTER TABLE public.whale_trades
 --    Pattern: ADD ... NOT VALID, then VALIDATE — avoids long lock at add time.
 -- =============================================================================
 
+-- ⚠️ NEUTERED 2026-08-03. All three tables in this section were deliberately UN-linked from
+-- `public.users` by later migrations so a signed-out caller can be partitioned per install:
+-- watchlist_items + portfolios by 108, chat_sessions by 111. A synthetic uuid5 has no
+-- `public.users` row, so the FKs below are incompatible with the current design.
+--
+-- The header warning alone was not enough. `.claude/rules/database.md` states every migration
+-- must be safe to re-apply, and a replay of this file did the opposite of a no-op: against a
+-- database with guest rows it FAILS at VALIDATE, and against one without it silently re-adds
+-- the constraints and undoes 108/111 — after which every guest INSERT starts failing the FK.
+-- 047's own remediation note then tells the operator to delete the "orphaned" rows, which are
+-- real user data. A comment cannot prevent that; the DDL had to stop existing.
+--
+-- Kept as an explicit skip rather than deleted so the file still records what it once did and
+-- an operator replaying it sees WHY nothing happened.
 DO $$
 BEGIN
-    IF NOT EXISTS (
+    RAISE NOTICE
+        '047 section 3 skipped: watchlist_items/portfolios (migration 108) and chat_sessions '
+        '(migration 111) are intentionally FK-free so guests can be partitioned per install.';
+END $$;
+
+-- Original DDL, retained for history and permanently disabled by the `FALSE AND` guard.
+DO $$
+BEGIN
+    IF FALSE AND NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'chat_sessions_user_id_fkey'
           AND conrelid = 'public.chat_sessions'::regclass
@@ -155,7 +177,7 @@ BEGIN
         ALTER TABLE public.chat_sessions VALIDATE CONSTRAINT chat_sessions_user_id_fkey;
     END IF;
 
-    IF NOT EXISTS (
+    IF FALSE AND NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'portfolios_user_id_fkey'
           AND conrelid = 'public.portfolios'::regclass
@@ -181,7 +203,7 @@ BEGIN
         ALTER TABLE public.portfolio_holdings VALIDATE CONSTRAINT portfolio_holdings_user_id_fkey;
     END IF;
 
-    IF NOT EXISTS (
+    IF FALSE AND NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'watchlist_items_user_id_fkey'
           AND conrelid = 'public.watchlist_items'::regclass

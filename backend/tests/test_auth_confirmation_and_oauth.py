@@ -42,9 +42,8 @@ _PASSWORD = "a-long-enough-password"
 
 @pytest.fixture(autouse=True)
 def _clear_rate_limiter():
-    store = getattr(rate_limiter, "_requests", None)
-    if isinstance(store, dict):
-        store.clear()
+    # `clear()` covers the credential pool too; `_requests` alone does not.
+    rate_limiter.clear()
     yield
 
 

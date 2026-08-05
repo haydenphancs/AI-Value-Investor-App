@@ -47,7 +47,9 @@ def _patch_budget(monkeypatch, *, claim_returns_error=False):
     """Patch the guest daily-turn helpers; returns a call recorder."""
     rec = {"claimed": 0, "refunded": 0}
 
-    def _claim(user, x_guest_id):
+    # `req` is the Request the IP-derived anti-rotation ceiling is derived from; it is
+    # optional so the non-HTTP call sites in these tests stay one-liners.
+    def _claim(user, x_guest_id, req=None):
         rec["claimed"] += 1
         return MagicMock(name="daily_limit_error") if claim_returns_error else None
 

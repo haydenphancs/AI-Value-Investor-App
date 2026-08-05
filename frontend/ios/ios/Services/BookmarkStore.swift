@@ -181,12 +181,22 @@ final class BookmarkStore: ObservableObject {
         // A tombstone the server STILL has means the DELETE never landed; retry it.
         let staleTombstones = pendingRemovals.intersection(remote)
 
+        // Identity guard on the WRITE side — see BookProgressStore.pushUnsynced. Both loops
+        // below are awaited network batches, and an account switch partway through wrote the
+        // previous user's bookmarks into the new account.
+        let epoch = LearnIdentityEpoch.current
+
         if !unsyncedAdds.isEmpty {
             print("[BookmarkStore] re-pushing \(unsyncedAdds.count) unsynced bookmark(s)")
             // Oldest first so the server's most-recent-first ordering ends up matching local order.
             // Bounded, and the bound can't strand anything: each pushed title leaves `unsyncedAdds`
             // once the server has it, so successive hydrates drain the backlog deterministically.
             for key in unsyncedAdds.reversed().prefix(Self.maxReconcilePushes) {
+                guard epoch == LearnIdentityEpoch.current else {
+                    print("[BookmarkStore] abandoned a reconcile push from a previous identity")
+                    persistLocal()
+                    return
+                }
                 // Pin only on CONFIRMED success. It used to be inserted unconditionally, before
                 // the await — so an offline reconcile marked the title "reconciled" permanently
                 // even though the server never received it. `merge` then suppressed its real
@@ -201,6 +211,10 @@ final class BookmarkStore: ObservableObject {
         if !staleTombstones.isEmpty {
             print("[BookmarkStore] retrying \(staleTombstones.count) unconfirmed removal(s)")
             for key in staleTombstones.sorted().prefix(Self.maxReconcilePushes) {
+                guard epoch == LearnIdentityEpoch.current else {
+                    print("[BookmarkStore] abandoned a tombstone retry from a previous identity")
+                    return
+                }
                 await pushRemove(key)
             }
         }
@@ -235,6 +249,7 @@ final class BookmarkStore: ObservableObject {
     @discardableResult
     private func pushAdd(_ key: String) async -> Bool {
         let token = localVersion
+        let epoch = LearnIdentityEpoch.current
         beginPush(key)
         defer { endPush(key) }
         do {
@@ -242,9 +257,11 @@ final class BookmarkStore: ObservableObject {
                 endpoint: .addBookBookmark(key: key),
                 responseType: BookmarkListResponse.self
             )
-            // Same stale-snapshot guard as hydrate: a toggle that landed while this POST was in
-            // flight makes the echoed list a pre-write view of the server.
-            guard token == localVersion else { return false }
+            // TWO guards, answering different questions. `localVersion` catches a local toggle
+            // racing this POST; it cannot see the ACCOUNT changing underneath, because each
+            // identity starts from its own local state. Returning false also keeps the caller
+            // from pinning this title into `reconciledTitles` for the wrong user.
+            guard epoch == LearnIdentityEpoch.current, token == localVersion else { return false }
             merge(resp.bookmarks)
             return true
         } catch {
@@ -259,6 +276,7 @@ final class BookmarkStore: ObservableObject {
 
     private func pushRemove(_ key: String) async {
         let token = localVersion
+        let epoch = LearnIdentityEpoch.current
         beginPush(key)
         defer { endPush(key) }
         do {
@@ -266,6 +284,9 @@ final class BookmarkStore: ObservableObject {
                 endpoint: .removeBookBookmark(key: key),
                 responseType: BookmarkListResponse.self
             )
+            // Identity moved while this was in flight → the response is the previous account's
+            // list. Bail before touching either the store or the tombstone.
+            guard epoch == LearnIdentityEpoch.current else { return }
             // Merge BEFORE retiring the tombstone: while `key` is still tombstoned the merge cannot
             // resurrect it, and retiring the tombstone is itself a local write that would
             // invalidate this very token.

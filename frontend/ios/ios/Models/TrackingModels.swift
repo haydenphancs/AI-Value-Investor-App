@@ -558,6 +558,49 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case marketValue = "market_value"
     }
 
+    /// Hand-written so ONE malformed row cannot destroy the entire watchlist.
+    ///
+    /// Synthesized `Codable` is all-or-nothing across an array: a single unusable element makes
+    /// `TrackingFeedResponse` throw, `loadTrackingFeed()` returns false, and the user's whole
+    /// watchlist AND every alert vanish behind a decode-error string — the exact "you own
+    /// nothing" outcome the degradation comment in `TrackingViewModel` argues against, reached
+    /// by a different door.
+    ///
+    /// Not a hypothetical null: `schemas/tracking.py` declares `price: float = 0.0` and a
+    /// default-empty `sparkline_data`, so the backend cannot send null for those. What it CAN
+    /// send is a non-finite float — `NaN`/`Infinity` serialize to bare tokens that are invalid
+    /// JSON, which `JSONDecoder` rejects outright — or a type it did not intend. This codebase
+    /// has shipped that class of bug repeatedly on the FMP-derived paths.
+    ///
+    /// Defaults deliberately mirror the backend's own declared defaults, so the client is not
+    /// inventing a second convention for "price unknown".
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        /// Absent, null, or the wrong shape all collapse to nil rather than throwing.
+        func lenient<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
+            (try? c.decodeIfPresent(type, forKey: key)) ?? nil
+        }
+
+        // The one genuinely required field: it is this row's identity, and a row we cannot
+        // name is not a row we can render or act on. Throwing here drops just this element
+        // once the enclosing array decodes leniently.
+        ticker = try c.decode(String.self, forKey: .ticker)
+
+        companyName = lenient(String.self, .companyName) ?? ticker
+        price = lenient(Double.self, .price).finiteOrNil ?? 0
+        changePercent = lenient(Double.self, .changePercent).finiteOrNil ?? 0
+        previousClose = lenient(Double.self, .previousClose).finiteOrNil
+        sparklineData = (lenient([Double].self, .sparklineData) ?? []).filter(\.isFinite)
+        logoUrl = lenient(String.self, .logoUrl)
+        sector = lenient(String.self, .sector)
+        country = lenient(String.self, .country)
+        marketCap = lenient(Double.self, .marketCap).finiteOrNil
+        assetType = lenient(String.self, .assetType)
+        shares = lenient(Double.self, .shares).finiteOrNil
+        marketValue = lenient(Double.self, .marketValue).finiteOrNil
+    }
+
     /// Map to the view-layer model used by AssetsListSection
     func toTrackedAsset() -> TrackedAsset {
         TrackedAsset(

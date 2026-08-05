@@ -226,21 +226,11 @@ class SearchViewModel: ObservableObject {
         selectedSearchSelection = SearchSelection(symbol: ticker, type: item.rawType)
     }
 
-    func toggleFollow(for item: SearchResultItem) {
-        if let index = recentSearches.firstIndex(where: { $0.id == item.id }) {
-            let updatedItem = SearchResultItem(
-                type: item.type,
-                rawType: item.rawType,
-                ticker: item.ticker,
-                name: item.name,
-                subtitle: item.subtitle,
-                imageName: item.imageName,
-                isFollowable: item.isFollowable,
-                isFollowing: !item.isFollowing
-            )
-            recentSearches[index] = updatedItem
-        }
-    }
+    // `toggleFollow(for:)` removed. It rebuilt one `recentSearches` element with `isFollowing`
+    // flipped and returned — no `APIClient`, no `WhaleService`, no sign-in gate, no
+    // `AppActions.reportMutationFailure`, and no durability (the array is transient). It was
+    // also unreachable: every live result is constructed with `isFollowable: false`, so the
+    // button never rendered. `WhaleService.toggleFollow` is the real implementation.
 
     func clearAllRecentSearches() {
         recentSearches.removeAll()

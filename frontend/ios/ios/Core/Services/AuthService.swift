@@ -183,7 +183,18 @@ final class AuthService {
             endpoint: .changePassword(
                 currentPassword: currentPassword, newPassword: newPassword
             ),
-            responseType: PasswordChangedResponse.self
+            responseType: PasswordChangedResponse.self,
+            // retryCount 0. The default of 2 auto-retries any `.serverError`, and the backend
+            // still raises bare-string 500s here (a missing users row, a Supabase transport
+            // fault) which iOS cannot decode as APIErrorResponse — so they surface as
+            // `.serverError` and ONE user tap became THREE requests. The per-user limiter is
+            // charged before any work and never refunded, so a brief blip burned 3 of the 5
+            // attempts per tap: two taps and the user is locked out of a security-critical
+            // action for 15 minutes without a password ever having been checked.
+            //
+            // Retrying is wrong here on its own terms too — this is a non-idempotent mutation
+            // guarded by an attempt limiter. It should be attempted exactly once.
+            retryCount: 0
         )
 
         // Adopt only if the server actually rotated. An older backend (the app ships separately

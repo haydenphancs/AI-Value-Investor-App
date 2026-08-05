@@ -31,11 +31,11 @@ actor APIClient {
     /// Refreshes the auth token on a 401. Wired from the app root to
     /// `AuthService.refreshToken()`. Returns the new access token, or nil when the
     /// refresh fails (the caller then surfaces `.unauthorized`).
-    private var tokenRefresher: (@Sendable () async -> String?)?
+    private var tokenRefresher: (@Sendable () async -> TokenRefreshOutcome)?
 
     /// Single-flight guard: a burst of concurrent 401s triggers ONE refresh, not a
     /// storm. Followers await the in-flight refresh instead of starting their own.
-    private var refreshInFlight: Task<String?, Never>?
+    private var refreshInFlight: Task<TokenRefreshOutcome, Never>?
 
     /// Enable debug logging
     var isDebugLoggingEnabled: Bool = false
@@ -83,23 +83,23 @@ actor APIClient {
 
     /// Install the token-refresh hook (called once from the app root after auth is
     /// configured). Enables the 401 → refresh → retry-once behavior below.
-    func setTokenRefresher(_ refresher: @escaping @Sendable () async -> String?) {
+    func setTokenRefresher(_ refresher: @escaping @Sendable () async -> TokenRefreshOutcome) {
         self.tokenRefresher = refresher
     }
 
     /// Run the refresher at most once concurrently. Concurrent 401s share the same
     /// in-flight refresh; on success `authToken` is updated for all subsequent calls.
-    private func refreshTokenSingleFlight() async -> String? {
+    private func refreshTokenSingleFlight() async -> TokenRefreshOutcome {
         if let inFlight = refreshInFlight {
             return await inFlight.value
         }
-        guard let refresher = tokenRefresher else { return nil }
+        guard let refresher = tokenRefresher else { return .credentialRejected }
         let task = Task { await refresher() }
         refreshInFlight = task
-        let newToken = await task.value
+        let outcome = await task.value
         refreshInFlight = nil
-        if let newToken { self.authToken = newToken }
-        return newToken
+        if case .refreshed(let newToken) = outcome { self.authToken = newToken }
+        return outcome
     }
 
     /// Called when a request failed for an auth reason the transports could not recover from.
@@ -186,7 +186,16 @@ actor APIClient {
                allowAuthRetry,
                tokenRefresher != nil,
                !endpoint.isAuthEndpoint {
-                if await refreshTokenSingleFlight() != nil {
+                let outcome = await refreshTokenSingleFlight()
+                if case .transientFailure = outcome {
+                    // The refresh could not be COMPLETED — rate limited, 5xx, offline. That
+                    // says nothing about the credential, so keep it and surface the original
+                    // error. Treating this as a dead session is how a shared NAT tripping the
+                    // per-IP refresh limiter signed a user out with a perfectly good refresh
+                    // token. `AppState.performRestore` already got this right; this path did not.
+                    throw error
+                }
+                if case .refreshed = outcome {
                     return try await self.request(
                         endpoint: endpoint, responseType: responseType,
                         retryCount: retryCount, allowAuthRetry: false
@@ -247,7 +256,16 @@ actor APIClient {
                allowAuthRetry,
                tokenRefresher != nil,
                !endpoint.isAuthEndpoint {
-                if await refreshTokenSingleFlight() != nil {
+                let outcome = await refreshTokenSingleFlight()
+                if case .transientFailure = outcome {
+                    // The refresh could not be COMPLETED — rate limited, 5xx, offline. That
+                    // says nothing about the credential, so keep it and surface the original
+                    // error. Treating this as a dead session is how a shared NAT tripping the
+                    // per-IP refresh limiter signed a user out with a perfectly good refresh
+                    // token. `AppState.performRestore` already got this right; this path did not.
+                    throw apiError
+                }
+                if case .refreshed = outcome {
                     return try await self.request(endpoint: endpoint, allowAuthRetry: false)
                 }
                 if await handleUnrecoverableAuthFailure(apiError, endpoint: endpoint) {
@@ -299,7 +317,16 @@ actor APIClient {
                allowAuthRetry,
                tokenRefresher != nil,
                !endpoint.isAuthEndpoint {
-                if await refreshTokenSingleFlight() != nil {
+                let outcome = await refreshTokenSingleFlight()
+                if case .transientFailure = outcome {
+                    // The refresh could not be COMPLETED — rate limited, 5xx, offline. That
+                    // says nothing about the credential, so keep it and surface the original
+                    // error. Treating this as a dead session is how a shared NAT tripping the
+                    // per-IP refresh limiter signed a user out with a perfectly good refresh
+                    // token. `AppState.performRestore` already got this right; this path did not.
+                    throw error
+                }
+                if case .refreshed = outcome {
                     return try await downloadData(endpoint: endpoint, retryCount: retryCount, allowAuthRetry: false)
                 }
                 if await handleUnrecoverableAuthFailure(error, endpoint: endpoint) {
@@ -381,7 +408,16 @@ actor APIClient {
                allowAuthRetry,
                tokenRefresher != nil,
                !endpoint.isAuthEndpoint {
-                if await refreshTokenSingleFlight() != nil {
+                let outcome = await refreshTokenSingleFlight()
+                if case .transientFailure = outcome {
+                    // The refresh could not be COMPLETED — rate limited, 5xx, offline. That
+                    // says nothing about the credential, so keep it and surface the original
+                    // error. Treating this as a dead session is how a shared NAT tripping the
+                    // per-IP refresh limiter signed a user out with a perfectly good refresh
+                    // token. `AppState.performRestore` already got this right; this path did not.
+                    throw error
+                }
+                if case .refreshed = outcome {
                     return try await openStreamOnce(endpoint: endpoint)
                 }
                 if await handleUnrecoverableAuthFailure(error, endpoint: endpoint) {
@@ -711,6 +747,28 @@ enum AuthFailure: Sendable, Equatable {
 
     /// A credential was presented, rejected, and the refresh failed. This one is terminal:
     /// clear it.
+    case credentialRejected
+}
+
+/// What happened when the client tried to refresh the access token.
+///
+/// THREE states, not two. This was `String?`, where `nil` meant "dead" — so a refresh that
+/// merely could not be COMPLETED cleared the Keychain, wiped watchlist and research state, and
+/// discarded device-global Learn data, for a user whose refresh token was perfectly valid.
+///
+/// The concrete case: the per-IP `refresh:ip:` limiter (60/min) is shared by everyone behind one
+/// NAT — a campus, an office, a carrier CGNAT pool. Trip it and every user behind that address
+/// whose 24-hour access token happens to expire is signed out. `.claude/rules/auth.md` §3 allows
+/// exactly three codes to destroy a credential, and a rate limit is not one of them; §5 says a
+/// transient failure must keep the token. `AppState.performRestore` already got this right, so
+/// the outcome depended purely on which path noticed the 401 first.
+enum TokenRefreshOutcome: Sendable {
+    /// A new access token. Retry the original request with it.
+    case refreshed(String)
+    /// Could not complete, for a reason that says nothing about the credential — rate limited,
+    /// 5xx, offline. KEEP the token and surface the original error.
+    case transientFailure
+    /// The refresh token itself was rejected. The session is genuinely over.
     case credentialRejected
 }
 

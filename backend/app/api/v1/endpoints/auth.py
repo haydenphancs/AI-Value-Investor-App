@@ -872,17 +872,31 @@ async def change_password(
     # Resolve the account's email — the request doesn't carry it, and it must come from
     # the token's subject rather than user input.
     try:
-        row = supabase.table("users").select("email").eq("id", user_id).single().execute()
-        email = (row.data or {}).get("email")
+        # `limit(1)`, not `single()`. `single()` RAISES on zero rows (PostgREST 406/PGRST116),
+        # so a missing `public.users` row — the exact state `_app_user_row_exists` exists to
+        # handle — became an indistinguishable 500 instead of the 404 below. That 500 is a
+        # bare-string body iOS cannot decode, so it surfaced as `.serverError` and used to be
+        # auto-retried twice, burning three of five attempts per tap.
+        result = supabase.table("users").select("email").eq("id", user_id).limit(1).execute()
+        rows = result.data or []
+        email = rows[0].get("email") if rows else None
     except Exception as e:
         logger.error(
             "change-password: user lookup failed for user=%s: %s: %s",
             user_id, type(e).__name__, e,
         )
-        raise HTTPException(status_code=500, detail="Couldn't verify your account.")
+        # Structured and retryable, so the client can tell a transport blip from "your account
+        # is gone" — and so it stops looking like a generic 500 to a decoder that then retries.
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"users lookup failed: {type(e).__name__}",
+        )
 
     if not email:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise auth_error(
+            ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
+            message=f"no public.users row for {user_id}",
+        )
 
     if request.new_password == request.current_password:
         raise HTTPException(

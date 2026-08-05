@@ -51,19 +51,25 @@ class _Q:
         self.store = store
         self._op = None
         self._payload = None
+        # PostgREST returns a bare OBJECT for single() and a LIST for limit()/plain. The fake
+        # has to model that: `change_password` reads the email with limit(1) (single() RAISES
+        # on zero rows, turning a missing row into an indistinguishable 500), so a fake that
+        # always returned the object would let `rows[0]` pass here and KeyError in production.
+        self._shape = "single"
 
     def select(self, *_a): self._op = "select"; return self
     def update(self, payload): self._op, self._payload = "update", payload; return self
     def eq(self, *_a): return self
-    def limit(self, *_a): return self
-    def single(self): return self
+    def limit(self, *_a): self._shape = "list"; return self
+    def single(self): self._shape = "single"; return self
 
     def execute(self):
         if self._op == "update":
             # This is `_mark_password_changed` stamping the row.
             self.store.update(self._payload)
             return type("R", (), {"data": [dict(self.store)]})()
-        return type("R", (), {"data": dict(self.store)})()
+        row = dict(self.store)
+        return type("R", (), {"data": row if self._shape == "single" else [row]})()
 
 
 class _SB:

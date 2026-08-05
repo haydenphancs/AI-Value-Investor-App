@@ -962,6 +962,41 @@ async def health_live():
     return {"status": "alive"}
 
 
+@app.get("/.well-known/apple-app-site-association", include_in_schema=False)
+async def apple_app_site_association():
+    """Apple's associated-domains manifest. Required for passkeys AND Password AutoFill.
+
+    `webcredentials` is what binds saved passwords and passkeys to this app: without it, an
+    `ASAuthorizationPlatformPublicKeyCredentialProvider` request returns an error outright, and
+    the `.textContentType(.username)` field in SignInView has no domain to offer credentials
+    for. The entitlement alone is not enough — Apple fetches THIS file and checks that the app
+    it names matches the one asking.
+
+    Four things Apple is strict about, all of which have to hold in production:
+
+      1. Served over HTTPS from the exact RP ID host, with **no redirects**. An HTTP→HTTPS or
+         apex→www redirect fails the check silently. This is why the domain is pointed straight
+         at the backend rather than left on a parking page.
+      2. `Content-Type: application/json`. FastAPI's JSONResponse sets it; do not "helpfully"
+         serve this as a static text file.
+      3. No `.json` extension on the path.
+      4. It must NOT be behind auth. This route is intentionally public — it contains no
+         secrets, only a Team ID and bundle id, both of which ship inside the app anyway.
+
+    ⚠️ The RP ID is effectively permanent: changing it invalidates every passkey already
+    enrolled. `caydexinvest.com` is the committed choice — see APPLE_APP_SITE_ASSOCIATION_*
+    settings in config.py.
+    """
+    return JSONResponse(
+        content={
+            "webcredentials": {
+                "apps": [f"{settings.APPLE_TEAM_ID}.{settings.APPLE_BUNDLE_ID}"]
+            }
+        },
+        media_type="application/json",
+    )
+
+
 @app.get("/health/pdf", tags=["Root"])
 async def health_pdf():
     """Verify the PDF stack end-to-end. Returns 503 when it can't render, so a

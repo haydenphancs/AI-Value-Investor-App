@@ -110,7 +110,15 @@ final class JourneyProgressStore: ObservableObject {
         // opening; the rest go on the next hydrate. Nothing strands: a pushed title leaves
         // `unsynced` once the server has it, and a title that keeps failing sorts to the back
         // rather than re-claiming a slot, so successive hydrates drain the whole backlog.
+        // Identity guard on the WRITE side — see BookProgressStore.pushUnsynced. Up to 25
+        // awaited round trips; a sign-out or switch partway through wrote the previous
+        // account's lessons into the next one.
+        let epoch = LearnIdentityEpoch.current
         for title in reconcileOrder(unsynced).prefix(Self.maxReconcilePushes) {
+            guard epoch == LearnIdentityEpoch.current else {
+                print("[JourneyProgressStore] abandoned a reconcile push from a previous identity")
+                return
+            }
             await pushCompletion(title)
         }
     }
@@ -127,11 +135,14 @@ final class JourneyProgressStore: ObservableObject {
     private static let maxReconcilePushes = 25
 
     private func pushCompletion(_ title: String) async {
+        let epoch = LearnIdentityEpoch.current
         do {
             let resp = try await apiClient.request(
                 endpoint: .completeLearnItem(contentType: Self.contentType, key: title),
                 responseType: LearnProgressResponse.self
             )
+            // Also guarded here because `markCompleted` calls this directly, not only the loop.
+            guard epoch == LearnIdentityEpoch.current else { return }
             pushFailures.removeValue(forKey: title)
             merge(resp)
         } catch {

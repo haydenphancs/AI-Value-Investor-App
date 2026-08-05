@@ -122,7 +122,10 @@ async def get_ticker_report(
         return make_error_response(
             ErrorCode.INVALID_PERSONA,
             message=f"Unsupported persona key: {persona!r}",
-            details={"persona": persona, "valid": sorted(VALID_PERSONAS)},
+            # Joined, not a list: iOS `AnyCodable` decodes String/Int/Double/Bool and silently
+            # falls through to "" for anything else, so a list arrived as an empty string and
+            # the hint the user needed was destroyed without an error anywhere.
+            details={"persona": persona, "valid": ", ".join(sorted(VALID_PERSONAS))},
         )
 
     # ── FREE PATH 1: legacy back-compat cache (recent completed research_reports).

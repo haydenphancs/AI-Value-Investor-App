@@ -1469,15 +1469,17 @@ Retry-After: 60                 # Seconds to wait (on 429)
 >
 > **Guest identity.** A signed-out caller is not "no user": `X-Guest-Id` is hashed
 > (`guest_user_id_for`, UUID5) into a per-INSTALL identity for watchlist/portfolios (migration
-> 108), research (110) and Learn (066/067). A missing header still resolves to the shared
-> `GUEST_USER_ID` sentinel. Chat history remains on the shared sentinel — `chat_sessions.user_id`
-> is FK-bound to `public.users` — so guest chat *cost* is partitioned per install but guest chat
-> *history* is not.
+> 108), research (110), chat (111) and Learn (066/067). A missing header still resolves to the
+> shared `GUEST_USER_ID` sentinel. Guest chat history is partitioned per install as of migration
+> 111 — see §9.3, which supersedes the earlier note here that said it was not.
 >
-> **Which surfaces require an account.** Only strict `get_current_user(_id)` routes: the
-> `/users/me` family, `/auth/logout`, `/auth/change-password`, `/billing/verify`, and whale
-> follow/unfollow/activity (`whale_follows.user_id` is FK-bound to `public.users`). Everything
-> else is guest-capable by design. The iOS mirror is `APIEndpoint.authPolicy`, and
+> **Which surfaces require an account.** All 27 `.signInRequired` routes. Beyond the
+> `/users/me` family, `/auth/logout`, `/auth/change-password`, `/billing/verify` and whale
+> follow/unfollow/activity (`whale_follows.user_id` is FK-bound to `public.users`), this now
+> covers **every AI-generation surface**: the nine `/research/*` routes, `GET /stocks/{t}/report`,
+> `POST /stocks/{t}/report/chat` and `POST /stocks/{t}/prewarm-report`. Both generation doors
+> must stay gated or the gate is cosmetic — they cost the same on a cache miss. Everything else
+> is guest-capable by design. The iOS mirror is `APIEndpoint.authPolicy`, and
 > `tests/test_ios_auth_policy_parity.py` fails the build if the two disagree.
 
 ```

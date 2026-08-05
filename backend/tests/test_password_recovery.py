@@ -32,6 +32,7 @@ from app.schemas.auth import (
     ChangePasswordRequest,
     ForgotPasswordRequest,
     PASSWORD_MIN_LENGTH,
+    RefreshTokenRequest,
     ResetPasswordRequest,
 )
 
@@ -42,11 +43,12 @@ _GOOD_PASSWORD = "correct horse battery"
 
 @pytest.fixture(autouse=True)
 def _clear_rate_limiter():
-    """The limiter is process-wide; without this, tests poison each other."""
-    for attr in ("_requests", "requests", "_buckets", "buckets"):
-        store = getattr(rate_limiter, attr, None)
-        if isinstance(store, dict):
-            store.clear()
+    """The limiter is process-wide; without this, tests poison each other.
+
+    Uses `clear()` rather than reaching for `_requests`: credential limiters live in a
+    separate pool, and a name-guessing loop silently stopped covering them.
+    """
+    rate_limiter.clear()
     yield
 
 
@@ -108,6 +110,12 @@ class _FakeQuery:
         return self
 
     def single(self):
+        return self
+
+    def limit(self, *_a, **_k):
+        # Needed by `_app_user_row_exists`. Without it the call raised AttributeError, which
+        # that helper deliberately treats as a transport blip and FAILS OPEN — so the
+        # account-existence check looked covered while never actually running.
         return self
 
     def execute(self):
@@ -293,7 +301,7 @@ async def test_change_password_requires_the_current_password():
     with pytest.raises(HTTPException) as ei:
         await auth_ep.change_password(
             ChangePasswordRequest(current_password="wrong", new_password=_GOOD_PASSWORD),
-            user_id=_USER_ID, supabase=sb,
+            _FakeRequest(), user_id=_USER_ID, supabase=sb,
         )
     assert ei.value.status_code == 401
     assert not [e for e in sb.log if e[0] == "admin.update_user_by_id"]
@@ -304,7 +312,7 @@ async def test_change_password_verifies_before_updating_and_stamps():
     sb = FakeSupabase()
     await auth_ep.change_password(
         ChangePasswordRequest(current_password="old-password", new_password=_GOOD_PASSWORD),
-        user_id=_USER_ID, supabase=sb,
+        _FakeRequest(), user_id=_USER_ID, supabase=sb,
     )
     kinds = [e[0] for e in sb.log]
     assert kinds.index("sign_in_with_password") < kinds.index("admin.update_user_by_id")
@@ -317,10 +325,66 @@ async def test_change_password_rejects_reusing_the_same_password():
     with pytest.raises(HTTPException) as ei:
         await auth_ep.change_password(
             ChangePasswordRequest(current_password=_GOOD_PASSWORD, new_password=_GOOD_PASSWORD),
-            user_id=_USER_ID, supabase=sb,
+            _FakeRequest(), user_id=_USER_ID, supabase=sb,
         )
     assert ei.value.status_code == 400
     assert not [e for e in sb.log if e[0] == "admin.update_user_by_id"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_is_rejected_when_the_account_row_is_gone():
+    """Otherwise the client loops forever: profile 401s, refresh SUCCEEDS, repeat.
+
+    `is_token_stale_after_password_change` fails open when its read finds no row, so nothing
+    else on this path notices a missing `public.users` row. iOS ends up holding a credential it
+    can never validate and never clears — permanently `.restoring`, re-hitting the backend.
+    AUTH_ACCOUNT_NOT_FOUND is one of the three codes allowed to clear a credential, so it ends
+    the loop rather than feeding it.
+    """
+    fresh = create_refresh_token({"sub": _USER_ID, "email": _EMAIL})
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.refresh_token(
+            RefreshTokenRequest(refresh_token=fresh), _FakeRequest(), FakeSupabase(row={}),
+        )
+    assert ei.value.status_code == 401
+    assert ei.value.detail["error_code"] == "AUTH_ACCOUNT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_refresh_still_works_when_the_existence_check_is_unavailable():
+    """Fail OPEN on a transport error — a Supabase blip must not lock every user out."""
+    fresh = create_refresh_token({"sub": _USER_ID, "email": _EMAIL})
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    sb = FakeSupabase(row={"id": _USER_ID, "password_changed_at": past}, fail=("lookup",))
+    out = await auth_ep.refresh_token(RefreshTokenRequest(refresh_token=fresh), _FakeRequest(), sb)
+    assert out.access_token
+
+
+@pytest.mark.asyncio
+async def test_change_password_is_rate_limited_per_user_across_ips():
+    """This route runs a real `sign_in_with_password` per call, so it is a password oracle
+    for anyone holding a stolen access token — the exact threat the current-password
+    requirement exists to stop. It was the only credential route with no limiter at all, and
+    Supabase's own limiting is not a backstop because every call leaves from one egress IP.
+
+    Keyed per USER, so rotating source addresses does not buy more guesses.
+    """
+    for i in range(5):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.change_password(
+                ChangePasswordRequest(current_password=f"guess-{i}", new_password=_GOOD_PASSWORD),
+                _FakeRequest(f"198.51.100.{i}"),
+                user_id=_USER_ID, supabase=FakeSupabase(fail=("signin",)),
+            )
+        assert ei.value.status_code == 401  # wrong password — and the budget is consumed
+
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.change_password(
+            ChangePasswordRequest(current_password="guess-6", new_password=_GOOD_PASSWORD),
+            _FakeRequest("198.51.100.200"),
+            user_id=_USER_ID, supabase=FakeSupabase(fail=("signin",)),
+        )
+    assert ei.value.status_code == 429
 
 
 @pytest.mark.asyncio
@@ -328,7 +392,7 @@ async def test_change_password_404s_when_the_account_has_no_email():
     with pytest.raises(HTTPException) as ei:
         await auth_ep.change_password(
             ChangePasswordRequest(current_password="x", new_password=_GOOD_PASSWORD),
-            user_id=_USER_ID, supabase=FakeSupabase(row={"id": _USER_ID}),
+            _FakeRequest(), user_id=_USER_ID, supabase=FakeSupabase(row={"id": _USER_ID}),
         )
     assert ei.value.status_code == 404
 
@@ -345,7 +409,7 @@ async def test_refresh_is_rejected_for_a_token_issued_before_the_password_change
     from app.schemas.auth import RefreshTokenRequest
 
     with pytest.raises(HTTPException) as ei:
-        await auth_ep.refresh_token(RefreshTokenRequest(refresh_token=stale), sb)
+        await auth_ep.refresh_token(RefreshTokenRequest(refresh_token=stale), _FakeRequest(), sb)
     assert ei.value.status_code == 401
 
 
@@ -356,7 +420,7 @@ async def test_refresh_still_works_when_the_password_predates_the_token():
     sb = FakeSupabase(row={"id": _USER_ID, "password_changed_at": past})
     from app.schemas.auth import RefreshTokenRequest
 
-    out = await auth_ep.refresh_token(RefreshTokenRequest(refresh_token=fresh), sb)
+    out = await auth_ep.refresh_token(RefreshTokenRequest(refresh_token=fresh), _FakeRequest(), sb)
     assert out.access_token and out.refresh_token
 
 

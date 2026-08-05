@@ -15,7 +15,7 @@ from app.core.security import (
     create_access_token, create_refresh_token, decode_token, rate_limiter,
     trusted_client_ip, verify_supabase_token,
 )
-from app.api.error_response import ErrorCode, make_error_response
+from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.schemas.auth import (
     SignInRequest, SignUpRequest, RefreshTokenRequest,
     TokenResponse, AuthUserResponse,
@@ -128,9 +128,14 @@ async def sign_in(
     # per-EMAIL window caps guesses against one address no matter where they come from, which
     # is the property that actually protects the account.
     email_key = (request.email or "").strip().lower()
-    ip_ok = rate_limiter.is_allowed(f"login:ip:{client_ip}", max_requests=10, window_seconds=60)
+    # `protected=True` on every credential limiter: it routes these keys into a pool that
+    # attacker-minted identifiers cannot reach. Sharing one table with the X-Guest-Id-keyed
+    # buckets let ~20k cheap requests evict this very bucket and reset the cap below.
+    ip_ok = rate_limiter.is_allowed(
+        f"login:ip:{client_ip}", max_requests=10, window_seconds=60, protected=True
+    )
     email_ok = rate_limiter.is_allowed(
-        f"login:email:{email_key}", max_requests=10, window_seconds=900
+        f"login:email:{email_key}", max_requests=10, window_seconds=900, protected=True
     )
     if not (ip_ok and email_ok):
         raise HTTPException(
@@ -234,9 +239,11 @@ async def sign_up(
     # whoever the attacker names — and it burns the project's mail quota, which is what stops
     # legitimate signups from arriving at all.
     email_key = (request.email or "").strip().lower()
-    ip_ok = rate_limiter.is_allowed(f"register:ip:{client_ip}", max_requests=5, window_seconds=60)
+    ip_ok = rate_limiter.is_allowed(
+        f"register:ip:{client_ip}", max_requests=5, window_seconds=60, protected=True
+    )
     email_ok = rate_limiter.is_allowed(
-        f"register:email:{email_key}", max_requests=5, window_seconds=3600
+        f"register:email:{email_key}", max_requests=5, window_seconds=3600, protected=True
     )
     if not (ip_ok and email_ok):
         raise HTTPException(
@@ -299,10 +306,23 @@ async def sign_up(
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     request: RefreshTokenRequest,
+    req: Request,
     supabase: Client = Depends(get_supabase),
     auth_client: Client = Depends(get_auth_client),
 ):
     """Refresh access token using refresh token."""
+    # Generous, because a legitimate client refreshes rarely but several screens can race a
+    # 401 at once. Present so a garbage-token flood cannot spin the decode + DB read path for
+    # free — the other unlimited credential route was `/change-password`, now limited above.
+    if not rate_limiter.is_allowed(
+        f"refresh:ip:{trusted_client_ip(req)}", max_requests=60, window_seconds=60,
+        protected=True,
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many refresh attempts. Please try again shortly.",
+            headers={"Retry-After": "60"},
+        )
     try:
         payload = decode_token(request.refresh_token)
         if payload.get("type") != "refresh":
@@ -310,6 +330,17 @@ async def refresh_token(
 
         user_id = payload.get("sub")
         email = payload.get("email")
+
+        # The account must still exist. Without this, a token whose `public.users` row is
+        # missing refreshes successfully forever while every real route 401s — see
+        # `_app_user_row_exists`. AUTH_ACCOUNT_NOT_FOUND is one of the three codes iOS is
+        # allowed to clear a credential on, so this ENDS the loop instead of feeding it.
+        if user_id and not _app_user_row_exists(supabase, user_id):
+            logger.warning("Refresh rejected: no public.users row for user=%s", user_id)
+            raise auth_error(
+                ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
+                message=f"no public.users row for {user_id}",
+            )
 
         # A refresh token minted BEFORE the last password change must not mint new access
         # tokens — otherwise a reset doesn't evict a thief and they keep access for the
@@ -367,8 +398,12 @@ async def resend_confirmation(
     client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
-    ip_ok = rate_limiter.is_allowed(f"resend:ip:{client_ip}", max_requests=5, window_seconds=3600)
-    email_ok = rate_limiter.is_allowed(f"resend:email:{email_key}", max_requests=3, window_seconds=3600)
+    ip_ok = rate_limiter.is_allowed(
+        f"resend:ip:{client_ip}", max_requests=5, window_seconds=3600, protected=True
+    )
+    email_ok = rate_limiter.is_allowed(
+        f"resend:email:{email_key}", max_requests=3, window_seconds=3600, protected=True
+    )
     if not (ip_ok and email_ok):
         raise HTTPException(
             status_code=429,
@@ -409,6 +444,34 @@ async def resend_confirmation(
 #
 # Neither path is subject to the email-confirmation gate: Apple and Google supply an
 # already-verified address, which is the whole point of using them.
+
+
+def _app_user_row_exists(supabase: Client, user_id: str) -> bool:
+    """Does this id have a `public.users` row?
+
+    The signup trigger (`handle_new_auth_user`) creates it, but it swallows its own failures,
+    and an aborted account deletion can leave the same shape. When the row is missing, minting
+    tokens produces a credential that authenticates against NOTHING: every route using
+    `get_current_user` answers 401 AUTH_ACCOUNT_NOT_FOUND, while `/auth/refresh` happily keeps
+    reissuing — `is_token_stale_after_password_change` fails OPEN when its read finds no row, so
+    nothing else on that path notices either. iOS then loops: profile 401 → refresh succeeds →
+    profile 401 → `.restoring` → backoff → forever, never clearing the credential, never
+    prompting, re-hitting the backend for the life of the install.
+
+    `limit(1)` rather than `single()`: "no row" must be an empty list, not an exception we would
+    have to disambiguate from a transport failure.
+    """
+    try:
+        result = supabase.table("users").select("id").eq("id", user_id).limit(1).execute()
+        return bool(result.data)
+    except Exception as e:
+        # Fail OPEN on a transport error — a Supabase blip must not lock out every refresh.
+        # Only a definitive "no row" is treated as a missing account.
+        logger.warning(
+            "users existence check unavailable for user=%s: %s: %s — allowing",
+            user_id, type(e).__name__, e,
+        )
+        return True
 
 
 def _issue_app_tokens_for(user_id: str, email: Optional[str]) -> TokenResponse:
@@ -455,7 +518,9 @@ async def oauth_sign_in(
 ):
     """Sign in with a native provider identity token (Sign in with Apple)."""
     client_ip = trusted_client_ip(req)
-    if not rate_limiter.is_allowed(f"oauth:{client_ip}", max_requests=20, window_seconds=60):
+    if not rate_limiter.is_allowed(
+        f"oauth:{client_ip}", max_requests=20, window_seconds=60, protected=True
+    ):
         raise HTTPException(
             status_code=429,
             detail="Too many sign-in attempts. Please try again later.",
@@ -486,6 +551,23 @@ async def oauth_sign_in(
         )
 
     user_id = str(user.id)
+
+    # Same app-row confirmation `/session-exchange` already does below. Its absence here was
+    # the asymmetry that made the missing-row case reachable at all: Apple sign-in minted
+    # tokens for an id with no `public.users` row, iOS wrote them to the Keychain, and the
+    # immediate profile fetch 401'd — leaving a stored credential the client could never
+    # validate and never clear.
+    if not _app_user_row_exists(supabase, user_id):
+        logger.error(
+            "OAuth: no public.users row for verified provider=%s user=%s — refusing to mint "
+            "tokens (check the handle_new_auth_user trigger for this account)",
+            request.provider, user_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
+            message=f"no public.users row for {user_id}",
+        )
+
     _ensure_display_name(supabase, user_id, request.display_name)
     logger.info("OAuth sign-in succeeded provider=%s user=%s", request.provider, user_id)
     return _issue_app_tokens_for(user_id, getattr(user, "email", None))
@@ -504,7 +586,9 @@ async def session_exchange(
     is only trusted after that check passes.
     """
     client_ip = trusted_client_ip(req)
-    if not rate_limiter.is_allowed(f"exchange:{client_ip}", max_requests=20, window_seconds=60):
+    if not rate_limiter.is_allowed(
+        f"exchange:{client_ip}", max_requests=20, window_seconds=60, protected=True
+    ):
         raise HTTPException(
             status_code=429,
             detail="Too many sign-in attempts. Please try again later.",
@@ -582,8 +666,12 @@ async def forgot_password(
     email_key = request.email.strip().lower()
 
     # 5/hour per IP, 3/hour per address. Deliberately tight — this endpoint sends mail.
-    ip_ok = rate_limiter.is_allowed(f"forgot:ip:{client_ip}", max_requests=5, window_seconds=3600)
-    email_ok = rate_limiter.is_allowed(f"forgot:email:{email_key}", max_requests=3, window_seconds=3600)
+    ip_ok = rate_limiter.is_allowed(
+        f"forgot:ip:{client_ip}", max_requests=5, window_seconds=3600, protected=True
+    )
+    email_ok = rate_limiter.is_allowed(
+        f"forgot:email:{email_key}", max_requests=3, window_seconds=3600, protected=True
+    )
     if not (ip_ok and email_ok):
         # Still a generic response shape, but 429 so a legitimate client can back off.
         raise HTTPException(
@@ -625,8 +713,12 @@ async def reset_password(
     client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
-    ip_ok = rate_limiter.is_allowed(f"reset:ip:{client_ip}", max_requests=10, window_seconds=3600)
-    email_ok = rate_limiter.is_allowed(f"reset:email:{email_key}", max_requests=10, window_seconds=3600)
+    ip_ok = rate_limiter.is_allowed(
+        f"reset:ip:{client_ip}", max_requests=10, window_seconds=3600, protected=True
+    )
+    email_ok = rate_limiter.is_allowed(
+        f"reset:email:{email_key}", max_requests=10, window_seconds=3600, protected=True
+    )
     if not (ip_ok and email_ok):
         raise HTTPException(
             status_code=429,
@@ -682,6 +774,7 @@ async def reset_password(
 @router.post("/change-password", response_model=PasswordChangedResponse)
 async def change_password(
     request: ChangePasswordRequest,
+    req: Request,
     user_id: str = Depends(get_current_user_id),
     supabase: Client = Depends(get_supabase),
     auth_client: Client = Depends(get_auth_client),
@@ -692,6 +785,29 @@ async def change_password(
     stolen access token is enough to take permanent ownership of the account by changing
     its password. Verified by attempting a real sign-in with it.
     """
+    # RATE LIMITED, and it must be. This route performs a real `sign_in_with_password` per
+    # call (step 2 below), so it is a password oracle for anyone holding a stolen access
+    # token — which is exactly the threat the current-password requirement above exists to
+    # stop. It was the ONLY credential route with no limiter; every other one keys off
+    # `trusted_client_ip`. Supabase's own limiting is not a backstop here: every call leaves
+    # from the Railway container's address, so tripping it degrades sign-in for ALL users.
+    #
+    # Keyed per USER as well as per IP — the per-IP half alone would let an attacker with a
+    # pool of addresses keep guessing against one account.
+    client_ip = trusted_client_ip(req)
+    ip_ok = rate_limiter.is_allowed(
+        f"changepw:ip:{client_ip}", max_requests=10, window_seconds=3600, protected=True
+    )
+    user_ok = rate_limiter.is_allowed(
+        f"changepw:user:{user_id}", max_requests=5, window_seconds=900, protected=True
+    )
+    if not (ip_ok and user_ok):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many password change attempts. Please try again later.",
+            headers={"Retry-After": "900"},
+        )
+
     # Resolve the account's email — the request doesn't carry it, and it must come from
     # the token's subject rather than user input.
     try:

@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
+from app.api.error_response import ErrorCode, auth_error
 from app.config import settings
 from app.dependencies import get_current_user_or_guest
 
@@ -26,15 +27,26 @@ def _authorize_admin(
     """Allow either (a) authenticated user whose email is on the allowlist
     or (b) an `X-Admin-Token` header that matches settings.ADMIN_TOKEN.
 
-    Raises HTTPException(403) when neither path passes. The token path
-    exists so dev/maintenance scripts can trigger benchmark recomputes
-    without going through the iOS sign-in flow.
+    Raises 401 AUTH_REQUIRED when the caller presented no credential at all, and 403
+    AUTH_FORBIDDEN when they did but are not an admin. The token path exists so
+    dev/maintenance scripts can trigger benchmark recomputes without the iOS sign-in flow.
+
+    The split matters and used to be missing. Every route here takes
+    ``get_current_user_or_guest``, so a TOKENLESS caller resolves to the guest sentinel, fails
+    the checks below, and used to receive a bare-string 403 — answering a missing credential
+    with 403 is precisely the shape ``.claude/rules/auth.md`` rule 2 bans, because iOS only
+    attempts recovery on 401 and so never tries. These were also the two sites the
+    ``AUTH_FORBIDDEN`` enum comment named, while the code emitted the value nowhere: iOS has
+    had a carefully-reasoned branch for it that could never execute.
     """
     token = settings.ADMIN_TOKEN
     if token and x_admin_token and x_admin_token == token:
         return
     if user and user.get("email") in _ADMIN_EMAILS:
         return
+    # No credential of either kind → 401, not 403. `is_guest` (not an id comparison) is the
+    # guest test: a per-install uuid5 never equals the shared sentinel.
+    presented_nothing = not x_admin_token and (user is None or user.get("is_guest"))
     # Log enough to debug without leaking the actual secret.
     logger.warning(
         "Admin auth failed: server_token_set=%s, header_present=%s, "
@@ -45,7 +57,15 @@ def _authorize_admin(
         len(token or ""),
         user.get("email") if user else None,
     )
-    raise HTTPException(status_code=403, detail="Admin access required")
+    if presented_nothing:
+        raise auth_error(
+            ErrorCode.AUTH_REQUIRED,
+            message="admin route reached without any credential",
+        )
+    raise auth_error(
+        ErrorCode.AUTH_FORBIDDEN,
+        message="caller is authenticated but not an admin",
+    )
 
 
 # NOTE: `GET /admin/auth-debug` was removed (2026-07-30). It was public and

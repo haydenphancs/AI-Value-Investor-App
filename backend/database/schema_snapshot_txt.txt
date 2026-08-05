@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict JORd88cKqxIvAW1M5YSZvyD6GmtQ4iQjM1gKeOs1aMhKoSGNdCHTQjMzX7rdpZQ
+\restrict LVonfhT1zWdBUIMvl9y0skeAS9pBVFy6BhCG3glaVIWVjwYpcQojtKN8FaoKqQb
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1048,6 +1048,42 @@ $$;
 
 
 --
+-- Name: claim_guest_report(uuid, date, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_guest_report(p_bucket_key uuid, p_period date, p_limit integer) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    -- Guard the INSERT path: the cap only constrains the DO UPDATE branch, so without
+    -- this a limit of 0 (intended kill switch) or NULL (missing env var) would still
+    -- grant the month's FIRST report — the one case an operator most wants blocked.
+    IF p_limit IS NULL OR p_limit <= 0 THEN
+        RETURN -1;
+    END IF;
+
+    INSERT INTO guest_report_budget (bucket_key, period_month, report_count, updated_at)
+    VALUES (p_bucket_key, p_period, 1, NOW())
+    ON CONFLICT (bucket_key, period_month) DO UPDATE
+        SET report_count = guest_report_budget.report_count + 1,
+            updated_at = NOW()
+        WHERE guest_report_budget.report_count < p_limit
+    RETURNING report_count INTO v_count;
+
+    -- No row returned => the WHERE on DO UPDATE failed => the cap is reached.
+    IF v_count IS NULL THEN
+        RETURN -1;
+    END IF;
+    RETURN v_count;
+END;
+$$;
+
+
+--
 -- Name: claim_updates_insight_scope(text, timestamp with time zone, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1082,6 +1118,22 @@ BEGIN
     RETURNING TRUE INTO v_ok;
 
     RETURN COALESCE(v_ok, FALSE);
+END;
+$$;
+
+
+--
+-- Name: cleanup_expired_news_articles(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.cleanup_expired_news_articles() RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    -- NULL expires_at counts as expired: a writer that forgets to set a retention
+    -- bound must not get indefinite storage by default.
+    DELETE FROM news_articles WHERE expires_at IS NULL OR expires_at < now();
 END;
 $$;
 
@@ -1455,6 +1507,31 @@ BEGIN
     RETURNING turn_count INTO v_count;
 
     -- No row (never claimed today) => nothing to release.
+    RETURN COALESCE(v_count, 0);
+END;
+$$;
+
+
+--
+-- Name: release_guest_report(uuid, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.release_guest_report(p_bucket_key uuid, p_period date) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    UPDATE guest_report_budget
+       SET report_count = GREATEST(0, report_count - 1),
+           updated_at = NOW()
+     WHERE bucket_key = p_bucket_key
+       AND period_month = p_period
+    RETURNING report_count INTO v_count;
+
+    -- No row (never claimed this month) => nothing to release.
     RETURN COALESCE(v_count, 0);
 END;
 $$;
@@ -4271,6 +4348,49 @@ ALTER SEQUENCE public.ai_insight_cache_id_seq OWNED BY public.ai_insight_cache.i
 
 
 --
+-- Name: analytics_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.analytics_events (
+    id bigint NOT NULL,
+    identity_key uuid NOT NULL,
+    session_id text,
+    event text NOT NULL,
+    props jsonb DEFAULT '{}'::jsonb NOT NULL,
+    app_version text,
+    platform text,
+    client_ts timestamp with time zone,
+    server_ts timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE analytics_events; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.analytics_events IS 'First-party product analytics. identity_key = real user id OR per-install guest uuid (no FK, by design). props is low-cardinality dimensions only — never user-typed text. Swept on a retention window; not a system of record.';
+
+
+--
+-- Name: analytics_events_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.analytics_events_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: analytics_events_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.analytics_events_id_seq OWNED BY public.analytics_events.id;
+
+
+--
 -- Name: article_chunks; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4460,6 +4580,13 @@ CREATE TABLE public.chat_sessions (
 --
 
 COMMENT ON TABLE public.chat_sessions IS 'AI chat sessions. Types: BOOK, CONCEPT, STOCK, NORMAL, JOURNEY, REPORT';
+
+
+--
+-- Name: COLUMN chat_sessions.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_sessions.user_id IS 'A real public.users id, OR a per-INSTALL synthetic uuid from guest_user_id_for() for signed-out users. NO foreign key by design (migration 111), same as watchlist_items and research_reports. Account deletion therefore clears this table EXPLICITLY via _UNLINKED_USER_TABLES, not via a cascade; chat_messages still cascades from chat_sessions.';
 
 
 --
@@ -4839,6 +4966,25 @@ CREATE TABLE public.growth_cache (
     cached_at timestamp with time zone DEFAULT now() NOT NULL,
     next_earnings_date text
 );
+
+
+--
+-- Name: guest_report_budget; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.guest_report_budget (
+    bucket_key uuid NOT NULL,
+    period_month date NOT NULL,
+    report_count integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE guest_report_budget; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.guest_report_budget IS 'Per-INSTALL monthly AI-report allowance for signed-out users. bucket_key is the synthetic guest id from guest_user_id_for() and deliberately has NO FK to public.users. Authenticated users are metered by user_credits instead.';
 
 
 --
@@ -5316,7 +5462,8 @@ CREATE TABLE public.news_articles (
     key_takeaways jsonb,
     read_time_minutes integer,
     external_id text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone
 );
 
 
@@ -5339,6 +5486,13 @@ COMMENT ON COLUMN public.news_articles.related_tickers IS 'JSONB array of ticker
 --
 
 COMMENT ON COLUMN public.news_articles.key_takeaways IS 'JSONB array: [{index, text}]';
+
+
+--
+-- Name: COLUMN news_articles.expires_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.news_articles.expires_at IS 'Retention bound for cached third-party article content. Any writer MUST set this. NULL rows are treated as expired by cleanup_expired_news_articles().';
 
 
 --
@@ -5416,6 +5570,13 @@ CREATE TABLE public.portfolios (
 
 
 --
+-- Name: COLUMN portfolios.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.portfolios.user_id IS 'A real public.users id, OR a per-INSTALL synthetic uuid from guest_user_id_for() for signed-out users. NO foreign key by design (migration 108), same as watchlist_items. Account deletion clears this table explicitly.';
+
+
+--
 -- Name: price_catalyst_audit; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5488,6 +5649,24 @@ CREATE TABLE public.profit_power_cache (
 
 
 --
+-- Name: push_send_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.push_send_log (
+    user_id uuid NOT NULL,
+    dedup_key text NOT NULL,
+    sent_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE push_send_log; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.push_send_log IS 'One row per push actually delivered. The PK is the dedup claim: insert BEFORE sending, and treat a conflict as "already sent". Prevents duplicate alerts across retries and across Railway instances. Swept on a retention window.';
+
+
+--
 -- Name: research_reports; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5541,6 +5720,13 @@ CREATE TABLE public.research_reports (
 --
 
 COMMENT ON TABLE public.research_reports IS 'AI research reports. Dual-purpose: task queue + content store.';
+
+
+--
+-- Name: COLUMN research_reports.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.research_reports.user_id IS 'Owner. Deliberately NOT a foreign key (migration 110): holds either a real public.users id or a synthetic per-install uuid5 for signed-out guests, mirroring watchlist_items and portfolios (migration 108). Account deletion therefore purges this table EXPLICITLY via _UNLINKED_USER_TABLES in app/api/v1/endpoints/users.py — there is no cascade.';
 
 
 --
@@ -6105,7 +6291,8 @@ CREATE TABLE public.users (
     avatar_url text,
     tier public.user_tier DEFAULT 'free'::public.user_tier NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    password_changed_at timestamp with time zone
 );
 
 
@@ -6121,6 +6308,13 @@ COMMENT ON TABLE public.users IS 'Core user profiles. id = auth.users.id (direct
 --
 
 COMMENT ON COLUMN public.users.tier IS 'Subscription tier: free (default), pro, premium';
+
+
+--
+-- Name: COLUMN users.password_changed_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.users.password_changed_at IS 'When the account password was last changed. Any app JWT whose `iat` predates this is rejected, so a password reset invalidates sessions an attacker may hold. NULL = never changed since signup (no restriction).';
 
 
 --
@@ -6179,6 +6373,13 @@ CREATE TABLE public.watchlist_items (
 --
 
 COMMENT ON TABLE public.watchlist_items IS 'User watchlist. Price data fetched live from FMP API.';
+
+
+--
+-- Name: COLUMN watchlist_items.user_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.watchlist_items.user_id IS 'A real public.users id, OR a per-INSTALL synthetic uuid from guest_user_id_for() for signed-out users. NO foreign key by design (migration 108) — the synthetic id has no users row. Account deletion therefore clears this table EXPLICITLY via _UNLINKED_USER_TABLES, not via a cascade.';
 
 
 --
@@ -6701,6 +6902,13 @@ ALTER TABLE ONLY public.ai_insight_cache ALTER COLUMN id SET DEFAULT nextval('pu
 
 
 --
+-- Name: analytics_events id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analytics_events ALTER COLUMN id SET DEFAULT nextval('public.analytics_events_id_seq'::regclass);
+
+
+--
 -- Name: competitor_intel_audit id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -7103,6 +7311,14 @@ ALTER TABLE ONLY public.ai_insight_cache
 
 
 --
+-- Name: analytics_events analytics_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.analytics_events
+    ADD CONSTRAINT analytics_events_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: article_chunks article_chunks_article_id_chunk_index_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7364,6 +7580,14 @@ ALTER TABLE ONLY public.geopolitical_macro_cache
 
 ALTER TABLE ONLY public.growth_cache
     ADD CONSTRAINT growth_cache_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: guest_report_budget guest_report_budget_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.guest_report_budget
+    ADD CONSTRAINT guest_report_budget_pkey PRIMARY KEY (bucket_key, period_month);
 
 
 --
@@ -7636,6 +7860,14 @@ ALTER TABLE ONLY public.profit_power_cache
 
 ALTER TABLE ONLY public.profit_power_cache
     ADD CONSTRAINT profit_power_cache_ticker_key UNIQUE (ticker);
+
+
+--
+-- Name: push_send_log push_send_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.push_send_log
+    ADD CONSTRAINT push_send_log_pkey PRIMARY KEY (user_id, dedup_key);
 
 
 --
@@ -8628,6 +8860,27 @@ CREATE INDEX idx_ai_insight_cache_expiry ON public.ai_insight_cache USING btree 
 
 
 --
+-- Name: idx_analytics_events_event_time; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_analytics_events_event_time ON public.analytics_events USING btree (event, server_ts DESC);
+
+
+--
+-- Name: idx_analytics_events_identity_time; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_analytics_events_identity_time ON public.analytics_events USING btree (identity_key, server_ts DESC);
+
+
+--
+-- Name: idx_analytics_events_server_ts; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_analytics_events_server_ts ON public.analytics_events USING btree (server_ts);
+
+
+--
 -- Name: idx_article_chunks_article; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8880,6 +9133,13 @@ CREATE UNIQUE INDEX idx_growth_cache_ticker ON public.growth_cache USING btree (
 
 
 --
+-- Name: idx_guest_report_budget_period; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_guest_report_budget_period ON public.guest_report_budget USING btree (period_month);
+
+
+--
 -- Name: idx_health_check_cache_ticker; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9069,6 +9329,13 @@ CREATE INDEX idx_money_moves_category ON public.money_move_articles USING btree 
 
 
 --
+-- Name: idx_news_articles_expires_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_news_articles_expires_at ON public.news_articles USING btree (expires_at);
+
+
+--
 -- Name: idx_news_breaking; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9164,6 +9431,13 @@ CREATE INDEX idx_price_catalyst_cache_expires ON public.price_catalyst_cache USI
 --
 
 CREATE INDEX idx_profit_power_cache_ticker ON public.profit_power_cache USING btree (ticker);
+
+
+--
+-- Name: idx_push_send_log_sent_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_push_send_log_sent_at ON public.push_send_log USING btree (sent_at);
 
 
 --
@@ -9437,6 +9711,13 @@ CREATE INDEX idx_users_tier ON public.users USING btree (tier);
 --
 
 CREATE INDEX idx_watchlist_items_needs_enrich ON public.watchlist_items USING btree (user_id) WHERE (sector IS NULL);
+
+
+--
+-- Name: idx_watchlist_items_ticker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_watchlist_items_ticker ON public.watchlist_items USING btree (ticker);
 
 
 --
@@ -9930,14 +10211,6 @@ ALTER TABLE ONLY public.chat_messages
 
 
 --
--- Name: chat_sessions chat_sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.chat_sessions
-    ADD CONSTRAINT chat_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
 -- Name: device_tokens device_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9959,22 +10232,6 @@ ALTER TABLE ONLY public.portfolio_holdings
 
 ALTER TABLE ONLY public.portfolio_items
     ADD CONSTRAINT portfolio_items_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(id) ON DELETE CASCADE;
-
-
---
--- Name: portfolios portfolios_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolios
-    ADD CONSTRAINT portfolios_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
--- Name: research_reports research_reports_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.research_reports
-    ADD CONSTRAINT research_reports_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -10039,14 +10296,6 @@ ALTER TABLE ONLY public.user_study_schedules
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE;
-
-
---
--- Name: watchlist_items watchlist_items_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.watchlist_items
-    ADD CONSTRAINT watchlist_items_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -10397,6 +10646,19 @@ CREATE POLICY ai_insight_cache_public_read ON public.ai_insight_cache FOR SELECT
 --
 
 CREATE POLICY ai_insight_cache_service_write ON public.ai_insight_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: analytics_events; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.analytics_events ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: analytics_events analytics_events_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY analytics_events_service_all ON public.analytics_events TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -10926,6 +11188,19 @@ CREATE POLICY growth_cache_service_role_all ON public.growth_cache TO service_ro
 
 
 --
+-- Name: guest_report_budget; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.guest_report_budget ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: guest_report_budget guest_report_budget_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY guest_report_budget_service_all ON public.guest_report_budget TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: health_check_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -11377,6 +11652,19 @@ ALTER TABLE public.profit_power_cache ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY profit_power_cache_service_all ON public.profit_power_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: push_send_log; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.push_send_log ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: push_send_log push_send_log_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY push_send_log_service_all ON public.push_send_log TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -12301,5 +12589,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict JORd88cKqxIvAW1M5YSZvyD6GmtQ4iQjM1gKeOs1aMhKoSGNdCHTQjMzX7rdpZQ
+\unrestrict LVonfhT1zWdBUIMvl9y0skeAS9pBVFy6BhCG3glaVIWVjwYpcQojtKN8FaoKqQb
 

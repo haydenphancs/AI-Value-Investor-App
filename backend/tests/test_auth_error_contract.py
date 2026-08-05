@@ -107,6 +107,43 @@ def test_auth_details_are_flat_scalars(code):
         assert isinstance(value, (str, int, float, bool)), f"{key} is {type(value).__name__}"
 
 
+def test_every_details_literal_in_the_app_is_flat_scalars():
+    """Static scan of every `details={...}` in backend/app.
+
+    iOS `AnyCodable` (APIClient.swift) tries String → Int → Double → Bool and falls through to
+    `value = ""` for anything else, WITHOUT throwing. So a list in `details` does not surface as
+    a decode error — the hint simply arrives empty and nobody finds out. Two live sites shipped
+    that way: `ticker_report.py` and `home.py` both passed `sorted(...)`.
+
+    `test_auth_details_are_flat_scalars` above cannot catch this — it builds its own flat dict
+    and asserts those literals are scalars, and `auth_error` never transforms `details`, so it
+    is a tautology. This reads the real call sites instead.
+    """
+    import re
+    from pathlib import Path
+
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    offenders: list[str] = []
+    pattern = re.compile(r"details=\{([^{}]*)\}")
+
+    for path in sorted(app_dir.rglob("*.py")):
+        for lineno, raw in enumerate(path.read_text().splitlines(), 1):
+            # Strip trailing comments — prose naming the retired pattern must not fail its own
+            # test. That has bitten the source-scan tests in this suite before.
+            line = raw.split("#", 1)[0]
+            for match in pattern.finditer(line):
+                body = match.group(1)
+                if re.search(r":\s*(\[|sorted\(|list\(|set\(|tuple\()", body):
+                    offenders.append(
+                        f"{path.relative_to(app_dir.parent)}:{lineno}: {body.strip()}"
+                    )
+
+    assert not offenders, (
+        "`details` values must be flat scalars — iOS AnyCodable silently renders anything "
+        "else as an empty string:\n  " + "\n  ".join(offenders)
+    )
+
+
 def test_401s_carry_WWW_Authenticate():
     for code in _AUTH_CODES:
         exc = auth_error(code, message="m")

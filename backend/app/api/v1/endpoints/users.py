@@ -10,7 +10,7 @@ from supabase import Client
 import logging
 from typing import Optional
 
-from app.api.error_response import ErrorCode, make_error_response
+from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.database import get_auth_client, get_supabase
 from app.dependencies import (
     get_current_user,
@@ -529,7 +529,14 @@ async def delete_account(
     """
     user_id = user["id"]
     if user_id == GUEST_USER_ID:
-        raise HTTPException(status_code=403, detail="Cannot delete the guest account.")
+        # AUTH_FORBIDDEN, not a bare 403: the credential is fine, the caller just isn't allowed
+        # to do this. Unreachable in practice (`get_current_user` 401s a guest before we get
+        # here) — defense in depth, and one of the two sites the enum comment names.
+        raise auth_error(
+            ErrorCode.AUTH_FORBIDDEN,
+            message="refusing to delete the shared guest account",
+            user_message="This account can't be deleted.",
+        )
 
     failures: dict[str, str] = {}
 

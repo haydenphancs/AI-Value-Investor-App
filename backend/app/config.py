@@ -304,6 +304,13 @@ class Settings(BaseSettings):
     # CHAT_DAILY_LIMIT_REACHED. Token count is best-effort observability + a soft
     # secondary ceiling. Set the turn limit to 0 to disable chat generation entirely.
     CHAT_DAILY_TURN_LIMIT: int = 60
+    # Anti-rotation ceiling for GUESTS only, keyed on `trusted_client_ip` rather than the
+    # client-chosen `X-Guest-Id`. The per-install budget above is the fair-use limit; this is
+    # the one a caller cannot reset by minting a new header. Set well above the per-install
+    # figure so a shared network (office, campus, CGNAT) is not throttled in normal use — it
+    # bounds abuse, it is not a second fair-use limit. Signed-in users are exempt: their bucket
+    # is a real account id, which is not rotatable.
+    CHAT_DAILY_TURN_LIMIT_PER_IP: int = 300
     CHAT_DAILY_TOKEN_LIMIT: int = 200000
 
     # Report pre-warming. After each market close the persona-neutral

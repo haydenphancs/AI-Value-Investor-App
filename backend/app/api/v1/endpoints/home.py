@@ -96,7 +96,9 @@ async def get_signal_ticker_detail(kind: str, ticker: str):
         return make_error_response(
             ErrorCode.INVALID_INPUT,
             message=f"Unsupported signal kind: {kind!r}",
-            details={"kind": kind, "valid": sorted(_VALID_SIGNAL_KINDS)},
+            # Joined, not a list — iOS `AnyCodable` yields "" for a non-scalar. See the same
+            # fix in ticker_report.py.
+            details={"kind": kind, "valid": ", ".join(sorted(_VALID_SIGNAL_KINDS))},
         )
     if not ticker or len(ticker) > 12:
         return make_error_response(

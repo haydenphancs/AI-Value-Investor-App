@@ -60,4 +60,21 @@ final class AIConsentStore: ObservableObject {
         hasConsented = false
         grantedAt = nil
     }
+
+    /// Drop consent because the SESSION that granted it ended — not because the user withdrew.
+    ///
+    /// Both keys are device-global, so without this the next account to sign in on this phone
+    /// inherits the previous user's "Allow". `ChatViewModel` gates the consent sheet on
+    /// `hasConsented`, so it would not present, and the new user's first message would be sent
+    /// for AI processing having never been asked. Consent is per person, and it cannot be
+    /// inherited from whoever held the phone before.
+    ///
+    /// Separate from `withdraw()` on purpose: that is a deliberate user action with its own
+    /// meaning in Settings, and conflating the two would misreport why consent went away.
+    func resetForEndedSession() {
+        defaults.removeObject(forKey: Keys.granted)
+        defaults.removeObject(forKey: Keys.grantedAt)
+        hasConsented = false
+        grantedAt = nil
+    }
 }

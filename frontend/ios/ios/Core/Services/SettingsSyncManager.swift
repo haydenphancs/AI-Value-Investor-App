@@ -77,6 +77,12 @@ final class SettingsSyncManager {
         for key in Self.boolKeys + Self.stringKeys + Self.doubleKeys {
             defaults.removeObject(forKey: key)
         }
+        // Reset the sync state machine too, not just the values. Leaving `hasHydrated` true
+        // would let the next account `push()` before its own hydrate had run, and a stale
+        // `pendingBlob` / `deferredPushPending` would replay the ended session's edits into it.
+        hasHydrated = false
+        pendingBlob = nil
+        deferredPushPending = false
         // The appearance override is applied to the window, not just stored, so re-apply the
         // now-default value or the previous user's Light/Dark choice stays on screen.
         AppearanceManager.applyStored()
@@ -105,10 +111,27 @@ final class SettingsSyncManager {
         guard !isHydrating else { return }   // a bounce between settings screens must not storm
         isHydrating = true
         hasHydrated = false   // re-gate for this (possibly new) session
+        // Snapshot the Learn identity epoch — it is bumped by
+        // `AppState.discardDataForEndedSession()`, i.e. on every session end and account switch.
+        //
+        // `isHydrating` alone was actively harmful across an identity change. A's fetch is in
+        // flight when A signs out and B signs in; B's hydrate hits the `isHydrating` guard and
+        // returns having done NOTHING, then A's response lands and `apply(prefs)` writes A's
+        // persona, appearance, playback speed and 13 notification toggles onto B's device —
+        // and B's next change calls `push()`, which is now ungated, sending A's blob up as B's
+        // own to every one of B's devices. The four Learn stores solve this exact race with the
+        // epoch; this one had no equivalent.
+        let epoch = LearnIdentityEpoch.current
         Task {
             defer { isHydrating = false }
             do {
                 let prefs = try await repository.fetchSettings()
+                guard epoch == LearnIdentityEpoch.current else {
+                    // These are the ENDED session's preferences. Drop them, and leave
+                    // `hasHydrated` false so the new identity's own hydrate still has to run.
+                    print("[SettingsSync] discarded a hydrate from a previous identity")
+                    return
+                }
                 apply(prefs)
                 // Re-assert anything the user changed WHILE the hydrate was gated, so the
                 // server blob does not silently revert their choice. Local wins here because

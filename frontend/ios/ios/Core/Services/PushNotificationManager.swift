@@ -122,6 +122,25 @@ final class PushNotificationManager {
         }
     }
 
+    /// Release this device's binding LOCALLY, for the session-end paths that have no usable
+    /// credential to de-register with.
+    ///
+    /// `unregisterCurrentDevice()` needs a live session, so it can only run from a deliberate
+    /// sign-out. The other two endings — a dead access token and a dead refresh token — cannot
+    /// call the server at all, and they used to do nothing: `device_tokens` kept mapping this
+    /// phone to the ended account, and because the only detach endpoint requires that account's
+    /// session, nothing could ever undo it. The sweeper kept delivering the previous user's
+    /// watchlist alerts to a phone now showing the guest UI, disclosing what they follow.
+    ///
+    /// Re-stashing the token as pending is what actually heals it: `flushPendingToken()` runs on
+    /// the next successful auth, and `device_tokens.token` is UNIQUE, so re-registering MOVES
+    /// the row to the new account rather than duplicating it.
+    func clearLocalRegistrationForEndedSession() {
+        guard let token = registeredToken else { return }
+        registeredToken = nil
+        pendingToken = token
+    }
+
     // MARK: - Private
 
     private func registerOrStash(_ token: String) {

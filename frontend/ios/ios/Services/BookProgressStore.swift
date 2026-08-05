@@ -200,7 +200,19 @@ final class BookProgressStore: ObservableObject {
         // the rest go on the next hydrate. Nothing strands: a pushed key leaves `unsynced` once the
         // server has it, and a key that keeps failing sorts to the back rather than re-claiming a
         // slot, so successive hydrates drain the whole backlog `maxReconcilePushes` at a time.
+        // The epoch guard belongs on the WRITE side too, not just on `hydrate()`'s read. This
+        // loop is up to 25 network round trips; a sign-out or account switch partway through
+        // used to POST the PREVIOUS account's completed cores into the NEW account, durable
+        // and visible on all of its devices — exactly the leak LearnIdentityEpoch exists to
+        // stop, arrived at from the other direction. Under `.restoring` it is worse in a
+        // quieter way: the token is disarmed mid-loop, so the rest of the batch lands in the
+        // install's guest partition instead.
+        let epoch = LearnIdentityEpoch.current
         for key in reconcileOrder(unsynced).prefix(Self.maxReconcilePushes) {
+            guard epoch == LearnIdentityEpoch.current else {
+                print("[BookProgressStore] abandoned a reconcile push from a previous identity")
+                return
+            }
             await pushCompletion(key)
         }
     }
@@ -217,11 +229,16 @@ final class BookProgressStore: ObservableObject {
     private static let maxReconcilePushes = 25
 
     private func pushCompletion(_ key: String) async {
+        let epoch = LearnIdentityEpoch.current
         do {
             let resp = try await apiClient.request(
                 endpoint: .completeLearnItem(contentType: Self.contentType, key: key),
                 responseType: LearnProgressResponse.self
             )
+            // Guarded here as well as in the loop, because `markCompleted` calls this directly.
+            // The response describes the PREVIOUS account's row set if the identity moved while
+            // it was in flight, and merging it would refill this store for the wrong user.
+            guard epoch == LearnIdentityEpoch.current else { return }
             pushFailures.removeValue(forKey: key)
             merge(resp)
         } catch {

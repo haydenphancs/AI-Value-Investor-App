@@ -4,6 +4,7 @@ Admin endpoints — operational triggers for background jobs.
 
 import asyncio
 import logging
+import secrets
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -16,16 +17,23 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Emails authorised to call admin endpoints
-_ADMIN_EMAILS: set[str] = {"haiphan@caydexinvest.com", "admin@caydexinvest.com"}
-
 
 def _authorize_admin(
     user: Optional[dict],
     x_admin_token: Optional[str],
 ) -> None:
-    """Allow either (a) authenticated user whose email is on the allowlist
+    """Allow either (a) an authenticated user whose `users.is_admin` flag is set
     or (b) an `X-Admin-Token` header that matches settings.ADMIN_TOKEN.
+
+    ⚠️ **Authorization is on a DATABASE FLAG, never on the email address.** This used to be
+    `user.get("email") in {"haiphan@caydexinvest.com", "admin@caydexinvest.com"}`, and an
+    email claim is not a credential: Supabase auto-sets `email_confirmed_at` whenever the
+    project's "Confirm email" setting is off, so `POST /auth/register` would mint a real
+    session for an address nobody owns (`auth.py:300` — "Confirmation disabled project-side")
+    and hand the registrant every route in this file. Do not reintroduce an email comparison
+    here, and do not add a fallback to one "so it keeps working" — set `is_admin` in the
+    database instead (migration 113). `tests/test_users_endpoint_guards.py` fails the build
+    if an allowlist reappears.
 
     Raises 401 AUTH_REQUIRED when the caller presented no credential at all, and 403
     AUTH_FORBIDDEN when they did but are not an admin. The token path exists so
@@ -40,22 +48,29 @@ def _authorize_admin(
     had a carefully-reasoned branch for it that could never execute.
     """
     token = settings.ADMIN_TOKEN
-    if token and x_admin_token and x_admin_token == token:
+    if token and x_admin_token and secrets.compare_digest(x_admin_token, token):
         return
-    if user and user.get("email") in _ADMIN_EMAILS:
+    # `is True` deliberately: a Supabase row can carry the column as NULL (a row written
+    # before migration 113) and `if user.get("is_admin")` would also accept the string
+    # "false", which is what a JSON round-trip through some clients produces.
+    if user and user.get("is_admin") is True:
         return
     # No credential of either kind → 401, not 403. `is_guest` (not an id comparison) is the
     # guest test: a per-install uuid5 never equals the shared sentinel.
     presented_nothing = not x_admin_token and (user is None or user.get("is_guest"))
     # Log enough to debug without leaking the actual secret.
+    # `is_admin=None` (rather than False) is the tell that migration 113 has not been applied
+    # to this database — worth distinguishing from a genuine "you are not an admin".
     logger.warning(
         "Admin auth failed: server_token_set=%s, header_present=%s, "
-        "header_len=%d, server_len=%d, user_email=%r",
+        "header_len=%d, server_len=%d, user_id=%r, is_guest=%s, is_admin=%r",
         bool(token),
         bool(x_admin_token),
         len(x_admin_token or ""),
         len(token or ""),
-        user.get("email") if user else None,
+        user.get("id") if user else None,
+        bool(user.get("is_guest")) if user else None,
+        user.get("is_admin", None) if user else None,
     )
     if presented_nothing:
         raise auth_error(

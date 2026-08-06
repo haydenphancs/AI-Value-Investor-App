@@ -29,7 +29,7 @@ Two invariants worth stating up front, because both are easy to lose:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from app.config import settings
@@ -347,9 +347,10 @@ class IAPService:
             )
             raise IAPError("could not update the account tier") from e
 
-        # Grant the tier's allocation. Best-effort: the entitlement itself is already
-        # recorded, and the same RPC runs lazily on the next credit read, so a failure here
-        # delays credits rather than losing the purchase.
+        # Roll the period over if it is due, and create the balance row on a first touch.
+        # Best-effort: the entitlement itself is already recorded, and the same RPC runs
+        # lazily on the next credit read, so a failure here delays credits rather than
+        # losing the purchase.
         try:
             self.supabase.rpc("ensure_credit_period", {"p_user_id": user_id}).execute()
         except Exception as e:
@@ -359,7 +360,137 @@ class IAPService:
                 tier, user_id, type(e).__name__, e,
             )
 
+        # THEN grant the new tier's allocation. `ensure_credit_period` alone is NOT enough and
+        # this call is the whole reason migration 112 exists: it only grants when the monthly
+        # boundary has passed, so an upgrade bought on the 10th used to leave the buyer on
+        # their old (often exhausted) balance until the 1st — paid, tier flipped, zero credits,
+        # 402 on the next tap. `grant_tier_upgrade` raises `total` to the new allocation and is
+        # idempotent by construction (it no-ops once total >= allocation), so replays from
+        # `Transaction.updates` on every app launch cannot farm credits, and a downgrade never
+        # claws back. See migrations/112_grant_tier_upgrade.sql for the full reasoning.
+        try:
+            self.supabase.rpc("grant_tier_upgrade", {"p_user_id": user_id}).execute()
+        except Exception as e:
+            # Degrades to exactly the old behaviour (credits at the next monthly reset), which
+            # is also what happens if 112 has not been applied yet — so this is warned, not
+            # raised, but it IS the difference between a working purchase and a silent one.
+            logger.error(
+                "IAP: tier=%s applied for user=%s but grant_tier_upgrade FAILED (%s: %s) — "
+                "the upgrade's credits will NOT land until the next monthly reset. If this is "
+                "PGRST202/undefined function, migration 112 has not been applied.",
+                tier, user_id, type(e).__name__, e,
+            )
+
         return tier
+
+    def sweep_expired_subscriptions(self, limit: int = 500) -> Dict[str, int]:
+        """Expire subscription rows whose paid period ended, and re-reconcile those users.
+
+        WHY THIS EXISTS: `reconcile_user_tier` is the only writer of `users.tier`, and it runs
+        only when a client `POST /billing/verify` or an App Store Server Notification arrives.
+        Nothing re-evaluated entitlement on its own. So a single lost EXPIRED or REFUND
+        notification — Apple stops retrying, the webhook URL is an unticked checklist item, a
+        deploy eats the delivery window — left the account on the paid tier permanently. Worse
+        than "keeps access": `ensure_credit_period` reads `users.tier` at every monthly
+        boundary (migration 100:185), so a cancelled Max subscriber keeps getting 4000 fresh
+        credits on the 1st of every month, forever, at real Gemini and FMP cost. The client
+        only ever reports *purchases*, so nothing else can notice.
+
+        This makes entitlement self-correcting with zero notifications delivered.
+
+        Grace windows are deliberately generous, because the cost of expiring a PAYING
+        customer early is far worse than carrying a lapsed one for another day:
+
+        * `active` — 24h past `current_period_end`. Apple renews slightly before the boundary,
+          and clock skew plus notification latency both push the other way.
+        * `grace_period` / `billing_retry` — 60 days, which is Apple's maximum billing-retry
+          window. These statuses mean "the period HAS ended and the customer is still entitled
+          while Apple retries", so the period-end filter must not apply to them at the short
+          window; that is exactly the demotion `winning_tier` documents avoiding.
+
+        Idempotent: a row already `expired` is not selected, so a re-run is a no-op.
+        """
+        now = datetime.now(timezone.utc)
+        short_cutoff = (now - timedelta(hours=24)).isoformat()
+        long_cutoff = (now - timedelta(days=60)).isoformat()
+
+        try:
+            result = (
+                self.supabase.table("subscriptions")
+                .select("id, user_id, status, current_period_end, tier")
+                .in_("status", sorted(_ENTITLING_STATUSES))
+                .not_.is_("current_period_end", "null")
+                .lt("current_period_end", short_cutoff)
+                .limit(limit)
+                .execute()
+            )
+            rows = result.data or []
+        except Exception as e:
+            logger.error(
+                "IAP sweep: could not read subscriptions (%s: %s) — no rows expired this pass",
+                type(e).__name__, e,
+            )
+            return {"scanned": 0, "expired": 0, "users_reconciled": 0, "errors": 1}
+
+        stale: list[dict] = []
+        for row in rows:
+            status = (row.get("status") or "").lower()
+            cutoff = long_cutoff if status in {"grace_period", "billing_retry"} else short_cutoff
+            end = row.get("current_period_end")
+            if end and str(end) < cutoff:
+                stale.append(row)
+
+        expired = 0
+        errors = 0
+        affected: set[str] = set()
+        for row in stale:
+            try:
+                (
+                    self.supabase.table("subscriptions")
+                    .update({"status": "expired", "updated_at": now.isoformat()})
+                    .eq("id", row["id"])
+                    .execute()
+                )
+                expired += 1
+                if row.get("user_id"):
+                    affected.add(str(row["user_id"]))
+            except Exception as e:
+                errors += 1
+                logger.error(
+                    "IAP sweep: could not expire subscription id=%s user=%s (%s: %s)",
+                    row.get("id"), row.get("user_id"), type(e).__name__, e,
+                )
+
+        reconciled = 0
+        for user_id in affected:
+            try:
+                # Recomputes from the user's REMAINING rows, so someone holding a second,
+                # still-valid subscription keeps their tier rather than being dropped to free.
+                new_tier = self.reconcile_user_tier(user_id)
+                reconciled += 1
+                logger.info(
+                    "IAP sweep: user=%s reconciled to tier=%s after expiry", user_id, new_tier
+                )
+            except Exception as e:
+                errors += 1
+                logger.error(
+                    "IAP sweep: expired rows for user=%s but reconcile FAILED (%s: %s) — "
+                    "users.tier still shows the lapsed tier and will keep allocating its "
+                    "credits until the next sweep",
+                    user_id, type(e).__name__, e,
+                )
+
+        if expired or errors:
+            logger.info(
+                "IAP sweep: scanned=%d expired=%d users_reconciled=%d errors=%d",
+                len(rows), expired, reconciled, errors,
+            )
+        return {
+            "scanned": len(rows),
+            "expired": expired,
+            "users_reconciled": reconciled,
+            "errors": errors,
+        }
 
     # ── Webhook handling ──────────────────────────────────────────────────────
 

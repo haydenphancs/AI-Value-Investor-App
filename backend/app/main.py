@@ -80,6 +80,16 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
         ],
         before_send=_sentry_before_send,
         send_default_pii=False,
+        # `send_default_pii=False` does NOT cover request bodies — it gates only cookies.
+        # `StarletteRequestExtractor.extract_request_info` attaches the parsed JSON body to
+        # every event unconditionally (integrations/starlette.py: `request_info["data"] =
+        # json`), and the only thing that suppresses it is this option. Without it, a failed
+        # sign-up — `auth.py` logs `logger.error(..., exc_info=True)`, which
+        # LoggingIntegration turns into an event — shipped
+        # `{"email": ..., "password": "<plaintext>"}` to Sentry. Same for the 6-digit
+        # password-reset code. These events are logger-driven and the stack is what
+        # diagnoses them, so the body was never adding diagnostic value.
+        max_request_body_size="never",
     )
     logger.info("Sentry error monitoring enabled (environment=%s)", settings.ENVIRONMENT)
 
@@ -117,29 +127,45 @@ async def lifespan(app: FastAPI):
     # Local server is a lightweight dev mirror that reads from the same
     # Supabase caches that Railway populates.
     is_local_dev = settings.ENVIRONMENT == "development"
-    # Declared before the branch so the shutdown block below can reference it
+    # Declared before the branch so the shutdown block below can reference them
     # even when background tasks were skipped (local dev).
     insight_sweeper_task: Optional[asyncio.Task] = None
+    # EVERY background task's handle lands here.
+    #
+    # Two reasons, both of which bit us. (1) `asyncio.create_task` keeps only a WEAK
+    # reference, so a fire-and-forget task can be garbage-collected mid-execution — the
+    # documented CPython caveat. (2) More importantly, the teardown below closes the shared
+    # httpx clients (`close_fmp_client` / `close_coingecko_client`); nine of these loops used
+    # to still be running at that point, so every Railway redeploy tore their HTTP client out
+    # from under them mid-request. The research reconciliation job is the one that hurts —
+    # it is the refund safety net for charged-but-undelivered reports.
+    background_tasks: list[asyncio.Task] = []
+
+    def _spawn(coro, name: str) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=name)
+        background_tasks.append(task)
+        return task
+
     if is_local_dev:
         logger.info("Local dev mode — skipping background tasks (Railway handles them)")
     else:
         # Pre-warm ApeWisdom social mentions cache at startup
-        asyncio.create_task(_warm_social_cache())
+        _spawn(_warm_social_cache(), "warm_social_cache")
 
         # Start background news pre-warmer for popular watchlist tickers
-        asyncio.create_task(_run_news_pre_warmer())
+        _spawn(_run_news_pre_warmer(), "run_news_pre_warmer")
 
         # Start background report pre-warmer: warms the persona-neutral
         # ticker_data_cache for top tickers so the first report after each close
         # (and any same-session burst) skips re-collecting it. Runs the full
         # persona-neutral collection (FMP fan-out + grounded precompute, which
         # makes some Gemini-grounded calls for cold tickers).
-        asyncio.create_task(_run_report_pre_warmer())
+        _spawn(_run_report_pre_warmer(), "run_report_pre_warmer")
 
         # Start background scanner pre-warmer: keeps the Home Daily Scanners
         # (Movers/Volume + Skeptical Money) hot during the regular session so the
         # first Home load after each 20-min cache expiry isn't a cold build.
-        asyncio.create_task(_run_scanner_pre_warmer())
+        _spawn(_run_scanner_pre_warmer(), "run_scanner_pre_warmer")
 
         # NOTE: the old weekly sector-only benchmark job was RETIRED here.
         # Sector + industry medians are now computed together by the
@@ -151,27 +177,33 @@ async def lifespan(app: FastAPI):
         # Start background industry dossier recompute (weekly).
         # Replaces live FRED+Census calls per ticker report with a
         # pre-computed Supabase cache keyed on industry.
-        asyncio.create_task(_run_industry_dossier_job())
+        _spawn(_run_industry_dossier_job(), "run_industry_dossier_job")
 
         # Start background TTM benchmark refresh (weekly). TTM is a CURRENT
         # snapshot (price ÷ trailing-12mo earnings → drifts daily for every
         # company), so it must refresh far more often than the quarterly fiscal
         # recompute. Upserts the period_type='ttm' rows in place (~3.5 min).
-        asyncio.create_task(_run_ttm_benchmark_job())
+        _spawn(_run_ttm_benchmark_job(), "run_ttm_benchmark_job")
 
         # Daily σ (daily-return volatility) precompute. Feeds the Updates insight
         # gate's volatility-relative move trigger: the 5-min sweeper reads each
         # ticker's σ from ticker_volatility_cache instead of fetching 180 daily
         # closes per ticker per sweep. ~201 light FMP calls/day (~08:00 UTC).
-        asyncio.create_task(_run_volatility_precompute_job())
+        _spawn(_run_volatility_precompute_job(), "run_volatility_precompute_job")
 
         # Start background whale hydration jobs
-        asyncio.create_task(_run_whale_hydration_job())
+        _spawn(_run_whale_hydration_job(), "run_whale_hydration_job")
 
         # Refund safety net: reconcile research reports stranded in
         # pending/processing (killed worker) so charged-but-undelivered
         # reports get their credits back.
-        asyncio.create_task(_run_research_reconciliation_job())
+        _spawn(_run_research_reconciliation_job(), "run_research_reconciliation_job")
+
+        # Entitlement safety net: expire subscriptions whose paid period ended so a
+        # cancelled subscriber stops drawing the paid monthly credit allocation. Without
+        # it, ONE lost EXPIRED/REFUND notification entitles an account forever, because
+        # nothing else ever re-evaluates `users.tier`.
+        _spawn(_run_subscription_expiry_sweep(), "run_subscription_expiry_sweep")
 
         # Updates-screen AI Insights sweeper. Re-evaluates every watchlisted
         # scope (plus the general market feed) on a 5-min price / 15-min news
@@ -179,15 +211,15 @@ async def lifespan(app: FastAPI):
         # materiality predicate trips. This is what keeps the read path free of
         # any Gemini call — see services/updates_insight_sweeper.py.
         #
-        # Unlike the loops above we RETAIN the handle and cancel it below: this
-        # task holds a cross-process claim row per scope, and a clean cancel lets
-        # the current sweep unwind instead of leaving claims to time out.
+        # Cancelled FIRST below, ahead of the others: it holds a cross-process claim row
+        # per scope, and a clean cancel lets the current sweep unwind instead of leaving
+        # claims to time out.
         from app.services.updates_insight_sweeper import run_insight_sweeper_loop
-        insight_sweeper_task = asyncio.create_task(run_insight_sweeper_loop())
+        insight_sweeper_task = _spawn(run_insight_sweeper_loop(), "insight_sweeper")
 
     yield
 
-    # Stop the insight sweeper before tearing down the HTTP clients it uses.
+    # Stop the insight sweeper first — it releases claim rows on the way out.
     if insight_sweeper_task is not None:
         insight_sweeper_task.cancel()
         try:
@@ -198,6 +230,27 @@ async def lifespan(app: FastAPI):
             logger.warning(
                 "Insight sweeper shutdown raised: %s: %s", type(e).__name__, e
             )
+
+    # Then stop EVERY remaining background loop BEFORE closing the HTTP clients they use.
+    # Skipping this is not cosmetic: `close_fmp_client()` below would otherwise pull the
+    # shared httpx client out from under nine still-running loops on every redeploy.
+    pending = [t for t in background_tasks if not t.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        # `return_exceptions=True` so one loop that raises on cancel cannot prevent the
+        # rest from being awaited — a hung shutdown is how Railway ends up SIGKILLing us
+        # mid-write instead of letting the sweeps unwind.
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for task, result in zip(pending, results):
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                logger.warning(
+                    "Background task %s raised on shutdown: %s: %s",
+                    task.get_name(), type(result).__name__, result,
+                )
+        logger.info("Stopped %d background tasks", len(pending))
 
     # Graceful shutdown: close live price WebSocket connections
     await get_live_price_manager().shutdown()
@@ -368,6 +421,33 @@ async def _run_scanner_pre_warmer():
             logger.error(f"Scanner pre-warmer failed: {e}", exc_info=True)
 
         await asyncio.sleep(settings.SCANNER_PREWARM_INTERVAL_SECONDS)
+
+
+async def _run_subscription_expiry_sweep():
+    """Background task: expire lapsed subscriptions so entitlement self-corrects.
+
+    `reconcile_user_tier` is the only writer of `users.tier` and it runs ONLY on a client
+    verify or an App Store Server Notification. A single lost EXPIRED/REFUND notification
+    therefore left a cancelled subscriber on their paid tier permanently — and because
+    `ensure_credit_period` reads `users.tier` at every monthly boundary, they kept drawing
+    the paid allocation (up to 4000 credits/month) forever, at real Gemini + FMP cost. The
+    client only ever reports purchases, so nothing else could notice.
+
+    Hourly is ample: the shortest grace window is 24h, so this is about eventual correctness,
+    not latency. Idempotent — an already-expired row is not selected.
+    """
+    from app.services.iap_service import get_iap_service
+
+    await asyncio.sleep(150)  # let app fully start, and stagger off the other sweeps
+
+    while True:
+        try:
+            # Sync Supabase SDK — must not block the event loop.
+            await asyncio.to_thread(get_iap_service().sweep_expired_subscriptions)
+        except Exception as e:
+            logger.error(f"Subscription expiry sweep failed: {e}", exc_info=True)
+
+        await asyncio.sleep(3600)
 
 
 async def _run_research_reconciliation_job():

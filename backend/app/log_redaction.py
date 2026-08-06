@@ -92,9 +92,57 @@ def scrub_sentry_event(event: dict, _hint: Any = None) -> dict:
             for b in bc.get("values") or []:
                 if isinstance(b, dict) and isinstance(b.get("message"), str):
                     b["message"] = redact_secrets(b["message"])
+
+        _scrub_request_body(event)
     except Exception:
         pass
     return event
+
+
+# Body keys that must never reach Sentry in the clear. Matched case-insensitively against
+# the whole key, plus a substring pass for the compound spellings (new_password, id_token…).
+_CREDENTIAL_KEYS = {
+    "password", "new_password", "current_password", "old_password", "confirm_password",
+    "token", "access_token", "refresh_token", "id_token", "identity_token",
+    "code", "otp", "secret", "api_key", "apikey", "authorization", "nonce",
+    "supabase_access_token", "signed_transaction", "signed_payload",
+}
+_CREDENTIAL_SUBSTRINGS = ("password", "token", "secret", "apikey", "api_key")
+
+
+def _scrub_request_body(event: dict) -> None:
+    """Redact credential fields in ``event["request"]["data"]``.
+
+    `send_default_pii=False` does NOT cover request bodies — it gates cookies only — and
+    sentry-sdk's Starlette integration attaches the parsed JSON body to every event. A failed
+    sign-up or a mistyped password-reset code is logged with ``logger.error(exc_info=True)``,
+    LoggingIntegration turns that into an event, and the body rides along: plaintext password,
+    or the 6-digit reset code.
+
+    `max_request_body_size="never"` in `main.py` is the primary control and suppresses the
+    body outright. This is the second layer, because that is a single option one edit away
+    from being flipped back, and the consequence is credentials sitting in a third-party
+    store. Keys are redacted rather than the whole body dropped so a genuine 400 is still
+    diagnosable (which field, which shape) without exposing the value.
+    """
+    req = event.get("request")
+    if not isinstance(req, dict):
+        return
+    data = req.get("data")
+    if isinstance(data, str):
+        req["data"] = redact_secrets(data)
+        return
+    if not isinstance(data, dict):
+        return  # AnnotatedValue (already suppressed), list, or absent — nothing to do.
+
+    for key in list(data.keys()):
+        if not isinstance(key, str):
+            continue
+        low = key.lower()
+        if low in _CREDENTIAL_KEYS or any(s in low for s in _CREDENTIAL_SUBSTRINGS):
+            data[key] = "[redacted]"
+        elif isinstance(data[key], str):
+            data[key] = redact_secrets(data[key])
 
 
 class SecretRedactingFilter(logging.Filter):

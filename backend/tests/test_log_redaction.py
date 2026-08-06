@@ -142,6 +142,67 @@ def test_scrub_sentry_event_covers_every_free_text_field():
     assert _JWT not in out["breadcrumbs"]["values"][0]["message"]
 
 
+def test_sentry_never_receives_a_plaintext_password():
+    """THE regression this guard exists for.
+
+    `send_default_pii=False` gates cookies only. sentry-sdk's Starlette integration attaches
+    the parsed JSON body to EVERY event, so a failed sign-up — logged with
+    `logger.error(..., exc_info=True)`, which LoggingIntegration turns into an event — used to
+    ship the user's plaintext password to a third-party store. Only reproducible in
+    production, since Sentry initialises only when ENVIRONMENT == "production"."""
+    event = {
+        "request": {
+            "url": "https://api/api/v1/auth/register",
+            "data": {
+                "email": "someone@example.com",
+                "password": "hunter2-the-real-thing",
+                "display_name": "Someone",
+            },
+        }
+    }
+    out = scrub_sentry_event(event)
+    body = out["request"]["data"]
+    assert body["password"] == "[redacted]"
+    assert "hunter2-the-real-thing" not in str(out)
+    # The non-credential shape survives, so a genuine 400 is still diagnosable.
+    assert body["display_name"] == "Someone"
+
+
+def test_sentry_never_receives_a_password_reset_code_or_token():
+    """The 6-digit reset code is a bearer credential for the duration of its life, and
+    `new_password` / `*_token` are the same class of secret under different spellings."""
+    event = {
+        "request": {
+            "data": {
+                "code": "482913",
+                "new_password": "brand-new-secret",
+                "refresh_token": _JWT,
+                "supabase_access_token": _JWT,
+                "signed_transaction": "eyJhbGciOi.fake.payload",
+            }
+        }
+    }
+    body = scrub_sentry_event(event)["request"]["data"]
+    for key in (
+        "code", "new_password", "refresh_token",
+        "supabase_access_token", "signed_transaction",
+    ):
+        assert body[key] == "[redacted]", f"{key} leaked to Sentry"
+    assert _JWT not in str(body)
+
+
+def test_sentry_request_body_scrub_tolerates_non_dict_bodies():
+    """With `max_request_body_size='never'` the body is an AnnotatedValue, not a dict, and a
+    form/raw body can be a string. Neither may raise inside before_send — an exception there
+    drops the event and blinds the monitoring."""
+    for data in (None, "raw string", ["a", "b"], 42, object()):
+        event = {"request": {"data": data}}
+        assert scrub_sentry_event(event) is not None
+    # A string body still gets the free-text redactor.
+    out = scrub_sentry_event({"request": {"data": f"Bearer {_JWT}"}})
+    assert _JWT not in out["request"]["data"]
+
+
 def test_scrub_sentry_event_tolerates_malformed_shapes():
     """A malformed event must never raise inside before_send — that would drop the
     event entirely and blind the monitoring."""

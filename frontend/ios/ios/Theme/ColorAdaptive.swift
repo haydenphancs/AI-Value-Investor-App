@@ -56,7 +56,8 @@ extension Color {
 
 extension Color {
     /// Adaptive token: resolves to `lightHex` in light mode and to `darkHex` in
-    /// dark (and for `.unspecified`).
+    /// dark — and for `.unspecified`, which is deliberate and explained on the
+    /// designated initialiser below.
     init(lightHex light: String, darkHex dark: String) {
         self.init(lightHex: light, lightAlpha: 1, darkHex: dark, darkAlpha: 1)
     }
@@ -76,9 +77,31 @@ extension Color {
     /// alphas roughly double between the two modes.)
     init(lightHex light: String, lightAlpha: Double, darkHex dark: String, darkAlpha: Double) {
         self = Color(uiColor: UIColor { traits in
-            traits.userInterfaceStyle == .light
-                ? UIColor(hexString: light).withAlphaComponent(CGFloat(lightAlpha))
-                : UIColor(hexString: dark).withAlphaComponent(CGFloat(darkAlpha))
+            // Exhaustive rather than a ternary so `.unspecified` is a stated decision
+            // and nobody "fixes" it by inverting the predicate.
+            //
+            // `.unspecified` is an OVERRIDE INPUT, never a resolved trait: a UIWindow
+            // attached to a UIWindowScene inherits the system style, and SwiftUI's
+            // `colorScheme` has no unspecified case. Measured across all six
+            // (mode × OS) combinations, every window resolved `.light` or `.dark` —
+            // including System, where the override IS `.unspecified`. So this arm is
+            // reached only OUTSIDE a window: pre-attach UIKit resolution, or a bare
+            // `UITraitCollection.current` on a background queue.
+            //
+            // There, the right answer is the app's DEFAULT look (`AppearanceMode`
+            // defaults to `.dark`), not the opposite of it — an out-of-window
+            // resolution that disagrees with the app is a glaring artifact, one that
+            // agrees is invisible. The launch-screen colorset's "Any Appearance" slot
+            // is held on this same polarity for the same reason; change both or
+            // neither.
+            switch traits.userInterfaceStyle {
+            case .light:
+                return UIColor(hexString: light).withAlphaComponent(CGFloat(lightAlpha))
+            case .dark, .unspecified:
+                return UIColor(hexString: dark).withAlphaComponent(CGFloat(darkAlpha))
+            @unknown default:
+                return UIColor(hexString: dark).withAlphaComponent(CGFloat(darkAlpha))
+            }
         })
     }
 }
@@ -136,6 +159,8 @@ extension Color {
             return
         }
         self = Color(uiColor: UIColor { traits in
+            // Same `.unspecified → dark` polarity as the adaptive-token initialiser
+            // above; see the reasoning there. Keep the two in step.
             let isLight = traits.userInterfaceStyle == .light
             // Clamp against the surface these actually land on: a card.
             let surface = UIColor(hexString: isLight ? "FFFFFF" : "1E2330")

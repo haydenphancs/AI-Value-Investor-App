@@ -110,21 +110,68 @@ class _Q:
         return type("R", (), {"data": []})()
 
 
+_PLAN_CREDITS = {"free": 50, "pro": 1200, "premium": 4000}
+
+
 class FakeSupabase:
-    def __init__(self, fail=(), subscriptions=None):
+    """Fake Supabase client.
+
+    The `rpc` handler MODELS the SQL of `ensure_credit_period` (migration 100) and
+    `grant_tier_upgrade` (migration 112) rather than merely recording that they were called.
+    That matters: a fake that returns a bland success for every rpc makes a credit test pass
+    no matter what the balance does, which is exactly how a money bug survives a green suite.
+    Keep this model in step with those two migrations — if you change the SQL, change this.
+    """
+
+    def __init__(self, fail=(), subscriptions=None, credits=None, period_due=False):
         self.db = {"subscriptions": list(subscriptions or []), "users": [{"id": _USER}]}
         self.log: list = []
         self._fail = set(fail)
         self.rpcs: list = []
+        # None = no balance row yet (first touch). Otherwise {"total", "used"}.
+        self.credits = dict(credits) if credits is not None else None
+        # Whether the stored period boundary has passed. False = mid-period, which is the
+        # case the upgrade bug lived in.
+        self.period_due = period_due
 
     def table(self, name):
         return _Q(self.db, self.log, name, self._fail)
 
+    def _tier(self) -> str:
+        for r in self.db["users"]:
+            if r.get("id") == _USER:
+                return (r.get("tier") or "free").lower()
+        return "free"
+
+    def _alloc(self) -> int:
+        return _PLAN_CREDITS.get(self._tier(), 0)
+
     def rpc(self, name, params):
-        if "rpc" in self._fail:
-            raise RuntimeError("rpc unavailable")
+        if "rpc" in self._fail or name in self._fail:
+            raise RuntimeError(f"rpc {name} unavailable")
         self.rpcs.append((name, params))
+
+        alloc = self._alloc()
+        if name == "ensure_credit_period":
+            if self.credits is None:
+                self.credits = {"total": alloc, "used": 0}
+            elif self.period_due:
+                self.credits = {"total": alloc, "used": 0}
+                self.period_due = False
+            # else: mid-period -> returns the live remaining UNCHANGED (migration 100:236).
+        elif name == "grant_tier_upgrade":
+            if self.credits is None:
+                self.credits = {"total": alloc, "used": 0}
+            elif alloc > self.credits["total"]:
+                # Raises the ceiling; `used` is preserved (migration 112).
+                self.credits["total"] = alloc
+            # else: replay or downgrade -> no-op, no clawback.
+
         return type("R", (), {"execute": lambda *_a, **_k: None})()
+
+    @property
+    def remaining(self) -> int:
+        return 0 if self.credits is None else self.credits["total"] - self.credits["used"]
 
 
 def _service(sb) -> svc.IAPService:
@@ -189,13 +236,58 @@ def test_apply_records_the_subscription_and_mirrors_the_tier():
 
 
 def test_apply_refreshes_the_credit_period_after_mirroring():
-    """ensure_credit_period reads users.tier, so the mirror has to happen first or the user
-    is granted the OLD tier's allocation."""
+    """Both credit RPCs read users.tier, so the mirror has to happen first or the user is
+    granted the OLD tier's allocation.
+
+    Order is asserted deliberately: `ensure_credit_period` first (rolls a due period over and
+    creates the balance row on a first touch), THEN `grant_tier_upgrade` (tops the ceiling up
+    to the new tier). Reversing them would let a due monthly reset overwrite the fresh upgrade
+    grant with the plain allocation."""
     sb = FakeSupabase()
     _service(sb).apply_transaction(_USER, _txn(product=_MAX))
-    assert [name for name, _ in sb.rpcs] == ["ensure_credit_period"]
+    assert [name for name, _ in sb.rpcs] == ["ensure_credit_period", "grant_tier_upgrade"]
     tier_update_idx = sb.log.index(("update", "users", {"tier": "premium"}))
     assert tier_update_idx >= 0
+
+
+def test_mid_period_upgrade_actually_delivers_the_credits():
+    """THE REGRESSION THIS FILE EXISTS FOR (migration 112).
+
+    `ensure_credit_period` grants only when the monthly boundary has passed, so an upgrade
+    bought mid-period used to leave the buyer on their old, usually exhausted, balance:
+    money taken, tier flipped, zero credits, 402 on the very next tap, for up to four weeks.
+    """
+    # Free user who has spent all 50 credits, three weeks before the reset.
+    sb = FakeSupabase(credits={"total": 50, "used": 50}, period_due=False)
+    assert sb.remaining == 0
+
+    _service(sb).apply_transaction(_USER, _txn(product=_PRO))
+
+    assert sb._tier() == "pro"
+    assert sb.credits["total"] == 1200
+    assert sb.remaining > 0, "paid for Pro and still had nothing to spend"
+
+
+def test_upgrade_before_any_credit_row_exists_still_grants():
+    """Upgrading before the first credit read means there is no `user_credits` row to raise."""
+    sb = FakeSupabase(credits=None)
+    _service(sb).apply_transaction(_USER, _txn(product=_MAX))
+    assert sb.credits == {"total": 4000, "used": 0}
+
+
+def test_downgrade_does_not_claw_back_paid_credits():
+    """A lower allocation must be a no-op mid-period — the user paid for those credits. This
+    is why the fix is a separate RPC and not a loosened condition on ensure_credit_period,
+    which would have reset `total` DOWN on every reconcile."""
+    sb = FakeSupabase(credits={"total": 4000, "used": 100}, period_due=False)
+    sb.db["users"][0]["tier"] = "premium"
+    sb.rpc("grant_tier_upgrade", {"p_user_id": _USER})
+    assert sb.credits["total"] == 4000
+
+    # Now the winning tier drops to pro; the ceiling must not fall mid-period.
+    sb.db["users"][0]["tier"] = "pro"
+    sb.rpc("grant_tier_upgrade", {"p_user_id": _USER})
+    assert sb.credits["total"] == 4000
 
 
 def test_tier_comes_from_the_verified_payload_not_the_client():
@@ -225,15 +317,68 @@ def test_replay_is_reported_as_a_replay():
     assert s.apply_transaction(_USER, _txn())["was_replay"] is True
 
 
-def test_replay_does_not_grant_extra_credits_directly():
-    """Credits come from the monthly allocation RPC, which is idempotent within a period —
-    NOT from a per-delivery grant. Asserted so nobody 'helpfully' adds one."""
-    sb = FakeSupabase()
+def test_replay_does_not_grant_extra_credits():
+    """StoreKit replays `Transaction.updates` on every launch, so a per-delivery grant would
+    be farmable by relaunching the app.
+
+    This used to assert that NO rpc with 'grant' in the name was ever called. That proxy
+    became wrong when migration 112 added `grant_tier_upgrade` to fix mid-period upgrades
+    delivering zero credits — so it now asserts the property the proxy stood for: five
+    replays leave the balance exactly where one delivery does. `grant_tier_upgrade` is
+    idempotent by construction (it no-ops once `total >= allocation`), which is what makes
+    that true; a naive additive grant would fail this test five times over.
+    """
+    sb = FakeSupabase(credits={"total": 50, "used": 0}, period_due=False)
     s = _service(sb)
-    for _ in range(5):
+
+    s.apply_transaction(_USER, _txn())          # Pro
+    after_first = dict(sb.credits)
+    assert after_first["total"] == 1200
+
+    for _ in range(4):
         s.apply_transaction(_USER, _txn())
-    assert all(name == "ensure_credit_period" for name, _ in sb.rpcs)
-    assert not [n for n, _ in sb.rpcs if "add_credit" in n or "grant" in n]
+
+    assert sb.credits == after_first, "replays moved the balance — credits are farmable"
+    assert not [n for n, _ in sb.rpcs if "add_credit" in n], (
+        "a direct ledger append on the delivery path is additive and therefore farmable"
+    )
+
+
+def test_grant_failure_does_not_lose_the_purchase():
+    """If migration 112 has not been applied the RPC 404s (PGRST202). The entitlement is
+    already recorded by then, so this must degrade to the old behaviour — credits at the next
+    monthly reset — rather than raise and fail a verified purchase."""
+    sb = FakeSupabase(fail=("grant_tier_upgrade",))
+    out = _service(sb).apply_transaction(_USER, _txn(product=_PRO))
+    assert out["tier"] == "pro"
+    assert ("update", "users", {"tier": "pro"}) in sb.log
+
+
+def test_migration_112_keeps_its_two_load_bearing_invariants():
+    """Source-scan on the SQL, because the Python fake can only model it.
+
+    Both properties below are what make the grant safe, and both are one careless edit away
+    from a money bug: drop the guard and every app launch mints credits; switch to a bare
+    assignment and a downgrade deletes credits the user paid for."""
+    from pathlib import Path
+
+    sql = (
+        Path(__file__).resolve().parents[1]
+        / "database" / "migrations" / "112_grant_tier_upgrade.sql"
+    ).read_text()
+
+    # 1. The idempotence / anti-farming guard: no grant once the ceiling is already met.
+    assert "v_alloc <= v_row.total" in sql, (
+        "the replay guard is gone — grant_tier_upgrade would add credits on every "
+        "Transaction.updates replay"
+    )
+    # 2. No clawback and no zeroing of `used`: the UPDATE must touch `total`, never `used`.
+    grant_update = sql[sql.index("UPDATE public.user_credits"):]
+    grant_update = grant_update[: grant_update.index(";")]
+    assert "used" not in grant_update, (
+        "the grant now writes `used`; zeroing it changes the period's total entitlement and "
+        "makes an upgrade's value depend on when in the month it happens"
+    )
 
 
 # ── Winning tier ──────────────────────────────────────────────────────────────

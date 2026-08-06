@@ -246,3 +246,26 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
         }
     }
 }
+
+extension AppearanceMode {
+    /// Tolerant parse for values that did NOT originate in this client — the synced
+    /// server blob, another platform, a hand-edited Supabase row. Case-insensitive
+    /// and whitespace-trimmed.
+    ///
+    /// Returns `nil` rather than a default, deliberately. Both read sites
+    /// (`AppearanceManager.parse` and the root `.preferredColorScheme`) coalesce a
+    /// miss to `.dark`, so a value that merely LOOKS wrong has to be logged and
+    /// rejected — never quietly turned into a mode the user did not choose. Silently
+    /// coalescing is how a "System" user would become a "Dark" user with nothing in
+    /// the logs to say so.
+    ///
+    /// All three keys are ASCII, so `lowercased()` has no locale hazard here.
+    init?(tolerantRawValue raw: String) {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "system": self = .system
+        case "dark":   self = .dark
+        case "light":  self = .light
+        default:       return nil
+        }
+    }
+}

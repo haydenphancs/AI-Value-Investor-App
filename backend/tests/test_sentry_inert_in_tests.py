@@ -28,3 +28,25 @@ def test_importing_app_main_does_not_activate_sentry():
         "Sentry was initialized during tests — test logger.error events would be "
         "shipped to prod. Ensure conftest.py neutralizes SENTRY_DSN."
     )
+
+
+def test_sentry_init_suppresses_request_bodies():
+    """Source-scan, because the init block is inert under tests and cannot be introspected.
+
+    `send_default_pii=False` gates COOKIES ONLY. sentry-sdk 2.20's Starlette integration
+    attaches the parsed JSON body to every event unconditionally
+    (`request_info["data"] = json`), so without `max_request_body_size="never"` a failed
+    sign-up ships the user's plaintext password — and a failed reset ships the 6-digit code —
+    to a third-party store. Production-only, so no local run can catch it.
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
+    init = src[src.index("sentry_sdk.init("):]
+    init = init[: init.index("\n    )")]
+
+    assert 'max_request_body_size="never"' in init, (
+        "sentry_sdk.init no longer suppresses request bodies — credential-endpoint payloads "
+        "(password, reset code, refresh token) will reach Sentry in the clear"
+    )
+    assert "send_default_pii=False" in init, "send_default_pii must stay False"

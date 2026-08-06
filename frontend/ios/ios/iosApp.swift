@@ -38,8 +38,11 @@ struct iosApp: App {
     @AppStorage(AppearanceManager.storageKey) private var appearanceModeRaw = AppearanceMode.dark.rawValue
 
     /// Resolved SwiftUI color scheme for the root modifier (`nil` = follow System).
+    /// Goes through `AppearanceManager.parse` rather than re-deriving the mode here:
+    /// the two writers of the window style are only guaranteed to agree if they share
+    /// one parse, and this used to be a second, independent copy of it.
     private var preferredColorScheme: ColorScheme? {
-        (AppearanceMode(rawValue: appearanceModeRaw) ?? .dark).colorScheme
+        AppearanceManager.parse(appearanceModeRaw).colorScheme
     }
 
     // MARK: - Initialization
@@ -52,6 +55,14 @@ struct iosApp: App {
 
         // Configure appearance
         configureAppearance()
+
+        #if DEBUG
+        // Runs here, before any window exists, so the nav-bar flatten check reports
+        // what `configureAppearance()` actually captured rather than what a later
+        // trait resolution would mask.
+        AppearanceProbe.selfTest()
+        AppearanceProbe.dump("init")
+        #endif
 
         // Observe StoreKit transactions from LAUNCH, not from when the paywall opens.
         // Apple delivers renewals, Ask-to-Buy approvals, and purchases that completed while
@@ -103,7 +114,22 @@ struct iosApp: App {
                     AppActions.shared.configure(appState: appState)
 
                     // Apply the persisted appearance choice (default .dark).
+                    //
+                    // The probe brackets this call on purpose. `.task` runs AFTER the
+                    // first frame, so `task-pre` is SwiftUI's opinion (it has already
+                    // applied the root `.preferredColorScheme`) and `task-post` is
+                    // AppearanceManager's. Two writers touch the same property; if
+                    // they ever disagree, this pair is what shows it.
+                    #if DEBUG
+                    AppearanceProbe.dump("task-pre")
+                    #endif
+
                     AppearanceManager.applyStored()
+
+                    #if DEBUG
+                    AppearanceProbe.dump("task-post")
+                    Task { await AppearanceProbe.runTransitionSelfTestIfRequested() }
+                    #endif
 
                     #if DEBUG
                     // Assert every palette token clears its WCAG floor in BOTH
@@ -153,6 +179,21 @@ struct iosApp: App {
                     )
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                    #if DEBUG
+                    AppearanceProbe.dump("foreground")
+                    #endif
+
+                    // Windows created while we were backgrounded never received the
+                    // override: `apply()` only touches windows that exist at call
+                    // time. A scene reconnecting after suspension, a UIKit-created
+                    // alert/overlay window, or a second scene would render in the OS
+                    // style while the rest of the app honours the user's choice.
+                    //
+                    // This is NOT a fix for a live OS appearance flip — under
+                    // `.unspecified` that propagates on its own through the trait
+                    // system. It is cheap insurance: an O(scenes × windows) loop.
+                    AppearanceManager.applyStored()
+
                     // Re-probe localhost vs Railway each time app comes to foreground.
                     // Handles: started/stopped localhost while app was backgrounded.
                     Task { await ServerEnvironmentManager.shared.resolve() }
@@ -202,6 +243,18 @@ struct iosApp: App {
 struct RootView: View {
     @Environment(AppState.self) private var appState
     @State private var appLock = AppLockManager.shared
+    #if DEBUG
+    /// Read only to drive the DEBUG appearance probe below. Nothing observes trait
+    /// changes otherwise (no `traitCollectionDidChange`, no `registerForTraitChanges`),
+    /// so this is the only thing that can tell us whether a LIVE OS appearance flip
+    /// reaches the app at all — the difference between an app bug and a harness that
+    /// flipped the wrong simulator.
+    ///
+    /// Compiled out of release along with its `.onChange`: reading it here would
+    /// otherwise add a colour-scheme dependency to the ROOT view, invalidating its
+    /// body on every appearance flip for no shipping benefit.
+    @Environment(\.colorScheme) private var colorScheme
+    #endif
     /// One-time first-run disclaimer acknowledgement. See
     /// DisclaimerAcknowledgementView for why this exists.
     @AppStorage("has_acknowledged_disclaimers") private var hasAcknowledgedDisclaimers = false
@@ -251,6 +304,11 @@ struct RootView: View {
                 RootContainerView()
             }
         }
+        #if DEBUG
+        .onChange(of: colorScheme) { _, scheme in
+            AppearanceProbe.dump("colorScheme→\(scheme)")
+        }
+        #endif
         .overlay {
             // Global error toast
             if let error = appState.currentError {

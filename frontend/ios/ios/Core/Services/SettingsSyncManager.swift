@@ -129,7 +129,9 @@ final class SettingsSyncManager {
                 guard epoch == LearnIdentityEpoch.current else {
                     // These are the ENDED session's preferences. Drop them, and leave
                     // `hasHydrated` false so the new identity's own hydrate still has to run.
+                    #if DEBUG
                     print("[SettingsSync] discarded a hydrate from a previous identity")
+                    #endif
                     return
                 }
                 apply(prefs)
@@ -217,9 +219,17 @@ final class SettingsSyncManager {
             blob[key] = .bool(defaults.bool(forKey: key))
         }
         for key in Self.stringKeys {
-            if let value = defaults.string(forKey: key) {
-                blob[key] = .string(value)
+            guard var value = defaults.string(forKey: key) else { continue }
+            // Heal a foreign/legacy value on the way OUT too, so one hydrate plus one
+            // push permanently repairs the server row instead of re-uploading junk
+            // forever. Unparseable values are left alone — `apply(_:)` already
+            // refused to store one, so anything unrecognised here came from outside
+            // this key's contract and is not ours to rewrite.
+            if key == AppearanceManager.storageKey,
+               let mode = AppearanceMode(tolerantRawValue: value) {
+                value = mode.rawValue
             }
+            blob[key] = .string(value)
         }
         for key in Self.doubleKeys where defaults.object(forKey: key) != nil {
             blob[key] = .double(defaults.double(forKey: key))
@@ -231,7 +241,32 @@ final class SettingsSyncManager {
         for (key, value) in prefs {
             switch value {
             case .bool(let b): defaults.set(b, forKey: key)
-            case .string(let s): defaults.set(s, forKey: key)
+            case .string(let s):
+                // `appearance_mode` is the one synced string this layer has SEMANTICS
+                // for. Every other key is opaque here, but a bad value in this one is
+                // silently destructive: `AppearanceManager.parse` and the root
+                // `.preferredColorScheme` both coalesce an unparseable value to
+                // `.dark`, so writing the server's string verbatim can turn a "System"
+                // user into a "Dark" user with nothing anywhere to say why.
+                if key == AppearanceManager.storageKey {
+                    guard let mode = AppearanceMode(tolerantRawValue: s) else {
+                        Analytics.shared.track(.backgroundSyncFailed, [
+                            "op": .string("settings_hydrate_appearance"),
+                            "code": .string("invalid_appearance_mode"),
+                        ])
+                        #if DEBUG
+                        print("⚠️ [Settings] rejected unrecognised appearance_mode \"\(s)\" — "
+                              + "keeping local \(AppearanceManager.current.rawValue)")
+                        #endif
+                        continue   // keep the user's local choice; do NOT write junk
+                    }
+                    // Write the CANONICAL casing, so a foreign value (lowercase from
+                    // another client, a hand-edited row) heals locally and the next
+                    // push repairs the server row — see `currentBlob()`.
+                    defaults.set(mode.rawValue, forKey: key)
+                } else {
+                    defaults.set(s, forKey: key)
+                }
             case .int(let i): defaults.set(i, forKey: key)
             case .double(let d): defaults.set(d, forKey: key)
             }

@@ -159,6 +159,7 @@ enum ThemeContrastAudit {
         }
 
         failures.append(contentsOf: auditManifestCompleteness())
+        failures.append(contentsOf: auditLightParity())
         failures.append(contentsOf: auditHexParsing())
 
         if failures.isEmpty {
@@ -203,6 +204,71 @@ enum ThemeContrastAudit {
                         measured: 0,
                         required: 1)
             }
+    }
+
+    // MARK: - Light-mode parity
+
+    /// Three tokens exist ONLY to zero something out in dark. Each one's LIGHT arm
+    /// must stay bit-identical to the token it replaced, because the entire premise
+    /// of removing dark card borders was "light mode does not move".
+    ///
+    /// That premise is otherwise unfalsifiable: light and dark are separate arms of
+    /// the same declaration, so a later edit that retunes `cardEdge` "a little"
+    /// silently drifts light away from `border` with nothing to catch it. Screenshots
+    /// cannot catch it either — the app's own content (prices, charts, timestamps)
+    /// changes between any two runs, so there is no byte-comparable baseline.
+    ///
+    /// The contrast loop above cannot see these at all: all three are `.decorative`
+    /// or `.surface`, whose floor is 0, so `run()` skips them before measuring
+    /// anything. This is the check that covers them.
+    private static func auditLightParity() -> [Failure] {
+        let pairs: [(name: String, mustEqual: String, lhs: Color, rhs: Color)] = [
+            ("cardEdge", "border", AppColors.cardEdge, AppColors.border),
+            ("shadowCard", "shadowAmbient", AppColors.shadowCard, AppColors.shadowAmbient),
+            ("cardBackgroundNested", "cardBackground",
+             AppColors.cardBackgroundNested, AppColors.cardBackground),
+        ]
+
+        var failures = pairs.compactMap { pair -> Failure? in
+            let lhs = resolve(pair.lhs, .light)
+            let rhs = resolve(pair.rhs, .light)
+            guard !componentsEqual(lhs, rhs) else { return nil }
+            return Failure(style: "PARITY",
+                           token: pair.name,
+                           surface: "must equal \(pair.mustEqual) in light",
+                           measured: 0,
+                           required: 1)
+        }
+
+        // Negative control. Every assertion above passes when `componentsEqual` returns
+        // true, so a comparator that ALWAYS returned true would make this whole check
+        // silently vacuous — it would keep printing ✅ while light mode drifted. Prove
+        // it can distinguish two tokens that are genuinely different (#F4F5F8 page vs
+        // #FFFFFF card).
+        if componentsEqual(resolve(AppColors.background, .light),
+                           resolve(AppColors.cardBackground, .light)) {
+            failures.append(Failure(style: "PARITY",
+                                    token: "componentsEqual",
+                                    surface: "comparator cannot detect a difference",
+                                    measured: 0,
+                                    required: 1))
+        }
+
+        return failures
+    }
+
+    /// RGBA equality. Compares components rather than `UIColor ==` because the two
+    /// sides are built by different dynamic providers, and `isEqual` on those can be
+    /// false for colours that resolve identically.
+    private static func componentsEqual(_ a: UIColor, _ b: UIColor) -> Bool {
+        var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        guard a.getRed(&ar, green: &ag, blue: &ab, alpha: &aa),
+              b.getRed(&br, green: &bg, blue: &bb, alpha: &ba) else { return false }
+        // Tolerance covers 8-bit hex → CGFloat round-tripping, nothing more: one
+        // step of 1/255 is ~0.0039, so 0.001 cannot mask a real difference.
+        let e = 0.001
+        return abs(ar - br) < e && abs(ag - bg) < e && abs(ab - bb) < e && abs(aa - ba) < e
     }
 
     // MARK: - Hex parsing

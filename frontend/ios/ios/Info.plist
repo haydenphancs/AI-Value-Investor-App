@@ -14,7 +14,19 @@
 				<string>caydex</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.phan.caydex.google</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.162115276254-cub5l1ogu29e15pumb35krfr9u8fc7ie</string>
+			</array>
+		</dict>
 	</array>
+	<key>GIDClientID</key>
+	<string>162115276254-cub5l1ogu29e15pumb35krfr9u8fc7ie.apps.googleusercontent.com</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Caydex uses Face ID to lock the app so only you can open it.</string>
 	<key>SupabaseURL</key>

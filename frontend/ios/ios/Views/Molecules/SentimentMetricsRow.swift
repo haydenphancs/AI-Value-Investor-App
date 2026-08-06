@@ -85,7 +85,7 @@ struct SentimentMetricCard: View {
         }
         .frame(maxWidth: .infinity)
         .padding(AppSpacing.md)
-        .cardSurface(cornerRadius: AppCornerRadius.medium)
+        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .stroke(AppColors.cardBackgroundLight, lineWidth: 1)

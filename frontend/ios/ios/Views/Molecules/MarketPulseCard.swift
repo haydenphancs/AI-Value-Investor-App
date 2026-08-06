@@ -56,6 +56,12 @@ struct MarketPulseCard: View {
             .padding(.vertical, 9)
             .background(AppColors.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            // Home built its cards before `cardSurface` existed, so it was the one
+            // screen with no edge in light — a #FFFFFF card on the #F4F5F8 page is
+            // 1.09:1. The clip stays (it bounds the sparkline's gradient fill), so the
+            // edge goes on as an overlay. `cardEdge` means light only; dark is
+            // untouched, which is the look this screen already had.
+            .cardBorder(cornerRadius: 12)
         }
         .buttonStyle(.plain)
     }

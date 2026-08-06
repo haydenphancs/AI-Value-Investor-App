@@ -50,7 +50,7 @@ struct InsiderActivityRow: View {
         .padding(AppSpacing.md)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .cardFill()
+                .cardFill(AppColors.cardBackgroundNested)
         )
     }
 }

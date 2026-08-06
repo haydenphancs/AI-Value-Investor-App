@@ -80,7 +80,7 @@ struct CaydexAIChatBar: View {
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.vertical, AppSpacing.sm)
-            .cardSurface(cornerRadius: AppCornerRadius.extraLarge)
+            .cardSurface(cornerRadius: AppCornerRadius.extraLarge, elevation: .raised)
             .padding(.horizontal, AppSpacing.lg)
         }
         .padding(.bottom, AppSpacing.md)

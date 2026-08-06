@@ -27,10 +27,11 @@ struct TrendingThemeTile: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(AppColors.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .stroke(AppColors.textPrimary.opacity(0.05), lineWidth: 1)
-            )
+            // Was a hand-rolled `textPrimary.opacity(0.05)` hairline — a third of the
+            // app's edge in light, and the only Home card that had one at all. Now the
+            // shared token, so the whole screen agrees: 14% ink in light, nothing in
+            // dark (it previously kept a white 5% line there).
+            .cardBorder(cornerRadius: 15)
         }
         .buttonStyle(.plain)
     }

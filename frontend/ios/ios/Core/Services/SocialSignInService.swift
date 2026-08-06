@@ -136,7 +136,47 @@ final class SocialSignInService: NSObject {
     // MARK: - Google (web redirect via Supabase)
 
     /// Present Google's consent screen and return the Supabase session it ends with.
+    /// Google's client id for the **iOS** OAuth client, from `Info.plist` → `GIDClientID`.
+    ///
+    /// Empty or absent means the native SDK path is not configured yet, and we fall back to
+    /// the web flow. That is what lets this file compile and ship before the Google Cloud
+    /// client exists.
+    static var googleClientID: String? {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "GIDClientID") as? String
+        guard let raw, !raw.trimmingCharacters(in: .whitespaces).isEmpty,
+              !raw.hasPrefix("REPLACE_ME") else { return nil }
+        return raw
+    }
+
+    /// Native Google sign-in, falling back to the web flow when the SDK or the client id is
+    /// absent.
+    ///
+    /// WHY THE NATIVE PATH EXISTS — the web flow dead-ends for passkey-only Google accounts.
+    /// Routing through Supabase's `/auth/v1/authorize` makes the request on Google's **Web**
+    /// OAuth client, and Google applies browser-grade risk checks to a Web client opened
+    /// inside a mobile web view: it reaches its credential step, finds no usable credential
+    /// (Google's passkeys live in Google Password Manager, which iOS cannot read unless
+    /// Chrome is the AutoFill provider, so iCloud Keychain offers no `google.com` passkey),
+    /// and the only WebAuthn transport left is hybrid — a QR code asking the user to scan
+    /// with a second device. On the phone that is displaying it. iOS also cannot persistently
+    /// link a hybrid device, so it is a fresh QR every single time.
+    ///
+    /// No query parameter fixes that; `prompt=select_account` and non-ephemeral sessions were
+    /// both tried and only change which chooser appears, not whether Google demands a
+    /// credential. The fix is the CLIENT TYPE: with an iOS client id the request is a native
+    /// app flow, which does not escalate to hybrid-only.
     func signInWithGoogle() async throws -> SocialSignInResult {
+        #if canImport(GoogleSignIn)
+        if let clientID = Self.googleClientID {
+            return try await signInWithGoogleNative(clientID: clientID)
+        }
+        #endif
+        return try await signInWithGoogleWeb()
+    }
+
+    /// The original web flow. Retained as the fallback, and as the only path until the
+    /// GoogleSignIn package and `GIDClientID` are both present.
+    private func signInWithGoogleWeb() async throws -> SocialSignInResult {
         guard let supabaseURL = APIConfig.supabaseURL, !supabaseURL.isEmpty else {
             throw SocialSignInError.notConfigured("Supabase URL missing")
         }
@@ -266,6 +306,70 @@ final class SocialSignInService: NSObject {
             .joined()
     }
 }
+
+// MARK: - Native Google (GoogleSignIn SDK)
+
+#if canImport(GoogleSignIn)
+import GoogleSignIn
+
+extension SocialSignInService {
+    /// Present Google's native sign-in and return the resulting **ID token**.
+    ///
+    /// The result is `.identityToken`, the same case Sign in with Apple produces, so it lands
+    /// on the existing `POST /auth/oauth` path in `AppState` — which already accepts
+    /// `provider: "google"` and hands the token to Supabase's `sign_in_with_id_token`. No
+    /// backend change, and the web flow's `/auth/session-exchange` round trip disappears.
+    ///
+    /// No nonce is sent. Supabase must therefore have **Skip nonce check** enabled on the
+    /// Google provider — the SDK does not expose the raw nonce needed to verify the pairing,
+    /// which is why Google's own documented Supabase integration requires that setting. Apple
+    /// is unaffected and keeps its nonce binding.
+    @MainActor
+    fileprivate func signInWithGoogleNative(clientID: String) async throws -> SocialSignInResult {
+        guard let presenter = Self.topViewController() else {
+            throw SocialSignInError.notConfigured("no view controller to present from")
+        }
+
+        GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID)
+
+        let result: GIDSignInResult
+        do {
+            result = try await GIDSignIn.sharedInstance.signIn(withPresenting: presenter)
+        } catch {
+            // `.canceled` must surface as our own cancelled case, or the caller shows an
+            // error toast for a user who simply tapped the X.
+            if (error as NSError).code == GIDSignInError.canceled.rawValue {
+                throw SocialSignInError.cancelled
+            }
+            throw SocialSignInError.provider(error.localizedDescription)
+        }
+
+        guard let idToken = result.user.idToken?.tokenString, !idToken.isEmpty else {
+            throw SocialSignInError.missingIdentityToken
+        }
+
+        return .identityToken(
+            provider: "google",
+            token: idToken,
+            nonce: nil,
+            displayName: result.user.profile?.name
+        )
+    }
+
+    /// Topmost presented controller, so the sheet is not attached to something already
+    /// covered (the sign-in screen is itself frequently presented modally).
+    private static func topViewController() -> UIViewController? {
+        let root = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first?.rootViewController
+        var top = root
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        return top
+    }
+}
+#endif
 
 // MARK: - Presentation anchor
 

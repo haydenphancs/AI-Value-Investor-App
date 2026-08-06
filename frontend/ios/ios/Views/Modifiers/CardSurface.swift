@@ -17,10 +17,20 @@
 //  defect in the light theme.
 //
 //  ELEVATION IS NOT SYMMETRIC. In light a card is lifted by a hairline plus a
-//  faint shadow; in dark it is lifted by being a LIGHTER surface than the page,
-//  where a shadow does almost nothing (black at 4–15% over #171B26 measures
-//  ~1.01:1). Both tokens are adaptive, so one call site gets the right mechanism
-//  in each mode without any `colorScheme` branching.
+//  faint shadow. In dark it gets NEITHER — `cardEdge` and `shadowCard` are both
+//  transparent there — and is lifted purely by being a LIGHTER SURFACE than what
+//  is behind it. A shadow does almost nothing in dark anyway (black at 4–15% over
+//  #171B26 measures ~1.01:1), and a hairline on every card read as noise. All the
+//  tokens are adaptive, so one call site gets the right mechanism in each mode
+//  with no `colorScheme` branching.
+//
+//  ⚠️ THE CONSEQUENCE, AND THE ONE WAY TO GET THIS WRONG:
+//  surface is the ONLY separator in dark, so a card nested inside another card
+//  MUST step up — `.cardFill(AppColors.cardBackgroundNested)` — or it shares its
+//  parent's fill, measures 1.00:1 against it, and is simply not there. That is not
+//  hypothetical: Recent Activities is a `cardFill()` card whose rows were also
+//  `cardFill()`, and in dark up to 73 of them merged into one unbroken slab.
+//  An OUTER card on the page needs nothing; fill alone is the Home screen's look.
 //
 
 import SwiftUI
@@ -43,9 +53,16 @@ enum CardElevation {
     }
 
     /// Overlays sit on a scrim, where a hairline reads as noise.
+    ///
+    /// `cardEdge`, not `border`: present in light, absent in dark. `.raised` moves
+    /// with `.flat` even though it has no production call sites today — leaving it on
+    /// `border` would just mean the next person to reach for it silently reintroduces
+    /// a dark border. Anything that genuinely wants one in dark should name
+    /// `AppColors.border` at the site, which documents the exception (see
+    /// AudioStatusIsland).
     var borderColor: Color? {
         switch self {
-        case .flat, .raised: return AppColors.border
+        case .flat, .raised: return AppColors.cardEdge
         case .overlay: return nil
         }
     }
@@ -80,10 +97,18 @@ extension View {
         .modifier(OptionalShadow(shadow: elevation.shadow))
     }
 
-    /// Hairline only — for a surface that already has its own fill, or an inset
-    /// row that should read as bounded without gaining a second background.
+    /// Edge only — for a view that ALREADY paints its own fill and clips itself, and
+    /// just needs the card hairline on top.
+    ///
+    /// Defaults to `cardEdge`, so it obeys the same rule as `cardSurface`/`cardFill`:
+    /// an edge in light, nothing in dark. (This briefly took `AppColors.border` and had
+    /// no callers, which made the one API named "card border" a trap that would hand
+    /// the next caller a dark hairline. The default is what fixes that, not deleting
+    /// the function — Home's cards are exactly the case it exists for: they build
+    /// `.background(fill)` + `.clipShape(...)` themselves because the clip is
+    /// load-bearing for their sparklines, so they cannot switch to `cardSurface`.)
     func cardBorder(cornerRadius: CGFloat = AppCornerRadius.large,
-                    color: Color = AppColors.border) -> some View {
+                    color: Color = AppColors.cardEdge) -> some View {
         self.overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(color, lineWidth: 1)
@@ -109,8 +134,10 @@ extension InsettableShape {
     ///
     /// `strokeBorder` (not `stroke`) insets the line so it stays fully inside
     /// the shape and doesn't double-darken where cards abut.
+    /// ⚠️ Nested in another card? Pass `AppColors.cardBackgroundNested` as the fill —
+    /// in dark the border is transparent, so an unchanged fill means no card at all.
     func cardFill(_ fill: Color = AppColors.cardBackground,
-                  border: Color = AppColors.border,
+                  border: Color = AppColors.cardEdge,
                   lineWidth: CGFloat = 1) -> some View {
         self.fill(fill).overlay(self.strokeBorder(border, lineWidth: lineWidth))
     }

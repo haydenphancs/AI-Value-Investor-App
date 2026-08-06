@@ -47,8 +47,11 @@ struct AppColors {
     // ━━━ SURFACES ━━━
     // Light card↔page separation is only 1.09:1 and that is CORRECT — no design
     // system separates them by luminance (Apple 1.116, Polaris 1.129, Carbon
-    // 1.100). Cards are distinguished by a BORDER, not by more grey. See
-    // `border` below and Views/Modifiers/CardSurface.swift.
+    // 1.100). In LIGHT a card is distinguished by a BORDER, not by more grey
+    // (see `cardEdge`). In DARK there is no border at all, so an outer card is
+    // fill-only against the page (the Home screen's look) and a card nested in
+    // another card MUST step up to `cardBackgroundNested` or it disappears.
+    // See Views/Modifiers/CardSurface.swift.
     static let background = Color(lightHex: "F4F5F8", darkHex: "171B26")
     static let cardBackground = Color(lightHex: "FFFFFF", darkHex: "1E2330")
 
@@ -57,6 +60,20 @@ struct AppColors {
     /// semantic token. `caution` (4.50) and `primaryBlue` (4.52) clear it by
     /// ~0.02 — darkening this value breaks them. `ThemeContrastAudit` will say so.
     static let cardBackgroundLight = Color(lightHex: "EDF0F5", darkHex: "252B3B")
+
+    /// A card sitting INSIDE another card. Identical to `cardBackground` in light,
+    /// one step lighter in dark.
+    ///
+    /// Exists because dark mode no longer draws a border (`cardEdge`), and a nested
+    /// card shares its parent's fill — so without a step up it is 1.00:1 against its
+    /// parent and simply ceases to exist. The concrete case: Recent Activities on
+    /// Ticker Detail is a `cardFill()` card whose rows are ALSO `cardFill()`, stacked
+    /// 8pt apart; up to 73 of them would merge into one unbroken slab.
+    ///
+    /// NOT `cardBackgroundLight`, whose light arm is #EDF0F5 — using that would visibly
+    /// grey these cards in light mode, which must not move. Same dark arm, different
+    /// light arm, on purpose.
+    static let cardBackgroundNested = Color(lightHex: "FFFFFF", darkHex: "252B3B")
 
     /// Inverted surface for toasts / tooltips — pair with `textInverse`.
     static let surfaceInverse = Color(lightHex: "1E2330", darkHex: "F4F5F8")
@@ -154,6 +171,28 @@ struct AppColors {
     static let borderStrong = Color(lightHex: "101828", lightAlpha: 0.24, darkHex: "FFFFFF", darkAlpha: 0.18)
     static var borderFocus: Color { primaryFill }
 
+    /// The card edge — present in light, ABSENT in dark. Used by `cardSurface` /
+    /// `cardFill`, i.e. every resting card and every input in the app.
+    ///
+    /// Not a fourth step on the `borderSubtle`/`border`/`borderStrong` ramp: it is
+    /// `border` with the dark arm zeroed, which is a different AXIS (per-mode
+    /// presence, not strength). Hence the role name.
+    ///
+    /// WHY dark gets none: light separates a card from the page with an edge because
+    /// it cannot do it with luminance (#FFFFFF on #F4F5F8 is 1.09:1). Dark has the
+    /// same problem (1.10:1) but solves it the way the Home screen already does —
+    /// fill alone for an outer card, and a LIGHTER SURFACE (`cardBackgroundNested`)
+    /// for a card sitting on another card. A hairline on every card read as noise.
+    ///
+    /// The dark hex is kept rather than dropped so the value is recoverable: set the
+    /// alpha back to 0.10 and the old behaviour returns exactly. 0.05 is the
+    /// intermediate Home itself uses on its nested tiles.
+    ///
+    /// ⚠️ The light arm MUST stay identical to `border` — `ThemeContrastAudit`
+    /// asserts that at launch (`auditLightParity`), because the whole premise of this
+    /// change is that light mode does not move.
+    static let cardEdge = Color(lightHex: "101828", lightAlpha: 0.14, darkHex: "FFFFFF", darkAlpha: 0)
+
     /// Hairline between rows. Same value as `borderSubtle`; named separately
     /// because the intent differs and they may diverge later.
     ///
@@ -169,6 +208,22 @@ struct AppColors {
     /// grey smudge on a light page.
     static let shadowKey = Color(lightHex: "101828", lightAlpha: 0.10, darkHex: "000000", darkAlpha: 0.40)
     static let shadowAmbient = Color(lightHex: "101828", lightAlpha: 0.05, darkHex: "000000", darkAlpha: 0.24)
+
+    /// The resting-card shadow — present in light, ABSENT in dark. Backs
+    /// `AppShadows.card`, which has exactly ONE consumer (`CardElevation.flat`), so
+    /// this cannot leak into the ~20 views that use `shadowAmbient` directly.
+    ///
+    /// Separate from `shadowAmbient` for that reason alone: a resting card in dark
+    /// should match the Home screen, which casts nothing, while chart tooltips and
+    /// book covers that reach for `shadowAmbient` by hand keep theirs.
+    ///
+    /// `.raised` and `.overlay` deliberately keep `shadowKey` — floating chrome and
+    /// sheets still need depth in dark; that is now the ONLY thing that lifts them,
+    /// since they no longer get a border either.
+    ///
+    /// ⚠️ Light arm must stay identical to `shadowAmbient` (asserted by
+    /// `ThemeContrastAudit.auditLightParity`).
+    static let shadowCard = Color(lightHex: "101828", lightAlpha: 0.05, darkHex: "000000", darkAlpha: 0)
 
     /// Backdrop behind sheets / modals / full-screen covers.
     static let scrim = Color(lightHex: "101828", lightAlpha: 0.32, darkHex: "000000", darkAlpha: 0.60)
@@ -289,6 +344,7 @@ extension AppColors {
         let background = AppColors.background
         let cardBackground = AppColors.cardBackground
         let cardBackgroundLight = AppColors.cardBackgroundLight
+        let cardBackgroundNested = AppColors.cardBackgroundNested
         let surfaceInverse = AppColors.surfaceInverse
         let textPrimary = AppColors.textPrimary
         let textSecondary = AppColors.textSecondary
@@ -317,8 +373,10 @@ extension AppColors {
         let borderSubtle = AppColors.borderSubtle
         let border = AppColors.border
         let borderStrong = AppColors.borderStrong
+        let cardEdge = AppColors.cardEdge
         let shadowKey = AppColors.shadowKey
         let shadowAmbient = AppColors.shadowAmbient
+        let shadowCard = AppColors.shadowCard
         let scrim = AppColors.scrim
         let tabBarBackground = AppColors.tabBarBackground
         let chipUnselectedBackground = AppColors.chipUnselectedBackground
@@ -347,6 +405,7 @@ extension AppColors {
         "background": background,
         "cardBackground": cardBackground,
         "cardBackgroundLight": cardBackgroundLight,
+        "cardBackgroundNested": cardBackgroundNested,
         "chipUnselectedBackground": chipUnselectedBackground,
         "toggleBackground": toggleBackground,
         "toggleSelectedBackground": toggleSelectedBackground,
@@ -414,11 +473,16 @@ extension AppColors {
         TokenSpec("borderSubtle", borderSubtle, .decorative),
         TokenSpec("border", border, .decorative),
         TokenSpec("borderStrong", borderStrong, .decorative),
+        // Transparent in dark BY DESIGN — `.decorative` is what lets that through.
+        // `auditLightParity()` covers the half that matters: the light arm must stay
+        // equal to `border` / `shadowAmbient`.
+        TokenSpec("cardEdge", cardEdge, .decorative),
 
         // Shadows and scrims are alpha over an arbitrary backdrop — there is no
         // fixed pair to measure, and they carry no information.
         TokenSpec("shadowKey", shadowKey, .decorative),
         TokenSpec("shadowAmbient", shadowAmbient, .decorative),
+        TokenSpec("shadowCard", shadowCard, .decorative),
         TokenSpec("scrim", scrim, .decorative),
 
         // Surfaces. Deliberately floor-0: page↔card separation is a BORDER's
@@ -428,6 +492,7 @@ extension AppColors {
         TokenSpec("background", background, .surface),
         TokenSpec("cardBackground", cardBackground, .surface),
         TokenSpec("cardBackgroundLight", cardBackgroundLight, .surface),
+        TokenSpec("cardBackgroundNested", cardBackgroundNested, .surface),
         TokenSpec("surfaceInverse", surfaceInverse, .surface),
         TokenSpec("tabBarBackground", tabBarBackground, .surface),
         TokenSpec("chipUnselectedBackground", chipUnselectedBackground, .surface),
@@ -585,10 +650,15 @@ struct AppGradients {
 // alphas per mode — and are hue-tinted, not pure black, so they don't read as a
 // grey smudge on a light page.
 struct AppShadows {
-    /// Resting card. Pair with `AppColors.border` — in light the border does most
-    /// of the separating and the shadow only softens the edge.
-    static let card = Shadow(color: AppColors.shadowAmbient, radius: 8, x: 0, y: 2)
-    /// Lifted: buttons, floating bars, selected states.
+    /// Resting card. Pairs with `AppColors.cardEdge`: in LIGHT the border does most
+    /// of the separating and this only softens the edge; in DARK both are absent, so
+    /// a resting card is fill-only — the Home screen's look, which is the reference.
+    ///
+    /// Backed by `shadowCard` (not `shadowAmbient`) purely so zeroing the dark arm
+    /// cannot leak into the ~20 views that reach for `shadowAmbient` by hand.
+    static let card = Shadow(color: AppColors.shadowCard, radius: 8, x: 0, y: 2)
+    /// Lifted: buttons, floating bars, selected states. KEEPS its dark shadow — with
+    /// borders gone this is the only thing that lifts floating chrome off the page.
     static let raised = Shadow(color: AppColors.shadowKey, radius: 12, x: 0, y: 4)
     /// Sheets, popovers, anything over a scrim.
     static let overlay = Shadow(color: AppColors.shadowKey, radius: 24, x: 0, y: 12)

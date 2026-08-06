@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		93350E262FFF40D100351547 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 93350E252FFF40D100351547 /* Sentry */; };
+		93DE099D3025390F00C5E948 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 93DE099C3025390F00C5E948 /* GoogleSignIn */; };
+		93DE099F3025390F00C5E948 /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 93DE099E3025390F00C5E948 /* GoogleSignInSwift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,7 +42,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				93DE099F3025390F00C5E948 /* GoogleSignInSwift in Frameworks */,
 				93350E262FFF40D100351547 /* Sentry in Frameworks */,
+				93DE099D3025390F00C5E948 /* GoogleSignIn in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -92,6 +96,8 @@
 			name = ios;
 			packageProductDependencies = (
 				93350E252FFF40D100351547 /* Sentry */,
+				93DE099C3025390F00C5E948 /* GoogleSignIn */,
+				93DE099E3025390F00C5E948 /* GoogleSignInSwift */,
 			);
 			productName = ios;
 			productReference = 938B285E2F04A07A00A3CE08 /* ios.app */;
@@ -123,6 +129,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				93350E232FFF3BA600351547 /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+				93DE099B3025390F00C5E948 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 938B285F2F04A07A00A3CE08 /* Products */;
@@ -318,7 +325,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = ios/ios-Release.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "ios/ios-Release.entitlements";
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -380,6 +387,14 @@
 				minimumVersion = 9.21.0;
 			};
 		};
+		93DE099B3025390F00C5E948 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.2.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -387,6 +402,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 93350E232FFF3BA600351547 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
 			productName = Sentry;
+		};
+		93DE099C3025390F00C5E948 /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 93DE099B3025390F00C5E948 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
+		};
+		93DE099E3025390F00C5E948 /* GoogleSignInSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 93DE099B3025390F00C5E948 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignInSwift;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

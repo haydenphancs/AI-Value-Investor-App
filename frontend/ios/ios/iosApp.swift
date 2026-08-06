@@ -453,7 +453,7 @@ struct ErrorToastView: View {
                 }
             }
             .padding()
-            .cardSurface(cornerRadius: AppCornerRadius.large)
+            .cardSurface(cornerRadius: AppCornerRadius.large, elevation: .raised)
             .padding(.horizontal)
             .padding(.bottom, 100) // Above tab bar
         }
@@ -481,7 +481,7 @@ struct ToastView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .cardSurface(cornerRadius: AppCornerRadius.pill)
+            .cardSurface(cornerRadius: AppCornerRadius.pill, elevation: .raised)
             .padding(.bottom, 100)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))

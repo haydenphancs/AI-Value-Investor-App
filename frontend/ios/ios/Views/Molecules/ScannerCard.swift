@@ -64,6 +64,10 @@ struct ScannerCard: View {
         .padding(15)
         .background(AppColors.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        // Light-only edge, matching every other screen. Overlay rather than
+        // `cardSurface` because the clip above is load-bearing: the expanded
+        // leaderboard has to be bounded by the same radius.
+        .cardBorder(cornerRadius: 18)
         // Swallow taps that land ON the card so a tap OUTSIDE it (caught at the
         // Home screen or a sibling section) collapses it, while a tap on the card
         // itself never does. Inner controls (toggle, expand button, ticker rows)

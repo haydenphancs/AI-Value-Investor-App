@@ -156,6 +156,10 @@ struct AppColors {
     static let lossFill = Color(lightHex: "CC1F1F", darkHex: "CC1F1F")
     static let cautionFill = Color(lightHex: "9A6100", darkHex: "9A6100")
     static let accentCyanFill = Color(lightHex: "0E7490", darkHex: "0E7490")
+    /// Purple fill for a saturated tile carrying `textOnAccent` ink. The text-role
+    /// `alertPurple` lightens to #C084FC in dark, where white on it is 2.64:1 — this
+    /// keeps the light value in both modes, giving 6.98:1.
+    static let alertPurpleFill = Color(lightHex: "7E22CE", darkHex: "7E22CE")
 
     // ━━━ ALERTS ━━━
     static let alertOrange = Color(lightHex: "C2410C", darkHex: "F97316")
@@ -326,8 +330,17 @@ extension AppColors {
             self.carriesOnAccentText = carriesOnAccentText
         }
 
-        /// The three surfaces content can land on. `cardBackgroundLight` binds.
-        static let contentSurfaces = ["background", "cardBackground", "cardBackgroundLight"]
+        /// The surfaces content can land on. `cardBackgroundLight` binds.
+        ///
+        /// `cardBackgroundNested` is listed even though it currently resolves to values that
+        /// are already measured (light == cardBackground, dark == cardBackgroundLight): it was
+        /// registered in `surfaceRegistry` but named by no spec, so its DARK arm was measured
+        /// by nothing. Retuning it — the obvious future edit, since it exists to separate a
+        /// nested card — would have dropped `textMuted` to ~3.9:1 across the eight live nested
+        /// card sites while the audit still printed ✅.
+        static let contentSurfaces = [
+            "background", "cardBackground", "cardBackgroundLight", "cardBackgroundNested",
+        ]
     }
 
     /// Every STORED colour token, as a struct so `Mirror` can enumerate the
@@ -368,6 +381,7 @@ extension AppColors {
         let lossFill = AppColors.lossFill
         let cautionFill = AppColors.cautionFill
         let accentCyanFill = AppColors.accentCyanFill
+        let alertPurpleFill = AppColors.alertPurpleFill
         let alertOrange = AppColors.alertOrange
         let alertPurple = AppColors.alertPurple
         let borderSubtle = AppColors.borderSubtle
@@ -443,6 +457,7 @@ extension AppColors {
         TokenSpec("lossFill", lossFill, .text, on: [], carriesOnAccentText: true),
         TokenSpec("cautionFill", cautionFill, .text, on: [], carriesOnAccentText: true),
         TokenSpec("accentCyanFill", accentCyanFill, .text, on: [], carriesOnAccentText: true),
+        TokenSpec("alertPurpleFill", alertPurpleFill, .text, on: [], carriesOnAccentText: true),
 
         // Graphic role — 3:1.
         TokenSpec("gainGraphic", gainGraphic, .graphic, on: ["background", "cardBackground"]),

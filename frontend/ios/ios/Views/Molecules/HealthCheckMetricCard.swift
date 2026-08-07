@@ -25,7 +25,7 @@ struct HealthCheckMetricCard: View {
         .padding(AppSpacing.lg)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .fill(AppColors.cardBackgroundLight)
+                .cardFill(AppColors.cardBackgroundNested)   // nested in a card: step the surface up in dark
         )
     }
 

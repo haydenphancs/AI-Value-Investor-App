@@ -61,6 +61,13 @@ class ErrorCode(str, Enum):
     # read failure laundered into an empty 200 makes the client delete every
     # ticker (and its hand-entered shares) from every portfolio, permanently.
     WATCHLIST_UNAVAILABLE = "WATCHLIST_UNAVAILABLE"
+    # The user's synced preference blob could not be READ. Same shape of hazard as
+    # WATCHLIST_UNAVAILABLE, and for the same reason it must not be an empty 200:
+    # iOS gates its FULL-REPLACE push on "the server state is known", so a read
+    # failure served as `{}` opens that gate on a session whose blob was never seen,
+    # and the next push overwrites ~20 synced keys with whatever this device holds.
+    # On a fresh install that is close to nothing — and it propagates everywhere.
+    SETTINGS_UNAVAILABLE = "SETTINGS_UNAVAILABLE"
 
     # ── Research-flow specific ───────────────────────────────────────
     REPORT_NOT_FOUND = "REPORT_NOT_FOUND"
@@ -178,6 +185,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.WATCHLIST_UNAVAILABLE: (
         "We couldn't load your holdings right now. Pull to refresh in a moment."
     ),
+    ErrorCode.SETTINGS_UNAVAILABLE: (
+        "We couldn't load your settings right now. They'll sync automatically in a moment."
+    ),
     ErrorCode.REPORT_NOT_FOUND: (
         "That report no longer exists."
     ),
@@ -248,6 +258,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.CHAT_MESSAGE_TOO_LONG: "fix_input",
     ErrorCode.CHAT_DAILY_LIMIT_REACHED: "retry_later",
     ErrorCode.WATCHLIST_UNAVAILABLE: "retry_later",
+    ErrorCode.SETTINGS_UNAVAILABLE: "retry_later",
     # `sign_in` maps to iOS `ErrorAction.signIn`, whose button opens SignInView.
     ErrorCode.AUTH_REQUIRED: "sign_in",
     ErrorCode.AUTH_TOKEN_INVALID: "sign_in",
@@ -300,6 +311,10 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # with an empty list (see the enum comment) and NOT 500: it is retryable and
     # the client must be able to tell "couldn't read" from "you have nothing".
     ErrorCode.WATCHLIST_UNAVAILABLE: 503,
+    # Same contract as WATCHLIST_UNAVAILABLE: retryable, and the client must be able
+    # to tell "couldn't read your settings" from "you have no settings yet" — the
+    # second opens its push gate, the first must not.
+    ErrorCode.SETTINGS_UNAVAILABLE: 503,
     # 401 for all four credential failures — NOT 403.
     #
     # FastAPI's `HTTPBearer(auto_error=True)` answers a MISSING or malformed Authorization

@@ -2,7 +2,24 @@
 //  AnalysisDisclaimerText.swift
 //  ios
 //
-//  Disclaimer text for analysis sections
+//  Disclaimer line for analysis sections — now a TAPPABLE route to the full disclaimers.
+//
+//  Why it changed: this used to render a plain `Text`. It said the right words and went
+//  nowhere. That made it a dead end at 9 call sites — including the two that host the
+//  Strong Buy/Sell meter — while `InlineDisclaimerNotice`, the tappable equivalent that
+//  presents `DisclaimersView`, was wired to only 2 places in the whole app. A user could
+//  reach every rating, score and fair-value estimate without ever seeing the language that
+//  actually matters ("not registered investment advisors", "general and impersonal, not
+//  tailored to you", "we hold no positions").
+//
+//  Wrapping rather than deleting is deliberate: it makes all 9 existing call sites tappable
+//  without touching 9 files, and keeps one place to change the wording.
+//
+//  ⚠️ The old default text said "AI-generated content may be inaccurate" at EVERY call site,
+//  including the technical meter — which is deterministic, rules-based, and contains no AI at
+//  all. Mislabelling a published formula as a black box is inaccurate in the direction that
+//  hurts, so the default no longer claims it. Surfaces that ARE AI-generated should say so
+//  explicitly by passing `text:`.
 //
 
 import SwiftUI
@@ -10,16 +27,41 @@ import SwiftUI
 struct AnalysisDisclaimerText: View {
     let text: String
 
-    init(text: String = "Data Disclaimer: For educational purposes only. Not financial advice. AI-generated content may be inaccurate.") {
+    /// Default wording is deliberately true of EVERY surface this appears on.
+    /// Pass `text:` for anything more specific — see `.aiGenerated` and `.rating` below.
+    init(text: String = "For educational purposes only · not financial advice · not tailored to you") {
         self.text = text
     }
 
     var body: some View {
-        Text(text)
-            .font(AppTypography.caption)
-            .foregroundColor(AppColors.textMuted)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
+        // Reuses the existing atom, which owns the info icon, the underlined link, the
+        // accessibility label, and the NavigationStack-wrapped sheet that solves
+        // DisclaimersView being push-only. Do not reimplement any of that here.
+        InlineDisclaimerNotice(text: text, linkLabel: "Details")
+    }
+}
+
+extension AnalysisDisclaimerText {
+    /// For surfaces whose content really is model-generated (reports, chat, AI summaries).
+    static var aiGenerated: AnalysisDisclaimerText {
+        AnalysisDisclaimerText(
+            text: "AI-generated · may be inaccurate · not financial advice"
+        )
+    }
+
+    /// For the technical meter. Says what the rating IS, which no surface previously did:
+    /// a rules-based read of price indicators, not a recommendation and not a forecast.
+    static var rating: AnalysisDisclaimerText {
+        AnalysisDisclaimerText(
+            text: "Rules-based reading of price indicators · not a recommendation or forecast"
+        )
+    }
+
+    /// For a published fair-value number sitting next to a live market price.
+    static var fairValue: AnalysisDisclaimerText {
+        AnalysisDisclaimerText(
+            text: "Model estimate under assumptions · not a price target"
+        )
     }
 }
 
@@ -28,7 +70,12 @@ struct AnalysisDisclaimerText: View {
         AppColors.background
             .ignoresSafeArea()
 
-        AnalysisDisclaimerText()
-            .padding()
+        VStack(alignment: .leading, spacing: AppSpacing.lg) {
+            AnalysisDisclaimerText()
+            AnalysisDisclaimerText.rating
+            AnalysisDisclaimerText.fairValue
+            AnalysisDisclaimerText.aiGenerated
+        }
+        .padding()
     }
 }

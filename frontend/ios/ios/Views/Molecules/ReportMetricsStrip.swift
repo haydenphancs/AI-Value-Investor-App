@@ -47,7 +47,7 @@ struct ReportMetricsStrip: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
+                .cardFill(AppColors.cardBackgroundNested)   // nested in a card: step the surface up in dark
         )
     }
 }

@@ -59,8 +59,9 @@ struct TechnicalAnalysisDetailView: View {
                         // Key Support & Resistance
                         SupportResistanceSection(srData: detailData.supportResistance)
 
-                        // Disclaimer
-                        AnalysisDisclaimerText()
+                        // Disclaimer — `.rating`: this screen is the meter in full, and the
+                        // rating is rules-based, not AI-generated.
+                        AnalysisDisclaimerText.rating
                             .padding(.horizontal, AppSpacing.lg)
 
                         // Bottom spacing

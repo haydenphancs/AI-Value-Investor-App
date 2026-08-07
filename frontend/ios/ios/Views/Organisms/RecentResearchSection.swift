@@ -34,6 +34,14 @@ struct RecentResearchSection: View {
                 }
                 .padding(.horizontal, AppSpacing.lg)
             }
+
+            // Every card in this carousel shows a 0-100 rating AND a "Fair Value: $X" on a
+            // NAMED security, and until now the section carried no disclosure at all — the
+            // most advice-like pairing in the app with nothing next to it. One notice per
+            // section rather than per card: repeating it on each card in a horizontal
+            // carousel is noise, and the cards are already tight.
+            AnalysisDisclaimerText.fairValue
+                .padding(.horizontal, AppSpacing.lg)
         }
     }
 }

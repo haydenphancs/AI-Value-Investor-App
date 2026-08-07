@@ -380,6 +380,8 @@ struct ProfileView: View {
             }
             .background(AppColors.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+            // Card on the page background: an edge in light, nothing in dark.
+            .cardBorder(cornerRadius: AppCornerRadius.large)
         }
         .padding(.horizontal, AppSpacing.lg)
     }
@@ -455,6 +457,8 @@ struct ProfileView: View {
             }
             .background(AppColors.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+            // Card on the page background: an edge in light, nothing in dark.
+            .cardBorder(cornerRadius: AppCornerRadius.large)
 
             // App Version
             HStack {

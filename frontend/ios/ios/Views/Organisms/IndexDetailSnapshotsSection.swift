@@ -222,8 +222,7 @@ struct ValuationMetricPill: View {
         }
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.sm)
-        .background(AppColors.cardBackgroundLight)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)  // nested in a card: light edge free, dark separates by surface
     }
 }
 

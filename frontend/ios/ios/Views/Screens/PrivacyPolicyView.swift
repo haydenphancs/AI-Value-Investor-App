@@ -28,7 +28,7 @@ struct PrivacyPolicyView: View {
                 "Account information: if you create an account, we collect your email address and any display name you provide.",
                 "Usage information: content you create or request in the App, such as watchlists, portfolios, generated research reports, saved items, chat messages, and preferences.",
                 "Holdings you enter: if you use Portfolio Insights, the share counts or position values you type in. These are self-reported by you \u{2014} we never connect to a brokerage and never see your actual account.",
-                "Device information: app version, device type, and general technical/log data used for reliability and security. A push notification token if you enable notifications.",
+                "Device information: app version, device type, IP address, and general technical/log data used for reliability, security, and abuse prevention. A push notification token if you enable notifications.",
                 "An install identifier: a random identifier we generate on first launch and store in your device\u{2019}s keychain. We send it with requests to apply fair-usage limits and to keep your learning progress before you sign in. It is not derived from your device or Apple ID, is not shared with advertisers, and is not used to track you across other apps or websites. Because it lives in the keychain it can persist if you delete and reinstall the App; signing in supersedes it.",
                 "We do not ask for or store your brokerage credentials, bank account numbers, or trading account access. Payment is handled by the Apple App Store; we do not receive your full payment card details."
             ]

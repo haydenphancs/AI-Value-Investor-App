@@ -10,7 +10,9 @@ import SwiftUI
 
 struct CongressActivityRow: View {
     let activity: CongressActivity
-    var background: Color = AppColors.cardBackground
+    /// Nested inside RecentActivitiesSection's card at every production call site,
+    /// so it must step the surface up or it is 1.00:1 against its parent in dark.
+    var background: Color = AppColors.cardBackgroundNested
     var nameFont: Font = AppTypography.bodyEmphasis
     var valueFont: Font = AppTypography.bodyEmphasis
 

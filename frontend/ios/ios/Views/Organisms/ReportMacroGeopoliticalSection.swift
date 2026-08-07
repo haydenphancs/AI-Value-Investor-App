@@ -45,7 +45,7 @@ struct ReportMacroGeopoliticalSection: View {
             .padding(AppSpacing.md)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(AppColors.cardBackgroundLight)
+                    .cardFill(AppColors.cardBackgroundNested)   // nested in a card: step the surface up in dark
                     .overlay(
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                             .stroke(data.overallThreatLevel.color.opacity(0.2), lineWidth: 1)

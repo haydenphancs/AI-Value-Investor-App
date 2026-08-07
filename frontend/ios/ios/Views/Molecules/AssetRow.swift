@@ -54,6 +54,8 @@ struct AssetRow: View {
             // Standalone rounded card — same radius as AlertCardView so the
             // holdings cards and the Alerts cards read as one family.
             .cornerRadius(AppCornerRadius.large)
+            // Card edge: present in light, absent in dark (cardEdge).
+            .cardBorder(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(.plain)
     }

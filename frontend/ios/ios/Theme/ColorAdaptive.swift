@@ -23,7 +23,19 @@ import SwiftUI
 extension UIColor {
     /// Build a `UIColor` from a hex string (RGB / ARGB), mirroring `Color(hex:)`.
     convenience init(hexString: String) {
-        let hex = hexString.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var hex = hexString.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        // Reject anything that is not pure hex BEFORE scanning.
+        //
+        // `Scanner.scanHexInt64` stops at the first non-hex character and reports no failure,
+        // and `trimmingCharacters` only strips the ENDS — so a typo could match a length arm
+        // and still be misread, two ways that are both worse than the documented
+        // fall-back-to-black:
+        //   "12345G"   scanned 0x12345 → an arbitrary navy, with no diagnostic anywhere
+        //   "0xFF0000" scanned 0 into the ARGB alpha byte → alpha 0, i.e. the view renders
+        //              NOTHING, which is far harder to notice than a wrong colour
+        // Falling through to `default:` gives black for all of them, which is the contract
+        // `ThemeContrastAudit.auditHexParsing` now actually pins.
+        if !hex.allSatisfy({ $0.isHexDigit }) { hex = "" }
         var int: UInt64 = 0
         Scanner(string: hex).scanHexInt64(&int)
         let a, r, g, b: UInt64
@@ -154,7 +166,17 @@ extension Color {
     init(themedHex hex: String?,
          role: ServerColorRole,
          fallback: Color = AppColors.textSecondary) {
-        guard let hex, let base = UIColor(validatingHexString: hex) else {
+        // Force opaque. `wcagLuminance` measures the colour's own channels and ignores its
+        // alpha, so a translucent server value was certified against contrast it could never
+        // deliver: "80CC1F1F" (50% red) MEASURES 5.55:1 on white and RENDERS 2.43:1. ARGB is
+        // a supported input (`validatingHexString` accepts 8 chars, and the audit pins
+        // "80FFFFFF" as valid), so this is reachable, not theoretical.
+        //
+        // Dropping the alpha rather than compositing inside `clamped` is the stronger fix: at
+        // alpha < 1 there are hues for which NO candidate can reach 4.5:1 against the card, so
+        // compositing would leave the clamp unable to satisfy its own contract. A server's
+        // chosen opacity was never part of the contrast contract; its hue is.
+        guard let hex, let base = UIColor(validatingHexString: hex)?.withAlphaComponent(1) else {
             self = fallback
             return
         }

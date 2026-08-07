@@ -16,7 +16,7 @@ struct GrowthMetricChip: View {
         Button(action: action) {
             Text(metricType.rawValue)
                 .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textSecondary)
+                .foregroundColor(isSelected ? AppColors.textOnAccent : AppColors.textSecondary)  // selected chip sits on primaryFill: textPrimary is 3.43:1 in light
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.sm)
                 .background(

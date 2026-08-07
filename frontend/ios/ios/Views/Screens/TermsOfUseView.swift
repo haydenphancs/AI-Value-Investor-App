@@ -32,7 +32,10 @@ struct TermsOfUseView: View {
             heading: "Not Financial Advice",
             paragraphs: [
                 "The App is an educational and informational research tool. Nothing in the App constitutes financial, investment, legal, tax, or other professional advice, a recommendation, or an offer or solicitation to buy or sell any security or financial instrument.",
-                "Caydex is not a registered investment adviser, broker-dealer, or financial planner. You are solely responsible for your own investment decisions and their outcomes. Past performance does not guarantee future results, and all investing involves risk, including the possible loss of principal. Consult a qualified professional before making investment decisions."
+                "Caydex is not a registered investment adviser, broker-dealer, or financial planner. You are solely responsible for your own investment decisions and their outcomes. Past performance does not guarantee future results, and all investing involves risk, including the possible loss of principal. Consult a qualified professional before making investment decisions.",
+                "Everything the App produces is general and impersonal. Ratings, scores, fair-value estimates, and research reports are produced from public data by the same methodology for every user, and are not adapted to your portfolio, holdings, financial situation, risk tolerance, or objectives. Where a feature uses figures you enter yourself — for example Portfolio Insights — it returns neutral descriptive diagnostics about the data you provided, and does not recommend that you buy, sell, or hold anything.",
+                "Caydex is independent. We hold no positions in the securities covered by the App, we receive no compensation from any issuer, and no company can pay to be featured, rated, scored, or covered. We do not sell advertising or paid placement to issuers, and no third party directs or reviews our ratings before publication.",
+                "We do not provide brokerage, custody, or execution services. We never hold your money or securities, we cannot place trades, and no fiduciary or advisory relationship is created between you and Caydex by your use of the App."
             ]
         ),
         LegalSection(
@@ -52,7 +55,7 @@ struct TermsOfUseView: View {
         LegalSection(
             heading: "Credits, Subscriptions & Billing",
             paragraphs: [
-                "The App uses a credit system for AI features (for example, AI reports and Cay AI chat). Paid subscription tiers provide a monthly allocation of credits. Unused credits do not roll over and reset each billing period.",
+                "The App uses a credit system for AI features (for example, AI reports and Cay AI chat). Paid subscription tiers provide a monthly allocation of credits. Unused credits do not roll over: your allowance resets at the start of each calendar month, US Eastern Time. If you upgrade mid-month your allowance is raised to the new tier immediately, and credits already spent that month remain spent.",
                 "Subscriptions are billed through your Apple App Store account. Payment is charged at confirmation of purchase, and subscriptions renew automatically for the same period and price unless canceled at least 24 hours before the end of the current period. You can manage or cancel subscriptions in your App Store account settings; deleting the App does not cancel a subscription.",
                 "Except where required by applicable law or the App Store\u{2019}s policies, purchases and credits are non-refundable. Prices and allocations may change prospectively; changes will not affect a billing period already paid for."
             ]

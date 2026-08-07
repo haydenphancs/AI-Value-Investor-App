@@ -148,7 +148,7 @@ struct FundamentalsHistorySheet: View {
                         Text(m.historyTitle)
                             .font(AppTypography.labelSmall)
                             .fontWeight(isSelected ? .semibold : .regular)
-                            .foregroundColor(isSelected ? AppColors.textPrimary : AppColors.textSecondary)
+                            .foregroundColor(isSelected ? AppColors.textOnAccent : AppColors.textSecondary)  // selected chip sits on primaryFill: textPrimary is 3.43:1 in light
                             .padding(.horizontal, AppSpacing.md)
                             .padding(.vertical, AppSpacing.sm)
                             .background(

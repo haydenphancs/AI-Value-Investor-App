@@ -20,6 +20,7 @@
 //
 
 import SwiftUI
+import SafariServices   // SFSafariViewController — excluded from the VC walk, see apply(_:)
 
 @MainActor
 enum AppearanceManager {
@@ -99,10 +100,27 @@ enum AppearanceManager {
         for scene in UIApplication.shared.connectedScenes {
             guard let windowScene = scene as? UIWindowScene else { continue }
             for window in windowScene.windows {
+                // Every window in the scene, deliberately — including `UITextEffectsWindow`
+                // and `UIRemoteKeyboardWindow`. Stamping those is currently the ONLY reason
+                // the keyboard matches a Light-mode user's choice on a dark OS, so do not
+                // "restrict this to our own windows" without first reading what
+                // `AppearanceProbe.dump` prints for `type(of: window)`.
                 window.overrideUserInterfaceStyle = style
                 var controller = window.rootViewController
                 while let current = controller {
-                    current.overrideUserInterfaceStyle = style
+                    // ...but NOT a controller that owns its own chrome.
+                    //
+                    // `SafariView` deliberately leaves `preferredBarTintColor` unset so
+                    // Safari can adapt its bars to the PAGE, and it is presented as a
+                    // `fullScreenCover` — i.e. it sits in this presented chain. Because
+                    // `applyStored()` runs on every `didBecomeActive`, opening an article,
+                    // app-switching and coming back force-restyled Safari's chrome: two
+                    // files, each internally consistent, silently contradicting each other.
+                    // Skipping the controller (not the walk) leaves anything IT presents
+                    // still reachable.
+                    if !(current is SFSafariViewController) {
+                        current.overrideUserInterfaceStyle = style
+                    }
                     controller = current.presentedViewController
                 }
             }

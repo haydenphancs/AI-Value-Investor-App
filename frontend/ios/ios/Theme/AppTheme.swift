@@ -52,14 +52,14 @@ struct AppColors {
     // fill-only against the page (the Home screen's look) and a card nested in
     // another card MUST step up to `cardBackgroundNested` or it disappears.
     // See Views/Modifiers/CardSurface.swift.
-    static let background = Color(lightHex: "F4F5F8", darkHex: "171B26")
-    static let cardBackground = Color(lightHex: "FFFFFF", darkHex: "1E2330")
+    static let background = Color(lightHex: "F4F5F8", darkHex: "171B26", boostsUnderIncreasedContrast: false)
+    static let cardBackground = Color(lightHex: "FFFFFF", darkHex: "1E2330", boostsUnderIncreasedContrast: false)
 
     /// Nested / inset surface. ⚠️ LOCKED: this is the darkest surface in light
     /// mode that carries text, so it sets the contrast floor for every text and
     /// semantic token. `caution` (4.50) and `primaryBlue` (4.52) clear it by
     /// ~0.02 — darkening this value breaks them. `ThemeContrastAudit` will say so.
-    static let cardBackgroundLight = Color(lightHex: "EDF0F5", darkHex: "252B3B")
+    static let cardBackgroundLight = Color(lightHex: "EDF0F5", darkHex: "252B3B", boostsUnderIncreasedContrast: false)
 
     /// A card sitting INSIDE another card. Identical to `cardBackground` in light,
     /// one step lighter in dark.
@@ -73,10 +73,10 @@ struct AppColors {
     /// NOT `cardBackgroundLight`, whose light arm is #EDF0F5 — using that would visibly
     /// grey these cards in light mode, which must not move. Same dark arm, different
     /// light arm, on purpose.
-    static let cardBackgroundNested = Color(lightHex: "FFFFFF", darkHex: "252B3B")
+    static let cardBackgroundNested = Color(lightHex: "FFFFFF", darkHex: "252B3B", boostsUnderIncreasedContrast: false)
 
     /// Inverted surface for toasts / tooltips — pair with `textInverse`.
-    static let surfaceInverse = Color(lightHex: "1E2330", darkHex: "F4F5F8")
+    static let surfaceInverse = Color(lightHex: "1E2330", darkHex: "F4F5F8", boostsUnderIncreasedContrast: false)
 
     /// A constant-LIGHT pill/circle that floats over MEDIA — hero photography,
     /// artwork, a saturated server gradient. Pair with `textOnMediaSurface`.
@@ -89,10 +89,10 @@ struct AppColors {
     /// The mirror of `textOnAccent`. This exists because `PlayAudioButton` filled a
     /// white circle and inked it with `AppColors.background` — #F4F5F8 in LIGHT, i.e.
     /// **1.09:1**, an invisible play triangle on every Money Moves hero.
-    static let mediaSurface = Color(lightHex: "FFFFFF", darkHex: "FFFFFF")
+    static let mediaSurface = Color(lightHex: "FFFFFF", darkHex: "FFFFFF", boostsUnderIncreasedContrast: false)
 
     /// Ink on `mediaSurface` — constant dark, 17.2:1. Never `AppColors.background`.
-    static let textOnMediaSurface = Color(lightHex: "171B26", darkHex: "171B26")
+    static let textOnMediaSurface = Color(lightHex: "171B26", darkHex: "171B26", boostsUnderIncreasedContrast: false)
 
     /// Scrim behind light ink floating over arbitrary MEDIA (a back button on a hero
     /// image). Constant, and strong enough for the worst case: the backdrop may be a
@@ -116,14 +116,14 @@ struct AppColors {
 
     /// Disabled / placeholder. Deliberately below 4.5:1 — WCAG 1.4.3 exempts
     /// inactive controls. Never use for content the user must read.
-    static let textDisabled = Color(lightHex: "A9B0BB", darkHex: "4C5563")
+    static let textDisabled = Color(lightHex: "A9B0BB", darkHex: "4C5563", boostsUnderIncreasedContrast: false)
 
     /// Text/icons sitting ON a saturated fill (`primaryFill`, gain/loss chips,
     /// gradients). Constant white by design in both modes.
-    static let textOnAccent = Color(lightHex: "FFFFFF", darkHex: "FFFFFF")
+    static let textOnAccent = Color(lightHex: "FFFFFF", darkHex: "FFFFFF", boostsUnderIncreasedContrast: false)
 
     /// Text on `surfaceInverse`.
-    static let textInverse = Color(lightHex: "FFFFFF", darkHex: "111827")
+    static let textInverse = Color(lightHex: "FFFFFF", darkHex: "111827", boostsUnderIncreasedContrast: false)
 
     // ━━━ SENTIMENT — text-safe (the shared default, see rule 3) ━━━
     // Light values sit in the 4.5–6.25:1 band where 7 of 9 surveyed investing
@@ -260,16 +260,16 @@ struct AppColors {
     static let scrim = Color(lightHex: "101828", lightAlpha: 0.32, darkHex: "000000", darkAlpha: 0.60)
 
     // ━━━ TAB BAR ━━━
-    static let tabBarBackground = Color(lightHex: "FFFFFF", darkHex: "171B26")
+    static let tabBarBackground = Color(lightHex: "FFFFFF", darkHex: "171B26", boostsUnderIncreasedContrast: false)
     static var tabBarSelected: Color { primaryBlue }
     static var tabBarUnselected: Color { textMuted }
 
     // ━━━ CONTROLS ━━━
     static var chipSelectedBackground: Color { primaryFill }
-    static let chipUnselectedBackground = Color(lightHex: "E7EAF0", darkHex: "2D3548")
-    static let toggleBackground = Color(lightHex: "EDF0F5", darkHex: "1E2330")
+    static let chipUnselectedBackground = Color(lightHex: "E7EAF0", darkHex: "2D3548", boostsUnderIncreasedContrast: false)
+    static let toggleBackground = Color(lightHex: "EDF0F5", darkHex: "1E2330", boostsUnderIncreasedContrast: false)
     /// Lightened from #D5DAE3: the old value put `textSecondary` at 4.26:1.
-    static let toggleSelectedBackground = Color(lightHex: "E2E6EE", darkHex: "374151")
+    static let toggleSelectedBackground = Color(lightHex: "E2E6EE", darkHex: "374151", boostsUnderIncreasedContrast: false)
 
     // ━━━ CHART CHROME ━━━
     /// Gridlines are DECORATIVE and deliberately sit below 3:1 — W3C: "not every
@@ -599,69 +599,170 @@ extension AppColors {
 
 struct AppTypography {
 
+    // MARK: - Dynamic Type
+    //
+    // MEASURED, not assumed: `Font.system(size:)` does NOT scale with the user's text
+    // size. `TypographyProbe` renders both constructions across the range and prints
+    //
+    //     Font.system(size: 15)   FIXED  | xSmall=18.0 … AX5=18.0
+    //     Font.body (text style)  SCALES | xSmall=18.7 … AX5=69.0
+    //
+    // so all 40 tokens below — and therefore all ~2,229 call sites — were inert for
+    // every user who has ever changed their text size. There is no `relativeTo:`
+    // overload for `.system(size:)`, so the scaling has to be computed.
+    //
+    // WHY AT THE TOKEN, NOT THE CALL SITE
+    // -----------------------------------
+    // The alternative is a `.appFont(_:)` ViewModifier, which means editing 2,229 sites
+    // across 455 files and cannot serve the 51 places that pass a `Font` as a VALUE
+    // (a modifier returns `some View`, not a `Font`). Scaling here keeps every call
+    // site untouched and covers all three shapes.
+    //
+    // THE CLAMP, AND WHY THE TWO TIERS DIFFER
+    // ---------------------------------------
+    // At AX5 an unclamped scale is ~3.5×, which turns a 4-column stat row into one
+    // column per screen. The file's own two-tier rule says reading prose breathes while
+    // dense data stays tight, and that rule is exactly what the caps encode:
+    //
+    //   • READING tiers (title/heading/body/label/caption) scale to 2.0×. Prose can
+    //     reflow; this is the tier a low-vision user actually needs.
+    //   • DATA and ICON tiers cap at 1.4×. These live in fixed-width columns, chart
+    //     axes and `.frame(width:height:)` badges, where growth does not reflow, it
+    //     truncates or overlaps. 1.4× is enough to be a real accommodation without
+    //     breaking the grid.
+    //
+    // The caps are a deliberate, stated limitation rather than an oversight — the
+    // honest position while the 455-file layout sweep at AX5 is still outstanding.
+    // Raising them is a layout project, not a token edit.
+
+    /// Scale `size` the way `style` scales, capped at `maxScale`.
+    ///
+    /// `UIFontMetrics.scaledValue(for:)` reads the CURRENT content size category, and
+    /// these tokens are computed `static var`s, so each render resolves afresh. The root
+    /// view reads `\.dynamicTypeSize` (see `iosApp`), which is what makes SwiftUI
+    /// re-evaluate the tree when the category changes rather than keeping stale sizes.
+    static func scaledSize(_ size: CGFloat,
+                                       _ style: UIFont.TextStyle,
+                                       maxScale: CGFloat) -> CGFloat {
+        let scaled = UIFontMetrics(forTextStyle: style).scaledValue(for: size)
+        return min(scaled, size * maxScale)
+    }
+
+    /// How far each tier is allowed to grow. MEASURED, not chosen by feel — see the
+    /// screenshots referenced in the block comment above: at 2.0× the Home "Today's Top
+    /// Movers" card reflowed to ONE CHARACTER PER LINE and the tab-bar labels split
+    /// mid-word ("Researc/h"). Bigger text that cannot be read is not an accommodation.
+    ///
+    /// 1.4 / 1.25 is what the CURRENT layouts absorb. Raising it is gated on the
+    /// fixed-frame sweep across the view layer, not on editing these two numbers.
+    static let readingCap: CGFloat = 1.4
+    static let dataCap: CGFloat = 1.25
+
+    /// Reading tier — prose that can reflow.
+    fileprivate static func scaled(_ size: CGFloat, _ style: Font.TextStyle,
+                                   weight: Font.Weight = .regular,
+                                   design: Font.Design = .default) -> Font {
+        .system(size: scaledSize(size, style.uiKit, maxScale: readingCap),
+                weight: weight, design: design)
+    }
+
+    /// Data / icon tier — fixed columns, chart axes, sized badges. Capped at 1.4×.
+    fileprivate static func scaledTight(_ size: CGFloat, _ style: Font.TextStyle,
+                                        weight: Font.Weight = .regular,
+                                        design: Font.Design = .default) -> Font {
+        .system(size: scaledSize(size, style.uiKit, maxScale: dataCap),
+                weight: weight, design: design)
+    }
+
     // ━━━ TITLE (Level 1) ━━━
     // Hero content, screen titles, major section headers
-    static let titleHero    = Font.system(size: 32, weight: .bold)
-    static let titleLarge   = Font.system(size: 28, weight: .bold)
-    static let title        = Font.system(size: 22, weight: .bold)
-    static let titleCompact = Font.system(size: 20, weight: .semibold)
+    static var titleHero    : Font { scaled(32, .largeTitle, weight: .bold) }
+    static var titleLarge   : Font { scaled(28, .largeTitle, weight: .bold) }
+    static var title        : Font { scaled(22, .title2, weight: .bold) }
+    static var titleCompact : Font { scaled(20, .title3, weight: .semibold) }
 
     // ━━━ HEADING (Level 2) ━━━
     // Section & card headers, emphasized inline content
-    static let heading      = Font.system(size: 18, weight: .semibold)
-    static let headingSmall = Font.system(size: 16, weight: .semibold)
+    static var heading      : Font { scaled(18, .title3, weight: .semibold) }
+    static var headingSmall : Font { scaled(16, .headline, weight: .semibold) }
 
     // ━━━ BODY (Level 3) ━━━
     // Primary readable content
-    static let bodyEmphasis      = Font.system(size: 15, weight: .semibold)
-    static let body              = Font.system(size: 15, weight: .regular)
-    static let bodySmallEmphasis = Font.system(size: 14, weight: .semibold)
-    static let bodySmall         = Font.system(size: 14, weight: .regular)
+    static var bodyEmphasis      : Font { scaled(15, .subheadline, weight: .semibold) }
+    static var body              : Font { scaled(15, .subheadline, weight: .regular) }
+    static var bodySmallEmphasis : Font { scaled(14, .subheadline, weight: .semibold) }
+    static var bodySmall         : Font { scaled(14, .subheadline, weight: .regular) }
 
     // ━━━ LABEL (Level 4) ━━━
     // Metadata, supporting info, subtitles
-    static let labelEmphasis      = Font.system(size: 13, weight: .semibold)
-    static let label              = Font.system(size: 13, weight: .regular)
-    static let labelSmallEmphasis = Font.system(size: 12, weight: .semibold)
-    static let labelSmall         = Font.system(size: 12, weight: .regular)
+    static var labelEmphasis      : Font { scaled(13, .footnote, weight: .semibold) }
+    static var label              : Font { scaled(13, .footnote, weight: .regular) }
+    static var labelSmallEmphasis : Font { scaled(12, .caption, weight: .semibold) }
+    static var labelSmall         : Font { scaled(12, .caption, weight: .regular) }
 
     // ━━━ CAPTION (Level 5) ━━━
     // Micro-copy, badges, chart axes, fine print
-    static let captionEmphasis      = Font.system(size: 11, weight: .semibold)
-    static let caption              = Font.system(size: 11, weight: .regular)
-    static let captionSmallEmphasis = Font.system(size: 10, weight: .semibold)
-    static let captionSmall         = Font.system(size: 10, weight: .regular)
-    static let captionTiny          = Font.system(size: 9, weight: .regular)
+    static var captionEmphasis      : Font { scaled(11, .caption2, weight: .semibold) }
+    static var caption              : Font { scaled(11, .caption2, weight: .regular) }
+    static var captionSmallEmphasis : Font { scaled(10, .caption2, weight: .semibold) }
+    static var captionSmall         : Font { scaled(10, .caption2, weight: .regular) }
+    static var captionTiny          : Font { scaled(9, .caption2, weight: .regular) }
 
     // ━━━ DATA (Financial numerics) ━━━
     // Rounded design for numeric emphasis in financial context.
     // .monospacedDigit() = tabular figures so prices/%/columns align and digits
     // don't jitter as values update — the fintech-standard treatment used by
     // Robinhood / Webull / Yahoo Finance. Numerals only (these tokens never back prose).
-    static let dataHero    = Font.system(size: 32, weight: .bold, design: .rounded).monospacedDigit()
-    static let dataDisplay = Font.system(size: 28, weight: .bold, design: .rounded).monospacedDigit()
-    static let dataTitle   = Font.system(size: 22, weight: .bold, design: .rounded).monospacedDigit()
-    static let dataHeading = Font.system(size: 20, weight: .bold, design: .rounded).monospacedDigit()
-    static let dataLarge   = Font.system(size: 18, weight: .bold, design: .rounded).monospacedDigit()
-    static let dataCompact = Font.system(size: 16, weight: .bold, design: .rounded).monospacedDigit()
-    static let dataMedium  = Font.system(size: 14, weight: .bold, design: .rounded).monospacedDigit()
-    static let dataSmall   = Font.system(size: 10, weight: .semibold, design: .rounded).monospacedDigit()
+    static var dataHero    : Font { scaledTight(32, .largeTitle, weight: .bold, design: .rounded).monospacedDigit() }
+    static var dataDisplay : Font { scaledTight(28, .largeTitle, weight: .bold, design: .rounded).monospacedDigit() }
+    static var dataTitle   : Font { scaledTight(22, .title2, weight: .bold, design: .rounded).monospacedDigit() }
+    static var dataHeading : Font { scaledTight(20, .title3, weight: .bold, design: .rounded).monospacedDigit() }
+    static var dataLarge   : Font { scaledTight(18, .headline, weight: .bold, design: .rounded).monospacedDigit() }
+    static var dataCompact : Font { scaledTight(16, .headline, weight: .bold, design: .rounded).monospacedDigit() }
+    static var dataMedium  : Font { scaledTight(14, .subheadline, weight: .bold, design: .rounded).monospacedDigit() }
+    static var dataSmall   : Font { scaledTight(10, .caption2, weight: .semibold, design: .rounded).monospacedDigit() }
 
     // ━━━ ICONS (SF Symbol sizing) ━━━
     // Size-only tokens — add .fontWeight() modifier for weight control
-    static let iconSplash  = Font.system(size: 80)
-    static let iconHero    = Font.system(size: 48)
-    static let iconXXL     = Font.system(size: 40)
-    static let iconJumbo   = Font.system(size: 36)
-    static let iconDisplay = Font.system(size: 32)
-    static let iconXL      = Font.system(size: 24)
-    static let iconLarge   = Font.system(size: 20)
-    static let iconMedium  = Font.system(size: 18)
-    static let iconDefault = Font.system(size: 16)
-    static let iconSmall   = Font.system(size: 14)
-    static let iconXS      = Font.system(size: 12)
-    static let iconTiny    = Font.system(size: 10)
-    static let iconMicro   = Font.system(size: 8)
+    static var iconSplash  : Font { scaledTight(80, .largeTitle) }
+    static var iconHero    : Font { scaledTight(48, .largeTitle) }
+    static var iconXXL     : Font { scaledTight(40, .largeTitle) }
+    static var iconJumbo   : Font { scaledTight(36, .title) }
+    static var iconDisplay : Font { scaledTight(32, .title) }
+    static var iconXL      : Font { scaledTight(24, .title3) }
+    static var iconLarge   : Font { scaledTight(20, .headline) }
+    static var iconMedium  : Font { scaledTight(18, .headline) }
+    static var iconDefault : Font { scaledTight(16, .headline) }
+    static var iconSmall   : Font { scaledTight(14, .subheadline) }
+    static var iconXS      : Font { scaledTight(12, .caption) }
+    static var iconTiny    : Font { scaledTight(10, .caption2) }
+    static var iconMicro   : Font { scaledTight(8, .caption2) }
+}
+
+/// SwiftUI `Font.TextStyle` → the UIKit style `UIFontMetrics` needs.
+///
+/// The two enums are separate types with no bridge in the SDK, and `UIFontMetrics` is
+/// the only API that can scale an arbitrary point size the way a text style scales.
+private extension Font.TextStyle {
+    var uiKit: UIFont.TextStyle {
+        switch self {
+        case .largeTitle: return .largeTitle
+        case .title:      return .title1
+        case .title2:     return .title2
+        case .title3:     return .title3
+        case .headline:   return .headline
+        case .subheadline: return .subheadline
+        case .body:       return .body
+        case .callout:    return .callout
+        case .footnote:   return .footnote
+        case .caption:    return .caption1
+        case .caption2:   return .caption2
+        // Exhaustive today; a future SwiftUI style falls back to `.body`, which scales
+        // correctly — merely on the wrong curve — rather than failing to compile a
+        // theme file on a new SDK.
+        @unknown default: return .body
+        }
+    }
 }
 
 // MARK: - App Spacing

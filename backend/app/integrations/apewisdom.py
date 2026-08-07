@@ -144,6 +144,51 @@ def _parse_page(
 
 # ── Public API ───────────────────────────────────────────────────
 
+# Strong reference to the in-flight background refresh. `asyncio.create_task` keeps only a
+# WEAK one, so without this the task can be collected mid-flight.
+_refresh_task: Optional["asyncio.Task"] = None
+
+
+def _kick_background_refresh() -> None:
+    """Start a refresh if the cache is stale and one is not already running.
+
+    WHY THE READERS NO LONGER AWAIT THIS. `refresh_cache` has an unconditional
+    `await asyncio.sleep(_FILTER_DELAY)` (30s) between the stock and crypto filters, so it
+    cannot complete in less than half a minute. Every caller wraps its read in a SHORTER
+    `asyncio.wait_for` — `news_cache_service` uses 2.0s — so the await was cancelled every
+    single time, `_cache_ts` was never advanced, and the cache could never be rebuilt after
+    the one-shot warm at boot. Thirty minutes after startup `_is_cache_fresh()` returned
+    False permanently, and from then on every sentiment request paid a full timeout to
+    abandon a live HTTP fetch and return nothing.
+
+    Serving slightly stale social-mention counts is obviously better than serving none, so
+    readers now take what is cached and let the refresh land when it lands.
+    """
+    global _refresh_task
+    if _is_cache_fresh():
+        return
+    if _refresh_task is not None and not _refresh_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no loop (sync context) — the lifespan warm task will handle it
+    _refresh_task = loop.create_task(_refresh_quietly())
+
+
+async def _refresh_quietly() -> None:
+    """Background refresh whose failure must never surface to a request."""
+    try:
+        await refresh_cache()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "ApeWisdom background refresh failed (%s: %s) — serving the previous cache",
+            type(e).__name__, e,
+        )
+
+
 async def refresh_cache() -> Dict[str, Dict[str, Any]]:
     """
     Fetch all stock + crypto mentions and populate the in-memory cache.
@@ -190,13 +235,11 @@ async def get_ticker_mentions(
 
     Returns dict with keys: mentions, mentions_24h_ago, upvotes, rank.
     Returns None if ticker not found on Reddit.
-    Refreshes cache if stale (30-min TTL).
+
+    NON-BLOCKING: serves the cache and refreshes in the BACKGROUND when stale.
     """
     ticker = ticker.upper().strip()
-
-    if not _is_cache_fresh():
-        await refresh_cache()
-
+    _kick_background_refresh()
     return _cache.get(ticker)
 
 
@@ -204,8 +247,8 @@ async def get_all_mentions() -> Dict[str, Dict[str, Any]]:
     """
     Get the full mention dataset (all tickers).
 
-    Used by the daily snapshot job. Refreshes cache if stale.
+    NON-BLOCKING: returns whatever is cached and refreshes in the BACKGROUND if stale.
+    See `_kick_background_refresh` for why awaiting the refresh here was unworkable.
     """
-    if not _is_cache_fresh():
-        await refresh_cache()
+    _kick_background_refresh()
     return dict(_cache)

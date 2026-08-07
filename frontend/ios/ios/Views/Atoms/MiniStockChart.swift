@@ -76,6 +76,7 @@ struct MiniStockChart: View {
             }
             // Flatten path rendering into a single Metal texture
             .drawingGroup()
+            .accessibilityIgnoresInvertColors()
             .id(colorScheme)
         }
         .frame(height: height)

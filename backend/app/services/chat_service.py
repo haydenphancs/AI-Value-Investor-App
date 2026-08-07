@@ -744,7 +744,17 @@ class ChatService:
             company_name=quote.get("name") or ticker,
             current_price=quote.get("price") or 0,
             change=quote.get("change") or 0,
-            change_percent=quote.get("changesPercentage") or 0,
+            # FMP `/stable` renamed this to the SINGULAR `changePercentage`; the plural is the
+            # dead `/api/v3` spelling. Reading only the plural meant `or 0` fired on every
+            # equity, so the card printed "+0.00%" — and because iOS colours on
+            # `changePercent >= 0`, it painted GREEN next to a negative dollar change. Two
+            # contradictory numbers on an AI-authored, credit-charged card.
+            # Singular first, plural retained: some non-equity quotes still carry it.
+            change_percent=(
+                quote.get("changePercentage")
+                if quote.get("changePercentage") is not None
+                else quote.get("changesPercentage")
+            ) or 0,
             day_high=quote.get("dayHigh") or 0,
             day_low=quote.get("dayLow") or 0,
             volume=int(quote.get("volume") or 0),

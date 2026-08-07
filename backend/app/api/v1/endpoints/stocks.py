@@ -684,6 +684,16 @@ async def get_stock_quote(ticker: str):
 
         response = normalize_fmp_response(quote)
 
+        # Ensure iOS-expected field names exist (stable API changed names), same pattern as
+        # `get_stock_details` above. FMP `/stable` renamed `changesPercentage` (plural, the
+        # dead /api/v3 spelling) to `changePercentage`, which normalizes to
+        # `change_percentage` — but the iOS `StockQuote` decoder keys on the OLD
+        # `changes_percentage`, so `changePercent` decoded as nil on every response. The
+        # visible symptom is a guest watching a ticker: `pollQuotePrice` updates the price and
+        # the dollar change every 15s while the PERCENTAGE stays frozen at whatever it was.
+        if "change_percentage" in response and "changes_percentage" not in response:
+            response["changes_percentage"] = response["change_percentage"]
+
         # EPS (TTM): sum diluted EPS from last 4 quarterly income statements
         price = quote.get("price")
         if isinstance(income_q, list) and len(income_q) >= 4:

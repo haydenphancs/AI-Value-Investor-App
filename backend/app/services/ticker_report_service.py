@@ -59,6 +59,23 @@ from app.services.ticker_report_cache import (
 logger = logging.getLogger(__name__)
 
 
+# Degradation marker. Kept OUT of the response schema on purpose: it rides on the Stage A
+# shell dict (which is internal) and on the returned report under a leading-underscore key,
+# so it never has to be added to `TickerReportResponse` and can never break the iOS decoder.
+_DEGRADED_KEY = "_stage_a_degraded"
+
+
+def _mark_degraded(shell: dict, reason: str) -> dict:
+    """Tag a fallback shell so the caller knows this report is not real."""
+    if isinstance(shell, dict):
+        shell[_DEGRADED_KEY] = reason
+    return shell
+
+
+def _degraded_reason(shell) -> str | None:
+    return shell.get(_DEGRADED_KEY) if isinstance(shell, dict) else None
+
+
 class TickerReportService:
     def __init__(self):
         self.collector: TickerReportDataCollector = get_collector()
@@ -232,8 +249,26 @@ LENGTH: 2-4 sentences, total under 90 words."""
         #    on success; the Stage A/B factors stay as the fallback otherwise.
         await synthesize_critical_factors(report, persona, self.gemini, evidence)
 
-        # 6. Persist to cache (best-effort; failure logged but doesn't raise)
-        await upsert_cached_report(ticker, persona_key, report)
+        # 6. Persist to cache (best-effort; failure logged but doesn't raise) — but ONLY
+        #    when the report is real.
+        #
+        #    When Gemini is unavailable (quota circuit open, 429s exhausted, 5xx) Stage A
+        #    silently degrades to `stage_a_fallback()` — empty bull/bear cases, blank
+        #    narrative slots — and every Stage B job falls back to its sentinel. The result
+        #    still VALIDATES against TickerReportResponse, so it used to be charged 20
+        #    credits, returned as a success, AND written here, where it was then served free
+        #    to every other user for the rest of the close cycle. One Gemini blip poisoned a
+        #    ticker for everyone until the next close.
+        degraded_reason = _degraded_reason(shell)
+        if degraded_reason:
+            logger.warning(
+                "Ticker report for %s/%s NOT cached — degraded (%s). The caller is "
+                "responsible for refunding credits on a degraded report.",
+                ticker, persona_key, degraded_reason,
+            )
+            report["_degraded"] = degraded_reason
+        else:
+            await upsert_cached_report(ticker, persona_key, report)
 
         return report
 
@@ -262,11 +297,11 @@ LENGTH: 2-4 sentences, total under 90 words."""
                     f"Stage A returned unparseable JSON for {ticker}; "
                     f"using honest fallback shell."
                 )
-                return stage_a_fallback()
+                return _mark_degraded(stage_a_fallback(), "stage_a_unparseable")
             return shell
         except Exception as e:
             logger.error(
                 f"Stage A generation failed for {ticker}: "
                 f"{type(e).__name__}: {e}"
             )
-            return stage_a_fallback()
+            return _mark_degraded(stage_a_fallback(), f"stage_a_{type(e).__name__}")

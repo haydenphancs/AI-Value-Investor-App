@@ -62,8 +62,21 @@ def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
     return value
 
 
+# Hard cap on the in-memory tier. Without it this dict grew with the number of DISTINCT
+# keys ever requested and was never pruned: `_cache_get` only deletes an entry when that
+# SAME key is read again after expiry, so a ticker fetched once and never revisited stayed
+# resident for the life of the process. Across ~17 services on a long-lived Railway
+# container that is a slow leak whose only resolution is an OOM restart — which drops every
+# in-flight report with it. Bounded LRU-ish: evict from the head (least recently WRITTEN).
+_CACHE_MAX_ENTRIES = 1024
+
+
 def _cache_set(key: str, value: Any):
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── FMP grade → category mapping ────────────────────────────────────

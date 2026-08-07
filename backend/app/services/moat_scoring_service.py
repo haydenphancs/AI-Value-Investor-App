@@ -885,7 +885,8 @@ class MoatScoringService:
                     pillars_resolved=[], rejected=[],
                     source_labels=[], tokens_used=None, model_version=None,
                 )
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
                 return None
 
             result = await self._do_grounded_extraction(focal, profile)
@@ -905,7 +906,8 @@ class MoatScoringService:
 
             pillar_scores = result.get("pillar_scores") or {}
             if not pillar_scores:
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
                 return None
 
             await asyncio.to_thread(
@@ -914,21 +916,24 @@ class MoatScoringService:
                 result.get("model_version"),
             )
             _grounded_mem_set(focal, pillar_scores)
-            future.set_result(pillar_scores)
+            if not future.done():
+                future.set_result(pillar_scores)
             return pillar_scores
         except Exception as exc:
             logger.exception(
                 "moat_scoring: unhandled error in grounded fallback for %s: %s",
                 focal, exc,
             )
-            future.set_exception(exc)
+            if not future.done():
+                future.set_exception(exc)
             return None
         finally:
             _grounded_inflight.pop(cache_key, None)
             if not future.done():
                 # Producer was cancelled mid-flight — wake awaiters with
                 # a None result so they fall back instead of hanging.
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
 
     async def _do_grounded_extraction(
         self, ticker: str, profile: Dict[str, Any],

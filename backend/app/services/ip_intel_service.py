@@ -232,7 +232,7 @@ class IPIntelService:
         # Inflight dedup.
         if focal in _inflight:
             try:
-                return await _inflight[focal]
+                return await asyncio.shield(_inflight[focal])
             except Exception:
                 return None
 
@@ -245,20 +245,24 @@ class IPIntelService:
             if payload:
                 await asyncio.to_thread(self._write_cache, focal, payload)
                 _mem_set(focal, payload)
-                future.set_result(payload)
+                if not future.done():
+                    future.set_result(payload)
                 return payload
-            future.set_result(None)
+            if not future.done():
+                future.set_result(None)
             return None
         except Exception as exc:
             logger.exception(
                 "ip_intel: unhandled error for %s: %s", focal, exc,
             )
-            future.set_exception(exc)
+            if not future.done():
+                future.set_exception(exc)
             return None
         finally:
             _inflight.pop(focal, None)
             if not future.done():
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
 
     async def refresh_top_tickers(
         self, top_n: int = _BATCH_TOP_N,

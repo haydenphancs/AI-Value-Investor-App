@@ -224,6 +224,7 @@ struct MainChartCanvas: View {
                     }
                 }
                 .drawingGroup()
+                .accessibilityIgnoresInvertColors()
                 .id(colorScheme)
             } else {
                 Text("No chart data")

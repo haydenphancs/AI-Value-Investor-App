@@ -55,19 +55,41 @@ class _FakeQuery:
 
 
 class _FakeBucket:
+    """Models storage3's REAL behaviour, which the previous version of this fake did not.
+
+    Two things it now gets right, both of which hid a live bug:
+
+    1. ``list()`` takes an options dict and **caps the page at ``limit``** — storage3's
+       ``DEFAULT_SEARCH_OPTIONS`` is ``{"limit": 100, "offset": 0, ...}``. The old fake
+       returned every object in one call regardless, so an unpaginated implementation looked
+       correct here while silently abandoning everything past the 100th object in production.
+       A Max subscriber generates up to 200 reports a month, so the heaviest users were
+       exactly the ones whose PDFs survived "account deletion".
+    2. ``remove()`` actually removes. The old fake only logged, so a paginating caller would
+       loop forever against it — a fake that cannot express deletion cannot test a
+       delete-until-empty loop.
+    """
+
     def __init__(self, log, objects, fail):
         self._log, self._objects, self._fail = log, objects, fail
 
-    def list(self, prefix):
+    def list(self, prefix, options=None):
         if "list" in self._fail:
             raise RuntimeError(self._fail["list"])
         self._log.append(("storage.list", prefix))
-        return [{"name": n} for n in self._objects]
+        limit = (options or {}).get("limit", 100)
+        offset = (options or {}).get("offset", 0)
+        page = sorted(self._objects)[offset: offset + limit]
+        return [{"name": n} for n in page]
 
     def remove(self, paths):
         if "remove" in self._fail:
             raise RuntimeError(self._fail["remove"])
         self._log.append(("storage.remove", tuple(paths)))
+        for p in paths:
+            name = p.rsplit("/", 1)[-1]
+            if name in self._objects:
+                self._objects.remove(name)
 
 
 class _FakeStorage:
@@ -98,7 +120,9 @@ class FakeSupabase:
     def __init__(self, objects=("a.pdf", "b.pdf"), fail=None):
         self.log: list[tuple] = []
         self._fail = fail or {}
-        self._objects = objects
+        # Mutable: `_FakeBucket.remove` deletes from it, so a delete-until-empty loop
+        # terminates the way it does against real storage.
+        self._objects = list(objects)
         self.auth = _FakeAuth(self.log, self._fail)
         self.storage = _FakeStorage(self.log, self._objects, self._fail)
 

@@ -52,6 +52,7 @@ struct ReportMoatRadarChart: View {
         }
         .frame(width: frameSize, height: frameSize)
         .drawingGroup()
+        .accessibilityIgnoresInvertColors()
         .id(colorScheme)
     }
 

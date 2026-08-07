@@ -284,8 +284,20 @@ def _cache_get(cache: Dict, key: str, ttl: int) -> Optional[Any]:
     return value
 
 
+# Hard cap per cache. This module keeps SEVERAL dicts and passes the target in, which is why
+# it needs its own bounded setter rather than the module-level one the other services use.
+# Unbounded, each grew with the number of distinct whales/tickers ever requested and was
+# never pruned — `_cache_get` only drops a key when that same key is read again after expiry.
+_CACHE_MAX_ENTRIES = 1024
+
+
 def _cache_set(cache: Dict, key: str, value: Any) -> None:
+    # Move-to-end on write so the head is the least-recently-written, then evict from it.
+    cache.pop(key, None)
     cache[key] = (_time.monotonic(), value)
+    if len(cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(cache.keys())[: len(cache) - _CACHE_MAX_ENTRIES]:
+            cache.pop(_old, None)
 
 
 # ── Service ──────────────────────────────────────────────────────────

@@ -283,7 +283,15 @@ async def get_current_user(
 
         # `credentials` cannot be None here: get_current_user_id already raised AUTH_REQUIRED
         # when no credential was presented, and this dependency only runs after it resolves.
-        _reject_if_password_changed_since_issue(credentials.credentials, rows[0])
+        #
+        # ⚠️ `.strip()` is load-bearing, not tidiness. `get_current_user_id` strips before it
+        # verifies, so a padded bearer authenticates fine — but this call used to receive the
+        # RAW value, fail to decode it, hit the fail-open `except Exception` inside, and
+        # return the user anyway. Net effect: `Authorization: Bearer  <token>` (two spaces —
+        # FastAPI splits on the FIRST space only, so the credential keeps a leading one)
+        # authenticated AND skipped password-change eviction, so a stolen token survived the
+        # victim's password reset. Both call sites must normalise identically.
+        _reject_if_password_changed_since_issue(credentials.credentials.strip(), rows[0])
         return rows[0]
     except HTTPException:
         raise

@@ -498,16 +498,44 @@ def _purge_research_pdfs(supabase: Client, user_id: str) -> Optional[str]:
     indefinitely. Path convention is set by pdf_report_service: reports/<user_id>/<id>.pdf
     """
     prefix = f"reports/{user_id}"
+    # storage3 silently caps an unpaginated `list()` at 100 objects
+    # (`DEFAULT_SEARCH_OPTIONS = {"limit": 100, "offset": 0, ...}`). A single call therefore
+    # deleted the first 100 PDFs, returned success, and left the rest in Storage FOREVER
+    # while the endpoint reported a complete deletion — and the privacy policy promises
+    # otherwise. Not hypothetical: a Max subscriber gets 4000 credits ÷ 20 = 200 reports a
+    # month, so the very users who generate the most are the ones whose data survives.
+    _PAGE = 100
+    _MAX_PAGES = 500          # 50k objects; a bound so a bad page-cursor cannot spin forever
     try:
         bucket = supabase.storage.from_(_RESEARCH_PDF_BUCKET)
-        entries = bucket.list(prefix) or []
-        names = [e["name"] for e in entries if isinstance(e, dict) and e.get("name")]
-        if not names:
-            return None
-        bucket.remove([f"{prefix}/{name}" for name in names])
-        logger.info(
-            "Account deletion: removed %d report PDF(s) for user=%s", len(names), user_id
-        )
+        removed = 0
+        for page in range(_MAX_PAGES):
+            entries = bucket.list(
+                prefix, {"limit": _PAGE, "offset": 0, "sortBy": {"column": "name", "order": "asc"}}
+            ) or []
+            names = [e["name"] for e in entries if isinstance(e, dict) and e.get("name")]
+            if not names:
+                break
+            # Offset stays 0 on purpose: each pass DELETES what it listed, so the next page
+            # of survivors shifts down into the same window. Paging with a growing offset
+            # against a shrinking collection is how you skip objects.
+            bucket.remove([f"{prefix}/{name}" for name in names])
+            removed += len(names)
+            if len(names) < _PAGE:
+                break
+        else:
+            # Loop ran to _MAX_PAGES without emptying — report it rather than claim success,
+            # so the caller keeps the auth row and the user can retry.
+            msg = f"still not empty after {_MAX_PAGES} pages ({removed} removed)"
+            logger.error(
+                "Account deletion: report PDF purge incomplete for user=%s: %s", user_id, msg
+            )
+            return msg
+
+        if removed:
+            logger.info(
+                "Account deletion: removed %d report PDF(s) for user=%s", removed, user_id
+            )
         return None
     except Exception as e:  # noqa: BLE001 — recorded and surfaced below
         logger.error(

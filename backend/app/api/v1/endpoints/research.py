@@ -299,9 +299,9 @@ async def get_research_status(
     """
     result = supabase.table("research_reports").select(
         "id, status, progress, current_step, error_message, estimated_time_remaining"
-    ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
+    ).eq("id", report_id).eq("user_id", user["id"]).maybe_single().execute()
 
-    if not result.data:
+    if not result or not result.data:
         raise HTTPException(status_code=404, detail="Report not found")
 
     raw_error = result.data.get("error_message")
@@ -366,14 +366,21 @@ async def get_research_report(
     """Fetch the full research report. RLS enforced via user_id check."""
     result = supabase.table("research_reports").select("*").eq(
         "id", report_id
-    ).eq("user_id", user["id"]).single().execute()
+    ).eq("user_id", user["id"]).maybe_single().execute()
 
-    if not result.data:
+    if not result or not result.data:
         raise HTTPException(status_code=404, detail="Report not found")
 
     row = result.data
-    # Inject stock_id = ticker so iOS ResearchReportDetail.stockId resolves
+    # Inject stock_id = ticker so iOS ResearchReportDetail.stockId resolves.
     row["stock_id"] = row["ticker"]
+    # And guarantee company_name. The insert path defaults it to the ticker
+    # (`generate_research` above), but the column is nullable and rows written by any other
+    # path — a backfill, a migration, a manual fix — need not carry it. Swift declares
+    # `companyName: String` NON-optional, so a null is a decode failure on the screen the user
+    # just paid 20 credits to reach. Both fields are `str` (required) on the response model, so
+    # a miss here surfaces as our own 500 rather than as a crash on a device we cannot see.
+    row["company_name"] = row.get("company_name") or row["ticker"]
 
     return row
 
@@ -398,9 +405,9 @@ async def get_research_ticker_report(
     """
     result = supabase.table("research_reports").select(
         "id, status, ticker, ticker_report_data"
-    ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
+    ).eq("id", report_id).eq("user_id", user["id"]).maybe_single().execute()
 
-    if not result.data:
+    if not result or not result.data:
         return make_error_response(
             ErrorCode.REPORT_NOT_FOUND,
             message=f"No research_reports row for id={report_id}",
@@ -454,9 +461,9 @@ async def get_research_report_pdf(
     """
     result = supabase.table("research_reports").select(
         "id, pdf_path, pdf_status"
-    ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
+    ).eq("id", report_id).eq("user_id", user["id"]).maybe_single().execute()
 
-    if not result.data:
+    if not result or not result.data:
         return make_error_response(
             ErrorCode.REPORT_NOT_FOUND,
             message=f"No research_reports row for id={report_id}",
@@ -501,9 +508,9 @@ async def regenerate_research_report_pdf(
     resulting {pdf_status}."""
     result = supabase.table("research_reports").select(
         "id, status"
-    ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
+    ).eq("id", report_id).eq("user_id", user["id"]).maybe_single().execute()
 
-    if not result.data:
+    if not result or not result.data:
         return make_error_response(
             ErrorCode.REPORT_NOT_FOUND,
             message=f"No research_reports row for id={report_id}",
@@ -520,8 +527,8 @@ async def regenerate_research_report_pdf(
 
     row = supabase.table("research_reports").select("pdf_status").eq(
         "id", report_id
-    ).eq("user_id", user["id"]).single().execute()
-    status = (row.data or {}).get("pdf_status", "failed")
+    ).eq("user_id", user["id"]).maybe_single().execute()
+    status = ((row.data if row else None) or {}).get("pdf_status", "failed")
     if status != "ready":
         return make_error_response(
             ErrorCode.DATA_INCOMPLETE,
@@ -774,8 +781,8 @@ async def _generate_report_pdf(report_id: str, user_id: str) -> None:
 
         row = supabase.table("research_reports").select(
             "ticker_report_data, fair_value_estimate"
-        ).eq("id", report_id).single().execute()
-        data = row.data or {}
+        ).eq("id", report_id).maybe_single().execute()
+        data = (row.data if row else None) or {}
         ticker_report_data = data.get("ticker_report_data")
         if not ticker_report_data:
             logger.warning("PDF skipped — no ticker_report_data for %s", report_id)

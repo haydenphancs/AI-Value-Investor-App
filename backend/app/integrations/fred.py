@@ -13,7 +13,9 @@ Per-process in-memory cache (6h TTL) keyed by `(series_id, op)`:
   - No Supabase round-trip per request.
 
 Failure modes:
-  - Missing API key → returns empty result, logged once per series.
+  - Missing API key → returns empty result, WARNED once per process (see
+    `_warn_unconfigured_once`). Silence here is what let a production deploy with no
+    FRED_API_KEY report a benign macro backdrop it had never measured.
   - HTTP / timeout error → logged, returns empty result. Callers gate
     risk-factor emission on a non-None payload, so a FRED outage just
     means the macro module shows fewer cards instead of crashing.
@@ -31,6 +33,30 @@ import httpx
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# One-shot unconfigured warning, per process.
+#
+# Every `if not self.is_configured: return []` used to be SILENT, while this module's own
+# docstring promised "logged once per series". That was not a small inaccuracy: with
+# FRED_API_KEY unset in production, the macro engine lost its entire authoritative tier (CPI,
+# Core PCE, breakevens, Fed Funds, DGS10, T10Y2Y, UNRATE, ICSA, HY OAS), the factor set came
+# back empty on a calm tape, and the report printed "Benign macro backdrop — no indicators
+# tripping risk thresholds." A confident all-clear derived from NO DATA, with nothing in the
+# logs to say so. CLAUDE.md: an intentionally non-fatal degradation must still say so.
+_warned_unconfigured: set[str] = set()
+
+
+def _warn_unconfigured_once(name: str, env_var: str) -> None:
+    if name in _warned_unconfigured:
+        return
+    _warned_unconfigured.add(name)
+    logger.warning(
+        "%s IS NOT CONFIGURED (%s unset) — every %s read will return empty for the life of "
+        "this process. Downstream: macro risk factors are suppressed, so the macro module "
+        "reports no threats rather than unknown ones.",
+        name, env_var, name,
+    )
+
 
 
 # Per-process in-memory cache. Key = (series_id, op_name); value =
@@ -105,6 +131,7 @@ class FREDClient:
         the API returns no observations.
         """
         if not self.is_configured:
+            _warn_unconfigured_once("FRED", "FRED_API_KEY")
             return []
         cache_key = (series_id, f"obs:{limit}")
         cached = _cache_get(cache_key)

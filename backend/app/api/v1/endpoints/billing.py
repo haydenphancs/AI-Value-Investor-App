@@ -25,7 +25,12 @@ from app.schemas.subscription import (
     PlanResponse, PlanCatalogResponse,
     VerifyPurchaseRequest, VerifyPurchaseResponse,
 )
-from app.services.iap_service import IAPError, UnknownProduct, get_iap_service
+from app.services.iap_service import (
+    IAPError,
+    PurchaseBoundToAnotherAccount,
+    UnknownProduct,
+    get_iap_service,
+)
 from app.services.subscription_service import SubscriptionService
 
 logger = logging.getLogger(__name__)
@@ -123,6 +128,21 @@ async def verify_purchase(
                 "That purchase went through but we couldn't match it to a plan. "
                 "Contact support and we'll apply it."
             ),
+        )
+    except PurchaseBoundToAnotherAccount as e:
+        # TERMINAL — must precede the generic `IAPError` arm below.
+        #
+        # Ownership of a transaction never moves, so this condition can never clear. Answering
+        # 503 "reopen the app shortly and it will be applied" told StoreKit to retry: the
+        # client never calls `Transaction.finish()`, `Transaction.updates` re-delivers on every
+        # launch, and the user waits forever for something that cannot happen. 409 is the
+        # honest answer and lets the client finish the transaction.
+        logger.warning(
+            "IAP: user=%s submitted a transaction owned by another account: %s", user_id, e
+        )
+        return make_error_response(
+            ErrorCode.PURCHASE_ALREADY_LINKED,
+            message="Transaction is bound to a different account",
         )
     except IAPError as e:
         logger.error("IAP entitlement failed for user=%s: %s", user_id, e)

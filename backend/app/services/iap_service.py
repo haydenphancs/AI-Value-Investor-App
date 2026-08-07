@@ -50,6 +50,20 @@ class UnknownProduct(IAPError):
     """
 
 
+class PurchaseBoundToAnotherAccount(IAPError):
+    """The transaction is already owned by a different user, and ownership never moves.
+
+    TERMINAL, not retryable — and that distinction is the whole reason this class exists.
+    Sharing the generic `IAPError` meant `billing.py` answered it with `SYSTEM_BUSY` / 503 and
+    "Reopen the app shortly and it will be applied." StoreKit reads a 5xx as "try again", so
+    the client never calls `Transaction.finish()`, and `Transaction.updates` re-delivers the
+    same transaction on every single launch — forever, against a condition that by definition
+    can never clear. The user is told to wait for something that will not happen.
+
+    Answering 409 instead lets the client finish the transaction and show something true.
+    """
+
+
 # Tier ordering, worst → best. Used to pick the winning entitlement, so a user holding both
 # Pro and Max gets Max. Kept explicit rather than relying on the DB enum's declaration order.
 _TIER_RANK: Dict[str, int] = {"free": 0, "pro": 1, "premium": 2}
@@ -297,7 +311,9 @@ class IAPService:
                 "IAP: txn=%s is already bound to user=%s — refusing to rebind to user=%s",
                 original_txn_id, prior["user_id"], user_id,
             )
-            raise IAPError("this purchase is already linked to another account")
+            raise PurchaseBoundToAnotherAccount(
+                "this purchase is already linked to another account"
+            )
 
         # A user holds AT MOST ONE subscriptions row (`subscriptions_user_id_key UNIQUE
         # (user_id)`). So when the transaction is new to us but the user already has a row —

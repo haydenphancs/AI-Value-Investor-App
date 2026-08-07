@@ -12,6 +12,7 @@ test_research_concurrency_cap / test_ticker_report_credits mock style.
 """
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -178,3 +179,70 @@ async def test_get_credits_skips_reset_for_guest(monkeypatch):
     sb = _credits_supabase({"total": 100000, "used": 0, "remaining": 100000, "resets_at": None})
     await users.get_user_credits(user={"id": GUEST_USER_ID}, supabase=sb)
     inst.ensure_period.assert_not_called()   # guest is never reset
+
+
+# ── A refund that lands AFTER a monthly reset cannot mint credits ─────────────
+#
+# Flagged by the 2026-08-07 audit and left unresolved (its adversarial verifiers died on a
+# session limit). Resolved by reading the SQL: it is a FALSE ALARM, and this pins why so it is
+# not re-chased.
+#
+# The worry: a report fails at 23:59 on the last day of the month, `ensure_credit_period` rolls
+# the period, and the refund then lands in the NEW period — crediting back 20 credits that were
+# spent out of the OLD one.
+#
+# It cannot happen. `ensure_credit_period` (migration 100:224-230) sets `used = 0` on the roll,
+# and `refund_credits` (migration 101:139) floors at zero:
+#
+#     SET used = GREATEST(0, u.used - p_amount)
+#
+# so the late refund computes `GREATEST(0, 0 - 20) = 0` — no change. The ledger then records
+# `v_delta = prev.old_used - u.used = 0`, i.e. it reports the ACTUAL change rather than the
+# requested amount, so `sum(delta)` cannot desync from the balance either.
+#
+# The floor was written for "a stray double-refund"; the cross-period case falls out of the
+# same guard.
+
+_MIGRATIONS = Path(__file__).resolve().parents[1] / "database/migrations"
+
+
+def _sql(pattern: str) -> str:
+    matches = sorted(_MIGRATIONS.glob(pattern))
+    assert matches, f"no migration matching {pattern}"
+    return matches[-1].read_text()
+
+
+def test_the_monthly_reset_zeroes_used():
+    """Half of the reason a late refund is harmless."""
+    sql = _sql("100_*.sql")
+    reset = sql[sql.index("IF v_row.resets_at IS NULL OR now() >= v_row.resets_at"):]
+    reset = reset[: reset.index("END IF;")]
+    assert "used       = 0" in reset or "used = 0" in reset
+
+
+def test_refund_floors_used_at_zero():
+    """The other half. Without this floor, a refund crossing the boundary WOULD mint."""
+    sql = _sql("101_*.sql")
+    fn = sql[sql.index("CREATE OR REPLACE FUNCTION public.refund_credits"):]
+    assert "GREATEST(0, u.used - p_amount)" in fn, (
+        "the zero floor is what makes a post-reset refund a no-op instead of a credit grant"
+    )
+
+
+def test_the_refund_ledger_records_the_actual_change_not_the_request():
+    """So a no-op refund writes delta 0 rather than -20, and sum(delta) stays consistent with
+    the balance."""
+    sql = _sql("101_*.sql")
+    fn = sql[sql.index("CREATE OR REPLACE FUNCTION public.refund_credits"):]
+    assert "(prev.old_used - u.used)" in fn
+
+
+def test_refund_does_not_touch_total_or_resets_at():
+    """A refund must not roll the period itself — that would be a second way to mint."""
+    sql = _sql("101_*.sql")
+    fn = sql[sql.index("CREATE OR REPLACE FUNCTION public.refund_credits"):]
+    body = fn[: fn.index("$$;")]
+    update = body[body.index("UPDATE public.user_credits"):]
+    update = update[: update.index("RETURNING")]
+    assert "total" not in update, "refund_credits must never change the allocation"
+    assert "resets_at" not in update, "refund_credits must never roll the period"

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
+from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.gemini import get_gemini_client
 from app.schemas.index import (
     BenchmarkSummaryResponse,
@@ -1032,7 +1033,8 @@ Write in a conversational, confident tone. Be specific and data-driven."""
 
             ai_response = await gemini.generate_text(
                 prompt=prompt,
-                system_instruction=(
+                # Wrapped: IDENTITY_RULE + ADVICE_BOUNDARY (see persona_config).
+                system_instruction=neutral_system_instruction(
                     "You are a senior market strategist providing concise, insightful commentary. "
                     "Keep stories to 2-3 sentences. Use the placeholder tokens exactly as given."
                 ),

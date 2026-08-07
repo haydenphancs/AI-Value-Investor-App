@@ -100,11 +100,34 @@ class RiskAssessment(BaseModel):
 
 
 class ResearchReportDetail(BaseModel):
+    """The shape iOS decodes immediately after a 20-credit generation.
+
+    ⚠️ `stock_id` and `company_name` are REQUIRED here on purpose, and that is stricter than
+    the underlying `research_reports` columns.
+
+    The Swift side (`TaskPollingManager.swift`, `struct ResearchReportDetail`) declares both as
+    NON-optional `String`. Swift's synthesised `Decodable` throws on a null or absent value for
+    a non-optional field, so a single null here is a hard decode failure on the most expensive
+    path in the product — the user has already been charged 20 credits and waited ~60s, and the
+    report never renders. They previously read `Optional[... ] = None`, which meant nothing on
+    either side enforced the agreement; it held only because
+    `GET /research/reports/{report_id}` happens to inject both before returning.
+
+    Making them required moves that implicit guarantee into the type. If the injection is ever
+    removed or a row arrives without them, Pydantic raises at the response boundary — a loud,
+    logged, greppable 500 on OUR side — instead of shipping a null that crashes the decoder on
+    a device we cannot see. `tests/test_research_report_detail_parity.py` pins this to the
+    Swift declarations so the two cannot drift apart again.
+
+    NOTE the asymmetry with `ResearchReportListItem` below: its Swift counterpart
+    (`BackendReportListItem`) declares the same two fields as `String?`, so there they stay
+    optional. The contract is per-shape, not per-column.
+    """
     id: str
     user_id: str
-    stock_id: Optional[str] = None  # mirrors ticker for iOS stockId
+    stock_id: str          # injected from `ticker` by the endpoint; never null on the wire
     ticker: str
-    company_name: Optional[str] = None
+    company_name: str      # coalesced to `ticker` by the endpoint when the column is null
     industry: Optional[str] = None  # populated from FMP profile at insert time
     investor_persona: str
     status: str

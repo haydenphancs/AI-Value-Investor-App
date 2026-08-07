@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.config import settings
+from app.services.agents.persona_config import neutral_system_instruction
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client, is_transient_gemini_error
 from app.services.ticker_report_cache import current_close_cycle_start
@@ -140,7 +141,9 @@ _INSIGHT_SCHEMA: Dict[str, Any] = {
     "required": ["headline", "bullets", "sentiment"],
 }
 
-_SYSTEM_INSTRUCTION = (
+# Wrapped in IDENTITY_RULE + ADVICE_BOUNDARY: this brief is shown as Cay AI output on the
+# Updates tab, so it needs the same guards the report and chat surfaces get.
+_SYSTEM_INSTRUCTION = neutral_system_instruction(
     "You are an expert financial translator. You read a batch of financial news "
     "and distill it into ONE short brief for everyday investors. Keep the tone "
     "friendly, accessible and reliable. Use concrete numbers from the articles "
@@ -209,6 +212,15 @@ class NewsInsightService:
                 if not fut.done():
                     fut.set_result(fetched)
             finally:
+                # SETTLE ON CANCELLATION. CancelledError is a BaseException, so neither branch
+                # above runs when this coroutine is cancelled, and joiners parked on
+                # `await inflight` (line ~193) hang forever — on the Updates tab hot path.
+                #
+                # `{}` rather than an exception: it is already this method's documented
+                # degraded value (the `except` branch above sets exactly that), so joiners fall
+                # through to `build_fallback_card` instead of failing.
+                if not fut.done():
+                    fut.set_result({})
                 self._inflight.pop(key, None)
 
         now_mono = time.monotonic()

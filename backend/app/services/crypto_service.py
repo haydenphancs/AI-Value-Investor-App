@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.coingecko import get_coingecko_client, CoinGeckoClient
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.gemini import get_gemini_client
@@ -1521,7 +1522,8 @@ Separate each category with "===CATEGORY===" followed by the category name.
 
             ai_response = await gemini.generate_text(
                 prompt=prompt,
-                system_instruction=(
+                # Wrapped: IDENTITY_RULE + ADVICE_BOUNDARY (see persona_config).
+                system_instruction=neutral_system_instruction(
                     "You are a senior crypto analyst providing sharp, concise educational content. "
                     "Write factually. Keep paragraphs to 2-3 sentences max — no fluff. "
                     "Use 2 to 4 paragraphs per section — let the content dictate the count. "

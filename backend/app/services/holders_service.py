@@ -220,7 +220,13 @@ class HoldersService:
         # In-flight dedup
         if cache_key in _inflight:
             logger.info(f"Holders in-flight JOIN for {ticker}")
-            return await _inflight[cache_key]
+            # SHIELDED. Awaiting the shared future directly means a joiner that gives up
+            # (client disconnect, request timeout) CANCELS THE FUTURE ITSELF — and the leader's
+            # `set_result` then raises InvalidStateError, 500ing a request whose data loaded
+            # perfectly, while every other joiner gets a CancelledError. Verified: an
+            # unshielded joiner cancellation makes the leader's set_result raise; a shielded
+            # one leaves it untouched. Matches profit_power_service.py.
+            return await asyncio.shield(_inflight[cache_key])
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -232,14 +238,16 @@ class HoldersService:
             if db_cached is not None:
                 logger.info(f"Holders Supabase cache HIT for {ticker}")
                 _cache_set(cache_key, db_cached)
-                future.set_result(db_cached)
+                if not future.done():
+                    future.set_result(db_cached)
                 return db_cached
 
             # Cache miss — build from FMP
             logger.info(f"Holders cache MISS for {ticker} — fetching from FMP")
             result, degraded = await self._build_holders(ticker)
             _cache_set(cache_key, result)
-            future.set_result(result)
+            if not future.done():
+                future.set_result(result)
 
             # Upsert to Supabase in background (non-blocking) — but ONLY when the
             # build was complete. A degraded build (an FMP call failed and
@@ -266,7 +274,8 @@ class HoldersService:
 
             return result
         except Exception as e:
-            future.set_exception(e)
+            if not future.done():
+                future.set_exception(e)
             raise
         finally:
             _inflight.pop(cache_key, None)

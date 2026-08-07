@@ -2089,6 +2089,13 @@ class TickerReportDataCollector:
         ]
         full_factor_set = fred_factors + fmp_factors + grounded_kept
 
+        # Was the authoritative macro tier actually read? `fred_indicators` is the raw
+        # FRED payload; empty means either unconfigured (see `_warn_unconfigured_once` in
+        # integrations/fred.py) or a total upstream failure. Either way the deterministic
+        # inflation / interest-rate / recession / credit categories are simply ABSENT, and
+        # the report must not present that as an all-clear.
+        macro_measured = bool(out.fred_indicators)
+
         macro_sector = (out.profile or {}).get("sector")
         threat_level, composite = _compute_macro_threat(
             full_factor_set, macro_sector,
@@ -2106,13 +2113,18 @@ class TickerReportDataCollector:
         risk_factors = [_strip_risk_group(rf) for rf in risk_factors_internal]
         macro_data = {
             "overall_threat_level": threat_level,
+            # `measured` = did the AUTHORITATIVE tier actually produce anything? With
+            # FRED unconfigured `fred_factors` is empty AND no FRED read happened, so an
+            # empty risk set means "not measured", not "nothing tripped".
             "headline": ai_macro.get("headline") or _fallback_macro_headline(
-                threat_level, risk_factors
+                threat_level, risk_factors, measured=macro_measured
             ),
             "risk_factors": risk_factors,
             "intelligence_brief": (
                 ai_macro.get("intelligence_brief")
-                or _fallback_macro_brief(threat_level, risk_factors)
+                or _fallback_macro_brief(
+                    threat_level, risk_factors, measured=macro_measured
+                )
             ),
             "last_updated": datetime.now(timezone.utc).strftime("Updated %b %d, %Y"),
         }
@@ -7362,15 +7374,33 @@ _THREAT_PHRASE = {
 
 
 def _fallback_macro_headline(
-    threat_level: str, risk_factors: List[Dict[str, Any]]
+    threat_level: str,
+    risk_factors: List[Dict[str, Any]],
+    *,
+    measured: bool = True,
 ) -> str:
     """Deterministic macro headline for when the AI narrative is absent.
 
     Never claims "unavailable" while factors exist — it summarizes the
     DETERMINISTIC tier + the top (most-severe-first) factor instead, so the
     headline can't contradict the threat badge + factor list shown beneath it.
+
+    ⚠️ `measured=False` means the AUTHORITATIVE tier was never read: FRED was
+    unconfigured or returned nothing, so CPI, Core PCE, breakevens, Fed Funds,
+    DGS10, T10Y2Y, UNRATE, ICSA and HY OAS were all absent from the factor set.
+    An empty factor set then looks identical to a genuinely calm tape — and this
+    function used to answer it with a confident "Benign macro backdrop — no
+    indicators tripping risk thresholds", which is an all-clear derived from no
+    data at all. In a product that publishes its own ratings, that is the most
+    dangerous shape a fallback can take. Say "unavailable" instead: unknown and
+    benign are different claims.
     """
     if not risk_factors:
+        if not measured:
+            return (
+                "Macro data unavailable — economic indicators could not be read, "
+                "so no macro assessment was made."
+            )
         return "Benign macro backdrop — no indicators tripping risk thresholds."
     phrase = _THREAT_PHRASE.get((threat_level or "elevated").lower(), "Elevated macro risk")
     top = (risk_factors[0].get("title") or "").strip()
@@ -7380,12 +7410,25 @@ def _fallback_macro_headline(
 
 
 def _fallback_macro_brief(
-    threat_level: str, risk_factors: List[Dict[str, Any]]
+    threat_level: str,
+    risk_factors: List[Dict[str, Any]],
+    *,
+    measured: bool = True,
 ) -> str:
     """Deterministic intelligence brief when the AI narrative is absent — a
     one-liner grounded in the computed tier + the top factors, so the brief
-    doesn't read "Data unavailable" while factors are displayed above it."""
+    doesn't read "Data unavailable" while factors are displayed above it.
+
+    `measured=False` carries the same meaning as in `_fallback_macro_headline`:
+    the authoritative FRED tier was never read, so silence is unknown rather
+    than benign."""
     if not risk_factors:
+        if not measured:
+            return (
+                "Economic indicators could not be read at compute time, so this "
+                "report contains no macro assessment. Treat the macro backdrop as "
+                "unknown rather than benign."
+            )
         return "No macro indicators are currently tripping risk thresholds for this name."
     titles = [(rf.get("title") or "").strip() for rf in risk_factors[:3] if rf.get("title")]
     lead = ", ".join(titles) if titles else "multiple fronts"

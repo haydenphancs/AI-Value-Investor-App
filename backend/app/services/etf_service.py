@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
+from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.gemini import get_gemini_client
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
@@ -1714,7 +1715,10 @@ RULES:
 
             ai_response = await gemini.generate_text(
                 prompt=prompt,
-                system_instruction="You are a concise financial writer. Output only the requested sentence.",
+                # Wrapped: IDENTITY_RULE + ADVICE_BOUNDARY (see persona_config).
+                system_instruction=neutral_system_instruction(
+                    "You are a concise financial writer. Output only the requested sentence."
+                ),
                 model_name="gemini-2.5-flash",
             )
 

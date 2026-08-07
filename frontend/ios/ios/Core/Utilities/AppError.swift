@@ -44,6 +44,19 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     case validationFailed(message: String)
     case rateLimited(retryAfter: Int)
 
+    /// The App Store transaction belongs to a DIFFERENT Caydex account (409
+    /// `PURCHASE_ALREADY_LINKED`). TERMINAL: ownership of a transaction never moves, so no
+    /// amount of retrying can clear it.
+    ///
+    /// Its own case rather than `.forbidden` because "You don't have permission to perform this
+    /// action" is materially wrong here — the user is not lacking a permission, their purchase
+    /// is attached to another account and they need to sign in with it. And not `.apiError`,
+    /// whose `suggestedAction` is `.retry`: this arrived as a retryable 503 SYSTEM_BUSY, which
+    /// told the user to "reopen the app shortly" AND kept `StoreKitService` from calling
+    /// `Transaction.finish()`, so Apple redelivered the same transaction on every launch
+    /// forever, against a condition that can never resolve.
+    case purchaseAlreadyLinked(message: String)
+
     // API errors (from backend)
     case apiError(code: String, message: String)
 
@@ -65,6 +78,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .notFound(let r): return "not_found_\(r)"
         case .validationFailed: return "validation"
         case .rateLimited: return "rate_limited"
+        case .purchaseAlreadyLinked: return "purchase_already_linked"
         case .apiError(let code, _): return "api_\(code)"
         case .unknown: return "unknown"
         }
@@ -98,6 +112,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Invalid Input"
         case .rateLimited:
             return "Too Many Requests"
+        case .purchaseAlreadyLinked:
+            return "Purchase Linked Elsewhere"
         case .apiError:
             return "Error"
         case .unknown:
@@ -141,6 +157,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "The requested \(resource) could not be found."
         case .validationFailed(let msg):
             return msg
+        case .purchaseAlreadyLinked(let message):
+            return message
         case .rateLimited(let seconds):
             return "Please wait \(seconds) seconds before trying again."
         case .apiError(_, let msg):
@@ -174,6 +192,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return .fixInput
         case .rateLimited:
             return .waitAndRetry
+        // NOT .retry — the condition can never clear, and a retry button is what kept the
+        // StoreKit transaction alive across every launch.
+        case .purchaseAlreadyLinked:
+            return .contactSupport
         case .apiError, .unknown:
             return .retry
         }
@@ -344,6 +366,15 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "SYSTEM_BUSY" || code == "TOO_MANY_CONCURRENT_REPORTS" {
                 return .apiError(code: code, message: message)
             }
+            // The App Store transaction belongs to a DIFFERENT Caydex account (HTTP 409).
+            // TERMINAL — ownership never moves, so retrying can never succeed. Deliberately
+            // NOT `.apiError`, whose `suggestedAction` is `.retry`: this used to arrive as a
+            // 503 SYSTEM_BUSY telling the user to "reopen the app shortly", which also meant
+            // `StoreKitService` never called `Transaction.finish()` and Apple redelivered the
+            // same transaction on every launch, forever.
+            if code == "PURCHASE_ALREADY_LINKED" {
+                return .purchaseAlreadyLinked(message: message)
+            }
             // A theme card tapped after it was deleted → a typed .notFound rather
             // than a generic .apiError (per the "don't fall through" rule).
             if code == "THEME_NOT_FOUND" {
@@ -513,6 +544,7 @@ extension AppError {
         case .notFound:            return "not_found"
         case .validationFailed:    return "validation_failed"
         case .rateLimited:         return "rate_limited"
+        case .purchaseAlreadyLinked: return "purchase_already_linked"
         // The backend's ErrorCode enum is already a stable machine-readable
         // vocabulary, so it is safe as a dimension. The message is not.
         case .apiError(let code, _): return code

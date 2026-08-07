@@ -539,7 +539,11 @@ struct ProfileView: View {
     // on this screen.
 
     private func openFeedback() {
-        if let url = URL(string: "mailto:feedback@caydexinvest.com?subject=App%20Feedback") {
+        // `support@`, NOT `feedback@`. Cloudflare Email Routing carries only support@,
+        // copyright@ and privacy@ (LAUNCH_CHECKLIST §2) — feedback@ has no route, so every
+        // message sent from this button bounced or vanished. The subject line keeps the two
+        // streams separable in the one inbox.
+        if let url = URL(string: "mailto:support@caydexinvest.com?subject=App%20Feedback") {
             UIApplication.shared.open(url)
         }
     }

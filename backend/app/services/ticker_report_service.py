@@ -59,21 +59,15 @@ from app.services.ticker_report_cache import (
 logger = logging.getLogger(__name__)
 
 
-# Degradation marker. Kept OUT of the response schema on purpose: it rides on the Stage A
-# shell dict (which is internal) and on the returned report under a leading-underscore key,
-# so it never has to be added to `TickerReportResponse` and can never break the iOS decoder.
-_DEGRADED_KEY = "_stage_a_degraded"
-
-
-def _mark_degraded(shell: dict, reason: str) -> dict:
-    """Tag a fallback shell so the caller knows this report is not real."""
-    if isinstance(shell, dict):
-        shell[_DEGRADED_KEY] = reason
-    return shell
-
-
-def _degraded_reason(shell) -> str | None:
-    return shell.get(_DEGRADED_KEY) if isinstance(shell, dict) else None
+# Degradation marker — now shared with the deep path (`ResearchAgent`), which had the
+# identical bug open on the more expensive door. Re-exported here because ~5 tests and the
+# rest of this module reference `ticker_report_service._mark_degraded` by name.
+# See `app/services/report_degradation.py` for the full reasoning.
+from app.services.report_degradation import (  # noqa: E402
+    _DEGRADED_KEY,
+    _degraded_reason,
+    _mark_degraded,
+)
 
 
 class TickerReportService:

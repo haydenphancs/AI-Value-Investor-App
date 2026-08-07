@@ -22,6 +22,21 @@ struct TintedSparkline: View {
     var showBaseline: Bool = false
     var showEndDot: Bool = false
     var lineWidth: CGFloat = 2
+    /// Direction this series represents, for the non-colour cue under Differentiate
+    /// Without Color. `nil` = the tint carries no sentiment (a neutral series), so no
+    /// cue is owed. Callers pass `bullish`/`bearish` as `color`, and the COLOUR was the
+    /// only thing distinguishing them — hence this parameter rather than inferring from
+    /// the series, whose slope is not the same claim as the caller's verdict.
+    var isPositive: Bool? = nil
+
+    @Environment(\.differentiateWithoutColor) private var differentiate
+
+    /// Dash the negative line only. `isPositive == nil` keeps the solid style.
+    private var lineStyle: StrokeStyle {
+        AppSentiment.strokeStyle(isPositive: isPositive ?? true,
+                                 differentiate: differentiate && isPositive != nil,
+                                 lineWidth: lineWidth)
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -65,17 +80,21 @@ struct TintedSparkline: View {
                         path.move(to: first)
                         pts.dropFirst().forEach { path.addLine(to: $0) }
                     }
-                    .stroke(
-                        color,
-                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
-                    )
+                    .stroke(color, style: lineStyle)
 
-                    // Optional end-point dot.
+                    // Optional end-point dot. Under DWC it becomes a hollow ring for a
+                    // negative series — same trick as a hollow candle body, and it reads
+                    // at 6pt where a dash would not.
                     if showEndDot, let last = pts.last {
-                        Circle()
-                            .fill(color)
-                            .frame(width: 6, height: 6)
-                            .position(last)
+                        Group {
+                            if differentiate, isPositive == false {
+                                Circle().strokeBorder(color, lineWidth: 2)
+                            } else {
+                                Circle().fill(color)
+                            }
+                        }
+                        .frame(width: 6, height: 6)
+                        .position(last)
                     }
                 }
             }
@@ -83,17 +102,33 @@ struct TintedSparkline: View {
     }
 }
 
-#Preview {
-    VStack(spacing: 24) {
-        TintedSparkline(points: [4, 8, 6, 14, 12, 22, 20, 31], color: AppColors.bullish)
-            .frame(width: 100, height: 18)
-        TintedSparkline(points: [28, 24, 26, 18, 16, 10, 12, 4], color: AppColors.bearish,
-                        showBaseline: true, showEndDot: true)
-            .frame(width: 104, height: 48)
-        TintedSparkline(points: [26, 22, 24, 18, 20, 14, 16, 11], color: AppColors.neutral,
-                        showEndDot: true)
-            .frame(width: 104, height: 48)
+#Preview("Default") {
+    TintedSparklinePreviewBody()
+        .differentiateWithoutColor(false)
+}
+
+/// The whole point of the override: SwiftUI's own DWC key is get-only, so without
+/// `.differentiateWithoutColor(_:)` there is no way to see this state in a canvas.
+#Preview("Differentiate Without Color") {
+    TintedSparklinePreviewBody()
+        .differentiateWithoutColor(true)
+}
+
+private struct TintedSparklinePreviewBody: View {
+    var body: some View {
+        VStack(spacing: 24) {
+            TintedSparkline(points: [4, 8, 6, 14, 12, 22, 20, 31], color: AppColors.bullish,
+                            showEndDot: true, isPositive: true)
+                .frame(width: 104, height: 48)
+            TintedSparkline(points: [28, 24, 26, 18, 16, 10, 12, 4], color: AppColors.bearish,
+                            showBaseline: true, showEndDot: true, isPositive: false)
+                .frame(width: 104, height: 48)
+            // Neutral: no sentiment, so no cue is owed and none appears.
+            TintedSparkline(points: [26, 22, 24, 18, 20, 14, 16, 11], color: AppColors.neutral,
+                            showEndDot: true)
+                .frame(width: 104, height: 48)
+        }
+        .padding()
+        .background(AppColors.cardBackground)
     }
-    .padding()
-    .background(AppColors.cardBackground)
 }

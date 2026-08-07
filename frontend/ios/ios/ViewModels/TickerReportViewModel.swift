@@ -102,6 +102,38 @@ class TickerReportViewModel: ObservableObject {
         await _fetchReport()
     }
 
+    /// The backend `ErrorCode`s that mean "this stored report isn't available", as opposed to
+    /// "we couldn't reach it". Only these justify falling through to the BILLABLE live fetch.
+    ///
+    /// Sourced from `research.py::get_research_ticker_report`, which documents its own
+    /// contract: REPORT_NOT_FOUND (no row), REPORT_NOT_READY (still generating),
+    /// DATA_INCOMPLETE (completed but the JSONB column was empty). Keep in step with it —
+    /// `/list-error-codes` verifies the enum on both sides.
+    private static let fallthroughErrorCodes: Set<String> = [
+        "REPORT_NOT_FOUND",
+        "REPORT_NOT_READY",
+        "DATA_INCOMPLETE",
+    ]
+
+    /// True when the stored report is genuinely absent, so regenerating is the right move.
+    ///
+    /// Everything else — network, timeout, 5xx, rate-limit, decode, auth — is a TRANSPORT or
+    /// CONTRACT failure. Those must surface, because falling through spends the user's money
+    /// on a report they already paid for.
+    static func reportIsGenuinelyUnavailable(_ error: Error) -> Bool {
+        guard let apiError = error as? APIError else { return false }
+        switch apiError {
+        case .notFound:
+            return true
+        case .businessError(let code, _):
+            return fallthroughErrorCodes.contains(code)
+        default:
+            // .networkError, .decodingError, .serverError, .rateLimited, .unauthorized,
+            // .forbidden, .unknown — all mean "we could not read it", not "it is not there".
+            return false
+        }
+    }
+
     /// Core fetch logic — shared by loadReport() and refresh()
     private func _fetchReport() async {
         let attempt = self.loadAttempts
@@ -124,9 +156,30 @@ class TickerReportViewModel: ObservableObject {
                 self.isLoading = false
                 return
             } catch {
-                // Most common: 409 (report not yet completed) or 404
-                // (data column was empty). Fall through to live fetch.
-                print("⚠️ [TickerReport] Cached ticker_report_data unavailable for \(reportId): \(type(of: error)): \(error.localizedDescription). Falling back to live fetch.")
+                // ⚠️ FALL THROUGH ONLY WHEN THE REPORT GENUINELY ISN'T THERE.
+                //
+                // Path B below is BILLABLE: on a cache miss it runs the full ~17 Gemini +
+                // ~20 FMP pipeline and charges 20 credits. This `catch` used to be
+                // unqualified, so ANY failure reaching it — a network blip, a timeout, a
+                // transient 500, a rate-limit, or a Codable `decodingError` — silently
+                // re-bought a report the user already owns.
+                //
+                // The realistic case: you open last week's report from the Reports tab, the
+                // connection hiccups, that (ticker, persona) cache row has since rotated out
+                // of the close cycle → 20 credits, no prompt, no way to tell it happened.
+                // A DTO drift is worse still: the decode fails every time, so that report
+                // charges on EVERY open, forever.
+                //
+                // The backend documents exactly three "not there" outcomes for this route
+                // (research.py `get_research_ticker_report`), and only those may fall through.
+                if Self.reportIsGenuinelyUnavailable(error) {
+                    print("⚠️ [TickerReport] Cached ticker_report_data unavailable for \(reportId): \(type(of: error)): \(error.localizedDescription). Falling back to live fetch.")
+                } else {
+                    print("❌ [TickerReport] Cached report \(reportId) failed to load (\(type(of: error)): \(error)) — NOT falling through to a billable regeneration.")
+                    self.isLoading = false
+                    self.error = self.userFriendlyError(error)
+                    return
+                }
             }
         }
 

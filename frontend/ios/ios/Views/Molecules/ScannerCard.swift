@@ -42,6 +42,16 @@ struct ScannerCard: View {
         }
     }
 
+    /// Direction the spark tint is CLAIMING, or `nil` where the tint is a category accent
+    /// carrying no sentiment. Mirrors `heroSparkColor` exactly — they must stay in step,
+    /// because this is the non-colour half of the same encoding.
+    private var heroSparkDirection: Bool? {
+        switch scanner.kind {
+        case .movers, .volume: return head?.isPositive ?? true
+        case .shorts: return nil
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -88,9 +98,16 @@ struct ScannerCard: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
+                    // Two lines, not one. This title shares its row with a `fixedSize`
+                    // toggle, so at larger content sizes the shortfall lands here — it
+                    // reflowed to four lines ("Today's Top Movers") before the toggle
+                    // stopped refusing to compress. Two is acceptable, four is not, and
+                    // the scale factor keeps a long title on two.
                     Text(scanner.title)
                         .font(AppTypography.bodySmallEmphasis)
                         .foregroundColor(AppColors.textPrimary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.85)
 
                     // Tappable info affordance — shown only when this card carries
                     // an explainer. Tapping pops over the note instead of always
@@ -146,7 +163,8 @@ struct ScannerCard: View {
                 color: heroSparkColor,
                 showBaseline: scanner.kind == .movers,
                 showEndDot: true,
-                lineWidth: 2.2
+                lineWidth: 2.2,
+                isPositive: heroSparkDirection
             )
             .frame(width: 104, height: 48)
         }
@@ -236,7 +254,7 @@ struct ScannerCard: View {
             .foregroundColor(AppColors.primaryBlue)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 9)
-            .background(Color(lightHex: "EEF1F6", darkHex: "14171F"))
+            .background(AppColors.surfaceRecessed)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)

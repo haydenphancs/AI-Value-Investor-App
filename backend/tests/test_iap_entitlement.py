@@ -116,11 +116,12 @@ _PLAN_CREDITS = {"free": 50, "pro": 1200, "premium": 4000}
 class FakeSupabase:
     """Fake Supabase client.
 
-    The `rpc` handler MODELS the SQL of `ensure_credit_period` (migration 100) and
-    `grant_tier_upgrade` (migration 112) rather than merely recording that they were called.
-    That matters: a fake that returns a bland success for every rpc makes a credit test pass
-    no matter what the balance does, which is exactly how a money bug survives a green suite.
-    Keep this model in step with those two migrations — if you change the SQL, change this.
+    The `rpc` handler MODELS the SQL of `ensure_credit_period` (migration 100),
+    `grant_tier_upgrade` (migration 112) and `revoke_tier_credits` (migration 114) rather than
+    merely recording that they were called. That matters: a fake that returns a bland success
+    for every rpc makes a credit test pass no matter what the balance does, which is exactly
+    how a money bug survives a green suite. Keep this model in step with those three
+    migrations — if you change the SQL, change this.
     """
 
     def __init__(self, fail=(), subscriptions=None, credits=None, period_due=False):
@@ -166,6 +167,14 @@ class FakeSupabase:
                 # Raises the ceiling; `used` is preserved (migration 112).
                 self.credits["total"] = alloc
             # else: replay or downgrade -> no-op, no clawback.
+        elif name == "revoke_tier_credits":
+            # Migration 114. Floors at GREATEST(free_allocation, used) so `remaining` — a
+            # GENERATED column, total - used — can never go negative. Idempotent: a replayed
+            # REFUND finds total already at the floor.
+            if self.credits is not None:
+                floor = max(_PLAN_CREDITS["free"], self.credits["used"])
+                if self.credits["total"] > floor:
+                    self.credits["total"] = floor
 
         return type("R", (), {"execute": lambda *_a, **_k: None})()
 
@@ -586,3 +595,246 @@ def test_local_testing_needs_no_certificates(_restore_iap_settings):
     settings.IAP_ROOT_CERT_DIR = "certs/definitely-not-here"
     app_store.reset_verifier_cache()
     assert app_store.get_verifier() is not None
+
+
+# ── Refund must take the UNSPENT credits back (migration 114 part 1) ──────────
+#
+# `grant_tier_upgrade` never lowers `total` — deliberately, so a VOLUNTARY downgrade does not
+# delete credits the user already paid for (migration 112 §2). Revocation routed through the
+# same call, so `reconcile_user_tier` dropped the tier while the allocation stayed spendable:
+# a refunded Max subscriber kept 4000 credits, roughly 200 AI reports at ~17 Gemini + ~20 FMP
+# calls each, having paid nothing. The tier flipping to free made it look handled.
+
+def _revoked_txn(product=_MAX, txn_id="txn-refund"):
+    return _txn(product=product, txn_id=txn_id, revocationDate=_ms(datetime.now(timezone.utc)))
+
+
+def test_a_refund_claws_back_the_unspent_allocation():
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-refund"))
+    assert sb.credits == {"total": 4000, "used": 0}
+
+    s.apply_transaction(_USER, _revoked_txn())
+
+    assert s.winning_tier(_USER) == "free"
+    assert sb.credits["total"] == 50, "a refunded subscriber must not keep the paid allocation"
+    assert ("revoke_tier_credits", {"p_user_id": _USER}) in sb.rpcs
+
+
+def test_the_clawback_never_drives_remaining_negative():
+    """`remaining` is a GENERATED column (total - used). Flooring at `used` is what keeps it
+    from going negative — every later charge would otherwise fail a CHECK rather than a
+    balance test. Credits already SPENT are a business loss, not a modelling problem."""
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-refund"))
+    sb.credits["used"] = 900          # spent 900 of 4000 before refunding
+
+    s.apply_transaction(_USER, _revoked_txn())
+
+    assert sb.credits["total"] == 900
+    assert sb.remaining == 0, "remaining must floor at zero, never go negative"
+
+
+def test_the_clawback_is_idempotent_across_apple_retries():
+    """Apple retries a notification up to 5 times over ~8 hours."""
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-refund"))
+    sb.credits["used"] = 120
+
+    for _ in range(4):
+        s.apply_transaction(_USER, _revoked_txn())
+
+    assert sb.credits["total"] == 120
+    assert sb.remaining == 0
+
+
+def test_an_ordinary_expiry_does_NOT_claw_back():
+    """Only a REFUND claws back. An expiry means the paid period was fully used — the next
+    monthly reset lowers the allocation naturally, and stripping it early would punish
+    someone who paid for what they got."""
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-e"))
+    s.apply_notification(
+        {"notificationType": "EXPIRED"},
+        _txn(product=_MAX, txn_id="txn-e", expires_in_days=-1),
+    )
+    assert s.winning_tier(_USER) == "free"
+    assert sb.credits["total"] == 4000, "expiry is not a refund"
+    assert not any(n == "revoke_tier_credits" for n, _ in sb.rpcs)
+
+
+def test_a_refund_does_not_strip_a_user_who_is_still_entitled():
+    """The clawback is gated on `winning_tier == "free"`, so a refund can never disentitle
+    someone who is still paying.
+
+    `subscriptions_user_id_key UNIQUE (user_id)` means a user holds AT MOST ONE row today —
+    `apply_transaction` updates the existing row rather than inserting a second — so this is
+    a guard against a future multi-row world (a second store, or family sharing) rather than
+    a reachable state now. Seed the rows directly, since the service layer cannot produce them.
+    """
+    future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    sb = FakeSupabase(subscriptions=[
+        {"id": "row-1", "user_id": _USER, "tier": "premium", "status": "revoked",
+         "original_transaction_id": "txn-a", "current_period_end": future},
+        {"id": "row-2", "user_id": _USER, "tier": "pro", "status": "active",
+         "original_transaction_id": "txn-b", "current_period_end": future},
+    ], credits={"total": 4000, "used": 0})
+    s = _service(sb)
+
+    assert s.winning_tier(_USER) == "pro", "the still-active row must keep them entitled"
+
+    s.apply_transaction(_USER, _revoked_txn(product=_MAX, txn_id="txn-a"))
+
+    assert sb.credits["total"] == 4000, "must not claw back from a still-entitled user"
+    assert not any(n == "revoke_tier_credits" for n, _ in sb.rpcs)
+
+
+def test_a_missing_revoke_rpc_degrades_instead_of_failing_the_webhook():
+    """Migration 114 is applied by hand. Until it is, the tier must still drop — and the
+    webhook must still return 2xx, or Apple redelivers a notification we DID apply."""
+    sb = FakeSupabase(fail={"revoke_tier_credits"})
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-refund"))
+
+    s.apply_transaction(_USER, _revoked_txn())      # must not raise
+
+    assert s.winning_tier(_USER) == "free"
+
+
+# ── Out-of-order notifications (migration 114 part 2) ─────────────────────────
+#
+# Apple guarantees NO ordering and retries for ~8 hours, so a redelivered EXPIRED can land
+# after the DID_RENEW that superseded it. `apply_transaction` blind-overwrote tier/status/
+# current_period_end with whatever arrived last, so the LAST delivery won regardless of which
+# described the newer state — silently demoting a paying subscriber.
+
+def _renew_notification(txn_id, *, signed_at, expires_in_days):
+    return (
+        {"notificationType": "DID_RENEW", "signedDate": _ms(signed_at)},
+        _txn(product=_PRO, txn_id=txn_id, expires_in_days=expires_in_days),
+    )
+
+
+def _expired_notification(txn_id, *, signed_at, expires_in_days):
+    return (
+        {"notificationType": "EXPIRED", "signedDate": _ms(signed_at)},
+        _txn(product=_PRO, txn_id=txn_id, expires_in_days=expires_in_days),
+    )
+
+
+def test_a_stale_EXPIRED_redelivery_does_not_demote_a_renewed_subscriber():
+    """THE bug. The renewal was signed later, so the expiry is older news."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_PRO, txn_id="txn-r"))
+
+    s.apply_notification(*_renew_notification(
+        "txn-r", signed_at=now, expires_in_days=30,
+    ))
+    s.apply_notification(*_expired_notification(
+        "txn-r", signed_at=now - timedelta(hours=6), expires_in_days=-1,
+    ))
+
+    assert s.winning_tier(_USER) == "pro", "a redelivered EXPIRED must not demote a payer"
+
+
+def test_notifications_still_apply_in_order():
+    """The guard must only reject OLDER deliveries — a genuine later expiry still lands."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_PRO, txn_id="txn-r"))
+
+    s.apply_notification(*_renew_notification(
+        "txn-r", signed_at=now - timedelta(hours=6), expires_in_days=30,
+    ))
+    s.apply_notification(*_expired_notification(
+        "txn-r", signed_at=now, expires_in_days=-1,
+    ))
+
+    assert s.winning_tier(_USER) == "free"
+
+
+def test_a_stale_delivery_can_never_block_a_refund():
+    """A refund is authoritative even when it arrives out of order — leaving a refunded user
+    entitled is the expensive direction."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-r"))
+    s.apply_notification(*_renew_notification("txn-r", signed_at=now, expires_in_days=30))
+
+    s.apply_notification(
+        {"notificationType": "REFUND", "signedDate": _ms(now - timedelta(days=1))},
+        _revoked_txn(product=_MAX, txn_id="txn-r"),
+    )
+    assert s.winning_tier(_USER) == "free"
+
+
+def test_the_client_verify_path_is_never_treated_as_stale():
+    """A transaction carries no signedDate, so it is unorderable. Dropping it would break
+    Restore Purchases and the normal buy flow."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_PRO, txn_id="txn-r"))
+    s.apply_notification(*_renew_notification("txn-r", signed_at=now, expires_in_days=30))
+
+    out = s.apply_transaction(_USER, _txn(product=_MAX, txn_id="txn-r", expires_in_days=30))
+    assert out["was_stale"] is False
+    assert s.winning_tier(_USER) == "premium"
+
+
+def test_ordering_is_on_signedDate_not_expiresDate():
+    """The distinction is the whole design. An EXPIRED notification is signed LATE and carries
+    an EARLY expiresDate, because it describes the period that just ended. Ordering on
+    expiresDate would classify every ordinary expiry as stale and keep lapsed subscribers
+    paid — the opposite bug, and the more expensive one."""
+    now = datetime.now(timezone.utc)
+    prior = {
+        "id": "row-1", "tier": "pro", "status": "active",
+        "current_period_end": (now + timedelta(days=30)).isoformat(),
+        "last_event_at": (now - timedelta(hours=6)).isoformat(),
+    }
+    # Later signedDate, EARLIER expiresDate — a real expiry. Must apply.
+    assert svc._stale_delivery_reason(prior, status="expired", event_at=now) is None
+    # Earlier signedDate — genuinely stale. Must be skipped.
+    assert svc._stale_delivery_reason(
+        prior, status="expired", event_at=now - timedelta(days=1)
+    ) is not None
+
+
+def test_the_guard_is_inert_before_migration_114_is_applied():
+    """Deploy order is not guaranteed. With no stored `last_event_at` there is nothing to
+    compare against, so every delivery applies exactly as it does today."""
+    now = datetime.now(timezone.utc)
+    prior_without_column = {"id": "row-1", "tier": "pro", "status": "active"}
+    assert svc._stale_delivery_reason(
+        prior_without_column, status="expired", event_at=now - timedelta(days=99)
+    ) is None
+
+
+@pytest.mark.parametrize("junk", [None, "", "not-a-date", 12345, "2026-13-45T99:99:99"])
+def test_a_junk_stored_timestamp_never_raises(junk):
+    """`_parse_iso` must degrade to None rather than raise — this runs inside a webhook, and
+    a TypeError here would make Apple redeliver forever."""
+    now = datetime.now(timezone.utc)
+    prior = {"id": "row-1", "tier": "pro", "status": "active", "last_event_at": junk}
+    assert svc._stale_delivery_reason(prior, status="active", event_at=now) is None
+
+
+def test_a_naive_stored_timestamp_is_comparable():
+    """Postgres emits +00:00 but some clients emit a naive string. Comparing naive against the
+    aware datetime derived from Apple's epoch-ms raises TypeError, which would 500 the
+    webhook."""
+    now = datetime.now(timezone.utc)
+    prior = {
+        "id": "row-1", "tier": "pro", "status": "active",
+        "last_event_at": (now + timedelta(days=1)).replace(tzinfo=None).isoformat(),
+    }
+    assert svc._stale_delivery_reason(prior, status="expired", event_at=now) is not None

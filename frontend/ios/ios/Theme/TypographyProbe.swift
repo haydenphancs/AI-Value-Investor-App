@@ -6,15 +6,20 @@
 //
 //  WHY THIS EXISTS
 //  ---------------
-//  `AppTypography` is 40 `Font.system(size:)` declarations with fixed point sizes,
-//  and the app contains zero references to `dynamicTypeSize`, `sizeCategory`,
-//  `ScaledMetric` or `Font.system(_:relativeTo:)`. Whether that means "Dynamic Type
-//  is inert" depends on a fact about SwiftUI that is widely asserted in both
-//  directions: does `Font.system(size:)` scale with the user's text-size setting?
+//  This probe was written to settle a question asserted in both directions: does
+//  `Font.system(size:)` scale with the user's text-size setting? It MEASURED the
+//  answer — it does NOT (18.0pt flat from xSmall to AX5, while `Font.body` goes
+//  18.7 → 69.0) — so all 40 `AppTypography` tokens, and therefore ~2,229 call sites,
+//  were inert for every user who had ever changed their text size.
 //
-//  The answer decides how much work Dynamic Type support is — a whole type-scale
-//  migration, or clamps plus layout fixes — so it is MEASURED here rather than
+//  That finding is now FIXED: the tokens are computed `static var`s that scale via
+//  `UIFontMetrics` under the `readingCap`/`dataCap` clamps, and `iosApp` reads
+//  `\.dynamicTypeSize` so the tree re-evaluates. The probe stays because it is the
+//  only thing that can prove the mechanism still works, and because of the harness
+//  trap documented below — which is why the answer must be re-measured, never
 //  remembered. Same discipline as `AppearanceProbe`: read the log, not a screenshot.
+//
+//  Driven across every content-size category by `frontend/ios/scripts/type-sweep.sh`.
 //
 //  `print` over `os.Logger` for the same reason `AppearanceProbe` gives: the
 //  verification recipe captures stdout via `simctl launch --console-pty`, which

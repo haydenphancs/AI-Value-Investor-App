@@ -12,6 +12,17 @@
 # codebase and shipped, and every one is documented in
 # .claude/rules/ios-swiftui.md.
 #
+# WHAT LIVES HERE, AND WHAT DOES NOT
+# ----------------------------------
+# Only the five FILE-SHAPE rules — 1, 5, 6, 7, 8 — the ones a grep pipeline expresses
+# as well as anything could. Rules 2, 3, 4 and 9 needed per-entry reasoning and
+# anti-vacuity controls that a shell pipeline cannot express, so they now live in
+# backend/tests/test_ios_theme_parity.py, which a PostToolUse hook runs on every themed
+# edit. See the stubs below for where each one went; the numbers are left as gaps on
+# purpose. One rule, one home.
+#
+# That module also SHELLS OUT to this script, so running the pytest file runs all nine.
+#
 # Usage:  ./frontend/ios/scripts/theme-lint.sh
 # Exit:   0 clean, 1 violations found.
 
@@ -47,40 +58,47 @@ report "no Color(hex:) outside Theme/" \
       | grep -v -i 'gradientcolors\|artworkcolors\|covergradient\|herogradient' \
       || true)"
 
-# ── 2. SwiftUI system colours ─────────────────────────────────────────────────
-# Apple's tints, not this palette. Measured on white: .cyan 2.54, .orange 2.20,
-# .green 2.22, .yellow 1.51 — all fail. They look adaptive and are not ours.
-report "no SwiftUI system colours in Views/ or Models/" \
-  "Apple's tints fail this app's contrast floors (.yellow is 1.51:1 on white)" \
-  "$(grep -rnE '(foregroundColor|foregroundStyle|\.fill|\.stroke(Border)?|\.tint|\.background|\.overlay|\.accentColor)\(\s*(Color\.)?\.(gray|cyan|yellow|orange|green|red|blue|purple|pink|indigo|mint|teal|brown)\b' \
-      --include='*.swift' Views/ Models/ Core/ 2>/dev/null || true)"
-
-# ── 3. On-accent ink ──────────────────────────────────────────────────────────
-# `.white` on a *Fill is correct behaviour with the wrong token; textPrimary on
-# a *Fill is an actual bug — it inverts with the appearance and fails in one.
-report "textPrimary never sits on a *Fill token" \
-  "textPrimary inverts per mode; on a saturated fill use AppColors.textOnAccent" \
-  "$(grep -rn --include='*.swift' -B6 'AppColors\.\(primary\|gain\|loss\|caution\|accentCyan\)Fill' Views/ 2>/dev/null \
-      | grep 'foregroundColor(AppColors.textPrimary)\|foregroundStyle(AppColors.textPrimary)' || true)"
-
-# ── 4. Graphic tokens must stay in the chart layer ────────────────────────────
-# *Graphic clears 3:1, not 4.5:1. Correct for a stroke, illegal for text.
-report "*Graphic tokens confined to the chart layer" \
-  "graphic tokens clear 3:1, not the 4.5:1 text floor" \
-  "$(grep -rn --include='*.swift' 'AppColors\.\(gain\|loss\|caution\|accent\|primary\)Graphic' Views/ Models/ Core/ 2>/dev/null \
-      | grep -v 'Views/Molecules/Chart/' \
-      | grep -v 'Models/ChartModels.swift' \
-      | grep -vE '(Sparkline|ChartView|Chart\.swift|MiniStockChart|RadarChart|Meter|Gauge|FlowChart|TimelineChart|MiniChart|BreakdownChart|LevelIndicator|ThresholdZones|SemiCircleGauge|StarRatingView|MetricCard)' \
-      || true)"
+# ── 2. MOVED → test_ios_theme_parity.py::test_no_bare_swiftui_colours_as_ink_or_opaque_fill
+#      The Python port scans the whole argument rather than only the token immediately
+#      after the paren, so it catches `.foregroundColor(isOn ? .white : …)`; it adds
+#      white/black/primary/secondary and the ViewModels/ + Services/ directories.
+#
+# ── 3. MOVED → test_ios_theme_parity.py::test_text_tokens_never_sit_on_a_fill
+#      Adds the `chipSelectedBackground` / `borderFocus` aliases a `*Fill`-suffix grep
+#      cannot see, four ink tokens instead of one, and four directories instead of one.
+#
+# ── 4. RETIRED, not ported → test_graphic_tokens_never_colour_text
+#      This rule asked "is the token outside the chart layer", which was only ever a
+#      PROXY for "is it inking text" — and the proxy is what hid nine real violations
+#      inside the chart layer, since its own filename exemption list swallowed them.
+#      Role is now asserted directly, in both directions: a 3:1 token may not ink a
+#      Text/Image/Label (that test), and may not be a surface text sits on (the five
+#      *Graphic names are in `_FILL_TOKENS`). A `*Graphic` as a raw `.fill()` anywhere
+#      is correct — that IS the graphic role — so location never belonged in the rule.
+#
+# ── 9. MOVED → test_ios_theme_parity.py::test_cards_with_a_fill_and_a_radius_carry_an_edge
+#      Plus a companion the shell could not express at all,
+#      `test_a_card_surface_reached_through_a_property_still_carries_an_edge`, for a card
+#      fill reached through a `var` rather than a token literal.
+#
+# The numbers above are deliberately LEFT AS GAPS. Renumbering 5→2, 6→3 … would silently
+# invalidate three correct source comments that cite rule numbers (PDFKitView.swift,
+# PersonaIcon.swift, ThemeContrastAudit.swift).
 
 # ── 5. drawingGroup rasterisation ─────────────────────────────────────────────
 # A .drawingGroup() flattens to a Metal texture that is NOT re-rendered on a
 # trait change, so it keeps stale colours across a live appearance flip.
+#
+# The key may be COMPOSITE. A raster whose colours also depend on Differentiate
+# Without Color needs `.id("\(colorScheme)-\(differentiate)")`, and an exact match on
+# `.id(colorScheme)` would reject the more-correct key — failing the build for doing
+# the right thing. Requiring only that `colorScheme` participates keeps the invariant
+# (the raster is re-created on an appearance flip) without dictating the key's shape.
 DG_BAD=""
 while IFS=: read -r file line _; do
   [ -z "$file" ] && continue
-  if ! sed -n "$((line)),$((line + 2))p" "$file" | grep -q '\.id(colorScheme)'; then
-    DG_BAD="${DG_BAD}${file}:${line}: .drawingGroup() without .id(colorScheme)"$'\n'
+  if ! sed -n "$((line)),$((line + 2))p" "$file" | grep -qE '\.id\([^)]*colorScheme'; then
+    DG_BAD="${DG_BAD}${file}:${line}: .drawingGroup() without a colorScheme-keyed .id()"$'\n'
   fi
 done < <(grep -rnE "\\.drawingGroup\\(\\)" --include='*.swift' . 2>/dev/null \
            | sed 's://.*$::' | grep '\\.drawingGroup()' || true)
@@ -126,29 +144,6 @@ done < <(sed -n '/^struct AppColors {/,/^    static let auditManifest/p' Theme/A
 report "every stored colour token is in TokenInventory AND auditManifest" \
   "the runtime audit cannot see a token you forgot to declare — it prints a green check anyway" \
   "$(printf '%s' "$TOKENS_MISSING")"
-
-# ── 9. Cards must have an edge ────────────────────────────────────────────────
-# The premise of Views/Modifiers/CardSurface.swift: a #FFFFFF card on a #F4F5F8
-# page is 1.09:1, so in LIGHT it is distinguished by a border, not by luminance.
-# A card built as .background(AppColors.cardBackground) + a corner radius has no
-# edge at all — the exact defect CardSurface exists to prevent. Use .cardSurface,
-# RoundedRectangle(...).cardFill(), or .cardBorder() when the clip is load-bearing.
-EDGELESS=""
-while IFS=: read -r file line _; do
-  [ -z "$file" ] && continue
-  # A #Preview backdrop is not shipped UI — it simulates the card a consumer draws.
-  pv=$(grep -n '^#Preview' "$file" 2>/dev/null | head -1 | cut -d: -f1)
-  if [ -n "$pv" ] && [ "$line" -gt "$pv" ]; then continue; fi
-  # Window has to outlive an interleaved comment between the fill and its radius/edge.
-  win=$(sed -n "$((line)),$((line + 10))p" "$file" 2>/dev/null)
-  echo "$win" | grep -qE '\.cornerRadius\(|\.clipShape\(RoundedRectangle' || continue
-  echo "$win" | grep -qE '\.cardBorder\(|\.cardFill\(|\.cardSurface\(' && continue
-  EDGELESS="${EDGELESS}${file}:${line}: card fill with a radius but no edge"$'\n'
-done < <(grep -rn --include='*.swift' -E '\.background\(AppColors\.cardBackground\)' Views/ 2>/dev/null \
-           | sed 's://.*$::' | grep '\.background(' || true)
-report "cards drawn with a fill+radius carry an edge" \
-  "a #FFFFFF card on the #F4F5F8 page is 1.09:1 — without a border it has no edge in light" \
-  "$(printf '%s' "$EDGELESS")"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

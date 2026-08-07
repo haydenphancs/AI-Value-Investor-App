@@ -91,6 +91,25 @@ def _ms_to_dt(value: Any) -> Optional[datetime]:
         return None
 
 
+def _parse_iso(value: Any) -> Optional[datetime]:
+    """Parse a `timestamptz` string as Supabase returns it, tolerating junk.
+
+    Always returns an AWARE datetime (or None) — comparing a naive one against the aware
+    `expiresDate` derived from Apple's epoch-milliseconds raises TypeError, which on this
+    path would 500 a webhook rather than degrade.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        # Postgres emits "+00:00"; some clients emit "Z". fromisoformat rejects "Z" < 3.11.
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _status_for_notification(notification_type: str, subtype: str) -> Optional[str]:
     """Subscription status implied by an App Store Server Notification, or None to derive it.
 
@@ -137,6 +156,61 @@ def status_for_transaction(payload: Dict[str, Any]) -> str:
     return "active"
 
 
+# Column added by migration 114. The code must work BEFORE it is applied, because migrations
+# are applied by hand and the deploy order is not guaranteed — see the write path below.
+_EVENT_AT_COLUMN = "last_event_at"
+
+
+def _stale_delivery_reason(
+    prior: Optional[Dict[str, Any]],
+    *,
+    status: str,
+    event_at: Optional[datetime],
+) -> Optional[str]:
+    """Return why this delivery is older news than what we already stored, or None to apply.
+
+    ORDERING IS ON APPLE'S `signedDate`, not on `expiresDate`. That distinction is the whole
+    design and it is not obvious:
+
+    `expiresDate` describes WHICH PERIOD a transaction is about; `signedDate` describes WHEN
+    APPLE SAID IT. They disagree precisely in the case that matters — an EXPIRED notification
+    is signed *late* and carries an *early* expiresDate, because it is telling you about the
+    period that just ended. Ordering on `expiresDate` therefore classifies every ordinary
+    expiry as "stale" and silently keeps lapsed subscribers on a paid tier: the opposite of
+    the bug, and more expensive. (`test_expiry_notification_drops_the_tier` catches exactly
+    that, which is how this was found.)
+
+    Deliberately CONSERVATIVE — dropping a genuine event is as bad as applying a stale one:
+
+      1. **No prior row, or no stored ordering key** — nothing to compare against, so apply.
+         This is also the pre-migration-114 state, where the whole guard is inert by design.
+      2. **No `signedDate` on the incoming record** — the client-verify path has none (it
+         submits a transaction, not a notification). Unorderable, so apply.
+      3. **Revocation always wins.** A refund/chargeback is authoritative, and leaving a
+         refunded user entitled is the expensive direction.
+      4. **Equal timestamps apply.** Apple can re-sign an identical payload; re-applying it is
+         idempotent, whereas dropping it on a tie could lose a real transition.
+    """
+    if not prior:
+        return None
+    if status == "revoked":
+        return None
+    if event_at is None:
+        return None
+
+    prior_event_at = _parse_iso(prior.get(_EVENT_AT_COLUMN))
+    if prior_event_at is None:
+        return None
+    if event_at >= prior_event_at:
+        return None
+
+    return (
+        f"incoming signedDate={event_at.isoformat()} predates the stored "
+        f"{_EVENT_AT_COLUMN}={prior_event_at.isoformat()} "
+        f"(stored status={prior.get('status')!r}, tier={prior.get('tier')!r})"
+    )
+
+
 class IAPService:
     def __init__(self):
         self.supabase = get_supabase()
@@ -144,7 +218,12 @@ class IAPService:
     # ── Entitlement application ───────────────────────────────────────────────
 
     def apply_transaction(
-        self, user_id: str, payload: Dict[str, Any], *, status_override: Optional[str] = None
+        self,
+        user_id: str,
+        payload: Dict[str, Any],
+        *,
+        status_override: Optional[str] = None,
+        event_at: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """Record a verified transaction and reconcile the user's entitlement.
 
@@ -177,12 +256,18 @@ class IAPService:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
+        # When Apple told us WHEN it said this, persist it as the ordering key. Absent on the
+        # client-verify path (a transaction has no signedDate), which is fine: that path is
+        # user-initiated and never arrives out of order relative to itself.
+        if event_at is not None:
+            row[_EVENT_AT_COLUMN] = event_at.isoformat()
+
         # Idempotent on original_transaction_id: a replayed delivery updates the existing
         # row rather than inserting a duplicate entitlement.
         try:
             existing = (
                 self.supabase.table("subscriptions")
-                .select("id, user_id, status, current_period_end")
+                .select("*")
                 .eq("original_transaction_id", original_txn_id)
                 .limit(1)
                 .execute()
@@ -224,7 +309,7 @@ class IAPService:
             try:
                 by_user = (
                     self.supabase.table("subscriptions")
-                    .select("id, user_id, status, current_period_end")
+                    .select("*")
                     .eq("user_id", user_id)
                     .limit(1)
                     .execute()
@@ -243,27 +328,84 @@ class IAPService:
                 )
                 prior = owned
 
-        try:
+        # REFUSE A STALE, OUT-OF-ORDER DELIVERY. Apple does not guarantee notification
+        # ordering and retries aggressively for up to 5 attempts over ~8 hours, so a
+        # redelivered EXPIRED can easily land AFTER the DID_RENEW that superseded it. The
+        # write below is a blind overwrite of tier/status/current_period_end, so the LAST
+        # delivery won regardless of which one described the newer state — silently demoting
+        # a paying subscriber (and, symmetrically, able to re-entitle a refunded one).
+        #
+        # `current_period_end` is the ordering key: a renewal always carries a LATER
+        # expiresDate than the period it replaces, so "incoming period ends before the one we
+        # already stored" is exactly "this describes older news".
+        stale = _stale_delivery_reason(prior, status=status, event_at=event_at)
+        if stale:
+            logger.warning(
+                "IAP: IGNORING stale delivery for txn=%s user=%s (%s) — stored state is "
+                "newer; tier/status/current_period_end left unchanged",
+                original_txn_id, user_id, stale,
+            )
+            winning_tier = self.reconcile_user_tier(user_id)
+            return {
+                "tier": prior.get("tier") or tier,
+                "status": prior.get("status") or status,
+                "winning_tier": winning_tier,
+                "original_transaction_id": original_txn_id,
+                "current_period_end": prior.get("current_period_end"),
+                "was_replay": txn_replay,
+                "was_stale": True,
+            }
+
+        def _write(payload_row: Dict[str, Any]) -> None:
             if prior:
-                self.supabase.table("subscriptions").update(row).eq(
+                self.supabase.table("subscriptions").update(payload_row).eq(
                     "id", prior["id"]
                 ).execute()
             else:
-                self.supabase.table("subscriptions").insert(row).execute()
+                self.supabase.table("subscriptions").insert(payload_row).execute()
+
+        try:
+            _write(row)
         except Exception as e:
-            logger.error(
-                "IAP: subscriptions write failed for txn=%s user=%s: %s: %s",
-                original_txn_id, user_id, type(e).__name__, e,
-            )
-            raise IAPError("could not record the subscription") from e
+            # Migration 114 adds `last_event_at`, and migrations here are applied BY HAND —
+            # so a deploy can legitimately run this code against a database that does not yet
+            # have the column, and PostgREST answers an unknown column with an error. Failing
+            # the whole apply there would reject a purchase Apple has ALREADY charged for, to
+            # protect an ordering guard that is merely an optimisation. Retry once without it.
+            if _EVENT_AT_COLUMN in row:
+                logger.warning(
+                    "IAP: subscriptions write with %s failed (%s: %s) — retrying without it. "
+                    "Apply migration 114 to enable out-of-order notification protection.",
+                    _EVENT_AT_COLUMN, type(e).__name__, e,
+                )
+                degraded_row = {k: v for k, v in row.items() if k != _EVENT_AT_COLUMN}
+                try:
+                    _write(degraded_row)
+                except Exception as e2:
+                    logger.error(
+                        "IAP: subscriptions write failed for txn=%s user=%s: %s: %s",
+                        original_txn_id, user_id, type(e2).__name__, e2,
+                    )
+                    raise IAPError("could not record the subscription") from e2
+            else:
+                logger.error(
+                    "IAP: subscriptions write failed for txn=%s user=%s: %s: %s",
+                    original_txn_id, user_id, type(e).__name__, e,
+                )
+                raise IAPError("could not record the subscription") from e
 
         winning_tier = self.reconcile_user_tier(user_id)
 
-        logger.info(
-            "IAP applied: user=%s txn=%s product=%s tier=%s status=%s winning=%s replay=%s",
-            user_id, original_txn_id, payload.get("productId"), tier, status,
-            winning_tier, txn_replay,
-        )
+        # A REFUND must take the unspent credits back. `reconcile_user_tier` drops the tier,
+        # but the allocation is granted by `grant_tier_upgrade`, which never lowers `total` —
+        # correct for a voluntary downgrade (you keep what you paid for until the next reset),
+        # wrong for a revocation, where the money went back. A refunded Max subscriber
+        # otherwise keeps 4000 credits, ~200 AI reports, having paid nothing.
+        #
+        # Gated on `winning_tier == "free"` so a user who holds a SECOND, still-active
+        # subscription is not stripped because an old one was refunded.
+        if status == "revoked" and winning_tier == "free":
+            self._revoke_tier_credits(user_id, original_txn_id)
         return {
             "tier": tier,
             "status": status,
@@ -271,6 +413,7 @@ class IAPService:
             "original_transaction_id": original_txn_id,
             "current_period_end": row["current_period_end"],
             "was_replay": txn_replay,
+            "was_stale": False,
         }
 
     # ── Tier reconciliation ───────────────────────────────────────────────────
@@ -328,6 +471,34 @@ class IAPService:
             if _TIER_RANK.get(tier, 0) > _TIER_RANK.get(best, 0):
                 best = tier
         return best
+
+    def _revoke_tier_credits(self, user_id: str, original_txn_id: str = "") -> None:
+        """Claw back the UNSPENT portion of a revoked tier's allocation. Best-effort.
+
+        Separate from `grant_tier_upgrade` on purpose. That function never lowers `total`
+        (migration 112 §2) because a voluntary downgrade must not delete credits the user
+        already paid for — but a refund is not a downgrade, and routing revocation through the
+        same no-op left a refunded Max subscriber holding 4000 credits for the rest of the
+        month. `revoke_tier_credits` floors at `GREATEST(free_allocation, used)` so `remaining`
+        (a GENERATED column, `total - used`) can never go negative.
+
+        Never raises: the entitlement itself is already recorded and the tier has already
+        dropped, so a failure here costs credits, not correctness — and raising would make the
+        webhook return non-2xx, which makes Apple redeliver a notification we DID apply.
+        """
+        try:
+            self.supabase.rpc("revoke_tier_credits", {"p_user_id": user_id}).execute()
+            logger.info(
+                "IAP: revoked unspent credits for user=%s after txn=%s was refunded",
+                user_id, original_txn_id,
+            )
+        except Exception as e:
+            logger.error(
+                "IAP: entitlement REVOKED for user=%s (txn=%s) but revoke_tier_credits FAILED "
+                "(%s: %s) — the user keeps their unspent credits until the next monthly reset. "
+                "If this is PGRST202/undefined function, migration 114 has not been applied.",
+                user_id, original_txn_id, type(e).__name__, e,
+            )
 
     def reconcile_user_tier(self, user_id: str) -> str:
         """Mirror the winning tier onto `users.tier` and refresh the credit period.
@@ -555,8 +726,19 @@ class IAPService:
 
         status_override = _status_for_notification(notification_type, subtype)
 
+        # Apple's `signedDate` — when Apple ASSERTED this, which is the only correct ordering
+        # key for out-of-order redeliveries (Apple retries up to 5 times over ~8 hours and
+        # guarantees no ordering, so a redelivered EXPIRED can land after the DID_RENEW that
+        # superseded it). NOT `expiresDate`: that says which period the transaction is about,
+        # and an EXPIRED notification is signed late while carrying an early expiresDate.
+        event_at = _ms_to_dt(notification.get("signedDate"))
+
         try:
-            self.apply_transaction(user_id, transaction, status_override=status_override)
+            self.apply_transaction(
+                user_id, transaction,
+                status_override=status_override,
+                event_at=event_at,
+            )
         except UnknownProduct as e:
             logger.error("IAP webhook: %s", e)
             return "ignored_unknown_product", user_id

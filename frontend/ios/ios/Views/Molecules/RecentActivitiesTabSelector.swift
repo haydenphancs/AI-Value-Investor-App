@@ -32,9 +32,16 @@ struct RecentActivitiesTabSelector: View {
                         .foregroundColor(tabForegroundColor(for: tab, isDisabled: isDisabled))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.sm)
+                        // `toggleSelectedBackground`, NOT `cardBackgroundLight`: this
+                        // track is `cardBackgroundNested`, and those two tokens have
+                        // byte-identical dark arms (#252B3B), so the selected tab was
+                        // 1.00:1 — invisible in dark, with `.cornerRadius` supplying no
+                        // edge to rescue it. Only the ink distinguished it. The toggle
+                        // token separates 1.37 dark / 1.25 light and already carries
+                        // `textPrimary` in the manifest.
                         .background(
                             selectedTab == tab && !isDisabled
-                                ? AppColors.cardBackgroundLight
+                                ? AppColors.toggleSelectedBackground
                                 : Color.clear
                         )
                         .cornerRadius(AppCornerRadius.medium)

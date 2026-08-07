@@ -170,6 +170,21 @@ class ChatViewModel: ObservableObject {
     /// buffers + `isAITyping` one-in-flight guard (mid-stream bubble collapse + duplicate persisted turn).
     private var respondTask: Task<Void, Never>?
 
+    /// Monotonic seed counter — the staleness test for `startNewConversation`.
+    ///
+    /// Bumped by every operation that makes an in-flight seed obsolete: starting a new one,
+    /// resetting, and loading a conversation from history. The seed captures it before its
+    /// `createChatSession` await and compares afterwards.
+    ///
+    /// It exists because `currentSessionId == nil` cannot express "is this seed still the
+    /// current one" once ANY conversation has been created. This view model is owned by the
+    /// host screen as a `@StateObject` and survives dismissal, so from the second "Ask Cay AI"
+    /// onward that test was always false and the seed aborted after already setting
+    /// `isAITyping = true` and clearing `messages` — a chat stuck typing forever, with no way
+    /// out but killing the app. `&+=` because wrap-around is harmless: only equality is ever
+    /// tested, and a collision needs 2^64 seeds in one view-model lifetime.
+    private var seedGeneration: UInt64 = 0
+
     // MARK: - Session Management
 
     /// Create a new chat session and optionally send the first message.
@@ -211,6 +226,11 @@ class ChatViewModel: ObservableObject {
         messages = [userMessage]
         isAITyping = true
 
+        // Claim this seed. Everything after the `createChatSession` await compares against
+        // this snapshot, so a newer seed (or a reset / history load) invalidates it.
+        seedGeneration &+= 1
+        let seed = seedGeneration
+
         respondTask?.cancel()
         respondTask = Task {
             do {
@@ -225,14 +245,23 @@ class ChatViewModel: ObservableObject {
                     ),
                     responseType: ChatSessionDTO.self
                 )
-                // Abandon this seed if the turn Task was cancelled (New chat / reset / navigate away
-                // during createSession) OR the user navigated into another conversation. resetConversation
-                // both cancels respondTask AND nils currentSessionId, so `currentSessionId == nil` alone
-                // can't distinguish "still seeding" from "was reset" — the Task.isCancelled check does,
-                // preventing a late-returning createSession from reviving the abandoned turn into the
-                // now-cleared chat (mirrors the streaming path's cancellation guard).
-                guard !Task.isCancelled, currentSessionId == nil else {
-                    print("⚠️ [ChatVM] Abandoning stale/cancelled seed; active session is \(currentSessionId ?? "nil")")
+                // Abandon this seed if the turn Task was cancelled (New chat / reset / navigate
+                // away during createSession) OR a NEWER seed has since started.
+                //
+                // ⚠️ This used to read `currentSessionId == nil`, which permanently STRANDED
+                // every conversation after the first. The host screen owns this view model as
+                // a `@StateObject` and `AIChatScreen` never resets it, so on the second and
+                // every later "Ask Cay AI" from the same screen `currentSessionId` was still
+                // set from the previous conversation — the guard failed, the seed returned
+                // early, and `isAITyping` (set to true just above, at line ~212) was never
+                // cleared. Result: messages wiped, spinner forever, send bar dead, on the
+                // app's flagship surface with ten entry points into it.
+                //
+                // A generation token separates the two questions the old test conflated:
+                // "am I still the newest seed?" (this) versus "is there a session?" (which
+                // says nothing about staleness once one already exists).
+                guard !Task.isCancelled, seed == seedGeneration else {
+                    print("⚠️ [ChatVM] Abandoning stale/cancelled seed \(seed); current generation is \(seedGeneration)")
                     return
                 }
                 currentSessionId = session.id
@@ -248,7 +277,10 @@ class ChatViewModel: ObservableObject {
                 // makes the in-flight request throw) must NOT paint an error on the now-cleared chat.
                 // Mirror the streaming catch's `!Task.isCancelled` guard; only surface a genuine failure
                 // that happened while this seed is still the active, un-cancelled context.
-                guard !Task.isCancelled, currentSessionId == nil else { return }
+                // Same generation test as the success path — a cancelled or superseded seed
+                // must not paint an error onto a chat that has already moved on. (`isAITyping`
+                // is cleared by whichever seed IS current.)
+                guard !Task.isCancelled, seed == seedGeneration else { return }
                 isAITyping = false
                 errorMessage = "Failed to start conversation. Please try again."
             }
@@ -308,6 +340,9 @@ class ChatViewModel: ObservableObject {
         // cancels) and can't later resume to clobber this session's reveal/typing state. The
         // stream's for-await throws CancellationError, which its catch drops via the stale guard.
         respondTask?.cancel()
+        // Invalidate any in-flight seed: the user has navigated into a different conversation,
+        // so a late-returning createChatSession must not adopt this screen.
+        seedGeneration &+= 1
         currentSessionId = sessionId
         messages = []
         isLoadingSession = true
@@ -459,6 +494,10 @@ class ChatViewModel: ObservableObject {
         // Cancel any in-flight turn so a stream from the session being cleared (e.g. deleteSession of
         // the current chat) can't resume and mutate the reset state.
         respondTask?.cancel()
+        // Invalidate any in-flight seed so it cannot revive the chat we are clearing.
+        // `respondTask.cancel()` alone is not enough: cancellation is cooperative, and the
+        // seed can already be past its await when this runs.
+        seedGeneration &+= 1
         currentSessionId = nil
         currentStockId = nil
         currentSessionType = "NORMAL"

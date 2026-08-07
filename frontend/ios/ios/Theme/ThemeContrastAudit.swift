@@ -240,10 +240,37 @@ enum ThemeContrastAudit {
         let minFillStep = 1.05
         var failures: [Failure] = []
 
+        // CURATED, deliberately not an enumeration of `surfaceRegistry`. A blind
+        // cross-product fails at launch on pairs that are a choice rather than a bug:
+        // `toggleBackground`'s dark arm (#1E2330) is byte-identical to
+        // `cardBackground`'s, and all three period toggles draw that track on a card.
+        // Their SELECTED segment separates and carries the meaning; the track outline
+        // carrying none is intentional. Every pair below is one a real view nests, and
+        // the comment names the view so the next person can re-check the claim.
         let pairs: [(inner: String, outer: String, innerColor: Color, outerColor: Color)] = [
+            // Every screen.
             ("cardBackground", "background", AppColors.cardBackground, AppColors.background),
+            // Recent Activities rows (insider / institutional / congress).
             ("cardBackgroundNested", "cardBackground",
              AppColors.cardBackgroundNested, AppColors.cardBackground),
+            // Learn / Top10Owners selected tab.
+            ("cardBackgroundLight", "cardBackground",
+             AppColors.cardBackgroundLight, AppColors.cardBackground),
+            // ⚠️ (cardBackgroundNested, cardBackgroundLight) is NOT here, and that is the
+            // single most important line in this function. Those two tokens share the
+            // #252B3B dark arm, so the pair measures 1.0000:1 with no edge in dark —
+            // asserting it would `assertionFailure` at every DEBUG launch. It is exactly
+            // the pairing that made the RecentActivities / SmartMoney selected tab
+            // invisible, and the fix was to stop the VIEWS pairing them
+            // (→ `toggleSelectedBackground`), not to retune two load-bearing surfaces.
+            // If you ever need that pair to separate, retune a token — do not add a row
+            // here and expect it to pass.
+            // MoversToggle track, ScannerCard expand CTA.
+            ("surfaceRecessed", "cardBackground",
+             AppColors.surfaceRecessed, AppColors.cardBackground),
+            // The selected segment inside those two segmented controls.
+            ("toggleSelectedBackground", "cardBackgroundNested",
+             AppColors.toggleSelectedBackground, AppColors.cardBackgroundNested),
         ]
 
         for style in [UIUserInterfaceStyle.light, .dark] {

@@ -20,6 +20,12 @@ struct SparklineView: View {
     private let dotRadius: CGFloat = 3
     private let lineWidth: CGFloat = 1.5
 
+    /// The area split is ALREADY a positional cue — green sits above the dashed reference
+    /// line, red below — so under Differentiate Without Color only the two marks that are
+    /// purely chromatic need help: the below-reference LINE (dashed) and the end DOT
+    /// (hollow). Dashing the above-reference line too would make the dash decorative.
+    @Environment(\.differentiateWithoutColor) private var differentiate
+
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
@@ -108,17 +114,20 @@ struct SparklineView: View {
                         )
                     }
 
-                    // --- Red line (below reference) ---
+                    // --- Red line (below reference), dashed under DWC ---
                     context.drawLayer { ctx in
                         ctx.clip(to: belowClip)
                         ctx.stroke(
                             line,
                             with: .color(AppColors.bearish),
-                            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
+                            style: AppSentiment.strokeStyle(isPositive: false,
+                                                            differentiate: differentiate,
+                                                            lineWidth: lineWidth,
+                                                            dash: [3, 2])
                         )
                     }
 
-                    // --- End dot ---
+                    // --- End dot: filled when above the reference, hollow when below ---
                     let dotRect = CGRect(
                         x: lastPoint.x - dotRadius,
                         y: lastPoint.y - dotRadius,
@@ -126,7 +135,12 @@ struct SparklineView: View {
                         height: dotRadius * 2
                     )
                     let dotPath = Path(ellipseIn: dotRect)
-                    context.fill(dotPath, with: .color(endIsAbove ? AppColors.bullish : AppColors.bearish))
+                    let dotColor = endIsAbove ? AppColors.bullish : AppColors.bearish
+                    if differentiate && !endIsAbove {
+                        context.stroke(dotPath, with: .color(dotColor), lineWidth: 1.5)
+                    } else {
+                        context.fill(dotPath, with: .color(dotColor))
+                    }
                 }
             }
         }

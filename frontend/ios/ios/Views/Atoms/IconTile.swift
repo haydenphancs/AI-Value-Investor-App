@@ -24,9 +24,18 @@ struct IconTile: View {
             .fill(accent.opacity(tintOpacity))
             .frame(width: size, height: size)
             .overlay(
+                // DELIBERATELY a raw `.system(size:)` and not an `AppTypography` icon
+                // token, i.e. this glyph does NOT scale with Dynamic Type. Scaling it
+                // alone overflows the fixed `size × size` tile; scaling both breaks
+                // every constrained row that budgets 30/40/42pt for this chip. The
+                // glyph is never the sole carrier of meaning — every call site pairs
+                // the tile with a `Text` label that DOES scale, and WCAG 1.4.4 governs
+                // text, not decorative iconography. Revisit only if a tile ever ships
+                // without an adjacent label.
                 Image(systemName: systemName)
                     .font(.system(size: iconPointSize ?? size * 0.5, weight: .semibold))
                     .foregroundColor(accent)
+                    .accessibilityHidden(true)
             )
     }
 }

@@ -271,6 +271,25 @@ struct AppColors {
     /// Lightened from #D5DAE3: the old value put `textSecondary` at 4.26:1.
     static let toggleSelectedBackground = Color(lightHex: "E2E6EE", darkHex: "374151", boostsUnderIncreasedContrast: false)
 
+    /// A well that sits BELOW the card it is on — a segmented-control track, an inset CTA.
+    /// Measured 1.13:1 (light) / 1.14:1 (dark) against `cardBackground`, and it recedes in
+    /// BOTH appearances, which is the whole point of a well.
+    ///
+    /// NOT `toggleBackground`: that token's dark arm is #1E2330, byte-identical to
+    /// `cardBackground`'s, so a track drawn with it is 1.00:1 on a card in dark.
+    ///
+    /// ⚠️ The LIGHT arm is #EEF1F6, NOT the #E7EAF0 that `MoversToggle` used inline before
+    /// this token existed. `primaryBlue` renders on this surface (ScannerCard's expand CTA)
+    /// and measures 4.29:1 on #E7EAF0 — below the 4.5 floor, i.e. adopting the inline value
+    /// verbatim would have `assertionFailure`d at launch. On #EEF1F6 it is 4.56:1.
+    /// `textMuted` on it is 4.98:1 / 7.06:1.
+    ///
+    /// Known gap this does NOT close: ~15 other views still declare a one-off surface with
+    /// an inline `Color(lightHex:darkHex:)`, which is legal (rule 1 bans `Color(hex:)`, not
+    /// the adaptive initialiser) and therefore invisible to every guard. `SignalDisclosureRow`
+    /// is the next-largest. Promote them when one of them next needs to carry ink.
+    static let surfaceRecessed = Color(lightHex: "EEF1F6", darkHex: "14171F", boostsUnderIncreasedContrast: false)
+
     // ━━━ CHART CHROME ━━━
     /// Gridlines are DECORATIVE and deliberately sit below 3:1 — W3C: "not every
     /// graphical object needs to contrast with its surroundings." Nine charting
@@ -365,25 +384,36 @@ extension AppColors {
         /// by nothing. Retuning it — the obvious future edit, since it exists to separate a
         /// nested card — would have dropped `textMuted` to ~3.9:1 across the eight live nested
         /// card sites while the audit still printed ✅.
-        /// ⚠️ KNOWN GAP — the CONTROL surfaces are deliberately not in here, and that is a
-        /// debt rather than a decision, so the numbers are recorded instead of being lost.
+        /// The CONTROL surfaces are deliberately NOT in here, and that is now a DECISION
+        /// rather than a debt. A previous revision of this comment recorded "24 failures"
+        /// from adding them and concluded that ten tokens would need retuning. That number
+        /// was hypothetical: it was the cross-product of every token against every control
+        /// surface, and it was never established that those pairings render. They mostly
+        /// do not. The eight live call sites were then enumerated by hand:
         ///
-        /// `toggleSelectedBackground` and `chipUnselectedBackground` are in
-        /// `surfaceRegistry` but reachable only through three hand-written opt-ins below
-        /// (`textPrimary`, `textSecondary`, `textMuted`). No SENTIMENT or ACCENT token is
-        /// measured on either. Adding them here produces **24 failures** in the palette as
-        /// it stands, measured:
+        ///   GrowthPeriodToggle · ProfitPowerPeriodToggle · SignalOfConfidenceViewToggle
+        ///     selected   textPrimary on toggleSelectedBackground   14.18 / 10.31
+        ///     unselected textMuted   on toggleBackground            4.94 /  6.18
+        ///   GrowthMetricChip · GrowthChartSheet · ProfitabilityChartSheet · FundamentalsHistorySheet
+        ///     selected   textOnAccent  on chipSelectedBackground(=primaryFill)  5.17
+        ///     unselected textSecondary on chipUnselectedBackground   6.27 /  6.40
+        ///   TabBarItem
+        ///     selected   tabBarSelected(=primaryBlue) on tabBarBackground  5.17 / 6.76
+        ///     unselected tabBarUnselected(=textMuted) on tabBarBackground  5.64 / 6.77
+        ///   MoversToggle
+        ///     selected   textOnAccent on gainFill / lossFill        5.42 / 5.55
+        ///     unselected textMuted    on surfaceRecessed             4.98 / 7.06
         ///
-        ///   on toggleSelectedBackground — gain 4.34 · loss 4.44/3.73 · caution 4.11 ·
-        ///     primaryBlue 4.13/4.05 · accentCyan 4.28/4.25 · accentYellow 4.33 ·
-        ///     alertOrange 4.14/3.68 · alertPurple 3.90 · textMuted 4.06 · aiRampStart 3.46
-        ///   on chipUnselectedBackground — loss 4.43 · caution 4.27 · primaryBlue 4.29 ·
-        ///     accentCyan 4.45 · accentYellow 4.49 · alertOrange 4.30/4.37 · aiRampStart 4.11
+        /// Every one passes. `MoversToggle` was the sole exception and the only site in the
+        /// app that ever put a SENTIMENT token on a control surface — it inked the selected
+        /// segment with `gain`/`loss` over `toggleSelectedBackground` (4.34 light, 4.44
+        /// light, 3.73 dark) until it moved to the `*Fill` + `textOnAccent` pair the rules
+        /// require. **No sentiment token renders on a control surface any more**, which is
+        /// why this list stays at four and the three `on:` overrides below are complete.
         ///
-        /// Most are 4.0–4.5, i.e. near-misses, and it is NOT established that every pairing
-        /// actually renders — widening the list would demand retuning ten tokens against
-        /// combinations that may never appear on screen. Establish which pairings are real
-        /// (a lint over the view layer, not a guess), then retune only those.
+        /// The right way to extend this is a per-token `on:` override naming the surface a
+        /// view actually pairs it with — never a widening of this constant, which would
+        /// re-measure the same phantom cross-product.
         static let contentSurfaces = [
             "background", "cardBackground", "cardBackgroundLight", "cardBackgroundNested",
         ]
@@ -446,6 +476,7 @@ extension AppColors {
         let chipUnselectedBackground = AppColors.chipUnselectedBackground
         let toggleBackground = AppColors.toggleBackground
         let toggleSelectedBackground = AppColors.toggleSelectedBackground
+        let surfaceRecessed = AppColors.surfaceRecessed
         let chartGridline = AppColors.chartGridline
         let chartCrosshair = AppColors.chartCrosshair
         let growthBarBlue = AppColors.growthBarBlue
@@ -473,6 +504,7 @@ extension AppColors {
         "chipUnselectedBackground": chipUnselectedBackground,
         "toggleBackground": toggleBackground,
         "toggleSelectedBackground": toggleSelectedBackground,
+        "surfaceRecessed": surfaceRecessed,
         "tabBarBackground": tabBarBackground,
         "surfaceInverse": surfaceInverse,
         "mediaSurface": mediaSurface,
@@ -486,7 +518,7 @@ extension AppColors {
         TokenSpec("textSecondary", textSecondary, .text,
                   on: TokenSpec.contentSurfaces + ["chipUnselectedBackground", "toggleBackground", "toggleSelectedBackground"]),
         TokenSpec("textMuted", textMuted, .text,
-                  on: TokenSpec.contentSurfaces + ["chipUnselectedBackground", "toggleBackground", "tabBarBackground"]),
+                  on: TokenSpec.contentSurfaces + ["chipUnselectedBackground", "toggleBackground", "tabBarBackground", "surfaceRecessed"]),
         TokenSpec("textInverse", textInverse, .text, on: ["surfaceInverse"]),
         TokenSpec("textOnMediaSurface", textOnMediaSurface, .text, on: ["mediaSurface"]),
         TokenSpec("textDisabled", textDisabled, .decorative),
@@ -495,7 +527,13 @@ extension AppColors {
         TokenSpec("gain", gain, .text),
         TokenSpec("loss", loss, .text),
         TokenSpec("caution", caution, .text),
-        TokenSpec("primaryBlue", primaryBlue, .text),
+        // `tabBarSelected` forwards to this, so it renders on `tabBarBackground` at every
+        // launch (TabBarItem.swift) — a live pairing that no spec named until now, i.e. the
+        // app's single most-visible accent was unmeasured. 5.17 light / 6.76 dark.
+        // `surfaceRecessed` is ScannerCard's expand-CTA track: 4.57 light / 7.05 dark, and
+        // it is the reason that token's light arm is #EEF1F6 rather than #E7EAF0 (4.29).
+        TokenSpec("primaryBlue", primaryBlue, .text,
+                  on: TokenSpec.contentSurfaces + ["tabBarBackground", "surfaceRecessed"]),
         TokenSpec("accentCyan", accentCyan, .text),
         TokenSpec("accentYellow", accentYellow, .text),
         TokenSpec("alertOrange", alertOrange, .text),
@@ -571,6 +609,7 @@ extension AppColors {
         TokenSpec("chipUnselectedBackground", chipUnselectedBackground, .surface),
         TokenSpec("toggleBackground", toggleBackground, .surface),
         TokenSpec("toggleSelectedBackground", toggleSelectedBackground, .surface),
+        TokenSpec("surfaceRecessed", surfaceRecessed, .surface),
 
         // On-accent ink. Its contrast IS verified — in reverse, by every
         // `carriesOnAccentText` fill above, which is the only direction that
@@ -624,12 +663,16 @@ struct AppTypography {
     // column per screen. The file's own two-tier rule says reading prose breathes while
     // dense data stays tight, and that rule is exactly what the caps encode:
     //
-    //   • READING tiers (title/heading/body/label/caption) scale to 2.0×. Prose can
-    //     reflow; this is the tier a low-vision user actually needs.
-    //   • DATA and ICON tiers cap at 1.4×. These live in fixed-width columns, chart
-    //     axes and `.frame(width:height:)` badges, where growth does not reflow, it
-    //     truncates or overlaps. 1.4× is enough to be a real accommodation without
-    //     breaking the grid.
+    //   • READING tiers (title/heading/body/label/caption) cap at `readingCap` = 1.4×.
+    //     Prose can reflow; this is the tier a low-vision user actually needs, so it
+    //     gets the larger of the two caps.
+    //   • DATA and ICON tiers cap at `dataCap` = 1.25×. These live in fixed-width
+    //     columns, chart axes and `.frame(width:height:)` badges, where growth does not
+    //     reflow, it truncates or overlaps.
+    //
+    // Read the caps off `readingCap`/`dataCap` below, not off this prose — an earlier
+    // revision of this comment said 2.0× / 1.4×, which were the values BEFORE the
+    // measurement described below forced them down.
     //
     // The caps are a deliberate, stated limitation rather than an oversight — the
     // honest position while the 455-file layout sweep at AX5 is still outstanding.
@@ -648,13 +691,19 @@ struct AppTypography {
         return min(scaled, size * maxScale)
     }
 
-    /// How far each tier is allowed to grow. MEASURED, not chosen by feel — see the
-    /// screenshots referenced in the block comment above: at 2.0× the Home "Today's Top
-    /// Movers" card reflowed to ONE CHARACTER PER LINE and the tab-bar labels split
-    /// mid-word ("Researc/h"). Bigger text that cannot be read is not an accommodation.
+    /// How far each tier is allowed to grow. MEASURED, not chosen by feel: at 2.0× the
+    /// Home "Today's Top Movers" card reflowed to ONE CHARACTER PER LINE and the tab-bar
+    /// labels split mid-word ("Researc/h"). Bigger text that cannot be read is not an
+    /// accommodation.
+    ///
+    /// ⚠️ That measurement was taken BEFORE these caps existed and before the
+    /// `MoversToggle` / `MarketPulseCard` / `TabBarItem` fixes, so it justifies the caps
+    /// rather than describing today's behaviour. Re-measure before quoting it.
     ///
     /// 1.4 / 1.25 is what the CURRENT layouts absorb. Raising it is gated on the
-    /// fixed-frame sweep across the view layer, not on editing these two numbers.
+    /// fixed-frame sweep across the view layer (~71 text-bearing fixed frames and ~89
+    /// unguarded `lineLimit(1)` sites remain), not on editing these two numbers.
+    /// `test_ios_a11y_parity.py` pins both values against this doc block.
     static let readingCap: CGFloat = 1.4
     static let dataCap: CGFloat = 1.25
 
@@ -666,7 +715,7 @@ struct AppTypography {
                 weight: weight, design: design)
     }
 
-    /// Data / icon tier — fixed columns, chart axes, sized badges. Capped at 1.4×.
+    /// Data / icon tier — fixed columns, chart axes, sized badges. Capped at `dataCap`.
     fileprivate static func scaledTight(_ size: CGFloat, _ style: Font.TextStyle,
                                         weight: Font.Weight = .regular,
                                         design: Font.Design = .default) -> Font {

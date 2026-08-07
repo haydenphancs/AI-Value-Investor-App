@@ -218,8 +218,22 @@ enum TechnicalIndicatorCalculator {
         }
 
         // %D = SMA of %K
+        //
+        // ⚠️ The guard above admits `count >= kPeriod` (14), but %D needs kPeriod + dPeriod - 1
+        // (16) points before its first value exists. At count == 14 or 15 the range below was
+        // `16..<14` / `16..<15` — and a Range with lowerBound > upperBound TRAPS at runtime
+        // ("Range requires lowerBound <= upperBound"), crashing the chart rather than drawing
+        // a shorter one. Reachable from any 14- or 15-candle series: a newly listed ticker, a
+        // short intraday window, or a holiday-shortened range.
+        //
+        // Return %K with an all-nil %D instead — the sub-chart already renders %K alone, which
+        // is the honest answer when there is not yet enough history to smooth it.
         var dValues = [Double?](repeating: nil, count: count)
-        for i in (kPeriod - 1 + dPeriod - 1)..<count {
+        let dStart = kPeriod - 1 + dPeriod - 1
+        guard dStart < count else {
+            return StochasticData(kValues: kValues, dValues: dValues)
+        }
+        for i in dStart..<count {
             var sum = 0.0
             var validCount = 0
             for j in (i - dPeriod + 1)...i {

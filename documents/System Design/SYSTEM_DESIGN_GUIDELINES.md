@@ -581,14 +581,29 @@ guarantees legibility.
 card is ~1.09:1 — no design system separates them by luminance); in dark it is
 separated by being a lighter surface. `.cardSurface()` encapsulates both.
 
-**Two automated guards, and they cover different halves:**
+**Three automated guards, and they cover different halves:**
 - `ThemeContrastAudit` (DEBUG, launch) resolves every token in both
   `UITraitCollection`s and asserts its floor, plus that no token is missing from
-  the manifest. It proves the PALETTE.
-- `frontend/ios/scripts/theme-lint.sh` scans source for the rules a runtime audit
-  cannot see (frozen hexes, system colours, on-accent ink, graphic-token escape,
-  `.drawingGroup()` raster staleness, inert `Divider().background`). It proves
-  USAGE.
+  the manifest, that surfaces separate from what they nest on, and that light mode
+  never moved. It proves the PALETTE. It uses `assertionFailure`, so **an app that
+  stays alive is the pass signal**.
+- `backend/tests/test_ios_theme_parity.py` greps Swift from Python for the usage
+  rules that need per-entry reasoning: system colours as ink or opaque fill, text
+  tokens on a saturated fill, graphic (3:1) tokens inking a `Text`/`Image`/`Label`,
+  cards with a fill and a radius but no edge, and token VALUE identity (both older
+  guards were name-only, so a spec could audit the wrong colour). Every scanner
+  ships an anti-vacuity control, because a regex that stops matching turns every
+  other assertion green.
+- `frontend/ios/scripts/theme-lint.sh` keeps the five FILE-SHAPE rules a grep
+  expresses as well as anything could: frozen hexes, `.drawingGroup()` raster
+  staleness, inert `Divider().background`, `CaydexLogo` masking, and token-inventory
+  completeness. Its numbering has gaps at 2/3/4/9 — those rules moved to the pytest
+  module above, and the numbers are left as gaps because source comments cite them.
+
+`.claude/hooks/post-tool-use-theme.sh` runs the pytest module (which in turn shells
+out to the lint) on every edit under `Theme/ Views/ Models/ Core/ ViewModels/
+Services/` or `Assets.xcassets/**/Contents.json`, so all three fire at the moment a
+mistake is made rather than when someone remembers to check.
 
 ## 5. Agent Orchestration Pattern
 

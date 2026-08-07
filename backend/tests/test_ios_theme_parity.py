@@ -1,16 +1,19 @@
 """The iOS theme contract, asserted from Python so that it GATES instead of merely existing.
 
-Why this exists. Two guards cover the palette today and NEITHER runs unless a human
-does something:
+Why this exists. Two guards covered the palette and NEITHER ran unless a human did
+something:
 
   * `ThemeContrastAudit` is `#if DEBUG` and fires only when someone launches a Debug build.
-  * `frontend/ios/scripts/theme-lint.sh` is invoked by nothing at all — not by a hook
-    (`.claude/hooks/` has five, none reference it), not by CI (there is no `.github/`),
-    not by a test. It is a script you must remember to run.
+  * `frontend/ios/scripts/theme-lint.sh` was invoked by nothing at all — not by a hook,
+    not by CI (there is still no `.github/`), not by a test. It was a script you had to
+    remember to run.
 
-Both were written in response to bugs that shipped; neither can stop the next one. Adding
-rules to a lint nobody runs changes nothing, so the rules move to where the tests already
-run. `test_ios_auth_policy_parity.py` proved the technique in this repo: grep Swift from
+Both were written in response to bugs that shipped; neither could stop the next one. Adding
+rules to a lint nobody runs changes nothing, so the rules moved to where the tests already
+run. That second bullet is now HISTORY, and this module is what changed it:
+`.claude/hooks/post-tool-use-theme.sh` runs this file on every themed edit, and
+`test_theme_lint_shell_rules_pass` below shells out to the lint — so the script has two
+callers, both of them this module. `test_ios_auth_policy_parity.py` proved the technique in this repo: grep Swift from
 Python, and it costs 50ms.
 
 This mirrors that module deliberately — two `str.index` anchors before any regex, `//`
@@ -399,11 +402,22 @@ def _bare_colour_violations() -> list[str]:
     hue_alt = "|".join(_BARE_HUES)
     ink = re.compile(rf"\.{_MODIFIER}\((?P<arg>[^\n]*)")
     surf = re.compile(rf"\.{_SURFACE_MODIFIER}\((?P<arg>[^\n]*)")
+    # A colour passed as a LABELLED ARGUMENT rather than through a modifier. Both this
+    # scanner and the shell rule it replaced keyed off `.modifier(`, so every hue handed
+    # to a helper function or an initialiser was invisible — which is how four bare
+    # system hues survived in `SubChartCanvas` (MACD/signal/%K/%D) with every guard green.
+    # Apple's `.green` is 2.22:1 on white and does not adapt, and inside a `Canvas` there
+    # is no modifier anywhere for a grep to anchor on.
+    labelled = re.compile(rf"\b(?:color|colour|tint|fill|stroke)\s*:\s*(?P<arg>[^,)\n]*)")
     bare_re = re.compile(bare)
     hue_re = re.compile(rf"(?<![A-Za-z0-9_])(?:Color)?\.({hue_alt})\b")
 
     for path in _swift_files():
-        for lineno, line in _code_lines(path):
+        lines = _code_lines(path)
+        # A `#Preview` may legitimately use a system hue as throwaway sample data — it is
+        # not shipped UI. Same boundary the card-edge rule uses.
+        preview = next((i for i, (_, l) in enumerate(lines) if l.startswith("#Preview")), len(lines))
+        for lineno, line in lines[:preview]:
             hit = False
             for m in ink.finditer(line):
                 if bare_re.search(m.group("arg")) or hue_re.search(m.group("arg")):
@@ -417,6 +431,10 @@ def _bare_colour_violations() -> list[str]:
                 # cannot rot the way a name list does.
                 elif bare_re.search(arg) and ".opacity(" not in arg:
                     hit = True
+            for m in labelled.finditer(line):
+                arg = m.group("arg")
+                if hue_re.search(arg) or bare_re.search(arg):
+                    hit = True
             if hit:
                 out.append(f"{_rel(path)}:{lineno}: {line.strip()}")
     return out
@@ -427,6 +445,17 @@ def test_bare_colour_scanner_is_not_vacuous():
     assert _bare_colour_violations() is not None
     probe = ".foregroundColor(.white)"
     assert re.search(rf"\.{_MODIFIER}\(\s*\.?(?:Color\.)?(white|black|primary|secondary)\b", probe)
+    # The labelled-argument arm, which has no modifier to anchor on. This is the shape of
+    # the four real `SubChartCanvas` violations that every guard missed until now.
+    labelled = re.compile(r"\b(?:color|colour|tint|fill|stroke)\s*:\s*(?P<arg>[^,)\n]*)")
+    hue = re.compile(r"(?<![A-Za-z0-9_])(?:Color)?\.(green|red|blue|orange)\b")
+    for probe in ("drawLine(context: context, color: .green, lineWidth: 1.5)",
+                  "CircularProgressViewStyle(tint: .white)"):
+        assert any(hue.search(m.group("arg")) or re.search(r"(?<![A-Za-z0-9_])\.white\b", m.group("arg"))
+                   for m in labelled.finditer(probe)), probe
+    # ...and it must NOT fire on a token, or every chart line in the app is a violation.
+    clean = "drawLine(context: context, color: AppColors.gainGraphic, lineWidth: 1.5)"
+    assert not any(hue.search(m.group("arg")) for m in labelled.finditer(clean))
 
 
 def test_no_bare_swiftui_colours_as_ink_or_opaque_fill():
@@ -445,8 +474,18 @@ def test_no_bare_swiftui_colours_as_ink_or_opaque_fill():
 # Fill tokens INCLUDING the computed aliases that forward to `primaryFill`. A `*Fill`-suffix
 # grep cannot see these two, and the four selected-chip sites use them — so the chip finding
 # that was already fixed had no regression guard at all.
+#
+# The five `*Graphic` tokens are in here too, and they are the REPLACEMENT for retired
+# shell rule 4's location test. That rule asked "is this token outside the chart layer",
+# which was only ever a proxy for role — and the proxy is what hid nine real violations
+# inside the chart layer. The genuine invariant is about role, in both directions: a
+# 3:1 token must not INK text (below), and it must not be a SURFACE that text sits on
+# (here). A `*Graphic` as a raw `.fill()`/`.stroke()` anywhere is correct — that IS the
+# graphic role — so location never belonged in the rule.
 _FILL_TOKENS = ("primaryFill", "gainFill", "lossFill", "cautionFill", "accentCyanFill",
-                "alertPurpleFill", "chipSelectedBackground", "borderFocus")
+                "alertPurpleFill", "alertOrangeFill", "chipSelectedBackground", "borderFocus",
+                "gainGraphic", "lossGraphic", "cautionGraphic", "accentGraphic",
+                "primaryGraphic")
 _BANNED_ON_FILL = ("textPrimary", "textSecondary", "textMuted", "textInverse")
 
 
@@ -512,12 +551,26 @@ def test_graphic_token_scanner_is_not_vacuous():
     assert len(hits) >= 20, len(hits)
 
 
-def test_graphic_tokens_never_colour_text():
-    """A 3:1 token may stroke a mark; it may not ink a `Text`.
+# A view whose foreground is read as CONTENT rather than as a mark. `.claude/rules/
+# ios-swiftui.md` puts "anything read as text OR A MEANINGFUL ICON" in the 4.5:1 text
+# role, so an SF Symbol inked with a 3:1 token is the same defect as a `Text` — the
+# original port only looked for `Text(` and could not see it.
+_TEXT_ROLE_VIEW = re.compile(r"\b(?:Text|Image|Label)\(")
 
-    The exemption is STRUCTURAL — is this line a `Text` foreground? — rather than "is this
-    file named *ChartView.swift", which is what the filename filter was crudely approximating
-    and why it hid nine genuine violations inside the chart layer.
+
+def test_graphic_tokens_never_colour_text():
+    """A 3:1 token may stroke a mark; it may not ink a `Text`, an `Image` or a `Label`.
+
+    The exemption is STRUCTURAL — is this line the foreground of a content view? — rather
+    than "is this file named *ChartView.swift", which is what retired shell rule 4's
+    filename filter was crudely approximating and why it hid nine genuine violations
+    inside the chart layer.
+
+    `Image(` is deliberately broad and will match decorative art as well as symbols. The
+    escape hatch is `accessibilityHidden(true)` in the same window: a glyph declared
+    invisible to assistive tech is chrome, not content, and 3:1 is the right floor for it.
+    That is a STATED exemption in the source rather than a filename list in the guard,
+    which is the whole difference between this rule and the one it replaced.
     """
     violations = []
     fg = re.compile(rf"\.{_MODIFIER}\(")
@@ -528,9 +581,24 @@ def test_graphic_tokens_never_colour_text():
                 continue
             # Walk back to the view this modifier is attached to.
             window = [w for _, w in lines[max(0, idx - 5):idx + 1]]
-            if any("Text(" in w for w in window):
-                violations.append(f"{_rel(path)}:{lineno}: {line.strip()}")
+            if not any(_TEXT_ROLE_VIEW.search(w) for w in window):
+                continue
+            if any("accessibilityHidden(true)" in w for w in window):
+                continue
+            violations.append(f"{_rel(path)}:{lineno}: {line.strip()}")
     assert not violations, "\n".join(violations)
+
+
+def test_graphic_token_text_role_scanner_is_not_vacuous():
+    """The rule above matches zero lines on a clean tree, so a broken `_TEXT_ROLE_VIEW`
+    or `_MODIFIER` would be indistinguishable from success. Prove each half still fires
+    on a synthetic violation, including the `Image` arm that this widening added."""
+    for view in ("Text(\"+12.4%\")", "Image(systemName: \"arrow.up\")", "Label(\"x\", systemImage: \"y\")"):
+        assert _TEXT_ROLE_VIEW.search(view), view
+    line = ".foregroundColor(AppColors.gainGraphic)"
+    assert _GRAPHIC_TOKEN.search(line) and re.compile(rf"\.{_MODIFIER}\(").search(line)
+    # ...and the escape hatch must actually exempt, or it is decoration.
+    assert "accessibilityHidden(true)" in ".accessibilityHidden(true)"
 
 
 def test_cards_with_a_fill_and_a_radius_carry_an_edge():
@@ -562,15 +630,90 @@ def test_cards_with_a_fill_and_a_radius_carry_an_edge():
     assert not violations, "\n".join(violations)
 
 
+# A card surface reached through a PROPERTY rather than a token literal. The test above
+# greps for `AppColors.cardBackground` on the line, so it is structurally blind to
+# `.fill(background)` where `background` is a `var` defaulting to a card token — which is
+# exactly how `CongressActivityRow` shipped: it stepped the fill up for dark (correctly)
+# and, because a bare `.fill` draws no `cardEdge`, was 1.00:1 against its parent in LIGHT
+# with no hairline. Its two sibling row types both used `.cardFill` and were fine.
+#
+# Deliberately NARROW: it fires only when the identifier's own declaration in the same
+# file resolves to a card token. The broad version — "any `.fill(someLocalVar)` under a
+# corner radius" — needs an allowlist to stay green, and an allowlist is the smell that
+# retired shell rule 4.
+_CARD_PROP = re.compile(
+    r"var\s+(\w+)\s*:\s*Color\s*=\s*AppColors\.(cardBackground\w*)\b")
+
+
+def _card_backed_properties(lines):
+    return {m.group(1) for _, l in lines if (m := _CARD_PROP.search(l))}
+
+
+def test_a_card_surface_reached_through_a_property_still_carries_an_edge():
+    violations = []
+    for path in _swift_files():
+        lines = _code_lines(path)
+        props = _card_backed_properties(lines)
+        if not props:
+            continue
+        preview = next((i for i, (_, l) in enumerate(lines) if l.startswith("#Preview")), len(lines))
+        for idx, (lineno, line) in enumerate(lines[:preview]):
+            m = re.search(r"\.fill\((\w+)\)|\.background\((\w+)\)", line)
+            if not m or (m.group(1) or m.group(2)) not in props:
+                continue
+            window = " ".join(w for _, w in lines[max(0, idx - 6):idx + 4])
+            if "cornerRadius" not in window and "RoundedRectangle" not in window:
+                continue
+            if any(x in window for x in (".cardBorder", ".cardFill", ".cardSurface", ".strokeBorder")):
+                continue
+            violations.append(f"{_rel(path)}:{lineno}: {line.strip()}")
+    assert not violations, "\n".join(violations)
+
+
+def test_card_backed_property_scanner_is_not_vacuous():
+    """The rule above legitimately matches ZERO lines now that CongressActivityRow is
+    fixed, so without this control a broken regex would look identical to a clean tree.
+    Two halves: the declaration regex must still find real properties in the real
+    codebase, and the violation shape must still be detectable."""
+    found = {p for path in _swift_files() for p in _card_backed_properties(_code_lines(path))}
+    assert found, "no `var x: Color = AppColors.cardBackground*` found — regex is dead"
+
+    synthetic = [(1, "var background: Color = AppColors.cardBackgroundNested"),
+                 (2, "RoundedRectangle(cornerRadius: AppCornerRadius.medium)"),
+                 (3, ".fill(background)")]
+    assert _card_backed_properties(synthetic) == {"background"}
+    window = " ".join(l for _, l in synthetic)
+    assert "RoundedRectangle" in window
+    assert not any(x in window for x in (".cardBorder", ".cardFill", ".cardSurface"))
+
+
 # ── 6. The shell rules that stayed in the shell ──────────────────────────────
+
+# The five rules that stayed in the shell, in the order the script runs them. Rules
+# 2/3/4/9 were deleted from `theme-lint.sh` and live in this module instead, so there is
+# one rule with one home; the script's numbering keeps gaps at 2/3/4/9 because three
+# source comments cite rule numbers and renumbering would silently invalidate them.
+_SHELL_RULE_TITLES = [
+    "no Color(hex:) outside Theme/",
+    "every .drawingGroup() is keyed on colorScheme",
+    "no inert Divider().background()",
+    "CaydexLogo rendered only via CaydexLogoMark",
+    "every stored colour token is in TokenInventory AND auditManifest",
+]
+
 
 @pytest.mark.skipif(not _LINT.exists(), reason="theme-lint.sh not present")
 def test_theme_lint_shell_rules_pass():
-    """Rules 1/5/6/7/8 are file-shape rules with no Python-side parsing to share, and
-    `theme-lint.sh` is what `.claude/rules/ios-swiftui.md` tells a human to run. Rules
-    2/3/4/9 MOVED into this module — they needed per-entry reasoning and anti-vacuity
-    controls a grep pipeline cannot express — so there is one rule with one home."""
+    """`theme-lint.sh` is what `.claude/rules/ios-swiftui.md` tells a human to run, and
+    rules 1/5/6/7/8 are file-shape rules with no Python-side parsing to share.
+
+    Asserting the exact TITLE SET rather than a count. `count >= 5` against exactly five
+    rules is a tautology — it cannot tell "all five ran" from "one ran five times", and
+    it goes quietly green if a rule is deleted and another added. Identity, order and
+    count in one assertion, so adding a rule to the shell without deciding whether it
+    belongs here fails loudly.
+    """
     r = subprocess.run(["bash", str(_LINT)], capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, r.stdout + r.stderr
-    # The script prints a ✓ per rule. Zero means it exited 0 without checking anything.
-    assert r.stdout.count("✓") >= 5, r.stdout
+    titles = [t.strip() for t in re.findall(r"✓\x1b\[0m (.+)", r.stdout)]
+    assert titles == _SHELL_RULE_TITLES, f"got {titles}\n\n{r.stdout}"

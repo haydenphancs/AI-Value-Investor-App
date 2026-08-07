@@ -1479,6 +1479,10 @@ struct PivotPointLevel: Identifiable {
         String(format: "%.2f", value)
     }
 
+    /// NOTE: no "R"/"S" prefix is added here, deliberately. An audit flagged this as
+    /// colour-only, but `name` already carries "R1"/"Pivot"/"S2" and `PivotPointRow`
+    /// renders it immediately left of the value — so the direction is in text already
+    /// and a prefix would read "R R1 180.67". Checked, not assumed.
     var valueColor: Color {
         levelType.color
     }
@@ -1496,6 +1500,7 @@ enum PivotLevelType {
         case .support: return AppColors.bearish
         }
     }
+
 }
 
 // MARK: - Pivot Points Data

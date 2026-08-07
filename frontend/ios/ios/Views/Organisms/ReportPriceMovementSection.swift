@@ -53,7 +53,8 @@ struct ReportPriceMovementSection: View {
             PriceActionSparkline(
                 data: ctx.chartData,
                 eventIndex: ctx.eventIndex,
-                trendColor: ctx.trendColor
+                trendColor: ctx.trendColor,
+                isPositive: ctx.isPositive
             )
 
             // Narrative box with header and explanation

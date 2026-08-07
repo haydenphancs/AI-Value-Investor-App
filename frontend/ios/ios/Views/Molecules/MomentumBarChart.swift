@@ -100,6 +100,16 @@ struct MomentumBar: View {
             let barWidth: CGFloat = 20
 
             ZStack {
+                // Zero rule. Bars grow UP for positive and DOWN for negative, which is a
+                // perfectly good non-colour cue — except there was no baseline drawn, so
+                // "up" and "down" had nothing to be measured against and the only reliable
+                // signal was green-vs-red. Drawn unconditionally: an axis helps everyone
+                // read the chart, not only users with Differentiate Without Color on.
+                Rectangle()
+                    .fill(AppColors.chartGridline)
+                    .frame(height: 1)
+                    .position(x: geometry.size.width / 2, y: midY)
+
                 if isEmpty {
                     // Thin gray dash for months with zero counts
                     RoundedRectangle(cornerRadius: 1)

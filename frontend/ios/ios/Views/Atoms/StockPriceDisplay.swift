@@ -13,6 +13,8 @@ struct StockPriceDisplay: View {
     let period: String
     let isPositive: Bool
 
+    @Environment(\.differentiateWithoutColor) private var differentiate
+
     var body: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
@@ -28,9 +30,22 @@ struct StockPriceDisplay: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                Text(change)
-                    .font(AppTypography.headingSmall)
-                    .foregroundColor(isPositive ? AppColors.bullish : AppColors.bearish)
+                // `change` is a caller-supplied STRING coloured by an unrelated Bool, so
+                // nothing here can guarantee it carries a sign — the direction may be
+                // encoded in the hue alone. The arrow is derived from `isPositive`, the
+                // same flag that picks the colour, so the two can never disagree.
+                // `PriceChangeLabel` does the same thing and is the pattern to copy.
+                HStack(spacing: 2) {
+                    if differentiate {
+                        Image(systemName: AppSentiment.symbolName(isPositive: isPositive))
+                            .font(AppTypography.iconXS)
+                            .accessibilityHidden(true)
+                    }
+                    Text(change)
+                        .font(AppTypography.headingSmall)
+                }
+                .foregroundColor(isPositive ? AppColors.bullish : AppColors.bearish)
+                .accessibilityLabel("\(isPositive ? "Up" : "Down") \(change) over \(period)")
 
                 Text(period)
                     .font(AppTypography.caption)

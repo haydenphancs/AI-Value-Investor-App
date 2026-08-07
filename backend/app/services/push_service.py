@@ -18,6 +18,7 @@ Push Notifications capability on the App ID, and the `aps-environment` entitleme
 in the app. Provide APNS_* via env/secrets — never commit the .p8.
 """
 
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -95,7 +96,12 @@ class PushService:
 
     def _device_tokens_for(self, user_id: str) -> List[dict]:
         """Return the user's device tokens WITH their per-token environment so each
-        can be routed to the correct APNs host."""
+        can be routed to the correct APNs host.
+
+        SYNCHRONOUS by design — the Supabase Python SDK is sync (CLAUDE.md invariant #5, no
+        ORM). Callers inside an `async def` MUST reach it via `asyncio.to_thread`, which is
+        what `send_to_user` does. See the note there.
+        """
         try:
             result = (
                 self.supabase.table("device_tokens")
@@ -141,7 +147,12 @@ class PushService:
             logger.info("Push disabled (APNs not configured) — skipping send to %s", user_id)
             return 0
 
-        devices = self._device_tokens_for(user_id)
+        # OFF-THREAD. The Supabase SDK is synchronous, and this runs inside the Updates
+        # sweeper's async loop — a blocking DB round-trip here stalls the ENTIRE event loop,
+        # i.e. every in-flight request in the process, once per recipient of every alert.
+        # `push_dispatch_service.py` already wraps all four of its Supabase calls this way;
+        # this module was the one that did not. CLAUDE.md invariant #6.
+        devices = await asyncio.to_thread(self._device_tokens_for, user_id)
         if not devices:
             return 0
 
@@ -185,7 +196,8 @@ class PushService:
                         # 410 Unregistered = token is genuinely dead → prune.
                         # NOT on 400/BadDeviceToken: that can be an env/routing issue,
                         # and pruning a valid token would silently stop notifications.
-                        self._prune_token(token)
+                        # Off-thread for the same reason as the read above.
+                        await asyncio.to_thread(self._prune_token, token)
                     else:
                         logger.warning(
                             "APNs rejected token …%s: %s %s",

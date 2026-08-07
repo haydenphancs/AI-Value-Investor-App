@@ -119,7 +119,7 @@ struct PortfolioHeaderMenuOverlay: View {
                     // manual fill / stroke / clipShape / shadow (an opaque fill
                     // would defeat the translucency; a manual shadow would double
                     // up). It also honors Reduce Transparency automatically.
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                    .glassPanel(cornerRadius: AppCornerRadius.large)
                     .offset(x: xOffset(for: menu, rect: rect), y: rect.maxY + AppSpacing.xs)
             }
             // No insertion/removal transition — the popup is on or off, instantly.

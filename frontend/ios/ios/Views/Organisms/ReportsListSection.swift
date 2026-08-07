@@ -189,7 +189,7 @@ struct ReportsListSection: View {
             // floating-layer shadow, so there's no manual fill / stroke / shadow
             // (an opaque fill would defeat the translucency; a manual shadow
             // would double up). Honors Reduce Transparency automatically.
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.medium))
+            .glassPanel(cornerRadius: AppCornerRadius.medium)
             .offset(y: 34)   // drop just below the Sort capsule
         }
     }

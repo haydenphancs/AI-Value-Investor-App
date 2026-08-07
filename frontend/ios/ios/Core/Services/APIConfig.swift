@@ -130,32 +130,11 @@ enum APIConfig: Sendable {
 // MARK: - Feature Flags
 
 enum FeatureFlags: Sendable {
-    /// Enable offline mode with cached data
-    nonisolated static var offlineModeEnabled: Bool {
-        #if DEBUG
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    /// Enable debug logging for API calls
-    nonisolated static var apiLoggingEnabled: Bool {
-        #if DEBUG
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    /// Enable mock data for development
-    nonisolated static var useMockData: Bool {
-        #if DEBUG
-        return ProcessInfo.processInfo.environment["USE_MOCK"] != nil
-        #else
-        return false
-        #endif
-    }
+    // NOTE: `offlineModeEnabled`, `apiLoggingEnabled` and `useMockData` were removed
+    // (2026-08-07). All three were DEBUG-gated flags with zero consumers anywhere in the app —
+    // nothing read them, so they described capabilities that did not exist. A flag nobody
+    // checks is worse than no flag: it reads as "offline mode is on in Debug" to the next
+    // person, who then builds on a promise the codebase never made.
 
     // MARK: - Built but not yet honest to ship
     //
@@ -164,18 +143,24 @@ enum FeatureFlags: Sendable {
     // something is happening when nothing is. These hide such controls until the backing
     // behaviour exists, without deleting UI that will need re-enabling.
 
-    /// Notification preference toggles (13 of them, in `NotificationsSettingsView`).
+    /// The notification preferences screen (`NotificationsSettingsView`).
     ///
-    /// FALSE because there is no delivery pipeline: `push_service.send_to_user` exists on
-    /// the backend but has **zero callers**, so every toggle writes a preference nothing
-    /// ever reads. Permission prompting and APNs token registration both already work —
-    /// the gap is purely that nothing sends.
+    /// TRUE since 2026-08-07. Push genuinely delivers: `updates_insight_sweeper.py:423` calls
+    /// `notify_watchers` → `push_dispatch_service.py:305` → `PushService.send_to_user`, all
+    /// four `APNS_*` signing vars are set on Railway, and `PushService.enabled` is therefore
+    /// true in production.
     ///
-    /// Flip to `true` when: at least one real event calls `send_to_user`, the APNs `.p8`
-    /// key + Push capability are configured, and `APNS_*` env vars are set on Railway.
-    /// The `aps-environment` entitlement is already wired per-configuration
-    /// (Debug → development, Release → production).
-    nonisolated static let notificationPreferencesEnabled = false
+    /// ⚠️ The previous comment here said `send_to_user` had "zero callers". That was true when
+    /// it was written (2026-07-30) and FALSE two days later — the dispatch pipeline shipped on
+    /// 2026-08-01 and nobody flipped this flag. The cost of the drift: users were prompted for
+    /// permission during onboarding, received alerts, and had no in-app way to turn them off,
+    /// because the only screen that could was hidden behind this. `preference_enabled` defaults
+    /// to TRUE on a missing key, so every user was silently opted in to everything.
+    ///
+    /// The screen now shows only `notify_watchlist_changes` — the one preference with a sender
+    /// behind it. Restoring a hidden group means wiring its key to a real `preference_key=`
+    /// caller FIRST; see the header of `NotificationsSettingsView.swift`.
+    nonisolated static let notificationPreferencesEnabled = true
 
     /// Appearance mode picker (Light / Dark / System).
     ///

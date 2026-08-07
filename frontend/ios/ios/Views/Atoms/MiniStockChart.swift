@@ -10,6 +10,10 @@ import SwiftUI
 struct MiniStockChart: View {
     /// Only read to bust the `.drawingGroup()` raster cache — see below.
     @Environment(\.colorScheme) private var colorScheme
+    /// Read for the dash cue AND, like `colorScheme`, to bust the raster: a
+    /// `.drawingGroup()` is a Metal texture that is not re-rendered just because an
+    /// accessibility setting changed, so it must participate in the `.id()`.
+    @Environment(\.differentiateWithoutColor) private var differentiate
 
     let data: [Double]
     let isPositive: Bool
@@ -71,13 +75,15 @@ struct MiniStockChart: View {
                 }
                 .stroke(
                     isPositive ? AppColors.bullish : AppColors.bearish,
-                    style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                    style: AppSentiment.strokeStyle(isPositive: isPositive,
+                                                    differentiate: differentiate,
+                                                    lineWidth: 2)
                 )
             }
             // Flatten path rendering into a single Metal texture
             .drawingGroup()
             .accessibilityIgnoresInvertColors()
-            .id(colorScheme)
+            .id("\(colorScheme)-\(differentiate)")
         }
         .frame(height: height)
     }

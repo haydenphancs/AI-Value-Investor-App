@@ -34,6 +34,12 @@ struct LiveIndicator: View {
         }
         .fixedSize()
         .frame(width: 14, height: 14)
+        // Purely decorative, and deliberately NOT given a colour-independent cue.
+        // Its one call site (`LiveNewsHeader`) puts it immediately left of a literal
+        // "Live News" label, so the meaning is already carried in text; adding a glyph
+        // or a caption inside the atom would duplicate that. What it DID need is to stop
+        // announcing itself as an unlabelled image to VoiceOver.
+        .accessibilityHidden(true)
         .onAppear { startHeartbeat() }
         .onDisappear { stopHeartbeat() }
     }

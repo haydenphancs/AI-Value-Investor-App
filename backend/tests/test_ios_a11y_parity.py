@@ -216,6 +216,10 @@ _SENTIMENT_RENDERERS = [
     "Views/Atoms/StockPriceDisplay.swift",
     "Views/Molecules/PriceActionSparkline.swift",
     "Views/Molecules/Chart/CandlestickChartRenderer.swift",
+    # Volume bars: the one chart in the app where hue was the SOLE channel. Bars grow up
+    # and height is volume, so position says nothing about direction, and the crosshair
+    # readout printed magnitude only. Hatched under DWC.
+    "Views/Molecules/Chart/SubChartCanvas.swift",
 ]
 
 # Renderers audited and deliberately EXEMPT, each with its reason stated in the source.

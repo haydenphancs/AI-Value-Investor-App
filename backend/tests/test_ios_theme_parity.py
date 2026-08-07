@@ -1011,6 +1011,27 @@ def _separation_pairs() -> list[tuple[str, str]]:
     return out
 
 
+def test_the_tab_bar_draws_its_own_hairline():
+    """`(tabBarBackground, background)` cannot go in the pair table above: both dark arms
+    are #171B26, so the fill step is 1.0000 and `cardEdge` is transparent in dark — the
+    generic check can only fail. The bar solves it locally with its own `border` hairline
+    instead, and this pins that.
+
+    Measured before the fix: the left gutter was one unbroken #171B26 for 320px from the
+    page through the bar, so a card scrolled to the edge was clipped against nothing."""
+    src = (_IOS / "Views/Organisms/CustomTabBar.swift").read_text()
+    assert "AppColors.tabBarBackground" in src
+    assert re.search(r"\.overlay\(alignment:\s*\.top\)", src), "tab-bar hairline is gone"
+    assert "AppColors.border" in src, "the hairline must use `border` — `cardEdge` is alpha 0 in dark"
+    tokens = _declared_tokens(_sections()[0])
+    bar, border = tokens["tabBarBackground"], tokens["border"]
+    for style in ("light", "dark"):
+        base = _composite(bar.rgb(style), bar.alpha(style), (1.0, 1.0, 1.0))
+        drawn = _composite(border.rgb(style), border.alpha(style), base)
+        assert _ratio(drawn, base) >= _MIN_EDGE_STEP, (
+            f"the tab-bar hairline is only {_ratio(drawn, base):.4f} against the bar in {style}")
+
+
 def test_separation_pair_scanner_is_not_vacuous():
     pairs = _separation_pairs()
     assert len(pairs) >= 5, f"only parsed {len(pairs)} separation pairs"

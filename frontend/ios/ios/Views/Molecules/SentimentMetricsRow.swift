@@ -85,11 +85,10 @@ struct SentimentMetricCard: View {
         }
         .frame(maxWidth: .infinity)
         .padding(AppSpacing.md)
+        // No `.overlay` stroke: `cardBackgroundLight` and `cardBackgroundNested` share the
+        // #252B3B dark arm, so it drew nothing there, and duplicated `cardEdge` in light.
+        // `.cardSurface` already draws the edge in the mode that needs one.
         .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)
-        .overlay(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
-        )
     }
 }
 

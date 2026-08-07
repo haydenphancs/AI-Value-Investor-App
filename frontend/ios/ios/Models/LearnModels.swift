@@ -120,6 +120,22 @@ enum MoneyMoveCategory: String, CaseIterable {
         case .battles: return AppColors.alertPurple // Purple - strategic
         }
     }
+
+    /// The same hue as a SATURATED TILE that `textOnAccent` ink sits on.
+    ///
+    /// `iconBackgroundColor` above is deliberately the TEXT-safe token (it also reaches
+    /// foreground call sites, e.g. TrendingAnalysisDetailView), and the text-safe values
+    /// LIGHTEN in dark: white on `gain` #22C55E is 2.28:1, on `loss` #F87171 2.77:1, on
+    /// `alertPurple` #C084FC 2.64:1 — all far under the 4.5 floor. The `*Fill` tokens keep
+    /// the light value in both modes, giving 5.42 / 5.55 / 6.98. Pair this with
+    /// `AppColors.textOnAccent`, never `.white` or `textPrimary` directly.
+    var iconFillColor: Color {
+        switch self {
+        case .blueprints: return AppColors.gainFill
+        case .valueTraps: return AppColors.lossFill
+        case .battles: return AppColors.alertPurpleFill
+        }
+    }
 }
 
 // MARK: - Money Move
@@ -143,6 +159,11 @@ struct MoneyMove: Identifiable {
     
     var iconBackgroundColor: Color {
         category.iconBackgroundColor
+    }
+
+    /// Saturated-tile variant — pair with `AppColors.textOnAccent`. See the category.
+    var iconFillColor: Color {
+        category.iconFillColor
     }
 }
 

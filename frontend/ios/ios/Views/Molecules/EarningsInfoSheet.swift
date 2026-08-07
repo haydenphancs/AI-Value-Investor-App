@@ -123,8 +123,7 @@ struct EarningsInfoSheet: View {
                         tipRow(icon: "lightbulb.fill", text: "Use 3Y view to identify long-term earnings trends")
                     }
                     .padding(AppSpacing.lg)
-                    .background(AppColors.cardBackgroundLight)
-                    .cornerRadius(AppCornerRadius.medium)
+                    .cardSurface(AppColors.cardBackgroundLight, cornerRadius: AppCornerRadius.medium)
 
                     Spacer()
                         .frame(height: AppSpacing.xl)

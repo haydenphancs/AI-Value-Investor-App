@@ -82,6 +82,8 @@ struct ResearchCard: View {
         }
         .frame(width: 260, height: 280)
         .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+        // Card on the page background: an edge in light, nothing in dark.
+        .cardBorder(cornerRadius: AppCornerRadius.large)
     }
 
     @ViewBuilder

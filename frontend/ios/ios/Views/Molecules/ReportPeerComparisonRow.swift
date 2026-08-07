@@ -69,7 +69,7 @@ struct ReportPeerComparisonRow: View {
         .padding(AppSpacing.md)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(AppColors.cardBackgroundLight)
+                .cardFill(AppColors.cardBackgroundNested)   // nested in a card: step the surface up in dark
         )
     }
 

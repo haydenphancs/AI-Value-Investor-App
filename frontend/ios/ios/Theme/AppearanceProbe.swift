@@ -36,7 +36,14 @@ enum AppearanceProbe {
     /// One trace. `phase` names the call site so interleaved lines stay attributable.
     static func dump(_ phase: String) {
         let raw = UserDefaults.standard.string(forKey: AppearanceManager.storageKey)
-        let parsed = raw.flatMap(AppearanceMode.init(rawValue:))
+        // The TOLERANT parse, matching what both production readers actually do
+        // (`AppearanceManager.parse` and `SettingsSyncManager.apply`). Using the strict
+        // `init(rawValue:)` here made the probe accuse itself: a stored "dark" (lowercase,
+        // from a foreign writer, in the window before a hydrate heals it) printed
+        // "PARSE MISS" on one line and "current: Dark" on the next. The whole point of this
+        // file is to be ground truth when the app and the harness disagree, so a line that
+        // reports a failure that did not happen is worse than no line.
+        let parsed = raw.flatMap(AppearanceMode.init(tolerantRawValue:))
 
         print("━━━ APPEARANCE [\(phase)] ━━━")
         print("  stored raw     : \(raw.map { "\"\($0)\"" } ?? "nil (key absent)")")
@@ -129,13 +136,30 @@ enum AppearanceProbe {
     /// runtime exposes whether the previous mode was actually cleared.
     static func runTransitionSelfTestIfRequested() async {
         guard ProcessInfo.processInfo.environment["CAYDEX_APPEARANCE_SELFTEST"] == "1" else { return }
-        let original = AppearanceManager.current
+
+        // Capture and restore the RAW stored value, including its ABSENCE.
+        //
+        // Round-tripping through `AppearanceManager.current` coalesces a missing key to
+        // `.dark`, so "restoring" would MATERIALISE `appearance_mode = "Dark"` on a device
+        // that had never stored one — flipping the sync blob from "omits the key" to "sends
+        // Dark", i.e. the diagnostic would change what gets synced. `defer` so an early exit
+        // cannot leave the store on a test value.
+        let key = AppearanceManager.storageKey
+        let originalRaw = UserDefaults.standard.string(forKey: key)
+        defer {
+            if let originalRaw {
+                UserDefaults.standard.set(originalRaw, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            AppearanceManager.applyStored()
+        }
+
         for mode in [AppearanceMode.light, .dark, .system, .light, .system] {
             AppearanceManager.set(mode)
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             dump("AFTER set→\(mode.rawValue)")
         }
-        AppearanceManager.set(original)
     }
 
     // MARK: - Formatting

@@ -75,7 +75,7 @@ class PriceActionViewModel: ObservableObject {
                 chartData: chartSlice,
                 eventIndex: adjustedEventIdx,
                 narrative: data.narrative,
-                isPositive: data.direction == "up" || data.direction == "flat",
+                isPositive: data.changePct >= 0,   // from the VALUE, not `direction` — see note above
                 tier: data.tier,
                 volatilitySubLabel: subLabel
             )
@@ -90,12 +90,20 @@ class PriceActionViewModel: ObservableObject {
             chartData: prices,
             eventIndex: nil,
             narrative: data.narrative,
-            isPositive: data.direction == "up" || data.direction == "flat",
+            isPositive: data.changePct >= 0,   // from the VALUE, not `direction` — see note above
             tier: data.tier,
             volatilitySubLabel: subLabel
         )
     }
 
+    // `isPositive` is derived from `changePct`, NOT from the backend's `direction` string.
+    //
+    // They are independent fields, and `direction` is tri-state: "flat" was mapped to
+    // positive, so a "flat" classification carrying changePct -0.34 rendered the text
+    // "-0.3%" in GAIN GREEN. Colour and sign are now two readings of one number and cannot
+    // contradict each other — which matters more here than usual, because the percentage was
+    // added to this badge specifically so colour would not be the only signal (WCAG 1.4.1).
+    // An unrecognised direction token no longer mis-colours anything either.
     private static func formatPercent(_ value: Double) -> String {
         String(format: "%+.1f%%", value)
     }

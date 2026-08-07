@@ -56,6 +56,8 @@ struct AcknowledgementsView: View {
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                    // Card on the page background: an edge in light, nothing in dark.
+                    .cardBorder(cornerRadius: AppCornerRadius.large)
                     .padding(.horizontal, AppSpacing.lg)
 
                     Spacer().frame(height: AppSpacing.xxxl)

@@ -242,6 +242,12 @@ struct TickerReportView: View {
                 maxScore: report.qualityRating.maxScore,
                 label: report.qualityRating.label
             )
+
+            // The report DOES carry a disclaimer — but in `disclaimerSection`, at the very
+            // bottom of a long scroll. A reader who sees the score and leaves never meets it.
+            // This puts the short form against the number itself; the full text is one tap
+            // away in both places.
+            AnalysisDisclaimerText()
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.sm)

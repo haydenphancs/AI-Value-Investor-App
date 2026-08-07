@@ -78,11 +78,21 @@ final class SettingsSyncManager {
             defaults.removeObject(forKey: key)
         }
         // Reset the sync state machine too, not just the values. Leaving `hasHydrated` true
-        // would let the next account `push()` before its own hydrate had run, and a stale
-        // `pendingBlob` / `deferredPushPending` would replay the ended session's edits into it.
+        // would let the next account `push()` before its own hydrate had run, and stale
+        // pending keys would replay the ended session's edits into it.
         hasHydrated = false
-        pendingBlob = nil
+        pendingKeys = []
         deferredPushPending = false
+        lastServerBlob = [:]
+        // `isHydrating` must reset too, and it did not.
+        //
+        // It is an in-flight guard, but it is not identity-scoped: if A's fetch was still in
+        // flight at sign-out, it stayed true, and B's hydrate then hit `guard !isHydrating`
+        // and returned having done NOTHING. A's response is correctly discarded by the epoch
+        // check, so nothing ever set `hasHydrated` for B — leaving every one of B's pushes
+        // gated for the whole session. The in-flight response cannot hurt us (the epoch guard
+        // owns that), so clearing the flag here is safe and is what lets B hydrate at all.
+        isHydrating = false
         // The appearance override is applied to the window, not just stored, so re-apply the
         // now-default value or the previous user's Light/Dark choice stays on screen.
         AppearanceManager.applyStored()
@@ -101,6 +111,54 @@ final class SettingsSyncManager {
 
     private var isAuthenticated: Bool {
         appState?.auth.isAuthenticated ?? false
+    }
+
+    /// We hold a credential we could not validate yet (`.restoring`). NOT a guest.
+    ///
+    /// `push()` used to fall through `guard isAuthenticated` and RETURN here, silently
+    /// discarding the change — which is the same class of loss the `hasHydrated` gate was
+    /// rewritten to avoid, on a path that is common rather than rare: `.restoring` is
+    /// entered on every transient network failure and every launch on a flaky connection.
+    private var isRestoring: Bool {
+        appState?.auth.status == .restoring
+    }
+
+    // MARK: - Durable sync state
+    //
+    // These three survive a relaunch on purpose. Everything the sync machine knows used to
+    // live in memory, so a kill (or a jetsam) between "user changed a setting while offline"
+    // and "a hydrate finally succeeded" lost the change AND let the stale server value
+    // overwrite it — the exact symptom `push()`'s deferral comment says was fixed.
+
+    private static let pendingKeysDefaultsKey = "settings_pending_dirty_keys"
+    private static let lastServerBlobDefaultsKey = "settings_last_server_blob"
+
+    /// Keys this device changed locally that the server has not accepted yet.
+    private var pendingKeys: Set<String> {
+        get { Set(defaults.stringArray(forKey: Self.pendingKeysDefaultsKey) ?? []) }
+        set {
+            if newValue.isEmpty { defaults.removeObject(forKey: Self.pendingKeysDefaultsKey) }
+            else { defaults.set(Array(newValue).sorted(), forKey: Self.pendingKeysDefaultsKey) }
+        }
+    }
+
+    /// The last blob the server confirmed, verbatim — INCLUDING keys this build does not know.
+    ///
+    /// Load-bearing for the full-replace contract: the PUT is built by overlaying local values
+    /// onto this, so a key introduced by a newer app version survives a push from an older one.
+    /// Without it, `currentBlob()` (which iterates only the three static key lists) defines the
+    /// whole row, and every key this build has never heard of is DELETED for every device.
+    private var lastServerBlob: [String: PreferenceValue] {
+        get {
+            guard let data = defaults.data(forKey: Self.lastServerBlobDefaultsKey),
+                  let decoded = try? JSONDecoder().decode([String: PreferenceValue].self, from: data)
+            else { return [:] }
+            return decoded
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            defaults.set(data, forKey: Self.lastServerBlobDefaultsKey)
+        }
     }
 
     /// Pull the backend preference blob into UserDefaults (authed only).
@@ -129,21 +187,36 @@ final class SettingsSyncManager {
                 guard epoch == LearnIdentityEpoch.current else {
                     // These are the ENDED session's preferences. Drop them, and leave
                     // `hasHydrated` false so the new identity's own hydrate still has to run.
+                    //
+                    // Re-drive for the CURRENT identity rather than just returning: this
+                    // branch used to leave the new account with `hasHydrated == false` and
+                    // nothing scheduled, so its push stayed gated until something else
+                    // happened to call hydrate() again.
                     #if DEBUG
                     print("[SettingsSync] discarded a hydrate from a previous identity")
                     #endif
+                    isHydrating = false
+                    hydrate()
                     return
                 }
+                // Record the server's blob VERBATIM before applying it, so the next PUT can
+                // preserve keys this build does not know about (see `lastServerBlob`).
+                lastServerBlob = prefs
                 apply(prefs)
-                // Re-assert anything the user changed WHILE the hydrate was gated, so the
-                // server blob does not silently revert their choice. Local wins here because
-                // it is strictly newer than the response now being applied.
-                if let deferred = pendingBlob {
-                    pendingBlob = nil
-                    applyLocalOverrides(deferred)
+                // Re-assert only the keys the user actually changed while the hydrate was
+                // gated — NOT the whole local blob.
+                //
+                // The old code snapshotted every key at defer time and replayed all of them,
+                // so one appearance tap made on an un-hydrated launch also re-asserted 17
+                // stale toggles over the server's newer values. Replaying a diff means an
+                // edit on device A can no longer resurrect device B's superseded settings.
+                let dirty = pendingKeys
+                if !dirty.isEmpty {
+                    pendingKeys = []
+                    applyLocalOverrides(currentBlob().filter { dirty.contains($0.key) })
                 }
                 hasHydrated = true   // safe to push now (server state is known)
-                if deferredPushPending {
+                if deferredPushPending || !dirty.isEmpty {
                     deferredPushPending = false
                     push()
                 }
@@ -164,10 +237,10 @@ final class SettingsSyncManager {
         }
     }
 
-    /// Local snapshot captured while `push()` was gated on an un-hydrated session. Held so the
-    /// change survives to the next successful hydrate instead of being dropped.
-    private var pendingBlob: [String: PreferenceValue]?
     /// A push was requested while gated; fire it once the hydrate lands.
+    /// (The VALUES live in `pendingKeys` + UserDefaults, which survive a relaunch — this flag
+    /// only says "there is something to send", and re-deriving it from a non-empty
+    /// `pendingKeys` on the next hydrate is what makes a killed app recover.)
     private var deferredPushPending = false
     /// In-flight guard so repeated `push()` calls can't launch a hydrate storm while offline.
     private var isHydrating = false
@@ -175,7 +248,15 @@ final class SettingsSyncManager {
     /// Push current UserDefaults values to the backend (best-effort, authed only).
     /// No-ops until the first successful `hydrate()` (see `hasHydrated`).
     func push() {
-        guard isAuthenticated else { return }
+        // `.restoring` means we HOLD a credential we could not validate — the user is not a
+        // guest, and their change must not be thrown away just because the token is in the
+        // middle of healing. Defer it like an un-hydrated push; the session heals on its own
+        // (AppState.restoreSession) and the pending keys replay then.
+        if !isAuthenticated {
+            guard isRestoring else { return }
+            deferLocalChange()
+            return
+        }
         guard hasHydrated else {
             // DEFER, don't discard. This gate exists so a partial local snapshot can't clobber
             // richer server settings — correct — but it used to `return` and lose the change
@@ -184,19 +265,37 @@ final class SettingsSyncManager {
             // was PUT, and the next successful hydrate then overwrote their local values with
             // the stale server blob. The toggle they flipped simply flipped back.
             //
-            // Hold the snapshot, retry the hydrate, and re-assert these keys over the response.
-            pendingBlob = currentBlob()
-            deferredPushPending = true
+            // Hold the changed keys, retry the hydrate, and re-assert them over the response.
+            deferLocalChange()
             #if DEBUG
             print("ℹ️ [Settings] push deferred (not hydrated) — retrying hydrate")
             #endif
             hydrate()
             return
         }
-        let blob = currentBlob()
+        // Overlay this build's known keys onto the last confirmed server blob, rather than
+        // letting a partial local snapshot define the whole row. The endpoint is a FULL
+        // REPLACE, so any key missing from this dictionary is deleted for every device —
+        // including keys a NEWER app version added and this one has never heard of.
+        var blob = lastServerBlob
+        for (key, value) in currentBlob() { blob[key] = value }
+        // Same identity race the hydrate path guards: capture the epoch before the Task, so a
+        // sign-out + sign-in that lands between here and the token being attached cannot PUT
+        // account A's blob with account B's credential.
+        let epoch = LearnIdentityEpoch.current
         Task {
+            guard epoch == LearnIdentityEpoch.current else {
+                #if DEBUG
+                print("[SettingsSync] dropped a push from a previous identity")
+                #endif
+                return
+            }
             do {
                 _ = try await repository.updateSettings(blob)
+                guard epoch == LearnIdentityEpoch.current else { return }
+                // The server has now confirmed exactly this blob.
+                lastServerBlob = blob
+                pendingKeys = []
             } catch {
                 // Release-visible: the toggle the user just flipped is now local-only and will
                 // be overwritten by the next hydrate.
@@ -209,6 +308,25 @@ final class SettingsSyncManager {
                 #endif
             }
         }
+    }
+
+    /// Remember that the local store has moved ahead of the server, and which keys moved.
+    ///
+    /// Diffed against the last confirmed server blob rather than snapshotting everything, so a
+    /// replay re-asserts only what this device actually changed. When no server blob is known
+    /// yet (fresh install, never hydrated) every present key counts as dirty — which is the
+    /// correct reading there: nothing on the server can be superseded by them.
+    private func deferLocalChange() {
+        let local = currentBlob()
+        let server = lastServerBlob
+        let changed = local.filter { key, value in server[key] != value }.keys
+        pendingKeys = pendingKeys.union(changed)
+        deferredPushPending = true
+    }
+
+    /// Keys this build owns. Anything else the server sends is NOT written to UserDefaults.
+    private static var syncedKeys: Set<String> {
+        Set(boolKeys).union(stringKeys).union(doubleKeys)
     }
 
     // MARK: - Blob <-> UserDefaults
@@ -239,34 +357,51 @@ final class SettingsSyncManager {
 
     private func apply(_ prefs: [String: PreferenceValue]) {
         for (key, value) in prefs {
+            // Only keys this build declares are written. `apply()` used to write ANY key the
+            // server returned straight into UserDefaults, so a row containing (say)
+            // `app_lock_enabled` — documented above as deliberately NOT synced — would set it
+            // on this device, and `clearLocalForEndedSession` (which only clears the three
+            // declared lists) would then leave it behind for the next account.
+            guard Self.syncedKeys.contains(key) else {
+                #if DEBUG
+                print("⚠️ [Settings] ignored unknown synced key \"\(key)\"")
+                #endif
+                continue
+            }
+
+            // `appearance_mode` is the one synced key this layer has SEMANTICS for, and a bad
+            // value is silently destructive: both readers coalesce an unparseable value to
+            // `.dark`, turning a "System" user into a "Dark" user with nothing to say why.
+            //
+            // Validated by KEY, before the value switch — not inside the `.string` arm.
+            // `PreferenceValue` decodes Bool → Int → Double → String, so a JSON number would
+            // arrive as `.int`, skip a string-only guard entirely, and write an NSNumber. The
+            // two readers then disagree (`@AppStorage<String>` falls back to its default while
+            // `AppearanceManager` sees the coerced "1"), and because the picker's ViewModel is
+            // seeded from the coerced value, the mode the user needs to tap becomes a no-op.
+            if key == AppearanceManager.storageKey {
+                guard case .string(let s) = value,
+                      let mode = AppearanceMode(tolerantRawValue: s) else {
+                    Analytics.shared.track(.backgroundSyncFailed, [
+                        "op": .string("settings_hydrate_appearance"),
+                        "code": .string("invalid_appearance_mode"),
+                    ])
+                    #if DEBUG
+                    print("⚠️ [Settings] rejected unusable appearance_mode \(value) — "
+                          + "keeping local \(AppearanceManager.current.rawValue)")
+                    #endif
+                    continue   // keep the user's local choice; do NOT write junk
+                }
+                // Write the CANONICAL casing, so a foreign value (lowercase from another
+                // client, a hand-edited row) heals locally and the next push repairs the
+                // server row — see `currentBlob()`.
+                defaults.set(mode.rawValue, forKey: key)
+                continue
+            }
+
             switch value {
             case .bool(let b): defaults.set(b, forKey: key)
-            case .string(let s):
-                // `appearance_mode` is the one synced string this layer has SEMANTICS
-                // for. Every other key is opaque here, but a bad value in this one is
-                // silently destructive: `AppearanceManager.parse` and the root
-                // `.preferredColorScheme` both coalesce an unparseable value to
-                // `.dark`, so writing the server's string verbatim can turn a "System"
-                // user into a "Dark" user with nothing anywhere to say why.
-                if key == AppearanceManager.storageKey {
-                    guard let mode = AppearanceMode(tolerantRawValue: s) else {
-                        Analytics.shared.track(.backgroundSyncFailed, [
-                            "op": .string("settings_hydrate_appearance"),
-                            "code": .string("invalid_appearance_mode"),
-                        ])
-                        #if DEBUG
-                        print("⚠️ [Settings] rejected unrecognised appearance_mode \"\(s)\" — "
-                              + "keeping local \(AppearanceManager.current.rawValue)")
-                        #endif
-                        continue   // keep the user's local choice; do NOT write junk
-                    }
-                    // Write the CANONICAL casing, so a foreign value (lowercase from
-                    // another client, a hand-edited row) heals locally and the next
-                    // push repairs the server row — see `currentBlob()`.
-                    defaults.set(mode.rawValue, forKey: key)
-                } else {
-                    defaults.set(s, forKey: key)
-                }
+            case .string(let s): defaults.set(s, forKey: key)
             case .int(let i): defaults.set(i, forKey: key)
             case .double(let d): defaults.set(d, forKey: key)
             }

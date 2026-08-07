@@ -68,7 +68,7 @@ struct PersonaCard: View {
             .padding(.horizontal, AppSpacing.sm)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                    .fill(isSelected ? persona.accentColor.opacity(0.15) : AppColors.cardBackground)
+                    .cardFill(isSelected ? persona.accentColor.opacity(0.15) : AppColors.cardBackground)
                     .overlay(
                         RoundedRectangle(cornerRadius: AppCornerRadius.large)
                             .stroke(

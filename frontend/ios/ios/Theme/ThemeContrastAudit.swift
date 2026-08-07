@@ -181,9 +181,15 @@ enum ThemeContrastAudit {
     /// Every colour token declared on `AppColors` must appear in `auditManifest`.
     ///
     /// Without this, adding a token is silently adding an UNAUDITED token — the
-    /// contrast guard would keep printing ✅ while the new value fails. Mirror
-    /// walks the type's stored properties, so it needs no maintenance as tokens
-    /// come and go.
+    /// contrast guard would keep printing ✅ while the new value fails.
+    ///
+    /// ⚠️ This does NOT make the palette self-maintaining, despite what this comment used
+    /// to claim. `Mirror` cannot enumerate `AppColors`' static members, so it walks
+    /// `AppColors.tokenInventory` — a HAND-WRITTEN duplicate of the palette. It therefore
+    /// catches "in `TokenInventory` but not in `auditManifest`" and nothing else: a token
+    /// added to `AppColors` and forgotten in `TokenInventory` is invisible to this check and
+    /// ships unaudited with a green ✅. `theme-lint.sh` rule 8 closes that hole at the source
+    /// level, which is the only layer that can see it.
     ///
     /// Computed aliases (`bullish`, `divider`, `tabBarSelected`, …) are `var`s
     /// that forward to a canonical token, so they are intentionally exempt —
@@ -299,6 +305,29 @@ enum ThemeContrastAudit {
         // …and must accept every form the lenient one does.
         for good in ["FFF", "FF0000", "#00FF00", "80FFFFFF"] {
             if UIColor(validatingHexString: good) == nil { fail("rejected valid '\(good)'") }
+        }
+
+        // Pin what the LENIENT parser actually does with junk. Nothing asserted this before,
+        // so the "silently blackens" contract above was a claim about untested behaviour —
+        // and it turns out to be only half true. `Scanner.scanHexInt64` stops at the first
+        // non-hex character WITHOUT reporting failure, and `trimmingCharacters` only strips
+        // the ends, so a string can match a length arm and still be misread:
+        //   "0O1122" (letter O) → scan stops immediately → BLACK
+        //   "12345G"            → scans 0x12345 → an arbitrary navy, no diagnostic
+        // Both are what a typo'd token looks like, so they are worth freezing rather than
+        // discovering later as "that colour looks a bit off".
+        for blackened in ["", "#", "zzz", "12", "1234", "1234567", "0O1122"] {
+            if UIColor(hexString: blackened).wcagContrast(against: .black) > 1.01 {
+                fail("lenient parser no longer blackens '\(blackened)'")
+            }
+        }
+        // The invisible class is the dangerous one: an 8-char string whose first byte scans as
+        // 0 yields alpha 0, so the view renders NOTHING rather than something wrong — which is
+        // far harder to notice. "0xFF0000" is the realistic typo (a CSS/Swift-style prefix).
+        for form in ["0xFF0000", "FF 00 00"] {
+            var alpha: CGFloat = 0
+            UIColor(hexString: form).getRed(nil, green: nil, blue: nil, alpha: &alpha)
+            if alpha < 0.99 { fail("lenient parser yields an invisible colour for '\(form)'") }
         }
 
         // The clamp must actually reach its floor, in both directions.

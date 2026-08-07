@@ -196,8 +196,12 @@ struct GlobalMiniPlayer: View {
         // resolves to near-black in light mode — so the whole player went
         // black-on-navy. It reads as a floating card, so it should BE one: an
         // adaptive surface, with the border carrying the edge in light.
+        // Just the surface. `.overlay(AppColors.border)` was NOT a hairline — overlaying a
+        // Color fills the WHOLE area, so the capsule rendered as a flat grey wash (#101828 at
+        // 14% over #FFFFFF ≈ #DEDFE1 in light) rather than a white card with an edge. The
+        // visible edge users actually see comes from the primaryBlue strokeBorder applied at
+        // the call site, which is unaffected.
         AppColors.cardBackground
-            .overlay(AppColors.border)
     }
 
     // MARK: - Progress Bar

@@ -39,10 +39,12 @@ report() {                       # report <title> <explanation> <matches>
 # construction. Brand trade dress is the one legitimate exception.
 report "no Color(hex:) outside Theme/" \
   "frozen colours can't adapt — declare a token in AppTheme.swift instead" \
-  "$(grep -rn --include='*.swift' 'Color(hex:' . \
+  "$(grep -rn --include='*.swift' -E 'Color\(hex:|UIColor\(hexString:' . \
       | grep -v '^./Theme/' \
       | grep -vE '(SearchResultRow|EducationBookCard|SearchBookCard|AIVoiceOrb|PlayAudioButton|CompanyLogoView|BookLibraryView|AudioPlayerModels|AudioManager|HomeDashboardModels)\.swift' \
-      | grep -v -i 'gradientcolors\|artworkcolors\|covergradient\|herogradient\|// ' \
+      | sed 's://.*$::' \
+      | grep -E 'Color\(hex:|UIColor\(hexString:' \
+      | grep -v -i 'gradientcolors\|artworkcolors\|covergradient\|herogradient' \
       || true)"
 
 # ── 2. SwiftUI system colours ─────────────────────────────────────────────────
@@ -50,7 +52,7 @@ report "no Color(hex:) outside Theme/" \
 # .green 2.22, .yellow 1.51 — all fail. They look adaptive and are not ours.
 report "no SwiftUI system colours in Views/ or Models/" \
   "Apple's tints fail this app's contrast floors (.yellow is 1.51:1 on white)" \
-  "$(grep -rnE '(foregroundColor|foregroundStyle|\.fill|\.stroke|\.tint)\(\s*(Color\.)?\.(gray|cyan|yellow|orange|green|red|blue|purple|pink|indigo|mint|teal|brown)\b' \
+  "$(grep -rnE '(foregroundColor|foregroundStyle|\.fill|\.stroke(Border)?|\.tint|\.background|\.overlay|\.accentColor)\(\s*(Color\.)?\.(gray|cyan|yellow|orange|green|red|blue|purple|pink|indigo|mint|teal|brown)\b' \
       --include='*.swift' Views/ Models/ Core/ 2>/dev/null || true)"
 
 # ── 3. On-accent ink ──────────────────────────────────────────────────────────
@@ -80,7 +82,8 @@ while IFS=: read -r file line _; do
   if ! sed -n "$((line)),$((line + 2))p" "$file" | grep -q '\.id(colorScheme)'; then
     DG_BAD="${DG_BAD}${file}:${line}: .drawingGroup() without .id(colorScheme)"$'\n'
   fi
-done < <(grep -rnE "^[^/]*[^/]\\.drawingGroup\\(\\)" --include='*.swift' . 2>/dev/null | grep -v '//' || true)
+done < <(grep -rnE "\\.drawingGroup\\(\\)" --include='*.swift' . 2>/dev/null \
+           | sed 's://.*$::' | grep '\\.drawingGroup()' || true)
 report "every .drawingGroup() is keyed on colorScheme" \
   "a Metal raster keeps stale colours across a LIVE appearance flip" \
   "$(printf '%s' "$DG_BAD")"
@@ -102,6 +105,50 @@ report "CaydexLogo rendered only via CaydexLogoMark" \
   "the PNG is an opaque #171B26 tile — bare, it is a dark square on a light page" \
   "$(grep -rn --include='*.swift' 'Image("CaydexLogo")' . 2>/dev/null \
       | grep -v 'Views/Atoms/CaydexLogoMark.swift' || true)"
+
+# ── 8. Every stored token is audited ──────────────────────────────────────────
+# ThemeContrastAudit's completeness check walks AppColors.tokenInventory, a
+# HAND-WRITTEN duplicate of the palette — Mirror cannot see static members. So a
+# token added to AppColors and forgotten in TokenInventory is invisible to the
+# runtime guard and ships unaudited with a green check. Only the source level can
+# see that, which is here.
+TOKENS_MISSING=""
+while read -r name; do
+  [ -z "$name" ] && continue
+  if ! grep -q "let ${name} = AppColors\.${name}" Theme/AppTheme.swift; then
+    TOKENS_MISSING="${TOKENS_MISSING}AppColors.${name} is not in TokenInventory"$'\n'
+  elif ! grep -q "TokenSpec(\"${name}\"" Theme/AppTheme.swift; then
+    TOKENS_MISSING="${TOKENS_MISSING}AppColors.${name} is not in auditManifest"$'\n'
+  fi
+done < <(sed -n '/^struct AppColors {/,/^    static let auditManifest/p' Theme/AppTheme.swift \
+           | grep -oE '^    static let [A-Za-z0-9_]+ = Color\(' \
+           | sed -E 's/^    static let ([A-Za-z0-9_]+) = Color\($/\1/' || true)
+report "every stored colour token is in TokenInventory AND auditManifest" \
+  "the runtime audit cannot see a token you forgot to declare — it prints a green check anyway" \
+  "$(printf '%s' "$TOKENS_MISSING")"
+
+# ── 9. Cards must have an edge ────────────────────────────────────────────────
+# The premise of Views/Modifiers/CardSurface.swift: a #FFFFFF card on a #F4F5F8
+# page is 1.09:1, so in LIGHT it is distinguished by a border, not by luminance.
+# A card built as .background(AppColors.cardBackground) + a corner radius has no
+# edge at all — the exact defect CardSurface exists to prevent. Use .cardSurface,
+# RoundedRectangle(...).cardFill(), or .cardBorder() when the clip is load-bearing.
+EDGELESS=""
+while IFS=: read -r file line _; do
+  [ -z "$file" ] && continue
+  # A #Preview backdrop is not shipped UI — it simulates the card a consumer draws.
+  pv=$(grep -n '^#Preview' "$file" 2>/dev/null | head -1 | cut -d: -f1)
+  if [ -n "$pv" ] && [ "$line" -gt "$pv" ]; then continue; fi
+  # Window has to outlive an interleaved comment between the fill and its radius/edge.
+  win=$(sed -n "$((line)),$((line + 10))p" "$file" 2>/dev/null)
+  echo "$win" | grep -qE '\.cornerRadius\(|\.clipShape\(RoundedRectangle' || continue
+  echo "$win" | grep -qE '\.cardBorder\(|\.cardFill\(|\.cardSurface\(' && continue
+  EDGELESS="${EDGELESS}${file}:${line}: card fill with a radius but no edge"$'\n'
+done < <(grep -rn --include='*.swift' -E '\.background\(AppColors\.cardBackground\)' Views/ 2>/dev/null \
+           | sed 's://.*$::' | grep '\.background(' || true)
+report "cards drawn with a fill+radius carry an edge" \
+  "a #FFFFFF card on the #F4F5F8 page is 1.09:1 — without a border it has no edge in light" \
+  "$(printf '%s' "$EDGELESS")"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

@@ -439,7 +439,7 @@ private struct MoneyMovesCategorySectionHeader: View {
             // Icon with colored background
             ZStack {
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(category.iconBackgroundColor)
+                    .fill(category.iconFillColor)
                     .frame(width: 36, height: 36)
 
                 Image(systemName: category.iconName)

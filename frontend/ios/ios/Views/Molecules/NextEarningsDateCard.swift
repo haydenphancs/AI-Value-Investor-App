@@ -39,8 +39,7 @@ struct NextEarningsDateCard: View {
             Spacer()
         }
         .padding(AppSpacing.lg)
-        .background(AppColors.cardBackgroundLight)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)  // nested in a card: light edge free, dark separates by surface
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .stroke(AppColors.cardBackgroundLight.opacity(0.5), lineWidth: 1)

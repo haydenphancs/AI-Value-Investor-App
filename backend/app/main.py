@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 # Registered on the STARLETTE base class, not fastapi.HTTPException: fastapi's subclasses it,
 # so this one handler covers both, including the 404/405 Starlette itself raises for an
@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import logging
 import time
 import asyncio
+from pathlib import Path
 from typing import Any, Optional
 
 from app.config import settings
@@ -892,6 +893,50 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
+# Largest JSON body any non-upload route legitimately sends. The settings blob is
+# capped at 16 KiB by `MAX_PREFERENCES_BYTES`, but that check runs AFTER FastAPI has
+# materialised the body, json.loads has built the object graph, and sanitize has built
+# a second dict — so a 50 MB blob costs ~150 MB of RSS per in-flight request before
+# anything rejects it. This rejects on Content-Length, before the body is read.
+_MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
+
+# Deliberately NOT applied globally: chat streams SSE and the report path proxies a
+# PDF through this same stack, so a blanket body cap would be a new failure mode on
+# routes that legitimately stream. Scoped to the JSON write routes that take a
+# client-authored document.
+_BODY_CAPPED_PATH_SUFFIXES = ("/me/settings",)
+
+
+@app.middleware("http")
+async def cap_json_body(request: Request, call_next):
+    if request.method in ("PUT", "POST", "PATCH") and request.url.path.endswith(
+        _BODY_CAPPED_PATH_SUFFIXES
+    ):
+        raw_length = request.headers.get("content-length")
+        try:
+            declared = int(raw_length) if raw_length is not None else 0
+        except ValueError:
+            declared = 0
+        if declared > _MAX_JSON_BODY_BYTES:
+            # Local import, matching the other handlers in this file (app.api.error_response
+            # imports from app.*, so a module-level import here would be circular).
+            from app.api.error_response import ErrorCode, make_error_body
+
+            logger.warning(
+                "rejected oversized body on %s: %s bytes (cap %s)",
+                request.url.path, declared, _MAX_JSON_BODY_BYTES,
+            )
+            return JSONResponse(
+                status_code=413,
+                content=make_error_body(
+                    ErrorCode.INVALID_INPUT,
+                    message=f"request body exceeds {_MAX_JSON_BODY_BYTES} bytes",
+                    user_message="Your settings couldn't be saved. Please try again.",
+                ),
+            )
+    return await call_next(request)
+
+
 # Request timing
 @app.middleware("http")
 async def add_process_time(request: Request, call_next):
@@ -1118,6 +1163,73 @@ async def health_pdf():
 @app.get("/disclaimer", tags=["Root"])
 async def disclaimer():
     return {"disclaimer": settings.LEGAL_DISCLAIMER}
+
+
+# ── Public legal pages ─────────────────────────────────────────────────────────
+#
+# App Store Connect requires a **Privacy Policy URL** and a **Support URL**, both of which
+# must resolve to real pages a reviewer can open. They are served from here rather than from
+# a separate static host so that the one custom domain (`caydexinvest.com`, already pointed at
+# this service for the Apple associated-domains manifest) covers every URL Apple needs. No
+# second host, no second certificate, nothing else to keep alive.
+#
+# ⚠️ The files live at `backend/app/templates/legal/`, NOT at the repo-root `documents/legal/`.
+# `backend/Dockerfile` builds with the `backend/` directory as its context (`COPY . .`), so
+# anything outside `backend/` simply does not exist in the deployed container — the route would
+# 404 in production while working perfectly on a laptop. `tests/test_legal_pages.py` asserts the
+# served copies still match the authored originals, so the duplication cannot drift silently.
+_LEGAL_DIR = Path(__file__).resolve().parents[0] / "templates" / "legal"
+
+_LEGAL_PAGES = {
+    "privacy": "privacy.html",
+    "terms": "terms.html",
+    "support": "support.html",
+}
+
+
+def _render_legal(name: str) -> HTMLResponse:
+    """Read and return a legal page, or a 404 that says which file is missing.
+
+    Read per request rather than cached at import: these are ~10 KB, served a handful of times
+    a day (App Review, and the occasional user), and a stale cache after a content edit is a
+    worse failure than the read. If that ever changes, cache it — but not before.
+    """
+    path = _LEGAL_DIR / _LEGAL_PAGES[name]
+    try:
+        html = path.read_text(encoding="utf-8")
+    except OSError as e:
+        # Loud, because a missing legal page is an App Review rejection, and the most likely
+        # cause is a deploy that did not include the file.
+        logger.error(
+            "Legal page %r could not be read from %s: %s: %s",
+            name, path, type(e).__name__, e,
+        )
+        raise StarletteHTTPException(
+            status_code=404, detail=f"{name} page is unavailable"
+        ) from e
+    return HTMLResponse(content=html)
+
+
+@app.get("/privacy", tags=["Root"], include_in_schema=False)
+async def privacy_policy():
+    """Privacy Policy. Set as the App Store Connect Privacy Policy URL."""
+    return _render_legal("privacy")
+
+
+@app.get("/terms", tags=["Root"], include_in_schema=False)
+async def terms_of_use():
+    """Terms of Use, referenced from the in-app Legal screen."""
+    return _render_legal("terms")
+
+
+@app.get("/support", tags=["Root"], include_in_schema=False)
+async def support_page():
+    """Support page. Set as the App Store Connect Support URL.
+
+    ASC will not accept a bare `mailto:` there, and a reviewer does open it — it is also where
+    account deletion is documented, which Apple requires to be discoverable.
+    """
+    return _render_legal("support")
 
 
 if __name__ == "__main__":

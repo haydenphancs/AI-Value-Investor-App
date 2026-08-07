@@ -244,7 +244,7 @@ struct ETFNetYieldCard: View {
                         .padding(AppSpacing.md)
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(AppColors.cardBackgroundLight.opacity(0.5))
+                                .fill(AppColors.cardBackgroundNested)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
@@ -277,7 +277,7 @@ struct ETFNetYieldCard: View {
                         .padding(AppSpacing.md)
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(AppColors.cardBackgroundLight.opacity(0.5))
+                                .fill(AppColors.cardBackgroundNested)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
@@ -394,7 +394,7 @@ struct ETFDividendHistoryRow: View {
             .padding(AppSpacing.md)
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(AppColors.cardBackgroundLight.opacity(0.5))
+                    .fill(AppColors.cardBackgroundNested)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)

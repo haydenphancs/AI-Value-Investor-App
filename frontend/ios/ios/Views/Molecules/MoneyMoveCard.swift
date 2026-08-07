@@ -23,12 +23,12 @@ struct MoneyMoveCard: View {
                     if showIcon {
                         ZStack {
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(moneyMove.iconBackgroundColor)
+                                .fill(moneyMove.iconFillColor)
                                 .frame(width: 40, height: 40)
 
                             Image(systemName: moneyMove.iconName)
                                 .font(AppTypography.iconMedium).fontWeight(.semibold)
-                                .foregroundColor(.white)
+                                .foregroundColor(AppColors.textOnAccent)
                         }
                     } else {
                         // Compact headphones badge on narrated moves (See-All). Reserve the slot so

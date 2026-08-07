@@ -271,6 +271,8 @@ struct ArticleChartView: View {
         .padding(AppSpacing.md)
         .background(AppColors.cardBackgroundLight)
         .cornerRadius(AppCornerRadius.medium)
+        // Card edge: present in light, absent in dark (cardEdge).
+        .cardBorder(cornerRadius: AppCornerRadius.medium)
     }
 }
 

@@ -179,8 +179,7 @@ struct VolumeCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.md)
-        .background(AppColors.cardBackgroundLight)
-        .cornerRadius(AppCornerRadius.medium)
+        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)  // nested in a card: light edge free, dark separates by surface
     }
 }
 
@@ -251,8 +250,7 @@ struct SupportResistanceSection: View {
                     Spacer()
                 }
                 .padding(.vertical, AppSpacing.md)
-                .background(AppColors.cardBackgroundLight)
-                .cornerRadius(AppCornerRadius.medium)
+                .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)  // nested in a card: light edge free, dark separates by surface
 
                 // Support levels
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {

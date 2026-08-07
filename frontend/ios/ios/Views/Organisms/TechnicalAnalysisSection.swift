@@ -28,8 +28,10 @@ struct TechnicalAnalysisSection: View {
                 Spacer()
             }
 
-            // Disclaimer
-            AnalysisDisclaimerText()
+            // Disclaimer. `.rating` (not the default) because this section hosts the
+            // Strong Sell → Strong Buy meter, which is deterministic and rules-based —
+            // the generic copy used to call it "AI-generated", which it is not.
+            AnalysisDisclaimerText.rating
         }
         .padding(AppSpacing.lg)
         .cardSurface(cornerRadius: AppCornerRadius.large)

@@ -124,7 +124,25 @@ class PushDispatchService:
         if not rows:
             return True
         value = (rows[0].get("preferences") or {}).get(key)
-        return True if value is None else bool(value)
+        if value is None:
+            return True
+        # Type the read; do NOT truthiness-cast it. `bool("false")` is True, so a
+        # string-typed toggle — from another client, a hand-edited row, or a future
+        # client bug — would silently RE-ENABLE a notification the user turned off.
+        # Nothing between here and the DB enforces the value's type.
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() not in {"false", "0", "no", "off", ""}
+        if isinstance(value, (int, float)):
+            return value != 0
+        # Anything else is not a toggle we can read; opting IN matches the
+        # missing-key default and is the safe direction for a delivery decision.
+        logger.warning(
+            "push: preference %s for user=%s has unreadable type %s — assuming opted IN",
+            key, user_id, type(value).__name__,
+        )
+        return True
 
     # ── once ─────────────────────────────────────────────────────────
 

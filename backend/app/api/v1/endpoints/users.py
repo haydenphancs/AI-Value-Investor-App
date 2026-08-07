@@ -33,6 +33,8 @@ from app.services.subscription_service import (
 from app.services.user_settings_service import (
     UserSettingsService,
     PreferencesTooLarge,
+    PreferencesUnreadable,
+    PreferencesEmptyAfterSanitize,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,8 +139,19 @@ async def get_my_settings(
     user: dict = Depends(get_current_user),
 ):
     """Fetch the current user's synced preference blob (appearance, notification
-    toggles, general prefs). Empty {} when nothing has been synced yet."""
-    prefs = UserSettingsService().get_settings(user["id"])
+    toggles, general prefs). Empty {} when nothing has been synced yet.
+
+    A READ FAILURE is 503 SETTINGS_UNAVAILABLE, never an empty 200 — the client
+    treats "server state known" as permission to full-replace the row, so the two
+    cases must not look alike. See the ErrorCode's comment.
+    """
+    try:
+        prefs = UserSettingsService().get_settings(user["id"])
+    except PreferencesUnreadable as e:
+        return make_error_response(
+            ErrorCode.SETTINGS_UNAVAILABLE,
+            message=str(e),
+        )
     return UserSettingsResponse(preferences=prefs)
 
 
@@ -151,6 +164,15 @@ async def update_my_settings(
     try:
         prefs = UserSettingsService().upsert_settings(user["id"], request.preferences)
     except PreferencesTooLarge as e:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=str(e),
+            user_message="Your settings couldn't be saved. Please try again.",
+        )
+    except PreferencesEmptyAfterSanitize as e:
+        # Refused rather than honoured: a full-replace write whose every value was
+        # unsupported would clear the row and answer 200, which is indistinguishable
+        # from success. An intentional clear sends an explicitly empty object.
         return make_error_response(
             ErrorCode.INVALID_INPUT,
             message=str(e),

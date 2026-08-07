@@ -67,16 +67,26 @@ struct DividendInfoCard: View {
         }
         .padding(.vertical, AppSpacing.md)
         .padding(.horizontal, AppSpacing.lg)
-        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)  // nested in a card: light edge free, dark separates by surface
-        .overlay(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .stroke(AppColors.cardBackgroundLight.opacity(0.5), lineWidth: 1)
-        )
+        // `.cardSurface` already draws `cardEdge`. The `.overlay` stroke that used to sit
+        // here was inert in dark — `cardBackgroundLight` and `cardBackgroundNested` share
+        // the #252B3B dark arm, so it composited to the fill — and a redundant second
+        // hairline over `cardEdge` in light. Decoration that renders in one mode only.
+        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)
     }
 
     private var divider: some View {
+        // `divider`, not `cardBackground`. This card's surface is
+        // `cardBackgroundNested`, whose LIGHT arm is #FFFFFF — identical to
+        // `cardBackground`'s — so these six hairlines were 1.0000:1 and drew nothing
+        // in light. (Dark was 1.11 and fine, which is why it looked correct.)
+        //
+        // Not `cardBackgroundLight` either, which is what the other ~40 divider sites
+        // use: its DARK arm #252B3B is identical to `cardBackgroundNested`'s, so that
+        // would trade a light bug for a dark one. `divider` is alpha over whatever it
+        // sits on, so it separates on both arms by construction — the exact shape its
+        // own docstring prescribes.
         Rectangle()
-            .fill(AppColors.cardBackground)
+            .fill(AppColors.divider)
             .frame(height: 1)
             .padding(.vertical, AppSpacing.md)
     }

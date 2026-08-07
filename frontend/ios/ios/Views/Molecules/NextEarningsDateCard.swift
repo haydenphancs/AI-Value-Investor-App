@@ -39,11 +39,10 @@ struct NextEarningsDateCard: View {
             Spacer()
         }
         .padding(AppSpacing.lg)
-        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)  // nested in a card: light edge free, dark separates by surface
-        .overlay(
-            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .stroke(AppColors.cardBackgroundLight.opacity(0.5), lineWidth: 1)
-        )
+        // Nested in a card: light gets `cardEdge` from `.cardSurface`, dark separates by
+        // surface (1.11). The `.overlay` stroke that was here added nothing — its token
+        // shares the #252B3B dark arm with this fill, so it composited away.
+        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)
     }
 
     // MARK: - Calendar Icon

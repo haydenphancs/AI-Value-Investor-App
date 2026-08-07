@@ -199,6 +199,58 @@ def _specs(manifest: str) -> list[dict]:
 _CONTENT_SURFACES = ("background", "cardBackground", "cardBackgroundLight", "cardBackgroundNested")
 
 
+# ── Computed aliases ─────────────────────────────────────────────────────────
+#
+# `AppColors` exposes 10 computed aliases that forward to a canonical token. Every scanner
+# in this module keys on the CANONICAL name, so before this map they were all invisible:
+# `AppColors.bullish` (277 refs), `bearish` (245) and `neutral` (124) alone are 646 of 657
+# alias references that no rule could resolve. Concretely, `_BANNED_ON_FILL` could not see
+# `AppColors.tabBarUnselected` or `AppColors.chartAxisLabel` even though both ARE
+# `textMuted`, and `_GRAPHIC_TOKEN` could see no alias at all.
+#
+# One map rather than adding alias names to each tuple — which is what `_FILL_TOKENS` used
+# to do for two of them. A hand-extended tuple is a second place the alias set lives, and it
+# rots the moment an eleventh alias is added. `test_alias_map_matches_the_swift` parses the
+# real declarations and asserts IDENTITY, so this cannot silently drift either way.
+_ALIAS = {
+    "bullish": "gain",
+    "bearish": "loss",
+    "neutral": "caution",
+    "alertBlue": "primaryBlue",
+    "borderFocus": "primaryFill",
+    "divider": "borderSubtle",
+    "tabBarSelected": "primaryBlue",
+    "tabBarUnselected": "textMuted",
+    "chipSelectedBackground": "primaryFill",
+    "chartAxisLabel": "textMuted",
+}
+
+
+def _canon(name: str) -> str:
+    """Resolve a computed alias to the token it forwards to. Identity for canonical names."""
+    return _ALIAS.get(name, name)
+
+
+def _with_aliases(tokens) -> tuple:
+    """`tokens` plus every alias that forwards into the set — for building a match regex.
+    Captures still have to be run through `_canon` before comparing."""
+    return tuple(tokens) + tuple(a for a, c in _ALIAS.items() if c in tokens)
+
+
+def test_alias_map_matches_the_swift():
+    """Anti-vacuity + drift guard, by IDENTITY not superset. An alias added to the palette
+    and forgotten here silently un-guards every one of its call sites; an alias deleted from
+    the palette and left here makes this module resolve a name that no longer exists."""
+    declared = dict(re.findall(r"static var (\w+): Color \{ (\w+) \}", _APPTHEME.read_text()))
+    assert declared == _ALIAS, (
+        f"alias drift.\n  in Swift not here: {set(declared) - set(_ALIAS)}"
+        f"\n  here not in Swift: {set(_ALIAS) - set(declared)}"
+        f"\n  disagree: {{k for k in declared.keys() & _ALIAS.keys() if declared[k] != _ALIAS[k]}}")
+    # Positive probes: an alias resolves, a canonical name is a fixed point.
+    assert _canon("bullish") == "gain"
+    assert _canon("gain") == "gain"
+
+
 # ── 1. The scanners must not be vacuous ──────────────────────────────────────
 
 def test_token_declaration_scanner_is_not_vacuous():
@@ -408,7 +460,23 @@ def _bare_colour_violations() -> list[str]:
     # system hues survived in `SubChartCanvas` (MACD/signal/%K/%D) with every guard green.
     # Apple's `.green` is 2.22:1 on white and does not adapt, and inside a `Canvas` there
     # is no modifier anywhere for a grep to anchor on.
-    labelled = re.compile(rf"\b(?:color|colour|tint|fill|stroke)\s*:\s*(?P<arg>[^,)\n]*)")
+    # `\w*` on the Color/Fill/Tint stems catches `iconColor:` (40), `valueColor:` (19),
+    # `labelColor:`, `dotColor:`, `textColor:`, `fillColor:`, `strokeColor:`,
+    # `iconBackgroundColor:`, `trendColor:`, `timeColor:` in one alternative instead of a
+    # name list that rots. Coverage goes 139 → 234 of 294 labelled colour arguments.
+    #
+    # `with:` is the most valuable single addition — 21 `GraphicsContext.fill(_:with:)` /
+    # `.stroke(_:with:)` sites, all inside a `Canvas`, which is precisely where the four
+    # original `SubChartCanvas` bare hues hid and where there is NO modifier to anchor on.
+    # `fallback:` covers the last-resort colour on the `Color(themedHex:role:fallback:)` path.
+    #
+    # ⚠️ `style:` is deliberately NOT here. It fires on `style: .primary`, where `.primary`
+    # is a `PlayAudioButton.Style` case, not `Color.primary` — 2 pure false positives for
+    # zero real coverage. An enum case named `.primary`/`.secondary` is a common Swift
+    # shape and `style:` is the label most likely to carry one.
+    labelled = re.compile(
+        r"\b(?:\w*(?:[Cc]olor|[Cc]olour|[Ff]ill|[Tt]int)|stroke|accent|active|base|inner|outer"
+        r"|with|fallback)\s*:\s*(?P<arg>[^,)\n]*)")
     bare_re = re.compile(bare)
     hue_re = re.compile(rf"(?<![A-Za-z0-9_])(?:Color)?\.({hue_alt})\b")
 
@@ -433,7 +501,15 @@ def _bare_colour_violations() -> list[str]:
                     hit = True
             for m in labelled.finditer(line):
                 arg = m.group("arg")
-                if hue_re.search(arg) or bare_re.search(arg):
+                if hue_re.search(arg):
+                    hit = True
+                # Same structural scrim exemption as the surface arm above, and it is
+                # load-bearing here: `with: .color(.white.opacity(opacity))` is the
+                # `GraphicsContext` spelling of a gradient scrim over artwork, and three
+                # legitimate sites use it (AudioArtworkThumbnail, MoneyMoveArticleHeroHeader,
+                # BookLibraryView). A named hue is still banned — only `.white`/`.black`
+                # get the scrim exemption, and only with an alpha on them.
+                elif bare_re.search(arg) and ".opacity(" not in arg:
                     hit = True
             if hit:
                 out.append(f"{_rel(path)}:{lineno}: {line.strip()}")
@@ -447,15 +523,36 @@ def test_bare_colour_scanner_is_not_vacuous():
     assert re.search(rf"\.{_MODIFIER}\(\s*\.?(?:Color\.)?(white|black|primary|secondary)\b", probe)
     # The labelled-argument arm, which has no modifier to anchor on. This is the shape of
     # the four real `SubChartCanvas` violations that every guard missed until now.
-    labelled = re.compile(r"\b(?:color|colour|tint|fill|stroke)\s*:\s*(?P<arg>[^,)\n]*)")
+    labelled = re.compile(
+        r"\b(?:\w*(?:[Cc]olor|[Cc]olour|[Ff]ill|[Tt]int)|stroke|accent|active|base|inner|outer"
+        r"|with|fallback)\s*:\s*(?P<arg>[^,)\n]*)")
     hue = re.compile(r"(?<![A-Za-z0-9_])(?:Color)?\.(green|red|blue|orange)\b")
+    bare = re.compile(r"(?<![A-Za-z0-9_])(?:Color)?\.(white|black|primary|secondary)\b")
+
+    def fires(src: str) -> bool:
+        for m in labelled.finditer(src):
+            arg = m.group("arg")
+            if hue.search(arg) or (bare.search(arg) and ".opacity(" not in arg):
+                return True
+        return False
+
+    # MUST fire — each is a real shape the pre-widening scanner could not see.
     for probe in ("drawLine(context: context, color: .green, lineWidth: 1.5)",
-                  "CircularProgressViewStyle(tint: .white)"):
-        assert any(hue.search(m.group("arg")) or re.search(r"(?<![A-Za-z0-9_])\.white\b", m.group("arg"))
-                   for m in labelled.finditer(probe)), probe
-    # ...and it must NOT fire on a token, or every chart line in the app is a violation.
-    clean = "drawLine(context: context, color: AppColors.gainGraphic, lineWidth: 1.5)"
-    assert not any(hue.search(m.group("arg")) for m in labelled.finditer(clean))
+                  "CircularProgressViewStyle(tint: .white)",
+                  "context.fill(p, with: .color(.green))",            # GraphicsContext, no modifier
+                  "Foo(iconColor: .orange)",                          # \\w*Color stem
+                  "Bar(valueColor: Color.red)",
+                  "Color(themedHex: h, role: .fill, fallback: .blue)"):
+        assert fires(probe), f"widened labelled-arg scanner went blind to: {probe}"
+
+    # MUST NOT fire.
+    # 1. A real token — otherwise every chart line in the app is a violation.
+    assert not fires("drawLine(context: context, color: AppColors.gainGraphic, lineWidth: 1.5)")
+    # 2. `style: .primary` is a PlayAudioButton.Style CASE, not Color.primary. This pins the
+    #    decision to keep `style` out of the alternation, so nobody re-adds it.
+    assert not fires("PlayAudioButton(episode: e, style: .primary, size: .medium)")
+    # 3. A `GraphicsContext` scrim — `.white` WITH an alpha is the legitimate spelling.
+    assert not fires("context.fill(r, with: .color(.white.opacity(0.4)))")
 
 
 def test_no_bare_swiftui_colours_as_ink_or_opaque_fill():
@@ -482,21 +579,93 @@ def test_no_bare_swiftui_colours_as_ink_or_opaque_fill():
 # 3:1 token must not INK text (below), and it must not be a SURFACE that text sits on
 # (here). A `*Graphic` as a raw `.fill()`/`.stroke()` anywhere is correct — that IS the
 # graphic role — so location never belonged in the rule.
+#
+# `chipSelectedBackground` and `borderFocus` used to be hand-listed here. They are ALIASES
+# of `primaryFill`, and `_ALIAS` now resolves them along with the other eight — one place,
+# not two. Removing them from this tuple is what makes the map load-bearing rather than
+# decorative: `_with_aliases` puts them back into the match regex, and `_canon` maps the
+# capture to `primaryFill` before it is compared.
 _FILL_TOKENS = ("primaryFill", "gainFill", "lossFill", "cautionFill", "accentCyanFill",
-                "alertPurpleFill", "alertOrangeFill", "chipSelectedBackground", "borderFocus",
+                "alertPurpleFill", "alertOrangeFill",
                 "gainGraphic", "lossGraphic", "cautionGraphic", "accentGraphic",
                 "primaryGraphic")
 _BANNED_ON_FILL = ("textPrimary", "textSecondary", "textMuted", "textInverse")
 
 
+# ── Same-file parameter resolution ───────────────────────────────────────────
+#
+# WHY. `MoversToggle` renders `.background(isActive ? active : Color.clear)`, where `active`
+# is a FUNCTION PARAMETER bound at the two call sites to `AppColors.gainFill` /
+# `AppColors.lossFill`. No literal fill token appears anywhere near the ink, so the 6-line
+# backward window sees nothing and reverting the ink to `AppColors.textPrimary` — the exact
+# regression the `*Fill` + `textOnAccent` fix exists to prevent — is GREEN under every other
+# guard in this repo. This resolver is the only thing that closes it.
+#
+# SAME-FILE ONLY, deliberately. 25 of the 82 Color-typed stored properties are constructed
+# only within their own file; the other 42 are cross-file and would need a project-wide
+# symbol table (a different program, and one that wants SourceKit rather than regex).
+# Same-file is the boundary `_CARD_PROP` already picked, and it is where the real defect is.
+_COLOR_PROP_DECL = re.compile(r"^\s*(?:private\s+)?(?:let|var)\s+(\w+)\s*:\s*Color\??\s*(?:=|$)")
+_COLOR_PARAM_DECL = re.compile(r"(\w+)\s*:\s*Color\??(?:\s*=|\s*[,)])")
+
+
+def _color_bindings(lines) -> dict[str, set]:
+    """{identifier -> canonical tokens it is bound to at same-file call sites}.
+
+    `#Preview` call sites are excluded: a preview may bind a parameter to a colour that
+    production never passes, which would make the resolver hallucinate a pairing.
+    """
+    preview = next((i for i, (_, l) in enumerate(lines) if l.startswith("#Preview")), len(lines))
+    names = set()
+    for _, line in lines[:preview]:
+        if (m := _COLOR_PROP_DECL.match(line)) and "{" not in line:
+            names.add(m.group(1))          # stored property, not a computed `var x: Color {`
+        if "func " in line:
+            names.update(_COLOR_PARAM_DECL.findall(line))
+    bindings: dict[str, set] = {}
+    if not names:
+        return bindings
+    binder = re.compile(rf"\b({'|'.join(map(re.escape, names))})\s*:\s*([^,)\n]*)")
+    for _, line in lines[:preview]:
+        for m in binder.finditer(line):
+            toks = {_canon(t) for t in _APPCOLOR.findall(m.group(2))}
+            if toks:
+                bindings.setdefault(m.group(1), set()).update(toks)
+    return bindings
+
+
+def test_param_binding_resolver_is_not_vacuous():
+    """Three halves. (i) the harvester must still find the real population; (ii)
+    `MoversToggle` specifically must resolve — it is named because it is the defect this
+    exists for, so a rename must fail loudly rather than silently un-guard it; (iii) the
+    resolver must not invent bindings out of nothing."""
+    total = {}
+    for path in _swift_files():
+        b = _color_bindings(_code_lines(path))
+        if b:
+            total[_rel(path)] = b
+    assert len(total) >= 25, f"only {len(total)} files with resolvable colour bindings"
+
+    mt = total.get("Views/Molecules/MoversToggle.swift", {})
+    assert mt.get("active") == {"gainFill", "lossFill"}, (
+        "MoversToggle's `active:` parameter no longer resolves — the sentiment-fill fix "
+        f"it guards is unprotected again. got: {mt}")
+
+    synthetic = [(1, "func seg(_ v: Int, active: Color) -> some View {"),
+                 (2, "seg(1, active: AppColors.gainFill)"),
+                 (3, "Text(\"x\")")]
+    assert _color_bindings(synthetic) == {"active": {"gainFill"}}
+    assert _color_bindings([(1, "Text(\"nothing here\")")]) == {}
+
+
 def _fill_sites() -> list[tuple[str, int, str]]:
-    pattern = re.compile(rf"AppColors\.({'|'.join(_FILL_TOKENS)})\b")
+    pattern = re.compile(rf"AppColors\.({'|'.join(_with_aliases(_FILL_TOKENS))})\b")
     out = []
     for path in _swift_files():
         for lineno, line in _code_lines(path):
             m = pattern.search(line)
             if m:
-                out.append((_rel(path), lineno, m.group(1)))
+                out.append((_rel(path), lineno, _canon(m.group(1))))
     return out
 
 
@@ -507,14 +676,20 @@ def test_fill_token_scanner_finds_the_known_sites():
     sites = _fill_sites()
     assert len(sites) >= 30, len(sites)
     assert any(f == "Views/Atoms/GrowthMetricChip.swift" for f, _, _ in sites)
-    assert any(tok == "chipSelectedBackground" for _, _, tok in sites)
+    # The four selected-chip sites reach `primaryFill` through the `chipSelectedBackground`
+    # alias, so this asserts the alias resolution is live, not just that the scanner runs.
+    assert any(tok == "primaryFill" for _, _, tok in sites)
+    assert _canon("chipSelectedBackground") == "primaryFill"
 
 
 def test_text_tokens_never_sit_on_a_fill():
     """Ink on a `*Fill` is `textOnAccent`, always. A text token there inverts against a fill
     that does not: `textPrimary` is #FFFFFF in dark and #0F172A in light."""
-    banned = re.compile(rf"AppColors\.({'|'.join(_BANNED_ON_FILL)})\b")
-    fill = re.compile(rf"AppColors\.({'|'.join(_FILL_TOKENS)})\b")
+    # Alias-expanded on BOTH sides: `tabBarUnselected` and `chartAxisLabel` are `textMuted`,
+    # and `chipSelectedBackground`/`borderFocus` are `primaryFill` — all four were invisible
+    # to this rule while it matched canonical names only.
+    banned = re.compile(rf"AppColors\.({'|'.join(_with_aliases(_BANNED_ON_FILL))})\b")
+    fill = re.compile(rf"AppColors\.({'|'.join(_with_aliases(_FILL_TOKENS))})\b")
     # Look BACKWARD from the fill only. SwiftUI applies `.foregroundColor` before
     # `.background` on the same view, so ink that appears AFTER a fill belongs to a
     # different view — which is what made a symmetric window flag the price label on a
@@ -523,8 +698,16 @@ def test_text_tokens_never_sit_on_a_fill():
     violations = []
     for path in _swift_files():
         lines = _code_lines(path)
+        # A fill reached through a same-file-bound identifier counts as a fill. Without
+        # this, `MoversToggle`'s `.background(isActive ? active : .clear)` — where `active`
+        # is bound to `gainFill`/`lossFill` — is invisible, and reverting its ink to
+        # `textPrimary` passes every guard.
+        bound = {n: t for n, t in _color_bindings(lines).items()
+                 if t & set(_FILL_TOKENS)}
+        bound_re = (re.compile(rf"\.(?:background|fill)\(.*\b({'|'.join(map(re.escape, bound))})\b")
+                    if bound else None)
         for idx, (lineno, line) in enumerate(lines):
-            if not fill.search(line):
+            if not (fill.search(line) or (bound_re and bound_re.search(line))):
                 continue
             for wlineno, wline in lines[max(0, idx - 6):idx + 1]:
                 if not (banned.search(wline) and ink_modifier.search(wline)):
@@ -611,7 +794,13 @@ def test_cards_with_a_fill_and_a_radius_carry_an_edge():
         for idx, (lineno, line) in enumerate(lines[:preview]):
             # Word-bounded: `cardBackgroundLight` and `cardBackgroundNested` are different
             # surfaces (an inset chip, a nested card), not the card this rule is about.
-            if not re.search(r"AppColors\.cardBackground\b", line) or ".background(" not in line:
+            # `Nested` included: it is a card in its own right (Recent Activities rows,
+            # the ETF snapshot tiles) and separates by `cardEdge` in light exactly as
+            # `cardBackground` does — 0 new violations. NOT `Light`: that adds 6 false
+            # positives (EarningsDataTypeToggle, EventDateBadge, ChatMarketOverviewWidget,
+            # DiversificationCard, UserMessageBubble, IndexDetailSnapshotsSection), all
+            # chips/badges/bubbles that separate by fill at 1.14 and correctly have no edge.
+            if not re.search(r"AppColors\.cardBackground(?:Nested)?\b", line) or ".background(" not in line:
                 continue
             # A translucent wash is a tint, not the card idiom — it has no fill to edge.
             if ".opacity(" in line:
@@ -670,6 +859,97 @@ def test_a_card_surface_reached_through_a_property_still_carries_an_edge():
     assert not violations, "\n".join(violations)
 
 
+# A 1pt hairline drawn in its own parent's colour. `DividendInfoCard` shipped six of them:
+# the card is `cardBackgroundNested` and the row separator was `cardBackground`, and those
+# two share the #FFFFFF LIGHT arm — so the dividers were 1.0000:1 and drew nothing. Dark was
+# 1.11 and fine, which is exactly why it looked correct to whoever wrote it.
+#
+# Value-compared, not token-allowlisted. The 63 1pt-`Rectangle` sites in this app use six
+# different tokens; an "approved divider tokens" list would either exclude the legitimate
+# `textMuted.opacity()` dimmed rules or admit `cardBackground`. The invariant is not WHICH
+# token — it is that A HAIRLINE MUST NOT BE ITS OWN PARENT, and that is decidable from the
+# two resolved values. Same reasoning that retired shell rule 4's filename filter.
+_STRUCT = re.compile(r"^\s*(?:public\s+|private\s+|internal\s+)?struct\s+(\w+)")
+# `.cardSurface()` DEFAULTS to `AppColors.cardBackground` (CardSurface.swift:81) and 76
+# files use the no-argument form — matching only the explicit-token spelling saw 5 of the
+# ~40 real sites, which is how the first draft of this rule nearly shipped vacuous.
+_CARD_PAINT = re.compile(r"\.(?:cardSurface|cardFill)\(\s*(?:AppColors\.(\w+))?")
+_HAIRLINE_FILL = re.compile(r"\.fill\(\s*AppColors\.(\w+)(?:\.opacity\(([\d.]+)\))?\s*\)")
+
+
+def _resolved(tok: Token, style: str, over: tuple, extra_alpha: float = 1.0):
+    """Flatten a token (its own alpha, then any inline `.opacity(n)`) onto `over`."""
+    return _composite(tok.rgb(style), tok.alpha(style) * extra_alpha, over)
+
+
+def _hairline_sites() -> list[tuple[str, int, str, str, float]]:
+    """(file, lineno, cardToken, hairlineToken, inlineAlpha) for every 1pt Rectangle
+    inside a struct that paints a known card surface."""
+    tokens = _declared_tokens(_sections()[0])
+    out = []
+    for path in _swift_files():
+        lines = _code_lines(path)
+        # Which card surface does the enclosing struct paint? Structs are top-level here,
+        # so a running "current struct" pointer is enough.
+        struct_surface: dict[str, str] = {}
+        cur = None
+        for _, line in lines:
+            if (m := _STRUCT.match(line)):
+                cur = m.group(1)
+            elif cur and (m := _CARD_PAINT.search(line)):
+                # No explicit token → `.cardSurface()`'s default, `AppColors.cardBackground`.
+                struct_surface.setdefault(cur, _canon(m.group(1) or "cardBackground"))
+        cur = None
+        for idx, (lineno, line) in enumerate(lines):
+            if (m := _STRUCT.match(line)):
+                cur = m.group(1)
+                continue
+            if "Rectangle()" not in line or cur not in struct_surface:
+                continue
+            window = lines[idx:idx + 6]
+            if not any(re.search(r"\.frame\((?:height|width):\s*1\b", w) for _, w in window):
+                continue
+            for _, w in window:
+                if (fm := _HAIRLINE_FILL.search(w)):
+                    name, alpha = _canon(fm.group(1)), float(fm.group(2) or 1.0)
+                    if name in tokens:
+                        out.append((_rel(path), lineno, struct_surface[cur], name, alpha))
+                    break
+    return out
+
+
+def test_a_hairline_is_never_its_own_parent():
+    tokens = _declared_tokens(_sections()[0])
+    violations = []
+    for rel, lineno, card_name, line_name, alpha in _hairline_sites():
+        card, hair = tokens[card_name], tokens[line_name]
+        for style in ("light", "dark"):
+            base = _resolved(card, style, (1.0, 1.0, 1.0))
+            drawn = _resolved(hair, style, base, alpha)
+            if _ratio(drawn, base) < 1.02:
+                violations.append(
+                    f"{rel}:{lineno}: {line_name} hairline on a {card_name} card is "
+                    f"{_ratio(drawn, base):.4f}:1 in {style} — it draws nothing")
+    assert not violations, "\n".join(violations)
+
+
+def test_hairline_scanner_is_not_vacuous():
+    """This rule matches 0 lines on a clean tree, so a broken `Rectangle()`/`.frame(height: 1)`
+    pattern is indistinguishable from success. Assert the scanner still finds the real
+    population, and that the comparison can still detect a same-colour hairline."""
+    sites = _hairline_sites()
+    assert len(sites) >= 20, f"only {len(sites)} hairline sites — the scanner went blind"
+    assert len({s[0] for s in sites}) >= 10, "hairlines found in suspiciously few files"
+    # The exact defect this exists for, as a synthetic: a #FFFFFF hairline on a #FFFFFF card.
+    tokens = _declared_tokens(_sections()[0])
+    base = _resolved(tokens["cardBackgroundNested"], "light", (1.0, 1.0, 1.0))
+    same = _resolved(tokens["cardBackground"], "light", base)
+    assert _ratio(same, base) < 1.02, "the comparison can no longer detect an invisible hairline"
+    # ...and it must NOT condemn the token the fix uses.
+    ok = _resolved(tokens["borderSubtle"], "light", base)
+    assert _ratio(ok, base) >= 1.02, "`divider`/`borderSubtle` should read as a real hairline"
+
+
 def test_card_backed_property_scanner_is_not_vacuous():
     """The rule above legitimately matches ZERO lines now that CongressActivityRow is
     fixed, so without this control a broken regex would look identical to a clean tree.
@@ -687,7 +967,304 @@ def test_card_backed_property_scanner_is_not_vacuous():
     assert not any(x in window for x in (".cardBorder", ".cardFill", ".cardSurface"))
 
 
-# ── 6. The shell rules that stayed in the shell ──────────────────────────────
+# ── 5b. Surface separation, mirrored — and its light leg made real ───────────
+#
+# `ThemeContrastAudit.auditSurfaceSeparation` cannot check what it claims to. Its guard is
+#
+#     let hasEdge = edgeAlpha > 0.01        // cardEdge LIGHT alpha is 0.14
+#     if measured >= minFillStep || hasEdge { continue }
+#
+# and `hasEdge` is a property of the cardEdge TOKEN, not of the pair and not of the view.
+# In light it is unconditionally true, so **all five light comparisons `continue` before
+# measuring anything** — 10 comparisons run, 5 can never fail. The docstring promises light
+# "MUST have an edge" and never checks that the edge is VISIBLE.
+#
+# That is why `CongressActivityRow` (1.0000:1 in light, no hairline) was invisible here as
+# well as to rule 9. This mirror implements the semantics the Swift only claims: light
+# passes on a fill step OR on a hairline that measurably separates from BOTH sides.
+#
+# It also exists so the Swift pair table is checked by the 50ms hook rather than by an
+# `assertionFailure` at launch — the module already mirrors WCAG maths, `auditLightParity`,
+# the manifest and the hex clamp; this is the missing fourth mirror.
+_MIN_FILL_STEP = 1.05
+# The binding measurement today is 1.2272 (cardEdge over `background`). 1.15 leaves real
+# headroom for a routine page-colour retune while still catching the regression that
+# matters: dropping cardEdge's light alpha 0.14 → 0.011 PASSES the `> 0.01` test the Swift
+# uses today and collapses edge-vs-inner to 1.022.
+_MIN_EDGE_STEP = 1.15
+
+_PAIR = re.compile(r'\(\s*"(\w+)"\s*,\s*"(\w+)"\s*,\s*\n?\s*AppColors\.(\w+)\s*,\s*AppColors\.(\w+)\s*\)')
+
+
+def _separation_pairs() -> list[tuple[str, str]]:
+    src = "\n".join(l for l in (_IOS / "Theme/ThemeContrastAudit.swift").read_text().splitlines()
+                    if not l.strip().startswith("//"))
+    # Search the closing anchor FROM the opening one: `for style in` also appears earlier
+    # in the file (`_measure_all`'s loop), so an unanchored index() yields an empty slice
+    # and the scanner silently parses zero pairs.
+    start = src.index("let pairs:")
+    block = src[start:src.index("for style in", start)]
+    out = []
+    for inner, outer, ic, oc in _PAIR.findall(block):
+        assert inner == ic and outer == oc, f"pair label/colour disagree: {inner}/{ic} {outer}/{oc}"
+        out.append((inner, outer))
+    return out
+
+
+def test_separation_pair_scanner_is_not_vacuous():
+    pairs = _separation_pairs()
+    assert len(pairs) >= 5, f"only parsed {len(pairs)} separation pairs"
+    assert ("cardBackgroundNested", "cardBackground") in pairs
+    # The pair deliberately EXCLUDED must stay excluded — it is 1.0000 in dark by design.
+    assert ("cardBackgroundNested", "cardBackgroundLight") not in pairs
+
+
+def test_every_declared_surface_pair_actually_separates():
+    """Both legs, for real. Dark needs a fill step (cardEdge is transparent there). Light
+    may lean on the hairline, but then the hairline has to be VISIBLE against both sides —
+    which is the half the Swift cannot express."""
+    tokens = _declared_tokens(_sections()[0])
+    edge = tokens["cardEdge"]
+    violations = []
+    for inner, outer in _separation_pairs():
+        for style in ("light", "dark"):
+            i, o = tokens[inner], tokens[outer]
+            irgb = _composite(i.rgb(style), i.alpha(style), (1.0, 1.0, 1.0))
+            orgb = _composite(o.rgb(style), o.alpha(style), (1.0, 1.0, 1.0))
+            if _ratio(irgb, orgb) >= _MIN_FILL_STEP:
+                continue
+            ea = edge.alpha(style)
+            if ea <= 0.01:
+                violations.append(f"{inner} on {outer} ({style}): fill step "
+                                  f"{_ratio(irgb, orgb):.4f} and cardEdge is transparent")
+                continue
+            drawn = _composite(edge.rgb(style), ea, irgb)
+            against = min(_ratio(drawn, irgb), _ratio(drawn, orgb))
+            if against < _MIN_EDGE_STEP:
+                violations.append(f"{inner} on {outer} ({style}): fill step "
+                                  f"{_ratio(irgb, orgb):.4f} and the cardEdge hairline is "
+                                  f"only {against:.4f} against the surfaces it divides")
+    assert not violations, "\n".join(violations)
+
+
+def test_the_light_leg_is_not_vacuous():
+    """The whole point of this mirror. Prove the light check can FAIL — if `cardEdge`'s
+    light alpha were dropped to a value that still clears the Swift's `> 0.01` test, the
+    hairline stops separating and this must catch it."""
+    tokens = _declared_tokens(_sections()[0])
+    card = tokens["cardBackgroundNested"]
+    base = _composite(card.rgb("light"), card.alpha("light"), (1.0, 1.0, 1.0))
+    faint = _composite(tokens["cardEdge"].rgb("light"), 0.011, base)   # > 0.01, so Swift passes
+    assert _ratio(faint, base) < _MIN_EDGE_STEP, (
+        "a near-invisible cardEdge now passes the light leg — it is vacuous again")
+    real = _composite(tokens["cardEdge"].rgb("light"), tokens["cardEdge"].alpha("light"), base)
+    assert _ratio(real, base) >= _MIN_EDGE_STEP, "the real cardEdge should pass"
+
+
+# ── 6. The manifest is the allowlist for ink-on-surface pairings ─────────────
+#
+# THE HOLE THIS CLOSES. `.foregroundColor(AppColors.gain).background(AppColors.
+# toggleSelectedBackground)` passed every guard in this repo: `gain` is not a bare hue, not
+# a `*Graphic`, and `toggleSelectedBackground` is not a `*Fill`; the runtime audit never
+# measured the pair because `gain`'s spec defaults to `contentSurfaces`, which excludes
+# every control surface. Measured, 16 of the 45 sentiment/accent × control-surface pairings
+# fail AA — so this was one line of code away from shipping, and `MoversToggle` is the site
+# where it actually did (gain 4.34 light, loss 3.73 dark).
+#
+# WHY THIS IS NOT AN ALLOWLIST. The escape hatch is `on: … + ["thatSurface"]` on the
+# `TokenSpec`, and adding it immediately enrols the pair in `_measure_all` AND in
+# `ThemeContrastAudit`. Declaring `gain` on `toggleSelectedBackground` therefore measures
+# 4.34 and fails `test_every_token_clears_its_floor` at edit time — before the app can even
+# launch. **You cannot silence this lint without measuring the pair, and you cannot declare
+# a failing pair without the tests going red first.** That is the whole design.
+_INK_MOD = re.compile(r"\.(?:foregroundColor|foregroundStyle|tint|accentColor)\s*\(")
+_BG_MOD = re.compile(r"\.(?:background|fill|cardFill|cardSurface)\s*\(")
+_APPCOLOR = re.compile(r"AppColors\.(\w+)")
+
+
+def _ternary_split(line: str):
+    """(condition, trueArm, falseArm) for a Swift ternary, or None.
+
+    A paren-DEPTH scanner, not a regex, and it has to be: Swift conditions contain parens
+    (`(x ?? false) ? a : b`), arms contain colons (nested calls, dictionary literals), and
+    `??` / `?.` are not the ternary `?`.
+    """
+    depth, i, q = 0, 0, -1
+    while i < len(line):
+        c = line[i]
+        if c == '"':                                  # skip string literals wholesale
+            i += 1
+            while i < len(line) and line[i] != '"':
+                i += 2 if line[i] == "\\" else 1
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "?" and q < 0:
+            nxt = line[i + 1] if i + 1 < len(line) else ""
+            if nxt not in "?.":                       # not `??`, not `?.`
+                q, q_depth = i, depth
+        i += 1
+    if q < 0:
+        return None
+    # The matching ':' at the same depth the '?' was found at.
+    depth, colon = 0, -1
+    for j in range(q + 1, len(line)):
+        c = line[j]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                break                                  # closed without a colon → not a ternary
+            depth -= 1
+        elif c == ":" and depth == 0:
+            colon = j
+            break
+    if colon < 0:
+        return None
+    # Walk LEFT from '?' to the start of the enclosing ARGUMENT, so
+    # `.foregroundColor(sel == p ? a : b)` yields "sel == p", not ".foregroundColor(sel == p".
+    depth, start = 0, 0
+    for j in range(q - 1, -1, -1):
+        c = line[j]
+        if c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth == 0:
+                start = j + 1
+                break
+            depth -= 1
+        elif c == "," and depth == 0:
+            start = j + 1
+            break
+    cond = re.sub(r"\s+", " ", line[start:q]).strip()
+    return (cond, line[q + 1:colon], line[colon + 1:]) if cond else None
+
+
+def _pairings(ink_line: str, bg_line: str, surfaces: set) -> set:
+    """(inkToken, surfaceToken) pairs that can actually co-render on screen.
+
+    ARM MATCHING is the structural exemption. Three period toggles and SmartMoneyTabSelector
+    drive BOTH the ink and the surface from one boolean, where the ink's false arm
+    (`textMuted`) pairs with the surface's false arm (`.clear`) and never with the true arm
+    (`toggleSelectedBackground`). Without this the rule reports 4 violations that are
+    physically impossible; with it, 0. It also matters that they are UNFIXABLE by declaring
+    — `textMuted` on `toggleSelectedBackground` is 4.51/4.06 — so an exemption is the only
+    correct answer, and a structural one beats a file list.
+
+    Conservative by construction: anything the splitter cannot parse falls back to the full
+    cross product, so the failure mode is a false POSITIVE, never a missed defect.
+    """
+    it, bt = _ternary_split(ink_line), _ternary_split(bg_line)
+    def toks(s): return {_canon(t) for t in _APPCOLOR.findall(s)}
+    if it and bt and it[0] == bt[0]:
+        return ({(i, s) for i in toks(it[1]) for s in toks(bt[1]) & surfaces} |
+                {(i, s) for i in toks(it[2]) for s in toks(bt[2]) & surfaces})
+    return {(i, s) for i in toks(ink_line) for s in toks(bg_line) & surfaces}
+
+
+def _ink_on_surface_pairings(arm_matching: bool = True) -> list:
+    """(file, lineno, ink, surface) for every ink that renders on a registered surface."""
+    palette, _, manifest = _sections()
+    surfaces = set(_surface_registry(palette, manifest))
+    out = []
+    for path in _swift_files():
+        lines = _code_lines(path)
+        preview = next((i for i, (_, l) in enumerate(lines) if l.startswith("#Preview")), len(lines))
+        for idx, (lineno, line) in enumerate(lines[:preview]):
+            names = {_canon(n) for n in _APPCOLOR.findall(line)} & surfaces
+            if not names:
+                continue
+            # `.background(` may open on an earlier line — SmartMoneyTabSelector opens at
+            # :35 and puts the token on :36. Without this the rule misses one of the four
+            # sites arm matching exists for, i.e. it would ship never having been exercised.
+            if not (_BG_MOD.search(line) or
+                    any(_BG_MOD.search(w) and w.count("(") > w.count(")")
+                        for _, w in lines[max(0, idx - 3):idx])):
+                continue
+            for wlineno, wline in lines[max(0, idx - 6):idx + 1]:
+                if not _INK_MOD.search(wline):
+                    continue
+                pairs = (_pairings(wline, line, surfaces) if arm_matching
+                         else {(_canon(i), s) for i in _APPCOLOR.findall(wline) for s in names})
+                for ink, surf in pairs:
+                    out.append((_rel(path), wlineno, ink, surf))
+    return out
+
+
+def test_ink_on_a_surface_is_declared_in_the_manifest():
+    specs = {s["name"]: s for s in _specs(_sections()[2])}
+    violations = []
+    for rel, lineno, ink, surf in _ink_on_surface_pairings():
+        spec = specs.get(ink)
+        # Floor-0 roles have no contract to violate. `textOnAccent` is `.decorative` and is
+        # verified in REVERSE by every `carriesOnAccentText` fill, so demanding a
+        # declaration would force entries that measure nothing — destroying the
+        # "declaring forces a measurement" property this rule depends on.
+        if spec is None or _FLOOR.get(spec["role"], 0) <= 0:
+            continue
+        if surf not in spec["surfaces"]:
+            violations.append(
+                f"{rel}:{lineno}: AppColors.{ink} renders on {surf}, which its TokenSpec "
+                f"does not declare. Add `on: … + [\"{surf}\"]` — that also MEASURES the pair.")
+    assert not violations, "\n".join(sorted(set(violations)))
+
+
+def test_ink_on_surface_scanner_is_not_vacuous():
+    found = _ink_on_surface_pairings()
+    assert len(found) >= 40, f"only {len(found)} ink-on-surface pairings — scanner went blind"
+    assert len({f[0] for f in found}) >= 15
+
+
+def test_ink_on_surface_rule_detects_the_regression_it_exists_for():
+    """The exact line that passed every other guard."""
+    surfaces = {"toggleSelectedBackground", "tabBarBackground", "cardBackground"}
+    assert ("gain", "toggleSelectedBackground") in _pairings(
+        ".foregroundColor(AppColors.gain)",
+        ".background(AppColors.toggleSelectedBackground)", surfaces)
+    # An alias must resolve too, or 657 references stay invisible to this rule.
+    assert ("gain", "toggleSelectedBackground") in _pairings(
+        ".foregroundColor(AppColors.bullish)",
+        ".background(AppColors.toggleSelectedBackground)", surfaces)
+    # Arm matching: same condition → arms pair with their own side, so the impossible
+    # (textMuted, toggleSelectedBackground) combination is not produced.
+    got = _pairings(
+        ".foregroundColor(sel == tab ? AppColors.textPrimary : AppColors.textMuted)",
+        ".background(sel == tab ? AppColors.toggleSelectedBackground : Color.clear)", surfaces)
+    assert ("textPrimary", "toggleSelectedBackground") in got
+    assert ("textMuted", "toggleSelectedBackground") not in got
+    # A DIFFERENT condition must NOT be arm-matched — falls back to the cross product.
+    got2 = _pairings(
+        ".foregroundColor(a == b ? AppColors.textPrimary : AppColors.textMuted)",
+        ".background(x == y ? AppColors.toggleSelectedBackground : Color.clear)", surfaces)
+    assert ("textMuted", "toggleSelectedBackground") in got2
+    # `??` and `?.` are not ternaries.
+    assert _ternary_split(".foregroundColor(a ?? b)") is None
+    assert _ternary_split("let x = foo?.bar") is None
+
+
+def test_arm_matching_is_still_load_bearing():
+    """Pins the exemption itself. With the splitter disabled the rule must report exactly
+    the four known ternary sites; with it enabled, zero. If `_ternary_split` silently stops
+    parsing, BOTH numbers move and this fails — which is the only way to tell a working
+    exemption from a dead one."""
+    specs = {s["name"]: s for s in _specs(_sections()[2])}
+
+    def undeclared(arm_matching):
+        out = set()
+        for rel, lineno, ink, surf in _ink_on_surface_pairings(arm_matching=arm_matching):
+            spec = specs.get(ink)
+            if spec and _FLOOR.get(spec["role"], 0) > 0 and surf not in spec["surfaces"]:
+                out.add((rel, ink, surf))
+        return out
+
+    assert undeclared(arm_matching=True) == set()
+    without = undeclared(arm_matching=False)
+    assert without, "arm matching is exempting nothing — it may have become dead code"
+    assert all(i == "textMuted" and s == "toggleSelectedBackground" for _, i, s in without), without
+
+
+# ── 7. The shell rules that stayed in the shell ──────────────────────────────
 
 # The five rules that stayed in the shell, in the order the script runs them. Rules
 # 2/3/4/9 were deleted from `theme-lint.sh` and live in this module instead, so there is

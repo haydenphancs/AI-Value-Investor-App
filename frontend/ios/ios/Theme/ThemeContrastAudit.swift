@@ -271,6 +271,31 @@ enum ThemeContrastAudit {
             // The selected segment inside those two segmented controls.
             ("toggleSelectedBackground", "cardBackgroundNested",
              AppColors.toggleSelectedBackground, AppColors.cardBackgroundNested),
+            // The selected segment inside the three PERIOD toggles. This is the entire
+            // visual affordance of those controls and nothing measured it until now.
+            ("toggleSelectedBackground", "toggleBackground",
+             AppColors.toggleSelectedBackground, AppColors.toggleBackground),
+            // GrowthMetricChip inside GrowthSectionCard's card.
+            ("chipUnselectedBackground", "cardBackground",
+             AppColors.chipUnselectedBackground, AppColors.cardBackground),
+            // The same chips on a sheet's page background (Growth / Profitability /
+            // FundamentalsHistory chart sheets).
+            ("chipUnselectedBackground", "background",
+             AppColors.chipUnselectedBackground, AppColors.background),
+            // SentimentMetricsRow / NextEarningsDateCard chains that bottom out on the page.
+            ("cardBackgroundNested", "background",
+             AppColors.cardBackgroundNested, AppColors.background),
+            // ⚠️ (cardBackgroundLight, background) is NOT here either. It looks like the
+            // obvious next entry — AddTickerButton / ManageAssetsButton / FilterButton /
+            // TickerSearchSheet all draw it on the page — but it measures 1.0478 in LIGHT,
+            // below the 1.05 fill step, and those four draw no edge. Adding it is a launch
+            // `assertionFailure`. They are chips, not cards; their legibility comes from
+            // the `textSecondary` ink inside, and cardBackgroundLight's light arm is locked.
+            //
+            // ⚠️ (mediaSurface, cardBackground) is 1.0000 in LIGHT — CompanyLogoView:85
+            // draws a white logo chip on a white card. Unlike the collisions above, nothing
+            // in the codebase argued for that one until this comment. It is accepted
+            // because the chip carries brand art, not a surface the eye must find.
         ]
 
         for style in [UIUserInterfaceStyle.light, .dark] {

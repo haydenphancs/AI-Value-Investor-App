@@ -151,9 +151,12 @@ struct ETFIdentityRatingCard: View {
                 .padding(.bottom, AppSpacing.md)
             }
 
-            // Divider
+            // `divider`, not `cardBackgroundLight`: these sit inside `cardBackgroundNested`
+            // cards, and those two tokens share the #252B3B DARK arm — so the hairline was
+            // 1.0000:1 and drew nothing there. `divider` is alpha over whatever it sits on,
+            // so it separates on both arms regardless of which card hosts it.
             Rectangle()
-                .fill(AppColors.cardBackgroundLight)
+                .fill(AppColors.divider)
                 .frame(height: 1)
         }
     }
@@ -197,9 +200,12 @@ struct ETFStrategyCard: View {
                 .padding(.bottom, AppSpacing.md)
             }
 
-            // Divider
+            // `divider`, not `cardBackgroundLight`: these sit inside `cardBackgroundNested`
+            // cards, and those two tokens share the #252B3B DARK arm — so the hairline was
+            // 1.0000:1 and drew nothing there. `divider` is alpha over whatever it sits on,
+            // so it separates on both arms regardless of which card hosts it.
             Rectangle()
-                .fill(AppColors.cardBackgroundLight)
+                .fill(AppColors.divider)
                 .frame(height: 1)
         }
     }
@@ -248,13 +254,14 @@ struct ETFNetYieldCard: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                         .padding(AppSpacing.md)
+                        // `.cardFill`, not a bare `.fill` + an overlay stroke. The stroke
+                        // was inert in dark (its token shares the #252B3B arm with this
+                        // fill) and was the ONLY light separation, since a bare `.fill`
+                        // draws no `cardEdge`. `.cardFill` gives light a real edge (1.34
+                        // vs the stroke's 1.14) and lets dark separate by fill step.
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(AppColors.cardBackgroundNested)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
+                                .cardFill(AppColors.cardBackgroundNested)
                         )
 
                         // Dividend side
@@ -281,13 +288,14 @@ struct ETFNetYieldCard: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                         .padding(AppSpacing.md)
+                        // `.cardFill`, not a bare `.fill` + an overlay stroke. The stroke
+                        // was inert in dark (its token shares the #252B3B arm with this
+                        // fill) and was the ONLY light separation, since a bare `.fill`
+                        // draws no `cardEdge`. `.cardFill` gives light a real edge (1.34
+                        // vs the stroke's 1.14) and lets dark separate by fill step.
                         .background(
                             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(AppColors.cardBackgroundNested)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
+                                .cardFill(AppColors.cardBackgroundNested)
                         )
                     }
 
@@ -316,9 +324,12 @@ struct ETFNetYieldCard: View {
                 .padding(.bottom, AppSpacing.md)
             }
 
-            // Divider
+            // `divider`, not `cardBackgroundLight`: these sit inside `cardBackgroundNested`
+            // cards, and those two tokens share the #252B3B DARK arm — so the hairline was
+            // 1.0000:1 and drew nothing there. `divider` is alpha over whatever it sits on,
+            // so it separates on both arms regardless of which card hosts it.
             Rectangle()
-                .fill(AppColors.cardBackgroundLight)
+                .fill(AppColors.divider)
                 .frame(height: 1)
         }
     }
@@ -398,13 +409,10 @@ struct ETFDividendHistoryRow: View {
                 }
             }
             .padding(AppSpacing.md)
+            // See the sibling rows above: bare `.fill` + inert stroke → `.cardFill`.
             .background(
                 RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(AppColors.cardBackgroundNested)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
+                    .cardFill(AppColors.cardBackgroundNested)
             )
         }
         .buttonStyle(PlainButtonStyle())
@@ -473,9 +481,12 @@ struct ETFHoldingsRiskCard: View {
                 }
             }
 
-            // Divider
+            // `divider`, not `cardBackgroundLight`: these sit inside `cardBackgroundNested`
+            // cards, and those two tokens share the #252B3B DARK arm — so the hairline was
+            // 1.0000:1 and drew nothing there. `divider` is alpha over whatever it sits on,
+            // so it separates on both arms regardless of which card hosts it.
             Rectangle()
-                .fill(AppColors.cardBackgroundLight)
+                .fill(AppColors.divider)
                 .frame(height: 1)
         }
     }

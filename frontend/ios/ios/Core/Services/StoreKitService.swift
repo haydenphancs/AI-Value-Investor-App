@@ -59,7 +59,17 @@ final class StoreKitService: ObservableObject {
 
     @Published private(set) var products: [Product] = []
     @Published private(set) var isLoadingProducts = false
+    /// True while ANY purchase is in flight. Drives the one-at-a-time guard: every plan button
+    /// disables, because two concurrent StoreKit sheets is not a state worth supporting.
     @Published private(set) var isPurchasing = false
+
+    /// WHICH product is being purchased, or nil. Distinct from `isPurchasing` on purpose.
+    ///
+    /// The paywall renders one CTA per plan and drove the label from `isPurchasing` alone, so
+    /// tapping "Choose Pro" made BOTH Pro and Max read "Processing…" — the app claiming to be
+    /// buying two subscriptions at once, on the screen where a user is deciding what to pay
+    /// for. Disabling every button is right; captioning every button is not.
+    @Published private(set) var purchasingProductID: String?
     /// Non-nil when product loading failed, so the paywall can say so rather than showing
     /// an empty list that looks like "no plans available".
     @Published private(set) var productLoadError: String?
@@ -122,13 +132,21 @@ final class StoreKitService: ObservableObject {
         isLoadingProducts = false
     }
 
-    func product(for tier: String) -> Product? {
-        let id: String
+    /// Tier → App Store product id. Pure mapping, independent of whether products have loaded.
+    ///
+    /// Split out from `product(for:)` so the paywall can compare against `purchasingProductID`
+    /// without depending on `products` being populated — the mapping is what identifies a plan,
+    /// the loaded `Product` is just the thing you buy with.
+    func productID(for tier: String) -> String? {
         switch tier.lowercased() {
-        case "pro": id = ProductID.proMonthly
-        case "premium", "max": id = ProductID.maxMonthly
+        case "pro": return ProductID.proMonthly
+        case "premium", "max": return ProductID.maxMonthly
         default: return nil
         }
+    }
+
+    func product(for tier: String) -> Product? {
+        guard let id = productID(for: tier) else { return nil }
         return products.first { $0.id == id }
     }
 
@@ -140,7 +158,11 @@ final class StoreKitService: ObservableObject {
     /// tapping "Cancel" is not an error and must not raise an alert.
     func purchase(_ product: Product) async throws -> PurchaseOutcome {
         isPurchasing = true
-        defer { isPurchasing = false }
+        purchasingProductID = product.id
+        defer {
+            isPurchasing = false
+            purchasingProductID = nil
+        }
 
         let result = try await product.purchase()
 

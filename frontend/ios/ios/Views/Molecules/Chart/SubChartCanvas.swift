@@ -25,6 +25,10 @@ private func subChartX(_ index: Int, width: CGFloat, count: Int, timeFractions: 
 }
 
 struct SubChartCanvas: View {
+    /// Used by `crosshairValueText` to prefix the VOLUME readout with a direction glyph;
+    /// the bars themselves read it in `VolumeBarRenderer`.
+    @Environment(\.differentiateWithoutColor) private var differentiate
+
     let indicator: TechnicalIndicatorType
     let pricePoints: [StockPricePoint]          // visible slice (for rendering positions)
     var allPricePoints: [StockPricePoint]? = nil // full dataset (for indicator computation)
@@ -131,7 +135,15 @@ struct SubChartCanvas: View {
         case .volume:
             guard visibleIndex < pricePoints.count,
                   let vol = pricePoints[visibleIndex].volume else { return "" }
-            return formatVolume(vol)
+            // Prefix the direction. This readout printed magnitude only, so a user who
+            // reads the value rather than the bar shape had NO access to up-vs-down —
+            // the MACD case below prints signed values, which is the standard this
+            // matches. Only under DWC, so the default readout stays unchanged.
+            let prev = visibleIndex > 0 ? pricePoints[visibleIndex - 1].close
+                                        : pricePoints[visibleIndex].close
+            let up = pricePoints[visibleIndex].close >= prev
+            return AppSentiment.marker(isPositive: up, differentiate: differentiate)
+                 + formatVolume(vol)
         case .rsi14:
             let allCloses = computePoints.map { $0.close }
             let rsiData = TechnicalIndicatorCalculator.rsi(closes: allCloses, period: 14)
@@ -183,6 +195,23 @@ struct VolumeBarRenderer: View {
     let size: CGSize
     var timeFractions: [CGFloat]? = nil
 
+    /// Up-volume vs down-volume is encoded by HUE ALONE here, and unlike every other
+    /// renderer in this file there is no second channel already doing the work: bars
+    /// always grow up from the baseline and their height is VOLUME, so position says
+    /// nothing about direction. There is no volume axis and no legend, and the crosshair
+    /// readout prints magnitude only (the MACD readout prints signed values — which is
+    /// exactly why MACD needs no cue and this does).
+    ///
+    /// HATCH, not a hollow body. `barWidth` is `width / count * 0.7`: on a ~350pt canvas
+    /// that is 11.7pt at 1M but **1.0pt at 1Y**, and a hollow 1pt rect stroked at 1.5pt is
+    /// a filled 1pt rect — the cue would vanish exactly where the bars are densest. A
+    /// clipped 45° hatch renders as visible texture at every density.
+    ///
+    /// Channel check: dash is spent app-wide on reference lines and benchmark series,
+    /// opacity on extended hours, outline-vs-fill on candle direction. Hatch had no other
+    /// meaning anywhere.
+    @Environment(\.differentiateWithoutColor) private var differentiate
+
     var body: some View {
         Canvas { context, canvasSize in
             let count = pricePoints.count
@@ -210,6 +239,16 @@ struct VolumeBarRenderer: View {
                     height: barHeight
                 )
                 context.fill(Path(rect), with: .color(color))
+
+                // Hatch the DOWN bars only. Hatching both would make the texture
+                // decorative and encode nothing — the cue has to be a difference.
+                if differentiate && !isBullish {
+                    context.drawLayer { layer in
+                        layer.clip(to: Path(rect))
+                        layer.stroke(AppSentiment.hatch(in: rect, differentiate: true, spacing: 4),
+                                     with: .color(color), lineWidth: 0.75)
+                    }
+                }
             }
         }
     }

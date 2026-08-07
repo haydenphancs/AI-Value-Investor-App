@@ -204,10 +204,16 @@ struct PaywallView: View {
             // The free tier is never a purchasable "upgrade" target.
             EmptyView()
         } else {
+            // Is THIS plan the one being bought? `isPurchasing` alone is global, so driving the
+            // label from it made every plan card read "Processing…" the moment any one of them
+            // was tapped. Compare the product id the store is actually working on.
+            let isThisPlan = viewModel.store.purchasingProductID != nil
+                && viewModel.store.purchasingProductID == viewModel.store.productID(for: plan.tier)
+
             Button {
                 Task { await viewModel.purchase(tier: plan.tier) }
             } label: {
-                Text(viewModel.store.isPurchasing
+                Text(isThisPlan
                      ? "Processing\u{2026}"
                      : "Choose \(plan.displayName)")
                     .font(AppTypography.bodyEmphasis)
@@ -225,7 +231,11 @@ struct PaywallView: View {
                     )
             }
             .buttonStyle(PlainButtonStyle())
+            // Still disable EVERY plan during a purchase — two concurrent StoreKit sheets is
+            // not a supported state — but dim only the ones that aren't the active purchase, so
+            // "disabled" is visible rather than a button that looks live and ignores taps.
             .disabled(viewModel.store.isPurchasing)
+            .opacity(viewModel.store.isPurchasing && !isThisPlan ? 0.45 : 1)
         }
     }
 

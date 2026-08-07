@@ -12,6 +12,13 @@ struct PriceActionSparkline: View {
     let data: [Double]
     let eventIndex: Int?
     let trendColor: Color
+    /// Direction `trendColor` encodes. Both call sites derive that colour from an
+    /// `isPositive` they already hold (`PriceMovementStats.trendColor`,
+    /// `PriceActionViewModel.trendColor`), so passing it costs nothing and keeps the
+    /// non-colour cue from having to guess at the hue.
+    var isPositive: Bool? = nil
+
+    @Environment(\.differentiateWithoutColor) private var differentiate
 
     var body: some View {
         GeometryReader { geo in
@@ -26,7 +33,10 @@ struct PriceActionSparkline: View {
 
             // Line stroke
             sparklinePath(w: w, h: h, minVal: minVal, range: range)
-                .stroke(trendColor, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .stroke(trendColor,
+                        style: AppSentiment.strokeStyle(isPositive: isPositive ?? true,
+                                                        differentiate: differentiate && isPositive != nil,
+                                                        lineWidth: 2))
 
             // Event dot.
             // Was a hardcoded white disc, which is invisible on a light card.

@@ -396,7 +396,7 @@ struct AIChatScreen: View {
                             .frame(width: menuWidth, alignment: .leading)
                             .padding(.vertical, AppSpacing.xs)
                             // Same iOS Liquid Glass material as the portfolio header popup.
-                            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                            .glassPanel(cornerRadius: AppCornerRadius.large)
                             .offset(
                                 x: menuXOffset(rect: rect, in: proxy.size.width),
                                 y: menuYOffset(rect: rect, in: proxy.size.height)

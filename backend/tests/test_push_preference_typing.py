@@ -124,9 +124,15 @@ def test_an_unreadable_type_falls_back_to_the_same_default(key):
 def test_the_ios_defaults_this_map_mirrors_still_say_off():
     """Pin the map to its SOURCE, or the two drift silently.
 
-    These defaults exist only to mirror the `@AppStorage` declarations in
-    NotificationsSettingsView.swift. If someone flips a toggle to ship ON there, this
-    map keeps suppressing it and the bug is invisible from the Python side.
+    These defaults exist only to mirror what iOS declares. If someone flips a key to ship ON
+    there, this map keeps suppressing it and the bug is invisible from the Python side.
+
+    The source moved on 2026-08-07. It used to be the `@AppStorage` declarations, but twelve of
+    the thirteen toggles were hidden (only `notify_watchlist_changes` has a sender behind it —
+    see `FeatureFlags.notificationPreferencesEnabled`) and their declarations went with the UI.
+    The keys did NOT stop existing: SettingsSyncManager still syncs them and
+    `preference_enabled` still reads them, so the defaults are now declared explicitly in
+    `NotificationsSettingsView.preferenceDefaults`.
     """
     import re
     from pathlib import Path
@@ -136,10 +142,30 @@ def test_the_ios_defaults_this_map_mirrors_still_say_off():
     assert view.exists(), f"missing {view}"
     src = view.read_text()
 
-    declared = dict(re.findall(
-        r'@AppStorage\("(notify_\w+)"\)[^=\n]*=\s*(true|false)', src))
+    block_start = src.find("static let preferenceDefaults")
+    assert block_start != -1, (
+        "NotificationsSettingsView.preferenceDefaults is gone — it is the declared source of "
+        "truth for every notification preference default, including the hidden ones"
+    )
+    # Slice from the literal's OPENING bracket, not from the declaration: the type annotation
+    # `[String: Bool]` contains a `]` that would truncate the block to nothing.
+    open_at = src.index("= [", block_start)
+    block = src[open_at: src.index("\n    ]", open_at)]
+
+    declared = dict(re.findall(r'"(notify_\w+)"\s*:\s*(true|false)', block))
     # Anti-vacuity: the regex must actually be finding the declarations.
     assert len(declared) >= 10, declared
+
+    # Every key the client SYNCS must have a declared default, or a hidden key silently
+    # inherits the blanket True on the backend.
+    sync = (Path(__file__).resolve().parents[2]
+            / "frontend/ios/ios/Core/Services/SettingsSyncManager.swift")
+    synced = set(re.findall(r'"(notify_\w+)"', sync.read_text()))
+    assert synced, "SettingsSyncManager declares no notify_* keys — regex drifted"
+    assert synced <= set(declared), (
+        f"synced but undeclared: {sorted(synced - set(declared))} — add them to "
+        f"NotificationsSettingsView.preferenceDefaults"
+    )
 
     off_in_ios = {k for k, v in declared.items() if v == "false"}
     assert off_in_ios == set(_OFF_BY_DEFAULT), (
@@ -147,3 +173,35 @@ def test_the_ios_defaults_this_map_mirrors_still_say_off():
         f"PushDispatchService._PREFERENCE_DEFAULTS covers: {sorted(_OFF_BY_DEFAULT)}"
     )
     assert set(PushDispatchService._PREFERENCE_DEFAULTS) == off_in_ios
+
+
+def test_only_wired_preference_keys_have_visible_toggles():
+    """A visible toggle must do what it says. `notify_watchlist_changes` is the only key passed
+    as a `preference_key=` to a real dispatcher, so it is the only one that may be rendered.
+
+    This is the invariant `FeatureFlags.notificationPreferencesEnabled` was created to protect,
+    and it was violated in the other direction for a week: push shipped on 2026-08-01, the flag
+    stayed false, and users got alerts with no in-app way to opt out.
+    """
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    backend = (repo / "backend/app/services").rglob("*.py")
+    wired = set()
+    for path in backend:
+        wired |= set(re.findall(r'preference_key\s*=\s*"(notify_\w+)"', path.read_text()))
+    assert wired, "no preference_key= call sites found — regex drifted"
+
+    view = (repo / "frontend/ios/ios/Views/Screens/NotificationsSettingsView.swift").read_text()
+    body = view[view.index("var body: some View"):]
+    rendered = set(re.findall(r'isOn:\s*\$(\w+)', body))
+    storage = dict(re.findall(r'@AppStorage\("(notify_\w+)"\)\s*private var (\w+)', view))
+    rendered_keys = {k for k, var in storage.items() if var in rendered}
+
+    assert rendered_keys, "no rendered toggles found — regex drifted"
+    assert rendered_keys <= wired, (
+        f"these toggles are visible but nothing sends them: {sorted(rendered_keys - wired)}. "
+        f"A control that stores a preference nothing reads tells the user something is "
+        f"happening when nothing is — wire a sender first, or hide the row."
+    )

@@ -10,6 +10,10 @@ import SwiftUI
 struct MainChartCanvas: View {
     /// Only read to bust the `.drawingGroup()` raster cache — see below.
     @Environment(\.colorScheme) private var colorScheme
+    /// Read for the dash cue AND to bust the same raster. This canvas rasterises FIVE
+    /// sub-renderers, so a stale texture here would freeze the cue across the whole
+    /// chart — and it would only show on a LIVE toggle, never on a cold launch.
+    @Environment(\.differentiateWithoutColor) private var differentiate
 
     let pricePoints: [StockPricePoint]
     let isPositive: Bool
@@ -225,7 +229,7 @@ struct MainChartCanvas: View {
                 }
                 .drawingGroup()
                 .accessibilityIgnoresInvertColors()
-                .id(colorScheme)
+                .id("\(colorScheme)-\(differentiate)")
             } else {
                 Text("No chart data")
                     .font(AppTypography.caption)

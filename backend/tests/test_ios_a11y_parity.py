@@ -201,3 +201,83 @@ def test_the_probe_still_prints_the_two_trustworthy_lines():
     probe = _src("Theme/TypographyProbe.swift")
     assert "SYSTEM category=" in probe
     assert "AppTypography resolved:" in probe
+
+
+# ── 4. Differentiate Without Color ───────────────────────────────────────────
+
+# Renderers whose ONLY signal for up-vs-down was the hue, and which therefore owe a
+# non-colour cue. Hardcoded rather than discovered: a heuristic over "files mentioning a
+# sentiment token" sweeps in ~187 files, almost all of which are text with a +/- sign
+# already and need nothing. This list is the audited subset.
+_SENTIMENT_RENDERERS = [
+    "Views/Atoms/SparklineView.swift",
+    "Views/Atoms/TintedSparkline.swift",
+    "Views/Atoms/MiniStockChart.swift",
+    "Views/Atoms/StockPriceDisplay.swift",
+    "Views/Molecules/PriceActionSparkline.swift",
+    "Views/Molecules/Chart/CandlestickChartRenderer.swift",
+]
+
+# Renderers audited and deliberately EXEMPT, each with its reason stated in the source.
+# Listed here so "no cue" stays a decision someone made rather than a gap nobody noticed.
+_DWC_EXEMPT = {
+    "Views/Molecules/Chart/LineChartRenderer.swift":
+        "dash is already taken by extended-hours segments; no free channel, and the "
+        "signed change is rendered in the header above the chart",
+}
+
+
+def test_every_sentiment_renderer_reads_the_differentiate_flag():
+    """WHAT THIS CANNOT DO: it cannot judge whether a cue is any GOOD — only that the
+    renderer consults the flag at all. What it stops is a new sentiment-coloured chart
+    landing with no non-colour cue whatsoever, which is how all of these started."""
+    missing = [r for r in _SENTIMENT_RENDERERS
+               if "differentiateWithoutColor" not in _src(r)]
+    assert not missing, f"sentiment renderers with no DWC cue: {missing}"
+
+
+def test_the_dwc_exemptions_still_explain_themselves():
+    """An exemption with no stated reason is indistinguishable from an oversight."""
+    for rel, reason in _DWC_EXEMPT.items():
+        src = _src(rel)
+        assert "Differentiate Without Color" in src, f"{rel}: exemption is undocumented"
+        assert "differentiateWithoutColor" not in src, \
+            f"{rel} now reads the flag — move it to _SENTIMENT_RENDERERS ({reason})"
+
+
+def test_rasterised_charts_key_their_id_on_the_flag_too():
+    """A `.drawingGroup()` is a Metal texture that UIKit does NOT re-render because an
+    accessibility setting changed. Without the flag in the `.id()`, the cue appears on a
+    cold launch and then freezes — the failure mode a screenshot cannot catch, because
+    the screenshot is always taken after a launch."""
+    for rel in ("Views/Atoms/MiniStockChart.swift",
+                "Views/Molecules/Chart/MainChartCanvas.swift"):
+        src = _src(rel)
+        assert ".drawingGroup()" in src, f"{rel}: no drawingGroup — is this test stale?"
+        assert re.search(r'\.id\("\\\(colorScheme\)-\\\(differentiate\)"\)', src), \
+            f"{rel}: .drawingGroup() id must include differentiate, not just colorScheme"
+
+
+def test_the_shared_helper_exists_and_dashes_only_the_negative():
+    """The cue has to be a DIFFERENCE. Dashing both arms encodes nothing, and that is an
+    easy edit for someone to make while 'making it consistent'."""
+    src = _src("Theme/AppSentiment.swift")
+    for fn in ("strokeStyle", "hollowBodyLineWidth", "hatch", "marker"):
+        assert f"static func {fn}" in src, f"AppSentiment.{fn} is gone"
+    assert "(differentiate && !isPositive) ? dash : []" in src, \
+        "strokeStyle no longer dashes exactly the negative arm"
+    # The preview/test override is the only way to exercise the ON state in a canvas,
+    # because SwiftUI's own key is get-only.
+    assert "caydexDifferentiateOverride" in src
+    assert "var differentiateWithoutColor: Bool" in src
+
+
+def test_dwc_renderer_list_is_not_vacuous():
+    """Both lists above are hardcoded paths — a rename turns every assertion into a
+    no-op unless the paths are proven to resolve."""
+    assert len(_SENTIMENT_RENDERERS) >= 6
+    for rel in _SENTIMENT_RENDERERS + list(_DWC_EXEMPT):
+        assert (_IOS / rel).exists(), f"{rel} moved — update the list, do not delete it"
+    # And the marker string must really be absent from an unrelated file, or
+    # `"differentiateWithoutColor" not in src` proves nothing.
+    assert "differentiateWithoutColor" not in _src("Views/Atoms/IconTile.swift")

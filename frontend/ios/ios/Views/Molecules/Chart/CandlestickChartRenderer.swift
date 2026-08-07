@@ -12,6 +12,13 @@ struct CandlestickChartRenderer: View {
     let coord: ChartCoordinateSystem
     var extendedHoursIndices: Set<Int> = []
 
+    /// ⚠️ Outline-vs-fill is ALREADY taken here: it encodes extended-hours trading
+    /// (`isExtended` below). Two meanings cannot share one channel, so under DWC the
+    /// extended-hours cue moves entirely onto OPACITY — which it already half-used —
+    /// and outline/fill is freed for direction: hollow body = up, filled = down, the
+    /// convention every trading platform uses.
+    @Environment(\.differentiateWithoutColor) private var differentiate
+
     var body: some View {
         Canvas { context, size in
             let count = pricePoints.count
@@ -49,7 +56,18 @@ struct CandlestickChartRenderer: View {
                     height: bodyHeight
                 )
 
-                if isExtended {
+                if differentiate {
+                    // Direction owns outline-vs-fill: hollow = up, filled = down.
+                    // Extended hours is still distinguishable — `color` is already at
+                    // 0.3 opacity for those candles (line 31), and the wick above is
+                    // drawn at half width.
+                    if isBullish {
+                        context.stroke(Path(bodyRect), with: .color(color),
+                                       lineWidth: isExtended ? 0.5 : 1)
+                    } else {
+                        context.fill(Path(bodyRect), with: .color(color))
+                    }
+                } else if isExtended {
                     // Draw outline only for extended hours candles
                     context.stroke(Path(bodyRect), with: .color(color), lineWidth: 0.5)
                 } else {

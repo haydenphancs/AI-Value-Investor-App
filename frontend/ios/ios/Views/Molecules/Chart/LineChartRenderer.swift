@@ -7,6 +7,19 @@
 
 import SwiftUI
 
+/// ⚠️ DELIBERATELY has no Differentiate Without Color cue, and this is the reasoning
+/// rather than an oversight — `test_ios_a11y_parity.py` exempts it by name.
+///
+/// The obvious cue for a line is a dash, and DASH IS ALREADY TAKEN here: line 27 uses
+/// `dash: [4, 2]` to mark extended-hours segments. A second meaning on the same channel
+/// makes both unreadable, which is worse than the problem being solved. Unlike
+/// `CandlestickChartRenderer` — where extended hours could move onto opacity because it
+/// was already half-encoded there — this renderer has no free channel: opacity is also
+/// taken (0.35 on the same line), and width carries the same distinction.
+///
+/// It is acceptable because this is the DETAIL chart, and the direction it encodes is
+/// stated in text directly above it: the price header renders a signed change and an
+/// arrow. The chart is not the only carrier of the claim.
 struct LineChartRenderer: View {
     let closes: [Double]
     let coord: ChartCoordinateSystem

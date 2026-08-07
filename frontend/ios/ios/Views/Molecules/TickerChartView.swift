@@ -350,7 +350,7 @@ struct TickerChartView: View {
                 }
                 .frame(width: width, alignment: .leading)
                 .padding(.vertical, AppSpacing.xs)
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                .glassPanel(cornerRadius: AppCornerRadius.large)
                 .offset(x: x, y: y)
             }
             .transition(.identity)

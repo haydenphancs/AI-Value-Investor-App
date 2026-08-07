@@ -16,7 +16,27 @@ struct PrivacyPolicyView: View {
         LegalDocumentView(
             title: "Privacy Policy",
             lastUpdated: "July 29, 2026",
-            intro: "This Privacy Policy explains how Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}) collects, uses, and shares information when you use the Caydex mobile application and related services (the \u{201C}App\u{201D}). By using the App, you agree to this Policy.",
+            // The summary is deliberately FIRST and in the intro rather than as a numbered
+            // section: "we don't sell your data" is the single thing users most want to know,
+            // and burying it in §5 (where it lived) meant almost nobody ever read it. The
+            // numbered sections below still govern; this only surfaces what they already say.
+            intro: """
+                This Privacy Policy explains how Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}) collects, uses, and shares information when you use the Caydex mobile application and related services (the \u{201C}App\u{201D}). By using the App, you agree to this Policy.
+
+                THE SHORT VERSION
+
+                •  We do not sell your personal information. We never have, to anyone, for any price \u{2014} and we do not \u{201C}share\u{201D} it for cross-context behavioural advertising either, as those terms are defined by US state privacy laws.
+
+                •  There are no advertisers, ad networks, or third-party trackers in this app. We do not use the advertising identifier (IDFA) and run no analytics SDK, so nothing you do here follows you across other apps or websites. That is why iOS never asks you for tracking permission.
+
+                •  We never connect to your brokerage. We hold no money or securities and cannot place trades. Any holdings in Portfolio Insights are figures you typed in yourself.
+
+                •  Your identity is not sent to the AI. When you use Cay AI, your name, email, account identifier, watchlist, portfolio and holdings are not transmitted with your message.
+
+                •  You can delete everything, from inside the app: Profile \u{2192} Settings \u{2192} Delete Account.
+
+                This summary is for readability. The full detail below governs, and nothing here limits it.
+                """,
             sections: Self.sections
         )
     }

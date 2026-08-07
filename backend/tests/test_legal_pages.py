@@ -190,6 +190,59 @@ def test_served_copy_matches_the_authored_original(page):
     )
 
 
+# ── "We don't sell your data" must stay prominent ─────────────────────────────
+#
+# This is the single thing users most want to know, and it used to live in §5 — past the
+# collection, use, AI-processing and service-provider sections — where almost nobody read it.
+# It is now a summary box at the top. These tests stop it drifting back down or being
+# softened, and stop it being claimed if the app ever starts doing the opposite.
+
+def test_privacy_policy_says_it_does_not_sell_data_ABOVE_the_first_section():
+    """Position matters, not just presence. Assert the claim appears BEFORE section 1."""
+    body = (_SERVED / "privacy.html").read_text(encoding="utf-8")
+    claim = body.lower().find("we do not sell your personal information")
+    first_section = body.lower().find("1. information we collect")
+    assert claim != -1, "the no-sale claim is missing entirely"
+    assert first_section != -1, "could not locate section 1 — did the headings change?"
+    assert claim < first_section, (
+        "the no-sale claim has drifted below the first section again; it belongs in the "
+        "summary at the top, which is the only place users reliably read"
+    )
+
+
+def test_privacy_summary_covers_the_five_reassurances(client):
+    body = client.get("/privacy").text.lower()
+    # No sale, and no CCPA-sense "sharing" either — the two are legally distinct.
+    assert "we do not sell your personal information" in body
+    assert "cross-context behavioural advertising" in body
+    # No ad/tracking stack. Verified true: the project pins sentry-cocoa and GoogleSignIn,
+    # neither of which is an ad SDK, and NSPrivacyTracking is false.
+    assert "no advertisers, ad networks, or third-party trackers" in body
+    assert "idfa" in body
+    # The three app-specific ones.
+    assert "never connect to your brokerage" in body
+    assert "not sent to the ai" in body or "not transmitted with your message" in body
+    assert "delete account" in body
+
+
+def test_privacy_summary_does_not_override_the_full_policy(client):
+    """A plain-language summary that reads as the operative text is its own risk. Keep the
+    line that says the detail governs."""
+    body = client.get("/privacy").text.lower()
+    assert "the full detail below governs" in body
+
+
+def test_in_app_privacy_policy_carries_the_same_summary():
+    """`privacy.html` and `PrivacyPolicyView.swift` are hand-maintained mirrors with no
+    automated sync, so the summary has to be asserted on both sides or it will drift."""
+    path = _IOS_SCREENS_DIR / "PrivacyPolicyView.swift"
+    if not path.is_file():
+        pytest.skip(f"{path} not present")
+    src = path.read_text(encoding="utf-8").lower()
+    assert "we do not sell your personal information" in src
+    assert "the short version" in src
+
+
 # ── The in-app legal screens must agree with the served pages ─────────────────
 
 _IOS_LEGAL_SCREENS = [

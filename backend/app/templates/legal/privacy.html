@@ -20,10 +20,25 @@
     p { margin: .6rem 0; }
     a { color: #2563eb; }
     footer { margin-top: 3rem; color: #6b7280; font-size: .85rem; }
+    .summary {
+      margin: 1.5rem 0 2rem; padding: 1.1rem 1.35rem;
+      border: 1px solid #bfdbfe; border-left: 4px solid #2563eb;
+      border-radius: 10px; background: #eff6ff;
+    }
+    .summary ul { margin: .5rem 0 0; padding-left: 1.2rem; }
+    .summary li { margin: .5rem 0; }
+    .summary .lead {
+      margin: 0; font-size: 1.05rem; font-weight: 700; letter-spacing: .01em;
+    }
+    .summary .lead-note {
+      margin: .9rem 0 0; font-size: .85rem; color: #4b5563;
+    }
     @media (prefers-color-scheme: dark) {
       body { color: #e5e7eb; background: #0b0b0c; }
       .updated, footer { color: #9ca3af; }
       a { color: #60a5fa; }
+      .summary { border-color: #1e3a5f; border-left-color: #60a5fa; background: #0e1626; }
+      .summary .lead-note { color: #9ca3af; }
     }
   </style>
 </head>
@@ -35,6 +50,27 @@
     <p>This Privacy Policy explains how Caydex (&ldquo;we,&rdquo; &ldquo;us,&rdquo; or &ldquo;our&rdquo;)
       collects, uses, and shares information when you use the Caydex mobile application and related services
       (the &ldquo;App&rdquo;). By using the App, you agree to this Policy.</p>
+
+    <div class="summary">
+      <p class="lead">The short version</p>
+      <ul>
+        <li><strong>We do not sell your personal information.</strong> We never have, to anyone, for any
+          price &mdash; and we do not &ldquo;share&rdquo; it for cross-context behavioural advertising
+          either, as those terms are defined by US state privacy laws.</li>
+        <li><strong>There are no advertisers, ad networks, or third-party trackers in this app.</strong>
+          We do not use the advertising identifier (IDFA), we run no analytics SDK, and nothing you do here
+          is used to follow you across other apps or websites. That is why iOS never shows you a tracking
+          permission prompt.</li>
+        <li><strong>We never connect to your brokerage.</strong> We hold no money or securities and cannot
+          place trades. Any holdings in Portfolio Insights are figures you typed in yourself.</li>
+        <li><strong>Your identity is not sent to the AI.</strong> When you use Cay AI, your name, email,
+          account identifier, watchlist, portfolio and holdings are not transmitted with your message.</li>
+        <li><strong>You can delete everything, from inside the app.</strong>
+          Profile &rarr; Settings &rarr; Delete Account permanently removes your account and its data.</li>
+      </ul>
+      <p class="lead-note">This summary is for readability. The full detail below governs, and nothing
+        here limits it.</p>
+    </div>
 
     <h2>1. Information We Collect</h2>
     <p><strong>Account information:</strong> if you create an account, we collect your email address and any
@@ -89,9 +125,15 @@
       United States.</p>
 
     <h2>5. How We Share Information</h2>
-    <p>We do not sell your personal information. We share information only with the service providers described
-      above, when required by law or legal process, to protect our rights or users&rsquo; safety, or in
-      connection with a business transfer (such as a merger or acquisition), subject to this Policy.</p>
+    <p><strong>We do not sell your personal information, and we have never sold it.</strong> We also do not
+      &ldquo;share&rdquo; it for cross-context behavioural advertising &mdash; both &ldquo;sell&rdquo; and
+      &ldquo;share&rdquo; carry specific meanings under US state privacy laws such as the CCPA/CPRA, and
+      neither describes anything we do. We receive no money or other consideration for disclosing your
+      information to anyone.</p>
+    <p>We disclose information only to the service providers described above (each acting on our instructions
+      and only to run the App), when required by law or legal process, to protect our rights or users&rsquo;
+      safety, or in connection with a business transfer such as a merger or acquisition &mdash; in which case
+      this Policy continues to govern the information, and any successor is bound by it.</p>
 
     <h2>6. Data Retention</h2>
     <p>Content you create &mdash; chat conversations, generated research reports, watchlists, holdings,

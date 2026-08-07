@@ -164,7 +164,26 @@ final class StoreKitService: ObservableObject {
             purchasingProductID = nil
         }
 
-        let result = try await product.purchase()
+        // `product.purchase()` presents Apple's payment sheet, and a failure to PRESENT it
+        // throws here rather than returning a `.userCancelled` / `.pending` case. Those
+        // failures arrive as opaque `NSError`s from Apple's own daemons — `ASDErrorDomain`
+        // (appstored) and `AMSErrorDomain` (AppleMediaServices) — whose `localizedDescription`
+        // is only "The operation couldn't be completed", so the domain + code are the entire
+        // diagnostic. Logging them here is what makes a presentation failure legible; without
+        // it the error travelled silently to `AppError.unknown` and, because the paywall only
+        // rendered `errorMessage` while the catalog was absent, showed the user nothing at all.
+        let result: Product.PurchaseResult
+        do {
+            result = try await product.purchase()
+        } catch {
+            #if DEBUG
+            let ns = error as NSError
+            print("🔴 [StoreKit] purchase sheet failed for \(product.id): "
+                  + "\(ns.domain) code=\(ns.code) — \(ns.localizedDescription)")
+            if !ns.userInfo.isEmpty { print("🔴 [StoreKit] userInfo: \(ns.userInfo)") }
+            #endif
+            throw error
+        }
 
         switch result {
         case .success(let verification):

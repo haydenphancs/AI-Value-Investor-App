@@ -425,7 +425,6 @@ async def update_profile(
 # NOT reach them. Each omits the FK deliberately (the shared guest id has to be able to
 # write them), which means account deletion has to clear them explicitly.
 #   user_learn_progress  — migrations/067, "no FK so the shared guest id works"
-#   user_book_progress   — migrations/066, same
 #   chat_usage_budget    — migrations/096, same
 #   credit_transactions  — migrations/100, described as an append-only audit ledger
 #   watchlist_items      — migrations/108. These two USED to cascade; the FKs were
@@ -441,9 +440,13 @@ async def update_profile(
 # deletion, credits are internal accounting rather than a payment record, and Apple holds
 # the actual purchase records independently. Revisit if real billing history ever needs to
 # survive deletion for tax or dispute reasons — and if it does, say so in the policy.
+# `user_book_progress` (migrations/066) is deliberately ABSENT: 067 superseded it, copied its
+# rows into `user_learn_progress`, and nothing has read or written it since — production held
+# 0 rows. Migration 116 drops the table. Do NOT re-add it here, and do not add it to
+# `claim-guest-data` either; the live book-progress path is `user_learn_progress` with
+# `content_type='book_core'`, which both already cover.
 _UNLINKED_USER_TABLES: tuple[str, ...] = (
     "user_learn_progress",
-    "user_book_progress",
     "chat_usage_budget",
     "credit_transactions",
     "watchlist_items",
@@ -482,6 +485,27 @@ def _purge_unlinked_rows(supabase: Client, user_id: str) -> dict[str, str]:
         try:
             supabase.table(table).delete().eq(column, user_id).execute()
         except Exception as e:  # noqa: BLE001 — recorded and surfaced below
+            # A table that does not exist cannot be holding this user's data, so a
+            # "relation not found" is a completed purge, not a failed one.
+            #
+            # This is NOT a convenience. A failure here aborts deletion with a 500 (see the
+            # caller), so without this branch, dropping a table in a migration would break
+            # in-app account deletion for EVERY user until the code that stops listing it
+            # deploys — an App Store 5.1.1(v) break, opened by a schema change that looks
+            # entirely unrelated. It makes the deploy/migrate ordering safe in BOTH
+            # directions instead of only code-first. Discovered while writing migration 116
+            # (`DROP TABLE user_book_progress`).
+            #
+            # Deliberately narrow: PGRST205 is PostgREST's schema-cache miss, and 42P01 is
+            # Postgres' own `undefined_table`. Every other error still fails the deletion.
+            detail = str(e)
+            if "PGRST205" in detail or "42P01" in detail:
+                logger.warning(
+                    "Account deletion: %s no longer exists — treating as already purged "
+                    "for user=%s. Remove it from _UNLINKED_USER_TABLES.",
+                    table, user_id,
+                )
+                continue
             failures[table] = f"{type(e).__name__}: {e}"
             logger.error(
                 "Account deletion: failed to purge %s for user=%s: %s: %s",

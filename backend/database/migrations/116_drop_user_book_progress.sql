@@ -1,0 +1,64 @@
+-- 116_drop_user_book_progress.sql
+--
+-- Why: `user_book_progress` (migration 066) was superseded by the polymorphic
+-- `user_learn_progress` (migration 067). 067's own header says so explicitly:
+--
+--     "066_user_book_progress was already applied, so this COPIES its rows into the unified
+--      table (idempotent). The old user_book_progress table is left in place (no data loss)
+--      — it's now unused and can be dropped manually after you've verified this migration."
+--
+-- This is that manual drop. It was never done, so the table has sat in the schema for ~50
+-- migrations as a decoy: a 2026-08-07 audit flagged it as "purged on account deletion but not
+-- carried by claim-guest-data" and proposed adding claim logic for it — which would have meant
+-- writing a data-migration path for a table nothing reads or writes.
+--
+-- Verified before writing this migration:
+--   * `grep -rn user_book_progress backend/app/ frontend/ios/ios/` matches ONLY the two
+--     references in `users.py` (the purge list and its comment). No service, no endpoint, no
+--     Swift file touches it.
+--   * The live book-progress path is `user_learn_progress` with `content_type='book_core'`
+--     (`BookProgressStore.swift` → `learn.py` `LEARN_CONTENT_TYPES`), and that table IS
+--     carried by `POST /users/me/claim-guest-data`. So guest book progress already survives
+--     sign-up; there was never a live gap.
+--   * `select count(*) from user_book_progress` → **0 rows** on production (2026-08-07),
+--     against 7 live `book_core` rows in `user_learn_progress`. 067's copy ran, and nothing
+--     has written to the old table since.
+--
+-- DESTRUCTIVE: drops `user_book_progress`. Zero rows at time of writing, and any row it could
+-- have held was copied into `user_learn_progress` by 067 — which is itself covered by both
+-- account deletion (`_UNLINKED_USER_TABLES`) and guest claim. Re-check the count before
+-- applying if this sits unapplied for a while:
+--
+--     select count(*) from public.user_book_progress;   -- expect 0
+--
+-- ⚠️ ORDERING — an earlier draft of this header got this WRONG, so read it.
+--
+-- The claim was "order is not critical; the purge is best-effort and records a failure rather
+-- than aborting". The second half is false. `_purge_unlinked_rows` is best-effort **per table**
+-- so one failure does not abandon the rest — but its caller then does:
+--
+--     if failures:  raise HTTPException(status_code=500, ...)
+--
+-- deliberately, so the auth row survives and a retry can still reach the un-purged data. So
+-- applying this migration while the old code is still deployed would have made **every** call
+-- to `DELETE /users/me` return 500 — in-app account deletion broken for all users, which is an
+-- App Store 5.1.1(v) requirement, caused by a schema change that looks unrelated to it.
+--
+-- That hazard is now closed at the source rather than by ordering discipline:
+-- `_purge_unlinked_rows` treats PostgREST `PGRST205` / Postgres `42P01` ("relation does not
+-- exist") as an already-completed purge — a table that is not there cannot be holding the
+-- user's rows — while every other error still aborts. Pinned by
+-- `tests/test_account_deletion_completeness.py::test_a_dropped_table_does_not_abort_deletion`,
+-- with `::test_a_genuine_purge_failure_still_aborts` as its anti-vacuity pair.
+--
+-- **So this is now safe to apply in either order** — but prefer deploying the code first
+-- anyway, since that leaves no window at all.
+--
+-- Dependency check (schema_snapshot.sql, 2026-08-07): every other object naming this table is
+-- OWNED by it — the `_id_seq` (OWNED BY, so it drops too), the id DEFAULT, the PK, the UNIQUE
+-- constraint, `idx_user_book_progress_user`, and 5 RLS policies. All drop with the table. No
+-- view, function or trigger references it, and no other table has an FK to it, so a plain
+-- DROP (no CASCADE) will not fail on a dependency — and if one ever appeared, it would error
+-- rather than silently take something with it.
+
+DROP TABLE IF EXISTS public.user_book_progress;

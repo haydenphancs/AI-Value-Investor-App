@@ -1,11 +1,28 @@
-"""Source-level guards for two iOS defects that cost users money or strand the app.
+"""Source-level guards for three iOS defects that cost users money or strand the app.
 
 There is no XCTest target in this project, so — exactly like `test_ios_auth_policy_parity.py`
 and `test_ios_theme_parity.py` — these invariants are pinned from Python by reading the Swift
 source. A failure here is a real bug that ships, not a style nit.
 
-Both defects were found in the 2026-08-07 deep check and are documented in
-`~/.claude/plans/handoff-deep-check-floofy-lightning.md` as C2 and C4.
+All three were found in the 2026-08-07 deep check and are documented in
+`~/.claude/plans/handoff-deep-check-floofy-lightning.md`:
+
+  * **C2** — opening a report you already own could silently charge 20 credits, because Path
+    A's `catch` was unqualified and fell through to the billable path on a network blip or a
+    decode failure (`TickerReportViewModel.swift`).
+  * **C4** — a second "Ask Cay AI" from the same host screen permanently stranded the chat.
+  * **C13** — `stochastic()` admitted `count >= 14` but built the %D range as `15..<count`,
+    trapping at runtime on a series of exactly 14 points
+    (`TechnicalIndicatorCalculator.swift`).
+
+(This header previously said "two defects … C2 and C4"; the C13 section was appended without
+updating it. Keep it in sync — a guard file whose header undercounts its own contents is how
+you end up believing a defect is uncovered.)
+
+Note what these can and cannot prove. They pin the SHAPE of the source, not runtime behaviour:
+a semantically-equivalent rewrite passes without the guard actually running, and a rename
+breaks the test without breaking the app. C13's only behavioural proof was a standalone Swift
+harness run in a throwaway scratchpad, and neither C2 nor C13 has been tap-verified in the app.
 """
 
 import re

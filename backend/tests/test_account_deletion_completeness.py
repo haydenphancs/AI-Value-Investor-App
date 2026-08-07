@@ -267,6 +267,66 @@ async def test_auth_step_failure_surfaces_as_500():
     assert ei.value.status_code == 500
 
 
+# ── A dropped table must not break deletion ───────────────────────────────────
+#
+# A purge failure aborts deletion with a 500 (deliberately — the auth row is kept so a retry
+# can still reach the data). That makes DROPPING a table in a migration a live hazard: between
+# applying the migration and deploying the code that stops listing the table, EVERY account
+# deletion 500s. That is an App Store 5.1.1(v) break introduced by a schema change that looks
+# unrelated to account deletion.
+#
+# Found while writing migration 116 (`DROP TABLE user_book_progress`). `_purge_unlinked_rows`
+# now treats "relation does not exist" as an already-completed purge — a table that is not
+# there cannot be holding the user's rows — which makes the deploy/migrate ordering safe in
+# both directions rather than code-first only.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        # PostgREST's schema-cache miss, verbatim in shape from a live probe.
+        "{'message': \"Could not find the table 'public.gone' in the schema cache\", "
+        "'code': 'PGRST205'}",
+        # Postgres' own undefined_table, in case the call ever bypasses PostgREST.
+        'relation "public.gone" does not exist (SQLSTATE 42P01)',
+    ],
+)
+async def test_a_dropped_table_does_not_abort_deletion(message):
+    victim = users_ep._UNLINKED_USER_TABLES[0]
+    sb = FakeSupabase(fail={victim: message})
+    assert await _delete(sb) == {"deleted": True}, (
+        "a table that no longer exists must not fail the purge — otherwise dropping any "
+        "table 500s every account deletion until the code deploys"
+    )
+    # The rest of the purge, and the auth delete, must still have happened.
+    deleted = {t for kind, t, *_ in sb.log if kind == "table.delete"}
+    assert victim not in deleted
+    assert deleted == (
+        set(users_ep._UNLINKED_USER_TABLES) | set(users_ep._UNLINKED_IDENTITY_TABLES)
+    ) - {victim}
+    assert any(kind == "auth.delete_user" for kind, *_ in sb.log)
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_purge_failure_still_aborts():
+    """Anti-vacuity for the branch above. Tolerating 'table is gone' must not become
+    tolerating everything — a permission error or a network fault means the user's data may
+    still be there, and deletion must fail loudly so a retry can reach it."""
+    victim = users_ep._UNLINKED_USER_TABLES[0]
+    for message in (
+        "{'message': 'permission denied for table x', 'code': '42501'}",
+        "Server disconnected without sending a response",
+    ):
+        sb = FakeSupabase(fail={victim: message})
+        with pytest.raises(HTTPException) as ei:
+            await _delete(sb)
+        assert ei.value.status_code == 500, f"should have aborted on: {message}"
+        assert not any(kind == "auth.delete_user" for kind, *_ in sb.log), (
+            "the auth row must be KEPT when a purge fails, so a retry can still reach the data"
+        )
+
+
 # ── The list itself must stay complete ────────────────────────────────────────
 
 _SCHEMA = Path(__file__).resolve().parents[1] / "database/schema_snapshot.sql"
@@ -277,13 +337,38 @@ _MIGRATIONS = Path(__file__).resolve().parents[1] / "database/migrations"
 _NOT_USER_OWNED: set[str] = set()
 
 
+def _tables_dropped_by_migrations() -> set[str]:
+    """Tables a migration drops.
+
+    The exact mirror of the snapshot-lag handling below. `_tables_with_user_id_column` reads
+    CREATEs from the migrations folder because the snapshot lags behind new tables — but it
+    ignored DROPs, so it also lagged behind *removed* ones in the opposite direction: a table
+    dropped by a migration stayed in the derived set until someone regenerated the snapshot,
+    and the purge-list guard then demanded an entry for a table that is on its way out.
+
+    That is not hypothetical: it is what migration 116 (`DROP TABLE user_book_progress`) hit.
+    The snapshot cannot be regenerated first, because it is a dump of the LIVE database and
+    the user applies migrations by hand.
+    """
+    if not _MIGRATIONS.is_dir():
+        return set()
+    dropped = set()
+    for f in _MIGRATIONS.glob("*.sql"):
+        for m in re.finditer(
+            r"DROP TABLE\s+(?:IF EXISTS\s+)?(?:public\.)?(\w+)", f.read_text(), re.IGNORECASE
+        ):
+            dropped.add(m.group(1))
+    return dropped
+
+
 def _tables_with_user_id_column() -> set[str]:
-    """Every public table declaring a `user_id` column.
+    """Every public table declaring a `user_id` column, minus any a migration drops.
 
     Reads the schema snapshot AND the migrations folder. The snapshot is regenerated
     only every few migrations (see .claude/rules/database.md), so it legitimately lags
     — a table created by a migration that has not been snapshotted yet is still real,
-    and treating it as unknown made this guard fail on correct code.
+    and treating it as unknown made this guard fail on correct code. The same lag applies
+    to drops, hence `_tables_dropped_by_migrations`.
     """
     sources = [_SCHEMA.read_text()]
     migrations = _SCHEMA.parent / "migrations"
@@ -301,7 +386,9 @@ def _tables_with_user_id_column() -> set[str]:
             name, body = m.group(1), m.group(2)
             if re.search(r"^\s*user_id\s", body, re.MULTILINE):
                 found.add(name)
-    return found
+    # A dropped table must ALSO leave `_UNLINKED_USER_TABLES` — subtracting here makes
+    # `test_purge_list_has_no_stale_entries` fail if it does not, which is the coupling we want.
+    return found - _tables_dropped_by_migrations()
 
 
 def _tables_with_fk_to_users() -> set[str]:

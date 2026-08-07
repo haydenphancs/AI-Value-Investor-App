@@ -549,6 +549,35 @@ final class AppState {
             // "already loaded" short-circuit, so the Tracking tab re-reads whenever it reappears
             // after the sign-in sheet dismisses. A revision counter here would be state nothing
             // observes.
+            // ⚠️ A PARTIAL FAILURE ARRIVES AS HTTP 200, NOT AS A THROW.
+            //
+            // The backend deliberately never raises mid-claim: it catches, logs, and answers
+            // 200 with `{"claimed": {all zeros}, "error": "<ExcType>"}`
+            // (users.py:376-385, pinned by
+            // tests/test_guest_data_claim.py::test_a_failure_PART_WAY_THROUGH_still_returns_rather_than_raises).
+            // That is the right server behaviour — a half-migrated claim must not look like a
+            // transport error — but on this side it lands in the SUCCESS branch.
+            //
+            // Inspecting it only inside `#if DEBUG` meant a release build treated the
+            // designed failure signal as a success: no toast, no analytics, no log. The user
+            // finishes sign-up, lands on an empty watchlist, and nothing anywhere records
+            // that their data is still sitting in the guest partition. That is exactly the
+            // shape `.claude/rules/auth.md` rule 6 bans ("banned on these paths: a bare
+            // `try?`, a `catch` that only prints, and `#if DEBUG`-only reporting").
+            //
+            // Route it through the same two lines the `catch` below uses, so both failure
+            // modes are reported identically.
+            if let error = result.error {
+                Analytics.shared.track(.backgroundSyncFailed, [
+                    "op": .string("claim_guest_data"),
+                    "code": .string("PARTIAL_\(error)"),
+                ])
+                showToast(
+                    "We couldn't move your saved tickers to your new account. Pull to refresh, or sign in again.",
+                    type: .warning
+                )
+            }
+
             #if DEBUG
             if let skipped = result.skipped {
                 print("ℹ️ [AppState] guest claim skipped: \(skipped)")

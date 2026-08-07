@@ -343,7 +343,13 @@ class GrowthService:
         # ── In-flight dedup ──
         if cache_key in _inflight:
             logger.info(f"Growth in-flight JOIN for {ticker}")
-            return await _inflight[cache_key]
+            # SHIELDED. Awaiting the shared future directly means a joiner that gives up
+            # (client disconnect, request timeout) CANCELS THE FUTURE ITSELF — and the leader's
+            # `set_result` then raises InvalidStateError, 500ing a request whose data loaded
+            # perfectly, while every other joiner gets a CancelledError. Verified: an
+            # unshielded joiner cancellation makes the leader's set_result raise; a shielded
+            # one leaves it untouched. Matches profit_power_service.py.
+            return await asyncio.shield(_inflight[cache_key])
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -371,18 +377,29 @@ class GrowthService:
                 )
 
             _cache_set(cache_key, result)
-            future.set_result(result)
+            # Guarded: a joiner that was cancelled before we shielded the join could have
+            # already resolved this future, and a bare set_result would raise InvalidStateError.
+            if not future.done():
+                future.set_result(result)
             return result
         except Exception as e:
-            future.set_exception(e)
+            if not future.done():
+                future.set_exception(e)
             raise
         finally:
-            # CancelledError is a BaseException, so the `except Exception` above
-            # does NOT resolve the future when this coroutine is cancelled (a
-            # client disconnect mid-fetch). Any joiner awaiting this future would
-            # then hang forever. Cancel it so joiners get a CancelledError.
+            # CancelledError is a BaseException, so the `except Exception` above does NOT
+            # resolve the future when this coroutine is cancelled (a client disconnect
+            # mid-fetch, or a pre-warm task cancelled at shutdown). Any joiner awaiting it
+            # would then hang forever.
+            #
+            # Hand waiters a NORMAL exception rather than `future.cancel()`: a joiner awaiting
+            # a cancelled future receives CancelledError, which inside an async handler reads
+            # as "this request was cancelled" and propagates as task cancellation instead of
+            # failing cleanly through the caller's own error path. Matches
+            # profit_power_service.py and holders_service.py.
             if not future.done():
-                future.cancel()
+                future.set_exception(RuntimeError("in-flight growth fetch was cancelled"))
+                future.exception()   # mark retrieved; silences the GC warning when unjoined
             _inflight.pop(cache_key, None)
 
     # ── Supabase helpers ──────────────────────────────────────────

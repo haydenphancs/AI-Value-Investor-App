@@ -26,6 +26,21 @@ _MAX_CONNECTIONS_PER_KEY = 10
 _active_connections: dict[str, int] = defaultdict(int)
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 
+def _release_connection(conn_key: str) -> None:
+    """Decrement, and DELETE the key at zero.
+
+    Storing a 0 instead of removing the entry made `_active_connections` grow by one entry
+    for every distinct user id or client IP that ever touched the live-price socket, and
+    never shrink — an unbounded dict keyed on caller-supplied-ish values, for the life of the
+    process. Nothing ever removed a key, so the only bound was a restart.
+    """
+    remaining = max(0, _active_connections.get(conn_key, 0) - 1)
+    if remaining:
+        _active_connections[conn_key] = remaining
+    else:
+        _active_connections.pop(conn_key, None)
+
+
 
 def _validate_ws_token(token: str) -> str | None:
     """
@@ -93,7 +108,9 @@ async def live_price_ws(
     # entry uvicorn puts in `websocket.client` under --forwarded-allow-ips='*' (caller-supplied,
     # so rotating it gave every connection a fresh bucket and voided this cap entirely).
     conn_key = user_id or trusted_client_ip(websocket)
-    if _active_connections[conn_key] >= _MAX_CONNECTIONS_PER_KEY:
+    # `.get`, NOT `[...]`: this is a defaultdict, so subscripting INSERTS the key — a
+    # connection REJECTED by the cap below would still leave a permanent entry behind.
+    if _active_connections.get(conn_key, 0) >= _MAX_CONNECTIONS_PER_KEY:
         await websocket.close(code=1008, reason="Too many connections")
         return
 
@@ -119,7 +136,7 @@ async def live_price_ws(
         except Exception as e:
             logger.warning(f"Market-closed notify failed for {ticker_upper}: {type(e).__name__}: {e}")
         finally:
-            _active_connections[conn_key] = max(0, _active_connections[conn_key] - 1)
+            _release_connection(conn_key)
         return
 
     # Subscribe to the ticker room
@@ -153,7 +170,7 @@ async def live_price_ws(
     except Exception as e:
         logger.error(f"WebSocket error for {ticker_upper}: {e}")
     finally:
-        _active_connections[conn_key] = max(0, _active_connections[conn_key] - 1)
+        _release_connection(conn_key)
         await manager.unsubscribe(ticker_upper, websocket)
         logger.info(
             f"WebSocket closed for {ticker_upper} (user: {user_id})"

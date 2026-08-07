@@ -41,6 +41,24 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# One-shot unconfigured warning, per process. Same reasoning as fred.py: a silent empty
+# return here zeroes industry TAM, and the quarterly `industry_dossier` recompute then
+# OVERWRITES good rows with a "no public data" placeholder.
+_warned_unconfigured = False
+
+
+def _warn_unconfigured_once() -> None:
+    global _warned_unconfigured
+    if _warned_unconfigured:
+        return
+    _warned_unconfigured = True
+    logger.warning(
+        "CENSUS IS NOT CONFIGURED (CENSUS_API_KEY unset) — every Census read returns empty "
+        "for the life of this process. Downstream: industry TAM falls through to FRED and "
+        "then to a zero-TAM placeholder.",
+    )
+
+
 
 # In-memory cache. Census data updates annually so 24h is plenty; the
 # cache key includes endpoint + naics + year so combinations coexist.
@@ -254,6 +272,7 @@ class CensusClient:
         aren't covered, so the caller falls through to FRED).
         """
         if not self.is_configured:
+            _warn_unconfigured_once()
             return None
 
         current_year = datetime.now(timezone.utc).year

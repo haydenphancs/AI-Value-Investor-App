@@ -118,7 +118,10 @@ class Settings(BaseSettings):
     RAG_TOP_K_RESULTS: int = 5
 
     # Research
-    DEEP_RESEARCH_TIMEOUT_SECONDS: int = 120  # legacy/unused (pinned to 30 in .env)
+    # DEEP_RESEARCH_TIMEOUT_SECONDS removed (2026-08-07): declared, settable, and read by
+    # NOTHING. It was set to 30 on Railway while the live knob —
+    # RESEARCH_PIPELINE_TIMEOUT_SECONDS below — ran at its 600s default, so the deploy
+    # looked configured and was not. `extra="ignore"` means an existing .env keeps loading.
     # Hard ceiling on a single deep-research agent run (Stage A collect →
     # agentic rounds → Stage B narratives). research_service wraps
     # `agent.run` in asyncio.wait_for(this) so a hung pipeline raises

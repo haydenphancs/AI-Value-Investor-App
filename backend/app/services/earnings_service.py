@@ -310,7 +310,13 @@ class EarningsService:
         # ── In-flight dedup ──
         if cache_key in _inflight:
             logger.info(f"Earnings in-flight JOIN for {ticker}")
-            return await _inflight[cache_key]
+            # SHIELDED. Awaiting the shared future directly means a joiner that gives up
+            # (client disconnect, request timeout) CANCELS THE FUTURE ITSELF — and the leader's
+            # `set_result` then raises InvalidStateError, 500ing a request whose data loaded
+            # perfectly, while every other joiner gets a CancelledError. Verified: an
+            # unshielded joiner cancellation makes the leader's set_result raise; a shielded
+            # one leaves it untouched. Matches profit_power_service.py.
+            return await asyncio.shield(_inflight[cache_key])
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -330,16 +336,21 @@ class EarningsService:
             )
 
             _cache_set(cache_key, result)
-            future.set_result(result)
+            if not future.done():
+                future.set_result(result)
             return result
         except Exception as e:
-            future.set_exception(e)
+            if not future.done():
+                future.set_exception(e)
             raise
         finally:
-            # CancelledError is a BaseException, not caught above — cancel the
-            # future on a mid-fetch cancellation so joiners don't hang forever.
+            # CancelledError is a BaseException, not caught above. Resolve with a NORMAL
+            # exception rather than `future.cancel()`: a joiner awaiting a cancelled future
+            # gets CancelledError, which propagates as task cancellation instead of failing
+            # through its own error path. Matches profit_power_service.py.
             if not future.done():
-                future.cancel()
+                future.set_exception(RuntimeError("in-flight earnings fetch was cancelled"))
+                future.exception()   # mark retrieved; silences the GC warning when unjoined
             _inflight.pop(cache_key, None)
 
     # ── Supabase helpers ───────────────────────────────────────────

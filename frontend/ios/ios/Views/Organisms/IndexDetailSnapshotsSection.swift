@@ -60,6 +60,12 @@ struct IndexDetailSnapshotsSection: View {
             AIDeepResearchButton {
                 onAIAnalystTap?()
             }
+
+            // Disclaimer — this section renders AI-derived verdicts on a NAMED security, so
+            // it carries the notice itself rather than relying on the screen that hosts it.
+            // The structurally identical Ticker and Crypto sections have always had this;
+            // ETF and Index were the two that shipped without it.
+            AnalysisDisclaimerText()
         }
         .padding(AppSpacing.lg)
         .background(

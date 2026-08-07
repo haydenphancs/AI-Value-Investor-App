@@ -867,7 +867,13 @@ class MoatScoringService:
         # Inflight dedup.
         if cache_key in _grounded_inflight:
             try:
-                return await _grounded_inflight[cache_key]
+                # SHIELDED. Awaiting the shared future directly means a joiner that gives up
+                # (client disconnect, report timeout) CANCELS THE SHARED FUTURE, and the
+                # leader's `set_result` below then raises InvalidStateError — 500ing a
+                # grounded extraction that completed perfectly, and handing every other
+                # joiner a CancelledError. The `except Exception` here would not even catch
+                # it, since CancelledError is a BaseException.
+                return await asyncio.shield(_grounded_inflight[cache_key])
             except Exception:
                 return None
 

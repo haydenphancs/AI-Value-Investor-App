@@ -215,6 +215,27 @@ final class StoreKitService: ObservableObject {
                 tier = try await AccountRepository.shared
                     .verifyPurchase(signedTransaction: signed)
             } catch {
+                // TERMINAL failures must be FINISHED, not retried.
+                //
+                // Leaving a transaction unfinished is right for a transient failure — Apple
+                // redelivers it, so a backend outage delays the entitlement instead of losing
+                // a purchase. But it is wrong for a condition that can never clear: ownership
+                // of an App Store transaction never moves between accounts, so a purchase
+                // bound to a different Caydex account fails identically on every attempt.
+                // Left unfinished, `Transaction.updates` re-delivers it on EVERY launch,
+                // forever, and the user is told each time to "reopen the app shortly".
+                //
+                // (The backend previously returned 503 SYSTEM_BUSY here, which made this
+                // indistinguishable from a real outage. It now returns 409
+                // PURCHASE_ALREADY_LINKED, which is what makes this branch possible.)
+                if case .purchaseAlreadyLinked = AppError.from(error) {
+                    await transaction.finish()
+                    #if DEBUG
+                    print("🔴 [StoreKit] transaction belongs to another account (\(origin)); finishing so Apple stops redelivering it")
+                    #endif
+                    throw error
+                }
+
                 // Left UNFINISHED on purpose. Apple redelivers unfinished transactions on
                 // the next launch, so a backend outage delays the entitlement instead of
                 // losing a purchase the user paid for.

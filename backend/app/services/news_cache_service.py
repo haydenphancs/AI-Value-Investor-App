@@ -16,6 +16,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 from app.database import get_supabase
+from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.apewisdom import get_all_mentions
 from app.integrations.fmp import (
     FMPAuthException,
@@ -717,6 +718,23 @@ class NewsCacheService:
                     fut.cancel()
             raise
         finally:
+            # SETTLE ON CANCELLATION. `asyncio.CancelledError` is a BaseException, so the
+            # `except Exception` above never runs when this coroutine is cancelled — and
+            # popping the key stops NEW joiners while leaving every joiner already parked on
+            # `await inflight` (line ~696) hanging for the life of the process. The sibling
+            # `get_market_news` in this same file was fixed; this one was missed.
+            #
+            # A NORMAL exception, not `fut.cancel()`: the joiner's handler is
+            # `except Exception: pass` (it falls through and fetches once itself), and
+            # CancelledError would slip straight past it and cancel the joiner's own task.
+            if not fut.done():
+                if _has_waiters(fut):
+                    fut.set_exception(
+                        RuntimeError("in-flight article enrichment was cancelled")
+                    )
+                    fut.exception()   # mark retrieved
+                else:
+                    fut.cancel()
             self._enrich_inflight.pop(key, None)
 
     async def _enrich_articles_uncached(
@@ -1034,7 +1052,10 @@ Return a JSON array with one object per article in order. Each object must have:
         try:
             response = await self.gemini.generate_json(
                 prompt=batch_prompt,
-                system_instruction=(
+                # Wrapped: IDENTITY_RULE + ADVICE_BOUNDARY. This output is attributed to
+                # "Cay AI" in the Updates UI exactly like the guarded report/chat surfaces,
+                # but built its own bare instruction and inherited neither guard.
+                system_instruction=neutral_system_instruction(
                     "You are an expert financial translator. Your job is to read dense "
                     "financial news and summarize it for everyday investors. Keep the tone "
                     "friendly, accessible and reliable. Must use correct numbers or data "

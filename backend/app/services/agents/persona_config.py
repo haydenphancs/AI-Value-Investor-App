@@ -58,6 +58,28 @@ ADVICE_BOUNDARY = (
 )
 
 
+def neutral_system_instruction(body: str) -> str:
+    """Wrap a NON-PERSONA system instruction in the same identity + advice guards.
+
+    `PersonaConfig.__post_init__` applies `IDENTITY_RULE` and `ADVICE_BOUNDARY` to every
+    persona prompt, and `chat_service._build_system_instruction` imports them directly — so
+    the report and chat surfaces were covered. Everything else was not.
+
+    Five user-visible generators built their own `system_instruction` string literal and got
+    neither guard, while their output is attributed to "Cay AI" in the UI exactly like the
+    guarded surfaces: the Updates AI-Insight card, index commentary, crypto deep-dive, the ETF
+    one-liner, and news enrichment. Nothing stopped those from naming the model if a ticker,
+    headline or company description happened to ask — and nothing stopped them phrasing a
+    verdict as a buy/sell instruction, which is the more likely of the two and the one with
+    legal weight (see `support.html`, "How our ratings and estimates are produced").
+
+    Use this for any new Gemini call whose output a user reads. Persona prompts must keep
+    going through `PersonaConfig`, which also layers the persona's own philosophy and bias
+    block — this is the non-persona equivalent, not a replacement.
+    """
+    return IDENTITY_RULE + body + ADVICE_BOUNDARY
+
+
 @dataclass
 class PersonaConfig:
     key: str

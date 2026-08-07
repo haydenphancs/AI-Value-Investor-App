@@ -838,3 +838,90 @@ def test_a_naive_stored_timestamp_is_comparable():
         "last_event_at": (now + timedelta(days=1)).replace(tzinfo=None).isoformat(),
     }
     assert svc._stale_delivery_reason(prior, status="expired", event_at=now) is not None
+
+
+# ── A cross-account purchase is TERMINAL, not retryable ──────────────────────
+#
+# `apply_transaction` correctly refuses to rebind a transaction owned by someone else, but it
+# signalled that with a plain `IAPError`, and `billing.py` maps every IAPError to SYSTEM_BUSY /
+# 503 "reopen the app shortly and it will be applied". StoreKit reads 5xx as retryable, so
+# `StoreKitService` left the transaction UNFINISHED and `Transaction.updates` re-delivered it on
+# every launch — forever, against a condition that can never clear, telling the user each time
+# to wait for something that will not happen.
+
+def test_a_cross_account_purchase_raises_the_terminal_type():
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_OTHER_USER, _txn(txn_id="txn-owned"))
+
+    with pytest.raises(svc.PurchaseBoundToAnotherAccount):
+        s.apply_transaction(_USER, _txn(txn_id="txn-owned"))
+
+
+def test_the_terminal_type_is_still_an_IAPError():
+    """Subclassing matters: `billing.py` and `apply_notification` both catch `IAPError`
+    broadly, and a sibling class would slip past them into a bare 500."""
+    assert issubclass(svc.PurchaseBoundToAnotherAccount, svc.IAPError)
+
+
+def test_billing_answers_it_before_the_retryable_arm():
+    """Python takes the FIRST matching `except`. A subclass listed after its parent is dead
+    code — the exact shape that would silently restore the 503."""
+    import inspect
+
+    from app.api.v1.endpoints import billing
+
+    src = inspect.getsource(billing.verify_purchase)
+    terminal_at = src.index("except PurchaseBoundToAnotherAccount")
+    generic_at = src.index("except IAPError")
+    assert terminal_at < generic_at, (
+        "the terminal arm must precede `except IAPError`, or it never runs"
+    )
+
+
+def test_billing_returns_a_terminal_4xx_with_its_own_code():
+    """409 + a distinct code is what lets the client finish the transaction. Sharing
+    INVALID_INPUT with the 400 verify-failure path would leave it indistinguishable."""
+    import inspect
+
+    from app.api.error_response import _DEFAULT_STATUS, ErrorCode
+    from app.api.v1.endpoints import billing
+
+    src = inspect.getsource(billing.verify_purchase)
+    arm = src[src.index("except PurchaseBoundToAnotherAccount"):src.index("except IAPError")]
+    assert "ErrorCode.PURCHASE_ALREADY_LINKED" in arm
+    assert "SYSTEM_BUSY" not in arm, "a retryable code here re-opens the redelivery loop"
+
+    assert _DEFAULT_STATUS[ErrorCode.PURCHASE_ALREADY_LINKED] == 409, (
+        "must be a terminal 4xx — StoreKit treats 5xx as retryable"
+    )
+
+
+def test_the_action_is_not_a_retry():
+    """`retry_later` is what told the user to reopen the app. Nothing about waiting helps."""
+    from app.api.error_response import _DEFAULT_ACTIONS, ErrorCode
+
+    assert _DEFAULT_ACTIONS[ErrorCode.PURCHASE_ALREADY_LINKED] != "retry_later"
+
+
+def test_the_ios_client_finishes_the_transaction_on_this_code_only():
+    """The backend fix alone does NOT break the loop: `StoreKitService` left the transaction
+    unfinished on ANY thrown error. It must finish on the terminal case, and ONLY that one —
+    finishing on a transient failure would lose a purchase the user paid for."""
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    src = (repo / "frontend/ios/ios/Core/Services/StoreKitService.swift").read_text()
+
+    catch = src[src.index("verifyPurchase(signedTransaction: signed)"):]
+    catch = catch[: catch.index("// Recorded server-side")]
+
+    assert "case .purchaseAlreadyLinked" in catch, (
+        "StoreKitService must finish the transaction on the terminal error, or Apple keeps "
+        "redelivering it every launch"
+    )
+    finish_at = catch.index("await transaction.finish()")
+    terminal_at = catch.index("case .purchaseAlreadyLinked")
+    assert terminal_at < finish_at, "the finish must sit inside the terminal branch"
+    # The unconditional 'leave unfinished' path must still exist for everything else.
+    assert "leaving unfinished" in catch

@@ -513,6 +513,19 @@ class WhaleService:
                 fut.set_exception(e)
             raise
         finally:
+            # SETTLE ON CANCELLATION. CancelledError is a BaseException and skips the
+            # `except Exception` above, so a cancelled build left this future PENDING forever
+            # while the pop below stopped only new joiners. Every caller already parked on
+            # `shared = await inflight` (line ~478) hung for the process lifetime — and that
+            # joiner has no try/except at all, so it cannot even fail out.
+            #
+            # A normal exception rather than `fut.cancel()`, so the joiner fails through the
+            # endpoint's own error path instead of having its task cancelled.
+            if not fut.done():
+                fut.set_exception(
+                    RuntimeError(f"whale profile build for {whale_id} was cancelled")
+                )
+                fut.exception()   # mark retrieved; silences the GC warning when unjoined
             if not force_refresh:
                 _whale_profile_inflight.pop(whale_id, None)
 

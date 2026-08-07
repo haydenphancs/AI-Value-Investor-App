@@ -73,6 +73,10 @@ class ErrorCode(str, Enum):
     REPORT_NOT_FOUND = "REPORT_NOT_FOUND"
     REPORT_NOT_READY = "REPORT_NOT_READY"
     INSUFFICIENT_CREDITS = "INSUFFICIENT_CREDITS"
+    # Terminal, NOT retryable. Ownership of an App Store transaction never moves, so this
+    # condition can never clear — which is why it must not share a code with the retryable
+    # billing failures. See PurchaseBoundToAnotherAccount in iap_service.py.
+    PURCHASE_ALREADY_LINKED = "PURCHASE_ALREADY_LINKED"
     TOO_MANY_CONCURRENT_REPORTS = "TOO_MANY_CONCURRENT_REPORTS"
     # Global overload backstop — distinct from the per-user cap above. The
     # whole service is at capacity, not just this user. 409 (not 429) so iOS
@@ -197,6 +201,10 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.INSUFFICIENT_CREDITS: (
         "You don't have enough credits. Upgrade your tier or wait for the monthly reset."
     ),
+    ErrorCode.PURCHASE_ALREADY_LINKED: (
+        "This subscription is already linked to a different Caydex account. Sign in with "
+        "that account, or contact support if you think this is wrong."
+    ),
     # Number-free default so the cap value never drifts here; the endpoint
     # overrides user_message with the live cap (e.g. "up to 4 at once").
     ErrorCode.TOO_MANY_CONCURRENT_REPORTS: (
@@ -253,6 +261,9 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.GEMINI_UNAVAILABLE: "retry_later",
     ErrorCode.REPORT_NOT_READY: "poll_again",
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
+    # NOT "retry_later": retrying can never succeed, and telling the client to wait is what
+    # left StoreKit redelivering the transaction on every launch forever.
+    ErrorCode.PURCHASE_ALREADY_LINKED: "contact_support",
     ErrorCode.TOO_MANY_CONCURRENT_REPORTS: "retry_later",
     ErrorCode.SYSTEM_BUSY: "retry_later",
     ErrorCode.CHAT_MESSAGE_TOO_LONG: "fix_input",
@@ -297,6 +308,9 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # failures are SYSTEM_BUSY (409, retryable), NEVER this — a DB blip must not tell a
     # paying user they're broke.
     ErrorCode.INSUFFICIENT_CREDITS: 402,
+    # 409 conflict — a terminal 4xx, so the client finishes the transaction instead of
+    # treating it as a transient 5xx and retrying forever.
+    ErrorCode.PURCHASE_ALREADY_LINKED: 409,
     # 409 (NOT 429): iOS APIClient intercepts 429 before decoding the body and
     # shows a generic "wait 60s", discarding our user_message. 409 falls
     # through to the structured-body decode so the cap copy is surfaced.

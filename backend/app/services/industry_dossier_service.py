@@ -387,6 +387,34 @@ class IndustryDossierService:
         if not universe:
             return {"status": "skipped", "reason": "empty universe"}
 
+        # ⚠️ REFUSE TO RUN WITH NO UPSTREAM CREDENTIALS.
+        #
+        # Phase A's TAM comes from Census (AIES / Economic Census) with a FRED fallback. With
+        # NEITHER configured, every industry resolves to the "No public data available —
+        # FRED/Census unreachable at compute time" placeholder with `current_tam_b = 0` — and
+        # the upsert below then OVERWRITES every existing good row with it.
+        #
+        # That is not hypothetical: it already happened in production. A live query on
+        # 2026-08-07 found 138 of 158 rows zeroed with exactly that source label, because
+        # FRED_API_KEY and CENSUS_API_KEY are set in `backend/.env` but were never set on
+        # Railway. Phase B only restores the ~21 curated industries, so the rest stay at zero
+        # until someone notices the Moat TAM row has silently vanished app-wide.
+        #
+        # A quarterly job that destroys data when a credential is missing is worse than one
+        # that does not run: skipping leaves the last good snapshot in place, which is stale
+        # at worst. Loud, and greppable.
+        from app.integrations.census import get_census_client  # noqa: PLC0415
+        from app.integrations.fred import get_fred_client      # noqa: PLC0415
+
+        if not get_fred_client().is_configured and not get_census_client().is_configured:
+            logger.error(
+                "industry_dossier recompute SKIPPED — neither FRED_API_KEY nor "
+                "CENSUS_API_KEY is configured, so every industry would resolve to a "
+                "zero-TAM placeholder and OVERWRITE the existing rows. Set the keys and "
+                "re-run; the previous snapshot is left untouched."
+            )
+            return {"status": "skipped", "reason": "no upstream credentials"}
+
         started = time.time()
 
         # Compute a dossier per industry — caps come from the universe
@@ -414,6 +442,57 @@ class IndustryDossierService:
         if dossiers:
             sb = get_supabase()
             rows = [d.to_db_row() for d in dossiers]
+
+            # PER-ROW GUARD: never replace a real TAM with a zero placeholder.
+            #
+            # The credential check at the top of this method covers "nothing is configured".
+            # This covers the narrower case that still destroys data: one upstream configured,
+            # but a specific industry resolving to the placeholder anyway — an AIES gap, a FRED
+            # series that stopped publishing, a transient upstream failure during the run.
+            # Upserting that over a row with a real number turns a temporary lookup miss into
+            # permanent data loss, and the next run has nothing to restore from.
+            #
+            # Skipping leaves the previous value in place, which is stale at worst — and stale
+            # is what the `computed_at` column is for.
+            try:
+                existing = (
+                    sb.table("industry_dossier")
+                    .select("industry, current_tam_b")
+                    .execute()
+                )
+                has_real_tam = {
+                    r["industry"] for r in (existing.data or [])
+                    if (r.get("current_tam_b") or 0) > 0
+                }
+            except Exception as exc:
+                # Fail SAFE: if we cannot tell which rows are good, do not risk clobbering
+                # them. An empty set would make the filter below a no-op.
+                logger.error(
+                    "industry_dossier pre-read failed (%s) — skipping the upsert rather than "
+                    "risking an overwrite of good rows", exc, exc_info=True,
+                )
+                has_real_tam = None
+
+            if has_real_tam is None:
+                rows = []
+            else:
+                kept, skipped = [], []
+                for row in rows:
+                    would_zero = (row.get("current_tam_b") or 0) <= 0
+                    if would_zero and row["industry"] in has_real_tam:
+                        skipped.append(row["industry"])
+                    else:
+                        kept.append(row)
+                if skipped:
+                    logger.warning(
+                        "industry_dossier: kept the EXISTING TAM for %d industr%s because "
+                        "this run resolved them to a zero placeholder (%s%s)",
+                        len(skipped), "y" if len(skipped) == 1 else "ies",
+                        ", ".join(sorted(skipped)[:8]),
+                        "…" if len(skipped) > 8 else "",
+                    )
+                rows = kept
+
             for batch in _chunked(rows, 100):
                 try:
                     sb.table("industry_dossier").upsert(

@@ -32,7 +32,7 @@ struct ChatWithBookPromptCard: View {
 
                     Image(systemName: "book.fill")
                         .font(AppTypography.iconMedium)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                 }
 
                 // Text content

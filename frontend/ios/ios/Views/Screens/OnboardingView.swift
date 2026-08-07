@@ -97,7 +97,7 @@ struct OnboardingView: View {
         } label: {
             Text(primaryButtonTitle)
                 .font(AppTypography.bodyEmphasis)
-                .foregroundColor(.white)
+                .foregroundColor(AppColors.textOnAccent)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, AppSpacing.md)
                 .background(
@@ -264,9 +264,9 @@ private struct FlowChips: View {
                             .font(AppTypography.bodySmallEmphasis)
                         Text(item.name)
                             .font(AppTypography.caption)
-                            .foregroundColor(on ? .white.opacity(0.8) : AppColors.textMuted)
+                            .foregroundColor(on ? AppColors.textOnAccent.opacity(0.8) : AppColors.textMuted)
                     }
-                    .foregroundColor(on ? .white : AppColors.textPrimary)
+                    .foregroundColor(on ? AppColors.textOnAccent : AppColors.textPrimary)
                     .padding(.horizontal, AppSpacing.md)
                     .padding(.vertical, AppSpacing.sm)
                     .background(

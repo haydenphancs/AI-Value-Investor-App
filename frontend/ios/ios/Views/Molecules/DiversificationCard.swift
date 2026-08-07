@@ -108,7 +108,7 @@ struct DiversificationCard: View {
                 } label: {
                     Text(option.rawValue)
                         .font(AppTypography.captionEmphasis)
-                        .foregroundColor(isActive ? .white : AppColors.textSecondary)
+                        .foregroundColor(isActive ? AppColors.textOnAccent : AppColors.textSecondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.xs)
                         .background(isActive ? AppColors.primaryFill : Color.clear)

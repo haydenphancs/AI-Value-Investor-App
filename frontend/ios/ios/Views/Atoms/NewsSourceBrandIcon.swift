@@ -13,7 +13,10 @@ struct NewsSourceBrandIcon: View {
     var cornerRadius: CGFloat = 8
 
     private var brandColor: Color {
-        Color(themedHex: source.brandColor, role: .graphic, fallback: AppColors.primaryFill)
+        // `.fill`, not `.graphic`: this is a saturated tile carrying `textOnAccent`
+        // ink at :31, so the floor is white-ON-it, not it-on-a-card. Under `.graphic`
+        // the brand hexes measured 1.81–3.96:1 under that ink.
+        Color(themedHex: source.brandColor, role: .fill, fallback: AppColors.primaryFill)
     }
 
     var body: some View {

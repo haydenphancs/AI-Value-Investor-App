@@ -87,14 +87,18 @@ struct ThemeDetailView: View {
             )
 
             VStack(alignment: .leading, spacing: 6) {
+                // This ink's contrast comes from the 0.78 black scrim above, NOT from
+                // the accent stops behind it — over a white photo the scrim alone still
+                // gives 11.73:1. If that scrim is ever removed or weakened, these stop
+                // being safe and the fallback gradient's own alphas become load-bearing.
                 Text(detail.title)
                     .font(AppTypography.titleLarge)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .lineLimit(2)
                 if !detail.subtitle.isEmpty {
                     Text(detail.subtitle)
                         .font(AppTypography.bodySmall)
-                        .foregroundColor(.white.opacity(0.9))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.9))
                         .lineLimit(2)
                 }
             }
@@ -121,8 +125,12 @@ struct ThemeDetailView: View {
     }
 
     private func heroFallback(_ detail: ThemeDetail) -> some View {
+        // `detail.accent` is now `.fill`-clamped (darker in both appearances), so the
+        // old 0.25 low stop washed out to near-nothing. 0.55 keeps this reading as a
+        // tile rather than a fade. The title ink above rides the 0.78 scrim, not these
+        // stops — see `hero(_:)`.
         LinearGradient(
-            colors: [detail.accent.opacity(0.85), detail.accent.opacity(0.25)],
+            colors: [detail.accent.opacity(0.85), detail.accent.opacity(0.55)],
             startPoint: .topLeading, endPoint: .bottomTrailing
         )
     }
@@ -162,9 +170,13 @@ struct ThemeDetailView: View {
         Button { dismiss() } label: {
             Image(systemName: "chevron.left")
                 .font(AppTypography.iconSmall).fontWeight(.semibold)
-                .foregroundColor(.white)
+                .foregroundColor(AppColors.textOnAccent)
                 .frame(width: 36, height: 36)
-                .background(Circle().fill(Color.black.opacity(0.35)))
+                // This floats over an arbitrary hero image, so the worst case is a
+                // near-white photo: `Color.black.opacity(0.35)` composited to #A6A6A6
+                // and put this chevron at 2.44:1. `mediaScrim` is 0.60 — 5.74:1 on
+                // white, better on anything darker.
+                .background(Circle().fill(AppColors.mediaScrim))
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.sm)

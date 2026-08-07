@@ -748,7 +748,9 @@ private struct CoreAssetCard: View {
 
                 Image(systemName: asset.icon)
                     .font(AppTypography.iconMedium).fontWeight(.semibold)
-                    .foregroundColor(Color(themedHex: asset.iconColor, role: .graphic, fallback: AppColors.primaryBlue))
+                    // A meaningful glyph on a card is TEXT (4.5), not a chart mark (3.0).
+                    // The 0.15 tint behind it stays `.graphic` — it carries no ink.
+                    .foregroundColor(Color(themedHex: asset.iconColor, role: .text, fallback: AppColors.primaryBlue))
             }
 
             // Content
@@ -1046,7 +1048,7 @@ private struct CoreCompletionButton: View {
                 Image(systemName: isCompleted ? "arrow.counterclockwise" : "arrow.right")
                     .font(AppTypography.iconSmall).fontWeight(.semibold)
             }
-            .foregroundColor(isCompleted ? AppColors.textSecondary : .white)
+            .foregroundColor(isCompleted ? AppColors.textSecondary : AppColors.textOnAccent)
             .frame(maxWidth: .infinity)
             .frame(height: 56)
             .background(

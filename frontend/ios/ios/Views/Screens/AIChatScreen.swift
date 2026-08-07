@@ -342,7 +342,7 @@ struct AIChatScreen: View {
                 historyActionBanner(actionError)
             }
 
-            // Bottom bar: search the history (left) + start a new chat (right, white box).
+            // Bottom bar: search the history (left) + start a new chat (right, accent box).
             historyBottomBar
         }
         .frame(width: width)
@@ -519,18 +519,23 @@ struct AIChatScreen: View {
             .cardSurface(cornerRadius: AppCornerRadius.large)
             .frame(maxWidth: .infinity)
 
-            // New chat — bigger icon in a smaller white box.
+            // New chat — bigger icon in a smaller accent-filled box.
             Button {
                 handleNewChat()
             } label: {
                 Image(systemName: "square.and.pencil")
                     .font(AppTypography.iconLarge).fontWeight(.semibold)
-                    .foregroundColor(.black)
+                    .foregroundColor(AppColors.textOnAccent)
                     // `square.and.pencil`'s pencil tip extends the glyph box upward, so plain
                     // frame-centering renders it visually low. Nudge the icon up (box unchanged).
                     .offset(y: -2)
                     .frame(width: 36, height: 36)
-                    .background(Color.white)
+                    // Was a hardcoded `Color.white` box with `.black` ink. This bar sits
+                    // on the app page next to a `.cardSurface()` field, so in LIGHT a
+                    // white box on a white card had nothing to separate it. `primaryFill`
+                    // + `textOnAccent` is the palette's primary-action pairing (5.17:1)
+                    // and reads as a button in both appearances.
+                    .background(AppColors.primaryFill)
                     .cornerRadius(AppCornerRadius.medium)
             }
             .buttonStyle(.plain)

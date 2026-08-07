@@ -24,7 +24,10 @@ struct TrendingAnalysisRow: View {
 
                     Image(systemName: analysis.systemIconName)
                         .font(AppTypography.iconMedium).fontWeight(.semibold)
-                        .foregroundColor(AppColors.textPrimary)
+                        // Ink on a `.fill`-clamped tile is `textOnAccent`, never
+                        // `textPrimary` — the latter is #FFFFFF in dark and #0F172A in
+                        // light, so it inverted against a fill that does not.
+                        .foregroundColor(AppColors.textOnAccent)
                 }
 
                 // Text Content

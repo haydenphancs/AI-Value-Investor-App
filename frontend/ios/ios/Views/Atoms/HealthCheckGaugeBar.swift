@@ -128,7 +128,7 @@ struct HealthCheckGaugeBar: View {
 
                 // Position indicator (white circle)
                 Circle()
-                    .fill(Color.white)
+                    .fill(AppColors.mediaSurface)
                     .frame(width: height + 6, height: height + 6)
                     .shadow(color: AppColors.shadowKey, radius: 2, x: 0, y: 1)
                     .offset(x: geometry.size.width * clampedPosition - (height + 6) / 2.0)
@@ -182,7 +182,7 @@ struct HealthCheckGaugeBar: View {
 
                 // Position indicator (white circle, same as other metrics)
                 Circle()
-                    .fill(Color.white)
+                    .fill(AppColors.mediaSurface)
                     .frame(width: height + 6, height: height + 6)
                     .shadow(color: AppColors.shadowKey, radius: 2, x: 0, y: 1)
                     .offset(x: w * zScorePosition - (height + 6) / 2.0)

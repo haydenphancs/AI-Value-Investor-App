@@ -36,7 +36,7 @@ struct RelatedMoneyMoveCard: View {
 
                         Image(systemName: article.category.iconName)
                             .font(AppTypography.iconSmall).fontWeight(.semibold)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                     }
                     .padding(AppSpacing.md)
                 }

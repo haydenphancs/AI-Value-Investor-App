@@ -45,7 +45,7 @@ struct ArticleAuthorAvatar: View {
                     .overlay(
                         Text(initials)
                             .font(.system(size: size * 0.4, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                     )
             }
 

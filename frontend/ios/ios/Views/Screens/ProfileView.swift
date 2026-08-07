@@ -170,7 +170,7 @@ struct ProfileView: View {
                             Text("Sign In")
                                 .font(AppTypography.bodyEmphasis)
                         }
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.md)
                         .background(
@@ -241,7 +241,7 @@ struct ProfileView: View {
                                 Text("Add Credits")
                                     .font(AppTypography.captionEmphasis)
                             }
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                             .padding(.horizontal, AppSpacing.md)
                             .padding(.vertical, AppSpacing.xs)
                             .background(

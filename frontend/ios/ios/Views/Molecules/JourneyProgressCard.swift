@@ -75,7 +75,7 @@ struct JourneyProgressCard: View {
             }) {
                 Text("Resume Lessons")
                     .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.md)
                     .background(track.level.color)

@@ -723,7 +723,7 @@ struct ETFConcentrationMeter: View {
 
                     // Indicator
                     Circle()
-                        .fill(Color.white)
+                        .fill(AppColors.mediaSurface)
                         .frame(width: 14, height: 14)
                         .shadow(color: AppColors.shadowKey, radius: 2, x: 0, y: 1)
                         .offset(x: (meterPosition * geometry.size.width) - 7)

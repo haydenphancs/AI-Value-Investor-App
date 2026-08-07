@@ -363,7 +363,13 @@ struct GrowthChartView: View {
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
                 Text(formatLargeNumber(dataPoint.value))
                     .font(.system(size: labelFontSize, weight: .semibold))
-                    .foregroundColor(AppColors.growthBarBlue)
+                    // A readable number is TEXT (4.5), not a chart mark (3.0). The series
+                    // token `growthBarBlue` is certified at 3:1 and measured 3.68:1 on a
+                    // light card / 3.22:1 nested. Colour stays with the BAR; the label
+                    // takes the series' text-safe sibling. Same swap in the other four
+                    // chart files — see the palette rule that `*Graphic` tokens must not
+                    // escape the chart layer.
+                    .foregroundColor(AppColors.primaryBlue)
                     .lineLimit(1)
                     .fixedSize()
                     .position(x: xCenter(index, barsWidth: barsWidth), y: 10)
@@ -396,7 +402,9 @@ struct GrowthChartView: View {
                 // nil sector value (no benchmark for this period) → muted "—".
                 Text(dataPoint.sectorAverageYoY.map { fmtYoY($0) } ?? "—")
                     .font(.system(size: labelFontSize, weight: .regular))
-                    .foregroundColor(AppColors.growthSectorGray)
+                    // Text-safe sibling of `growthSectorGray` (3.78:1 light card). Dark is
+                    // the same #9CA3AF, so this is a light-mode correction only.
+                    .foregroundColor(AppColors.textMuted)
                     .lineLimit(1)
                     .fixedSize()
                     .position(x: xCenter(index, barsWidth: barsWidth), y: 10)

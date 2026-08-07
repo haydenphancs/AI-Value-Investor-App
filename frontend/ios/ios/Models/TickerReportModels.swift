@@ -136,12 +136,30 @@ enum QualityBand {
         return "\(adjective) \(lens) Profile"
     }
 
+    /// The band's hue as TEXT / a gauge arc, on a card. The shared default.
     var color: Color {
         switch self {
         case .excellent, .strong: return AppColors.bullish
         case .fair:               return AppColors.neutral
         case .weak:               return AppColors.alertOrange
         case .distressed:         return AppColors.bearish
+        }
+    }
+
+    /// The same band as a SATURATED BADGE FILL carrying `AppColors.textOnAccent` ink.
+    ///
+    /// Split from `color` for the reason the palette states in its FILLS block: the two
+    /// roles pull in OPPOSITE directions in dark. `RatingBadge` used `color` as a
+    /// background under white text, and `bullish` is #22C55E in dark — **2.28:1**. Same
+    /// pattern as `AnalysisPersona.accentColor`/`accentFill` and
+    /// `LessonCategory.iconBackgroundColor`/`iconFillColor`; pair this with
+    /// `textOnAccent`, never `.white` or `textPrimary`.
+    var fillColor: Color {
+        switch self {
+        case .excellent, .strong: return AppColors.gainFill
+        case .fair:               return AppColors.cautionFill
+        case .weak:               return AppColors.alertOrangeFill
+        case .distressed:         return AppColors.lossFill
         }
     }
 }

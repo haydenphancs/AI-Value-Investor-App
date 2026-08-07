@@ -78,6 +78,29 @@ struct AppColors {
     /// Inverted surface for toasts / tooltips — pair with `textInverse`.
     static let surfaceInverse = Color(lightHex: "1E2330", darkHex: "F4F5F8")
 
+    /// A constant-LIGHT pill/circle that floats over MEDIA — hero photography,
+    /// artwork, a saturated server gradient. Pair with `textOnMediaSurface`.
+    ///
+    /// Constant in both appearances by design, and it is NOT `surfaceInverse`: that
+    /// token flips, because what sits behind a toast IS the app's page. What sits
+    /// behind this is a photograph the app did not choose, so following the app's
+    /// appearance buys nothing and costs legibility.
+    ///
+    /// The mirror of `textOnAccent`. This exists because `PlayAudioButton` filled a
+    /// white circle and inked it with `AppColors.background` — #F4F5F8 in LIGHT, i.e.
+    /// **1.09:1**, an invisible play triangle on every Money Moves hero.
+    static let mediaSurface = Color(lightHex: "FFFFFF", darkHex: "FFFFFF")
+
+    /// Ink on `mediaSurface` — constant dark, 17.2:1. Never `AppColors.background`.
+    static let textOnMediaSurface = Color(lightHex: "171B26", darkHex: "171B26")
+
+    /// Scrim behind light ink floating over arbitrary MEDIA (a back button on a hero
+    /// image). Constant, and strong enough for the worst case: the backdrop may be a
+    /// near-white photo, where `Color.black.opacity(0.35)` composites to #A6A6A6 and
+    /// put `textOnAccent` at **2.44:1**. At 0.60 the floor is 5.74:1 on white and
+    /// better on anything darker.
+    static let mediaScrim = Color(lightHex: "000000", lightAlpha: 0.60, darkHex: "000000", darkAlpha: 0.60)
+
     // ━━━ TEXT ━━━
     // A three-step ladder: ~17 → ~7.5 → ~5.5. `textSecondary` moved in light even
     // though the old #5C6470 passed (5.98) — once `textMuted` rises to 5.64 the
@@ -160,6 +183,10 @@ struct AppColors {
     /// `alertPurple` lightens to #C084FC in dark, where white on it is 2.64:1 — this
     /// keeps the light value in both modes, giving 6.98:1.
     static let alertPurpleFill = Color(lightHex: "7E22CE", darkHex: "7E22CE")
+    /// Orange fill for a saturated badge carrying `textOnAccent` ink. The text-role
+    /// `alertOrange` lightens to #F97316 in dark, where white on it is 2.80:1 — this
+    /// keeps the light value in both modes, giving 5.18:1.
+    static let alertOrangeFill = Color(lightHex: "C2410C", darkHex: "C2410C")
 
     // ━━━ ALERTS ━━━
     static let alertOrange = Color(lightHex: "C2410C", darkHex: "F97316")
@@ -338,6 +365,25 @@ extension AppColors {
         /// by nothing. Retuning it — the obvious future edit, since it exists to separate a
         /// nested card — would have dropped `textMuted` to ~3.9:1 across the eight live nested
         /// card sites while the audit still printed ✅.
+        /// ⚠️ KNOWN GAP — the CONTROL surfaces are deliberately not in here, and that is a
+        /// debt rather than a decision, so the numbers are recorded instead of being lost.
+        ///
+        /// `toggleSelectedBackground` and `chipUnselectedBackground` are in
+        /// `surfaceRegistry` but reachable only through three hand-written opt-ins below
+        /// (`textPrimary`, `textSecondary`, `textMuted`). No SENTIMENT or ACCENT token is
+        /// measured on either. Adding them here produces **24 failures** in the palette as
+        /// it stands, measured:
+        ///
+        ///   on toggleSelectedBackground — gain 4.34 · loss 4.44/3.73 · caution 4.11 ·
+        ///     primaryBlue 4.13/4.05 · accentCyan 4.28/4.25 · accentYellow 4.33 ·
+        ///     alertOrange 4.14/3.68 · alertPurple 3.90 · textMuted 4.06 · aiRampStart 3.46
+        ///   on chipUnselectedBackground — loss 4.43 · caution 4.27 · primaryBlue 4.29 ·
+        ///     accentCyan 4.45 · accentYellow 4.49 · alertOrange 4.30/4.37 · aiRampStart 4.11
+        ///
+        /// Most are 4.0–4.5, i.e. near-misses, and it is NOT established that every pairing
+        /// actually renders — widening the list would demand retuning ten tokens against
+        /// combinations that may never appear on screen. Establish which pairings are real
+        /// (a lint over the view layer, not a guess), then retune only those.
         static let contentSurfaces = [
             "background", "cardBackground", "cardBackgroundLight", "cardBackgroundNested",
         ]
@@ -359,6 +405,9 @@ extension AppColors {
         let cardBackgroundLight = AppColors.cardBackgroundLight
         let cardBackgroundNested = AppColors.cardBackgroundNested
         let surfaceInverse = AppColors.surfaceInverse
+        let mediaSurface = AppColors.mediaSurface
+        let textOnMediaSurface = AppColors.textOnMediaSurface
+        let mediaScrim = AppColors.mediaScrim
         let textPrimary = AppColors.textPrimary
         let textSecondary = AppColors.textSecondary
         let textMuted = AppColors.textMuted
@@ -382,6 +431,7 @@ extension AppColors {
         let cautionFill = AppColors.cautionFill
         let accentCyanFill = AppColors.accentCyanFill
         let alertPurpleFill = AppColors.alertPurpleFill
+        let alertOrangeFill = AppColors.alertOrangeFill
         let alertOrange = AppColors.alertOrange
         let alertPurple = AppColors.alertPurple
         let borderSubtle = AppColors.borderSubtle
@@ -425,6 +475,7 @@ extension AppColors {
         "toggleSelectedBackground": toggleSelectedBackground,
         "tabBarBackground": tabBarBackground,
         "surfaceInverse": surfaceInverse,
+        "mediaSurface": mediaSurface,
     ]
 
     static let auditManifest: [TokenSpec] = [
@@ -437,6 +488,7 @@ extension AppColors {
         TokenSpec("textMuted", textMuted, .text,
                   on: TokenSpec.contentSurfaces + ["chipUnselectedBackground", "toggleBackground", "tabBarBackground"]),
         TokenSpec("textInverse", textInverse, .text, on: ["surfaceInverse"]),
+        TokenSpec("textOnMediaSurface", textOnMediaSurface, .text, on: ["mediaSurface"]),
         TokenSpec("textDisabled", textDisabled, .decorative),
 
         // Sentiment / accents — text-safe role.
@@ -458,6 +510,7 @@ extension AppColors {
         TokenSpec("cautionFill", cautionFill, .text, on: [], carriesOnAccentText: true),
         TokenSpec("accentCyanFill", accentCyanFill, .text, on: [], carriesOnAccentText: true),
         TokenSpec("alertPurpleFill", alertPurpleFill, .text, on: [], carriesOnAccentText: true),
+        TokenSpec("alertOrangeFill", alertOrangeFill, .text, on: [], carriesOnAccentText: true),
 
         // Graphic role — 3:1.
         TokenSpec("gainGraphic", gainGraphic, .graphic, on: ["background", "cardBackground"]),
@@ -499,6 +552,10 @@ extension AppColors {
         TokenSpec("shadowAmbient", shadowAmbient, .decorative),
         TokenSpec("shadowCard", shadowCard, .decorative),
         TokenSpec("scrim", scrim, .decorative),
+        // Alpha over media the app did not choose, so there is no fixed pair to
+        // measure. Its floor is argued at the declaration instead: 0.60 puts
+        // `textOnAccent` at 5.74:1 even over a pure-white photo.
+        TokenSpec("mediaScrim", mediaScrim, .decorative),
 
         // Surfaces. Deliberately floor-0: page↔card separation is a BORDER's
         // job, not a luminance job (Apple 1.116:1, Polaris 1.129, Carbon 1.100
@@ -509,6 +566,7 @@ extension AppColors {
         TokenSpec("cardBackgroundLight", cardBackgroundLight, .surface),
         TokenSpec("cardBackgroundNested", cardBackgroundNested, .surface),
         TokenSpec("surfaceInverse", surfaceInverse, .surface),
+        TokenSpec("mediaSurface", mediaSurface, .surface),
         TokenSpec("tabBarBackground", tabBarBackground, .surface),
         TokenSpec("chipUnselectedBackground", chipUnselectedBackground, .surface),
         TokenSpec("toggleBackground", toggleBackground, .surface),

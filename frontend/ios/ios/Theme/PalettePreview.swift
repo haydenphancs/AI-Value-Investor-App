@@ -24,27 +24,57 @@ import SwiftUI
 
 private struct Swatch: Identifiable {
     let id = UUID()
-    let name: String
-    let color: Color
-    let role: AppColors.TokenRole
+    let spec: AppColors.TokenSpec
+
+    var name: String { spec.name }
+    var color: Color { spec.color }
+    var role: AppColors.TokenRole { spec.role }
 }
 
 private struct SwatchRow: View {
     let swatch: Swatch
     let scheme: ColorScheme
 
-    /// Measured against the card, which is the surface these sit on here.
-    private var ratio: Double {
-        let style: UIUserInterfaceStyle = scheme == .light ? .light : .dark
-        let bg = UIColor(AppColors.cardBackground)
-            .resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
-        let fg = UIColor(swatch.color)
-            .resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
-        return ThemeContrastAudit.ratio(fg, bg)
+    private var style: UIUserInterfaceStyle { scheme == .light ? .light : .dark }
+
+    private func resolve(_ color: Color) -> UIColor {
+        UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
     }
 
-    private var floor: Double { ThemeContrastAudit.floor(for: swatch.role) }
-    private var passes: Bool { floor == 0 || ratio >= floor }
+    /// The WORST measurement across everything this token contractually has to clear,
+    /// mirroring `ThemeContrastAudit.run()`.
+    ///
+    /// This used to be one number: the token against `cardBackground`, ignoring both
+    /// `carriesOnAccentText` and the spec's own `surfaces` list. That produced six-plus
+    /// PERMANENT false FAILs — every `*Fill` token is declared `.text` with `on: []`, so
+    /// the preview measured e.g. `primaryFill` as ink on a card (~2.2:1 in dark) and
+    /// painted it red, while the runtime audit passed it on the reverse check it actually
+    /// has to satisfy. `textInverse` measured #FFFFFF on #FFFFFF = 1.00:1 in light for the
+    /// same reason. A preview that is permanently part-red is a preview people learn to
+    /// ignore, which is worse than not having one.
+    private var measurement: (ratio: Double, floor: Double, against: String)? {
+        if swatch.spec.carriesOnAccentText {
+            // A FILL: the check runs the other way round — is `textOnAccent` legible ON it?
+            return (ThemeContrastAudit.ratio(resolve(AppColors.textOnAccent),
+                                             resolve(swatch.color)),
+                    4.5, "textOnAccent on it")
+        }
+        let floor = ThemeContrastAudit.floor(for: swatch.role)
+        guard floor > 0 else { return nil }
+        var worst: (Double, String)?
+        for key in swatch.spec.surfaces {
+            guard let surface = AppColors.surfaceRegistry[key] else { continue }
+            let r = ThemeContrastAudit.ratio(resolve(swatch.color), resolve(surface))
+            if worst == nil || r < worst!.0 { worst = (r, key) }
+        }
+        guard let worst else { return nil }
+        return (worst.0, floor, worst.1)
+    }
+
+    private var passes: Bool {
+        guard let m = measurement else { return true }
+        return m.ratio >= m.floor
+    }
 
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
@@ -60,10 +90,18 @@ private struct SwatchRow: View {
 
             Spacer(minLength: AppSpacing.xs)
 
-            if floor > 0 {
-                Text(String(format: "%.2f", ratio))
-                    .font(AppTypography.dataSmall)
-                    .foregroundColor(passes ? AppColors.textMuted : AppColors.loss)
+            if let m = measurement {
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(String(format: "%.2f", m.ratio))
+                        .font(AppTypography.dataSmall)
+                        .foregroundColor(passes ? AppColors.textMuted : AppColors.loss)
+                    // Name the surface the number is measured against, so a failing row
+                    // says WHICH pairing failed rather than leaving it to be guessed.
+                    Text(m.against)
+                        .font(AppTypography.captionTiny)
+                        .foregroundColor(AppColors.textDisabled)
+                        .lineLimit(1)
+                }
             } else {
                 Text("—")
                     .font(AppTypography.dataSmall)
@@ -78,9 +116,9 @@ private struct PalettePane: View {
     let scheme: ColorScheme
 
     private var swatches: [Swatch] {
-        AppColors.auditManifest.map {
-            Swatch(name: $0.name, color: $0.color, role: $0.role)
-        }
+        // Carry the whole spec, not three of its five fields — dropping
+        // `carriesOnAccentText` and `surfaces` is what made the ratios wrong.
+        AppColors.auditManifest.map { Swatch(spec: $0) }
     }
 
     var body: some View {

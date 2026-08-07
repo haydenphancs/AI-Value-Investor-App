@@ -17,12 +17,12 @@ struct SendButton: View {
         }) {
             ZStack {
                 Circle()
-                    .fill(isEnabled ? AppColors.primaryBlue : AppColors.cardBackgroundLight)
+                    .fill(isEnabled ? AppColors.primaryFill : AppColors.cardBackgroundLight)
                     .frame(width: 44, height: 44)
 
                 Image(systemName: "arrow.up")
                     .font(AppTypography.iconMedium).fontWeight(.bold)
-                    .foregroundColor(isEnabled ? .white : AppColors.textMuted)
+                    .foregroundColor(isEnabled ? AppColors.textOnAccent : AppColors.textMuted)
             }
         }
         .buttonStyle(PlainButtonStyle())

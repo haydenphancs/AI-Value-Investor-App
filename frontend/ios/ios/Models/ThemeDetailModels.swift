@@ -63,7 +63,13 @@ struct ThemeDetailDTO: Decodable {
             title: title,
             subtitle: subtitle ?? "",
             imageUrl: imageUrl,
-            accent: Color(themedHex: accentHex, role: .graphic, fallback: AppColors.primaryBlue),
+            // `.fill`: this is the hero surface when the image fails to load, and it
+            // carries `textOnAccent` title/subtitle ink. Deliberately a DIFFERENT role
+            // from the same theme's accent on the Home grid tile
+            // (`HomeRepository.TrendingTheme.accent`, which stays `.graphic`) — that tile
+            // carries no ink of its own, so it has no white-on-it floor to clear. Do not
+            // "unify" them.
+            accent: Color(themedHex: accentHex, role: .fill, fallback: AppColors.primaryFill),
             companies: constituents.map { $0.toDisplay() }
         )
     }

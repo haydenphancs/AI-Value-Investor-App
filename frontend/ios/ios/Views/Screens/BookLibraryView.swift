@@ -253,18 +253,18 @@ private struct ProgressDashboardCard: View {
                     // Label
                     Text("YOUR PROGRESS")
                         .font(AppTypography.captionEmphasis)
-                        .foregroundColor(.white.opacity(0.8))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                         .tracking(1.2)
 
                     // Main stat
                     VStack(alignment: .leading, spacing: AppSpacing.xs) {
                         Text("\(masteredCount) of \(totalCount)")
                             .font(AppTypography.titleHero)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
 
                         Text("Guides Completed")
                             .font(AppTypography.headingSmall)
-                            .foregroundColor(.white.opacity(0.9))
+                            .foregroundColor(AppColors.textOnAccent.opacity(0.9))
                     }
 
                     // A bookmarked-book shortcut when one exists; otherwise the motivational
@@ -289,16 +289,16 @@ private struct ProgressDashboardCard: View {
                             if let bookmarkedCoreLabel {
                                 Text(bookmarkedCoreLabel)
                                     .font(AppTypography.labelSmall)
-                                    .foregroundColor(.white.opacity(0.8))
+                                    .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                                     .lineLimit(1)
                                     .truncationMode(.tail)
                             }
                         }
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                     } else {
                         Text(motivationalMessage)
                             .font(AppTypography.bodySmall)
-                            .foregroundColor(.white.opacity(0.85))
+                            .foregroundColor(AppColors.textOnAccent.opacity(0.85))
                             .lineLimit(2)
                     }
                 }
@@ -379,11 +379,11 @@ private struct ProgressRingView: View {
             VStack(spacing: 0) {
                 Text("\(Int(progress * 100))%")
                     .font(AppTypography.title)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
 
                 Text("Complete")
                     .font(AppTypography.captionTiny).fontWeight(.medium)
-                    .foregroundColor(.white.opacity(0.8))
+                    .foregroundColor(AppColors.textOnAccent.opacity(0.8))
             }
         }
     }
@@ -401,7 +401,7 @@ private struct ProgressBadgePill: View {
             Text("\(count) COMPLETED")
                 .font(AppTypography.captionEmphasis)
         }
-        .foregroundColor(.white)
+        .foregroundColor(AppColors.textOnAccent)
         .padding(.horizontal, AppSpacing.md)
         .padding(.vertical, AppSpacing.xs)
         .background(

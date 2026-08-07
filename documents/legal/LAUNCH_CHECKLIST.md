@@ -115,11 +115,13 @@ DBAs or trade names.
 
 Three addresses are now promised in the legal documents and must actually receive mail.
 
-- [ ] `support@caydexinvest.com` — in Terms §16 and Privacy §13, and used as the ASC
-      Support URL contact
-- [ ] `copyright@caydexinvest.com` — the DMCA/copyright-complaints address in Terms §9.
-      Legally you should monitor this
-- [ ] `privacy@caydexinvest.com` *(optional but conventional)* — if you'd rather route
+- [x] `support@caydexinvest.com` — in Terms §16 and Privacy §13, and used as the ASC
+      Support URL contact. *(Cloudflare Email Routing → haydenphancs@gmail.com, 2026-08-06.
+      Namecheap's forwarder stopped working when the nameservers moved; Cloudflare Routing
+      replaced it and has better deliverability.)*
+- [x] `copyright@caydexinvest.com` — the DMCA/copyright-complaints address in Terms §9.
+      Legally you should monitor this. *(routed 2026-08-06)*
+- [x] `privacy@caydexinvest.com` *(optional but conventional)* — if you'd rather route
       data-rights requests separately from general support, tell me and I'll update both
       policy surfaces
 

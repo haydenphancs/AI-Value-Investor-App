@@ -143,7 +143,7 @@ struct PaywallView: View {
                     if isCurrent {
                         Text("CURRENT")
                             .font(AppTypography.captionEmphasis)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                             .padding(.horizontal, AppSpacing.sm)
                             .padding(.vertical, 2)
                             .background(Capsule().fill(AppColors.primaryFill))
@@ -211,7 +211,7 @@ struct PaywallView: View {
                      ? "Processing\u{2026}"
                      : "Choose \(plan.displayName)")
                     .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.md)
                     .background(

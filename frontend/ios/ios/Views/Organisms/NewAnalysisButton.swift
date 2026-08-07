@@ -21,7 +21,7 @@ struct NewAnalysisButton: View {
                 Text("New Analysis")
                     .font(AppTypography.bodyEmphasis)
             }
-            .foregroundColor(.white)
+            .foregroundColor(AppColors.textOnAccent)
             .padding(.horizontal, AppSpacing.xxl)
             .padding(.vertical, AppSpacing.md)
             .frame(maxWidth: .infinity)

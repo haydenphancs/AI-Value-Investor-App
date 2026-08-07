@@ -282,6 +282,29 @@ final class AudioManager: ObservableObject {
         $playbackSpeed
             .sink { [weak self] speed in
                 self?.updatePlaybackSpeed(speed)
+                // PERSIST it. `playbackSpeed` was read from UserDefaults once, at property
+                // initialisation, and never written back — so the two speed controls in the
+                // PLAYER (`FullScreenAudioPlayer`, `GlobalMiniPlayer`) were in-memory only.
+                // A user who changed speed in the player lost it on relaunch, and the value
+                // never reached the synced blob at all.
+                UserDefaults.standard.set(speed.rawValue, forKey: "playback_speed")
+            }
+            .store(in: &cancellables)
+
+        // ...and the other direction. This is a process-lifetime singleton, so a hydrate or a
+        // session end writing "playback_speed" in UserDefaults never reached the LIVE value:
+        // user B inherited user A's speed in the player for the whole process. `AppSettingsView`
+        // bridged one direction from one screen; this closes both from one place.
+        NotificationCenter.default.publisher(for: .caydexSettingsHydrated)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                // Absent (cleared at session end) → fall back to the declared default, exactly
+                // as the settings screens do.
+                let stored = UserDefaults.standard.object(forKey: "playback_speed") as? Double
+                let resolved = stored.flatMap { PlaybackSpeed(rawValue: $0) } ?? .normal
+                guard resolved != self.playbackSpeed else { return }   // no write-back loop
+                self.playbackSpeed = resolved
             }
             .store(in: &cancellables)
 
@@ -393,7 +416,22 @@ final class AudioManager: ObservableObject {
         if let cached = artworkCache[episode.id] { return cached }
 
         let size = CGSize(width: 600, height: 600)
-        var uiColors: [UIColor] = episode.artworkGradientColors.map { UIColor(Color(hex: $0)) }
+        // Non-dynamic on purpose, and clamped as a FILL.
+        //
+        // Two defects here, both silent. (1) `UIColor(Color(hex:))` yields a DYNAMIC
+        // UIColor, and `.cgColor` on a dynamic colour resolves against whatever
+        // `UITraitCollection.current` happens to be inside this render block — then the
+        // result is memoised in `artworkCache` forever, so nothing re-renders it on an
+        // appearance change. `clampedAsFill` is appearance-invariant, which makes the
+        // question moot instead of merely unlikely. (2) `Color(hex:)` is LENIENT: a
+        // malformed server hex became opaque black and the `isEmpty` guard below never
+        // fired, because the array was not empty — it was full of black. `compactMap`
+        // + `validatingHexString` lets the real fallback run.
+        var uiColors: [UIColor] = episode.artworkGradientColors.compactMap {
+            UIColor(validatingHexString: $0)?
+                .withAlphaComponent(1)
+                .clampedAsFill(carrying: .white)
+        }
         if uiColors.isEmpty { uiColors = [.black, .darkGray] }
         if uiColors.count == 1 { uiColors.append(uiColors[0]) } // CGGradient needs ≥ 2 stops
         let cgColors = uiColors.map { $0.cgColor }

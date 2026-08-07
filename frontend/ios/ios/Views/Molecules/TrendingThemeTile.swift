@@ -48,14 +48,16 @@ struct TrendingThemeTile: View {
             if !theme.changeText.isEmpty {
                 Text(theme.changeText)
                     .font(AppTypography.captionEmphasis)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
                     .background(
-                        Capsule().fill(
-                            (theme.isPositive ? AppColors.bullish : AppColors.bearish)
-                                .opacity(0.92)
-                        )
+                        // FILL tokens, opaque. `bullish`/`bearish` are text-safe tokens —
+                        // white on `bullish` #22C55E is 2.28:1 opaque and 2.60:1 at the old
+                        // 0.92, and this capsule sits on a PHOTO, so there is no surface
+                        // whose luminance can be assumed. Opaque `gainFill`/`lossFill`
+                        // measure 5.42 / 5.55 under this ink regardless of the image.
+                        Capsule().fill(theme.isPositive ? AppColors.gainFill : AppColors.lossFill)
                     )
                     .shadow(color: AppColors.shadowKey, radius: 3, y: 1)
                     .padding(10)

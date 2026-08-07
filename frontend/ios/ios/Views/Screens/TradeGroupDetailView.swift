@@ -72,7 +72,7 @@ struct TradeGroupDetailView: View {
                             } label: {
                                 Text("Retry")
                                     .font(AppTypography.bodySmallEmphasis)
-                                    .foregroundColor(.white)
+                                    .foregroundColor(AppColors.textOnAccent)
                                     .padding(.horizontal, AppSpacing.lg)
                                     .padding(.vertical, AppSpacing.sm)
                                     .background(AppColors.primaryFill)
@@ -219,18 +219,20 @@ struct TradeFilterPill: View {
                     if let iconName = tab.iconName {
                         Image(systemName: iconName)
                             .font(AppTypography.iconXS).fontWeight(.semibold)
-                            .foregroundColor(isSelected ? .white : tab.iconColor)
+                            .foregroundColor(isSelected ? AppColors.textOnAccent : tab.iconColor)
                     }
 
                     Text(tab.rawValue)
                         .font(AppTypography.captionEmphasis)
                 }
-                .foregroundColor(isSelected ? .white : AppColors.textSecondary)
+                .foregroundColor(isSelected ? AppColors.textOnAccent : AppColors.textSecondary)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)
                 .background(
+                    // `primaryFill`, not the TEXT-safe `primaryBlue` (#60A5FA in dark,
+                    // where `textOnAccent` on it is 2.24:1).
                     isSelected
-                        ? AppColors.primaryBlue
+                        ? AppColors.primaryFill
                         : AppColors.cardBackgroundLight
                 )
                 .cornerRadius(AppCornerRadius.pill)
@@ -399,7 +401,7 @@ struct TradeActionBadge: View {
     var body: some View {
         Text(action.rawValue)
             .font(AppTypography.caption).fontWeight(.bold)
-            .foregroundColor(.white)
+            .foregroundColor(AppColors.textOnAccent)
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.xs)
             .background(action.color)

@@ -20,7 +20,10 @@ struct AnalysisDescriptionCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.md) {
-            // Accent line
+            // Accent line. Deliberately `accentColor` and NOT `accentFill`: this bar
+            // carries no ink, so it has no white-on-it floor to clear, and `accentColor`'s
+            // 4.5 text floor is already stricter than the 3:1 a decorative bar needs.
+            // `accentFill` would only make it muddier on a dark card.
             RoundedRectangle(cornerRadius: 2)
                 .fill(persona.accentColor)
                 .frame(width: 4)

@@ -135,7 +135,7 @@ struct CaydexSloganView: View {
                             // Fixed, not adaptive: this always sits on the black
                             // brand backdrop, so an adaptive token would turn the
                             // glyph near-black on black in light mode.
-                            .foregroundStyle(Color.white.opacity(0.65), Color.white.opacity(0.15))
+                            .foregroundStyle(AppColors.textOnAccent.opacity(0.65), AppColors.textOnAccent.opacity(0.15))
                     }
                     .buttonStyle(PlainButtonStyle())
                 }

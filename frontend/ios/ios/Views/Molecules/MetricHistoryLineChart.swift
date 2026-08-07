@@ -292,7 +292,9 @@ struct MetricHistoryLineChart: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { index, r in
                 Text(r.company.map { fmtValue($0) } ?? "—")
                     .font(.system(size: labelFontSize, weight: .semibold))
-                    .foregroundColor(AppColors.growthYoYYellow)
+                    // Text-safe sibling of the series token: a readable number needs 4.5,
+                    // and `growthYoYYellow` is a 3:1 graphic (3.57:1 on a light card).
+                    .foregroundColor(AppColors.accentYellow)
                     .lineLimit(1).fixedSize()
                     .position(x: xCenter(index, plotWidth: plotWidth), y: 10)
             }
@@ -305,7 +307,8 @@ struct MetricHistoryLineChart: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { index, r in
                 Text(r.sector.map { fmtValue($0) } ?? "—")
                     .font(.system(size: labelFontSize, weight: .regular))
-                    .foregroundColor(AppColors.growthSectorGray)
+                    // Text-safe sibling of `growthSectorGray` (3.78:1 light card).
+                    .foregroundColor(AppColors.textMuted)
                     .lineLimit(1).fixedSize()
                     .position(x: xCenter(index, plotWidth: plotWidth), y: 10)
             }

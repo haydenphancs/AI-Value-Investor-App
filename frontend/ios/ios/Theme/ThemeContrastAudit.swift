@@ -160,6 +160,7 @@ enum ThemeContrastAudit {
 
         failures.append(contentsOf: auditManifestCompleteness())
         failures.append(contentsOf: auditLightParity())
+        failures.append(contentsOf: auditSurfaceSeparation())
         failures.append(contentsOf: auditHexParsing())
 
         if failures.isEmpty {
@@ -210,6 +211,68 @@ enum ThemeContrastAudit {
                         measured: 0,
                         required: 1)
             }
+    }
+
+    // MARK: - Surface separation
+
+    /// Can a card be told apart from what it sits ON?
+    ///
+    /// This is the question the whole `cardEdge` / `cardBackgroundNested` design answers,
+    /// and until now NOTHING measured it — in either guard. Every `TokenSpec` measures a
+    /// FOREGROUND on a surface; there is no spec anywhere comparing a surface to another
+    /// surface. Surfaces are `.surface`, whose floor is 0, so `run()` skips them before it
+    /// measures anything, and `cardEdge` is `.decorative` and can never acquire a floor.
+    /// The 297-site card sweep therefore produced a fix with no possible verification.
+    ///
+    /// The invariant has TWO legs, and which one carries depends on the appearance:
+    ///   • DARK draws no border at all (`cardEdge` and `shadowCard` are transparent there),
+    ///     so the fills themselves must differ.
+    ///   • LIGHT is allowed to have identical fills — a #FFFFFF card on a #F4F5F8 page is
+    ///     1.09:1 and cannot separate by luminance — but then it MUST have an edge.
+    ///
+    /// So each pair passes if it separates by fill OR by edge, per appearance. Asserting
+    /// one leg alone would be wrong in one mode and would fail today.
+    private static func auditSurfaceSeparation() -> [Failure] {
+        // A ratio of 1.0 is literally the same colour. 1.05 is the smallest step this
+        // palette actually uses for a fill-based separation (measured: nested vs card in
+        // dark is 1.111, card vs page is 1.096), so it distinguishes "deliberately
+        // stepped" from "identical" without pretending to be a perceptual threshold.
+        let minFillStep = 1.05
+        var failures: [Failure] = []
+
+        let pairs: [(inner: String, outer: String, innerColor: Color, outerColor: Color)] = [
+            ("cardBackground", "background", AppColors.cardBackground, AppColors.background),
+            ("cardBackgroundNested", "cardBackground",
+             AppColors.cardBackgroundNested, AppColors.cardBackground),
+        ]
+
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let styleName = style == .light ? "LIGHT" : "DARK"
+            var edgeAlpha: CGFloat = 0
+            resolve(AppColors.cardEdge, style).getRed(nil, green: nil, blue: nil, alpha: &edgeAlpha)
+            let hasEdge = edgeAlpha > 0.01
+
+            for pair in pairs {
+                let measured = ratio(resolve(pair.innerColor, style), resolve(pair.outerColor, style))
+                if measured >= minFillStep || hasEdge { continue }
+                failures.append(Failure(style: styleName,
+                                        token: pair.inner,
+                                        surface: "\(pair.outer) — no fill step AND no edge",
+                                        measured: measured,
+                                        required: minFillStep))
+            }
+        }
+
+        // Negative control: the comparison must be able to FAIL. A pair that is genuinely
+        // identical in both appearances, with the edge ignored, has to be detected — or
+        // `ratio` returning a constant would make everything above vacuously green.
+        if ratio(resolve(AppColors.cardBackground, .dark),
+                 resolve(AppColors.cardBackground, .dark)) >= minFillStep {
+            failures.append(Failure(style: "SURFACE", token: "ratio",
+                                    surface: "cannot detect two identical surfaces",
+                                    measured: 0, required: minFillStep))
+        }
+        return failures
     }
 
     // MARK: - Light-mode parity
@@ -342,12 +405,74 @@ enum ThemeContrastAudit {
 
             // Hue must survive the clamp — that is the whole point of clamping
             // rather than snapping to a token.
-            var h0: CGFloat = 0, h1: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-            base.getHue(&h0, saturation: &s, brightness: &b, alpha: &a)
-            onLight.getHue(&h1, saturation: &s, brightness: &b, alpha: &a)
-            if s > 0.05, abs(h0 - h1) > 0.02 { fail("clamp shifted hue #\(hex)") }
+            //
+            // THREE defects lived in the four lines this replaces, and the first made the
+            // assertion self-nullifying:
+            //
+            //  1. One shared inout `s` was passed to BOTH `getHue` calls, so the second
+            //     overwrote it and the gate read the POST-clamp saturation. If the
+            //     desaturation fallback in `clamped` ever drove `s → 0`, the guard went
+            //     false and the hue check was skipped — precisely when the hue had been
+            //     destroyed. Separate out-parameters, gated on the BASE saturation.
+            //  2. `abs(h0 - h1)` is not a hue distance. Hue wraps at 1.0, so a red at
+            //     0.998 landing on 0.002 measured 0.996 and reported a bogus failure.
+            //  3. `onDark` was computed and its CONTRAST measured, but its hue was never
+            //     checked at all — half the assertion was missing.
+            var h0: CGFloat = 0, s0: CGFloat = 0, b0: CGFloat = 0, a0: CGFloat = 0
+            base.getHue(&h0, saturation: &s0, brightness: &b0, alpha: &a0)
+            guard s0 > 0.05 else { continue }   // greys have no hue to preserve
+
+            func hueDrift(_ candidate: UIColor) -> CGFloat {
+                var h1: CGFloat = 0, s1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
+                candidate.getHue(&h1, saturation: &s1, brightness: &b1, alpha: &a1)
+                let raw = abs(h0 - h1)
+                return min(raw, 1 - raw)        // circular
+            }
+            if hueDrift(onLight) > 0.02 { fail("clamp shifted hue (light) #\(hex)") }
+            if hueDrift(onDark) > 0.02 { fail("clamp shifted hue (dark) #\(hex)") }
         }
 
+        failures.append(contentsOf: auditServerFillRole())
+        return failures
+    }
+
+    /// The FILL clamp is the one whose DIRECTION was wrong, so pin both halves of its
+    /// contract: it reaches 4.5:1 under `textOnAccent`, and it produces the SAME value in
+    /// both appearances. Without the second assertion a future edit that makes it
+    /// trait-dependent silently reintroduces the tile bug — which is the exact shape the
+    /// `.graphic` role already had.
+    private static func auditServerFillRole() -> [Failure] {
+        var failures: [Failure] = []
+        func fail(_ what: String) {
+            failures.append(Failure(style: "FILL", token: what,
+                                    surface: "clampedAsFill", measured: 0, required: 4.5))
+        }
+
+        for hex in ["22D3EE", "FBBF24", "34D399", "C084FC", "FFFF00",
+                    "3B82F6", "A855F7", "06B6D4", "F97316", "DC2626", "FFFFFF", "000000"] {
+            let token = Color(themedHex: hex, role: .fill)
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                let fill = resolve(token, style)
+                let ink = resolve(AppColors.textOnAccent, style)
+                let measured = ratio(ink, fill)
+                if measured < 4.5 {
+                    failures.append(Failure(style: style == .light ? "LIGHT" : "DARK",
+                                            token: "textOnAccent", surface: "fill #\(hex)",
+                                            measured: measured, required: 4.5))
+                }
+            }
+            if !componentsEqual(resolve(token, .light), resolve(token, .dark)) {
+                fail("#\(hex) is not appearance-invariant")
+            }
+        }
+
+        // Negative control. `.graphic` must still DISAGREE with `.fill` in dark, or the two
+        // roles have collapsed into one and every assertion above is vacuous — the same
+        // reasoning as `auditLightParity`'s comparator check.
+        if componentsEqual(resolve(Color(themedHex: "34D399", role: .graphic), .dark),
+                           resolve(Color(themedHex: "34D399", role: .fill), .dark)) {
+            fail("roles .graphic and .fill have become indistinguishable")
+        }
         return failures
     }
 

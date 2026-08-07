@@ -24,7 +24,7 @@ struct ReportsSelectionBar: View {
                 HStack(spacing: AppSpacing.xs) {
                     if isDeleting {
                         ProgressView()
-                            .tint(.white)
+                            .tint(AppColors.textOnAccent)
                     } else {
                         Image(systemName: "trash")
                             .font(AppTypography.iconSmall).fontWeight(.semibold)
@@ -32,7 +32,7 @@ struct ReportsSelectionBar: View {
                     Text(selectedCount > 0 ? "Delete (\(selectedCount) Selected)" : "Delete")
                         .font(AppTypography.labelSmallEmphasis)
                 }
-                .foregroundColor(.white)
+                .foregroundColor(AppColors.textOnAccent)
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.sm)
                 .background(

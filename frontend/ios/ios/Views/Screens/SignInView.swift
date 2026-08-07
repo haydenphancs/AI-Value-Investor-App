@@ -96,11 +96,11 @@ struct SignInView: View {
                         HStack {
                             Spacer()
                             if isSubmitting {
-                                ProgressView().tint(.white)
+                                ProgressView().tint(AppColors.textOnAccent)
                             } else {
                                 Text(mode == .signIn ? "Sign In" : "Create Account")
                                     .font(AppTypography.bodyEmphasis)
-                                    .foregroundColor(.white)
+                                    .foregroundColor(AppColors.textOnAccent)
                             }
                             Spacer()
                         }
@@ -239,7 +239,7 @@ struct SignInView: View {
                 } label: {
                     Text("Back to Sign In")
                         .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
                         .background(AppColors.primaryFill)

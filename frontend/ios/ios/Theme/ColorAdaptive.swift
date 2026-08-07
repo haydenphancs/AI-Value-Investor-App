@@ -124,15 +124,38 @@ extension Color {
 /// floor the clamp has to reach. Mirrors `AppColors.TokenRole`, but lives here
 /// so the boundary layers (`*Repository`, `Models/`) don't import the audit.
 enum ServerColorRole {
-    /// Text or a meaningful icon glyph — WCAG 1.4.3 AA.
+    /// Text or a meaningful icon glyph drawn ON a card — WCAG 1.4.3 AA.
     case text
-    /// Chart series, bars, dots, tile tints — WCAG 1.4.11.
+    /// Chart series, bars, dots, decorative tints drawn ON a card — WCAG 1.4.11.
+    /// Carries no ink of its own.
     case graphic
+    /// A SATURATED BACKGROUND that `AppColors.textOnAccent` ink sits on.
+    ///
+    /// Measured the other way round from the two above: the server colour is the
+    /// BACKGROUND and the ink is the foreground, so the floor is "textOnAccent ON
+    /// it ≥ 4.5", not "it ON a card ≥ N". That inversion is the whole reason this
+    /// case exists.
+    ///
+    /// `.graphic` measures against the CARD, which is why it read as correct while
+    /// being exactly wrong for a tile: in DARK it BRIGHTENS the colour — right for a
+    /// chart dot on #1E2330, backwards under white ink — and seven call sites drew
+    /// server hexes as tiles/gradients carrying light ink. Measured on the hexes
+    /// shipping today, white on the resulting tile was 1.92–3.96:1 in dark and
+    /// 3.04–3.96:1 in LIGHT. So `darken:` was never the bug; the ROLE was.
+    ///
+    /// Appearance-INVARIANT by construction, exactly like the `*Fill` tokens (see
+    /// AppTheme.swift "FILLS — saturated backgrounds that WHITE TEXT sits on"): a
+    /// value dark enough to carry white ink in light is dark enough in dark. One
+    /// value, both jobs, no second calibration.
+    case fill
 
     var floor: Double {
         switch self {
         case .text: return 4.5
         case .graphic: return 3.0
+        // Same 4.5 as `.text`, but measured under `textOnAccent` rather than
+        // against a card — see `Color.init(themedHex:role:fallback:)`.
+        case .fill: return 4.5
         }
     }
 }
@@ -184,9 +207,25 @@ extension Color {
             // Same `.unspecified → dark` polarity as the adaptive-token initialiser
             // above; see the reasoning there. Keep the two in step.
             let isLight = traits.userInterfaceStyle == .light
-            // Clamp against the surface these actually land on: a card.
-            let surface = UIColor(hexString: isLight ? "FFFFFF" : "1E2330")
-            return base.clamped(toContrast: role.floor, against: surface, darken: isLight)
+            // Exhaustive on purpose — no `default:`. A fourth role must be a compile
+            // error here, not a silent inheritance of the card clamp, which is exactly
+            // how `.fill`'s call sites spent their life being measured the wrong way
+            // round. Same argument as `APIEndpoint.authPolicy`.
+            switch role {
+            case .text, .graphic:
+                // Clamp against the surface these actually land on: a card.
+                let surface = UIColor(hexString: isLight ? "FFFFFF" : "1E2330")
+                return base.clamped(toContrast: role.floor, against: surface, darken: isLight)
+
+            case .fill:
+                // The INK is the foreground and THIS is the background, so walk DOWN in
+                // both appearances. `textOnAccent` is resolved through `traits` rather
+                // than hardcoded to white so this tracks the token if it ever stops
+                // being constant; today both arms are #FFFFFF, which is precisely why
+                // the result is identical in light and dark — the `*Fill` contract.
+                let ink = UIColor(AppColors.textOnAccent).resolvedColor(with: traits)
+                return base.clampedAsFill(carrying: ink, toContrast: role.floor)
+            }
         })
     }
 }
@@ -239,10 +278,18 @@ extension UIColor {
 
         // Brightness alone was not enough (saturated yellows/cyans on white).
         // Now trade saturation, which is the last thing worth giving up.
+        //
+        // Keep the brightness the loop above REACHED rather than slamming to the
+        // extreme. `nb = darken ? 0 : 1` was loop-invariant, so on the darken path
+        // every one of these ten iterations constructed pure BLACK (brightness 0 is
+        // black at any saturation) and iteration 1 returned it — the loop was
+        // functionally `return .black`, discarding both hue and saturation and
+        // contradicting the comment directly above it. Desaturation is only a second
+        // axis if the first one holds its position.
+        let exhausted: CGFloat = darken ? max(0, b - 24 * 0.04) : min(1, b + 24 * 0.04)
         for step in 1...10 {
             let ns = max(0, s - CGFloat(step) * 0.1)
-            let nb: CGFloat = darken ? 0 : 1
-            let candidate = UIColor(hue: h, saturation: ns, brightness: nb, alpha: a)
+            let candidate = UIColor(hue: h, saturation: ns, brightness: exhausted, alpha: a)
             if candidate.wcagContrast(against: surface) >= target { return candidate }
         }
 
@@ -250,5 +297,25 @@ extension UIColor {
         // card), but degrade to maximum contrast rather than returning a value
         // known to fail.
         return darken ? .black : .white
+    }
+
+    /// Clamp this colour AS A FILL: darken until `ink` laid ON TOP of it clears `target`.
+    ///
+    /// Delegates to `clamped(toContrast:against:darken:)` rather than duplicating the
+    /// 24-step walk, and it is correct to do so: `wcagContrast` is
+    /// `(max L + 0.05)/(min L + 0.05)` — SYMMETRIC. It does not know or care which side
+    /// is the foreground. The only two things that differ between a fill and a
+    /// foreground are which colour goes into `against:` and the direction of the walk,
+    /// and this wrapper fixes both. It exists so that no call site has to pass its INK
+    /// into a parameter spelled `against:` and rely on the next reader noticing.
+    ///
+    /// `darken: true` unconditionally, because `textOnAccent` is white in BOTH
+    /// appearances: down is the only direction that can help. It always converges —
+    /// brightness 0 is black at 21:1 — so the desaturation fallback above is
+    /// unreachable here and hue AND saturation are preserved exactly. Measured over
+    /// the server hexes in the app today the deepest walk was 13 of 24 steps
+    /// (#FFFF00 → #7A7A00, 4.53:1).
+    func clampedAsFill(carrying ink: UIColor, toContrast target: Double = 4.5) -> UIColor {
+        clamped(toContrast: target, against: ink, darken: true)
     }
 }

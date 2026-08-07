@@ -54,7 +54,7 @@ struct CompanyLogoView: View {
     private var initialsView: some View {
         Text(String(ticker.prefix(1)))
             .font(.system(size: size * 0.4, weight: .bold))
-            .foregroundColor(.white)
+            .foregroundColor(AppColors.textOnAccent)
             .frame(width: size, height: size)
             .background(fallbackGradient)
             .clipShape(RoundedRectangle(cornerRadius: size * 0.25))
@@ -82,7 +82,7 @@ struct CompanyLogoView: View {
                             .aspectRatio(contentMode: .fit)
                             .padding(size * 0.16)
                             .frame(width: size, height: size)
-                            .background(Color.white)
+                            .background(AppColors.mediaSurface)
                             .clipShape(RoundedRectangle(cornerRadius: size * 0.25))
                     } else {
                         initialsView
@@ -112,7 +112,7 @@ struct SystemLogoView: View {
     var body: some View {
         Image(systemName: systemName)
             .font(.system(size: size * 0.4, weight: .semibold))
-            .foregroundColor(.white)
+            .foregroundColor(AppColors.textOnAccent)
             .frame(width: size, height: size)
             .background(gradient)
             .clipShape(RoundedRectangle(cornerRadius: size * 0.25))

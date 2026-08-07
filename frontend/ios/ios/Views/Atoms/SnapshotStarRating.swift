@@ -27,23 +27,23 @@ struct SnapshotStarRating: View {
     VStack(spacing: AppSpacing.md) {
         HStack(spacing: AppSpacing.lg) {
             SnapshotStarRating(rating: .excellent)
-            Text("Excellent").foregroundColor(.white)
+            Text("Excellent").foregroundColor(AppColors.textPrimary)
         }
         HStack(spacing: AppSpacing.lg) {
             SnapshotStarRating(rating: .strong)
-            Text("Strong").foregroundColor(.white)
+            Text("Strong").foregroundColor(AppColors.textPrimary)
         }
         HStack(spacing: AppSpacing.lg) {
             SnapshotStarRating(rating: .average)
-            Text("Average").foregroundColor(.white)
+            Text("Average").foregroundColor(AppColors.textPrimary)
         }
         HStack(spacing: AppSpacing.lg) {
             SnapshotStarRating(rating: .weak)
-            Text("Weak").foregroundColor(.white)
+            Text("Weak").foregroundColor(AppColors.textPrimary)
         }
         HStack(spacing: AppSpacing.lg) {
             SnapshotStarRating(rating: .poor)
-            Text("Poor").foregroundColor(.white)
+            Text("Poor").foregroundColor(AppColors.textPrimary)
         }
     }
     .padding()

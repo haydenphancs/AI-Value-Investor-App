@@ -111,7 +111,26 @@ struct AnalysisPersona: Identifiable, Hashable {
         }
     }
 
-    var accentColor: Color { Color(themedHex: accentColorHex, role: .graphic, fallback: AppColors.primaryBlue) }
+    /// The persona's hue as TEXT / a meaningful glyph, on a card. This is the SHARED
+    /// default, per the palette rule that the shared token is always the text-safe one:
+    /// a text value leaking into a stroke is merely less vivid, a graphic value leaking
+    /// into text fails AA.
+    ///
+    /// Was `role: .graphic` — a 3:1 floor — so on a light card the shipped accents
+    /// rendered their taglines at 3.04–4.23:1, i.e. below AA as body text at
+    /// `PersonaCard`, `ReportCard` and `PersonasSheet`.
+    var accentColor: Color { Color(themedHex: accentColorHex, role: .text, fallback: AppColors.primaryBlue) }
+
+    /// The same hue as a SATURATED FILL that `AppColors.textOnAccent` ink sits on.
+    ///
+    /// Split from `accentColor` rather than replacing it, mirroring
+    /// `LessonCategory.iconBackgroundColor` / `iconFillColor` in LearnModels.swift and
+    /// for the same measured reason: the two roles pull in OPPOSITE directions. A
+    /// `.fill`-clamped accent measures 3.25–3.45:1 against the DARK card, so one value
+    /// for both jobs would trade seven readable foregrounds for two readable tiles.
+    ///
+    /// Pair this with `AppColors.textOnAccent` — never `.white`, never `textPrimary`.
+    var accentFill: Color { Color(themedHex: accentColorHex, role: .fill, fallback: AppColors.primaryFill) }
 
     static func == (lhs: AnalysisPersona, rhs: AnalysisPersona) -> Bool {
         lhs.key == rhs.key
@@ -814,7 +833,11 @@ extension TrendingAnalysis {
             interestPercent: item.interestPercent,
             iconName: "",
             systemIconName: item.systemIconName,
-            iconBackgroundColor: Color(themedHex: item.iconBackgroundColor, role: .graphic, fallback: AppColors.primaryBlue)
+            // `.fill`: drawn as a saturated 44×44 tile carrying `textOnAccent` ink in
+            // `TrendingAnalysisRow`. Under `.graphic` this was the worst site in the app —
+            // the clamp BRIGHTENS in dark, which is right for a chart dot on a card and
+            // backwards under white ink.
+            iconBackgroundColor: Color(themedHex: item.iconBackgroundColor, role: .fill, fallback: AppColors.primaryFill)
         )
     }
 }

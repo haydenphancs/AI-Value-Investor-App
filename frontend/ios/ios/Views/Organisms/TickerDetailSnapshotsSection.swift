@@ -292,7 +292,7 @@ struct SnapshotUsageStep: View {
 
                 Text("\(number)")
                     .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
             }
 
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {

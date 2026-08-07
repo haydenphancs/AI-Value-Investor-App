@@ -28,14 +28,16 @@ struct DateBadge: View {
         VStack(spacing: 0) {
             Text(day)
                 .font(AppTypography.dataHeading)
-                .foregroundColor(.white)
+                .foregroundColor(AppColors.textOnAccent)
 
             Text(month)
                 .font(AppTypography.captionSmallEmphasis)
-                .foregroundColor(.white.opacity(0.8))
+                .foregroundColor(AppColors.textOnAccent.opacity(0.8))
         }
         .frame(width: 48, height: 48)
-        .background(AppColors.alertBlue)
+        // `primaryFill`, not `alertBlue` (which forwards to the TEXT-safe `primaryBlue`,
+        // #60A5FA in dark — white on it is 2.24:1). Both halves move together.
+        .background(AppColors.primaryFill)
         .cornerRadius(AppCornerRadius.medium)
     }
 }

@@ -87,11 +87,11 @@ struct ChangePasswordView: View {
                 HStack {
                     Spacer()
                     if isSubmitting {
-                        ProgressView().tint(.white)
+                        ProgressView().tint(AppColors.textOnAccent)
                     } else {
                         Text("Change Password")
                             .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                     }
                     Spacer()
                 }
@@ -121,7 +121,7 @@ struct ChangePasswordView: View {
             Button { dismiss() } label: {
                 Text("Done")
                     .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
                     .background(AppColors.primaryFill)

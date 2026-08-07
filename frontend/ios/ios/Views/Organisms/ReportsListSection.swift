@@ -212,11 +212,14 @@ struct ReportsListSection: View {
         } label: {
             Text(persona.shortName)
                 .font(AppTypography.caption).fontWeight(.semibold)
-                .foregroundColor(isOn ? .white : persona.accentColor)
+                .foregroundColor(isOn ? AppColors.textOnAccent : persona.accentColor)
                 .padding(.horizontal, AppSpacing.sm)
                 .padding(.vertical, AppSpacing.xs)
                 .background(
-                    Capsule().fill(isOn ? persona.accentColor
+                    // Selected = `accentFill` (clamped so `textOnAccent` clears 4.5 on it);
+                    // unselected = the text-safe accent at 0.15, which carries no ink.
+                    // Both halves of the selected pair must move together.
+                    Capsule().fill(isOn ? persona.accentFill
                                         : persona.accentColor.opacity(0.15))
                 )
                 .fixedSize(horizontal: true, vertical: false)   // keep natural width in the scroll
@@ -283,7 +286,7 @@ struct ReportsListSection: View {
                 Button(action: onGenerateFirst) {
                     Text("Generate your first analysis")
                         .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .padding(.horizontal, AppSpacing.xl)
                         .padding(.vertical, AppSpacing.md)
                         .background(AppColors.primaryFill)
@@ -320,7 +323,7 @@ struct ReportsListSection: View {
                 Button(action: onSignIn) {
                     Text("Sign In")
                         .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .padding(.horizontal, AppSpacing.xl)
                         .padding(.vertical, AppSpacing.md)
                         .background(AppColors.primaryFill)

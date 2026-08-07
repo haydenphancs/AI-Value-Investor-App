@@ -59,7 +59,7 @@ struct ReportPDFView: View {
                 ProgressView()
                 Text("Preparing your report…")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -76,11 +76,11 @@ struct ReportPDFView: View {
             VStack(spacing: 14) {
                 Image(systemName: "doc.questionmark")
                     .font(.largeTitle)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                 Text(message)
                     .font(.subheadline)
                     .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppColors.textSecondary)
                 Button("Retry") {
                     Task { await viewModel.load() }
                 }

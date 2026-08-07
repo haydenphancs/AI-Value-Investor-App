@@ -240,11 +240,11 @@ struct ForgotPasswordView: View {
             HStack {
                 Spacer()
                 if isSubmitting {
-                    ProgressView().tint(.white)
+                    ProgressView().tint(AppColors.textOnAccent)
                 } else {
                     Text(title)
                         .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                 }
                 Spacer()
             }

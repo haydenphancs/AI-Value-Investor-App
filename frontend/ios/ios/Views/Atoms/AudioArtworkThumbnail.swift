@@ -25,7 +25,7 @@ struct AudioArtworkThumbnail: View {
             // Category icon
             Image(systemName: episode.artworkIcon)
                 .font(.system(size: size * 0.4, weight: .semibold))
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundColor(AppColors.textOnAccent.opacity(0.9))
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
@@ -85,7 +85,7 @@ struct AudioArtworkLarge: View {
                 // Icon
                 Image(systemName: episode.artworkIcon)
                     .font(.system(size: size * 0.35, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.9))
+                    .foregroundColor(AppColors.textOnAccent.opacity(0.9))
             }
             .frame(width: size, height: size)
             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))

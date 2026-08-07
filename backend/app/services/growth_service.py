@@ -85,8 +85,21 @@ def _cache_get(key: str) -> Optional[Any]:
     return value
 
 
+# Hard cap on the in-memory tier. Without it this dict grew with the number of DISTINCT
+# keys ever requested and was never pruned: `_cache_get` only deletes an entry when that
+# SAME key is read again after expiry, so a ticker fetched once and never revisited stayed
+# resident for the life of the process. Across ~17 services on a long-lived Railway
+# container that is a slow leak whose only resolution is an OOM restart — which drops every
+# in-flight report with it. Bounded LRU-ish: evict from the head (least recently WRITTEN).
+_CACHE_MAX_ENTRIES = 1024
+
+
 def _cache_set(key: str, value: Any) -> None:
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -338,15 +351,24 @@ class GrowthService:
 
         try:
             logger.info(f"Growth cache MISS for {ticker} — fetching from FMP")
-            result = await self._build_growth(ticker)
+            result, degraded = await self._build_growth(ticker)
             next_earnings = await asyncio.to_thread(
                 self._next_earnings_date_safe, ticker
             )
 
-            # Best-effort write-through (never blocks the response).
-            loop.run_in_executor(
-                None, self._upsert_supabase_cache_safe, ticker, result, next_earnings
-            )
+            # Best-effort write-through (never blocks the response) — but ONLY when the build
+            # was complete. One transient FMP failure otherwise pins a hole in the chart for
+            # 24 hours and bakes it into every paid report generated in that window.
+            if degraded:
+                logger.warning(
+                    "Growth NOT persisted for %s (degraded: %s) — will rebuild after the "
+                    "5-min in-memory TTL",
+                    ticker, ", ".join(degraded),
+                )
+            else:
+                loop.run_in_executor(
+                    None, self._upsert_supabase_cache_safe, ticker, result, next_earnings
+                )
 
             _cache_set(cache_key, result)
             future.set_result(result)
@@ -466,7 +488,7 @@ class GrowthService:
         except Exception as e:
             logger.warning(f"Growth Supabase upsert failed for {ticker}: {e}")
 
-    async def _build_growth(self, ticker: str) -> GrowthResponse:
+    async def _build_growth(self, ticker: str) -> Tuple[GrowthResponse, list]:
         """Fetch income + cash flow statements, compute YoY growth, look up sector benchmarks."""
 
         # Phase 1: parallel fetch — profile + income + cash flow (5 FMP calls)
@@ -486,21 +508,31 @@ class GrowthService:
         )
 
         # Handle failures gracefully
+        # Legs replaced by an empty default. Such a build still renders — a missing
+        # quarterly cash-flow leg simply yields no quarterly FCF series — but persisting it
+        # to the 24h Supabase tier pins that hole for a day and freezes it into paid reports.
+        degraded: list[str] = []
+
         if isinstance(profile, Exception):
             logger.warning(f"Profile fetch failed for {ticker}: {profile}")
             profile = {}
+            degraded.append("profile")
         if isinstance(annual_income, Exception):
             logger.error(f"Annual income fetch failed for {ticker}: {annual_income}")
             annual_income = []
+            degraded.append("annual_income")
         if isinstance(quarterly_income, Exception):
             logger.error(f"Quarterly income fetch failed for {ticker}: {quarterly_income}")
             quarterly_income = []
+            degraded.append("quarterly_income")
         if isinstance(annual_cashflow, Exception):
             logger.error(f"Annual cash flow fetch failed for {ticker}: {annual_cashflow}")
             annual_cashflow = []
+            degraded.append("annual_cashflow")
         if isinstance(quarterly_cashflow, Exception):
             logger.error(f"Quarterly cash flow fetch failed for {ticker}: {quarterly_cashflow}")
             quarterly_cashflow = []
+            degraded.append("quarterly_cashflow")
 
         # Phase 2: get sector from profile (normalize to canonical name for benchmark lookup)
         raw_sector = profile.get("sector", "") if isinstance(profile, dict) else ""
@@ -576,7 +608,7 @@ class GrowthService:
                 for p in points
             ]
 
-        return GrowthResponse(
+        response = GrowthResponse(
             symbol=ticker,
             eps_annual=_to_schemas(eps_annual_points, "eps_yoy", benchmarks_annual),
             eps_quarterly=_to_schemas(
@@ -601,6 +633,7 @@ class GrowthService:
                 fcf_quarterly_points, "fcf_yoy", benchmarks_quarterly,
             ),
         )
+        return response, degraded
 
 
 # ── Singleton ─────────────────────────────────────────────────────

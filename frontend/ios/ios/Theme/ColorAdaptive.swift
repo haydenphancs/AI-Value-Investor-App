@@ -70,8 +70,10 @@ extension Color {
     /// Adaptive token: resolves to `lightHex` in light mode and to `darkHex` in
     /// dark — and for `.unspecified`, which is deliberate and explained on the
     /// designated initialiser below.
-    init(lightHex light: String, darkHex dark: String) {
-        self.init(lightHex: light, lightAlpha: 1, darkHex: dark, darkAlpha: 1)
+    init(lightHex light: String, darkHex dark: String,
+         boostsUnderIncreasedContrast: Bool = true) {
+        self.init(lightHex: light, lightAlpha: 1, darkHex: dark, darkAlpha: 1,
+                  boostsUnderIncreasedContrast: boostsUnderIncreasedContrast)
     }
 
     /// Adaptive token with a per-mode alpha.
@@ -87,10 +89,17 @@ extension Color {
     /// dark it is light ink on a dark surface, and the eye needs roughly twice
     /// the ink in light to read the same edge. (Same reason Apple's `systemFill`
     /// alphas roughly double between the two modes.)
-    init(lightHex light: String, lightAlpha: Double, darkHex dark: String, darkAlpha: Double) {
+    /// - Parameter boostsUnderIncreasedContrast: whether this token participates in the
+    ///   Increase Contrast boost. `false` for SURFACES and for constant-by-design pairs
+    ///   (`textOnAccent`, `mediaSurface`) — moving those breaks the contract they exist
+    ///   to hold, and a surface has nothing to be pushed away from.
+    init(lightHex light: String, lightAlpha: Double, darkHex dark: String, darkAlpha: Double,
+         boostsUnderIncreasedContrast: Bool = true) {
         self = Color(uiColor: UIColor { traits in
-            // Exhaustive rather than a ternary so `.unspecified` is a stated decision
-            // and nobody "fixes" it by inverting the predicate.
+            // `isLight` is written as an equality against `.light`, NOT as a ternary on
+            // `.dark`, so that `.unspecified` (and any future case) lands on DARK. That
+            // polarity is a stated decision, not an accident — keep the predicate this
+            // way round.
             //
             // `.unspecified` is an OVERRIDE INPUT, never a resolved trait: a UIWindow
             // attached to a UIWindowScene inherits the system style, and SwiftUI's
@@ -106,14 +115,35 @@ extension Color {
             // agrees is invisible. The launch-screen colorset's "Any Appearance" slot
             // is held on this same polarity for the same reason; change both or
             // neither.
-            switch traits.userInterfaceStyle {
-            case .light:
-                return UIColor(hexString: light).withAlphaComponent(CGFloat(lightAlpha))
-            case .dark, .unspecified:
-                return UIColor(hexString: dark).withAlphaComponent(CGFloat(darkAlpha))
-            @unknown default:
-                return UIColor(hexString: dark).withAlphaComponent(CGFloat(darkAlpha))
-            }
+            // INCREASE CONTRAST is the second axis, and it used to be a literal no-op.
+            //
+            // This closure receives the WHOLE trait collection, and it only ever read
+            // `userInterfaceStyle` — so the one OS lever a low-vision user has against a
+            // borderline token moved nothing. A hand-rolled dynamic `UIColor` gets no
+            // High Contrast variant for free (an asset-catalog colorset would), which is
+            // exactly why it has to be read here.
+            //
+            // The boost is COMPUTED rather than hand-authored per token: push the colour
+            // away from the surface it will land on until it clears WCAG AAA (7:1),
+            // reusing the same clamp the server-colour path uses. Hue and saturation
+            // survive; only lightness moves — so the palette keeps its identity and no
+            // second set of 61 hexes has to be maintained in step with the first.
+            //
+            // SURFACES and alpha'd DECORATIVE tokens are left alone: pushing a surface
+            // "away from itself" is meaningless, and a border/shadow is defined by its
+            // alpha, not by a contrast floor. `boostsUnderIncreasedContrast` names that.
+            let isLight = traits.userInterfaceStyle == .light
+            let base: UIColor = isLight
+                ? UIColor(hexString: light).withAlphaComponent(CGFloat(lightAlpha))
+                : UIColor(hexString: dark).withAlphaComponent(CGFloat(darkAlpha))
+
+            guard traits.accessibilityContrast == .high,
+                  boostsUnderIncreasedContrast,
+                  base.cgColor.alpha >= 0.99
+            else { return base }
+
+            let surface = UIColor(hexString: isLight ? "EDF0F5" : "252B3B")   // the binding surfaces
+            return base.clamped(toContrast: 7.0, against: surface, darken: isLight)
         })
     }
 }

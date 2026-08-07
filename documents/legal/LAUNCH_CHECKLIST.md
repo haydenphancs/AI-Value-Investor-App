@@ -28,7 +28,7 @@ This file is long and most of it is already done. If you only do one thing, do #
 
 | # | Do this | Why now | Where |
 |---|---|---|---|
-| **1** | **Point `caydexinvest.com` at Railway, and add the SMTP provider's SPF/DKIM records in the same sitting** | 🔴 Email signup is a DEAD END today — Confirm email is ON but no mail is delivered. One DNS session also unblocks the legal pages, both App Store Connect URLs, and the passkey AASA fetch. | §5c + §3 |
+| **1** | **Set up Resend (or Postmark/SES) and point Supabase SMTP at it** | 🔴 Email/password signup is STILL a dead end — Confirm email is ON and Supabase's built-in mailer does not deliver. Everything else in the old item #1 is now DONE (2026-08-06): domain live on Railway, legal pages served, both ASC URLs ready, AASA fetching, mail receiving via Cloudflare Email Routing. | §5c |
 | **2** | Publish the Google OAuth consent screen (*Testing* → *In production*) | Google sign-in currently works **only for allow-listed accounts**, and refresh tokens expire after 7 days. Looks exactly like an app bug, and only after release. | §5e |
 | **3** | Purge the two copyrighted PDFs from git history | Public repo. Independent of everything else — can be done any time. | §4 |
 | **4** | Create the App Store Connect record + IAP products, set the Server Notifications URL | Needed before you can charge. The notifications URL is what stops a cancelled subscriber keeping their tier. | §6b, §7 |
@@ -37,7 +37,15 @@ This file is long and most of it is already done. If you only do one thing, do #
 **Already done, stop re-reading these:** migrations 104–113 (§5), Supabase Apple + Google
 providers and redirect URL (§5b d/e/f), the Apple capabilities — Sign in with Apple,
 Associated Domains, Push Notifications (§5b, §9), the native Google SDK and its iOS OAuth
-client (§5e), iPhone-only device support (§8).
+client (§5e), iPhone-only device support (§8), and **as of 2026-08-06** the whole domain
+sitting: `caydexinvest.com` live on Railway via Cloudflare, `/privacy` `/terms` `/support`
+serving 200 text/html, the AASA returning `application/json` with **zero** redirects, and
+`support@` / `copyright@` / `privacy@` receiving via Cloudflare Email Routing (§2, §3).
+
+**Verified live 2026-08-06**, not assumed:
+```bash
+for p in privacy terms support .well-known/apple-app-site-association; do curl -sI "https://caydexinvest.com/$p" | head -1; done
+```
 
 **Meanwhile:** use **Google sign-in** to test the app. It bypasses email confirmation entirely
 (Google addresses arrive pre-verified), so #1 does not block anything except email/password

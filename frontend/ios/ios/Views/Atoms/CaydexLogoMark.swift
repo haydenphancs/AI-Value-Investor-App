@@ -40,9 +40,17 @@ struct CaydexLogoMark: View {
     }
 
     var body: some View {
+        // Smart Invert inverts every image the app does not exempt, and this is
+        // brand art / a rendered data graphic — both are exactly what
+        // `accessibilityIgnoresInvertColors` exists for. Nothing in this app
+        // applied it before, so the opaque logo tile, the brand slogan artwork,
+        // third-party company logos and every Canvas chart inverted along with
+        // the UI, which is the one case where inverting makes the pixels WRONG
+        // rather than merely different.
         Image("CaydexLogo")
             .resizable()
             .aspectRatio(contentMode: .fill)
+            .accessibilityIgnoresInvertColors()
             .frame(width: size, height: size)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .accessibilityLabel("Caydex")

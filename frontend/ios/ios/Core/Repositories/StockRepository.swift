@@ -821,7 +821,10 @@ struct StockQuote: Codable {
     enum CodingKeys: String, CodingKey {
         case ticker = "symbol"
         case price, change
-        case changePercent = "changes_percentage"
+        // `change_percentage` is what FMP `/stable` yields after normalization. The backend
+        // ALSO emits the legacy `changes_percentage` alias, so both spellings work — but key
+        // on the current one so this does not silently break if the alias is ever tidied up.
+        case changePercent = "change_percentage"
         case open
         case high = "day_high"
         case low = "day_low"

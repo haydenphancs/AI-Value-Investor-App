@@ -48,8 +48,21 @@ def _cache_get(key: str) -> Optional[Any]:
     return value
 
 
+# Hard cap on the in-memory tier. Without it this dict grew with the number of DISTINCT
+# keys ever requested and was never pruned: `_cache_get` only deletes an entry when that
+# SAME key is read again after expiry, so a ticker fetched once and never revisited stayed
+# resident for the life of the process. Across ~17 services on a long-lived Railway
+# container that is a slow leak whose only resolution is an OOM restart — which drops every
+# in-flight report with it. Bounded LRU-ish: evict from the head (least recently WRITTEN).
+_CACHE_MAX_ENTRIES = 1024
+
+
 def _cache_set(key: str, value: Any) -> None:
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -177,7 +190,7 @@ class SignalOfConfidenceService:
         # ── In-flight deduplication ──
         if cache_key in _inflight:
             logger.info(f"Signal of confidence in-flight JOIN for {ticker}")
-            return await _inflight[cache_key]
+            return await asyncio.shield(_inflight[cache_key])
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -197,10 +210,22 @@ class SignalOfConfidenceService:
             )
 
             _cache_set(cache_key, result)
-            future.set_result(result)
+            if not future.done():
+                future.set_result(result)
             return result
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, NOT an Exception, so it skips the handler
+            # below and used to leave this future unresolved forever — every joiner attached
+            # via `await _inflight[...]` then hung for the life of the process. Reachable
+            # whenever the LEADER is a cancellable caller: a report run hitting
+            # RESEARCH_PIPELINE_TIMEOUT_SECONDS, or any pre-warm task cancelled at shutdown.
+            # Hand waiters a normal exception so they fail fast through their own error path.
+            if not future.done():
+                future.set_exception(RuntimeError("in-flight fetch was cancelled"))
+            raise
         except Exception as e:
-            future.set_exception(e)
+            if not future.done():
+                future.set_exception(e)
             raise
         finally:
             _inflight.pop(cache_key, None)

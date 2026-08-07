@@ -696,11 +696,45 @@ actor APIClient {
                     message: errorResponse.userMessage
                 )
             }
-            throw APIError.unknown(message: "HTTP \(response.statusCode)")
+            // FALL BACK TO FastAPI's `{"detail": "..."}` BEFORE giving up.
+            //
+            // ~100 backend raise sites pass a plain string detail rather than the structured
+            // `APIErrorResponse` shape (`main.py`'s HTTPException handler passes a dict
+            // through verbatim and renders anything else as `{"detail": ...}`), and this arm
+            // used to discard that message entirely and surface the literal text
+            // "HTTP 400" to the user. The live path is the account-recovery flow:
+            // `auth.py` raises `HTTPException(400, "That code is invalid or has expired.
+            // Request a new one.")`, and `ForgotPasswordView` displayed **HTTP 400**.
+            // `.unknown` already renders its message verbatim (AppError.swift:148); the bug
+            // was only ever that we passed "HTTP 400" instead of the message the backend
+            // actually wrote for the user.
+            throw APIError.unknown(
+                message: Self.detailMessage(from: data) ?? "HTTP \(response.statusCode)"
+            )
         }
     }
 
     // MARK: - Logging
+
+    /// Extract FastAPI's plain `{"detail": "..."}` message.
+    ///
+    /// The backend has TWO error shapes and both are deliberate: the structured
+    /// `{error_code, user_message, ...}` contract, and — at roughly a hundred raise sites —
+    /// a bare string detail that `main.py`'s handler renders as `{"detail": "..."}`. Only the
+    /// first was ever decoded, so every one of those hundred sites reached the user as the
+    /// literal text "HTTP 400".
+    ///
+    /// Returns nil when `detail` is absent or is NOT a string — FastAPI's own 422 validation
+    /// errors put an ARRAY there, and showing a user a serialised array of field errors is
+    /// worse than the generic fallback.
+    static func detailMessage(from data: Data) -> String? {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let detail = object["detail"] as? String
+        else { return nil }
+        let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
     private func logRequest(_ request: URLRequest, endpoint: APIEndpoint) {
         guard isDebugLoggingEnabled else { return }

@@ -43,8 +43,21 @@ def _cache_get(key: str) -> Optional[Any]:
     return value
 
 
+# Hard cap on the in-memory tier. Without it this dict grew with the number of DISTINCT
+# keys ever requested and was never pruned: `_cache_get` only deletes an entry when that
+# SAME key is read again after expiry, so a ticker fetched once and never revisited stayed
+# resident for the life of the process. Across ~17 services on a long-lived Railway
+# container that is a slow leak whose only resolution is an OOM restart — which drops every
+# in-flight report with it. Bounded LRU-ish: evict from the head (least recently WRITTEN).
+_CACHE_MAX_ENTRIES = 1024
+
+
 def _cache_set(key: str, value: Any) -> None:
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -244,7 +257,7 @@ class ProfitPowerService:
         # If another request is already fetching this ticker, wait for it
         if cache_key in _inflight:
             logger.info(f"Profit power in-flight JOIN for {ticker}")
-            return await _inflight[cache_key]
+            return await asyncio.shield(_inflight[cache_key])
 
         # Create a future so other concurrent requests can wait on us
         loop = asyncio.get_running_loop()
@@ -254,22 +267,44 @@ class ProfitPowerService:
         try:
             # ── Cache miss: build from FMP ──
             logger.info(f"Profit power cache MISS for {ticker} — fetching from FMP")
-            result, next_earnings = await self._build_profit_power(ticker)
+            result, next_earnings, degraded = await self._build_profit_power(ticker)
 
-            # Persist to Supabase in background thread (truly fire-and-forget)
-            asyncio.get_running_loop().run_in_executor(
-                None,
-                self._upsert_supabase_cache_safe,
-                ticker,
-                result,
-                next_earnings,
-            )
+            # Persist to Supabase in background thread (truly fire-and-forget) — but ONLY
+            # when the build was complete. Persisting a degraded build pins the hole for 24h
+            # and bakes it into paid reports; the 5-min in-memory tier below still absorbs
+            # the retry storm, so the cost of skipping is one extra FMP fan-out per 5 min.
+            if degraded:
+                logger.warning(
+                    "Profit power NOT persisted for %s (degraded: %s) — will rebuild after "
+                    "the 5-min in-memory TTL",
+                    ticker, ", ".join(degraded),
+                )
+            else:
+                asyncio.get_running_loop().run_in_executor(
+                    None,
+                    self._upsert_supabase_cache_safe,
+                    ticker,
+                    result,
+                    next_earnings,
+                )
 
             _cache_set(cache_key, result)
-            future.set_result(result)
+            if not future.done():
+                future.set_result(result)
             return result
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, NOT an Exception, so it skips the handler
+            # below and used to leave this future unresolved forever — every joiner attached
+            # via `await _inflight[...]` then hung for the life of the process. Reachable
+            # whenever the LEADER is a cancellable caller: a report run hitting
+            # RESEARCH_PIPELINE_TIMEOUT_SECONDS, or any pre-warm task cancelled at shutdown.
+            # Hand waiters a normal exception so they fail fast through their own error path.
+            if not future.done():
+                future.set_exception(RuntimeError("in-flight fetch was cancelled"))
+            raise
         except Exception as e:
-            future.set_exception(e)
+            if not future.done():
+                future.set_exception(e)
             raise
         finally:
             _inflight.pop(cache_key, None)
@@ -345,7 +380,7 @@ class ProfitPowerService:
 
     async def _build_profit_power(
         self, ticker: str
-    ) -> Tuple[ProfitPowerResponse, Optional[str]]:
+    ) -> Tuple[ProfitPowerResponse, Optional[str], list]:
         """Fetch income + cash flow, compute margins, look up sector benchmarks.
         Returns (response, next_earnings_date).
         """
@@ -368,22 +403,33 @@ class ProfitPowerService:
             return_exceptions=True,
         )
 
+        # Legs that failed and were replaced by an empty default. A build missing any of
+        # these still RENDERS — which is why it used to be persisted — but writing it to the
+        # 24-hour Supabase tier pins the hole for a full day and freezes it into every paid
+        # report generated in that window. Same reasoning as holders_service.
+        degraded: list[str] = []
+
         # Handle failures gracefully
         if isinstance(profile, Exception):
             logger.warning(f"Profile fetch failed for {ticker}: {profile}")
             profile = {}
+            degraded.append("profile")
         if isinstance(annual_income, Exception):
             logger.error(f"Annual income fetch failed for {ticker}: {annual_income}")
             annual_income = []
+            degraded.append("annual_income")
         if isinstance(quarterly_income, Exception):
             logger.error(f"Quarterly income fetch failed for {ticker}: {quarterly_income}")
             quarterly_income = []
+            degraded.append("quarterly_income")
         if isinstance(annual_cashflow, Exception):
             logger.error(f"Annual cash flow fetch failed for {ticker}: {annual_cashflow}")
             annual_cashflow = []
+            degraded.append("annual_cashflow")
         if isinstance(quarterly_cashflow, Exception):
             logger.error(f"Quarterly cash flow fetch failed for {ticker}: {quarterly_cashflow}")
             quarterly_cashflow = []
+            degraded.append("quarterly_cashflow")
         if isinstance(ec_raw, Exception):
             logger.warning(f"Earnings calendar fetch failed for {ticker}: {ec_raw}")
             ec_raw = []
@@ -489,7 +535,7 @@ class ProfitPowerService:
             ec_raw if isinstance(ec_raw, list) else []
         )
 
-        return response, next_earnings
+        return response, next_earnings, degraded
 
 
 # ── Singleton ─────────────────────────────────────────────────────

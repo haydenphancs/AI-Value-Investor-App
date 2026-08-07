@@ -83,6 +83,7 @@ struct CompanyLogoView: View {
                             .padding(size * 0.16)
                             .frame(width: size, height: size)
                             .background(AppColors.mediaSurface)
+                            .accessibilityIgnoresInvertColors()
                             .clipShape(RoundedRectangle(cornerRadius: size * 0.25))
                     } else {
                         initialsView

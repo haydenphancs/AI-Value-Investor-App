@@ -99,9 +99,22 @@ struct ProfileAvatarView: View {
 ///
 /// Since the artwork cannot be made transparent, the fix is to stop fighting it:
 /// paint the backdrop to MATCH the asset so the square has no edge, and treat
-/// the screen as a brand ident (the same call made for the launch screen, which
-/// is pinned to a fixed dark colour for the same reason). The close button is
-/// pinned to fixed light ink because it now always sits on black.
+/// the screen as a brand ident. The close button is pinned to fixed light ink
+/// because it now always sits on black.
+///
+/// (This used to cite the launch screen as precedent, "pinned to a fixed dark colour
+/// for the same reason". It is not pinned: `LaunchBackground.colorset` carries a real
+/// light variant, #F4F5F8. The claim was stale and was being used to justify the hard
+/// black here, so it is corrected rather than repeated.)
+///
+/// STATUS BAR: `.environment(\.colorScheme, .dark)` below styles the view tree and
+/// NOTHING ELSE — the status bar is driven by the window's TRAIT, not by a SwiftUI
+/// environment value. On a black backdrop in Light mode the clock and battery
+/// therefore rendered dark-on-black. `.toolbarColorScheme(.dark, for: .navigationBar)`
+/// does not reach it either (there is no navigation bar here), so the cover hides the
+/// bar outright: nothing in this ident needs the time, and hiding is the one fix that
+/// cannot be undone by `AppearanceManager.apply()` re-stamping the presented chain on
+/// the next `didBecomeActive`.
 ///
 /// If a light-appearance slogan asset is ever produced, revert the backdrop to
 /// `AppColors.background` and add the variant to the imageset — nothing else
@@ -121,6 +134,7 @@ struct CaydexSloganView: View {
             Image("CaydexSlogan")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
+                .accessibilityIgnoresInvertColors()
                 .padding(.horizontal, AppSpacing.xxxl)
 
             // Close button
@@ -152,6 +166,7 @@ struct CaydexSloganView: View {
         // fight `AppearanceManager` and the root modifier in iosApp.swift. The
         // environment value flows DOWN only, which is all that is wanted here:
         // light ink on this screen's black brand backdrop.
+        .statusBarHidden(true)
         .environment(\.colorScheme, .dark)
     }
 }

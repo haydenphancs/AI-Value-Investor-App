@@ -171,7 +171,7 @@ class PriceCatalystService:
 
         if ctx_key in _inflight:
             try:
-                return await _inflight[ctx_key]
+                return await asyncio.shield(_inflight[ctx_key])
             except Exception:
                 return None
 
@@ -188,7 +188,8 @@ class PriceCatalystService:
                     sources=[], raw_response=None, search_queries=[],
                     tokens_used=None, model_version=None,
                 )
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
                 return None
 
             result = await self._do_grounded(focal, change_pct, window_label)
@@ -203,7 +204,8 @@ class PriceCatalystService:
             )
 
             if result["status"] == "gemini_error":
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
                 return None
 
             served = {
@@ -216,19 +218,22 @@ class PriceCatalystService:
                 window_label, change_pct,
             )
             _mem_set(ctx_key, served)
-            future.set_result(served)
+            if not future.done():
+                future.set_result(served)
             return served
         except Exception as exc:
             logger.exception(
                 "price_catalyst: unhandled error for %s: %s", focal, exc,
             )
             if not future.done():
-                future.set_exception(exc)
+                if not future.done():
+                    future.set_exception(exc)
             return None
         finally:
             _inflight.pop(ctx_key, None)
             if not future.done():
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
 
     # ── Grounded call ──────────────────────────────────────────────────
 

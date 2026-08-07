@@ -129,6 +129,9 @@ struct iosApp: App {
                     #if DEBUG
                     AppearanceProbe.dump("task-post")
                     Task { await AppearanceProbe.runTransitionSelfTestIfRequested() }
+                    // Measures whether `Font.system(size:)` — the construction all 40
+                    // AppTypography tokens use — responds to Dynamic Type at all.
+                    TypographyProbe.dumpDynamicTypeScaling()
                     #endif
 
                     #if DEBUG
@@ -234,6 +237,31 @@ struct iosApp: App {
         UINavigationBar.appearance().standardAppearance = navAppearance
         UINavigationBar.appearance().compactAppearance = navAppearance
         UINavigationBar.appearance().scrollEdgeAppearance = navAppearance
+
+        // Tab bar. `UINavigationBarAppearance` was the ONLY UIKit proxy configured, and
+        // the tab bar is the second-largest piece of persistent chrome in the app — it
+        // took whatever a SwiftUI view happened to supply, with `UITabBarAppearance`
+        // untouched. On iOS 15+ an unconfigured `scrollEdgeAppearance` is TRANSPARENT,
+        // so content scrolling under the bar showed through it.
+        //
+        // Same discipline as above: read the tokens, never re-declare their hexes. They
+        // are dynamic `UIColor`s underneath, so they keep resolving per-trait through
+        // UIKit and follow the window override.
+        let tabAppearance = UITabBarAppearance()
+        tabAppearance.configureWithOpaqueBackground()
+        tabAppearance.backgroundColor = UIColor(AppColors.tabBarBackground)
+
+        for item in [tabAppearance.stackedLayoutAppearance,
+                     tabAppearance.inlineLayoutAppearance,
+                     tabAppearance.compactInlineLayoutAppearance] {
+            item.normal.iconColor = UIColor(AppColors.textMuted)
+            item.normal.titleTextAttributes = [.foregroundColor: UIColor(AppColors.textMuted)]
+            item.selected.iconColor = UIColor(AppColors.primaryBlue)
+            item.selected.titleTextAttributes = [.foregroundColor: UIColor(AppColors.primaryBlue)]
+        }
+
+        UITabBar.appearance().standardAppearance = tabAppearance
+        UITabBar.appearance().scrollEdgeAppearance = tabAppearance
     }
 }
 
@@ -243,6 +271,22 @@ struct iosApp: App {
 struct RootView: View {
     @Environment(AppState.self) private var appState
     @State private var appLock = AppLockManager.shared
+
+    /// Read so the tree re-evaluates when the user's text size changes. NOT debug-only,
+    /// unlike `colorScheme` below.
+    ///
+    /// `AppTypography`'s tokens are computed `static var`s that resolve through
+    /// `UIFontMetrics` against the CURRENT content size category — so they produce the
+    /// right size whenever a body runs, but nothing would make a body run. A view that
+    /// only calls `.font(AppTypography.body)` declares no dependency on the type size, so
+    /// SwiftUI has no reason to re-render it and the app would keep the sizes it launched
+    /// with until something unrelated invalidated the view.
+    ///
+    /// Reading the value HERE puts that dependency at the root, so the whole tree
+    /// re-evaluates once on a change. Deliberately not `.id(dynamicTypeSize)`, which would
+    /// also work but would tear down and rebuild every view — dropping navigation state
+    /// and scroll position because the user changed their text size.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     #if DEBUG
     /// Read only to drive the DEBUG appearance probe below. Nothing observes trait
     /// changes otherwise (no `traitCollectionDidChange`, no `registerForTraitChanges`),
@@ -283,24 +327,36 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            switch appState.auth.status {
-            case .unknown, .loading:
-                // Loading/splash screen
+            // ONE branch renders RootContainerView, for all three signed-in/guest/restoring
+            // states. This is a structural-identity requirement, not a style preference.
+            //
+            // SwiftUI gives each arm of a `switch` in a ViewBuilder its OWN identity
+            // (`_ConditionalContent`). `.authenticated` used to be a separate arm from
+            // `.unauthenticated, .restoring` even though both returned `RootContainerView()`,
+            // so every auth transition swapped branches and SwiftUI tore the entire tree down
+            // and rebuilt it. Signing in therefore reset the selected tab, every
+            // NavigationStack's path, and every tab ViewModel's @StateObject — including the
+            // ticker screen the user was reading when they were asked to sign in. It reads as
+            // "the app threw me out and lost my place", and it fires on the single most
+            // important conversion moment in the product.
+            //
+            // Same family as the `.loading`-destroys-the-sign-in-screen bug: the auth state
+            // machine was right, the VIEW IDENTITY was wrong.
+            //
+            // Keep `.unknown`/`.loading` separate — that one SHOULD be a different view.
+            if appState.auth.status == .unknown || appState.auth.status == .loading {
+                // Launch / restore only. Never set from a rendered screen: doing so swaps the
+                // root out mid-request and takes the presenting sheet with it.
                 SplashView()
-
-            case .unauthenticated, .restoring:
-                // Guest-first BY DESIGN: the app is fully usable signed-out.
-                // Requests without a Bearer token fall back to the backend
-                // GUEST_USER_ID; sign-in is offered from the Account screen and
-                // unlocks real per-user profile / credits / tier / upgrade.
+            } else {
+                // Guest-first BY DESIGN: the app is fully usable signed-out. Requests without
+                // a Bearer token fall back to the backend GUEST_USER_ID; sign-in is offered
+                // from the Account screen and unlocks real per-user profile / credits / tier.
                 //
-                // `.restoring` renders the SAME container, deliberately. We hold a credential we
-                // could not validate — on the wire that is a guest, so showing guest content is
-                // honest. Sending it to SplashView instead would trade a usable app for a
-                // spinner on exactly the flaky networks where restore takes longest.
-                RootContainerView()
-
-            case .authenticated:
+                // `.restoring` renders the SAME container, deliberately. We hold a credential
+                // we could not validate — on the wire that is a guest, so showing guest
+                // content is honest. Sending it to SplashView instead would trade a usable
+                // app for a spinner on exactly the flaky networks where restore takes longest.
                 RootContainerView()
             }
         }

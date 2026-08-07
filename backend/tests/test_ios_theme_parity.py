@@ -138,7 +138,13 @@ _DECL = re.compile(
     r'static let (\w+) = Color\(\s*lightHex:\s*"([0-9A-Fa-f]{3,8})"\s*'
     r'(?:,\s*lightAlpha:\s*([0-9.]+)\s*)?'
     r',\s*darkHex:\s*"([0-9A-Fa-f]{3,8})"\s*'
-    r'(?:,\s*darkAlpha:\s*([0-9.]+)\s*)?\)'
+    r'(?:,\s*darkAlpha:\s*([0-9.]+)\s*)?'
+    # Trailing arguments after the four colour values — `boostsUnderIncreasedContrast:`
+    # today, whatever the next axis needs later. Anchoring on `\)` right after darkAlpha
+    # silently DROPPED the 14 tokens that opted out of the Increase Contrast boost, and
+    # `test_token_declaration_scanner_is_not_vacuous` is what caught it: they vanished
+    # from the parse while every contrast assertion still passed on the remaining 47.
+    r'(?:,\s*\w+:\s*[^),]+\s*)*\)'
 )
 
 _SPEC = re.compile(

@@ -229,6 +229,29 @@ async def get_ticker_report(
         service = TickerReportService()
         report = await service.generate_fresh_report(ticker, persona)
 
+        # A DEGRADED report is a non-delivery too. When Gemini is unavailable (quota circuit
+        # open, 429s exhausted, 5xx) Stage A falls back to an empty shell and every Stage B
+        # narrative uses its sentinel. The result still validates, so it used to be charged
+        # 20 credits and returned as a success — the user paid full price for a blank report.
+        # Returning an error here leaves `delivered` False, so the `finally` refunds.
+        # `generate_fresh_report` has already declined to cache it.
+        degraded = report.get("_degraded") if isinstance(report, dict) else None
+        if degraded:
+            logger.warning(
+                "Degraded report for %s/%s (%s) — refunding rather than delivering a shell",
+                ticker, persona, degraded,
+            )
+            return make_error_response(
+                ErrorCode.GEMINI_UNAVAILABLE,
+                message=f"report generation degraded for {ticker}/{persona}: {degraded}",
+                status_code=503,
+                user_message=(
+                    "Analysis is temporarily unavailable. You have not been charged — "
+                    "please try again in a few minutes."
+                ),
+                action="retry",
+            )
+
         # A malformed report is a non-delivery → the finally refunds (the user
         # must not pay for a report they can't use).
         result, err = _validate_report(report, ticker, persona)

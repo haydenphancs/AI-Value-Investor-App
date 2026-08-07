@@ -110,6 +110,45 @@ def _good_hist():
     )
 
 
+def test_build_widget_reads_the_stable_singular_percent_key():
+    """THE regression this file missed for months.
+
+    FMP `/stable` returns `changePercentage` (SINGULAR). The widget read only the plural
+    `changesPercentage` — the dead `/api/v3` spelling — so `or 0` fired on every equity and
+    the card printed "+0.00%". Worse than a missing number: iOS colours on
+    `changePercent >= 0` (ChatConversationModels.swift), so on a down day the card painted
+    GREEN and showed "+0.00%" beside a negative dollar change. Two contradictory numbers on an
+    AI-authored, credit-charged financial card.
+
+    It survived because every fixture in this file used the plural, so the test suite and the
+    production payload disagreed and only the fixtures were ever checked.
+    """
+    quote = {
+        "name": "NVIDIA", "price": 171.30, "change": -9.40, "changePercentage": -5.20,
+        "dayHigh": 181.0, "dayLow": 170.0, "volume": 1_000, "marketCap": 1.0e12,
+    }
+    w = ChatService._build_stock_widget("NVDA", quote, _good_hist(), 900, True)
+    assert w["change_percent"] == -5.20, "singular changePercentage was ignored"
+    # And the two numbers must agree in sign, which is the user-visible defect.
+    assert (w["change"] < 0) == (w["change_percent"] < 0)
+
+
+def test_build_widget_still_accepts_the_legacy_plural_key():
+    """Non-equity quotes can still carry the plural; the fix must read both."""
+    quote = {"name": "X", "price": 1.0, "change": 0.5, "changesPercentage": 2.0}
+    w = ChatService._build_stock_widget("X", quote, _good_hist(), 0, True)
+    assert w["change_percent"] == 2.0
+
+
+def test_singular_wins_when_both_keys_are_present():
+    quote = {
+        "name": "X", "price": 1.0, "change": 0.5,
+        "changePercentage": 3.0, "changesPercentage": 99.0,
+    }
+    w = ChatService._build_stock_widget("X", quote, _good_hist(), 0, True)
+    assert w["change_percent"] == 3.0
+
+
 def test_build_widget_happy_path():
     quote = {
         "name": "Apple Inc.", "price": 150.0, "change": 1.5, "changesPercentage": 1.0,

@@ -270,7 +270,7 @@ class CompetitorIntelService:
         # ── Inflight dedup ──
         if cache_key in _inflight:
             try:
-                return await _inflight[cache_key]
+                return await asyncio.shield(_inflight[cache_key])
             except Exception:
                 return None
 
@@ -287,7 +287,8 @@ class CompetitorIntelService:
                 await asyncio.to_thread(
                     self._write_audit_row, run_id or str(uuid.uuid4()), result,
                 )
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
                 return None
 
             # ── Gemini extraction + validation ──
@@ -301,16 +302,20 @@ class CompetitorIntelService:
                     result.source_labels, result.model_version,
                 )
                 _mem_set(focal, result.validated_tickers)
-                future.set_result(result.validated_tickers)
+                if not future.done():
+                    future.set_result(result.validated_tickers)
                 return result.validated_tickers
 
-            future.set_result(None)
+            if not future.done():
+
+                future.set_result(None)
             return None
         except Exception as exc:
             logger.exception(
                 "competitor_intel: unhandled error for %s: %s", focal, exc,
             )
-            future.set_exception(exc)
+            if not future.done():
+                future.set_exception(exc)
             return None
         finally:
             _inflight.pop(cache_key, None)
@@ -320,7 +325,8 @@ class CompetitorIntelService:
             # result so they fall back to the Phase-1 deterministic path
             # instead of hanging on an orphaned future forever.
             if not future.done():
-                future.set_result(None)
+                if not future.done():
+                    future.set_result(None)
 
     async def refresh_top_tickers(
         self,

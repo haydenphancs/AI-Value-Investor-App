@@ -33,6 +33,12 @@ from app.services.social_mentions_service import get_social_mentions_service
 
 logger = logging.getLogger(__name__)
 
+# `ticker_news_cache` is owned by NewsCacheService; borrow ITS ttl so the two writers cannot
+# drift. A longer value here silently freezes the News tab (see `_persist_articles`).
+from app.services.news_cache_service import CACHE_TTL_HOURS as _NEWS_CACHE_TTL_HOURS
+
+_NEWS_CACHE_TTL = timedelta(hours=_NEWS_CACHE_TTL_HOURS)
+
 # ── In-memory cache (same pattern as analyst_service) ─────────────
 
 _cache: Dict[str, Tuple[float, Any]] = {}
@@ -53,8 +59,21 @@ def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
     return value
 
 
+# Hard cap on the in-memory tier. Without it this dict grew with the number of DISTINCT
+# keys ever requested and was never pruned: `_cache_get` only deletes an entry when that
+# SAME key is read again after expiry, so a ticker fetched once and never revisited stayed
+# resident for the life of the process. Across ~17 services on a long-lived Railway
+# container that is a slow leak whose only resolution is an OOM restart — which drops every
+# in-flight report with it. Bounded LRU-ish: evict from the head (least recently WRITTEN).
+_CACHE_MAX_ENTRIES = 1024
+
+
 def _cache_set(key: str, value: Any):
+    _cache.pop(key, None)
     _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
 
 
 # ── Keyword-based sentiment classifier ───────────────────────────
@@ -389,9 +408,28 @@ class SentimentService:
     def _persist_articles(
         self, ticker: str, articles: List[Dict[str, Any]]
     ):
-        """Upsert FMP articles into ticker_news_cache with sentiment."""
+        """Upsert FMP articles into ticker_news_cache.
+
+        ⚠️ `ticker_news_cache` is OWNED BY `NewsCacheService`, which runs a 6-hour TTL and
+        fills `sentiment` / `sentiment_confidence` from Gemini. This method writes the same
+        rows — same table, same `(ticker, external_id)` conflict key, `external_id` being the
+        article URL in both — so it used to do two destructive things on every sentiment
+        request:
+
+          1. Stamp `expires_at` **14 days** out. `NewsCacheService._get_cached` gates
+             freshness solely on `.gte("expires_at", now)`, so those rows read as fresh for a
+             fortnight and the News tab simply STOPPED refreshing for that ticker.
+          2. Overwrite the Gemini-derived `sentiment` with a keyword classifier's guess —
+             destroying AI enrichment the user's credits paid for, and replacing it with
+             something materially worse.
+
+        Both are fixed by matching the owner's TTL and not touching the AI columns. The
+        keyword classification is still computed for THIS response; it is just never
+        persisted over the owner's data.
+        """
         now = datetime.now(timezone.utc)
-        expires = (now + timedelta(days=14)).isoformat()
+        # Match NewsCacheService's 6-hour TTL. Anything longer freezes the News tab.
+        expires = (now + _NEWS_CACHE_TTL).isoformat()
         rows = []
 
         for a in articles:
@@ -414,8 +452,11 @@ class SentimentService:
                 "external_id": url,  # Use URL as dedup key
                 "headline": title[:500],
                 "summary": (text or "")[:2000],
-                "sentiment": sentiment_db,
-                "sentiment_confidence": confidence,
+                # `sentiment` / `sentiment_confidence` are DELIBERATELY NOT WRITTEN.
+                # NewsCacheService fills them from Gemini and the user's credits paid for
+                # that; overwriting them with `_classify_headline`'s keyword guess destroyed
+                # the enrichment and replaced it with something materially worse. The
+                # classification above is still used for THIS response.
                 "source_name": a.get("site") or a.get("source") or "",
                 "published_at": published,
                 "thumbnail_url": a.get("image") or "",

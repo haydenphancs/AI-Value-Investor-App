@@ -98,7 +98,21 @@ final class PushNotificationManager {
     /// Awaited by `AuthService.signOut()` BEFORE the token is cleared, because the call needs
     /// the session that is being ended. Best-effort: a failure must never block sign-out.
     func unregisterCurrentDevice() async {
-        guard let token = registeredToken else { return }
+        // `?? pendingToken` is what makes this work at all on the deliberate sign-out path,
+        // and it is not defensive padding — it fixes a deterministic ordering bug.
+        //
+        // `AppState.signOut()` DEFERS the backend logout into a `Task` and then runs the rest
+        // of itself synchronously, reaching `discardDataForEndedSession()` →
+        // `clearLocalRegistrationForEndedSession()`, which nils `registeredToken` and stashes
+        // it in `pendingToken`. So by the time this runs, the guard it used to have had
+        // already failed and `DELETE /users/me/devices` was NEVER SENT on a normal sign-out.
+        // The server kept the token bound to the account, and a signed-out phone carried on
+        // receiving that account's alerts.
+        //
+        // Reading the stash instead of racing the ordering means this is correct whichever
+        // side wins. `pendingToken` is intentionally left in place: it is the device's APNs
+        // token, still valid, and re-registration on the next sign-in wants it.
+        guard let token = registeredToken ?? pendingToken else { return }
         do {
             _ = try await repository.unregisterDevice(token: token)
             registeredToken = nil

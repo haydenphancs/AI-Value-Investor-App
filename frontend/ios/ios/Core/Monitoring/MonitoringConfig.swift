@@ -87,12 +87,59 @@ enum MonitoringConfig {
 /// Starts error monitoring as early as possible in the app lifecycle. Safe to
 /// call unconditionally: it is a no-op when the Sentry package is absent OR the
 /// DSN is empty, so it never affects local dev or an un-provisioned build.
+/// True only in a Debug configuration. Deliberately a runtime constant rather than an
+/// `#if DEBUG … #else … #endif` wrapped around the whole function body.
+///
+/// The `#else` form works, but it excludes the ENTIRE Sentry integration from Debug
+/// compilation — and `sentry-cocoa` is a real linked SPM dependency, so `SentrySDK.start`,
+/// the `beforeSend` closure and `event.exceptions` would stop being type-checked on every
+/// dev build. A sentry-cocoa API change would then first surface at archive/TestFlight time,
+/// which is the worst possible moment to discover it, and nothing in CI compiles Release
+/// Swift. A `Bool` the optimizer folds keeps the code compiled in both configurations while
+/// producing the same Release codegen.
+#if DEBUG
+private let isDebugBuild = true
+#else
+private let isDebugBuild = false
+#endif
+
 func startErrorMonitoring() {
+    // ⛔️ NEVER report from a Debug build.
+    //
+    // The DSN points at the PRODUCTION `caydex-apple-ios` project, and the Discord alert is
+    // "A new issue is created" on ALL environments — so every simulator run pinged Discord and
+    // filed an issue. An `environment=development` TAG was not enough: the events still land in
+    // the production project, still fire the alert, still burn quota, and still have to be
+    // triaged by a human who does not yet know they are noise.
+    //
+    // Measured 2026-08-07: 23 unresolved issues in 24h, essentially all of them local. Two
+    // examples of why Debug capture can only ever be noise:
+    //
+    //   * "Fatal App Hang" whose main thread is `_swift_getGenericMetadata` under
+    //     `LockingConcurrentMap` inside `ViewLayoutEngine.explicitAlignment` — Debug builds do
+    //     not pre-specialize generics, so the first SwiftUI layout pass instantiates metadata
+    //     at runtime. On a simulator that alone exceeds the 2s watchdog. It cannot happen in
+    //     an optimized Release build on real hardware.
+    //   * `ThemeContrastAudit.swift` "Fatal error: Theme contrast regression" — that audit is
+    //     `#if DEBUG` ONLY and calls `assertionFailure`, which traps under `-Onone` and is
+    //     compiled out at `-O`, so it is doubly unreachable for a user. It filed 5 production
+    //     issues. (The runtime prints "Fatal error:" for a trapped `assertionFailure`; the
+    //     source really does say `assertionFailure`, at `ThemeContrastAudit.swift:172`.)
+    //
+    // In Debug you already have Xcode, the console and the debugger; Sentry adds nothing.
+    // Gating on the build CONFIGURATION (rather than the backend's `ENVIRONMENT ==
+    // "production"`) keeps BOTH TestFlight and App Store builds reporting, since those are
+    // Release-configured — which is where real users are, and the only place a hang means
+    // anything.
+    guard !isDebugBuild else {
+        #if DEBUG
+        print("🟡 [Sentry] Debug build — error monitoring intentionally disabled (see MonitoringConfig)")
+        #endif
+        return
+    }
+
     #if canImport(Sentry)
     guard !MonitoringConfig.sentryDSN.isEmpty else {
-        #if DEBUG
-        print("🟡 [Sentry] DSN empty — error monitoring inert")
-        #endif
         return
     }
 
@@ -153,14 +200,9 @@ func startErrorMonitoring() {
         }
     }
 
-    #if DEBUG
-    print("🟢 [Sentry] error monitoring enabled (environment=\(MonitoringConfig.environmentName))")
-    #endif
     #else
-    // Sentry package not yet linked — nothing to start (expected until the SPM
-    // package is added). Kept as a no-op so callers never need a compile guard.
-    #if DEBUG
-    print("🟡 [Sentry] package not linked — error monitoring unavailable")
-    #endif
+    // Sentry package not yet linked — nothing to start. Kept as a no-op so callers never
+    // need a compile guard. (`sentry-cocoa` IS linked today, so this branch is not taken;
+    // it exists so removing the package cannot break the build.)
     #endif
 }

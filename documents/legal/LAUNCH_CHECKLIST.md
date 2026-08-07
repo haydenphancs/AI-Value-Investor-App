@@ -34,7 +34,7 @@ This file is long and most of it is already done. If you only do one thing, do #
 | **4** | Create the App Store Connect record + IAP products, set the Server Notifications URL | Needed before you can charge. The notifications URL is what stops a cancelled subscriber keeping their tier. | §6b, §7 |
 | **5** | Ask FMP and CoinGecko about commercial redistribution | Free to ask, slow to answer — start the clock early. | §6 |
 
-**Already done, stop re-reading these:** migrations 104–113 (§5), Supabase Apple + Google
+**Already done, stop re-reading these:** migrations 103–115 — ALL of them (§5), Supabase Apple + Google
 providers and redirect URL (§5b d/e/f), the Apple capabilities — Sign in with Apple,
 Associated Domains, Push Notifications (§5b, §9), the native Google SDK and its iOS OAuth
 client (§5e), iPhone-only device support (§8), and **as of 2026-08-06** the whole domain
@@ -139,34 +139,56 @@ Three addresses are now promised in the legal documents and must actually receiv
 
 Both files are final and dated **July 29, 2026**.
 
-- [ ] Host `documents/legal/privacy.html` at `https://caydexinvest.com/privacy`
-- [ ] Host `documents/legal/terms.html` at `https://caydexinvest.com/terms`
-- [ ] Stand up a **support page** at `https://caydexinvest.com/support` — App Store Connect
+- [x] Host `documents/legal/privacy.html` at `https://caydexinvest.com/privacy`
+- [x] Host `documents/legal/terms.html` at `https://caydexinvest.com/terms`
+- [x] Stand up a **support page** at `https://caydexinvest.com/support` — App Store Connect
       requires a Support URL and yours is currently `mailto:`-only. A page with a contact
       form or just the support email plus a short FAQ is enough
-- [ ] Verify all three load over HTTPS with no mixed content
+- [x] Verify all three load over HTTPS with no mixed content
+      *(all four verified live 2026-08-07: 200 `text/html`, zero redirects. The START HERE
+      block above has claimed this since 2026-08-06 — §3 was simply never back-ticked, which
+      is exactly the "unticked boxes that are secretly done" failure the preamble warns about.)*
 
 The in-app native versions (`PrivacyPolicyView`, `TermsOfUseView`) mirror the hosted text.
 If you edit one, edit both — I've kept them in parity.
 
 ---
 
-## 4. Purge the copyrighted PDFs from git 🔴 DO THIS TODAY
+## 4. Purge git history 🔴 — SCOPE CORRECTED 2026-08-07
 
-Two complete copyrighted books are in your **public** repo history. Script is ready and
-verified against your repo (0 forks, `git-filter-repo` installed).
+**Full runbook: [GIT_HISTORY_PURGE_RUNBOOK.md](GIT_HISTORY_PURGE_RUNBOOK.md).** Read that, not
+this summary — it has the pre-flight safety check, the exact `git-filter-repo` invocation, and
+the trap about `documents/Books`.
 
-- [ ] Flip the repo **private** (Settings → Danger Zone → Change visibility)
-- [ ] Run the prepared script (it backs up to a bundle first and refuses to push if any
-      PDF blob survives)
-- [ ] Flip back to **public**
+This section used to scope the job as "the two copyrighted PDFs". That is off by three orders
+of magnitude. `.git` is **1.0 GB**, and the PDFs are a few MB of it. Measured 2026-08-07:
+
+| Path | Bytes in history |
+|---|---|
+| `backend/data/book_audio` | **702 MB** |
+| `separate_project/stocks_detector` | 367 MB |
+| `backend/data/journey_audio` | 83 MB |
+| `backend/data/money_moves_audio` | 45 MB |
+| `*_gemini_bak` | 54 MB |
+| The PDFs | a few MB |
+
+⚠️ **The narration audio is NOT a copyright problem** — it narrates the app's own ~500-word
+`documents/Books/core N.txt` summaries (~150 wpm against a 58-minute clip), not the books. It
+is a *size* problem. The two PDFs remain a genuine copyright item and ride the same rewrite.
+
+✅ **Pre-flight already verified:** all 10 book clips, 207 journey clips and 13 money-moves
+clips are in Supabase Storage, so the repo copies are redundant and recoverable. Re-check
+before running (command in the runbook).
+
+- [ ] Run the runbook (back up first — it rewrites every commit)
+- [ ] Force-push, then delete and re-clone every other copy of the repo
 - [ ] Email GitHub Support to purge cached views — old blobs stay reachable by direct
       commit SHA until garbage collection
-- [ ] Move the source PDFs outside the repo, or delete them
+- [ ] Confirm `du -sh .git` is well under 100 MB, and both gates still pass
 
 ---
 
-## 5. Apply the pending migrations — ✅ 104–111 ALREADY APPLIED (corrected 2026-08-05)
+## 5. Migrations — ✅ 103–115 ALL APPLIED, NONE PENDING (re-verified 2026-08-07)
 
 **This section used to list six migrations as pending, with alarming consequences attached.
 They were all already applied.** Corrected after checking every one against
@@ -191,47 +213,78 @@ which is exactly what 108/110/111 do and cannot happen by accident.
 that deploying their code without the migration makes *every guest INSERT fail the FK check*,
 and the backend is already deployed. Worth knowing they are fine rather than assuming.
 
-### Still to apply
+### Migrations: all applied — but one ACTION remains
 
-- [ ] **103_persona_style_names.sql** — the only one from the original list still unverified,
-      because it is a data `UPDATE` on `agent_personas` rows and therefore invisible in a
-      schema-only dump. Check it directly:
+> **Re-verified 2026-08-07 against a fresh `schema_snapshot.sql`.** The previous dump was from
+> 2026-08-04 and predated 112–115, so it could not answer for any of them; this section listed
+> three migrations as pending that were all already applied. **103–115 are now all applied and
+> nothing is pending.** The remaining work below is a data change and an env var, not DDL.
+
+- [x] **103_persona_style_names.sql** — applied. *(verified live 2026-08-07: all five active
+      personas carry style names, no real investor names.)* Real names would be an App Store
+      5.2.1 risk. **Do not replay 043 or 074** — both revert the names via
+      `ON CONFLICT DO UPDATE`, so this can regress without anyone touching 103.
+      To re-check (this is a data `UPDATE`, invisible to a schema-only dump):
       ```sql
-      select persona_key, display_name from agent_personas order by persona_key;
+      select key, name from public.agent_personas order by key;
       ```
-      If any row still shows a real investor's name, apply it — real names in the app are an
-      App Store 5.2.1 risk. Each statement should report `UPDATE 1`; `UPDATE 0` means the key
-      is missing and that persona silently kept its old name. **Do not replay 043 or 074
-      afterwards** — both revert the names via `ON CONFLICT DO UPDATE`. No rush window: the
-      iOS app decodes old labels, new labels, and backend keys.
+      ⚠️ The query printed here previously was `select persona_key, display_name …`, which
+      **errors** — `agent_personas` has no such columns (`schema_snapshot.sql`, and
+      `103_persona_style_names.sql:42-45` itself writes `SET name = … WHERE key = …`). Anyone
+      who ran it saw a failure and could reasonably have read that as "not applied".
 
-- [ ] **112_grant_tier_upgrade.sql** — 🔴 **required before you charge anyone.** Fixes a
-      mid-month upgrade delivering **zero credits**: `ensure_credit_period` only grants at the
-      monthly boundary, so buying Pro on the 10th flipped `users.tier` and left the balance
-      untouched — money taken, next tap returns 402, for up to four weeks. Adds a
-      `grant_tier_upgrade` RPC that grants on the tier *transition*, idempotent by
-      construction so `Transaction.updates` replays cannot farm credits, and never clawing
-      back on a downgrade.
-      Safe either order: without it the RPC 404s, the failure is logged, and credits land at
-      the next monthly reset exactly as they do today.
+- [x] **112_grant_tier_upgrade.sql** — applied *(verified live 2026-08-07)*. Fixed a mid-month
+      upgrade delivering **zero credits**: `ensure_credit_period` only grants at the monthly
+      boundary, so buying Pro on the 10th flipped `users.tier` and left the balance untouched —
+      money taken, next tap returns 402, for up to four weeks. The `grant_tier_upgrade` RPC
+      grants on the tier *transition*, idempotent by construction so `Transaction.updates`
+      replays cannot farm credits, and never claws back on a downgrade.
       **One product decision is baked in** — `used` is preserved, so a Free user who spent 30
-      credits and upgrades has 1170 available rather than 1200 ("Pro grants 1200 per period,
-      you already used 30 of it"). Zeroing `used` is a one-word change documented in the
-      migration header.
+      credits and upgrades has 1170 available rather than 1200. Zeroing `used` is a one-word
+      change documented in the migration header.
 
-- [ ] **113_users_is_admin.sql** — 🔴 closes a privilege escalation. `admin.py` authorized on a
-      hardcoded email allowlist, and an email claim is not a credential: Supabase auto-sets
-      `email_confirmed_at` while "Confirm email" is off (§5b(b), still unticked), so
-      registering `admin@caydexinvest.com` — an address nobody holds, since §2 is unticked
-      too — yielded a real session and every admin route. Authorization now reads
-      `users.is_admin`, which registration cannot set.
-      Fails closed: until applied, admin routes answer 403. **After applying, verify the right
-      row was flagged:**
+- [x] **113_users_is_admin.sql** — applied *(verified live 2026-08-07)*. Closed a privilege
+      escalation: `admin.py` authorized on a hardcoded email allowlist, and an email claim is
+      not a credential — Supabase auto-sets `email_confirmed_at` while "Confirm email" is off
+      (§5b(b), still unticked), so registering `admin@caydexinvest.com` — an address nobody
+      holds, since §2 is unticked too — yielded a real session and every admin route.
+      Authorization now reads `users.is_admin`, which registration cannot set.
+
+- [ ] 🔴 **Flag your own account as admin — `is_admin` currently matches ZERO rows.**
+      113 is applied and fails closed (`admin.py:64-66` returns only when
+      `user.get("is_admin") is True`), so **every admin route answers 403 for every signed-in
+      account today, including yours.** The escalation is closed; so is your own door.
       ```sql
       select id, email, is_admin, created_at from public.users where is_admin;
+      -- verified 2026-08-07: (0 rows)
+
+      update public.users set is_admin = true where email = '<your real address>';
+      select id, email, is_admin from public.users where is_admin;   -- expect exactly 1 row
       ```
-      If it flags a row you do not recognise, that address was already registered by someone
-      else — clear it immediately and treat it as evidence the escalation was exercised.
+      If the first query ever returns a row you do not recognise, that address was registered
+      by someone else — clear it and treat it as evidence the escalation was exercised.
+
+- [ ] **Only after the row above is flagged:** confirm `ADMIN_TOKEN` is unset on Railway.
+      ⚠️ **Sequence matters, and getting it backwards locks you out.** `config.py:38` defaults
+      `ADMIN_TOKEN` to `None` and `admin.py:58-60` honours it only when set, comparing with
+      constant-time `secrets.compare_digest` on bytes — it is a deliberate, off-by-default
+      escape hatch for scripted maintenance, **not** a weak secret. But while `is_admin`
+      matches zero rows it is the *only* credential that can reach an admin route. Unset it
+      first and your sole recovery path is a direct SQL write. Flag the row, verify the select
+      returns it, sign in and hit one admin route, **then** clear the variable.
+
+- [x] **114_revoke_tier_credits_and_event_ordering.sql** — applied *(verified live 2026-08-07)*.
+      A refund dropped the tier but left the credits spendable: revocation routed through
+      `grant_tier_upgrade`, which never lowers `total`, so a refunded Max subscriber kept 4000
+      credits (~200 reports) for the rest of the month having paid nothing. Also adds
+      `subscriptions.last_event_at` for monotonic event ordering.
+
+- [x] **115_drop_vestigial_credits_update_policy.sql** — applied *(verified live 2026-08-07)*.
+      Dropped the `credits_update_own` UPDATE policy on `user_credits`. It was unreachable
+      (`anon`/`authenticated` hold no privileges on that table) but read like an intentional
+      "users may update their own credits" and was one routine `GRANT UPDATE … TO authenticated`
+      away from becoming exactly that. Evidence: the fresh dump keeps `credits_select_own` and
+      `credits_service_all` on that table and no longer contains `credits_update_own`.
 
 **Tune the guest allowance after launch.** `GUEST_REPORT_MONTHLY_LIMIT = 1` in
 `backend/app/config.py` is a deliberate starting point: it delivers the "wow" report
@@ -609,7 +662,16 @@ No longer blocked — your existing Individual account can create this record (s
 - [ ] Support URL → `https://caydexinvest.com/support`
 - [ ] **App Privacy questionnaire** → read straight from
       `documents/legal/app-privacy-answers.md`. Eight data types, tracking = No
-- [ ] Category: Finance. Age rating: 4+ (no gambling, no unrestricted web)
+- [ ] Category: Finance. **Age rating: 17+.** ⚠️ This line said **4+** until 2026-08-07 and that
+      was an inconsistency App Review reads as carelessness: `documents/legal/terms.html:41`
+      (mirrored verbatim in `Views/Screens/TermsOfUseView.swift:27`) requires users to be **18
+      or the age of majority**, and a 4+ listing on an app whose own Terms bar minors
+      contradicts itself. 17+ is the highest rating Apple offers — there is no 18+ tier — so it
+      is the closest available match. Answer the questionnaire honestly: no gambling, no
+      unrestricted web, no user-generated content. Neither of the two questions that normally
+      drive the number up ("Unrestricted Web Access", "Frequent/Intense Mature Themes") applies,
+      so you will need to set 17+ via the age-gate question rather than have it derived.
+      Leave both Terms surfaces alone — they already agree with each other.
 - [ ] **App Review notes** → the paragraph in §7 of `app-privacy-answers.md`. This is the
       single highest-value thing you'll paste; it heads off the fintech rejection
 - [ ] IAP products: **do create them now** — see §6b. (This line used to say "not yet, wait for

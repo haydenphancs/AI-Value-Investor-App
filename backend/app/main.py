@@ -22,7 +22,10 @@ from app.config import settings
 from app.database import check_supabase_health, get_supabase
 from app.api.v1.api import api_router
 from app.integrations.coingecko import close_coingecko_client
+from app.integrations.finra_short_interest import close_finra_client
 from app.integrations.fmp import close_fmp_client
+from app.integrations.openfda import close_openfda_client
+from app.integrations.uspto import close_uspto_client
 from app.services.live_price_manager import get_live_price_manager
 from app.log_redaction import scrub_sentry_event, SecretRedactingFilter
 
@@ -256,9 +259,18 @@ async def lifespan(app: FastAPI):
     # Graceful shutdown: close live price WebSocket connections
     await get_live_price_manager().shutdown()
 
-    # Close persistent HTTP clients
+    # Close persistent HTTP clients.
+    #
+    # Every integration holding a module-level `httpx.AsyncClient` must appear here. openfda
+    # and uspto shipped finished, docstring'd `close_*_client()` hooks that were never imported
+    # by anything — the tear-down existed and simply was not wired — and FINRA's two clients
+    # had no hook at all. `tests/test_integration_client_teardown.py` fails the build if a new
+    # integration adds a persistent client without joining this list.
     await close_fmp_client()
     await close_coingecko_client()
+    await close_openfda_client()
+    await close_uspto_client()
+    await close_finra_client()
     logger.info("Shutting down")
 
 
@@ -1160,9 +1172,13 @@ async def health_pdf():
         )
 
 
-@app.get("/disclaimer", tags=["Root"])
-async def disclaimer():
-    return {"disclaimer": settings.LEGAL_DISCLAIMER}
+# `GET /disclaimer` was removed 2026-08-07. It served `settings.LEGAL_DISCLAIMER` and was
+# confirmed dead: repo-wide, the path string occurred exactly once — its own definition. No
+# iOS call site (`APIEndpoint`/`APIClient` never referenced it), no test, no doc. Every
+# disclaimer the app shows is bundled client-side, so wiring it would have duplicated copy
+# that already ships, and a route nobody calls is a route nobody keeps accurate.
+# `settings.LEGAL_DISCLAIMER` itself stays — `chat_security.py` uses it to append the
+# disclaimer to AI replies.
 
 
 # ── Public legal pages ─────────────────────────────────────────────────────────

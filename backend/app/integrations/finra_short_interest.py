@@ -588,3 +588,37 @@ async def get_short_interest(ticker: str) -> Dict[str, Any]:
         return stale
 
     return {}
+
+
+async def close_finra_client() -> None:
+    """Tear-down hook for app.main lifespan.
+
+    This module keeps TWO persistent clients, not one — `_http_client` for the Nasdaq path
+    (`_get_client`) and `_finra_http_client` for the FINRA OAuth path (`_get_finra_client`) —
+    and neither had a closer, so both leaked their connection pools at shutdown. Closing both
+    here keeps the lifespan's import list to one name per module, matching
+    `close_fmp_client` / `close_coingecko_client`.
+
+    Both builders re-create on `is_closed`, so calling this is safe even if something
+    subsequently reaches for a client during shutdown.
+    """
+    global _http_client, _finra_http_client
+    _http_client = await _aclose("_http_client", _http_client)
+    _finra_http_client = await _aclose("_finra_http_client", _finra_http_client)
+
+
+async def _aclose(name: str, client: Optional[httpx.AsyncClient]) -> None:
+    """Close `client` if it exists, swallowing (but logging) any failure. Always returns None
+    so the caller can reassign the global unconditionally.
+
+    Best-effort on purpose: shutdown must not raise. A closer that propagates would abort the
+    lifespan teardown and skip every `close_*` registered after it in `main.py`, turning one
+    integration's problem into four leaked pools.
+    """
+    if client is None:
+        return None
+    try:
+        await client.aclose()
+    except Exception as e:  # noqa: BLE001 — logged, and shutdown must continue
+        logger.warning("finra %s failed to close cleanly: %s: %s", name, type(e).__name__, e)
+    return None

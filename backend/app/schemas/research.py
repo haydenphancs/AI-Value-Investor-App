@@ -1,8 +1,22 @@
 """
 Research schemas — aligned with Supabase research_reports table and Swift frontend models.
 
-Swift frontend uses .convertFromSnakeCase / .convertToSnakeCase on its JSONDecoder/Encoder,
-so all field names here are snake_case and map 1-to-1 with iOS property names.
+All field names here are snake_case, and they must match the iOS DTOs' explicit `CodingKeys`
+RAW VALUES exactly.
+
+⚠️ This block used to say the Swift side uses `.convertFromSnakeCase` on its decoder. **It does
+not, and believing that ships a decode crash.** `APIClient.swift:61-67` builds a plain
+`JSONDecoder()` and carries a comment forbidding key conversion: every DTO declares explicit
+snake_case `CodingKeys`, so adding `.convertFromSnakeCase` double-converts ("company_name" →
+"companyName" while the key expects "company_name") and every field fails key-not-found. A DTO
+written on the old assumption — camelCase properties and no `CodingKeys` — will not decode.
+
+The ENCODER is the half that was true: `APIClient.swift:71` does set
+`keyEncodingStrategy = .convertToSnakeCase`, so REQUEST bodies convert automatically and
+request models need no `CodingKeys`. Responses are the asymmetric side.
+
+`tests/test_ios_response_schema_parity.py` pins the decoder's plainness so this cannot drift
+back without a test failing.
 
 Key alignment points:
   - iOS GenerateResearchRequest sends: stock_id, investor_persona

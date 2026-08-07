@@ -35,6 +35,17 @@ struct PaywallView: View {
         )
     }
 
+    /// A purchase failure must NOT go through the inline `errorView` below: that branch is
+    /// reachable only while `catalog == nil`, and a plan button cannot exist until the catalog
+    /// has loaded. Anything written there after a tap is unreachable, which is exactly how a
+    /// failing purchase came to show nothing at all.
+    private var purchaseFailed: Binding<Bool> {
+        Binding(
+            get: { viewModel.purchaseError != nil },
+            set: { if !$0 { viewModel.purchaseError = nil } }
+        )
+    }
+
     private var currentTier: UserTier {
         appState.user.tier
     }
@@ -103,6 +114,11 @@ struct PaywallView: View {
                 Button("OK", role: .cancel) { viewModel.restoreMessage = nil }
             } message: {
                 Text(viewModel.restoreMessage ?? "")
+            }
+            .alert("Purchase Failed", isPresented: purchaseFailed) {
+                Button("OK", role: .cancel) { viewModel.purchaseError = nil }
+            } message: {
+                Text(viewModel.purchaseError ?? "")
             }
         }
         .task {

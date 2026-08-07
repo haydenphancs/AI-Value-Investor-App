@@ -20,7 +20,15 @@ final class PaywallViewModel: ObservableObject {
 
     @Published var catalog: PlanCatalog?
     @Published var isLoading: Bool = false
+    /// Failure to load the CATALOG. Rendered inline, in place of the plan list, with a retry —
+    /// which only makes sense while there is no list to show.
     @Published var errorMessage: String?
+    /// Failure of a PURCHASE the user just tapped. Deliberately a separate property from
+    /// `errorMessage`: the view renders that one only when `catalog == nil`, so by the time a
+    /// plan button exists to tap, anything written to it is unreachable. A purchase failure was
+    /// therefore completely silent — the button simply returned to its idle label. This one is
+    /// surfaced as an alert, because the user is mid-action and a retry link would be wrong.
+    @Published var purchaseError: String?
 
     /// Set after a successful purchase so the view can confirm what was applied.
     @Published var purchasedTier: String?
@@ -74,14 +82,14 @@ final class PaywallViewModel: ObservableObject {
 
     func purchase(tier: String) async {
         Analytics.shared.track(.paywallPurchaseStarted, ["tier": .string(tier)])
-        errorMessage = nil
+        purchaseError = nil
         restoreMessage = nil
         isPendingApproval = false
 
         guard let product = store.product(for: tier) else {
             // Products missing is a configuration problem, not the user's fault. Say so
             // instead of failing silently on tap.
-            errorMessage = store.productLoadError
+            purchaseError = store.productLoadError
                 ?? "That plan isn't available right now. Please try again shortly."
             return
         }
@@ -97,12 +105,12 @@ final class PaywallViewModel: ObservableObject {
                 isPendingApproval = true
             }
         } catch {
-            errorMessage = AppError.from(error).message
+            purchaseError = AppError.from(error).message
         }
     }
 
     func restore() async {
-        errorMessage = nil
+        purchaseError = nil
         restoreMessage = nil
         let count = await store.restorePurchases()
         restoreMessage = count > 0

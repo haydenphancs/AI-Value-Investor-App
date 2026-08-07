@@ -26,7 +26,7 @@ struct RecentActivitiesFlowBar: View {
 
                     Text(formattedInFlow)
                         .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .padding(.leading, AppSpacing.md)
                 }
                 .frame(width: geometry.size.width * inFlowPercent)
@@ -38,7 +38,7 @@ struct RecentActivitiesFlowBar: View {
 
                     Text(formattedOutFlow)
                         .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .padding(.trailing, AppSpacing.md)
                 }
                 .frame(width: geometry.size.width * (1 - inFlowPercent))

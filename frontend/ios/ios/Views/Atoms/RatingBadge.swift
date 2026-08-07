@@ -17,22 +17,27 @@ struct RatingBadge: View {
     }
 
     private var backgroundColor: Color {
+        // FILL tokens, not the text-safe ones. This is a saturated chip carrying
+        // `textOnAccent` ink, and the text-safe tokens lighten in dark: white on
+        // `bullish` #22C55E is 2.28:1, on `bearish` #EF4444 3.76:1, on `primaryBlue`
+        // #60A5FA 2.24:1 — i.e. this badge was below AA in dark at every rating.
+        //
         // For the 0–100 report score, defer to QualityBand (the SINGLE source of
         // truth for score→band color, cutoffs 80/65/48/33) so this carousel chip
         // can never disagree with the report gauge. The ratio cutoffs below are
         // only for the 5-star rating path (maxRating <= 5).
         if maxRating >= 100 {
-            return QualityBand.forScore(Int(rating.rounded())).color
+            return QualityBand.forScore(Int(rating.rounded())).fillColor
         }
         let ratio = rating / maxRating
         if ratio >= 0.8 {
-            return AppColors.bullish
+            return AppColors.gainFill
         } else if ratio >= 0.6 {
-            return AppColors.primaryBlue
+            return AppColors.primaryFill
         } else if ratio >= 0.4 {
-            return AppColors.neutral
+            return AppColors.cautionFill
         } else {
-            return AppColors.bearish
+            return AppColors.lossFill
         }
     }
 
@@ -46,7 +51,7 @@ struct RatingBadge: View {
     var body: some View {
         Text(formattedText)
             .font(AppTypography.captionEmphasis)
-            .foregroundColor(.white)
+            .foregroundColor(AppColors.textOnAccent)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)
             .background(backgroundColor)

@@ -440,6 +440,19 @@ final class AppState {
                 didWriteAsGuestWhileRestoring = false
                 await claimGuestDataIfNeeded()
             }
+            // ...and one more. `SettingsSyncManager.push()` correctly DEFERS a change made
+            // during `.restoring` into its pending-key set, and this early return is the only
+            // reason nothing ever drained it: `hydrate()` sits at the bottom of this method,
+            // past the `return`. A user who flipped a toggle on a flaky connection kept that
+            // change local-only until they happened to open a settings screen again.
+            //
+            // Safe here precisely because it is NOT the fan-out: `resumeSyncIfNeeded` is
+            // self-gating on "is anything actually pending", so a healthy reconnect with
+            // nothing outstanding performs ZERO network calls — which is the property this
+            // guard exists to protect. It deliberately does not touch the guest claim, which
+            // stays conditional above: idempotence is not enough there, because a re-POSTed
+            // claim is a real indexed write and the log stops being truthful.
+            SettingsSyncManager.shared.resumeSyncIfNeeded(trigger: "session-healed")
             return
         }
         // A different account on the same device: drop the previous session's device-global

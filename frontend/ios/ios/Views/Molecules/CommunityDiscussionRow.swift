@@ -23,7 +23,7 @@ struct CommunityDiscussionRow: View {
                     .overlay(
                         Text(discussion.authorName.prefix(1).uppercased())
                             .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                     )
 
                 // Content

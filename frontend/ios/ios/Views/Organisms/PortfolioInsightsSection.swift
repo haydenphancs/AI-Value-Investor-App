@@ -122,7 +122,7 @@ struct PortfolioInsightsSection: View {
                         Text("Edit holdings")
                             .font(AppTypography.bodySmallEmphasis)
                     }
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .padding(.horizontal, AppSpacing.xl)
                     .padding(.vertical, AppSpacing.sm)
                     .background(AppColors.primaryFill)
@@ -156,7 +156,7 @@ struct PortfolioInsightsSection: View {
                 } label: {
                     Text("Set up Portfolio Insights")
                         .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .padding(.horizontal, AppSpacing.xl)
                         .padding(.vertical, AppSpacing.sm)
                         .background(AppColors.primaryFill)

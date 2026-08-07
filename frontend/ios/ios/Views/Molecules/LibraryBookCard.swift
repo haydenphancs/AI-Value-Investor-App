@@ -32,7 +32,7 @@ struct LibraryBookCard: View {
                         VStack {
                             Text(book.title.uppercased())
                                 .font(AppTypography.captionTiny).fontWeight(.bold)
-                                .foregroundColor(.white)
+                                .foregroundColor(AppColors.textOnAccent)
                                 .multilineTextAlignment(.center)
                                 .lineLimit(3)
                                 .padding(.horizontal, AppSpacing.xs)
@@ -50,7 +50,7 @@ struct LibraryBookCard: View {
 
                             Image(systemName: "checkmark")
                                 .font(AppTypography.iconXS).fontWeight(.bold)
-                                .foregroundColor(.white)
+                                .foregroundColor(AppColors.textOnAccent)
                         }
                         .offset(x: 6, y: -6)
                     }

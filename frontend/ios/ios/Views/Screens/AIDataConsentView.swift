@@ -83,7 +83,7 @@ struct AIDataConsentView: View {
                     Button(action: onAllow) {
                         Text("Allow and continue")
                             .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, AppSpacing.lg)
                             .background(

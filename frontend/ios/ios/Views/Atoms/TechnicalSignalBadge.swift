@@ -33,7 +33,7 @@ struct TechnicalSignalBadge: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .stroke(isSelected ? Color.gray : Color.clear, lineWidth: 2)
+                .stroke(isSelected ? AppColors.borderStrong : Color.clear, lineWidth: 2)
         )
     }
 }

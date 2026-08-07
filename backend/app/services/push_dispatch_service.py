@@ -6,7 +6,8 @@ decisions that determine whether a notification is welcome or an uninstall:
   1. **Who.** Reverse lookup from a ticker to the users watching it
      (`idx_watchlist_items_ticker`, migration 108).
   2. **Whether.** The user's own `notify_*` preference, synced from the app into
-     `user_settings.preferences`. Absent → treated as ON, matching the iOS default.
+     `user_settings.preferences`. Absent → that key's declared iOS default
+     (`_PREFERENCE_DEFAULTS`); ON for every category that ships opted-in.
   3. **Once.** A unique claim in `push_send_log` (migration 109) inserted BEFORE the
      send, so a retry, a re-trip of the same scope, or two overlapping Railway
      instances cannot produce a second buzz.
@@ -97,14 +98,29 @@ class PushDispatchService:
 
     # ── whether ──────────────────────────────────────────────────────
 
+    # Per-key default for an ABSENT preference, mirroring each toggle's declared iOS
+    # default. A blanket `True` was wrong for exactly two keys, and it was latent rather
+    # than harmless: the client's `currentBlob()` omits any key the user has never
+    # touched, so a user who never opened Notification Settings has NO row entry for
+    # these — and both render as OFF in the UI. The instant a volatility or institutional
+    # dispatcher is wired up, that user is opted INTO something the app shows as off.
+    #
+    # Keep in step with the `@AppStorage` defaults in `NotificationsSettingsView.swift`.
+    _PREFERENCE_DEFAULTS = {
+        "notify_market_volatility": False,           # NotificationsSettingsView.swift
+        "notify_smart_money_institutional": False,   # NotificationsSettingsView.swift
+    }
+
     def preference_enabled(self, user_id: str, key: str) -> bool:
         """Whether `user_id` wants this category.
 
-        Absent preference → True, matching the iOS default for the keys used here.
-        A FAILED read also returns True: the alternative is silently withholding
+        Absent preference → that key's declared iOS default (`_PREFERENCE_DEFAULTS`,
+        defaulting to True for the opt-out-style categories).
+        A FAILED read returns the same default: the alternative is silently withholding
         notifications a user asked for because of a transient DB blip, which is
         indistinguishable from the feature being broken.
         """
+        default = self._PREFERENCE_DEFAULTS.get(key, True)
         try:
             rows = (
                 self.supabase.table("user_settings")
@@ -117,15 +133,16 @@ class PushDispatchService:
             )
         except Exception as e:
             logger.warning(
-                "push: settings read failed for user=%s (%s: %s) — assuming opted IN",
-                user_id, type(e).__name__, e,
+                "push: settings read failed for user=%s key=%s (%s: %s) — "
+                "falling back to the declared default (%s)",
+                user_id, key, type(e).__name__, e, default,
             )
-            return True
+            return default
         if not rows:
-            return True
+            return default
         value = (rows[0].get("preferences") or {}).get(key)
         if value is None:
-            return True
+            return default
         # Type the read; do NOT truthiness-cast it. `bool("false")` is True, so a
         # string-typed toggle — from another client, a hand-edited row, or a future
         # client bug — would silently RE-ENABLE a notification the user turned off.
@@ -136,13 +153,15 @@ class PushDispatchService:
             return value.strip().lower() not in {"false", "0", "no", "off", ""}
         if isinstance(value, (int, float)):
             return value != 0
-        # Anything else is not a toggle we can read; opting IN matches the
-        # missing-key default and is the safe direction for a delivery decision.
+        # Anything else is not a toggle we can read, so fall back to the key's declared
+        # default — the same answer as a missing entry, which is what an unreadable one
+        # effectively is.
         logger.warning(
-            "push: preference %s for user=%s has unreadable type %s — assuming opted IN",
-            key, user_id, type(value).__name__,
+            "push: preference %s for user=%s has unreadable type %s — "
+            "falling back to the declared default (%s)",
+            key, user_id, type(value).__name__, default,
         )
-        return True
+        return default
 
     # ── once ─────────────────────────────────────────────────────────
 

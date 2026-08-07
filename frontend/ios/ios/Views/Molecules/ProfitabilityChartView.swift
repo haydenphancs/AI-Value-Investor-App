@@ -246,7 +246,8 @@ struct ProfitabilityChartView: View {
             ForEach(Array(points.enumerated()), id: \.offset) { index, p in
                 Text(p.company.map { fmtPct($0) } ?? "—")
                     .font(.system(size: labelFontSize, weight: .semibold))
-                    .foregroundColor(AppColors.growthYoYYellow)
+                    // Text-safe sibling of the series token (3.57:1 on a light card).
+                    .foregroundColor(AppColors.accentYellow)
                     .lineLimit(1).fixedSize()
                     .position(x: xCenter(index, plotWidth: plotWidth), y: 10)
             }
@@ -259,7 +260,8 @@ struct ProfitabilityChartView: View {
             ForEach(Array(points.enumerated()), id: \.offset) { index, p in
                 Text(p.sector.map { fmtPct($0) } ?? "—")
                     .font(.system(size: labelFontSize, weight: .regular))
-                    .foregroundColor(AppColors.growthSectorGray)
+                    // Text-safe sibling of `growthSectorGray` (3.78:1 light card).
+                    .foregroundColor(AppColors.textMuted)
                     .lineLimit(1).fixedSize()
                     .position(x: xCenter(index, plotWidth: plotWidth), y: 10)
             }

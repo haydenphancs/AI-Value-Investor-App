@@ -13,10 +13,13 @@ struct PersonaBadge: View {
     var body: some View {
         Text(persona.displayName)
             .font(AppTypography.caption)
-            .foregroundColor(.white)
+            .foregroundColor(AppColors.textOnAccent)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)
-            .background(Color(themedHex: persona.badgeColor, role: .graphic, fallback: AppColors.primaryFill))
+            // `.fill` + `textOnAccent`, and both halves must stay together: this capsule
+            // is a saturated background carrying light ink, so the contrast contract is
+            // white-ON-it. Under `.graphic` the badge hexes measured as low as 1.92:1.
+            .background(Color(themedHex: persona.badgeColor, role: .fill, fallback: AppColors.primaryFill))
             .clipShape(Capsule())
     }
 }

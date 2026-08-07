@@ -15,6 +15,7 @@
 //
 
 import Foundation
+import UIKit   // willEnterForegroundNotification — see `configure(appState:)`
 
 extension Notification.Name {
     /// Posted after the backend settings blob is applied to UserDefaults, so open
@@ -93,6 +94,15 @@ final class SettingsSyncManager {
         // gated for the whole session. The in-flight response cannot hurt us (the epoch guard
         // owns that), so clearing the flag here is safe and is what lets B hydrate at all.
         isHydrating = false
+        // Same reasoning for the in-flight PUT and the retry ladder: a rung firing into the
+        // NEXT account, or a stale push confirming and stamping `lastServerBlob`, is the same
+        // "state from the ended session leaks forward" class the isHydrating reset fixed.
+        // Bumping `localVersion` also neutralises any push already awaiting its response.
+        pushTask?.cancel()
+        pushTask = nil
+        cancelSyncRetry()
+        redriveDepth = 0
+        bumpLocalVersion()
         // The appearance override is applied to the window, not just stored, so re-apply the
         // now-default value or the previous user's Light/Dark choice stays on screen.
         AppearanceManager.applyStored()
@@ -107,6 +117,53 @@ final class SettingsSyncManager {
 
     func configure(appState: AppState) {
         self.appState = appState
+
+        guard !hasInstalledObservers else { return }
+        hasInstalledObservers = true
+
+        // These live HERE rather than in `AppState.configure`, and that is load-bearing.
+        //
+        // AppState observes both of these already, but its handler calls
+        // `restoreSessionIfNeeded`, which early-returns unless there is an unused stored
+        // credential — i.e. exactly NOT the case this exists for: a perfectly healthy
+        // session where one push happened to fail on a network blip. Driving the settings
+        // retry from there would mean it never fires when it is needed.
+        //
+        // Never removed: this is a `@MainActor` singleton with process lifetime, the same
+        // arrangement as AppState's own two observers.
+        NotificationCenter.default.addObserver(
+            forName: NetworkMonitor.didRestoreNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in
+                SettingsSyncManager.shared.resumeSyncIfNeeded(trigger: "network-restored")
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in
+                SettingsSyncManager.shared.resumeSyncIfNeeded(trigger: "foreground")
+            }
+        }
+    }
+
+    /// "Something changed — do we owe the server anything?"
+    ///
+    /// Self-gating and idempotent, so every trigger can call it unconditionally and none of
+    /// them needs to know the state machine. Costs ZERO network calls when nothing is
+    /// pending, which is what lets `AppState`'s same-user reconnect path call it without
+    /// reintroducing the per-reconnect fan-out that guard exists to prevent.
+    func resumeSyncIfNeeded(trigger: String) {
+        guard isAuthenticated else { return }   // guests and `.restoring` keep holding their keys
+        if !hasHydrated {
+            hydrate()                            // re-drives the push via `deferredPushPending`
+        } else if deferredPushPending || !pendingKeys.isEmpty {
+            #if DEBUG
+            print("ℹ️ [Settings] resuming deferred push (\(trigger))")
+            #endif
+            push()
+        }
+        // Deliberately does NOT reset the retry ladder — see `scheduleSyncRetry`.
     }
 
     private var isAuthenticated: Bool {
@@ -180,8 +237,22 @@ final class SettingsSyncManager {
         // own to every one of B's devices. The four Learn stores solve this exact race with the
         // epoch; this one had no equivalent.
         let epoch = LearnIdentityEpoch.current
+        // A hydrate is about to REWRITE local state, so any push already on the wire is
+        // describing a snapshot that is going away. Bump before the fetch so its confirmation
+        // cannot stamp `lastServerBlob`, and cancel it so it does not linger.
+        bumpLocalVersion()
+        pushTask?.cancel()
         Task {
-            defer { isHydrating = false }
+            // NOT a bare `defer { isHydrating = false }`. The epoch-mismatch branch below
+            // re-drives hydrate() from INSIDE this task, so the defer ran AFTER the new
+            // hydrate had set the flag and spawned its own Task — clearing it and leaving
+            // the `guard !isHydrating` storm guard at the top of hydrate() wide open for the
+            // rest of the session. Clear the flag FIRST, re-drive AFTER.
+            var redrive = false
+            defer {
+                isHydrating = false
+                if redrive { hydrate() }
+            }
             do {
                 let prefs = try await repository.fetchSettings()
                 guard epoch == LearnIdentityEpoch.current else {
@@ -191,18 +262,21 @@ final class SettingsSyncManager {
                     // Re-drive for the CURRENT identity rather than just returning: this
                     // branch used to leave the new account with `hasHydrated == false` and
                     // nothing scheduled, so its push stayed gated until something else
-                    // happened to call hydrate() again.
+                    // happened to call hydrate() again. Bounded, so a burst of account
+                    // switches cannot recurse one GET per bounce.
                     #if DEBUG
                     print("[SettingsSync] discarded a hydrate from a previous identity")
                     #endif
-                    isHydrating = false
-                    hydrate()
+                    redrive = redriveDepth < 2
+                    redriveDepth += 1
                     return
                 }
+                redriveDepth = 0
                 // Record the server's blob VERBATIM before applying it, so the next PUT can
                 // preserve keys this build does not know about (see `lastServerBlob`).
                 lastServerBlob = prefs
-                apply(prefs)
+                let rejected = apply(prefs)
+                if !rejected.isEmpty { healRejectedKeys(rejected) }
                 // Re-assert only the keys the user actually changed while the hydrate was
                 // gated — NOT the whole local blob.
                 //
@@ -212,15 +286,20 @@ final class SettingsSyncManager {
                 // edit on device A can no longer resurrect device B's superseded settings.
                 let dirty = pendingKeys
                 if !dirty.isEmpty {
-                    pendingKeys = []
+                    // `pendingKeys = []` used to live here, and it was the same silent lost
+                    // edit as the one in push(): if the push below then failed, those keys
+                    // were gone and the NEXT hydrate overwrote the user's values with the
+                    // stale server blob. Only a CONFIRMED push clears a key now.
                     applyLocalOverrides(currentBlob().filter { dirty.contains($0.key) })
                 }
                 hasHydrated = true   // safe to push now (server state is known)
+                cancelSyncRetry()    // a success, and the only thing that resets the ladder
                 if deferredPushPending || !dirty.isEmpty {
                     deferredPushPending = false
                     push()
                 }
             } catch {
+                if wasSuperseded { return }
                 // Leave hasHydrated false so push() stays gated — we don't know the
                 // server state, so pushing would risk a clobber. A later hydrate retries.
                 // Release-visible: a failed hydrate leaves `hasHydrated` false, which GATES
@@ -233,6 +312,7 @@ final class SettingsSyncManager {
                 #if DEBUG
                 print("⚠️ [Settings] hydrate failed: \(AppError.from(error).message)")
                 #endif
+                scheduleSyncRetry(after: error)
             }
         }
     }
@@ -244,6 +324,74 @@ final class SettingsSyncManager {
     private var deferredPushPending = false
     /// In-flight guard so repeated `push()` calls can't launch a hydrate storm while offline.
     private var isHydrating = false
+
+    /// Installed once, from `configure(appState:)`.
+    private var hasInstalledObservers = false
+
+    // MARK: - Ordering, single-flight, and retry
+
+    /// Monotonic counter of LOCAL writes — a push capturing its snapshot, a hydrate about to
+    /// overwrite the store, a session ending. Every request snapshots it before awaiting; a
+    /// response carrying a stale snapshot describes state that has since moved on and must
+    /// not be committed.
+    ///
+    /// TWO guards, answering different questions — the same arrangement `BookmarkStore` and
+    /// `MoneyMovesProgressStore` already use. The EPOCH catches the account changing
+    /// underneath; it cannot see a second local edit, because one identity keeps one epoch
+    /// for its whole session. This manager had only the epoch half, so two pushes 200ms apart
+    /// raced: `lastServerBlob = blob` landed in arbitrary completion order and poisoned the
+    /// overlay that builds the NEXT push.
+    private var localVersion: UInt64 = 0
+    private func bumpLocalVersion() { localVersion &+= 1 }
+
+    /// The single in-flight PUT. Cancel-and-replace is safe here specifically because the
+    /// endpoint is a FULL REPLACE and a newer blob is built by overlaying onto the same
+    /// `lastServerBlob` — so it strictly supersedes an older one. A cancelled push loses
+    /// nothing: only a CONFIRMED push clears `pendingKeys`.
+    private var pushTask: Task<Void, Never>?
+
+    /// Bounded backoff after a TRANSIENT failure. Same ladder as
+    /// `AppState.scheduleRestoreBackoff`, for the same reason: a blip must not strand the
+    /// user's settings for a whole app run. The `catch` here used to be analytics and a
+    /// DEBUG print, with no driver anywhere — a failed hydrate left `hasHydrated` false,
+    /// which gates every later push, so one 5xx stopped settings syncing for the session.
+    private static let retryDelays: [UInt64] = [2, 8, 30, 120, 300]
+    private var retryAttempt = 0
+    private var retryTask: Task<Void, Never>?
+
+    /// Depth cap on the epoch-mismatch re-drive, so rapid account switching cannot recurse
+    /// one GET per bounce.
+    private var redriveDepth = 0
+
+    private func scheduleSyncRetry(after error: Error) {
+        // A dead credential is AppState's problem — it ends the session. Retrying it burns a
+        // request per rung and hides a session that has actually ended.
+        guard !AppError.from(error).isAuthError else { return }
+        retryTask?.cancel()
+        let seconds = Self.retryDelays[min(retryAttempt, Self.retryDelays.count - 1)]
+        retryAttempt += 1
+        retryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.resumeSyncIfNeeded(trigger: "backoff")
+        }
+    }
+
+    /// Only a SUCCESS resets the ladder. A rung firing must not, or the delay would restart
+    /// at 2s every time and never escalate.
+    private func cancelSyncRetry() {
+        retryTask?.cancel()
+        retryTask = nil
+        retryAttempt = 0
+    }
+
+    /// Was this request superseded rather than genuinely failing?
+    ///
+    /// `APIClient` wraps anything it does not recognise into `APIError.networkError(_)`, so a
+    /// cancellation arrives NESTED and `catch is CancellationError` never fires.
+    /// `Task.isCancelled` is true regardless of how the underlying error got wrapped — without
+    /// this check every superseded push would report `backgroundSyncFailed` and arm the ladder.
+    private var wasSuperseded: Bool { Task.isCancelled }
 
     /// Push current UserDefaults values to the backend (best-effort, authed only).
     /// No-ops until the first successful `hydrate()` (see `hasHydrated`).
@@ -283,7 +431,21 @@ final class SettingsSyncManager {
         // sign-out + sign-in that lands between here and the token being attached cannot PUT
         // account A's blob with account B's credential.
         let epoch = LearnIdentityEpoch.current
-        Task {
+        // A push IS a local write from the sync machine's point of view: the snapshot it is
+        // about to send is newer than anything already on the wire.
+        bumpLocalVersion()
+        let token = localVersion
+
+        // Cancel-and-replace. Two rapid pushes — the settings screen's `.onDisappear` and the
+        // appearance picker's `didSet` are ~200ms apart in practice — each used to get a bare
+        // `Task`, so `lastServerBlob = blob` landed in arbitrary completion order and left the
+        // cached "confirmed" blob describing a row the server does not hold, poisoning the
+        // overlay that builds the next push. Cancelling loses nothing: only a CONFIRMED push
+        // clears `pendingKeys`, so at worst this costs one redundant PUT, and the endpoint is
+        // idempotent by construction (full replace).
+        pushTask?.cancel()
+        pushTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             guard epoch == LearnIdentityEpoch.current else {
                 #if DEBUG
                 print("[SettingsSync] dropped a push from a previous identity")
@@ -291,12 +453,30 @@ final class SettingsSyncManager {
                 return
             }
             do {
-                _ = try await repository.updateSettings(blob)
-                guard epoch == LearnIdentityEpoch.current else { return }
+                _ = try await self.repository.updateSettings(blob)
+                // TWO guards, answering different questions. `epoch` catches the ACCOUNT
+                // changing underneath — `localVersion` cannot see that, because each identity
+                // starts from its own local state. `token` catches a newer local edit or a
+                // newer push having superseded this blob; without it a stale response stamps
+                // `lastServerBlob` with a row the server no longer holds.
+                guard epoch == LearnIdentityEpoch.current, token == self.localVersion else { return }
+
                 // The server has now confirmed exactly this blob.
-                lastServerBlob = blob
-                pendingKeys = []
+                self.lastServerBlob = blob
+                // `pendingKeys = []` was a silent lost edit: a key dirtied AFTER this blob was
+                // captured got cleared without ever being sent. Retain a key iff its CURRENT
+                // local value still differs from what the server just confirmed — the same
+                // "diff against the last confirmed blob" definition `deferLocalChange()` uses,
+                // so there is exactly one meaning of "dirty" in this file.
+                let local = self.currentBlob()
+                self.pendingKeys = self.pendingKeys.filter { key in
+                    guard let localValue = local[key] else { return false }
+                    return blob[key] != localValue
+                }
+                self.deferredPushPending = false
+                self.cancelSyncRetry()
             } catch {
+                if self.wasSuperseded { return }   // superseded; its keys are still pending
                 // Release-visible: the toggle the user just flipped is now local-only and will
                 // be overwritten by the next hydrate.
                 Analytics.shared.track(.backgroundSyncFailed, [
@@ -306,6 +486,7 @@ final class SettingsSyncManager {
                 #if DEBUG
                 print("⚠️ [Settings] push failed: \(AppError.from(error).message)")
                 #endif
+                self.scheduleSyncRetry(after: error)
             }
         }
     }
@@ -355,7 +536,21 @@ final class SettingsSyncManager {
         return blob
     }
 
-    private func apply(_ prefs: [String: PreferenceValue]) {
+    /// The declared type of every synced key.
+    private enum PreferenceKind { case bool, string, double }
+
+    private static func kind(of key: String) -> PreferenceKind? {
+        if boolKeys.contains(key) { return .bool }
+        if stringKeys.contains(key) { return .string }
+        if doubleKeys.contains(key) { return .double }
+        return nil
+    }
+
+    /// Write the server's blob into UserDefaults. Returns the keys it REFUSED, so the caller
+    /// can heal them (see `healRejectedKeys`).
+    @discardableResult
+    private func apply(_ prefs: [String: PreferenceValue]) -> Set<String> {
+        var rejected: Set<String> = []
         for (key, value) in prefs {
             // Only keys this build declares are written. `apply()` used to write ANY key the
             // server returned straight into UserDefaults, so a row containing (say)
@@ -390,6 +585,7 @@ final class SettingsSyncManager {
                     print("⚠️ [Settings] rejected unusable appearance_mode \(value) — "
                           + "keeping local \(AppearanceManager.current.rawValue)")
                     #endif
+                    rejected.insert(key)
                     continue   // keep the user's local choice; do NOT write junk
                 }
                 // Write the CANONICAL casing, so a foreign value (lowercase from another
@@ -399,17 +595,62 @@ final class SettingsSyncManager {
                 continue
             }
 
-            switch value {
-            case .bool(let b): defaults.set(b, forKey: key)
-            case .string(let s): defaults.set(s, forKey: key)
-            case .int(let i): defaults.set(i, forKey: key)
-            case .double(let d): defaults.set(d, forKey: key)
+            // Match the value's type against the KEY's declared type. Only `appearance_mode`
+            // was checked before, and a mismatch elsewhere is DURABLY destructive rather than
+            // cosmetic: a `boolKeys` member arriving as `.string("off")` was written to
+            // UserDefaults as a String, so `@AppStorage<Bool>` fell back to its declared
+            // default while `currentBlob()`'s `defaults.bool(forKey:)` read FALSE — and the
+            // next push() rewrote the server row to false, on every one of the user's devices.
+            // A user's notification toggle turned itself off permanently, from one bad row.
+            switch (Self.kind(of: key), value) {
+            case (.bool, .bool(let b)):
+                defaults.set(b, forKey: key)
+            // 0/1 is a legitimate JSON wire form for a bool and `PreferenceValue` decodes a
+            // bare number as `.int`, so accepting exactly those two is lossless. Anything else
+            // numeric is not a bool and must not be coerced into one.
+            case (.bool, .int(let i)) where i == 0 || i == 1:
+                defaults.set(i == 1, forKey: key)
+            case (.string, .string(let s)):
+                defaults.set(s, forKey: key)
+            case (.double, .double(let d)):
+                defaults.set(d, forKey: key)
+            case (.double, .int(let i)):
+                defaults.set(Double(i), forKey: key)
+            default:
+                rejected.insert(key)
+                Analytics.shared.track(.backgroundSyncFailed, [
+                    "op": .string("settings_hydrate_type"),
+                    "code": .string("type_mismatch"),
+                ])
+                #if DEBUG
+                print("⚠️ [Settings] rejected \(value) for \"\(key)\" — keeping the local value")
+                #endif
+                continue
             }
         }
         // Re-apply appearance in case the synced blob changed it.
         AppearanceManager.applyStored()
         // Let open screens refresh from the store (e.g. the appearance picker).
         NotificationCenter.default.post(name: .caydexSettingsHydrated, object: nil)
+        return rejected
+    }
+
+    /// A value this build OWNS but could not use must not survive in `lastServerBlob`.
+    ///
+    /// `push()` builds its blob as `lastServerBlob` overlaid with `currentBlob()`, and
+    /// `currentBlob()` SKIPS a key with no UserDefaults entry — so a rejected value for a
+    /// toggle the user has never touched would sit in the cached blob and be re-PUT verbatim
+    /// for the life of the row. Drop it and mark the key dirty so the next push heals the
+    /// server, mirroring what `currentBlob()` already does for a foreign `appearance_mode`.
+    ///
+    /// Only keys in `syncedKeys` can be rejected, so this never touches the unknown keys
+    /// `lastServerBlob` exists to preserve.
+    private func healRejectedKeys(_ rejected: Set<String>) {
+        guard !rejected.isEmpty else { return }
+        lastServerBlob = lastServerBlob.filter { !rejected.contains($0.key) }
+        pendingKeys.formUnion(rejected)
+        deferredPushPending = true
+        bumpLocalVersion()
     }
 
     /// Re-assert values the user changed while `push()` was gated, on top of a just-applied

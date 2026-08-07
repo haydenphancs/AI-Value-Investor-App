@@ -4,27 +4,30 @@ Pure function only — no Supabase, no network.
 """
 
 from app.services.user_settings_service import (
+    key_is_syncable,
     preferences_too_large,
     sanitize_preferences,
+    MAX_PREFERENCE_KEYS,
     MAX_PREFERENCES_BYTES,
 )
 
 
 def test_sanitize_keeps_scalar_values():
     prefs = {"appearance_mode": "dark", "notify_earnings_alerts": True,
-             "count": 3, "ratio": 1.5}
+             "notify_count": 3, "playback_speed": 1.5}
     assert sanitize_preferences(prefs) == prefs
 
 
 def test_sanitize_drops_nested_object_array_and_null():
-    prefs = {"default_currency": "USD", "obj": {"a": 1}, "arr": [1, 2], "nada": None}
+    prefs = {"default_persona": "buffett", "notify_obj": {"a": 1},
+             "notify_arr": [1, 2], "notify_nada": None}
     # Only the scalar survives — a nested/null value would break the iOS decode.
-    assert sanitize_preferences(prefs) == {"default_currency": "USD"}
+    assert sanitize_preferences(prefs) == {"default_persona": "buffett"}
 
 
 def test_sanitize_keeps_false_bool():
     # bool is a subclass of int; False must be kept, not dropped as "falsy".
-    assert sanitize_preferences({"show_premarket": False}) == {"show_premarket": False}
+    assert sanitize_preferences({"notify_market_macro": False}) == {"notify_market_macro": False}
 
 
 def test_sanitize_non_dict_returns_empty():
@@ -85,22 +88,24 @@ def test_sanitize_drops_non_finite_floats(bad):
     surfaced as a 500 whose body is `{"detail": ...}`, which iOS cannot decode as an
     APIErrorResponse (invariant #3).
     """
-    assert sanitize_preferences({"playback_speed": bad, "keep": 1.5}) == {"keep": 1.5}
+    assert sanitize_preferences({"notify_bad": bad, "playback_speed": 1.5}) == {"playback_speed": 1.5}
 
 
 def test_sanitize_output_is_always_json_serializable_strictly():
     """The property that actually matters: whatever survives must encode with allow_nan=False."""
     hostile = {
-        "a": float("nan"), "b": float("inf"), "c": float("-inf"),
-        "d": 1.5, "e": "x", "f": True, "g": 7,
-        "h": {"nested": 1}, "i": [1], "j": None,
+        "notify_a": float("nan"), "notify_b": float("inf"), "notify_c": float("-inf"),
+        "playback_speed": 1.5, "default_persona": "x", "haptic_feedback": True,
+        "notify_g": 7,
+        "notify_h": {"nested": 1}, "notify_i": [1], "notify_j": None,
     }
     json.dumps(sanitize_preferences(hostile), allow_nan=False)  # must not raise
 
 
 def test_sanitize_keeps_finite_extremes():
     """Large-but-finite values are legitimate and must survive."""
-    prefs = {"big": 1e308, "small": -1e308, "tiny": 5e-324, "zero": 0.0, "negzero": -0.0}
+    prefs = {"notify_big": 1e308, "notify_small": -1e308, "notify_tiny": 5e-324,
+             "notify_zero": 0.0, "notify_negzero": -0.0}
     out = sanitize_preferences(prefs)
     assert out == prefs
     assert all(math.isfinite(v) for v in out.values())
@@ -182,3 +187,67 @@ def test_get_settings_returns_empty_for_a_genuinely_absent_row():
 
     svc.supabase = _Supa()
     assert svc.get_settings("user-1") == {}
+
+
+# ── Key-NAME policy ──────────────────────────────────────────────────────────
+#
+# `sanitize_preferences` filtered by value type and size only, so ANY key name was
+# persistable — including the two device-local first-run gates the app never clears at
+# sign-out. A blob carrying `has_acknowledged_disclaimers: true` describes an account
+# that skips the legal disclaimer on every device it signs into, permanently.
+
+@pytest.mark.parametrize("key", [
+    "has_acknowledged_disclaimers",
+    "has_completed_onboarding",
+    "app_lock_enabled",
+])
+def test_reserved_keys_are_never_persisted(key):
+    """These three are device-local by contract. The server must not be able to set them."""
+    assert key_is_syncable(key) is False
+    assert sanitize_preferences({key: True}) == {}
+
+
+@pytest.mark.parametrize("key", [
+    "notify_earnings_alerts", "notify_market_volatility", "notify_smart_money_whale",
+    "default_persona", "appearance_mode", "playback_speed",
+    "haptic_feedback", "autoplay_next",
+])
+def test_every_key_the_app_actually_syncs_survives(key):
+    """Anti-vacuity: a policy that drops everything would pass every test above."""
+    assert key_is_syncable(key) is True
+    assert sanitize_preferences({key: True}) == {key: True}
+
+
+def test_a_future_notification_toggle_survives():
+    """Forward compat is deliberate, not accidental.
+
+    The client's `lastServerBlob` exists so a key added by a NEWER app version survives a
+    push from an older one. A hard list of today's 18 keys would delete every such key
+    until the backend redeployed — coupling two independently deployed artifacts in the
+    one direction that silently loses data.
+    """
+    assert sanitize_preferences({"notify_something_new_2027": False}) == {
+        "notify_something_new_2027": False
+    }
+
+
+def test_unknown_non_notify_keys_are_dropped():
+    assert sanitize_preferences({"arbitrary_kv_key": "x"}) == {}
+    assert sanitize_preferences({"": True}) == {}
+    assert sanitize_preferences({"n" * 200: True}) == {}
+
+
+def test_key_cap_bounds_the_blob():
+    """The byte cap alone permits thousands of tiny keys; a blob is not a KV store."""
+    blob = {f"notify_k{i}": True for i in range(MAX_PREFERENCE_KEYS + 25)}
+    assert len(sanitize_preferences(blob)) == MAX_PREFERENCE_KEYS
+
+
+def test_key_policy_composes_with_the_value_filter():
+    """A syncable NAME with an unusable VALUE is still dropped, and vice versa."""
+    assert sanitize_preferences({
+        "notify_earnings_alerts": True,       # kept
+        "notify_market_macro": float("inf"),  # good name, non-finite value
+        "has_completed_onboarding": True,     # bad name, good value
+        "notify_nested": {"a": 1},            # good name, non-scalar value
+    }) == {"notify_earnings_alerts": True}

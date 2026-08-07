@@ -863,7 +863,7 @@ struct WhaleCard: View {
                 } label: {
                     Text(whale.isFollowing ? "Following" : "Follow")
                         .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(whale.isFollowing ? AppColors.textSecondary : .white)
+                        .foregroundColor(whale.isFollowing ? AppColors.textSecondary : AppColors.textOnAccent)
                         .padding(.horizontal, AppSpacing.lg)
                         .padding(.vertical, AppSpacing.sm)
                         .background(whale.isFollowing ? AppColors.cardBackgroundLight : AppColors.primaryFill)
@@ -1278,7 +1278,7 @@ struct PortfolioConfigSheet: View {
                         Spacer()
                         Text(error)
                             .font(AppTypography.caption)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                             .padding(AppSpacing.md)
                             .background(AppColors.lossFill)
                             .cornerRadius(AppCornerRadius.medium)

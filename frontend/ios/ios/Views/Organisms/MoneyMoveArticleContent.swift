@@ -72,7 +72,7 @@ struct MoneyMoveArticleContent: View {
                 Text(isCompleted ? "Completed" : "Mark as Complete")
                     .font(AppTypography.bodyEmphasis)
             }
-            .foregroundColor(isCompleted ? AppColors.bullish : .white)
+            .foregroundColor(isCompleted ? AppColors.bullish : AppColors.textOnAccent)
             .frame(maxWidth: .infinity)
             .frame(height: 54)
             .background(

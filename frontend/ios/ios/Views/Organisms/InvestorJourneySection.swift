@@ -87,10 +87,10 @@ struct InvestorJourneySection: View {
                         }) {
                             Text("Resume Lessons")
                                 .font(AppTypography.bodyEmphasis)
-                                .foregroundColor(.white)
+                                .foregroundColor(AppColors.textOnAccent)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, AppSpacing.md)
-                                .background(track.level.color)
+                                .background(track.level.fillColor)
                                 .cornerRadius(AppCornerRadius.medium)
                         }
                         .buttonStyle(PlainButtonStyle())
@@ -144,12 +144,12 @@ struct InvestorJourneySection: View {
                     // Badge circle (on top of connector lines)
                     ZStack {
                         Circle()
-                            .fill(isActive || isCompleted ? level.color : AppColors.cardBackgroundLight)
+                            .fill(isActive || isCompleted ? level.fillColor : AppColors.cardBackgroundLight)
                             .frame(width: 44, height: 44)
 
                         Image(systemName: level.iconName)
                             .font(AppTypography.iconMedium).fontWeight(.semibold)
-                            .foregroundColor(isActive || isCompleted ? .white : AppColors.textMuted)
+                            .foregroundColor(isActive || isCompleted ? AppColors.textOnAccent : AppColors.textMuted)
                     }
                 }
 

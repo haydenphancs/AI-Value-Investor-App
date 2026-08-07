@@ -53,7 +53,7 @@ struct ArticleAuthorRow: View {
                 Button(action: { onFollowTapped?() }) {
                     Text(isFollowing ? "Following" : "Follow")
                         .font(AppTypography.captionEmphasis)
-                        .foregroundColor(isFollowing ? AppColors.textSecondary : .white)
+                        .foregroundColor(isFollowing ? AppColors.textSecondary : AppColors.textOnAccent)
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.sm)
                         .background(

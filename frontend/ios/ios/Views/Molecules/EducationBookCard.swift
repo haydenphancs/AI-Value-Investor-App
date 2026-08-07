@@ -36,7 +36,7 @@ struct EducationBookCard: View {
                     VStack {
                         Text(book.title.uppercased())
                             .font(AppTypography.captionTiny).fontWeight(.bold)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                             .multilineTextAlignment(.center)
                             .lineLimit(3)
                             .padding(.horizontal, AppSpacing.xs)

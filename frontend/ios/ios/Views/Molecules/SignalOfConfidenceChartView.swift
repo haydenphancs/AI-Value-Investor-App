@@ -350,7 +350,10 @@ struct SignalOfConfidenceChartView: View {
                      ? String(format: "%.2f%%", dataPoint.dividendYield)
                      : formatLargeNumber(dataPoint.dividendAmount))
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(AppColors.confidenceDividends)
+                    // Text-safe sibling of the series token: a readable number needs 4.5
+                    // and `confidenceDividends` is a 3:1 graphic (4.27:1 on the dark card,
+                    // 3.84:1 nested). Colour stays with the bar/line.
+                    .foregroundColor(AppColors.primaryBlue)
                     .lineLimit(1)
                     .fixedSize()
                     .position(
@@ -372,7 +375,8 @@ struct SignalOfConfidenceChartView: View {
                      ? String(format: "%.2f%%", dataPoint.buybackYield)
                      : formatLargeNumber(dataPoint.buybackAmount))
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(AppColors.confidenceBuybacks)
+                    // Text-safe sibling of `confidenceBuybacks` (3.30:1 light card).
+                    .foregroundColor(AppColors.gain)
                     .lineLimit(1)
                     .fixedSize()
                     .position(
@@ -392,7 +396,8 @@ struct SignalOfConfidenceChartView: View {
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
                 Text(formatSharesValue(dataPoint.sharesOutstanding))
                     .font(.system(size: 11, weight: .regular))
-                    .foregroundColor(AppColors.confidenceSharesOutstanding)
+                    // Text-safe sibling of `confidenceSharesOutstanding` (3.57:1 light card).
+                    .foregroundColor(AppColors.accentYellow)
                     .lineLimit(1)
                     .fixedSize()
                     .position(
@@ -477,7 +482,7 @@ struct SignalOfConfidenceChartView: View {
 
         VStack(spacing: AppSpacing.xl) {
             Text("Yield View")
-                .foregroundColor(.white)
+                .foregroundColor(AppColors.textOnAccent)
             SignalOfConfidenceChartView(
                 dataPoints: SignalOfConfidenceSectionData.sampleData.dataPoints,
                 viewType: .yield
@@ -486,7 +491,7 @@ struct SignalOfConfidenceChartView: View {
             Divider()
 
             Text("Capital View")
-                .foregroundColor(.white)
+                .foregroundColor(AppColors.textOnAccent)
             SignalOfConfidenceChartView(
                 dataPoints: SignalOfConfidenceSectionData.sampleData.dataPoints,
                 viewType: .capital

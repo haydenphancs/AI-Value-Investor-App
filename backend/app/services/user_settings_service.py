@@ -51,6 +51,57 @@ def preferences_too_large(preferences: Dict[str, Any]) -> bool:
     return len(json.dumps(preferences)) > MAX_PREFERENCES_BYTES
 
 
+# ── Key-name policy ──────────────────────────────────────────────────────────
+#
+# `sanitize_preferences` filtered by VALUE type and total size only. Key names were
+# never checked, so any name at all was persistable — including two the app treats as
+# device-local first-run state and that `clearLocalForEndedSession()` never removes:
+#
+#     has_acknowledged_disclaimers   has_completed_onboarding
+#
+# A blob carrying `"has_acknowledged_disclaimers": true` describes an account that
+# SKIPS the first-run legal disclaimer on every device it signs into, permanently. iOS
+# blocks the write today (`SettingsSyncManager.apply()` allowlists the keys it owns), but
+# that is one client's guard on one code path, and it is the wrong layer for a legal gate.
+#
+# NOT a bare list of the 18 keys the current app version syncs, which is what a first
+# reading suggests: the client's `lastServerBlob` exists precisely so a key introduced by
+# a NEWER app version survives a push from an older one, and a hard list here would delete
+# every such key until the backend redeployed — coupling two independently deployed
+# artifacts in the one direction that silently loses data. So: an explicit set for what
+# ships today, a documented forward-compatible PREFIX for the category that actually
+# grows (notification toggles), and a hard denial for the reserved names.
+_RESERVED_KEYS = frozenset({
+    "has_acknowledged_disclaimers",   # legal gate — must be earned on THIS device
+    "has_completed_onboarding",       # first-run gate, same reasoning
+    "app_lock_enabled",               # device-local security, deliberately unsynced
+})
+
+_KNOWN_KEYS = frozenset({
+    "default_persona", "appearance_mode", "playback_speed",
+    "haptic_feedback", "autoplay_next",
+})
+
+# New notification toggles ship regularly and are harmless by construction (they can only
+# reduce or restore what the user is sent). Anything else new gets dropped and LOGGED, so
+# a genuinely new key shape is visible in the logs rather than silently discarded.
+_KNOWN_KEY_PREFIXES = ("notify_",)
+
+# A blob is a fixed set of app preferences, not a KV store. The byte cap alone permits
+# thousands of tiny keys.
+MAX_PREFERENCE_KEYS = 64
+MAX_PREFERENCE_KEY_LENGTH = 64
+
+
+def key_is_syncable(key: str) -> bool:
+    """Pure: may this key name be persisted in a user's preference blob?"""
+    if not isinstance(key, str) or not key or len(key) > MAX_PREFERENCE_KEY_LENGTH:
+        return False
+    if key in _RESERVED_KEYS:
+        return False
+    return key in _KNOWN_KEYS or key.startswith(_KNOWN_KEY_PREFIXES)
+
+
 def _is_scalar(value: Any) -> bool:
     """Scalar the iOS `PreferenceValue` can decode — and that JSON can represent.
 
@@ -75,11 +126,35 @@ def sanitize_preferences(preferences: Dict[str, Any]) -> Dict[str, Any]:
     blob the client can't read. Non-dict input yields {}.
 
     Non-finite floats are dropped for a second reason — see `_is_scalar`.
+
+    Key NAMES are filtered too — see `key_is_syncable` and `_RESERVED_KEYS`.
     """
     if not isinstance(preferences, dict):
         return {}
-    # NB: bool is a subclass of int — both are kept intentionally.
-    return {k: v for k, v in preferences.items() if isinstance(k, str) and _is_scalar(v)}
+    kept: Dict[str, Any] = {}
+    dropped_names: list[str] = []
+    for k, v in preferences.items():
+        # NB: bool is a subclass of int — both are kept intentionally.
+        if not isinstance(k, str) or not _is_scalar(v):
+            continue
+        if not key_is_syncable(k):
+            dropped_names.append(k)
+            continue
+        kept[k] = v
+        if len(kept) >= MAX_PREFERENCE_KEYS:
+            logger.warning(
+                "user_settings: blob hit the %d-key cap; remaining keys dropped",
+                MAX_PREFERENCE_KEYS,
+            )
+            break
+    if dropped_names:
+        # Loud, because this is either a client sending something it should not or a new
+        # key shape that needs adding above — and both are invisible otherwise.
+        logger.warning(
+            "user_settings: dropped %d non-syncable preference key(s): %s",
+            len(dropped_names), sorted(dropped_names)[:10],
+        )
+    return kept
 
 
 def _now_iso() -> str:

@@ -98,7 +98,7 @@ struct WhaleProfileView: View {
                     } label: {
                         Text("Retry")
                             .font(AppTypography.bodySmallEmphasis)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                             .padding(.horizontal, AppSpacing.lg)
                             .padding(.vertical, AppSpacing.sm)
                             .background(AppColors.primaryFill)
@@ -207,10 +207,13 @@ struct WhaleAvatarView: View {
     }
 
     private var backgroundColor: Color {
+        // FILL tokens: this is a saturated avatar circle carrying `textOnAccent` initials,
+        // and the text-safe siblings lighten in dark — white on `gain` #22C55E is 2.28:1,
+        // on `accentCyan` #06B6D4 2.43:1, on `alertPurple` #C084FC 2.64:1.
         let colors: [Color] = [
-            AppColors.primaryBlue, AppColors.gain,
-            AppColors.alertOrange, AppColors.alertPurple,
-            AppColors.accentCyan, AppColors.loss,
+            AppColors.primaryFill, AppColors.gainFill,
+            AppColors.alertOrangeFill, AppColors.alertPurpleFill,
+            AppColors.accentCyanFill, AppColors.lossFill,
         ]
         return colors[abs(name.hashValue) % colors.count]
     }
@@ -221,7 +224,7 @@ struct WhaleAvatarView: View {
                 switch phase {
                 case .success(let image):
                     Circle()
-                        .fill(Color.white)
+                        .fill(AppColors.textOnAccent)
                         .frame(width: size, height: size)
                         .overlay(
                             image
@@ -248,7 +251,7 @@ struct WhaleAvatarView: View {
             .overlay(
                 Text(initials)
                     .font(.system(size: size * 0.38, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
             )
     }
 }

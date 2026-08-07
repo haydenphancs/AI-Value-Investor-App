@@ -66,7 +66,7 @@ struct SignInRequiredSheet: View {
                         Spacer()
                         Text("Sign In")
                             .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                         Spacer()
                     }
                     .padding(.vertical, 14)

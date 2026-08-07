@@ -121,7 +121,7 @@ struct DisclaimerAcknowledgementView: View {
                 } label: {
                     Text("I Understand")
                         .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.lg)
                         .background(

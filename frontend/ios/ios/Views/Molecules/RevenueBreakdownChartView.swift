@@ -398,7 +398,7 @@ struct RevenueBreakdownChartView: View {
         ScrollView {
             VStack(spacing: AppSpacing.xxl) {
                 Text("Profitable Company (Apple)")
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .font(AppTypography.headingSmall)
 
                 RevenueBreakdownChartView(data: RevenueBreakdownData.sampleApple)
@@ -410,7 +410,7 @@ struct RevenueBreakdownChartView: View {
                     .overlay(AppColors.textMuted)
 
                 Text("Loss-Making Company (Rivian)")
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .font(AppTypography.headingSmall)
 
                 RevenueBreakdownChartView(data: RevenueBreakdownData.sampleLossCompany)

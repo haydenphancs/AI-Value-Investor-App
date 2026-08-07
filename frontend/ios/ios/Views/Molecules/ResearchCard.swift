@@ -93,19 +93,19 @@ struct ResearchCard: View {
         case "ORCL":
             Image(systemName: "server.rack")
                 .font(AppTypography.iconDisplay).fontWeight(.bold)
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundColor(AppColors.textOnAccent.opacity(0.9))
         case "AAPL":
             Image(systemName: "apple.logo")
                 .font(AppTypography.iconJumbo).fontWeight(.bold)
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundColor(AppColors.textOnAccent.opacity(0.9))
         case "NVDA":
             Image(systemName: "gpu")
                 .font(AppTypography.iconDisplay).fontWeight(.bold)
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundColor(AppColors.textOnAccent.opacity(0.9))
         default:
             Text(String(report.stockTicker.prefix(1)))
                 .font(AppTypography.iconXXL).fontWeight(.bold)
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundColor(AppColors.textOnAccent.opacity(0.9))
         }
     }
 }

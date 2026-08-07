@@ -323,7 +323,7 @@ private struct BookDetailCoverImage: View {
                 VStack(spacing: AppSpacing.sm) {
                     Text(book.title.uppercased())
                         .font(AppTypography.bodySmall).fontWeight(.bold)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .multilineTextAlignment(.center)
                         .lineLimit(4)
                         .padding(.horizontal, AppSpacing.lg)
@@ -334,7 +334,7 @@ private struct BookDetailCoverImage: View {
 
                     Text(book.author.uppercased())
                         .font(AppTypography.captionTiny).fontWeight(.medium)
-                        .foregroundColor(.white.opacity(0.8))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                         .tracking(1)
                 }
             }
@@ -614,7 +614,7 @@ private struct BookDetailAuthorCard: View {
 
                     Text(author.name.prefix(1))
                         .font(AppTypography.title)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                 }
 
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
@@ -715,7 +715,9 @@ private struct KeyHighlightCard: View {
 
                 Image(systemName: highlight.iconName)
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
-                    .foregroundColor(Color(themedHex: highlight.iconColor, role: .graphic, fallback: AppColors.primaryBlue))
+                    // A meaningful glyph on a card is TEXT (4.5), not a chart mark (3.0).
+                    // The 0.15 tint behind it stays `.graphic` — it carries no ink.
+                    .foregroundColor(Color(themedHex: highlight.iconColor, role: .text, fallback: AppColors.primaryBlue))
             }
 
             // Content
@@ -783,6 +785,10 @@ private struct CoreChapterTimelineRow: View {
 
     private let completedColor = Color(lightHex: "0F766E", darkHex: "2DD4BF") // Teal color for completed
     private let uncompletedColor = Color(lightHex: "0F766E", darkHex: "2DD4BF").opacity(0.5) // Muted color for outline
+    /// The same teal as a FILL carrying `textOnAccent`. `completedColor` lightens to
+    /// #2DD4BF in dark, where white on it is 1.86:1 — the `*Fill` contract (one value,
+    /// both modes) applies to an ad-hoc colour exactly as it does to a palette token.
+    private let completedFill = Color(lightHex: "0F766E", darkHex: "0F766E")
     private let lineColor = Color(lightHex: "0F766E", darkHex: "2DD4BF").opacity(0.5) // Subtle dark line
     private let badgeSize: CGFloat = 32
 
@@ -796,7 +802,7 @@ private struct CoreChapterTimelineRow: View {
                         if isCompleted {
                             // Filled badge for completed/current chapters
                             Circle()
-                                .fill(completedColor)
+                                .fill(completedFill)
                                 .frame(width: badgeSize, height: badgeSize)
                         } else {
                             // Outline-only badge for unread chapters
@@ -807,7 +813,7 @@ private struct CoreChapterTimelineRow: View {
 
                         Text("\(chapter.number)")
                             .font(AppTypography.label).fontWeight(.bold)
-                            .foregroundColor(isCompleted ? .white : uncompletedColor)
+                            .foregroundColor(isCompleted ? AppColors.textOnAccent : uncompletedColor)
                     }
                     .frame(width: badgeSize, height: badgeSize)
 
@@ -903,7 +909,12 @@ private struct DiscussionCard: View {
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: discussion.authorAvatarGradient.map { Color(themedHex: $0, role: .graphic) },
+                                // `.fill`: an opaque avatar circle carrying an initial in
+                                // `textOnAccent`. Both stops are opaque, so the clamp's
+                                // certification survives compositing.
+                                colors: discussion.authorAvatarGradient.map {
+                                    Color(themedHex: $0, role: .fill, fallback: AppColors.primaryFill)
+                                },
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -912,7 +923,7 @@ private struct DiscussionCard: View {
 
                     Text(discussion.authorName.prefix(1))
                         .font(AppTypography.bodySmall).fontWeight(.bold)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                 }
 
                 // Name and date

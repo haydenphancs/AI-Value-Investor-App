@@ -41,7 +41,7 @@ report "no Color(hex:) outside Theme/" \
   "frozen colours can't adapt — declare a token in AppTheme.swift instead" \
   "$(grep -rn --include='*.swift' -E 'Color\(hex:|UIColor\(hexString:' . \
       | grep -v '^./Theme/' \
-      | grep -vE '(SearchResultRow|EducationBookCard|SearchBookCard|AIVoiceOrb|PlayAudioButton|CompanyLogoView|BookLibraryView|AudioPlayerModels|AudioManager|HomeDashboardModels)\.swift' \
+      | grep -vE '(SearchResultRow|EducationBookCard|SearchBookCard|AIVoiceOrb|PlayAudioButton|CompanyLogoView|BookLibraryView|HomeDashboardModels)\.swift' \
       | sed 's://.*$::' \
       | grep -E 'Color\(hex:|UIColor\(hexString:' \
       | grep -v -i 'gradientcolors\|artworkcolors\|covergradient\|herogradient' \

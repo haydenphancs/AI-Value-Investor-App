@@ -36,7 +36,7 @@ struct AppLockView: View {
                         Text("Unlock")
                             .font(AppTypography.bodyEmphasis)
                     }
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .padding(.horizontal, AppSpacing.xl)
                     .padding(.vertical, AppSpacing.md)
                     .background(

@@ -170,7 +170,7 @@ struct GlobalMiniPlayer: View {
 
                 Image(systemName: audioManager.isPlaying ? "pause.fill" : "play.fill")
                     .font(AppTypography.iconDefault).fontWeight(.bold)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
                     .offset(x: audioManager.isPlaying ? 0 : 1)
             }
         }

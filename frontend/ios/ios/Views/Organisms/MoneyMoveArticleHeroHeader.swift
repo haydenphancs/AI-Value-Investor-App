@@ -66,7 +66,7 @@ struct MoneyMoveArticleHeroHeader: View {
                             Text("Back")
                                 .font(AppTypography.body)
                         }
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .padding(.horizontal, AppSpacing.md)
                         .padding(.vertical, AppSpacing.sm)
                         .background(
@@ -82,7 +82,7 @@ struct MoneyMoveArticleHeroHeader: View {
                     Button(action: { onShareTapped?() }) {
                         Image(systemName: "square.and.arrow.up")
                             .font(AppTypography.iconDefault).fontWeight(.semibold)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
                             .frame(width: 36, height: 36)
                             .background(
                                 Circle()
@@ -101,19 +101,19 @@ struct MoneyMoveArticleHeroHeader: View {
                     // Category (or "FEATURED DEEP DIVE" for featured articles)
                     Text(article.isFeatured ? "FEATURED DEEP DIVE" : article.category.rawValue.uppercased())
                         .font(AppTypography.captionEmphasis)
-                        .foregroundColor(.white.opacity(0.7))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.7))
                         .tracking(1.2)
 
                     // Title
                     Text(article.title)
                         .font(AppTypography.titleLarge)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .lineSpacing(4)
 
                     // Subtitle
                     Text(article.subtitle)
                         .font(AppTypography.body)
-                        .foregroundColor(.white.opacity(0.85))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.85))
                         .lineSpacing(4)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -147,12 +147,12 @@ struct MoneyMoveArticleHeroHeader: View {
                                     }
                                 }
                             }
-                            .foregroundColor(.white.opacity(0.7))
+                            .foregroundColor(AppColors.textOnAccent.opacity(0.7))
 
                             // Date
                             Text(article.formattedDate)
                                 .font(AppTypography.caption)
-                                .foregroundColor(.white.opacity(0.6))
+                                .foregroundColor(AppColors.textOnAccent.opacity(0.6))
                         }
                     }
 
@@ -162,7 +162,7 @@ struct MoneyMoveArticleHeroHeader: View {
                             NowPlayingBars()
                             Text("Now Playing")
                                 .font(AppTypography.captionEmphasis)
-                                .foregroundColor(.white)
+                                .foregroundColor(AppColors.textOnAccent)
                         }
                         .padding(.top, AppSpacing.xs)
                     }
@@ -183,7 +183,7 @@ struct NowPlayingBars: View {
         HStack(spacing: 2) {
             ForEach(0..<4) { index in
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.white)
+                    .fill(AppColors.textOnAccent)
                     .frame(width: 3, height: isAnimating ? CGFloat.random(in: 8...16) : 4)
                     .animation(
                         .easeInOut(duration: 0.4)
@@ -226,7 +226,7 @@ struct GrainyTextureOverlay: View {
         )
 
         Text("Content goes here")
-            .foregroundColor(.white)
+            .foregroundColor(AppColors.textOnAccent)
             .padding()
     }
     .background(AppColors.background)

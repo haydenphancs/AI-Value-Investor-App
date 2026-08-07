@@ -84,7 +84,7 @@ struct PlayAudioButton: View {
     private var foregroundColor: Color {
         switch style {
         case .primary:
-            return .white
+            return AppColors.textOnAccent
         case .secondary:
             return AppColors.primaryBlue
         case .minimal:
@@ -137,24 +137,29 @@ struct LargePlayButton: View {
             HStack(spacing: AppSpacing.md) {
                 ZStack {
                     Circle()
-                        .fill(.white)
+                        .fill(AppColors.mediaSurface)
                         .frame(width: 48, height: 48)
 
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(AppTypography.iconMedium).fontWeight(.bold)
-                        .foregroundColor(AppColors.background)
+                        // NOT `AppColors.background`: that is #F4F5F8 in light, so this
+                        // play triangle measured 1.09:1 on its own white circle and was
+                        // simply invisible on every Money Moves hero in light mode.
+                        .foregroundColor(AppColors.textOnMediaSurface)
                         .offset(x: isPlaying ? 0 : 2)
                 }
 
                 if showLabel {
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                        // Sits on the article hero gradient, not on the page — so this is
+                        // on-accent ink, constant in both appearances.
                         Text(isPlaying ? "Now Playing" : "Listen Now")
                             .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(.white)
+                            .foregroundColor(AppColors.textOnAccent)
 
                         Text(episode.formattedDuration)
                             .font(AppTypography.caption)
-                            .foregroundColor(.white.opacity(0.8))
+                            .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                     }
                 }
             }

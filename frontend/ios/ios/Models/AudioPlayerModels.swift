@@ -29,8 +29,18 @@ struct AudioEpisode: Identifiable, Equatable {
         return String(format: "%d:%02d", minutes, seconds)
     }
 
+    /// The episode's cover gradient, clamped as a FILL.
+    ///
+    /// These hexes are SERVER-supplied for the real content paths
+    /// (`LearnModels` cover gradients, `MoneyMovesContentModels.heroGradientColors`),
+    /// and this gradient is not just lock-screen art — `AudioArtworkThumbnail` and
+    /// `FullScreenAudioPlayer` draw it in-app with `textOnAccent` glyphs on top. Raw
+    /// `Color(hex:)` bypassed the clamp entirely, so a pale backend gradient put those
+    /// glyphs below AA with nothing to catch it.
     var artworkColors: [Color] {
-        artworkGradientColors.map { Color(hex: $0) }
+        artworkGradientColors.map {
+            Color(themedHex: $0, role: .fill, fallback: AppColors.primaryFill)
+        }
     }
 
     static func == (lhs: AudioEpisode, rhs: AudioEpisode) -> Bool {

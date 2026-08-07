@@ -336,20 +336,20 @@ private struct FeaturedDeepDiveHeroCard: View {
                     // Category label
                     Text("FEATURED DEEP DIVE")
                         .font(AppTypography.captionEmphasis)
-                        .foregroundColor(.white.opacity(0.8))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                         .tracking(1.2)
 
                     // Title
                     Text(article.title)
                         .font(AppTypography.titleLarge)
-                        .foregroundColor(.white)
+                        .foregroundColor(AppColors.textOnAccent)
                         .minimumScaleFactor(0.8)
                         .lineLimit(2)
 
                     // Description
                     Text(article.subtitle)
                         .font(AppTypography.bodySmall)
-                        .foregroundColor(.white.opacity(0.9))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.9))
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -361,7 +361,7 @@ private struct FeaturedDeepDiveHeroCard: View {
                             Text("\(article.readTimeMinutes) min")
                                 .font(AppTypography.caption)
                         }
-                        .foregroundColor(.white.opacity(0.8))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
 
                         HStack(spacing: AppSpacing.xs) {
                             // Only shown when we have a real count. Empty means we don't
@@ -379,7 +379,7 @@ private struct FeaturedDeepDiveHeroCard: View {
                                     .padding(.leading, article.viewCount.isEmpty ? 0 : AppSpacing.md)
                             }
                         }
-                        .foregroundColor(.white.opacity(0.8))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                     }
                     .padding(.top, AppSpacing.xs)
                 }
@@ -444,7 +444,7 @@ private struct MoneyMovesCategorySectionHeader: View {
 
                 Image(systemName: category.iconName)
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
-                    .foregroundColor(.white)
+                    .foregroundColor(AppColors.textOnAccent)
             }
 
             // Title and subtitle

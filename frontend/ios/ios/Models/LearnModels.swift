@@ -30,12 +30,29 @@ enum InvestorLevel: String, CaseIterable {
         }
     }
 
+    /// The level's hue as TEXT / a glyph, on a card. The shared default.
     var color: Color {
         switch self {
         case .foundation: return AppColors.gain
         case .analyst: return AppColors.primaryBlue
         case .strategist: return AppColors.alertPurple
         case .master: return AppColors.caution
+        }
+    }
+
+    /// The same level as a SATURATED FILL carrying `AppColors.textOnAccent` ink.
+    ///
+    /// Split for the reason the palette's FILLS block states: the text-safe tokens lighten
+    /// in dark, so the "Resume Lessons" button and the active level badge measured
+    /// 2.28:1 (`gain`), 2.24:1 (`primaryBlue`), 2.64:1 (`alertPurple`) and 2.50:1
+    /// (`caution`) under their white ink. Same pattern as `iconBackgroundColor` /
+    /// `iconFillColor` on `LessonCategory` below.
+    var fillColor: Color {
+        switch self {
+        case .foundation: return AppColors.gainFill
+        case .analyst: return AppColors.primaryFill
+        case .strategist: return AppColors.alertPurpleFill
+        case .master: return AppColors.cautionFill
         }
     }
 

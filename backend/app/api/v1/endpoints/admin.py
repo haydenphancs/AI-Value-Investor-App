@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app.api.error_response import ErrorCode, auth_error
 from app.config import settings
-from app.dependencies import get_current_user_or_guest
+from app.dependencies import GUEST_USER_ID, get_current_user_or_guest
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +48,41 @@ def _authorize_admin(
     had a carefully-reasoned branch for it that could never execute.
     """
     token = settings.ADMIN_TOKEN
-    if token and x_admin_token and secrets.compare_digest(x_admin_token, token):
+    # Compare BYTES, not str. `secrets.compare_digest` raises
+    # `TypeError: comparing strings with non-ASCII characters is not supported` when either
+    # side is a non-ASCII `str`, and Starlette decodes header values as latin-1 — so any byte
+    # >0x7F in `X-Admin-Token` arrived here as a non-ASCII str and took down EVERY route in
+    # this file with an unauthenticated 500 (nothing catches TypeError; it falls to the
+    # generic handler). Encoding first keeps the comparison constant-time and makes a junk
+    # header simply not match. `errors="ignore"` cannot raise on any input.
+    if token and x_admin_token and secrets.compare_digest(
+        x_admin_token.encode("utf-8", "ignore"), token.encode("utf-8", "ignore")
+    ):
         return
     # `is True` deliberately: a Supabase row can carry the column as NULL (a row written
     # before migration 113) and `if user.get("is_admin")` would also accept the string
     # "false", which is what a JSON round-trip through some clients produces.
     if user and user.get("is_admin") is True:
         return
-    # No credential of either kind → 401, not 403. `is_guest` (not an id comparison) is the
-    # guest test: a per-install uuid5 never equals the shared sentinel.
-    presented_nothing = not x_admin_token and (user is None or user.get("is_guest"))
+    # No credential of either kind → 401, not 403.
+    #
+    # ⚠️ `is_guest` alone is NOT enough here, and that made the 401 branch below dead code.
+    # The four `*_identity` wrappers in dependencies.py stamp `is_guest` on their sentinels,
+    # but the BASE `get_current_user_or_guest` — the one every route in this file actually
+    # depends on — returns a bare `{"id": GUEST_USER_ID, "email": "guest@local", "tier":
+    # "free"}` with no such key. So `user.get("is_guest")` read None for a completely
+    # credential-less caller, `presented_nothing` was False, and a missing credential was
+    # answered with 403 — exactly the shape `.claude/rules/auth.md` rule 2 bans, and the very
+    # thing the comment above claimed to have fixed. Test the sentinel id as well.
+    #
+    # This also catches the "valid token but no public.users row" path, which returns the same
+    # sentinel. 401 is the right answer there too: the credential is the problem, not the
+    # permission.
+    presented_nothing = not x_admin_token and (
+        user is None
+        or user.get("is_guest")
+        or user.get("id") == GUEST_USER_ID
+    )
     # Log enough to debug without leaking the actual secret.
     # `is_admin=None` (rather than False) is the tell that migration 113 has not been applied
     # to this database — worth distinguishing from a genuine "you are not an admin".

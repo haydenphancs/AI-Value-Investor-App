@@ -74,10 +74,49 @@ _alt_verifier_key: tuple | None = None
 # app) must stay fatal — retrying those would be a real weakening.
 _RETRYABLE_STATUS_NAME = "INVALID_ENVIRONMENT"
 
+# NOTIFICATIONS ONLY. A Sandbox notification configured against Production never reaches the
+# environment comparison at all, so the fallback above was dead on this path and EVERY sandbox
+# notification was rejected 400 — which lands exactly when you first wire up the Server
+# Notifications URL and reads as a bad URL rather than a code bug.
+#
+# The library (`SignedDataVerifier._verify_notification`) checks in this order:
+#
+#     if bundle_id != self._bundle_id or (
+#         self._environment == Environment.PRODUCTION and app_apple_id != self._app_apple_id
+#     ):
+#         raise VerificationException(VerificationStatus.INVALID_APP_IDENTIFIER)
+#     if environment != self._environment:
+#         raise VerificationException(VerificationStatus.INVALID_ENVIRONMENT)
+#
+# Apple does not send `data.appAppleId` in Sandbox, so under a PRODUCTION verifier the
+# `app_apple_id` half of that first condition trips and INVALID_APP_IDENTIFIER is raised
+# before the environment is ever compared.
+#
+# Why retrying it is safe — the bundle id is STILL enforced:
+#   * `_decode_signed_object` has already run, so the JWS signature and Apple's trust chain
+#     passed. Only Apple can produce such a payload; a forged one dies here on every verifier.
+#   * The sibling SANDBOX verifier re-runs the identical `bundle_id != self._bundle_id` test.
+#     What it skips is only the `appAppleId` comparison — which the library itself skips for
+#     non-Production, because Apple does not send the field there.
+#   * A Production-signed payload retried against SANDBOX still fails on INVALID_ENVIRONMENT,
+#     so a misconfigured `IAP_APP_APPLE_ID` cannot be laundered into an acceptance.
+#
+# Deliberately NOT applied to signed transactions: those carry no appAppleId comparison, so
+# INVALID_APP_IDENTIFIER there means a genuine bundle-id mismatch — a different app — and must
+# stay fatal.
+_RETRYABLE_NOTIFICATION_STATUS_NAMES = frozenset(
+    {_RETRYABLE_STATUS_NAME, "INVALID_APP_IDENTIFIER"}
+)
 
-def _is_environment_mismatch(exc: Exception) -> bool:
+_NOTIFICATION_METHOD = "verify_and_decode_notification"
+
+
+def _is_environment_mismatch(exc: Exception, method_name: str = "") -> bool:
     status = getattr(exc, "status", None)
-    return getattr(status, "name", None) == _RETRYABLE_STATUS_NAME
+    name = getattr(status, "name", None)
+    if method_name == _NOTIFICATION_METHOD:
+        return name in _RETRYABLE_NOTIFICATION_STATUS_NAMES
+    return name == _RETRYABLE_STATUS_NAME
 
 
 def _resolve_environment():
@@ -254,16 +293,20 @@ def _get_sibling_verifiers():
 def _verify_with_environment_fallback(method_name: str, blob: str):
     """Run `method_name` on the configured verifier, retrying siblings on an env mismatch.
 
-    ONLY `INVALID_ENVIRONMENT` is retried, and only after the primary verifier has already
-    validated the signature, the trust chain and the bundle id (Apple's library checks those
-    first — see `_RETRYABLE_STATUS_NAME`). A forged or tampered payload fails identically on
-    every verifier, so this cannot be used to smuggle one through.
+    For TRANSACTIONS, only `INVALID_ENVIRONMENT` is retried, and only after the primary
+    verifier has already validated the signature, the trust chain and the bundle id (Apple's
+    library checks those first — see `_RETRYABLE_STATUS_NAME`). A forged or tampered payload
+    fails identically on every verifier, so this cannot be used to smuggle one through.
+
+    For NOTIFICATIONS, `INVALID_APP_IDENTIFIER` is retried as well, because a Sandbox
+    notification never reaches the environment comparison — see
+    `_RETRYABLE_NOTIFICATION_STATUS_NAMES` for why the bundle id is still enforced.
     """
     primary = get_verifier()
     try:
         return getattr(primary, method_name)(blob)
     except Exception as first:
-        if not _is_environment_mismatch(first):
+        if not _is_environment_mismatch(first, method_name):
             raise
 
         for name, verifier in _get_sibling_verifiers().items():

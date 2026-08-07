@@ -55,9 +55,15 @@ struct CongressActivityRow: View {
             }
         }
         .padding(AppSpacing.md)
+        // `.cardFill`, not a bare `.fill` — the fill alone fixes DARK (where
+        // cardBackgroundNested #252B3B steps up from cardBackground #1E2330 at 1.11:1)
+        // and does nothing at all in LIGHT, where both arms are #FFFFFF and the row was
+        // 1.00:1 against its parent card with no hairline either. Light separates by
+        // `cardEdge`, and only `.cardFill`/`.cardSurface`/`.cardBorder` draw it. The two
+        // sibling row types (InsiderActivityRow, InstitutionalActivityRow) always did.
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                .fill(background)
+                .cardFill(background)
         )
     }
 }

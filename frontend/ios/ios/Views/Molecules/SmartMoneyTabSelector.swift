@@ -12,9 +12,15 @@ import SwiftUI
 struct SmartMoneyTabSelector: View {
     @Binding var selectedTab: SmartMoneyTab
 
-    // Segmented control — matches RecentActivitiesTabSelector exactly: equal-
-    // width tabs in a rounded `cardBackground` container, the selected tab
-    // filled with `cardBackgroundLight`.
+    // Segmented control — matches RecentActivitiesTabSelector exactly: equal-width
+    // tabs in a rounded `cardBackgroundNested` container, the selected tab filled
+    // with `toggleSelectedBackground`.
+    //
+    // It was `cardBackgroundLight`, which has the SAME dark arm as the
+    // `cardBackgroundNested` track (#252B3B) — so the selected tab was 1.00:1 and
+    // invisible in dark, distinguished only by its ink. "Matches
+    // RecentActivitiesTabSelector exactly" was true then and has to stay true: both
+    // carried the identical defect and both were fixed together.
     var body: some View {
         HStack(spacing: 0) {
             ForEach(SmartMoneyTab.allCases, id: \.rawValue) { tab in
@@ -27,7 +33,7 @@ struct SmartMoneyTabSelector: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.sm)
                         .background(
-                            selectedTab == tab ? AppColors.cardBackgroundLight : Color.clear
+                            selectedTab == tab ? AppColors.toggleSelectedBackground : Color.clear
                         )
                         .cornerRadius(AppCornerRadius.medium)
                 }

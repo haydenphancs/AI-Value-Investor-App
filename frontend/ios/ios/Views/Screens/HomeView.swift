@@ -168,8 +168,10 @@ struct LoadingOverlay: View {
             Color.black.opacity(0.3)
                 .ignoresSafeArea()
 
+            // On the scrim above, so `textOnAccent` (constant #FFFFFF by design) is the
+            // right token — same pixels as the bare `.white` it replaces, but declared.
             ProgressView()
-                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                .progressViewStyle(CircularProgressViewStyle(tint: AppColors.textOnAccent))
                 .scaleEffect(1.5)
         }
     }

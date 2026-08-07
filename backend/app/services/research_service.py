@@ -26,6 +26,10 @@ from app.integrations.fmp import get_fmp_client
 from app.services.agents.research_agent import ResearchAgent
 from app.services.agents.persona_config import get_persona_config
 from app.services.agents.persona_scoring import compute_quality_score
+from app.services.report_degradation import (
+    DegradedReportError,
+    report_degraded_reason,
+)
 from app.services.ticker_report_cache import (
     CACHE_SCHEMA_FLOOR,
     current_close_cycle_start,
@@ -240,6 +244,31 @@ class ResearchService:
                     ticker, persona_key, _run_agent, on_started=_on_started
                 )
 
+            # A DEGRADED report is a non-delivery. When Gemini is unavailable — quota
+            # circuit open, 429s exhausted, a 5xx — or simply returns something
+            # unparseable, Stage A falls back to an empty shell and every Stage B narrative
+            # uses its sentinel. The deterministic numerics still merge in, so the result
+            # VALIDATES against TickerReportResponse and renders: which is why, untagged,
+            # it was charged 20 credits, written status='completed' (so the except-only
+            # refund in _run_research_task never fired), AND seeded into
+            # ticker_report_cache — from where it was served FREE to every other user for
+            # the rest of the close cycle and RE-SOLD at 20 credits to the next research
+            # buyer via _lookup_shared_cache.
+            #
+            # Raising is what makes the refund fire: _run_research_task only refunds inside
+            # `except Exception`. The `except` below stamps status='failed' and re-raises;
+            # 'failed' is a claimable status, so claim_and_mark_failed still refunds
+            # exactly once. This mirrors the direct path (ticker_report.py's `_degraded`
+            # check leaving `delivered=False`).
+            degraded = report_degraded_reason(ticker_report_data)
+            if degraded:
+                logger.warning(
+                    "Report %s DEGRADED (%s) for %s/%s — not delivering, not caching; "
+                    "credits will be refunded",
+                    report_id, degraded, ticker, persona_key,
+                )
+                raise DegradedReportError(degraded, ticker=ticker, persona=persona_key)
+
             # Extract legacy fields for backward compatibility
             self._update_status(report_id, "processing", 92, "Saving report...")
 
@@ -446,7 +475,22 @@ class ResearchService:
                 ).limit(1).execute()
 
                 if result.data and result.data[0].get("ticker_report_data"):
-                    return result.data[0]["ticker_report_data"]
+                    blob = result.data[0]["ticker_report_data"]
+                    # Never re-sell a degraded shell. Nothing writes one any more (the
+                    # generate path raises before the completion write), but rows written
+                    # BEFORE that fix are still sitting in the table inside the close
+                    # cycle — and this lookup is a paid path, so serving one charges a
+                    # second user 20 credits for the same blank report. Treat it as a miss
+                    # and regenerate.
+                    stale_degraded = report_degraded_reason(blob)
+                    if stale_degraded:
+                        logger.warning(
+                            "Shared cache row for %s/%s is DEGRADED (%s) — treating as a "
+                            "miss rather than re-selling it",
+                            ticker, persona_key, stale_degraded,
+                        )
+                        return None
+                    return blob
                 return None
             except Exception as e:
                 # Cache lookup failures should never block generation —

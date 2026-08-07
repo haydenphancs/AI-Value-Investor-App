@@ -324,11 +324,13 @@ struct MACDRenderer: View {
                 context.fill(Path(rect), with: .color(color))
             }
 
-            // MACD line
-            drawLine(context: context, values: visibleMACD, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: .green, lineWidth: 1.5)
+            // MACD line. Apple's `.green` is 2.22:1 on white and does not adapt — these
+            // were bare system hues, invisible to both guards because they arrive as a
+            // LABELLED ARGUMENT rather than a `.foregroundColor(...)` modifier.
+            drawLine(context: context, values: visibleMACD, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: AppColors.gainGraphic, lineWidth: 1.5)
 
             // Signal line
-            drawLine(context: context, values: visibleSignal, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: .red, lineWidth: 1)
+            drawLine(context: context, values: visibleSignal, count: count, canvasWidth: canvasSize.width, yPos: yPos, color: AppColors.lossGraphic, lineWidth: 1)
         }
     }
 
@@ -385,11 +387,11 @@ struct StochasticRenderer: View {
             line80.addLine(to: CGPoint(x: canvasSize.width, y: y80))
             context.stroke(line80, with: .color(AppColors.chartGridline), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
 
-            // %K line (blue)
-            drawStochLine(context: context, values: visibleK, count: count, canvasSize: canvasSize, color: .blue, lineWidth: 1.5)
+            // %K line. Same bare-system-hue defect as the MACD pair above.
+            drawStochLine(context: context, values: visibleK, count: count, canvasSize: canvasSize, color: AppColors.primaryGraphic, lineWidth: 1.5)
 
-            // %D line (orange)
-            drawStochLine(context: context, values: visibleD, count: count, canvasSize: canvasSize, color: .orange, lineWidth: 1)
+            // %D line
+            drawStochLine(context: context, values: visibleD, count: count, canvasSize: canvasSize, color: AppColors.cautionGraphic, lineWidth: 1)
         }
     }
 

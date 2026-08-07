@@ -31,19 +31,25 @@ struct ScannerLeaderboardRow: View {
     var body: some View {
         Button { onTap?() } label: {
             HStack(spacing: 10) {
+                // `minWidth`, not `width: 16`: at 11pt a two-digit rank already clipped
+                // at the DEFAULT content size, before Dynamic Type entered into it.
                 Text("\(entry.rank)")
                     .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textMuted)
-                    .frame(width: 16, alignment: .leading)
+                    .lineLimit(1)
+                    .frame(minWidth: 20, alignment: .leading)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(entry.symbol)
                         .font(AppTypography.labelEmphasis)
                         .foregroundColor(AppColors.textPrimary)
+                        .lineLimit(1)
                     Text(entry.name)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .truncationMode(.tail)
                 }
 
                 Spacer(minLength: 8)

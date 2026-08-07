@@ -471,6 +471,17 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
             _DEFAULT_STATUS[ErrorCode.WATCHLIST_UNAVAILABLE],
         )
 
+    # ── Degraded report (deep path refuses to deliver a Gemini-outage shell) ──
+    # Matched by name before the Gemini block below: the exception is raised by our own
+    # service layer, so neither its module nor its message contains "google"/"genai", and
+    # without this it would fall through to a bare 500 — which on the paid research path
+    # means the user sees "Something went wrong" instead of "you have not been charged".
+    if "degradedreporterror" in cls:
+        return (
+            ErrorCode.GEMINI_UNAVAILABLE,
+            _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE],
+        )
+
     # ── Gemini / Google generative AI errors ──────────────────────────
     if (
         "google" in cls_module

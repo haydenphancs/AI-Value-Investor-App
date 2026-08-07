@@ -90,6 +90,81 @@ def test_no_user_and_no_token_is_401():
     assert _denied(None).status_code == 401
 
 
+def test_the_REAL_guest_sentinel_is_401_not_403():
+    """The test above passes a hand-made `{"is_guest": True}` — a shape the dependency these
+    routes actually use NEVER produces. That is why this shipped anyway.
+
+    `get_current_user_or_guest` (dependencies.py, the base dependency every route in admin.py
+    depends on) returns a bare sentinel with NO `is_guest` key — only the four `*_identity`
+    wrappers stamp it. So `user.get("is_guest")` read None, `presented_nothing` was False, and
+    a caller with no credential whatsoever got 403 — the exact shape auth.md rule 2 bans, and
+    the thing `_authorize_admin`'s own docstring claimed to have fixed. The 401 branch was
+    unreachable in production.
+
+    Build the sentinel the same way the dependency does, so this test cannot drift from it.
+    """
+    from app.dependencies import GUEST_USER_ID
+
+    sentinel = {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
+    assert "is_guest" not in sentinel, (
+        "if the base dependency starts stamping is_guest, update this fixture from it"
+    )
+
+    exc = _denied(sentinel)
+    assert exc.status_code == 401
+    assert exc.detail["error_code"] == "AUTH_REQUIRED"
+
+
+def test_a_guest_sentinel_with_a_wrong_token_is_403_not_401():
+    """Presenting a credential — even a bad one — is not the same as presenting nothing.
+    Only the no-credential case may be 401."""
+    exc = _denied({"id": "00000000-0000-4000-8000-00000000dead"}, "some-wrong-token")
+    assert exc.status_code == 403
+
+
+# ── Header robustness (unauthenticated 500) ───────────────────────────────────
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "tökén",                 # latin-1 decoded header with a byte > 0x7F
+        "adminÿ",
+        "  ",          # line separators
+        "日本語",
+        "\x80\x81",
+    ],
+)
+def test_a_non_ascii_admin_token_header_is_rejected_not_a_500(monkeypatch, header):
+    """`secrets.compare_digest` raises TypeError on a non-ASCII `str`, and Starlette decodes
+    header values as latin-1 — so ANY byte >0x7F in `X-Admin-Token` used to crash every route
+    in this file with an unauthenticated 500. Comparing bytes keeps it constant-time and makes
+    junk simply not match."""
+    monkeypatch.setattr(settings, "ADMIN_TOKEN", "s3cret-maintenance-token")
+    exc = _denied(_user(), header)
+    assert exc.status_code == 403          # rejected, not crashed
+    assert exc.detail["error_code"] == "AUTH_FORBIDDEN"
+
+
+def test_a_non_ascii_token_does_not_crash_when_the_server_token_is_also_non_ascii(monkeypatch):
+    """Both sides encode, so a non-ASCII configured secret is comparable too — and an equal
+    pair still matches."""
+    monkeypatch.setattr(settings, "ADMIN_TOKEN", "tökén-sécret")
+    admin._authorize_admin(None, "tökén-sécret")          # must not raise
+    assert _denied(_user(), "tökén-wrong").status_code == 403
+
+
+def test_encoding_cannot_collide_two_different_tokens(monkeypatch):
+    """`errors="ignore"` drops unencodable code points. Guard that it cannot make a WRONG
+    token equal the real one — surrogates are the only thing utf-8 refuses, and dropping
+    them must not leave a matching prefix."""
+    monkeypatch.setattr(settings, "ADMIN_TOKEN", "abc")
+    for probe in ["ab\ud800c", "\ud800abc\ud800", "abcd", "ab"]:
+        if probe.encode("utf-8", "ignore") == b"abc":
+            admin._authorize_admin(None, probe)   # a genuine byte-equal match is fine
+        else:
+            assert _denied(_user(), probe).status_code == 403
+
+
 def test_authenticated_non_admin_is_403():
     """A valid credential that simply isn't allowed is 403 — clearing the token would be
     wrong, the session is fine."""

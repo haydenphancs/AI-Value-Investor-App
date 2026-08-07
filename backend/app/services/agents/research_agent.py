@@ -40,6 +40,11 @@ from app.services.agents.fmp_tools import (
     build_fmp_tool_declarations,
     build_tool_handlers,
 )
+from app.services.report_degradation import (
+    REPORT_DEGRADED_KEY,
+    _degraded_reason,
+    _mark_degraded,
+)
 from app.services.agents.narrative_prompts import (
     build_narrative_jobs,
     build_stage_a_prompt,
@@ -161,6 +166,16 @@ class ResearchAgent:
 
         # ── Phase 4: assemble (real-data + Stage A merge) ────────────
         report = self.collector.assemble_report(out, shell)
+
+        # Carry the degradation marker across the merge. `assemble_report` builds a fresh
+        # dict from the real-data sections, so the shell-level key does NOT survive on its
+        # own — and an untagged degraded report is charged 20 credits, marked completed
+        # (so the `except`-only refund never fires) and written to the SHARED cache, where
+        # it is then served free to everyone else and re-sold to the next research buyer.
+        # The direct path has done this since 2026-08-05; this door never did.
+        stage_a_degradation = _degraded_reason(shell)
+        if stage_a_degradation:
+            report[REPORT_DEGRADED_KEY] = stage_a_degradation
 
         # ── Phase 5: Stage B narratives + cross-module thesis synthesis ──
         # Both mutate `report` in place on disjoint keys (Stage B fills
@@ -377,11 +392,11 @@ class ResearchAgent:
                     f"Stage A returned unparseable JSON for {ticker}; "
                     f"using honest fallback shell."
                 )
-                return stage_a_fallback()
+                return _mark_degraded(stage_a_fallback(), "stage_a_unparseable")
             return shell
         except Exception as e:
             logger.error(
                 f"Stage A generation failed for {ticker}: "
                 f"{type(e).__name__}: {e}"
             )
-            return stage_a_fallback()
+            return _mark_degraded(stage_a_fallback(), f"stage_a_{type(e).__name__}")

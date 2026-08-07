@@ -18,9 +18,10 @@ struct PersonaIcon: View {
                 .fill(
                     // Selected = a saturated fill carrying light ink, so `accentFill` +
                     // `textOnAccent` below. It was `accentColor` + `textPrimary`, i.e.
-                    // exactly the "text token on a fill" defect theme-lint rule 3 exists
-                    // to catch — invisible to it because the rule greps literal `*Fill`
-                    // token names and this arrives from the server at runtime.
+                    // exactly the "text token on a fill" defect that
+                    // `test_ios_theme_parity.py::test_text_tokens_never_sit_on_a_fill`
+                    // exists to catch — invisible to it because the rule matches literal
+                    // `*Fill` token names and this arrives from the server at runtime.
                     isSelected
                         ? persona.accentFill
                         : AppColors.cardBackgroundLight

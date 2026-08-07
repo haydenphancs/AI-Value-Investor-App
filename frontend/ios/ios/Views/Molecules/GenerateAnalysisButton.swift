@@ -19,8 +19,10 @@ struct GenerateAnalysisButton: View {
         }) {
             VStack(spacing: AppSpacing.xs) {
                 if isLoading {
+                    // `textOnAccent`, not a bare `.white`: this spinner sits on
+                    // `primaryFill` (line 48), which is exactly the on-accent-ink case.
                     ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .progressViewStyle(CircularProgressViewStyle(tint: AppColors.textOnAccent))
                 } else {
                     HStack(spacing: AppSpacing.sm) {
                         Image(systemName: "sparkles.2")

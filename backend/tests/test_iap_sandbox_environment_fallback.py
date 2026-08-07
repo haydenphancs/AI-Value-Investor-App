@@ -145,6 +145,138 @@ def test_only_the_environment_status_is_treated_as_retryable():
     assert not app_store._is_environment_mismatch(ValueError("unrelated"))
 
 
+# ── NOTIFICATIONS: the fallback above never actually fired on this path ───────
+#
+# `_StubVerifier` checks bundle id, then environment — which is how the library treats
+# TRANSACTIONS. Notifications go through `_verify_notification`, which is materially
+# different, and modelling it wrongly is why `test_notifications_get_the_same_treatment`
+# passed while every real sandbox notification was rejected 400. (Same failure mode the
+# `_to_dict` docstring records: "survived 35 IAP tests because they all feed plain dicts,
+# never a real library model.")
+#
+# Verified against appstoreserverlibrary 1.x, SignedDataVerifier._verify_notification:
+#
+#     if bundle_id != self._bundle_id or (
+#         self._environment == Environment.PRODUCTION and app_apple_id != self._app_apple_id
+#     ):
+#         raise VerificationException(VerificationStatus.INVALID_APP_IDENTIFIER)
+#     if environment != self._environment:
+#         raise VerificationException(VerificationStatus.INVALID_ENVIRONMENT)
+#
+# Apple omits `data.appAppleId` in Sandbox, so a Sandbox notification hitting a PRODUCTION
+# verifier raises INVALID_APP_IDENTIFIER and never reaches the environment comparison.
+
+_APP_APPLE_ID = 6740000001
+
+
+class _NotificationVerifier:
+    """Faithful port of `SignedDataVerifier._verify_notification`, order included."""
+
+    def __init__(self, environment: str, calls: list):
+        self._environment = environment
+        self._bundle_id = "com.phan.caydex"
+        self._app_apple_id = _APP_APPLE_ID
+        self._calls = calls
+
+    def verify_and_decode_notification(self, blob):
+        self._calls.append(self._environment)
+        if blob.get("forged"):
+            raise VerificationException(VerificationStatus.VERIFICATION_FAILURE)
+
+        bundle_id = blob.get("bundleId", "com.phan.caydex")
+        # Apple does not send appAppleId in Sandbox.
+        app_apple_id = _APP_APPLE_ID if blob.get("environment") == "Production" else None
+
+        if bundle_id != self._bundle_id or (
+            self._environment == "Production" and app_apple_id != self._app_apple_id
+        ):
+            raise VerificationException(VerificationStatus.INVALID_APP_IDENTIFIER)
+        if blob.get("environment") != self._environment:
+            raise VerificationException(VerificationStatus.INVALID_ENVIRONMENT)
+        return dict(_TXN, environment=blob["environment"], notificationType="DID_RENEW")
+
+
+@pytest.fixture
+def notif_wired(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(app_store, "get_verifier", lambda: _NotificationVerifier("Production", calls))
+    monkeypatch.setattr(
+        app_store, "_get_sibling_verifiers",
+        lambda: {"SANDBOX": _NotificationVerifier("Sandbox", calls)},
+    )
+    monkeypatch.setattr(app_store, "_resolve_environment", lambda: (None, "PRODUCTION"))
+    return calls
+
+
+def test_a_sandbox_notification_is_accepted_against_a_production_server(notif_wired):
+    """THE bug. Every sandbox notification used to 400 — and it surfaces the moment you set
+    the Server Notifications URL in App Store Connect, where it reads as a wrong URL."""
+    out = app_store._verify_with_environment_fallback(
+        "verify_and_decode_notification", {"environment": "Sandbox"}
+    )
+    assert out["notificationType"] == "DID_RENEW"
+    assert notif_wired == ["Production", "Sandbox"], "configured env must be tried first"
+
+
+def test_a_production_notification_still_takes_the_primary_verifier(notif_wired):
+    app_store._verify_with_environment_fallback(
+        "verify_and_decode_notification", {"environment": "Production"}
+    )
+    assert notif_wired == ["Production"]
+
+
+def test_a_notification_for_a_DIFFERENT_APP_is_still_rejected(notif_wired):
+    """The bundle id is what the retry must not weaken. The sibling verifier re-runs the
+    identical `bundle_id != self._bundle_id` test — only the appAppleId comparison is
+    skipped, exactly as the library itself skips it outside Production."""
+    with pytest.raises(VerificationException) as ei:
+        app_store._verify_with_environment_fallback(
+            "verify_and_decode_notification",
+            {"environment": "Sandbox", "bundleId": "com.someone.else"},
+        )
+    assert ei.value.status is VerificationStatus.INVALID_APP_IDENTIFIER
+    assert notif_wired == ["Production", "Sandbox"], "retried, and rejected by both"
+
+
+def test_a_forged_notification_is_never_retried(notif_wired):
+    with pytest.raises(VerificationException) as ei:
+        app_store._verify_with_environment_fallback(
+            "verify_and_decode_notification",
+            {"environment": "Sandbox", "forged": True},
+        )
+    assert ei.value.status is VerificationStatus.VERIFICATION_FAILURE
+    assert notif_wired == ["Production"]
+
+
+def test_the_widened_status_is_scoped_to_notifications_only():
+    """On a TRANSACTION there is no appAppleId comparison, so INVALID_APP_IDENTIFIER means a
+    genuine bundle-id mismatch — a different app — and must stay fatal."""
+    exc = VerificationException(VerificationStatus.INVALID_APP_IDENTIFIER)
+
+    assert app_store._is_environment_mismatch(exc, "verify_and_decode_notification")
+    assert not app_store._is_environment_mismatch(exc, "verify_and_decode_signed_transaction")
+    assert not app_store._is_environment_mismatch(exc), "the default must stay strict"
+
+    # And nothing else widens, on either path.
+    for status in VerificationStatus:
+        if status.name in {"INVALID_ENVIRONMENT", "INVALID_APP_IDENTIFIER"}:
+            continue
+        assert not app_store._is_environment_mismatch(
+            VerificationException(status), "verify_and_decode_notification"
+        ), f"{status.name} must stay fatal even on the notification path"
+
+
+def test_a_transaction_with_a_bundle_mismatch_is_still_not_retried(wired):
+    """Belt and braces on the scoping, through the real entry point rather than the predicate."""
+    with pytest.raises(VerificationException) as ei:
+        app_store._verify_with_environment_fallback(
+            "verify_and_decode_signed_transaction",
+            {"environment": "Sandbox", "bundle_mismatch": True},
+        )
+    assert ei.value.status is VerificationStatus.INVALID_APP_IDENTIFIER
+    assert wired == ["Production"], "must not consult the sibling"
+
+
 # ── Local environments are never cross-accepted ───────────────────────────────
 
 @pytest.mark.parametrize("env_name", ["XCODE", "LOCALTESTING"])

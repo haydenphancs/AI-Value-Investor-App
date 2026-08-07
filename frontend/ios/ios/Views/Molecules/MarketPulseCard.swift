@@ -23,11 +23,18 @@ struct MarketPulseCard: View {
                     .font(AppTypography.captionSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.85)
 
+                // A `lineLimit(1)` with no `minimumScaleFactor` TRUNCATES, and the real
+                // values are 9 characters ("23,840.10"). At `dataMedium` × dataCap that
+                // is ~88pt of monospaced digits in a 68pt box, which is why index prices
+                // clipped. 0.75 is derived, not felt: 88 × 0.75 = 66pt, just inside.
                 Text(item.priceText)
                     .font(AppTypography.dataMedium)
                     .foregroundColor(AppColors.textPrimary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .allowsTightening(true)
 
                 // Dual-tone sparkline with a dashed previous-close reference
                 // line — green above / red below — matching the Holdings cards.
@@ -47,11 +54,20 @@ struct MarketPulseCard: View {
                     .frame(height: 22)
                 }
 
+                // Had NO line limit at all, so it wrapped instead of truncating and grew
+                // the tile vertically rather than clipping — a different symptom of the
+                // same 68pt squeeze.
                 Text(item.changeText)
                     .font(AppTypography.dataSmall)
                     .foregroundColor(changeColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-            .frame(width: 88, alignment: .leading)
+            // `minWidth`, not a hard `width`: the strip is a horizontal ScrollView that
+            // constrains nothing, so letting the tile grow means larger text costs a
+            // little scroll rather than shrinking every glyph. The scale factors above
+            // are the backstop for when it cannot grow.
+            .frame(minWidth: 88, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 9)
             .background(AppColors.cardBackground)

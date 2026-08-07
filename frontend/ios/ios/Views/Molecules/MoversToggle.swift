@@ -20,15 +20,20 @@ struct MoversToggle: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            segment(.gainers, "Gainers", active: AppColors.bullish)
-            segment(.losers, "Losers", active: AppColors.bearish)
+            segment(.gainers, "Gainers", active: AppColors.gainFill)
+            segment(.losers, "Losers", active: AppColors.lossFill)
         }
         .padding(3)
-        .background(Color(lightHex: "E7EAF0", darkHex: "14171F"))
+        .background(AppColors.surfaceRecessed)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        // Keep the toggle at its intrinsic width so a long card title can't
-        // squeeze the labels onto a second line ("Gaine\nrs").
-        .fixedSize()
+        // NOTE: there is deliberately NO container-level `.fixedSize()` here.
+        // It used to be, to stop "Gaine\nrs" — but the per-segment
+        // `.lineLimit(1).fixedSize(horizontal:)` below is what actually prevents that,
+        // and the container version additionally told the parent HStack "never
+        // compress me". That made the sibling card TITLE absorb 100% of any shortfall,
+        // which is how "Today's Top Movers" reflowed to four lines at larger type
+        // sizes. Removing either guard alone reintroduces one of the two bugs, so
+        // `test_ios_a11y_parity.py` pins them as a pair.
     }
 
     private func segment(_ value: MoversMode, _ label: String, active: Color) -> some View {
@@ -40,10 +45,15 @@ struct MoversToggle: View {
                 .font(AppTypography.labelSmallEmphasis)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
-                .foregroundColor(isActive ? active : AppColors.textMuted)
+                // The active segment is a SATURATED FILL, so its ink is `textOnAccent`,
+                // never the sentiment token. `gain`/`loss` are 4.5:1 TEXT tokens tuned
+                // for a card, and on `toggleSelectedBackground` they measured 4.34 / 4.44
+                // light and 3.73 dark — this was the app's only sentiment-on-control-
+                // surface pairing. `textOnAccent` on gainFill/lossFill is 5.42 / 5.55.
+                .foregroundColor(isActive ? AppColors.textOnAccent : AppColors.textMuted)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(isActive ? AppColors.toggleSelectedBackground : Color.clear)
+                .background(isActive ? active : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)

@@ -26,7 +26,6 @@ struct LearnContentView: View {
     @State private var showingMoneyMovesDetail = false
     @State private var showingBookLibrary = false
     @State private var showProfile = false
-    @State private var showPaywall = false
     @State private var showSearch = false
     @State private var selectedMoneyMoveArticle: MoneyMoveArticle?
     @State private var selectedLibraryBook: LibraryBook?
@@ -83,11 +82,6 @@ struct LearnContentView: View {
         .fullScreenCover(item: $selectedLibraryBook) { book in
             BookDetailView(book: book)
                 .environmentObject(audioManager)
-        }
-        // The Learn card's "Add More Credits" → buy credits, not the subscription paywall.
-        .sheet(isPresented: $showPaywall) {
-            BuyCreditsView()
-                .environment(\.appState, appState)
         }
         .fullScreenCover(isPresented: $showProfile) {
             ProfileView()
@@ -207,15 +201,10 @@ struct LearnContentView: View {
             )
         }
 
-        // Credits Balance Section — the REAL balance from AppState (the documented
-        // single source of truth), not a hardcoded one. Hidden entirely when unknown
-        // rather than showing a number the user doesn't have.
-        if let credits = appState.user.credits {
-            LearnCreditsSection(
-                balance: CreditBalance.from(credits),
-                onAddCredits: handleAddCredits
-            )
-        }
+        // Credits live on the RESEARCH tab, where they are actually spent — a balance
+        // shown next to reading material invited a top-up at the moment the user was
+        // least likely to need one, and duplicated a number that must never disagree
+        // with itself across two screens.
     }
 
     // MARK: - Filtered content (keyword active)
@@ -333,10 +322,6 @@ struct LearnContentView: View {
 
     private func handleDiscussionTap(_ discussion: CommunityDiscussion) {
         viewModel.openDiscussion(discussion)
-    }
-
-    private func handleAddCredits() {
-        showPaywall = true
     }
 
     // MARK: - Helpers

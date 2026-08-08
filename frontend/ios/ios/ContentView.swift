@@ -353,6 +353,23 @@ struct ResearchViewWithBinding: View {
     }
 
     // MARK: - Research Tab Content
+    /// The balance to display, preferring the ViewModel's own copy and falling back to
+    /// `AppState`.
+    ///
+    /// The ViewModel deliberately keeps its OWN `creditBalance` (it has no AppState
+    /// reference) so it can adopt a purchase the instant `.caydexEntitlementChanged`
+    /// fires. That copy is authoritative when present — but it is nil until
+    /// `loadCredits()` returns, and it STAYS nil if that one request fails. The card and
+    /// the Generate badge then vanish entirely, while the Wiser tab — which reads
+    /// `appState.user.credits`, the documented single source of truth — shows the real
+    /// number on the same screen-swipe. Two surfaces disagreeing about the user's
+    /// balance reads as a bug in the credits system, not as a failed fetch.
+    ///
+    /// Falling back rather than replacing keeps the purchase-adoption path intact.
+    private var effectiveCreditBalance: CreditBalance? {
+        viewModel.creditBalance ?? appState.user.credits.map(CreditBalance.from)
+    }
+
     private var researchTabContent: some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: AppSpacing.xxl) {
@@ -375,7 +392,7 @@ struct ResearchViewWithBinding: View {
                 // Generate Analysis Section
                 GenerateAnalysisSection(
                     cost: viewModel.analysisCost,
-                    remainingCredits: viewModel.creditBalance?.credits,
+                    remainingCredits: effectiveCreditBalance?.credits,
                     isEnabled: viewModel.canStartNewGeneration,
                     isLoading: viewModel.isAtConcurrencyCap,
                     onGenerate: handleGenerateAnalysis
@@ -385,7 +402,7 @@ struct ResearchViewWithBinding: View {
                 WhatYouGetSection(features: viewModel.features)
 
                 // Credits Balance Card — only once a real balance is known.
-                if let balance = viewModel.creditBalance {
+                if let balance = effectiveCreditBalance {
                     CreditsBalanceCard(
                         balance: balance,
                         onAddCredits: handleAddCredits

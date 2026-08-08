@@ -266,21 +266,34 @@ struct BuyCreditsView: View {
             Button {
                 Task { await viewModel.purchase(pack) }
             } label: {
-                Text(isThisPack ? "Processing…" : "Buy")
-                    .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(AppColors.textOnAccent)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.md)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(AppColors.primaryFill)
-                    )
+                HStack(spacing: AppSpacing.xs) {
+                    // See PaywallView: a spinner appears on exactly ONE card, so "which pack am
+                    // I buying" is answered at a glance rather than inferred from which button
+                    // is dimmer.
+                    if isThisPack {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(AppColors.textOnAccent)
+                            .scaleEffect(0.8)
+                    }
+                    Text(isThisPack ? "Processing…" : "Buy")
+                }
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textOnAccent)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, AppSpacing.md)
+                .background(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                        .fill(AppColors.primaryFill)
+                )
             }
             // Every button disables while ANY purchase is in flight — two concurrent StoreKit
             // sheets is not a state worth supporting — but only the one being bought says
-            // "Processing…", so the screen never claims to be buying two packs at once.
+            // "Processing…", and the rest desaturate so they read as unavailable rather than
+            // as also-working.
             .disabled(store.isPurchasing)
-            .opacity(store.isPurchasing && !isThisPack ? 0.45 : 1)
+            .opacity(store.isPurchasing && !isThisPack ? 0.3 : 1)
+            .saturation(store.isPurchasing && !isThisPack ? 0 : 1)
         }
         .padding(AppSpacing.lg)
         .background(

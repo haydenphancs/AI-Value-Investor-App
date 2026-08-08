@@ -206,3 +206,63 @@ def test_the_two_purchase_409_codes_map_to_distinct_apperror_cases():
         "PURCHASE_ACCOUNT_MISMATCH must have its OWN AppError case — falling through to "
         ".apiError would lose the distinction handle() depends on"
     )
+
+
+# ── Defect 4: exactly ONE card may say "Processing…" ──────────────────────────────────
+
+
+def test_tier_to_product_id_is_injective_so_one_purchase_marks_one_card():
+    """At most one plan card can ever read "Processing…".
+
+    The paywall decides each card's label by comparing the store's single
+    `purchasingProductID` against THAT plan's product id. Two cards can therefore both match
+    only if two tiers map to the SAME product id — so this pins the mapping as injective over
+    the tiers the backend actually ships (`plan_credits`: free / pro / premium).
+
+    Reported as "tapping Choose Pro makes both Pro and Max say Processing", which is the
+    behaviour the pre-`purchasingProductID` code had (driving the label from the global
+    `isPurchasing`). This is the assertion that keeps it from coming back.
+    """
+    body = _strip_comments(_func_body(_read(_SERVICE), "func productID(for tier: String)"))
+
+    mapped = dict(re.findall(r'case\s+"(\w+)"[^:]*:\s*return\s+ProductID\.(\w+)', body))
+    # `case "premium", "max":` — the multi-label form the regex above sees only partly.
+    for m in re.finditer(r'case\s+((?:"\w+"\s*,\s*)+"\w+")\s*:\s*return\s+ProductID\.(\w+)', body):
+        for tier in re.findall(r'"(\w+)"', m.group(1)):
+            mapped[tier] = m.group(2)
+
+    assert {"pro", "premium"} <= set(mapped), (
+        f"the shipped tiers are no longer mapped — got {mapped}. `plan_credits` seeds "
+        "free/pro/premium, and an unmapped paid tier means its Choose button does nothing."
+    )
+    paid = {t: p for t, p in mapped.items() if t in {"pro", "premium"}}
+    assert len(set(paid.values())) == len(paid), (
+        f"two tiers map to the SAME product id ({paid}) — one purchase would light up BOTH "
+        "plan cards as 'Processing…', which is exactly the reported bug"
+    )
+
+
+def test_the_paywall_cta_label_is_per_product_not_global():
+    """`isPurchasing` is global to the service. Driving the LABEL from it is what made every
+    card read "Processing…" on any tap; only the disabled/dimmed state may use it."""
+    body = _strip_comments(_func_body(_read(_VIEW), "private func planCTA("))
+
+    assert "isThisPlan" in body, "the per-product comparison is gone"
+    assert "purchasingProductID" in body, (
+        "the CTA must compare the store's purchasingProductID against THIS plan's product id"
+    )
+    # The label ternary must key off the per-product flag, never the global one.
+    label = re.search(r"Text\(\s*(is\w+)\s*\n?\s*\?", body) or re.search(r"Text\((is\w+)\s*\?", body)
+    assert label and label.group(1) == "isThisPlan", (
+        "the \"Processing…\" label must be driven by isThisPlan, not by the global "
+        f"isPurchasing (found: {label.group(1) if label else 'no ternary'})"
+    )
+
+
+def test_the_credit_pack_cta_label_is_per_product_too():
+    """Same rule on the Buy Credits screen — four packs, one purchase."""
+    view = _strip_comments(_read(_ROOT / "Views/Screens/BuyCreditsView.swift"))
+    assert "isThisPack" in view
+    assert re.search(r"Text\(isThisPack \?", view), (
+        "the pack CTA label must be driven by isThisPack, not by the global isPurchasing"
+    )

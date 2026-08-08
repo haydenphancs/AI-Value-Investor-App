@@ -233,32 +233,47 @@ struct PaywallView: View {
             Button {
                 Task { await viewModel.purchase(tier: plan.tier) }
             } label: {
-                Text(isThisPlan
-                     ? "Processing\u{2026}"
-                     : "Choose \(plan.displayName)")
-                    .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(AppColors.textOnAccent)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, AppSpacing.md)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(
-                                // `alertOrangeFill`, not `alertOrange`: this button carries
-                                // constant-white `textOnAccent`, and the text token lightens to
-                                // #F97316 in dark where white on it is 2.80. 5.18 both modes now.
-                                LinearGradient(
-                                    colors: [AppColors.alertOrangeFill, AppColors.alertOrangeFill],
-                                    startPoint: .leading, endPoint: .trailing
-                                )
+                HStack(spacing: AppSpacing.xs) {
+                    // A SPINNER, not just a word. The label alone was ambiguous: during a
+                    // purchase one card reads "Processing…" while the other merely dims, and
+                    // "dimmed" is easy to read as "busy too" — which is what made this look
+                    // like both plans were being bought at once. A moving indicator appears on
+                    // exactly one card and settles the question at a glance.
+                    if isThisPlan {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(AppColors.textOnAccent)
+                            .scaleEffect(0.8)
+                    }
+                    Text(isThisPlan
+                         ? "Processing\u{2026}"
+                         : "Choose \(plan.displayName)")
+                }
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textOnAccent)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, AppSpacing.md)
+                .background(
+                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                        .fill(
+                            // `alertOrangeFill`, not `alertOrange`: this button carries
+                            // constant-white `textOnAccent`, and the text token lightens to
+                            // #F97316 in dark where white on it is 2.80. 5.18 both modes now.
+                            LinearGradient(
+                                colors: [AppColors.alertOrangeFill, AppColors.alertOrangeFill],
+                                startPoint: .leading, endPoint: .trailing
                             )
-                    )
+                        )
+                )
             }
             .buttonStyle(PlainButtonStyle())
             // Still disable EVERY plan during a purchase — two concurrent StoreKit sheets is
-            // not a supported state — but dim only the ones that aren't the active purchase, so
-            // "disabled" is visible rather than a button that looks live and ignores taps.
+            // not a supported state — but dim the ones that aren't the active purchase HARD, so
+            // they read as "unavailable right now" rather than "also working". 0.45 was light
+            // enough that a dimmed orange button still looked live.
             .disabled(viewModel.store.isPurchasing)
-            .opacity(viewModel.store.isPurchasing && !isThisPlan ? 0.45 : 1)
+            .opacity(viewModel.store.isPurchasing && !isThisPlan ? 0.3 : 1)
+            .saturation(viewModel.store.isPurchasing && !isThisPlan ? 0 : 1)
         }
     }
 

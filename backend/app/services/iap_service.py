@@ -64,6 +64,27 @@ class PurchaseBoundToAnotherAccount(IAPError):
     """
 
 
+class PurchaseAccountMismatch(PurchaseBoundToAnotherAccount):
+    """The transaction's `appAccountToken` names a different account, and NOTHING was recorded.
+
+    A subclass because it is still "this isn't your purchase" — but the money consequence is the
+    opposite of its parent's, and conflating them destroys purchases.
+
+    `PurchaseBoundToAnotherAccount` means we ALREADY HAVE this transaction against another
+    account: somebody was credited, the condition can never clear, and the client SHOULD finish
+    it so Apple stops redelivering.
+
+    This one is raised BEFORE any grant, when the token proves the buyer is a different account
+    from the one submitting. No `credit_purchases` row exists and NOBODY has been credited — so
+    finishing it deletes a purchase the user paid for, with no redelivery left to repair it. The
+    honest handling is to keep it unfinished until the buying account signs in, at which point
+    the very same redelivery grants it.
+
+    Carries its own `ErrorCode.PURCHASE_ACCOUNT_MISMATCH` so the client can tell the two apart;
+    `billing.py` must catch this arm BEFORE the parent.
+    """
+
+
 # Tier ordering, worst → best. Used to pick the winning entitlement, so a user holding both
 # Pro and Max gets Max. Kept explicit rather than relying on the DB enum's declaration order.
 _TIER_RANK: Dict[str, int] = {"free": 0, "pro": 1, "premium": 2}
@@ -434,7 +455,10 @@ class IAPService:
                     "user=%s — refusing to credit a different account",
                     transaction_id, token, user_id,
                 )
-                raise PurchaseBoundToAnotherAccount(
+                # NOT `PurchaseBoundToAnotherAccount`: we are refusing BEFORE any grant, so no
+                # row exists and nobody has been credited. The client must keep the transaction
+                # unfinished — see `PurchaseAccountMismatch`.
+                raise PurchaseAccountMismatch(
                     "this purchase belongs to a different account"
                 )
         else:

@@ -553,10 +553,21 @@ struct BackendCreditsResponse: Sendable {
     let used: Int
     let remaining: Int
     let resetsAt: String?
+    /// The pool split. Optional because the app and backend deploy independently — a build
+    /// carrying this type can hit a Railway instance that predates credit packs.
+    ///
+    /// Carried here, not just on `CreditInfo`, because this is the DTO that feeds
+    /// `CreditBalance` on the Research and Learn cards. Without it those cards structurally
+    /// cannot tell which part of the balance expires, and they printed "Renews <date>" over a
+    /// total that includes never-expiring purchased credits.
+    let grantedRemaining: Int?
+    let purchasedRemaining: Int?
 
     enum CodingKeys: String, CodingKey {
         case total, used, remaining
         case resetsAt = "resets_at"
+        case grantedRemaining = "granted_remaining"
+        case purchasedRemaining = "purchased_remaining"
     }
 }
 
@@ -567,5 +578,9 @@ extension BackendCreditsResponse: Decodable {
         self.used = try container.decode(Int.self, forKey: .used)
         self.remaining = try container.decode(Int.self, forKey: .remaining)
         self.resetsAt = try container.decodeIfPresent(String.self, forKey: .resetsAt)
+        // decodeIfPresent, not decode: these are Optional AND may be absent from an older
+        // backend. `decode` on an absent key throws even for an Optional type.
+        self.grantedRemaining = try container.decodeIfPresent(Int.self, forKey: .grantedRemaining)
+        self.purchasedRemaining = try container.decodeIfPresent(Int.self, forKey: .purchasedRemaining)
     }
 }

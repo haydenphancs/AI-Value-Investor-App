@@ -41,6 +41,21 @@ def _read(path: Path) -> str:
     return path.read_text()
 
 
+def _strip_comments(src: str) -> str:
+    """Drop `//` comment lines and trailing comments.
+
+    Mandatory for any assertion of the form "token X must NOT appear": the codebase explains
+    its subtler invariants in prose that quotes the very identifiers being forbidden, so an
+    unstripped scan fails on documentation rather than on code.
+    """
+    out = []
+    for raw in src.splitlines():
+        if raw.strip().startswith("//"):
+            continue
+        out.append(re.sub(r"//.*$", "", raw))
+    return "\n".join(out)
+
+
 def _func_body(src: str, signature: str) -> str:
     """Slice from `signature` to the start of the next declaration at the same level.
 
@@ -146,3 +161,48 @@ def test_the_purchase_error_is_not_shown_to_the_user_raw():
     vm = _func_body(_read(_VM), "func purchase(tier: String) async {")
     assert "AppError.from(error).message" in vm
     assert "ns.domain" not in vm and "localizedDescription" not in vm
+
+
+# ── Defect 3: only ONE of the two 409s may finish the transaction ─────────────────────
+
+
+def test_only_purchase_already_linked_finishes_the_transaction():
+    """`handle()` must finish a terminal 409 ONLY when the server actually recorded it.
+
+    The backend raises two structurally different 409s. `PURCHASE_ALREADY_LINKED` means the
+    transaction IS recorded against another account — somebody was credited, the condition can
+    never clear, so finishing it is right and stops Apple redelivering forever.
+    `PURCHASE_ACCOUNT_MISMATCH` is refused BEFORE any grant: no `credit_purchases` row, nobody
+    credited. Finishing THAT one deletes a purchase the user paid for, with no redelivery left
+    to repair it — it must fall through to the "leave unfinished" branch so the same transaction
+    is granted once the buying account signs in.
+
+    Naming `purchaseAccountMismatch` anywhere in this function is therefore the regression: the
+    only correct handling is to NOT special-case it.
+    """
+    # Comments STRIPPED before scanning. This function is heavily commented precisely because
+    # the distinction is subtle, and those comments name `.purchaseAccountMismatch` to explain
+    # why it must NOT be special-cased — a raw scan reads that prose as the very branch it is
+    # forbidding. (See `project_source_scan_guard_vacuity`: strip comments, bound the window.)
+    body = _strip_comments(_func_body(_read(_SERVICE), "private func handle("))
+
+    assert "purchaseAlreadyLinked" in body and "await transaction.finish()" in body, (
+        "the terminal-409 branch is gone — an already-linked transaction will redeliver on "
+        "every launch forever"
+    )
+    assert "purchaseAccountMismatch" not in body, (
+        "handle() special-cases .purchaseAccountMismatch. That 409 means the server recorded "
+        "NOTHING, so any branch naming it here is either finishing a purchase nobody was "
+        "credited for, or is dead code that invites someone to. Let it fall through."
+    )
+
+
+def test_the_two_purchase_409_codes_map_to_distinct_apperror_cases():
+    """A shared case would make the finish-decision above unrepresentable."""
+    err = _read(_ROOT / "Core/Utilities/AppError.swift")
+    assert 'if code == "PURCHASE_ALREADY_LINKED"' in err
+    assert 'if code == "PURCHASE_ACCOUNT_MISMATCH"' in err
+    assert "case purchaseAccountMismatch(message: String)" in err, (
+        "PURCHASE_ACCOUNT_MISMATCH must have its OWN AppError case — falling through to "
+        ".apiError would lose the distinction handle() depends on"
+    )

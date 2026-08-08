@@ -61,7 +61,12 @@ struct CreditsBalanceCard: View {
                         .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                 }
 
-                Text(balance.formattedRenewalDate)
+                // `compositionSummary`, not `formattedRenewalDate`: the number above is the
+                // COMBINED balance, and printing "Renews <date>" under it told a user who
+                // bought a credit pack that their purchased credits expire. App Store
+                // Guideline 3.1.1 forbids them expiring, so saying so is both false and a
+                // review risk. This renders whichever halves actually exist.
+                Text(balance.compositionSummary)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textOnAccent.opacity(0.8))
             }

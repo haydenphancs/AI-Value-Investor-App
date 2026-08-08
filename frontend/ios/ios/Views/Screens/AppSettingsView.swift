@@ -152,14 +152,21 @@ struct AppSettingsView: View {
             Button {
                 Task {
                     isRestoring = true
-                    let count = await StoreKitService.shared.restorePurchases()
+                    let result = await StoreKitService.shared.restorePurchases()
                     isRestoring = false
-                    // Distinguish the two outcomes: "nothing to restore" is the common case
-                    // for someone who never subscribed, and a generic success there just
-                    // confuses them.
-                    restoreMessage = count > 0
-                        ? "Restored your subscription."
-                        : "No previous purchases found for this Apple Account."
+                    // THREE outcomes, not two. "Nothing to restore" is the common case for
+                    // someone who never subscribed — but it used to also swallow the case
+                    // where Apple DID return entitlements and every submission failed, which
+                    // tells an active subscriber they never bought anything.
+                    if result.applied > 0 {
+                        restoreMessage = "Restored your subscription."
+                    } else if result.seen > 0 {
+                        let err = AppError.from(result.lastError ?? AppError.unknown(message: "The purchase couldn't be applied. Please try again."))
+                        restoreMessage = "We found your purchase but couldn't restore it: "
+                            + err.message
+                    } else {
+                        restoreMessage = "No previous purchases found for this Apple Account."
+                    }
                 }
             } label: {
                 actionRow(title: "Restore Purchases",

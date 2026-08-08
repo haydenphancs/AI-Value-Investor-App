@@ -48,21 +48,34 @@ class ProfileViewModel: BaseViewModel {
 
     // MARK: - Credit Usage
 
+    /// Fraction of the MONTHLY allowance consumed, clamped to 0...1.
+    ///
+    /// Reads the GRANTED pool, not the combined one. `credits.total` / `.used` are
+    /// lifetime-inclusive of every credit pack the user has ever bought, so the old
+    /// `used / total` made the "Monthly Credits" bar meaningless: buy the 1,200-credit pack on
+    /// the Free tier and it reads 0/1250 — implying a monthly quota 25x the real 50 — and it
+    /// can never fill, so the >70% / >90% colour warnings never fire again.
     var creditUsagePercent: Double {
-        guard let credits = appState?.user.credits, credits.total > 0 else { return 0 }
-        return Double(credits.used) / Double(credits.total)
+        appState?.user.credits?.monthlyUsageFraction ?? 0
     }
 
     var creditsUsed: Int {
-        appState?.user.credits?.used ?? 0
+        appState?.user.credits?.monthlyUsed ?? 0
     }
 
     var creditsTotal: Int {
-        appState?.user.credits?.total ?? 0
+        appState?.user.credits?.monthlyTotal ?? 0
     }
 
+    /// Spendable across BOTH pools — this one is deliberately the combined figure, because it
+    /// answers "how much can I spend right now".
     var creditsRemaining: Int {
         appState?.user.credits?.remaining ?? 0
+    }
+
+    /// Never-expiring credits bought as packs. 0 when there are none, so the row can be hidden.
+    var purchasedCredits: Int {
+        appState?.user.credits?.purchasedCredits ?? 0
     }
 
     var creditResetDate: String? {
@@ -199,6 +212,22 @@ class ProfileViewModel: BaseViewModel {
     }
 
     func loadCredits() {
+        // A signed-out caller is NOT rejected by this endpoint — `.getUserCredits` is
+        // `.guestAllowed`, and the backend resolves a tokenless request to the SHARED guest
+        // sentinel, which is seeded ~100,000 credits. Loading that wrote a balance that is not
+        // the user's into `AppState.user.credits`, and every other surface reads AppState: the
+        // Wiser/Learn card and the Research badge then displayed the sentinel's credits as
+        // theirs, and `canGenerateResearch` returned true for someone who cannot generate.
+        //
+        // Clearing rather than merely skipping matters too: without it a balance left over from
+        // a previous session survives a sign-out on this screen.
+        //
+        // `ResearchViewModel.loadCredits()` has carried this guard since the same bug was found
+        // there; Profile is the other caller and was missed.
+        guard appState?.auth.isAuthenticated == true else {
+            appState?.user.credits = nil
+            return
+        }
         performTask("loadCredits", showLoading: false) { [weak self] in
             let credits = try await self?.apiClient.request(
                 endpoint: .getUserCredits,

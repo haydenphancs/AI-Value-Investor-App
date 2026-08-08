@@ -201,3 +201,67 @@ def test_stochastic_still_returns_percent_k_when_percent_d_is_impossible():
     assert "kValues: kValues" in guard_body, (
         "the short-series path must still return the computed %K values"
     )
+
+
+# ── Credit-balance freshness and honesty (2026-08-08 adversarial review) ──────────────
+#
+# All four below are places where a credit number shown to the user was either stale, not
+# theirs, or described as something it isn't. They cost trust and, in two cases, money.
+
+_RESEARCH_VM = _REPO / "frontend/ios/ios/ViewModels/ResearchViewModel.swift"
+_PROFILE_VM = _REPO / "frontend/ios/ios/ViewModels/ProfileViewModel.swift"
+_BUY_VIEW = _REPO / "frontend/ios/ios/Views/Screens/BuyCreditsView.swift"
+
+
+def _strip_swift_comments(src: str) -> str:
+    """Drop `//` lines and trailing comments — mandatory for "must NOT appear" assertions,
+    since this codebase explains its invariants in prose that quotes the forbidden tokens."""
+    out = []
+    for raw in src.splitlines():
+        if raw.strip().startswith("//"):
+            continue
+        out.append(re.sub(r"//.*$", "", raw))
+    return "\n".join(out)
+
+
+def test_research_view_model_refreshes_credits_when_an_entitlement_lands():
+    """Buying credits from the Research tab must re-enable Generate without a relaunch.
+
+    `ResearchViewModel` holds its own `creditBalance` (it has no `AppState` reference), written
+    only by `loadCredits()` from init / refresh / report-completion. Nothing re-read it after a
+    purchase — the sheets carry no `onDismiss` — so a user paid, the sheet closed, and the
+    Generate button stayed disabled with "insufficient credits" until a manual refresh.
+    """
+    src = _strip_swift_comments(_src(_RESEARCH_VM))
+    assert "@Published var creditBalance" in src, "guard is stale — the property moved"
+    assert "caydexEntitlementChanged" in src, (
+        "ResearchViewModel must observe .caydexEntitlementChanged (StoreKitService's single "
+        "funnel for interactive purchases AND Transaction.updates replays) or its private "
+        "credit balance goes stale the moment a user buys credits from this very tab"
+    )
+
+
+def test_profile_view_model_does_not_load_the_guest_sentinel_balance():
+    """`/users/me/credits` is `.guestAllowed`, and a signed-out caller resolves to the SHARED
+    guest sentinel — seeded ~100,000 credits. Loading it writes a balance that is not the
+    user's into `AppState.user.credits`, which every other surface then renders as theirs.
+    `ResearchViewModel.loadCredits` already guards; Profile did not."""
+    src = _strip_swift_comments(_src(_PROFILE_VM))
+    body = src[src.index("func loadCredits("):]
+    body = body[:body.index("\n    func ", 1)] if "\n    func " in body[1:] else body
+    assert re.search(r"isAuthenticated|isSignedIn", body), (
+        "ProfileViewModel.loadCredits() must refuse to load a balance for a signed-out caller "
+        "— otherwise the shared guest sentinel's credits are written into AppState as the "
+        "user's own"
+    )
+
+
+def test_buy_credits_header_does_not_fabricate_a_zero_balance():
+    """Rendering `?? 0` states a balance we do not have. The codebase's stated policy for an
+    unknown balance is to HIDE the number (ResearchModels' `.mock` note, GenerateAnalysisSection),
+    because "0 credits available" on the Buy Credits screen reads as "you have none" to someone
+    who may have plenty."""
+    src = _strip_swift_comments(_src(_BUY_VIEW))
+    assert "credits?.remaining ?? 0" not in src, (
+        "Buy Credits renders a fabricated 0 when the balance is unknown — hide it instead"
+    )

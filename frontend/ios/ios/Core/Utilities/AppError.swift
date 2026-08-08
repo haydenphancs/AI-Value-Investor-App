@@ -57,6 +57,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// forever, against a condition that can never resolve.
     case purchaseAlreadyLinked(message: String)
 
+    /// The transaction's `appAccountToken` names a DIFFERENT Caydex account, and the server
+    /// recorded nothing — nobody has been credited for it.
+    ///
+    /// Deliberately separate from `.purchaseAlreadyLinked`, because the two demand opposite
+    /// handling and getting it wrong destroys a purchase. `.purchaseAlreadyLinked` means the
+    /// transaction IS recorded, against someone else — terminal, so `StoreKitService` finishes
+    /// it and Apple stops redelivering. This case means the grant was refused BEFORE anything
+    /// was written, so finishing it would delete a purchase the user paid for with no
+    /// redelivery left to repair it. The transaction must stay unfinished until the buying
+    /// account signs in, at which point the same redelivery grants it.
+    case purchaseAccountMismatch(message: String)
+
     /// No installed app can handle a URL we tried to open — `mailto:` with no mail client,
     /// an App Store link on a device without the App Store, and so on.
     ///
@@ -94,6 +106,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .validationFailed: return "validation"
         case .rateLimited: return "rate_limited"
         case .purchaseAlreadyLinked: return "purchase_already_linked"
+        case .purchaseAccountMismatch: return "purchase_account_mismatch"
         case .noAppToOpenURL: return "no_app_to_open_url"
         case .apiError(let code, _): return "api_\(code)"
         case .unknown: return "unknown"
@@ -130,6 +143,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Too Many Requests"
         case .purchaseAlreadyLinked:
             return "Purchase Linked Elsewhere"
+        case .purchaseAccountMismatch:
+            return "Different Account"
         case .noAppToOpenURL:
             return "Can’t Open That Here"
         case .apiError:
@@ -177,6 +192,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return msg
         case .purchaseAlreadyLinked(let message):
             return message
+        case .purchaseAccountMismatch(let message):
+            return message
         case .noAppToOpenURL(let what):
             return "This device has no app set up to open \(what)."
         case .rateLimited(let seconds):
@@ -216,6 +233,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // StoreKit transaction alive across every launch.
         case .purchaseAlreadyLinked:
             return .contactSupport
+        // `.signIn`, NOT `.contactSupport`: the purchase is intact and un-granted, and signing
+        // in as the account that bought it is precisely the action that claims it.
+        case .purchaseAccountMismatch:
+            return .signIn
         // NOT .retry: nothing on the device can service the URL, so a retry is guaranteed to
         // fail. NOT .contactSupport either — the link that failed may BE contact support.
         case .noAppToOpenURL:
@@ -398,6 +419,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             // same transaction on every launch, forever.
             if code == "PURCHASE_ALREADY_LINKED" {
                 return .purchaseAlreadyLinked(message: message)
+            }
+            // Separate case, separate handling: nothing was recorded server-side, so
+            // `StoreKitService` must NOT finish this transaction. Finishing it deletes a
+            // purchase the user paid for. See `AppError.purchaseAccountMismatch`.
+            if code == "PURCHASE_ACCOUNT_MISMATCH" {
+                return .purchaseAccountMismatch(message: message)
             }
             // A theme card tapped after it was deleted → a typed .notFound rather
             // than a generic .apiError (per the "don't fall through" rule).
@@ -588,6 +615,7 @@ extension AppError {
         case .validationFailed:    return "validation_failed"
         case .rateLimited:         return "rate_limited"
         case .purchaseAlreadyLinked: return "purchase_already_linked"
+        case .purchaseAccountMismatch: return "purchase_account_mismatch"
         case .noAppToOpenURL:      return "no_app_to_open_url"
         // The backend's ErrorCode enum is already a stable machine-readable
         // vocabulary, so it is safe as a dimension. The message is not.

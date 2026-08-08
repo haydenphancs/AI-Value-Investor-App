@@ -157,6 +157,13 @@ struct BuyCreditsView: View {
             // Stamped onto the purchase as StoreKit's `appAccountToken`, so a transaction
             // redelivered into a different signed-in session can be refused server-side.
             viewModel.accountID = appState.user.profile?.id
+            // Re-read the balance on open. Nothing else does: `AppState.user.credits` is
+            // populated at sign-in and refreshed only by an entitlement change, so a user who
+            // spent credits elsewhere in the session arrived here to a stale number — on the
+            // one screen where the balance is the whole point.
+            if appState.auth.isAuthenticated {
+                await appState.refreshCredits()
+            }
             await viewModel.load()
         }
     }
@@ -169,12 +176,23 @@ struct BuyCreditsView: View {
                 .font(.system(size: 32))
                 .foregroundColor(AppColors.alertOrange)
 
-            Text("\(credits?.remaining ?? 0)")
-                .font(AppTypography.dataHero)
-                .foregroundColor(AppColors.textPrimary)
-            Text("credits available")
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textSecondary)
+            // HIDE an unknown balance rather than rendering `?? 0`. "0 credits available" on
+            // the buy screen reads as "you have none" to someone who may have plenty — and it
+            // is the one number on this screen a user will check against what they just paid
+            // for. Matches the policy the rest of the app already follows for an unknown
+            // balance (see `CreditBalance.mock`'s note and `GenerateAnalysisSection`).
+            if let credits {
+                Text("\(credits.remaining)")
+                    .font(AppTypography.dataHero)
+                    .foregroundColor(AppColors.textPrimary)
+                Text("credits available")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textSecondary)
+            } else {
+                Text("Your balance")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textSecondary)
+            }
 
             balanceBreakdown
         }
@@ -187,7 +205,7 @@ struct BuyCreditsView: View {
     private var balanceBreakdown: some View {
         if let credits {
             let purchased = credits.purchasedCredits
-            let monthly = credits.grantedRemaining ?? credits.remaining
+            let monthly = credits.monthlyRemaining
             HStack(spacing: AppSpacing.xs) {
                 Text("\(monthly) monthly")
                     .font(AppTypography.caption)

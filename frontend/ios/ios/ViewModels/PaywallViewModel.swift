@@ -117,9 +117,17 @@ final class PaywallViewModel: ObservableObject {
     func restore() async {
         purchaseError = nil
         restoreMessage = nil
-        let count = await store.restorePurchases()
-        restoreMessage = count > 0
-            ? "Restored your subscription."
-            : "No previous purchases found for this Apple Account."
+        let result = await store.restorePurchases()
+        if result.applied > 0 {
+            restoreMessage = "Restored your subscription."
+        } else if result.seen > 0 {
+            // Apple returned entitlements and every submission failed. Reporting "no previous
+            // purchases" there tells an ACTIVE subscriber they never bought anything, and
+            // leaves them no reason to contact support.
+            let err = AppError.from(result.lastError ?? AppError.unknown(message: "The purchase couldn't be applied. Please try again."))
+            restoreMessage = "We found your purchase but couldn't restore it: \(err.message)"
+        } else {
+            restoreMessage = "No previous purchases found for this Apple Account."
+        }
     }
 }

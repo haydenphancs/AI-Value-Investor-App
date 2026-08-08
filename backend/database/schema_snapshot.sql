@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 5z9fxHg5NcSHY8TOenSpfSkvSThGUGrx2RUbxzzr0unN08bGHc2TGHCW6wUvflR
+\restrict TD2ioylK96dqrmxSZ9VLohwUiXcm5mtUeJc7N2fpGSZfHq0rd4EGIqvxBzVfKfg
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -989,6 +989,118 @@ $$;
 
 
 --
+-- Name: add_purchased_credits(text, uuid, text, integer, text, text, integer, uuid, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.add_purchased_credits(p_transaction_id text, p_user_id uuid, p_product_id text, p_credits integer, p_environment text DEFAULT 'Production'::text, p_original_transaction_id text DEFAULT NULL::text, p_price_cents integer DEFAULT NULL::integer, p_app_account_token uuid DEFAULT NULL::uuid, p_purchased_at timestamp with time zone DEFAULT NULL::timestamp with time zone) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    _GUEST      CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_env       TEXT;
+    v_inserted  INTEGER := 0;
+    v_owner     UUID;
+    v_credits   INTEGER;
+    v_spendable INTEGER;
+BEGIN
+    -- Same guest guard as ensure_credit_period / spend_credits / grant_tier_upgrade. The
+    -- endpoint already refuses guests, so reaching here means a bug or a stray call; refuse
+    -- rather than crediting the shared sentinel every signed-out install uses.
+    IF p_user_id IS NULL OR p_user_id = _GUEST THEN
+        RETURN jsonb_build_object('outcome', 'invalid', 'reason', 'guest_or_null_user');
+    END IF;
+
+    IF p_transaction_id IS NULL OR p_transaction_id = '' THEN
+        RETURN jsonb_build_object('outcome', 'invalid', 'reason', 'missing_transaction_id');
+    END IF;
+
+    -- NULL environment would defeat the unique index (NULLs are distinct), so the same
+    -- purchase could be granted repeatedly. Never let it through.
+    v_env := COALESCE(NULLIF(p_environment, ''), 'Production');
+
+    -- A non-positive grant is a corrupt catalog row or a caller bug. Refuse BEFORE the dedup
+    -- INSERT: writing a purchase row for a zero grant is unrecoverable, because every
+    -- redelivery afterwards finds a duplicate and reports "replay" forever. The user paid, so
+    -- a silent zero-grant is the worst outcome available.
+    IF p_credits IS NULL OR p_credits <= 0 THEN
+        RETURN jsonb_build_object('outcome', 'invalid', 'reason', 'non_positive_credits');
+    END IF;
+
+    -- THE idempotency. Claim the transaction id first: if this INSERT does nothing, another
+    -- delivery of the same purchase already granted it and no balance is touched below.
+    -- Doing it before the balance work also makes the common (replay) case one statement.
+    INSERT INTO public.credit_purchases (
+        user_id, transaction_id, environment, original_transaction_id,
+        product_id, credits, price_cents, app_account_token, purchased_at
+    ) VALUES (
+        p_user_id, p_transaction_id, v_env, p_original_transaction_id,
+        p_product_id, p_credits, p_price_cents, p_app_account_token, p_purchased_at
+    )
+    ON CONFLICT (environment, transaction_id) DO NOTHING;
+
+    GET DIAGNOSTICS v_inserted = ROW_COUNT;
+
+    IF v_inserted = 0 THEN
+        SELECT user_id, credits INTO v_owner, v_credits
+          FROM public.credit_purchases
+         WHERE environment = v_env AND transaction_id = p_transaction_id;
+
+        -- Ownership of a transaction never moves. Answering "retry later" here would make the
+        -- client leave the transaction unfinished and redeliver it on every launch forever —
+        -- the exact failure PURCHASE_ALREADY_LINKED / 409 was added to end for subscriptions.
+        IF v_owner IS DISTINCT FROM p_user_id THEN
+            RETURN jsonb_build_object('outcome', 'conflict', 'owner_user_id', v_owner);
+        END IF;
+
+        SELECT spendable INTO v_spendable
+          FROM public.user_credits WHERE user_id = p_user_id;
+
+        RETURN jsonb_build_object(
+            'outcome',   'replay',
+            'credits',   v_credits,
+            'spendable', COALESCE(v_spendable, 0)
+        );
+    END IF;
+
+    -- Fresh grant. ensure_credit_period creates the balance row if this is the user's first
+    -- touch, rolls a due month, and takes SELECT ... FOR UPDATE on the row — held for the rest
+    -- of this transaction, so a concurrent grant or spend serialises behind us. Reused rather
+    -- than re-implemented so the first-touch race handling stays in one place, and so we never
+    -- hand-insert a row with a wrong `resets_at` that would skip the user's first allocation.
+    PERFORM public.ensure_credit_period(p_user_id);
+
+    UPDATE public.user_credits
+       SET purchased_total = purchased_total + p_credits,
+           updated_at      = NOW()
+     WHERE user_id = p_user_id
+    RETURNING spendable INTO v_spendable;
+
+    IF v_spendable IS NULL THEN
+        -- ensure_credit_period should have guaranteed a row. If it somehow did not, RAISE so
+        -- the whole transaction — including the credit_purchases claim — rolls back. Otherwise
+        -- the id is burned with no credits granted and every retry reports "replay".
+        RAISE EXCEPTION
+            'add_purchased_credits: no user_credits row for % after ensure_credit_period',
+            p_user_id;
+    END IF;
+
+    INSERT INTO public.credit_transactions
+        (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+    VALUES
+        (p_user_id, p_credits, 0, p_credits, 'pack_purchase', p_transaction_id, v_spendable);
+
+    RETURN jsonb_build_object(
+        'outcome',   'granted',
+        'credits',   p_credits,
+        'spendable', v_spendable
+    );
+END;
+$$;
+
+
+--
 -- Name: charge_user_credits(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1009,6 +1121,13 @@ BEGIN
     RETURN new_remaining;  -- NULL when WHERE missed (insufficient balance)
 END;
 $$;
+
+
+--
+-- Name: FUNCTION charge_user_credits(p_user_id uuid, p_amount integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.charge_user_credits(p_user_id uuid, p_amount integer) IS 'DEPRECATED (migration 118). Pool-blind: tests and mutates user_credits.used against `total` only and cannot see the purchased pool, so it will refuse a spend the user can afford and bypass the granted-first ordering. Use spend_credits. Unused by application code as of migration 118.';
 
 
 --
@@ -1047,6 +1166,71 @@ END;
 $$;
 
 
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: notification_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.notification_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    dedup_key text NOT NULL,
+    kind text NOT NULL,
+    category text NOT NULL,
+    title text NOT NULL,
+    body text NOT NULL,
+    route jsonb DEFAULT '{}'::jsonb NOT NULL,
+    push_state text DEFAULT 'pending'::text NOT NULL,
+    deliver_after timestamp with time zone,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_error text,
+    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
+    sent_at timestamp with time zone,
+    read_at timestamp with time zone,
+    CONSTRAINT notification_events_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT notification_events_state_check CHECK ((push_state = ANY (ARRAY['pending'::text, 'deferred'::text, 'sent'::text, 'no_device'::text, 'dry_run'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: TABLE notification_events; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.notification_events IS 'One row per notification DECIDED (not merely delivered). UNIQUE(user_id, dedup_key) is the dedup claim: insert BEFORE sending, treat a conflict as "already handled". Doubles as the in-app inbox (title/body/route/read_at), the per-category cap ledger (category + sent_at), and the quiet-hours deferral queue (push_state/deliver_after). Swept on a retention window.';
+
+
+--
+-- Name: claim_due_notifications(timestamp with time zone, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_due_notifications(p_now timestamp with time zone, p_limit integer) RETURNS SETOF public.notification_events
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+BEGIN
+    RETURN QUERY
+    UPDATE notification_events e
+       SET push_state = 'pending',
+           attempts   = e.attempts + 1
+     WHERE e.id IN (
+        SELECT s.id
+          FROM notification_events s
+         WHERE s.push_state = 'deferred'
+           AND s.deliver_after IS NOT NULL
+           AND s.deliver_after <= p_now
+         ORDER BY s.deliver_after
+         FOR UPDATE SKIP LOCKED
+         LIMIT GREATEST(p_limit, 0)
+     )
+    RETURNING e.*;
+END;
+$$;
+
+
 --
 -- Name: claim_guest_report(uuid, date, integer); Type: FUNCTION; Schema: public; Owner: -
 --
@@ -1079,6 +1263,46 @@ BEGIN
         RETURN -1;
     END IF;
     RETURN v_count;
+END;
+$$;
+
+
+--
+-- Name: claim_notification_job(text, timestamp with time zone, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_notification_job(p_job text, p_now timestamp with time zone, p_stale_seconds integer) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_ok BOOLEAN;
+    -- ET trading date, NOT UTC. See the header comment and migration 089.
+    -- p_now arrives as an ISO-8601 string with offset into a TIMESTAMPTZ parameter, so
+    -- AT TIME ZONE converts a real instant — it does not reinterpret a naive local time.
+    v_today DATE := (p_now AT TIME ZONE 'America/New_York')::date;
+BEGIN
+    INSERT INTO notification_job_state (job, updated_at)
+    VALUES (p_job, p_now)
+    ON CONFLICT (job) DO NOTHING;
+
+    UPDATE notification_job_state s
+       SET claim_at   = p_now,
+           runs_today = CASE WHEN s.run_day IS DISTINCT FROM v_today
+                             THEN 1 ELSE s.runs_today + 1 END,
+           updated_at = p_now
+     WHERE s.job = p_job
+       AND s.enabled                              -- the kill switch
+       AND s.run_day IS DISTINCT FROM v_today     -- at most one successful run per ET day
+       -- `claim_at <= p_now - interval`, NOT `>=`. An instance running ahead of us
+       -- writes a FUTURE claim_at; this predicate leaves that alone rather than
+       -- stealing the claim out from under a run that is genuinely in flight.
+       AND (s.claim_at IS NULL
+            OR s.claim_at <= p_now - make_interval(secs => GREATEST(p_stale_seconds, 0)))
+    RETURNING TRUE INTO v_ok;
+
+    RETURN COALESCE(v_ok, FALSE);
 END;
 $$;
 
@@ -1266,6 +1490,34 @@ BEGIN
 
     -- Not due: return the live remaining unchanged.
     RETURN (v_row.total - v_row.used);
+END;
+$$;
+
+
+--
+-- Name: finish_notification_job(text, timestamp with time zone, boolean, integer, timestamp with time zone, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.finish_notification_job(p_job text, p_now timestamp with time zone, p_success boolean, p_notified integer DEFAULT 0, p_cursor timestamp with time zone DEFAULT NULL::timestamp with time zone, p_error text DEFAULT NULL::text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_today DATE := (p_now AT TIME ZONE 'America/New_York')::date;
+BEGIN
+    UPDATE notification_job_state s
+       SET claim_at       = NULL,
+           run_day        = CASE WHEN p_success THEN v_today ELSE s.run_day END,
+           last_run_at    = p_now,
+           last_cursor    = CASE WHEN p_success AND p_cursor IS NOT NULL
+                                 THEN p_cursor ELSE s.last_cursor END,
+           notified_today = CASE WHEN s.run_day IS DISTINCT FROM v_today
+                                 THEN COALESCE(p_notified, 0)
+                                 ELSE s.notified_today + COALESCE(p_notified, 0) END,
+           last_error     = p_error,
+           updated_at     = p_now
+     WHERE s.job = p_job;
 END;
 $$;
 
@@ -1508,48 +1760,110 @@ CREATE FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason
     AS $$
 DECLARE
     _GUEST CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
-    v_remaining INTEGER;
-    v_delta     INTEGER;
+    v_spendable      INTEGER;
+    v_old_used       INTEGER;
+    v_old_pused      INTEGER;
+    v_debit_id       BIGINT;     -- the debit row this refund pairs with, NULL if none
+    v_spent_granted  INTEGER;    -- positive magnitude taken from granted by that spend
+    v_spent_purch    INTEGER;    -- positive magnitude taken from purchased
+    v_have_split     BOOLEAN := FALSE;
+    v_back_granted   INTEGER := 0;
+    v_back_purch     INTEGER := 0;
 BEGIN
     IF p_user_id = _GUEST THEN
-        SELECT (total - used) INTO v_remaining
+        SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
-        RETURN COALESCE(v_remaining, 0);
+        RETURN COALESCE(v_spendable, 0);
     END IF;
 
     -- Non-positive refund is a caller/sign bug — no-op (a negative amount would DEBIT).
     IF p_amount IS NULL OR p_amount <= 0 THEN
-        SELECT (total - used) INTO v_remaining
+        SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
-        RETURN v_remaining;
+        RETURN v_spendable;
     END IF;
 
-    -- Refund, flooring `used` at 0 (a stray double-refund can't drive it negative and
-    -- silently grant credits). NOT idempotent — callers guarantee at-most-once. The ledger
-    -- records the ACTUAL change (old_used - new_used = LEAST(old_used, p_amount)), NOT the
-    -- requested amount, so a (contract-forbidden) over-refund can't desync sum(delta) from
-    -- the balance. The CTE's SELECT ... FOR UPDATE captures old_used and serializes
-    -- concurrent refunds on the single (user_id-unique) row.
-    WITH prev AS (
-        SELECT used AS old_used FROM public.user_credits
-         WHERE user_id = p_user_id FOR UPDATE
-    )
-    UPDATE public.user_credits u
-       SET used       = GREATEST(0, u.used - p_amount),
-           updated_at = NOW()
-      FROM prev
-     WHERE u.user_id = p_user_id
-    RETURNING (u.total - u.used), (prev.old_used - u.used)
-      INTO v_remaining, v_delta;
+    -- Lock the balance row for the rest of the transaction. Everything below is computed in
+    -- plpgsql against these captured values, which is safe precisely because of this lock — no
+    -- other transaction can move the row underneath us, and that same lock serialises two
+    -- concurrent refunds so they cannot both pass the NOT EXISTS check on one debit.
+    SELECT used, purchased_used INTO v_old_used, v_old_pused
+      FROM public.user_credits
+     WHERE user_id = p_user_id
+       FOR UPDATE;
 
-    IF v_remaining IS NULL THEN
+    IF NOT FOUND THEN
         RETURN NULL;  -- no credit row for this user (nothing to refund)
     END IF;
 
-    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
-    VALUES (p_user_id, v_delta, p_reason, p_ref_id, v_remaining);
+    -- Pair with the newest debit of this amount on this ref_id that NOTHING has reversed yet.
+    -- The `NOT EXISTS` anti-join is the entire fix — see the header for why pairing-at-most-once
+    -- is what makes over-returning to either pool impossible.
+    IF p_ref_id IS NOT NULL AND p_ref_id <> '' THEN
+        SELECT t.id, -t.granted_delta, -t.purchased_delta
+          INTO v_debit_id, v_spent_granted, v_spent_purch
+          FROM public.credit_transactions t
+         WHERE t.user_id = p_user_id
+           AND t.ref_id  = p_ref_id
+           AND t.delta   = -p_amount
+           AND NOT EXISTS (
+                 SELECT 1 FROM public.credit_transactions r
+                  WHERE r.reverses_id = t.id
+               )
+         ORDER BY t.id DESC
+         LIMIT 1;
 
-    RETURN v_remaining;
+        -- A row written before migration 117 carries 0/0 with a non-zero delta: the split is
+        -- unknown, not zero. Treat it as unknown and take the fallback — but keep v_debit_id so
+        -- the row is still marked reversed and cannot be paired twice.
+        IF FOUND AND (COALESCE(v_spent_granted, 0) <> 0 OR COALESCE(v_spent_purch, 0) <> 0) THEN
+            v_have_split := TRUE;
+        END IF;
+    END IF;
+
+    IF v_have_split THEN
+        -- Exact reversal, each side capped BOTH by what the paired spend took from that pool and
+        -- by what the pool currently shows as spent.
+        v_back_purch   := LEAST(GREATEST(v_spent_purch, 0), p_amount, v_old_pused);
+        v_back_granted := LEAST(GREATEST(v_spent_granted, 0), p_amount - v_back_purch,
+                                v_old_used);
+    ELSE
+        -- Unknown split (no ref_id, no un-reversed debit, or a pre-117 row): granted-first,
+        -- overflowing to purchased only if granted cannot absorb it (otherwise the credits would
+        -- simply vanish). The non-farmable direction.
+        v_back_granted := LEAST(p_amount, v_old_used);
+        v_back_purch   := LEAST(p_amount - v_back_granted, v_old_pused);
+    END IF;
+
+    IF v_back_granted + v_back_purch = 0 THEN
+        -- Genuinely nothing to give back: both pools already show the spend returned. Distinct
+        -- from the pre-124 bug, where this branch fired because the refund had re-selected an
+        -- already-reversed debit. Return the live balance without writing a zero-delta row.
+        SELECT spendable INTO v_spendable
+          FROM public.user_credits WHERE user_id = p_user_id;
+        RETURN v_spendable;
+    END IF;
+
+    -- Both terms are capped at the corresponding `*_used` above, so neither can go negative and
+    -- the purchased_used <= purchased_total CHECK cannot be tripped.
+    UPDATE public.user_credits
+       SET used           = used - v_back_granted,
+           purchased_used = purchased_used - v_back_purch,
+           updated_at     = NOW()
+     WHERE user_id = p_user_id
+    RETURNING spendable INTO v_spendable;
+
+    -- Ledger the ACTUAL movement, not the requested amount, so a (contract-forbidden)
+    -- over-refund cannot desync sum(delta) from the balance. `reverses_id` is what retires the
+    -- paired debit from any future lookup.
+    INSERT INTO public.credit_transactions
+        (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after,
+         reverses_id)
+    VALUES
+        (p_user_id, v_back_granted + v_back_purch, v_back_granted, v_back_purch,
+         p_reason, p_ref_id, v_spendable, v_debit_id);
+
+    RETURN v_spendable;
 END;
 $$;
 
@@ -1574,6 +1888,13 @@ BEGIN
     RETURN new_remaining;
 END;
 $$;
+
+
+--
+-- Name: FUNCTION refund_user_credits(p_user_id uuid, p_amount integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.refund_user_credits(p_user_id uuid, p_amount integer) IS 'DEPRECATED (migration 118). Pool-blind, and writes no ledger row and no granted/purchased split, so a later refund cannot be reversed exactly. Use refund_credits. Unused by application code as of migration 118.';
 
 
 --
@@ -1622,6 +1943,97 @@ BEGIN
 
     -- No row (never claimed this month) => nothing to release.
     RETURN COALESCE(v_count, 0);
+END;
+$$;
+
+
+--
+-- Name: revoke_purchased_credits(text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.revoke_purchased_credits(p_transaction_id text, p_environment text DEFAULT 'Production'::text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_env         TEXT;
+    v_row         public.credit_purchases%ROWTYPE;
+    v_credits_row public.user_credits%ROWTYPE;
+    v_new_total   INTEGER;
+    v_delta       INTEGER;
+    v_spendable   INTEGER;
+BEGIN
+    IF p_transaction_id IS NULL OR p_transaction_id = '' THEN
+        RETURN jsonb_build_object('outcome', 'invalid', 'reason', 'missing_transaction_id');
+    END IF;
+
+    v_env := COALESCE(NULLIF(p_environment, ''), 'Production');
+
+    -- Lock the purchase row so two concurrent REFUND deliveries cannot both pass the
+    -- revoked_at check and claw back twice.
+    SELECT * INTO v_row FROM public.credit_purchases
+     WHERE environment = v_env AND transaction_id = p_transaction_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        -- A refund for a transaction we never granted (a subscription id routed here by
+        -- mistake, or a purchase predating this feature). Not an error — the webhook must
+        -- still answer 200 or Apple retries for days.
+        RETURN jsonb_build_object('outcome', 'unknown');
+    END IF;
+
+    IF v_row.revoked_at IS NOT NULL THEN
+        SELECT spendable INTO v_spendable
+          FROM public.user_credits WHERE user_id = v_row.user_id;
+        RETURN jsonb_build_object(
+            'outcome',   'already_revoked',
+            'spendable', COALESCE(v_spendable, 0)
+        );
+    END IF;
+
+    UPDATE public.credit_purchases
+       SET revoked_at = NOW()
+     WHERE id = v_row.id;
+
+    SELECT * INTO v_credits_row FROM public.user_credits
+     WHERE user_id = v_row.user_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        -- Nothing was ever granted to claw back from. revoked_at is set, so retries no-op.
+        RETURN jsonb_build_object('outcome', 'revoked', 'spendable', 0, 'reclaimed', 0);
+    END IF;
+
+    v_new_total := GREATEST(v_credits_row.purchased_used,
+                            v_credits_row.purchased_total - v_row.credits);
+    v_delta     := v_new_total - v_credits_row.purchased_total;   -- <= 0
+
+    IF v_delta = 0 THEN
+        -- Fully spent already: the floor bites and there is nothing to reclaim. Still counts
+        -- as revoked (revoked_at is set), so a retry short-circuits above.
+        RETURN jsonb_build_object(
+            'outcome',   'revoked',
+            'spendable', v_credits_row.spendable,
+            'reclaimed', 0
+        );
+    END IF;
+
+    UPDATE public.user_credits
+       SET purchased_total = v_new_total,
+           updated_at      = NOW()
+     WHERE user_id = v_row.user_id
+    RETURNING spendable INTO v_spendable;
+
+    INSERT INTO public.credit_transactions
+        (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+    VALUES
+        (v_row.user_id, v_delta, 0, v_delta, 'pack_revoked', p_transaction_id, v_spendable);
+
+    RETURN jsonb_build_object(
+        'outcome',   'revoked',
+        'spendable', v_spendable,
+        'reclaimed', -v_delta
+    );
 END;
 $$;
 
@@ -1853,49 +2265,81 @@ CREATE FUNCTION public.spend_credits(p_user_id uuid, p_amount integer, p_reason 
     AS $$
 DECLARE
     _GUEST CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
-    v_remaining INTEGER;
+    v_spendable       INTEGER;
+    v_granted_taken   INTEGER;
+    v_purchased_taken INTEGER;
 BEGIN
-    -- Guests are never metered (shared pool; never refilled). Return current remaining
+    -- Guests are never metered (shared pool; never refilled). Return current spendable
     -- (non-NULL = "ok, not charged") without debiting.
     IF p_user_id = _GUEST THEN
-        SELECT (total - used) INTO v_remaining
+        SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
-        RETURN COALESCE(v_remaining, 0);
+        RETURN COALESCE(v_spendable, 0);
     END IF;
 
-    -- Non-positive charge is a caller/sign bug — no-op (a negative amount would MINT
-    -- credits via the predicate below). Return current remaining, no debit, no ledger row.
+    -- Non-positive charge is a caller/sign bug — no-op (a negative amount would MINT credits
+    -- via the predicate below). Return current spendable, no debit, no ledger row.
     IF p_amount IS NULL OR p_amount <= 0 THEN
-        SELECT (total - used) INTO v_remaining
+        SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
-        RETURN COALESCE(v_remaining, 0);
+        RETURN COALESCE(v_spendable, 0);
     END IF;
 
     -- Roll into the current month's tier allocation first (no-op mid-month). This takes
     -- SELECT ... FOR UPDATE on the single user_credits row and holds it for this whole
-    -- transaction, so the charge UPDATE below serializes with concurrent spends.
+    -- transaction, so the charge below serializes with concurrent spends and grants.
     PERFORM public.ensure_credit_period(p_user_id);
 
-    -- Atomic check-and-debit (mirrors charge_user_credits, migration 041): the
-    -- (total - used) >= amount predicate means no row mutates when the balance is
-    -- insufficient — no race window, never negative. `remaining` is a GENERATED column,
-    -- so we only ever write `used`.
-    UPDATE public.user_credits
-       SET used       = used + p_amount,
-           updated_at = NOW()
-     WHERE user_id   = p_user_id
-       AND (total - used) >= p_amount
-    RETURNING (total - used) INTO v_remaining;
+    -- ⚠️ ONE STATEMENT, ON PURPOSE. Every right-hand side is evaluated against the PRE-UPDATE
+    -- tuple, so the granted/purchased split is computed atomically with the guard that
+    -- authorises it. `prev` captures the old values so RETURNING (which sees the NEW row) can
+    -- report how much came from each pool.
+    --
+    -- Do NOT refactor this into "read the balance, decide the split, then update". That
+    -- reintroduces exactly the race the WHERE clause exists to close: two concurrent spends
+    -- would both read a sufficient balance and both debit, overdrawing the account. The guard
+    -- is the entire atomicity story of the credit system (migration 101), and a read-then-write
+    -- makes it decorative.
+    --
+    -- Do NOT simplify to "wholly granted OR wholly purchased" either — a user with 15 granted
+    -- and 1000 purchased would be refused a 20-credit report they can clearly afford.
+    --
+    -- GREATEST(0, total - used) rather than (total - used): `used > total` is not forbidden by
+    -- any CHECK, and a negative granted remainder would otherwise make LEAST() subtract from
+    -- `used` — a silent credit mint.
+    WITH prev AS (
+        SELECT used AS old_used, purchased_used AS old_purchased_used
+          FROM public.user_credits
+         WHERE user_id = p_user_id
+           FOR UPDATE
+    )
+    UPDATE public.user_credits u
+       SET used           = u.used
+                              + LEAST(p_amount, GREATEST(0, u.total - u.used)),
+           purchased_used = u.purchased_used
+                              + GREATEST(0, p_amount - GREATEST(0, u.total - u.used)),
+           updated_at     = NOW()
+      FROM prev
+     WHERE u.user_id = p_user_id
+       AND (u.total - u.used) + (u.purchased_total - u.purchased_used) >= p_amount
+    RETURNING u.spendable,
+              (u.used - prev.old_used),
+              (u.purchased_used - prev.old_purchased_used)
+      INTO v_spendable, v_granted_taken, v_purchased_taken;
 
-    IF v_remaining IS NULL THEN
+    IF v_spendable IS NULL THEN
         RETURN NULL;  -- insufficient (caller → 402); nothing debited, no ledger row
     END IF;
 
-    -- Ledger the spend in the SAME transaction (guaranteed, not best-effort).
-    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
-    VALUES (p_user_id, -p_amount, p_reason, p_ref_id, v_remaining);
+    -- Ledger the spend in the SAME transaction (guaranteed, not best-effort). The split is
+    -- what makes an exact refund possible later — see the header.
+    INSERT INTO public.credit_transactions
+        (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+    VALUES
+        (p_user_id, -p_amount, -v_granted_taken, -v_purchased_taken,
+         p_reason, p_ref_id, v_spendable);
 
-    RETURN v_remaining;
+    RETURN v_spendable;
 END;
 $$;
 
@@ -3741,10 +4185,6 @@ END;
 $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
 --
 -- Name: audit_log_entries; Type: TABLE; Schema: auth; Owner: -
 --
@@ -4872,6 +5312,63 @@ CREATE TABLE public.competitor_intel_cache (
 
 
 --
+-- Name: credit_packs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.credit_packs (
+    product_id text NOT NULL,
+    credits integer NOT NULL,
+    price_cents integer DEFAULT 0 NOT NULL,
+    display_name text NOT NULL,
+    sort_order integer DEFAULT 0 NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT credit_packs_credits_positive CHECK ((credits > 0)),
+    CONSTRAINT credit_packs_price_nonneg CHECK ((price_cents >= 0))
+);
+
+
+--
+-- Name: credit_purchases; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.credit_purchases (
+    id bigint NOT NULL,
+    user_id uuid NOT NULL,
+    transaction_id text NOT NULL,
+    environment text DEFAULT 'Production'::text NOT NULL,
+    original_transaction_id text,
+    product_id text NOT NULL,
+    credits integer NOT NULL,
+    price_cents integer,
+    app_account_token uuid,
+    purchased_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT credit_purchases_credits_positive CHECK ((credits > 0))
+);
+
+
+--
+-- Name: credit_purchases_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.credit_purchases_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: credit_purchases_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.credit_purchases_id_seq OWNED BY public.credit_purchases.id;
+
+
+--
 -- Name: credit_transactions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4882,8 +5379,32 @@ CREATE TABLE public.credit_transactions (
     reason text NOT NULL,
     ref_id text,
     balance_after integer,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    granted_delta integer DEFAULT 0 NOT NULL,
+    purchased_delta integer DEFAULT 0 NOT NULL,
+    reverses_id bigint
 );
+
+
+--
+-- Name: COLUMN credit_transactions.granted_delta; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.credit_transactions.granted_delta IS 'Signed portion of `delta` that moved the GRANTED pool. delta = granted_delta + purchased_delta for every row written from migration 118 onward. Rows written BEFORE 118 have 0/0 with a non-zero delta — refund_credits treats a 0/0 spend row as "unknown split" and falls back to granted-first, which is the direction that cannot mint permanent credits.';
+
+
+--
+-- Name: COLUMN credit_transactions.purchased_delta; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.credit_transactions.purchased_delta IS 'Signed portion of `delta` that moved the PURCHASED pool. See granted_delta.';
+
+
+--
+-- Name: COLUMN credit_transactions.reverses_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.credit_transactions.reverses_id IS 'For a refund row: the id of the DEBIT row it reverses. NULL on debits, on grants, on monthly resets, and on any refund that found no matching debit (the granted-first fallback). A debit with a row pointing at it is already reversed and can never be paired again — that is what makes over-returning to either pool impossible. See migration 124.';
 
 
 --
@@ -5646,6 +6167,32 @@ COMMENT ON COLUMN public.news_articles.expires_at IS 'Retention bound for cached
 
 
 --
+-- Name: notification_job_state; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.notification_job_state (
+    job text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    run_day date,
+    claim_at timestamp with time zone,
+    last_run_at timestamp with time zone,
+    last_cursor timestamp with time zone,
+    runs_today integer DEFAULT 0 NOT NULL,
+    notified_today integer DEFAULT 0 NOT NULL,
+    last_error text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT notification_job_state_counts_check CHECK (((runs_today >= 0) AND (notified_today >= 0)))
+);
+
+
+--
+-- Name: TABLE notification_job_state; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.notification_job_state IS 'Cross-instance claim + daily budget for the scheduled notification senders (earnings, smart_money, ...). One row per job name. `enabled` is a no-deploy kill switch. Claim via claim_notification_job(), release via finish_notification_job().';
+
+
+--
 -- Name: plan_credits; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5724,6 +6271,41 @@ CREATE TABLE public.portfolios (
 --
 
 COMMENT ON COLUMN public.portfolios.user_id IS 'A real public.users id, OR a per-INSTALL synthetic uuid from guest_user_id_for() for signed-out users. NO foreign key by design (migration 108), same as watchlist_items. Account deletion clears this table explicitly.';
+
+
+--
+-- Name: price_alerts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.price_alerts (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    ticker text NOT NULL,
+    asset_type text DEFAULT 'stock'::text NOT NULL,
+    kind text NOT NULL,
+    threshold numeric NOT NULL,
+    repeat_mode text DEFAULT 'once'::text NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    armed boolean DEFAULT true NOT NULL,
+    last_price numeric,
+    last_evaluated_at timestamp with time zone,
+    last_triggered_at timestamp with time zone,
+    trigger_count integer DEFAULT 0 NOT NULL,
+    note text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT price_alerts_kind_check CHECK ((kind = ANY (ARRAY['price_above'::text, 'price_below'::text, 'percent_move'::text]))),
+    CONSTRAINT price_alerts_repeat_check CHECK ((repeat_mode = ANY (ARRAY['once'::text, 'daily'::text]))),
+    CONSTRAINT price_alerts_threshold_check CHECK (((threshold > (0)::numeric) AND (threshold = threshold))),
+    CONSTRAINT price_alerts_trigger_count_check CHECK ((trigger_count >= 0))
+);
+
+
+--
+-- Name: TABLE price_alerts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.price_alerts IS 'User-set price rules evaluated by the 60s price-alert loop. `armed` is a hysteresis latch (a stock oscillating around the threshold must fire ONCE); `last_price` NULL means never-observed, which SEEDS rather than fires.';
 
 
 --
@@ -6310,6 +6892,12 @@ CREATE TABLE public.user_credits (
     remaining integer GENERATED ALWAYS AS ((total - used)) STORED,
     resets_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    purchased_total integer DEFAULT 0 NOT NULL,
+    purchased_used integer DEFAULT 0 NOT NULL,
+    spendable integer GENERATED ALWAYS AS (((total - used) + (purchased_total - purchased_used))) STORED,
+    CONSTRAINT user_credits_purchased_total_nonneg CHECK ((purchased_total >= 0)),
+    CONSTRAINT user_credits_purchased_used_le_total CHECK ((purchased_used <= purchased_total)),
+    CONSTRAINT user_credits_purchased_used_nonneg CHECK ((purchased_used >= 0)),
     CONSTRAINT user_credits_total_nonneg CHECK ((total >= 0)),
     CONSTRAINT user_credits_used_nonneg CHECK ((used >= 0))
 );
@@ -6319,7 +6907,7 @@ CREATE TABLE public.user_credits (
 -- Name: TABLE user_credits; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.user_credits IS 'Credit balances. SERVICE-ROLE ONLY: every write goes through a SECURITY DEFINER RPC (spend_credits / refund_credits / ensure_credit_period / grant_tier_upgrade / revoke_tier_credits). Do not GRANT to anon or authenticated — `remaining` is a generated column and the invariants live in those functions, not in constraints. See migration 115.';
+COMMENT ON TABLE public.user_credits IS 'Credit balances, TWO POOLS: granted (total/used, monthly, use-it-or-lose-it) and purchased (purchased_total/purchased_used, from consumable IAP, NEVER expires per App Store Guideline 3.1.1). `spendable` is the sum and the number the API serves. SERVICE-ROLE ONLY: every write goes through a SECURITY DEFINER RPC (spend_credits / refund_credits / ensure_credit_period / grant_tier_upgrade / revoke_tier_credits / add_purchased_credits / revoke_purchased_credits). Do not GRANT to anon or authenticated — `remaining` and `spendable` are generated columns and the invariants live in those functions, not in constraints. See migrations 115 and 117.';
 
 
 --
@@ -6327,6 +6915,27 @@ COMMENT ON TABLE public.user_credits IS 'Credit balances. SERVICE-ROLE ONLY: eve
 --
 
 COMMENT ON COLUMN public.user_credits.remaining IS 'Auto-computed: total - used. Never set directly.';
+
+
+--
+-- Name: COLUMN user_credits.purchased_total; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_credits.purchased_total IS 'Lifetime credits granted from CONSUMABLE in-app purchases (credit packs). NEVER reset by ensure_credit_period / grant_tier_upgrade / revoke_tier_credits — App Store Guideline 3.1.1 forbids purchased credits expiring. Only add_purchased_credits raises it and only revoke_purchased_credits (Apple REFUND) lowers it. See migration 117.';
+
+
+--
+-- Name: COLUMN user_credits.purchased_used; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_credits.purchased_used IS 'Credits spent out of the purchased pool. spend_credits drains the GRANTED pool first and only overflows here, so this stays 0 until the monthly allocation is exhausted.';
+
+
+--
+-- Name: COLUMN user_credits.spendable; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_credits.spendable IS 'Auto-computed: (total - used) + (purchased_total - purchased_used). The real balance and the one the API returns. `remaining` deliberately still means the GRANTED half only, so pre-existing SQL readers keep their original semantics. Never set directly.';
 
 
 --
@@ -7050,6 +7659,13 @@ ALTER TABLE ONLY public.competitor_intel_audit ALTER COLUMN id SET DEFAULT nextv
 
 
 --
+-- Name: credit_purchases id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credit_purchases ALTER COLUMN id SET DEFAULT nextval('public.credit_purchases_id_seq'::regclass);
+
+
+--
 -- Name: credit_transactions id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -7574,6 +8190,22 @@ ALTER TABLE ONLY public.competitor_intel_cache
 
 
 --
+-- Name: credit_packs credit_packs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credit_packs
+    ADD CONSTRAINT credit_packs_pkey PRIMARY KEY (product_id);
+
+
+--
+-- Name: credit_purchases credit_purchases_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credit_purchases
+    ADD CONSTRAINT credit_purchases_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: credit_transactions credit_transactions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7902,6 +8534,30 @@ ALTER TABLE ONLY public.news_articles
 
 
 --
+-- Name: notification_events notification_events_dedup_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification_events
+    ADD CONSTRAINT notification_events_dedup_unique UNIQUE (user_id, dedup_key);
+
+
+--
+-- Name: notification_events notification_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification_events
+    ADD CONSTRAINT notification_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: notification_job_state notification_job_state_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification_job_state
+    ADD CONSTRAINT notification_job_state_pkey PRIMARY KEY (job);
+
+
+--
 -- Name: plan_credits plan_credits_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7955,6 +8611,22 @@ ALTER TABLE ONLY public.portfolios
 
 ALTER TABLE ONLY public.portfolios
     ADD CONSTRAINT portfolios_user_id_name_key UNIQUE (user_id, name);
+
+
+--
+-- Name: price_alerts price_alerts_no_dupes; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.price_alerts
+    ADD CONSTRAINT price_alerts_no_dupes UNIQUE (user_id, ticker, kind, threshold);
+
+
+--
+-- Name: price_alerts price_alerts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.price_alerts
+    ADD CONSTRAINT price_alerts_pkey PRIMARY KEY (id);
 
 
 --
@@ -9125,6 +9797,55 @@ CREATE INDEX idx_competitor_intel_cache_expires ON public.competitor_intel_cache
 
 
 --
+-- Name: idx_credit_purchases_original_txn; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_credit_purchases_original_txn ON public.credit_purchases USING btree (original_transaction_id);
+
+
+--
+-- Name: idx_credit_purchases_txn; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_credit_purchases_txn ON public.credit_purchases USING btree (environment, transaction_id);
+
+
+--
+-- Name: idx_credit_purchases_txn_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_credit_purchases_txn_lookup ON public.credit_purchases USING btree (transaction_id);
+
+
+--
+-- Name: INDEX idx_credit_purchases_txn_lookup; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.idx_credit_purchases_txn_lookup IS 'Serves IAPService.user_id_for_transaction, which looks up a refunded consumable by transaction_id alone. The unique (environment, transaction_id) index cannot serve it — wrong leading column. See migration 121.';
+
+
+--
+-- Name: idx_credit_purchases_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_credit_purchases_user ON public.credit_purchases USING btree (user_id, created_at DESC);
+
+
+--
+-- Name: idx_credit_transactions_reverses; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_credit_transactions_reverses ON public.credit_transactions USING btree (reverses_id) WHERE (reverses_id IS NOT NULL);
+
+
+--
+-- Name: idx_credit_transactions_spend_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_credit_transactions_spend_lookup ON public.credit_transactions USING btree (user_id, ref_id, id DESC) WHERE (delta < 0);
+
+
+--
 -- Name: idx_credit_transactions_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9489,6 +10210,41 @@ CREATE INDEX idx_news_source ON public.news_articles USING btree (source_name);
 
 
 --
+-- Name: idx_notification_events_category_sent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_notification_events_category_sent ON public.notification_events USING btree (user_id, category, sent_at) WHERE (sent_at IS NOT NULL);
+
+
+--
+-- Name: idx_notification_events_claimed_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_notification_events_claimed_at ON public.notification_events USING btree (claimed_at);
+
+
+--
+-- Name: idx_notification_events_due; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_notification_events_due ON public.notification_events USING btree (deliver_after) WHERE (push_state = 'deferred'::text);
+
+
+--
+-- Name: idx_notification_events_inbox; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_notification_events_inbox ON public.notification_events USING btree (user_id, claimed_at DESC);
+
+
+--
+-- Name: idx_notification_events_unread; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_notification_events_unread ON public.notification_events USING btree (user_id) WHERE (read_at IS NULL);
+
+
+--
 -- Name: idx_portfolio_holdings_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9514,6 +10270,27 @@ CREATE INDEX idx_portfolio_items_portfolio ON public.portfolio_items USING btree
 --
 
 CREATE INDEX idx_portfolios_user_sort ON public.portfolios USING btree (user_id, sort_order);
+
+
+--
+-- Name: idx_price_alerts_active_ticker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_price_alerts_active_ticker ON public.price_alerts USING btree (ticker) WHERE is_active;
+
+
+--
+-- Name: idx_price_alerts_eval; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_price_alerts_eval ON public.price_alerts USING btree (ticker, is_active, armed);
+
+
+--
+-- Name: idx_price_alerts_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_price_alerts_user ON public.price_alerts USING btree (user_id, created_at DESC);
 
 
 --
@@ -10322,11 +11099,27 @@ ALTER TABLE ONLY public.chat_messages
 
 
 --
+-- Name: credit_purchases credit_purchases_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credit_purchases
+    ADD CONSTRAINT credit_purchases_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: device_tokens device_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.device_tokens
     ADD CONSTRAINT device_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: notification_events notification_events_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification_events
+    ADD CONSTRAINT notification_events_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -10343,6 +11136,14 @@ ALTER TABLE ONLY public.portfolio_holdings
 
 ALTER TABLE ONLY public.portfolio_items
     ADD CONSTRAINT portfolio_items_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES public.portfolios(id) ON DELETE CASCADE;
+
+
+--
+-- Name: price_alerts price_alerts_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.price_alerts
+    ADD CONSTRAINT price_alerts_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -11031,6 +11832,39 @@ CREATE POLICY competitor_intel_cache_service_write ON public.competitor_intel_ca
 
 
 --
+-- Name: credit_packs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.credit_packs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: credit_packs credit_packs_public_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY credit_packs_public_read ON public.credit_packs FOR SELECT TO authenticated, anon USING (true);
+
+
+--
+-- Name: credit_packs credit_packs_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY credit_packs_service_all ON public.credit_packs TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: credit_purchases; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.credit_purchases ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: credit_purchases credit_purchases_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY credit_purchases_service_all ON public.credit_purchases TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: credit_transactions; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -11645,6 +12479,32 @@ CREATE POLICY news_service_all ON public.news_articles USING ((auth.role() = 'se
 
 
 --
+-- Name: notification_events; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.notification_events ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: notification_events notification_events_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY notification_events_service_all ON public.notification_events TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: notification_job_state; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.notification_job_state ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: notification_job_state notification_job_state_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY notification_job_state_service_all ON public.notification_job_state TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: agent_personas personas_select_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -11710,6 +12570,19 @@ ALTER TABLE public.portfolios ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY portfolios_owner ON public.portfolios USING ((user_id = auth.uid()));
+
+
+--
+-- Name: price_alerts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.price_alerts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: price_alerts price_alerts_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY price_alerts_service_all ON public.price_alerts TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -12652,5 +13525,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 5z9fxHg5NcSHY8TOenSpfSkvSThGUGrx2RUbxzzr0unN08bGHc2TGHCW6wUvflR
+\unrestrict TD2ioylK96dqrmxSZ9VLohwUiXcm5mtUeJc7N2fpGSZfHq0rd4EGIqvxBzVfKfg
 

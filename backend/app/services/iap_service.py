@@ -83,7 +83,13 @@ def product_tier_map() -> Dict[str, str]:
 
 
 def tier_for_product(product_id: Optional[str]) -> str:
-    """Resolve a product id to a tier, or raise."""
+    """Resolve a product id to a tier, or raise.
+
+    DELIBERATELY UNCHANGED by the credit-pack work. It answers exactly one question — "which
+    SUBSCRIPTION tier is this?" — and every caller depends on it raising for anything else.
+    Consumables are routed away from it by `product_kind` BEFORE it is reached; teaching this
+    function about packs would make an unmapped product resolvable and lose the honest 400.
+    """
     if not product_id:
         raise UnknownProduct("transaction has no productId")
     tier = product_tier_map().get(product_id)
@@ -93,6 +99,39 @@ def tier_for_product(product_id: Optional[str]) -> str:
             "IAP_PRODUCT_* settings against App Store Connect"
         )
     return tier
+
+
+def is_credit_pack_product(product_id: Optional[str]) -> bool:
+    """Is this product id a consumable credit pack?
+
+    Decided by NAMING PREFIX, not by a DB lookup, so the routing question is answerable
+    without I/O and — more importantly — so a pack that has been retired from `credit_packs`
+    is still recognised AS a pack. Otherwise a retired product would fall through to
+    `tier_for_product` and be reported as an unmapped subscription, which is both the wrong
+    diagnosis and the wrong HTTP status for a purchase someone actually made.
+    """
+    prefix = settings.IAP_CREDIT_PACK_PREFIX
+    return bool(product_id) and bool(prefix) and str(product_id).startswith(prefix)
+
+
+def product_kind(product_id: Optional[str]) -> str:
+    """"credit_pack" | "subscription", or raise `UnknownProduct`.
+
+    The single routing decision for a verified transaction. Packs are checked first because
+    the prefix test is exact and cheap; anything else must be a mapped subscription or it is
+    a genuine anomaly — a real purchase we cannot price.
+    """
+    if is_credit_pack_product(product_id):
+        return "credit_pack"
+    if product_id and product_id in product_tier_map():
+        return "subscription"
+    if not product_id:
+        raise UnknownProduct("transaction has no productId")
+    raise UnknownProduct(
+        f"productId {product_id!r} is neither a mapped subscription nor a credit pack "
+        f"(prefix {settings.IAP_CREDIT_PACK_PREFIX!r}) — check IAP_PRODUCT_* settings and "
+        "the credit_packs table against App Store Connect"
+    )
 
 
 def _ms_to_dt(value: Any) -> Optional[datetime]:
@@ -228,6 +267,254 @@ def _stale_delivery_reason(
 class IAPService:
     def __init__(self):
         self.supabase = get_supabase()
+
+    # ── Routing ───────────────────────────────────────────────────────────────
+
+    def apply_verified_transaction(
+        self,
+        user_id: str,
+        payload: Dict[str, Any],
+        *,
+        status_override: Optional[str] = None,
+        event_at: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """THE entry point for any Apple-verified transaction. Routes by product kind.
+
+        `apply_transaction` below is left byte-identical to what shipped: the subscription
+        path carries two rounds of money-bug fixes (cross-account rebind, out-of-order
+        deliveries) and 35 tests pin it, so consumables get a SIBLING rather than a branch
+        inside it. If this dispatcher is wrong, subscriptions are provably unaffected.
+
+        `payload` MUST already be Apple-verified (integrations/app_store.py).
+        """
+        kind = product_kind(payload.get("productId"))
+        if kind == "credit_pack":
+            # status_override / event_at are subscription-lifecycle concepts (grace periods,
+            # out-of-order renewals). A consumable has no lifecycle and is idempotent by
+            # transaction id, so ordering does not apply and neither is forwarded.
+            return self.apply_consumable_transaction(user_id, payload)
+        return self.apply_transaction(
+            user_id, payload, status_override=status_override, event_at=event_at
+        )
+
+    # ── Consumable credit packs ───────────────────────────────────────────────
+
+    def credit_pack_for_product(self, product_id: str) -> Dict[str, Any]:
+        """Look up how many credits a pack grants, from the `credit_packs` table.
+
+        The AMOUNT is read here and nowhere else — never from the client, never inferred from
+        the product id string. Raises `UnknownProduct` if the row is missing, so a verified
+        purchase of something we cannot price gets the same honest 400 a bad subscription id
+        gets, rather than silently granting 0.
+
+        Deliberately ignores `is_active`: retiring a pack hides it from the storefront, but a
+        user who already bought one (a queued transaction, a cached catalog) must still be
+        credited. Refusing there would take money for nothing.
+        """
+        try:
+            result = (
+                self.supabase.table("credit_packs")
+                .select("product_id, credits, price_cents, display_name")
+                .eq("product_id", product_id)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+        except Exception as e:
+            # A read failure is NOT "unknown product" — the user paid and this is our outage.
+            # IAPError → 503 → the client leaves the transaction unfinished and Apple
+            # redelivers, which is exactly the recovery we want.
+            logger.error(
+                "IAP: credit_packs lookup failed for product=%s: %s: %s",
+                product_id, type(e).__name__, e,
+            )
+            raise IAPError("could not read credit pack catalog") from e
+
+        if not rows:
+            raise UnknownProduct(
+                f"productId {product_id!r} looks like a credit pack but has no row in "
+                "credit_packs — apply migration 117 or add the row"
+            )
+
+        pack = rows[0]
+        credits = int(pack.get("credits") or 0)
+
+        # The catalog is a DB table, so a bad hand-edit in Studio is the realistic failure
+        # mode. `credits <= 0` would take money and grant nothing; an absurd value would mint
+        # an unbounded balance on a $1.99 purchase. Both are refused as OUR fault (503, the
+        # transaction stays unfinished and is repaired once the row is fixed), not as a bad
+        # receipt. The SQL CHECK covers the low end too; this covers the high end and the gap
+        # where the value passes through Python.
+        if credits <= 0 or credits > settings.IAP_MAX_PACK_CREDITS:
+            logger.error(
+                "IAP: credit_packs row for product=%s has implausible credits=%s "
+                "(bounds 1..%s) — refusing to grant",
+                product_id, credits, settings.IAP_MAX_PACK_CREDITS,
+            )
+            raise IAPError(f"credit pack {product_id} is misconfigured (credits={credits})")
+
+        return pack
+
+    def apply_consumable_transaction(
+        self, user_id: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Grant a verified consumable credit-pack purchase, exactly once.
+
+        Unlike the subscription path this writes NO `subscriptions` row and does NOT reconcile
+        the tier — a pack is not an entitlement, it is a balance. It also skips the
+        stale-delivery guard, which is a `subscriptions`-row ordering concept: consumables are
+        idempotent by transaction id, so ordering is irrelevant.
+
+        Returns the shape `billing.py` turns into a `VerifyPurchaseResponse`.
+        """
+        product_id = str(payload.get("productId") or "")
+
+        # REFUSE AN ALREADY-REVOKED PURCHASE — first, before any DB read.
+        #
+        # The subscription path gets this for free: it routes through `status_for_transaction`,
+        # which reads `revocationDate` / `revocationReason` and yields "revoked". This path
+        # never consulted them, so a transaction Apple has ALREADY REFUNDED was granted as an
+        # ordinary purchase — the user got their money back AND kept the credits.
+        #
+        # No race is needed to reach it. `Transaction.updates` redelivers unfinished
+        # transactions on every launch, so one that was refunded while unfinished arrives here
+        # carrying its revocation. And the webhook cannot clean up afterwards:
+        # `revoke_purchased_credits` answers `{"outcome":"unknown"}` and writes no tombstone
+        # when the REFUND notification lands before any `credit_purchases` row exists, so a
+        # late first grant has nothing to collide with.
+        #
+        # `UnknownProduct` is the right exception: billing.py maps it to a terminal 400, so the
+        # client finishes the transaction and stops redelivering something that can never be
+        # granted.
+        if status_for_transaction(payload) == "revoked":
+            logger.warning(
+                "IAP: refusing REVOKED consumable txn=%s product=%s user=%s — Apple already "
+                "refunded or cancelled this purchase",
+                payload.get("transactionId"), product_id, user_id,
+            )
+            raise UnknownProduct(
+                f"consumable transaction {payload.get('transactionId')!r} is revoked "
+                "(refunded or cancelled); refusing to grant credits for it"
+            )
+
+        pack = self.credit_pack_for_product(product_id)
+        credits = int(pack["credits"])
+
+        # For a consumable, EACH purchase mints a fresh `transactionId` — that is the dedup
+        # key. `originalTransactionId` is deliberately NOT used: reusing the subscription
+        # path's coalescing would collapse ten purchases of the same pack into one grant.
+        transaction_id = str(payload.get("transactionId") or "")
+        if not transaction_id:
+            raise UnknownProduct("consumable transaction has no transactionId")
+        original_txn_id = payload.get("originalTransactionId")
+
+        # `_to_dict` (app_store.py:355-360) DROPS None values, so `environment` may be absent.
+        # It is part of the unique dedup key, so it must never be NULL — fall back to how this
+        # deploy is configured rather than letting the index stop deduping.
+        environment = str(payload.get("environment") or settings.IAP_ENVIRONMENT)
+
+        purchased_at = _ms_to_dt(payload.get("purchaseDate"))
+
+        # THE CROSS-ACCOUNT GUARD FOR A *FIRST* DELIVERY.
+        #
+        # `add_purchased_credits` refuses a transaction already recorded against another user,
+        # but that only catches a SECOND delivery. The dangerous case has no prior row: user A
+        # buys, the verify call fails, A signs out, B signs in on the same device, and
+        # `Transaction.updates` redelivers into B's session. The insert succeeds under B's id
+        # and B receives credits A paid for.
+        #
+        # `appAccountToken` is the only evidence of who actually paid — the client stamps the
+        # buying account's id onto the purchase, and Apple returns it inside the SIGNED
+        # payload, so it cannot be forged separately from the transaction.
+        token = payload.get("appAccountToken")
+        if token:
+            if str(token).lower() != str(user_id).lower():
+                logger.error(
+                    "IAP: consumable txn=%s carries appAccountToken=%s but was submitted by "
+                    "user=%s — refusing to credit a different account",
+                    transaction_id, token, user_id,
+                )
+                raise PurchaseBoundToAnotherAccount(
+                    "this purchase belongs to a different account"
+                )
+        else:
+            # Older client, or a purchase made before the token was wired in. Not fatal — the
+            # per-transaction dedup still prevents double-granting — but it means this
+            # particular delivery cannot be proven to belong to the submitter.
+            logger.warning(
+                "IAP: consumable txn=%s has no appAccountToken (product=%s user=%s) — "
+                "granting without the cross-account proof",
+                transaction_id, product_id, user_id,
+            )
+
+        from app.services.credit_service import CreditService, PackGrantConflict
+
+        try:
+            outcome = CreditService().grant_purchased(
+                user_id=user_id,
+                transaction_id=transaction_id,
+                product_id=product_id,
+                credits=credits,
+                environment=environment,
+                original_transaction_id=str(original_txn_id) if original_txn_id else None,
+                price_cents=pack.get("price_cents"),
+                app_account_token=str(token) if token else None,
+                purchased_at=purchased_at.isoformat() if purchased_at else None,
+            )
+        except PackGrantConflict as e:
+            # Translate to the IAP-layer exception billing.py already maps to 409, so the
+            # client finishes the transaction instead of redelivering forever.
+            raise PurchaseBoundToAnotherAccount(str(e)) from e
+        except Exception as e:
+            # CreditServiceUnavailable and anything else: the user WAS charged, so this must
+            # surface as retryable (503) and the transaction must stay unfinished.
+            raise IAPError(f"could not apply credit pack {product_id}: {e}") from e
+
+        was_replay = outcome.get("outcome") == "replay"
+
+        return {
+            "kind": "credit_pack",
+            # The user's real tier, NOT this product's. A pack has no tier, and answering
+            # "free" would render on the client as a demotion for a paying subscriber.
+            "tier": self._current_tier(user_id),
+            "status": "duplicate" if was_replay else "granted",
+            "winning_tier": self._current_tier(user_id),
+            "current_period_end": None,
+            "was_replay": was_replay,
+            # 0 on a replay: the client must not claim "1,200 credits added" for something the
+            # user can check against their balance.
+            "credits_granted": 0 if was_replay else credits,
+            "credits_spendable": outcome.get("spendable"),
+            "original_transaction_id": str(original_txn_id or transaction_id),
+        }
+
+    def _current_tier(self, user_id: str) -> str:
+        """The user's mirrored tier, for reporting on a non-subscription purchase.
+
+        Reads `users.tier` (kept current by `reconcile_user_tier`) rather than recomputing
+        via `winning_tier`, because a pack purchase must not fail on a `subscriptions` read
+        and because this is the same value every other surface shows. On a read error it
+        degrades to "free" with a loud log — the client re-reads `/users/me` moments later via
+        `.caydexEntitlementChanged`, so a transient wrong value self-corrects.
+        """
+        try:
+            result = (
+                self.supabase.table("users")
+                .select("tier")
+                .eq("id", user_id)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+            if rows:
+                return str(rows[0].get("tier") or "free")
+        except Exception as e:
+            logger.error(
+                "IAP: could not read users.tier for user=%s (%s: %s) — reporting 'free' on "
+                "this credit-pack response; the client's own /users/me read will correct it",
+                user_id, type(e).__name__, e,
+            )
+        return "free"
 
     # ── Entitlement application ───────────────────────────────────────────────
 
@@ -688,6 +975,11 @@ class IAPService:
         because the client's verified purchase created the row first — so a notification for
         an unknown transaction is expected (e.g. it arrived before the client call) and is
         reported rather than guessed at.
+
+        Checks `subscriptions` first so the pre-existing behaviour is byte-identical, then
+        `credit_purchases`. Without the second lookup a consumable REFUND resolved to None and
+        was dropped as "ignored_unknown_transaction" — the refunded user silently kept every
+        credit they bought.
         """
         try:
             result = (
@@ -698,13 +990,113 @@ class IAPService:
                 .execute()
             )
             rows = result.data or []
-            return rows[0]["user_id"] if rows else None
+            if rows:
+                return rows[0]["user_id"]
         except Exception as e:
             logger.error(
                 "IAP: user lookup failed for txn=%s: %s: %s",
                 original_transaction_id, type(e).__name__, e,
             )
             return None
+
+        # Consumables have no `subscriptions` row. Apple may identify the purchase by either
+        # id, so try both — for the FIRST purchase of a consumable the two are equal, and for
+        # later ones `original_transaction_id` links back to the first.
+        for column in ("transaction_id", "original_transaction_id"):
+            try:
+                packs = (
+                    self.supabase.table("credit_purchases")
+                    .select("user_id")
+                    .eq(column, original_transaction_id)
+                    .limit(1)
+                    .execute()
+                )
+                pack_rows = packs.data or []
+                if pack_rows:
+                    return pack_rows[0]["user_id"]
+            except Exception as e:
+                logger.error(
+                    "IAP: credit_purchases user lookup failed on %s for txn=%s: %s: %s",
+                    column, original_transaction_id, type(e).__name__, e,
+                )
+                return None
+        return None
+
+    def _apply_consumable_notification(
+        self,
+        notification_type: str,
+        subtype: str,
+        transaction: Dict[str, Any],
+        original_txn_id: str,
+    ) -> Tuple[str, Optional[str]]:
+        """Server-notification handling for a CREDIT PACK.
+
+        Only refunds matter. A consumable has no renewal, no expiry and no grace period, and
+        the purchase itself already landed through `POST /billing/verify` — the webhook is
+        purely the channel through which Apple tells us money went back.
+
+        Never raises: every path returns an outcome so the webhook answers 200.
+        """
+        from app.services.credit_service import CreditService
+
+        # The per-purchase id is the dedup/revoke key for a consumable, NOT the original.
+        transaction_id = str(transaction.get("transactionId") or original_txn_id)
+        environment = str(transaction.get("environment") or settings.IAP_ENVIRONMENT)
+        user_id = self.user_id_for_transaction(transaction_id) or \
+            self.user_id_for_transaction(original_txn_id)
+
+        ntype = (notification_type or "").upper()
+
+        # Reuses the same notification types `_status_for_notification` maps to "revoked", so
+        # the two cannot drift apart.
+        if ntype in {"REFUND", "REVOKE"}:
+            outcome = CreditService().revoke_purchased(
+                transaction_id=transaction_id, environment=environment
+            )
+            if outcome is None:
+                # RPC failed. Best-effort by design (see `revoke_purchased`): the user keeps
+                # credits they were refunded for, which is a loss, not a correctness problem —
+                # and raising here would make Apple redeliver a notification we may already
+                # have applied.
+                return "credit_pack_revoke_failed", user_id
+            return f"credit_pack_{outcome.get('outcome', 'revoked')}", user_id
+
+        if ntype == "CONSUMPTION_REQUEST":
+            # Apple wants consumption data within 12 hours to adjudicate a refund request.
+            # Answering requires PUT /inApps/v1/transactions/consumption/{id} on the App Store
+            # Server API, which needs an ASC API key and a signed JWT — this repo has neither
+            # (app_store.py is verification-only). Consequence: Apple decides these refunds
+            # without our input and approves more of them. Logged distinctly so the exposure
+            # is measurable before deciding to build that client. NEVER answer non-2xx.
+            logger.warning(
+                "IAP webhook CONSUMPTION_REQUEST for credit pack txn=%s user=%s — not "
+                "answered (no App Store Server API client); Apple will adjudicate this "
+                "refund without our consumption data",
+                transaction_id, user_id,
+            )
+            return "credit_pack_consumption_request_unanswered", user_id
+
+        if ntype == "REFUND_REVERSED":
+            # Apple reversed a refund it had granted. The credits were clawed back by the
+            # REFUND above and are NOT restored here: re-granting means re-running the grant
+            # against a purchase row whose `revoked_at` is set, which `add_purchased_credits`
+            # would report as a replay rather than re-crediting. Rare enough to handle by
+            # hand; logged loudly so it is not silent.
+            logger.error(
+                "IAP webhook REFUND_REVERSED for credit pack txn=%s user=%s — credits were "
+                "clawed back and are NOT automatically restored; grant them manually",
+                transaction_id, user_id,
+            )
+            return "credit_pack_refund_reversed_unhandled", user_id
+
+        # ONE_TIME_CHARGE, REFUND_DECLINED, and anything else. The purchase path is the
+        # client's verify call plus StoreKit's redelivery of unfinished transactions, so there
+        # is nothing to do here.
+        logger.info(
+            "IAP webhook %s/%s for credit pack txn=%s — no action needed",
+            notification_type, subtype, transaction_id,
+        )
+        return f"credit_pack_ignored:{notification_type}", user_id
 
     def apply_notification(
         self, notification: Dict[str, Any], transaction: Optional[Dict[str, Any]]
@@ -730,6 +1122,15 @@ class IAPService:
         )
         if not original_txn_id:
             return "ignored_no_transaction_id", None
+
+        # Consumables branch BEFORE the user lookup: a credit pack has no `subscriptions` row
+        # and no lifecycle, so routing it through the subscription machinery would write a
+        # bogus entitlement row. Everything here answers 200 — Apple retries non-2xx for days,
+        # and a notification we have decided to ignore must not generate retries forever.
+        if is_credit_pack_product(transaction.get("productId")):
+            return self._apply_consumable_notification(
+                notification_type, subtype, transaction, original_txn_id
+            )
 
         user_id = self.user_id_for_transaction(original_txn_id)
         if not user_id:

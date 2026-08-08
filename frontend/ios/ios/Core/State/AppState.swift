@@ -92,6 +92,38 @@ final class AppState {
     /// already owns. Cleared by whoever consumes it, so one tap opens one screen.
     var pendingPushTicker: String?
 
+    /// Where a notification tap wants to land, resolved from the payload.
+    ///
+    /// Supersedes `pendingPushTicker`, which could only ever express "open a ticker" —
+    /// and did so with a HARDCODED `.stock` type, so a crypto or ETF alert opened the
+    /// wrong detail screen. `NotificationRoute` carries the asset type from the payload
+    /// and can also express a report or the inbox.
+    ///
+    /// `pendingPushTicker` is kept alongside it, set in lockstep, so any existing reader
+    /// keeps working through the transition.
+    var pendingPushRoute: NotificationRoute?
+
+    /// Unread notification count, for the tab-bar badge.
+    ///
+    /// Device-global (no user id), so it MUST be reset in `discardDataForEndedSession()`
+    /// — otherwise the next account to sign in on this phone inherits the previous
+    /// user's badge. Same bug class as the four Learn stores and `WhaleService`.
+    var unreadNotificationCount: Int = 0
+
+    /// Broadcast an authoritative unread count from wherever it was last observed.
+    ///
+    /// Posted as a Notification rather than written directly because the inbox ViewModel
+    /// is not `@Observable` and has no AppState reference; `iosApp` observes this and
+    /// updates the badge. Keeps the ViewModel free of a global lookup (ios-swiftui.md:
+    /// dependencies arrive via `init`, never a singleton reach-through).
+    static func notificationUnreadDidChange(_ count: Int) {
+        NotificationCenter.default.post(
+            name: .caydexNotificationUnreadChanged,
+            object: nil,
+            userInfo: ["count": count]
+        )
+    }
+
     // MARK: - Services (Injected)
 
     private(set) var apiClient: APIClient!
@@ -469,6 +501,15 @@ final class AppState {
         // empty list they'd have to pull-to-refresh away.
         didWriteAsGuestWhileRestoring = false
         await claimGuestDataIfNeeded()
+        // Apply any credit-pack purchase that Apple delivered while there was no account to
+        // attach it to. `POST /billing/verify` is `.signInRequired`, so a transaction arriving
+        // during a signed-out session is refused by `APIClient` before it goes out and stays
+        // unfinished until something re-submits it — and `restorePurchases()` cannot, because
+        // `Transaction.currentEntitlements` excludes consumables. Without this, the credits
+        // land only on the NEXT cold launch. Runs before `refreshCredits` so the balance the
+        // user sees already includes them; idempotent server-side, so a no-op is one cheap
+        // call.
+        await StoreKitService.shared.drainUnfinishedTransactions()
         await refreshCredits()
         SettingsSyncManager.shared.hydrate()
         PushNotificationManager.shared.flushPendingToken()
@@ -685,6 +726,13 @@ final class AppState {
         // APNs: without this the phone keeps receiving the ended account's watchlist alerts,
         // and the only server-side detach requires the session that just died.
         PushNotificationManager.shared.clearLocalRegistrationForEndedSession()
+        // The inbox badge and any parked tap are device-global with no user id, so they
+        // survive a session end unless cleared here — handing the next account to sign in
+        // on this phone the previous user's unread count, and possibly opening a screen
+        // they never asked for. Same reasoning as the Learn stores above.
+        unreadNotificationCount = 0
+        pendingPushRoute = nil
+        pendingPushTicker = nil
         PortfolioStore.shared.reset()
         // Consent is per person and must never be inherited — see the note on the method.
         AIConsentStore.shared.resetForEndedSession()
@@ -1016,15 +1064,38 @@ struct UserProfile: Codable, Identifiable, Sendable {
     }
 }
 
+/// Credit balance across BOTH pools.
+///
+/// `total` / `used` / `remaining` are the COMBINED position — the backend aggregates the
+/// monthly (granted) pool and the purchased (consumable IAP) pool before sending them, so
+/// every existing reader of `remaining` keeps working and a user holding purchased credits is
+/// not shown 0 with a disabled Generate button.
+///
+/// ⚠️ `resetsAt` describes the GRANTED pool ONLY. App Store Guideline 3.1.1 forbids purchased
+/// credits expiring, so anything that renders a reset date next to `remaining` must qualify it
+/// with `purchasedRemaining` — otherwise the app is telling the user their paid credits
+/// expire.
 struct CreditInfo: Codable, Sendable {
     let total: Int
     let used: Int
     let remaining: Int
     let resetsAt: String?
+    /// Optional because the app and the backend deploy independently — a build carrying this
+    /// type can hit a Railway instance that predates the two-pool split.
+    let grantedRemaining: Int?
+    let purchasedRemaining: Int?
+
+    /// Credits that will survive the next monthly reset. 0 (not nil) when the backend has not
+    /// told us, so callers can render honestly without special-casing.
+    var purchasedCredits: Int { purchasedRemaining ?? 0 }
+    /// Whether any part of this balance actually expires at `resetsAt`.
+    var hasExpiringCredits: Bool { (grantedRemaining ?? remaining) > 0 }
 
     enum CodingKeys: String, CodingKey {
         case total, used, remaining
         case resetsAt = "resets_at"
+        case grantedRemaining = "granted_remaining"
+        case purchasedRemaining = "purchased_remaining"
     }
 }
 

@@ -113,18 +113,21 @@ class FakeSupabase:
 class FakeCreditService:
     DEEP_RESEARCH_COST = 20
     calls = []  # class-level so every instance records to the same log
+    ref_ids = []  # recorded separately so the (user, amount) assertions above stay readable
     raise_on_refund = False
 
     def refund_ledgered(self, user_id, amount, *, reason=None, ref_id=None):
         if FakeCreditService.raise_on_refund:
             raise RuntimeError("refund RPC down")
         FakeCreditService.calls.append((user_id, amount))
+        FakeCreditService.ref_ids.append(ref_id)
         return 999
 
 
 @pytest.fixture(autouse=True)
 def _patch_credit_service(monkeypatch):
     FakeCreditService.calls = []
+    FakeCreditService.ref_ids = []
     FakeCreditService.raise_on_refund = False
     monkeypatch.setattr(recon, "CreditService", FakeCreditService)
     yield
@@ -134,6 +137,7 @@ def _row(**over):
     base = {
         "id": "r1",
         "user_id": "u1",
+        "ticker": "NVDA",
         "status": "processing",
         "is_refunded": False,
         "credits_charged": 5,
@@ -160,6 +164,43 @@ async def test_claim_refunds_processing_row_once():
     assert rows[0]["status"] == "failed"
     assert rows[0]["is_refunded"] is True
     assert FakeCreditService.calls == [("u1", 5)]
+
+
+@pytest.mark.asyncio
+async def test_refund_is_keyed_by_ticker_to_match_the_charge():
+    """The reconciled refund MUST use the same `ref_id` the charge used —
+    `research.py` charges with `ref_id=request.stock_id.upper()`.
+
+    This stopped being cosmetic at migration 118. `refund_credits` now looks the original
+    spend up BY (user, ref_id, amount) to learn which credit pool it drained. This call site
+    passed `report_id`, which is never equal to a ticker, so every reconciled failure missed
+    the lookup and took the granted-first fallback — refunding a report that was paid for out
+    of PURCHASED credits into the GRANTED pool, where `ensure_credit_period` destroys it at
+    the month boundary. That is the App Store Guideline 3.1.1 violation the two-pool design
+    exists to prevent, on the primary failure path of the 20-credit action.
+    """
+    rows = [_row(ticker="nvda")]
+    sb = FakeSupabase(rows)
+
+    await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
+
+    assert FakeCreditService.ref_ids == ["NVDA"], (
+        "the refund must be keyed by the UPPER-CASED ticker, exactly as research.py charges — "
+        f"got {FakeCreditService.ref_ids}"
+    )
+    assert "r1" not in FakeCreditService.ref_ids, "report_id is not a valid refund key"
+
+
+@pytest.mark.asyncio
+async def test_refund_without_a_ticker_still_refunds():
+    """A row missing its ticker must not lose the user their credits — degrade to the
+    fallback (which is safe, just not exact) rather than skipping the refund."""
+    rows = [_row(ticker=None)]
+    sb = FakeSupabase(rows)
+
+    assert await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb) is True
+    assert FakeCreditService.calls == [("u1", 5)]
+    assert FakeCreditService.ref_ids == [None]
 
 
 @pytest.mark.asyncio

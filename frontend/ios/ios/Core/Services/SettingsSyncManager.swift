@@ -45,12 +45,24 @@ final class SettingsSyncManager {
         "notify_smart_money", "notify_smart_money_whale", "notify_smart_money_insider",
         "notify_smart_money_institutional",
         "notify_research_complete", "notify_watchlist_changes",
+        "notify_price_alerts",
+        "notify_quiet_hours_enabled",
         "haptic_feedback", "autoplay_next",
     ]
 
-    // String preferences (persona, appearance). Currency is USD-only (no picker).
+    // String preferences (persona, appearance, quiet hours, timezone).
+    // Currency is USD-only (no picker).
+    //
+    // The quiet-hours pair is `"HH:MM"` (24-hour, zero-padded) and the timezone is an
+    // IANA identifier from `TimeZone.current.identifier`. Both are read by the BACKEND
+    // — `quiet_hours.py` parses them to decide whether a notification buzzes now or is
+    // parked until the window ends — so the formats are a contract, not a display
+    // choice. The backend rejects anything else and degrades to "not quiet" rather
+    // than guessing, so a malformed value costs a notification's timing, never its
+    // delivery.
     static let stringKeys: [String] = [
         "default_persona", AppearanceManager.storageKey,
+        "notify_quiet_start", "notify_quiet_end", "notify_timezone",
     ]
 
     // Numeric preferences (playback speed).

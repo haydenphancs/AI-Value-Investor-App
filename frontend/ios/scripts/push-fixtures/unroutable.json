@@ -1,0 +1,14 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Something happened",
+      "body": "A payload with no destination."
+    },
+    "sound": "default",
+    "thread-id": "app",
+    "category": "app",
+    "badge": 8
+  },
+  "kind": "ticker_move",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

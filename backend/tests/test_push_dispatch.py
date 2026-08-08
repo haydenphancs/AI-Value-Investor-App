@@ -16,10 +16,14 @@ import asyncio
 
 import pytest
 
+from app.services.notification_kinds import KIND_TICKER_MOVE, get_kind
 from app.services.push_dispatch_service import (
     MAX_RECIPIENTS_PER_SCOPE,
     PushDispatchService,
+    _Recipient,
 )
+
+_MOVE = get_kind(KIND_TICKER_MOVE)
 
 
 class _FakePush:
@@ -28,14 +32,25 @@ class _FakePush:
         self._accepted = accepted
         self.sent = []
 
-    async def send_to_user(self, user_id, *, title, body, data=None):
+    async def send_to_user(self, user_id, *, title, body, data=None, **kw):
+        # **kw absorbs the APNs-shaping arguments the registry supplies
+        # (interruption_level / thread_id / collapse_id / category / badge / devices).
+        # They are asserted separately in test_notification_dispatch.py; the properties
+        # pinned in THIS file are about who gets sent to, not how the payload is shaped.
         self.sent.append((user_id, title, body, data))
+        self.last_kwargs = kw
         return self._accepted
 
 
 def _service(*, watchers=None, prefs=None, claim=True, push=None,
              watchers_raise=False, prefs_raise=False, claim_raise=None,
-             sent_today=0):
+             sent_today=0, devices=True):
+    """A PushDispatchService with every Supabase seam stubbed.
+
+    `prefs` is user_id -> bool (does this user want the category?), which the fake
+    translates into the preferences blob `decide()` actually reads. `sent_today` is an
+    int or a user_id -> int map, standing in for the per-category count.
+    """
     svc = object.__new__(PushDispatchService)
     svc._push = push or _FakePush()
     svc.supabase = None
@@ -47,23 +62,42 @@ def _service(*, watchers=None, prefs=None, claim=True, push=None,
         users = list(watchers or [])
         return users[:MAX_RECIPIENTS_PER_SCOPE]
 
-    def _pref(user_id, key):
-        if prefs_raise:
-            return True   # the service's documented fail-open
-        return (prefs or {}).get(user_id, True)
+    def _count_for(user_id):
+        return sent_today.get(user_id, 0) if isinstance(sent_today, dict) else sent_today
 
-    def _claim(user_id, dedup_key):
+    def _resolve(user_ids, kind, now):
+        out = {}
+        for uid in user_ids:
+            blob = {}
+            if not prefs_raise and prefs is not None and uid in prefs:
+                blob = {kind.preference_key: prefs[uid]}
+            out[uid] = _Recipient(
+                user_id=uid,
+                preferences=blob,
+                # prefs_raise stands for a failed read, whose documented behaviour is to
+                # fail OPEN to the declared default — i.e. an empty blob, exactly as
+                # `_preferences_bulk` produces.
+                preferences_known=not prefs_raise,
+                devices=[{"token": f"tok-{uid}", "environment": "sandbox"}] if devices else [],
+                category_sent_today=_count_for(uid),
+                unread=0,
+            )
+        return out
+
+    def _claim(user_id, dedup_key, **kw):
         if claim_raise:
             return False
         svc.claimed.append((user_id, dedup_key))
         return claim
 
     svc.watchers_of = _watchers_of
-    svc.preference_enabled = _pref
+    svc.resolve_recipients = _resolve
     svc.claim_send = _claim
-    svc.alerts_sent_today = lambda user_id: (
-        sent_today.get(user_id, 0) if isinstance(sent_today, dict) else sent_today
+    svc.mark_state = lambda *a, **k: None
+    svc.preference_enabled = lambda user_id, key: (
+        True if prefs_raise else (prefs or {}).get(user_id, True)
     )
+    svc.alerts_sent_today = lambda user_id, category=None: _count_for(user_id)
     return svc
 
 
@@ -161,10 +195,12 @@ async def test_a_failed_watcher_lookup_degrades_to_zero():
 @pytest.mark.asyncio
 async def test_one_failing_recipient_does_not_abandon_the_rest():
     class _Flaky(_FakePush):
-        async def send_to_user(self, user_id, *, title, body, data=None):
+        async def send_to_user(self, user_id, *, title, body, data=None, **kw):
             if user_id == "bad":
                 raise RuntimeError("apns exploded")
-            return await super().send_to_user(user_id, title=title, body=body, data=data)
+            return await super().send_to_user(
+                user_id, title=title, body=body, data=data, **kw
+            )
 
     push = _Flaky()
     svc = _service(watchers=["a", "bad", "b"], push=push)

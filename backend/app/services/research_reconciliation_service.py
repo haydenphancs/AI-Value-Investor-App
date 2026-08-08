@@ -157,9 +157,24 @@ async def claim_and_mark_failed(
         )
         return True
 
+    # ⚠️ `ref_id` MUST match the one the CHARGE used — `research.py` passes the upper-cased
+    # ticker (`precharge(..., ref_id=request.stock_id.upper())`). This used to pass
+    # `report_id`, which is never equal to a ticker, and since migration 118 that mismatch is
+    # no longer cosmetic: `refund_credits` looks the original spend up BY ref_id to learn which
+    # pool it drained. With no match it takes the granted-first fallback, so a user whose
+    # report was paid for out of PURCHASED credits got the refund into their GRANTED pool —
+    # which `ensure_credit_period` then wipes at the month boundary. That silently destroys
+    # credits bought with real money, i.e. exactly the App Store Guideline 3.1.1 violation the
+    # two-pool design exists to prevent, on the primary failure path of the 20-credit action.
+    ticker = (row.get("ticker") or "").upper() or None
+    if not ticker:
+        logger.warning(
+            "claim_and_mark_failed: report %s has no ticker — refunding %s credits without a "
+            "split lookup (granted-first fallback)", report_id, amount,
+        )
     try:
         CreditService().refund_ledgered(
-            user_id, amount, reason="report_refund_reconciled", ref_id=report_id
+            user_id, amount, reason="report_refund_reconciled", ref_id=ticker,
         )
         logger.info(
             "Refunded %s credits for failed report %s (user %s)",

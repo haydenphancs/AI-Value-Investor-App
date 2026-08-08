@@ -60,13 +60,13 @@ struct ContentView: View {
                 .allowsHitTesting(selectedTab == .wiser)
                 .environment(\.isActiveTab, selectedTab == .wiser)
         }
-        .onChange(of: appState.pendingPushTicker, initial: true) { _, ticker in
+        .onChange(of: appState.pendingPushRoute, initial: true) { _, route in
             // `initial: true` for the same reason as HomeDashboardView: a cold launch
             // from a tap sets this before either view exists.
             // Bring Home forward FIRST. Tabs are opacity-mounted, so without this the
-            // ticker cover would present over a tab the user isn't looking at.
+            // destination cover would present over a tab the user isn't looking at.
             // HomeDashboardView consumes and clears the value.
-            if ticker != nil { selectedTab = .home }
+            if route != nil { selectedTab = .home }
         }
         .onChange(of: selectedTab) { oldValue, newValue in
             // Which tabs actually get used. `HomeTab` is a fixed 5-case enum, so this
@@ -175,7 +175,10 @@ struct HomeViewWithBinding: View {
                     await viewModel.refresh()
                 }
 
-                CustomTabBar(selectedTab: $selectedTab)
+                CustomTabBar(
+                    selectedTab: $selectedTab,
+                    unreadNotifications: appState.unreadNotificationCount
+                )
             }
 
             if viewModel.isLoading {
@@ -282,7 +285,10 @@ struct ResearchViewWithBinding: View {
                     reportsTabContent
                 }
 
-                CustomTabBar(selectedTab: $selectedTab)
+                CustomTabBar(
+                    selectedTab: $selectedTab,
+                    unreadNotifications: appState.unreadNotificationCount
+                )
             }
 
             if viewModel.isLoading {
@@ -309,8 +315,11 @@ struct ResearchViewWithBinding: View {
                 }
             }
         }
+        // "Add More Credits" now sells credits instead of opening the subscription paywall.
+        // A user who ran out mid-task wants to finish it, not commit to a monthly plan;
+        // BuyCreditsView carries a "See plans" button so the paywall stays one tap away.
         .sheet(isPresented: $viewModel.showCreditsSheet) {
-            PaywallView()
+            BuyCreditsView()
                 .environment(\.appState, appState)
         }
         .sheet(isPresented: $viewModel.showPersonasSheet) {
@@ -502,6 +511,10 @@ struct ResearchViewWithBinding: View {
 
 // MARK: - TrackingView with Binding Support
 struct TrackingViewWithBinding: View {
+    // The tab bar renders on every one of these wrappers, so the unread badge
+    // must be readable from all of them — otherwise it appears and vanishes as
+    // the user switches tabs.
+    @Environment(AppState.self) private var appState
     @Binding var selectedTab: HomeTab
     @Binding var researchTickerSymbol: String?
 
@@ -516,7 +529,10 @@ struct TrackingViewWithBinding: View {
                     researchTickerSymbol: $researchTickerSymbol
                 )
 
-                CustomTabBar(selectedTab: $selectedTab)
+                CustomTabBar(
+                    selectedTab: $selectedTab,
+                    unreadNotifications: appState.unreadNotificationCount
+                )
             }
         }
     }
@@ -524,6 +540,10 @@ struct TrackingViewWithBinding: View {
 
 // MARK: - WiserView with Binding Support (Learn)
 struct WiserViewWithBinding: View {
+    // The tab bar renders on every one of these wrappers, so the unread badge
+    // must be readable from all of them — otherwise it appears and vanishes as
+    // the user switches tabs.
+    @Environment(AppState.self) private var appState
     @Binding var selectedTab: HomeTab
 
     var body: some View {
@@ -537,7 +557,10 @@ struct WiserViewWithBinding: View {
                 // needs an active-tab signal here.
                 LearnContentView()
 
-                CustomTabBar(selectedTab: $selectedTab)
+                CustomTabBar(
+                    selectedTab: $selectedTab,
+                    unreadNotifications: appState.unreadNotificationCount
+                )
             }
         }
     }
@@ -545,6 +568,10 @@ struct WiserViewWithBinding: View {
 
 // MARK: - Placeholder View for Other Tabs
 struct TabPlaceholderView: View {
+    // The tab bar renders on every one of these wrappers, so the unread badge
+    // must be readable from all of them — otherwise it appears and vanishes as
+    // the user switches tabs.
+    @Environment(AppState.self) private var appState
     let title: String
     @Binding var selectedTab: HomeTab
 
@@ -572,7 +599,10 @@ struct TabPlaceholderView: View {
 
                 Spacer()
 
-                CustomTabBar(selectedTab: $selectedTab)
+                CustomTabBar(
+                    selectedTab: $selectedTab,
+                    unreadNotifications: appState.unreadNotificationCount
+                )
             }
         }
     }

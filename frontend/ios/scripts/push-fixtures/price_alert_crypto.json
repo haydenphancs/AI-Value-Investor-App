@@ -1,0 +1,19 @@
+{
+  "aps": {
+    "alert": {
+      "title": "BTC is above $95,000.00",
+      "body": "BTC is trading at $95,240.00."
+    },
+    "sound": "default",
+    "thread-id": "price_alert",
+    "interruption-level": "time-sensitive",
+    "category": "price_alert",
+    "badge": 7
+  },
+  "kind": "price_alert",
+  "route": "ticker",
+  "ticker": "BTC",
+  "asset_type": "crypto",
+  "alert_id": "22222222-2222-2222-2222-222222222222",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

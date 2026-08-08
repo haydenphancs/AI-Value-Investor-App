@@ -99,6 +99,7 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Billing / Subscription / Settings / Devices
     case getPlanCatalog                                    // public tier catalog (guest-safe)
+    case getCreditPackCatalog                              // public consumable catalog (guest-safe)
     case getMySubscription                                 // current user's entitlement
     case getMySettings                                     // synced preference blob
     case updateMySettings(preferences: [String: PreferenceValue])
@@ -110,6 +111,17 @@ enum APIEndpoint: Sendable {
     /// Submit an Apple-signed StoreKit 2 transaction for server-side verification.
     /// The signed blob is the ONLY thing sent — the tier is derived server-side.
     case verifyPurchase(signedTransaction: String)
+
+    // MARK: - Notifications / Price alerts
+    /// Inbox page. `before` is a KEYSET cursor (the previous page's last `createdAt`),
+    /// not an offset — rows arrive continuously at the head, so an offset page 2 would
+    /// repeat or skip whenever a notification landed between requests.
+    case listNotifications(limit: Int, before: String?)
+    case markNotificationsRead(ids: [String], all: Bool)
+    case listPriceAlerts(ticker: String?)
+    case createPriceAlert(ticker: String, kind: String, threshold: Double, assetType: String, repeatMode: String)
+    case updatePriceAlert(id: String, threshold: Double?, isActive: Bool?, repeatMode: String?)
+    case deletePriceAlert(id: String)
 
     // MARK: - Stocks
     case searchStocks(query: String, limit: Int)
@@ -303,6 +315,8 @@ enum APIEndpoint: Sendable {
         // Billing / Subscription / Settings / Devices
         case .getPlanCatalog:
             return "/api/v1/billing/plans"
+        case .getCreditPackCatalog:
+            return "/api/v1/billing/credit-packs"
         case .verifyPurchase:
             return "/api/v1/billing/verify"
         case .getMySubscription:
@@ -311,6 +325,18 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me/settings"
         case .registerDevice, .unregisterDevice:
             return "/api/v1/users/me/devices"
+
+        // Notifications / price alerts
+        case .listNotifications:
+            return "/api/v1/users/me/notifications"
+        case .markNotificationsRead:
+            return "/api/v1/users/me/notifications/read"
+        case .listPriceAlerts, .createPriceAlert:
+            return "/api/v1/alerts/price"
+        case .updatePriceAlert(let id, _, _, _):
+            return "/api/v1/alerts/price/\(id)"
+        case .deletePriceAlert(let id):
+            return "/api/v1/alerts/price/\(id)"
 
         // Stocks
         case .searchStocks:
@@ -565,12 +591,15 @@ enum APIEndpoint: Sendable {
              .updateMySettings:
             return .PUT
 
-        case .registerDevice:
+        case .registerDevice, .markNotificationsRead, .createPriceAlert:
             return .POST
+
+        case .updatePriceAlert:
+            return .PATCH
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
              .unfollowWhale, .deletePortfolio, .removeBookBookmark, .uncompleteLearnItem,
-             .deleteAccount, .unregisterDevice:
+             .deleteAccount, .unregisterDevice, .deletePriceAlert:
             return .DELETE
 
         default:
@@ -584,6 +613,18 @@ enum APIEndpoint: Sendable {
         switch self {
         case .searchStocks(let query, let limit):
             return ["q": query, "limit": String(limit)]
+
+        case .listNotifications(let limit, let before):
+            var q = ["limit": String(limit)]
+            // Omitted on the first page so that request line stays byte-identical.
+            if let before, !before.isEmpty { q["before"] = before }
+            return q
+
+        case .listPriceAlerts(let ticker):
+            // No ticker = the whole list (the settings screen); a ticker = just that
+            // symbol's rules, which is what the detail-screen bell needs.
+            guard let ticker, !ticker.isEmpty else { return nil }
+            return ["ticker": ticker.uppercased()]
 
         case .getStockNews(_, let limit):
             return ["limit": String(limit)]
@@ -714,6 +755,20 @@ enum APIEndpoint: Sendable {
             // Same body shape; the backend reads only `token` and scopes the delete to the caller.
             return DeviceRegisterRequestBody(token: token, platform: "ios", environment: nil)
 
+        case .markNotificationsRead(let ids, let all):
+            return MarkNotificationsReadRequestBody(ids: ids, all: all)
+
+        case .createPriceAlert(let ticker, let kind, let threshold, let assetType, let repeatMode):
+            return CreatePriceAlertRequestBody(
+                ticker: ticker, kind: kind, threshold: threshold,
+                assetType: assetType, repeatMode: repeatMode
+            )
+
+        case .updatePriceAlert(_, let threshold, let isActive, let repeatMode):
+            return UpdatePriceAlertRequestBody(
+                threshold: threshold, isActive: isActive, repeatMode: repeatMode
+            )
+
         case .addToWatchlist(let stockId):
             return AddToWatchlistRequest(stockId: stockId)
 
@@ -839,6 +894,14 @@ enum APIEndpoint: Sendable {
         case .getPlanCatalog:
             return .public
 
+        // Credit-pack catalog. Public for the same reason: the Buy Credits screen must render
+        // before we know who is looking, and it is the same pricing Apple already shows on the
+        // storefront. Only BUYING is gated — `verifyPurchase` is `.signInRequired` below,
+        // because consumables are not restorable by Apple, so credits must attach to a real
+        // account or a reinstall loses money the user actually spent.
+        case .getCreditPackCatalog:
+            return .public
+
         // Market data. `getHoldersData` and `enrichStockNews` are here rather than under
         // sign-in-required (where `default: true` used to put them): `/stocks/{t}/holders`
         // and `/stocks/{t}/news/enrich` take no auth dependency at all.
@@ -957,6 +1020,14 @@ enum APIEndpoint: Sendable {
 
         case .getMySubscription, .getMySettings, .updateMySettings,
              .registerDevice, .unregisterDevice, .verifyPurchase:
+            return .signInRequired
+
+        // Push never reaches a guest: `device_tokens` is FK-bound to public.users and
+        // auth-only, so a guest inbox is empty by construction and a guest price alert is
+        // a rule that can never fire. Both are "durable cross-device identity" by
+        // auth.md §1a's tier test — the same tier as settings and devices.
+        case .listNotifications, .markNotificationsRead,
+             .listPriceAlerts, .createPriceAlert, .updatePriceAlert, .deletePriceAlert:
             return .signInRequired
 
         // Both take `get_current_user_id`. Short-circuiting a tokenless `signOut` is harmless —
@@ -1102,6 +1173,29 @@ nonisolated struct UpdateProfileRequest: Encodable, Sendable {
 /// (the @AppStorage keys), so the encoder's convertToSnakeCase leaves them intact.
 nonisolated struct UpdateUserSettingsRequestBody: Encodable, Sendable {
     let preferences: [String: PreferenceValue]
+}
+
+/// POST /users/me/notifications/read body. `all: true` marks everything and `ids` is
+/// ignored — the two are deliberately one call so "mark all read" is not N requests.
+nonisolated struct MarkNotificationsReadRequestBody: Encodable, Sendable {
+    let ids: [String]
+    let all: Bool
+}
+
+nonisolated struct CreatePriceAlertRequestBody: Encodable, Sendable {
+    let ticker: String
+    let kind: String
+    let threshold: Double
+    let assetType: String
+    let repeatMode: String
+}
+
+/// PATCH body. Every field is Optional and nil ones are OMITTED by the encoder, so a
+/// patch that only changes `isActive` cannot accidentally clear the threshold.
+nonisolated struct UpdatePriceAlertRequestBody: Encodable, Sendable {
+    let threshold: Double?
+    let isActive: Bool?
+    let repeatMode: String?
 }
 
 nonisolated struct DeviceRegisterRequestBody: Encodable, Sendable {

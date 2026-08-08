@@ -150,8 +150,21 @@ async def lifespan(app: FastAPI):
         background_tasks.append(task)
         return task
 
+    # The notification loops are the one family that CAN be opted back in locally.
+    # Everything else here is FMP/Gemini-heavy and belongs to Railway, but with the
+    # blanket skip there was no way to exercise a notification sender on a laptop at
+    # all — which made "does this notification actually fire?" unanswerable before
+    # deploying it. Pair with PUSH_DRY_RUN=true to run the full pipeline (audience,
+    # preferences, caps, quiet hours, claim, ledger row) with no APNs and no device.
+    run_notification_jobs = (not is_local_dev) or settings.RUN_NOTIFICATION_JOBS_LOCALLY
+
     if is_local_dev:
         logger.info("Local dev mode — skipping background tasks (Railway handles them)")
+        if run_notification_jobs:
+            logger.info(
+                "RUN_NOTIFICATION_JOBS_LOCALLY is set — starting the notification "
+                "loops locally (PUSH_DRY_RUN=%s)", settings.PUSH_DRY_RUN,
+            )
     else:
         # Pre-warm ApeWisdom social mentions cache at startup
         _spawn(_warm_social_cache(), "warm_social_cache")
@@ -220,6 +233,21 @@ async def lifespan(app: FastAPI):
         # claims to time out.
         from app.services.updates_insight_sweeper import run_insight_sweeper_loop
         insight_sweeper_task = _spawn(run_insight_sweeper_loop(), "insight_sweeper")
+
+    # Outside the else: this family is opt-in-able locally (see `run_notification_jobs`).
+    if run_notification_jobs:
+        # Quiet-hours flush. Runs 24/7 — NOT gated on market hours, because a quiet
+        # window ends on the USER's clock, not the market's.
+        _spawn(_run_notification_dispatch_loop(), "notification_dispatch")
+        # Daily senders (earnings after the close, smart money in the evening). Wakes
+        # hourly; the once-per-ET-day schedule is enforced by the cross-instance claim.
+        _spawn(_run_scheduled_notification_senders(), "notification_senders")
+        # User-set price alerts. 60s cadence across the extended session (04:00-20:00 ET)
+        # — a threshold crossed in pre-market is exactly what someone sets an alert for.
+        # Separate from the Updates sweeper on purpose: that loop's universe is capped at
+        # the top-200 watchlisted tickers, and an alerted ticker is frequently outside it.
+        from app.services.price_alert_service import run_price_alert_loop
+        _spawn(run_price_alert_loop(), "price_alerts")
 
     yield
 
@@ -336,6 +364,99 @@ async def _run_news_pre_warmer():
 
         # Re-run every 2 hours
         await asyncio.sleep(7200)
+
+
+async def _run_notification_dispatch_loop():
+    """Background task: deliver notifications parked by quiet hours.
+
+    Quiet hours DEFER a notification rather than dropping it — the ledger row is
+    written immediately (so the in-app inbox has it) and only the buzz waits. Something
+    has to wake those rows up, and it cannot be the Updates insight sweeper: that loop
+    is gated on `is_market_active()`, and a European user's 07:00 quiet-end is 01:00 ET,
+    when the sweeper is asleep. A user in Asia would never receive a deferred alert at
+    all. So this runs 24/7, deliberately, and is the only loop here that does.
+
+    Cheap when idle: one RPC per cycle that returns zero rows on the overwhelming
+    majority of ticks. Cross-instance safe — `claim_due_notifications` (migration 119)
+    uses FOR UPDATE SKIP LOCKED, so two instances never hand out the same row.
+    """
+    from app.services.push_dispatch_service import get_push_dispatch_service
+
+    # Stagger past the startup burst so this is not competing with the pre-warmers for
+    # the event loop on the first seconds of a deploy.
+    await asyncio.sleep(45)
+
+    interval = max(settings.NOTIFICATION_DISPATCH_INTERVAL_SECONDS, 10)
+    while True:
+        try:
+            await get_push_dispatch_service().flush_deferred()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Never let one bad cycle kill the loop — a dead dispatcher means every
+            # deferred notification silently expires unsent, which looks exactly like
+            # "push is broken" and has no other symptom.
+            logger.error(
+                "Notification dispatch cycle failed (%s: %s)",
+                type(e).__name__, e, exc_info=True,
+            )
+        await asyncio.sleep(interval)
+
+
+async def _run_scheduled_notification_senders():
+    """Background task: the daily notification senders (earnings, smart money).
+
+    ONE loop for both, waking hourly. The hourly cadence is not the schedule — the
+    schedule is enforced by `claim_notification_job`, which grants a job at most once per
+    ET trading day. Waking often just means a job that was missed (deploy, crash, an
+    instance rotating out) is picked up within the hour instead of being lost until
+    tomorrow, and a claim that is refused costs one cheap RPC.
+
+    Each sender is invoked past its own ET hour: earnings after the close (16:00), smart
+    money in the evening (18:00) once Form 4s have landed. Guarding on the hour here as
+    well as in the claim keeps a restart at 06:00 from spending 200 FMP calls on a day's
+    Form 4s that do not exist yet.
+    """
+    from app.services.notification_senders.earnings_sender import (
+        run_earnings_notifications,
+    )
+    from app.services.notification_senders.smart_money_sender import (
+        run_smart_money_notifications,
+    )
+    # `datetime` is not a module-level import in this file (every other loop imports it
+    # locally), so it must be imported here or the first wake raises NameError — an
+    # error a plain `from app.main import app` import check would never surface.
+    from datetime import datetime as _dt
+
+    from app.utils.market_hours import ET as _ET
+
+    # Stagger past both the startup burst and the dispatch loop.
+    await asyncio.sleep(90)
+
+    senders = (
+        ("earnings", settings.EARNINGS_NOTIFY_HOUR_ET, run_earnings_notifications),
+        ("smart_money", settings.SMART_MONEY_NOTIFY_HOUR_ET, run_smart_money_notifications),
+    )
+
+    while True:
+        hour_et = _dt.now(_ET).hour
+        for name, after_hour, run_sender in senders:
+            if hour_et < after_hour:
+                continue
+            try:
+                await run_sender()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # The claim is released by `claimed_job`'s shielded finally with
+                # success=False, so the day is RETRIED on the next wake rather than
+                # silently skipped. Log loudly: a sender that quietly stops is
+                # indistinguishable from "nothing happened today".
+                logger.error(
+                    "Notification sender %s failed (%s: %s) — will retry next hour",
+                    name, type(e).__name__, e, exc_info=True,
+                )
+        await asyncio.sleep(3600)
 
 
 async def _run_report_pre_warmer():

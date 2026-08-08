@@ -44,6 +44,13 @@ enum AnalyticsEventName: String {
     case paywallShown = "paywall_shown"
     case paywallPurchaseStarted = "paywall_purchase_started"
     case purchaseCompleted = "purchase_completed"
+    /// Consumable credit packs ("Buy Credits"). Separate from the `paywall*` trio on purpose:
+    /// a top-up and a subscription are different decisions, and merging their funnels would
+    /// make the subscription conversion rate — the number the pricing model rests on —
+    /// unreadable. Carry `product_id`, and `count` for the credits granted.
+    case creditPackShown = "credit_pack_shown"
+    case creditPackPurchaseStarted = "credit_pack_purchase_started"
+    case creditPackPurchased = "credit_pack_purchased"
     case watchlistAdded = "watchlist_added"
     case lessonCompleted = "lesson_completed"
     case audioPlayed = "audio_played"
@@ -57,6 +64,20 @@ enum AnalyticsEventName: String {
     /// used to be a `print` — so in production there was no way to know how often a tap on
     /// Follow, a star, or a portfolio edit quietly did nothing.
     case mutationFailed = "mutation_failed"
+
+    /// Push funnel. Nothing in the app measured notifications at all, so "did anyone tap
+    /// it?" and "how many people turned them off?" — the two questions that decide whether
+    /// a category is worth sending — were unanswerable.
+    ///
+    /// `kind` is the fixed registry key ("earnings_upcoming"), `route` the destination
+    /// family. NEVER a ticker: `props` is for low-cardinality dimensions, and a per-user
+    /// value there is both useless as a metric and a privacy footgun.
+    case pushReceived = "push_received"
+    case pushOpened = "push_opened"
+    case pushPermissionResult = "push_permission_result"
+    case pushRegisterFailed = "push_register_failed"
+    case notificationInboxOpened = "notification_inbox_opened"
+    case priceAlertCreated = "price_alert_created"
     /// A best-effort background sync that failed (settings hydrate/push, device registration,
     /// guest-data claim). Same rationale: these were `#if DEBUG` prints, i.e. invisible in the
     /// builds that matter.

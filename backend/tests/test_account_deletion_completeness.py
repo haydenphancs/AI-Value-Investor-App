@@ -392,7 +392,35 @@ def _tables_with_user_id_column() -> set[str]:
 
 
 def _tables_with_fk_to_users() -> set[str]:
-    """Tables whose user_id has an FK — the cascade covers these."""
+    """Tables whose user_id has an FK — the cascade covers these.
+
+    Reads the snapshot AND, for tables the snapshot has never heard of, the migrations.
+
+    That second half closes an ASYMMETRY that made this guard cry wolf:
+    `_tables_with_user_id_column` learns about a new table from the migrations (the snapshot
+    lags by design), but FK detection read only the dump — so a NEW table with a perfectly
+    good `REFERENCES public.users(id) ON DELETE CASCADE` failed the guard until someone
+    regenerated the snapshot. The obvious way to make that failure go away is to add the table
+    to `_UNLINKED_USER_TABLES`, which then DOUBLE-deletes: once by cascade, once by hand. The
+    guard would have taught the exact wrong lesson.
+
+    ⚠️ TWO scopes keep the migration half from making this test vacuous, and the second is the
+    load-bearing one:
+
+    1. Only tables ABSENT from the snapshot. The snapshot is a dump of the live database, so
+       for anything it knows it is the truth — including that a constraint was later dropped.
+
+    2. Only `CREATE TABLE (...)` BODIES — never `ALTER TABLE ... ADD CONSTRAINT`. This is what
+       actually protects the guest-writable tables. Migration 047 adds
+       `FOREIGN KEY (user_id) REFERENCES public.users(id)` to `watchlist_items`, `portfolios`,
+       `research_reports` and `chat_sessions` via ALTER, and migrations 108/110/111 later DROP
+       exactly those so guests can be partitioned per install (see .claude/rules/auth.md §1a).
+       A scanner that read ALTER statements would resurrect all four as "linked" and this test
+       would pass while account deletion silently left their rows behind.
+
+    `test_fk_scanner_still_sees_the_deliberately_unlinked_tables` below pins both, and has been
+    mutation-tested against exactly that loosening.
+    """
     sql = _SCHEMA.read_text()
     linked = set()
     for m in re.finditer(
@@ -400,7 +428,68 @@ def _tables_with_fk_to_users() -> set[str]:
         sql,
     ):
         linked.add(m.group(1))
+
+    snapshotted = {
+        m.group(1)
+        for m in re.finditer(r"CREATE TABLE public\.(\w+)\s*\(", sql, re.IGNORECASE)
+    }
+
+    migrations = _SCHEMA.parent / "migrations"
+    if not migrations.is_dir():
+        return linked
+
+    for f in sorted(migrations.glob("*.sql")):
+        for m in re.finditer(
+            r"CREATE TABLE (?:IF NOT EXISTS )?(?:public\.)?(\w+)\s*\((.*?)\n\);",
+            f.read_text(), re.DOTALL | re.IGNORECASE,
+        ):
+            name, body = m.group(1), m.group(2)
+            if name in snapshotted:
+                continue  # the dump is authoritative — see the warning above
+            # Whitespace-flattened so a column definition wrapped across lines still matches;
+            # `[^,]*?` confines the match to ONE column definition, so a REFERENCES on some
+            # other column cannot satisfy it.
+            flat = re.sub(r"\s+", " ", body)
+            inline = re.search(
+                r"\buser_id\b[^,]*?REFERENCES\s+(?:public\.)?users\b", flat, re.IGNORECASE
+            )
+            table_level = re.search(
+                r"FOREIGN KEY\s*\(\s*user_id\s*\)\s*REFERENCES\s+(?:public\.)?users\b",
+                flat, re.IGNORECASE,
+            )
+            if inline or table_level:
+                linked.add(name)
     return linked
+
+
+def test_fk_scanner_still_sees_the_deliberately_unlinked_tables():
+    """Mutation guard for `_tables_with_fk_to_users`.
+
+    The migration-reading half above is one `if name in snapshotted: continue` away from
+    marking every guest-writable table as FK-linked — migration 047 declares FKs for all four,
+    and 108/110/111 drop them. If that scope is ever loosened, this test fails instead of
+    `test_every_unlinked_user_table_is_in_the_purge_list` silently passing for the wrong
+    reason. See .claude/rules/auth.md §1a for why those FKs are gone.
+    """
+    linked = _tables_with_fk_to_users()
+    for table in ("watchlist_items", "portfolios", "research_reports", "chat_sessions"):
+        assert table not in linked, (
+            f"{table} deliberately has NO FK to users (migrations 108/110/111 dropped it so "
+            "guests can be partitioned per install), but the scanner reports it as linked — "
+            "the purge guard is now vacuous for it and a deleted account keeps its rows."
+        )
+
+
+def test_fk_scanner_sees_a_new_migration_only_table():
+    """The other half: a table created by a migration and not yet snapshotted, WITH an FK,
+    must be recognised — otherwise the purge guard demands a `_UNLINKED_USER_TABLES` entry
+    that would double-delete alongside the cascade."""
+    linked = _tables_with_fk_to_users()
+    assert "credit_purchases" in linked, (
+        "credit_purchases (migration 117) declares `user_id UUID NOT NULL REFERENCES "
+        "public.users(id) ON DELETE CASCADE` but the scanner did not see it — the inline / "
+        "multi-line column form has stopped matching."
+    )
 
 
 def test_every_unlinked_user_table_is_in_the_purge_list():

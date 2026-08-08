@@ -65,8 +65,18 @@ def test_unreadable_type_defaults_to_opted_in_and_does_not_raise():
 # so a user who never opened Notification Settings has no row entry for these — and
 # both render as OFF in the UI. The first volatility/institutional dispatcher to ship
 # would have opted them into something the app shows as off.
+#
+# `notify_quiet_hours_enabled` joined them for the same reason from the other side: it
+# shapes DELIVERY rather than selecting a category, so no NotificationKind references it
+# and `preference_enabled` never looks it up in normal operation — which is exactly how
+# an off-by-default key gets forgotten. It is declared anyway so both sides agree on
+# what its absence means. See `notification_kinds.DELIVERY_PREFERENCE_DEFAULTS`.
 
-_OFF_BY_DEFAULT = ["notify_market_volatility", "notify_smart_money_institutional"]
+_OFF_BY_DEFAULT = [
+    "notify_market_volatility",
+    "notify_smart_money_institutional",
+    "notify_quiet_hours_enabled",
+]
 
 
 @pytest.mark.parametrize("key", _OFF_BY_DEFAULT)
@@ -156,15 +166,37 @@ def test_the_ios_defaults_this_map_mirrors_still_say_off():
     # Anti-vacuity: the regex must actually be finding the declarations.
     assert len(declared) >= 10, declared
 
+    # Non-Bool notification preferences (quiet-hours times, timezone) live in a SECOND
+    # map. `preferenceDefaults` is deliberately `[String: Bool]` — its type is what makes
+    # "which toggles ship off?" readable, and `_PREFERENCE_DEFAULTS` mirrors only the
+    # false entries. Without this union the `synced <= declared` check below fails the
+    # build the moment a string-valued notify_* key is added, which is not drift.
+    string_start = src.find("static let preferenceStringDefaults")
+    declared_strings: set[str] = set()
+    if string_start != -1:
+        s_open = src.index("= [", string_start)
+        s_block = src[s_open: src.index("\n    ]", s_open)]
+        declared_strings = set(re.findall(r'"(notify_\w+)"\s*:', s_block))
+        assert declared_strings, (
+            "preferenceStringDefaults exists but declares no notify_* keys — regex drifted"
+        )
+
+    # `notify_timezone` has no static default by design: it is the device's own
+    # TimeZone.current.identifier, written on first sync, and the backend falls back to
+    # ET when it is absent. Exempt it explicitly rather than inventing a fake default.
+    _NO_STATIC_DEFAULT = {"notify_timezone"}
+
     # Every key the client SYNCS must have a declared default, or a hidden key silently
     # inherits the blanket True on the backend.
     sync = (Path(__file__).resolve().parents[2]
             / "frontend/ios/ios/Core/Services/SettingsSyncManager.swift")
     synced = set(re.findall(r'"(notify_\w+)"', sync.read_text()))
     assert synced, "SettingsSyncManager declares no notify_* keys — regex drifted"
-    assert synced <= set(declared), (
-        f"synced but undeclared: {sorted(synced - set(declared))} — add them to "
-        f"NotificationsSettingsView.preferenceDefaults"
+    undeclared = synced - set(declared) - declared_strings - _NO_STATIC_DEFAULT
+    assert not undeclared, (
+        f"synced but undeclared: {sorted(undeclared)} — add them to "
+        f"NotificationsSettingsView.preferenceDefaults (Bool) or "
+        f"preferenceStringDefaults (String)"
     )
 
     off_in_ios = {k for k, v in declared.items() if v == "false"}
@@ -175,33 +207,121 @@ def test_the_ios_defaults_this_map_mirrors_still_say_off():
     assert set(PushDispatchService._PREFERENCE_DEFAULTS) == off_in_ios
 
 
-def test_only_wired_preference_keys_have_visible_toggles():
-    """A visible toggle must do what it says. `notify_watchlist_changes` is the only key passed
-    as a `preference_key=` to a real dispatcher, so it is the only one that may be rendered.
+def _rendered_preference_keys() -> set:
+    """Every `notify_*` key the Notifications screen actually renders a control for.
 
-    This is the invariant `FeatureFlags.notificationPreferencesEnabled` was created to protect,
-    and it was violated in the other direction for a week: push shipped on 2026-08-01, the flag
-    stayed false, and users got alerts with no in-app way to opt out.
+    Read from `NotificationSettingsViewModel.groups`, the screen's DECLARATIVE row
+    manifest, rather than by parsing SwiftUI. The predecessor keyed off
+    `@AppStorage("notify_…") private var X` plus `isOn: $X`, which stopped existing the
+    moment the screen gained a ViewModel — and a source scan whose regex stops matching
+    does not fail, it passes VACUOUSLY on an empty set.
+
+    Brace-bounded to the manifest and comment-stripped: a key merely NAMED in a comment
+    is not a rendered control, and counting one would weaken every assertion below.
     """
     import re
     from pathlib import Path
 
-    repo = Path(__file__).resolve().parents[2]
-    backend = (repo / "backend/app/services").rglob("*.py")
-    wired = set()
-    for path in backend:
-        wired |= set(re.findall(r'preference_key\s*=\s*"(notify_\w+)"', path.read_text()))
-    assert wired, "no preference_key= call sites found — regex drifted"
+    vm = (Path(__file__).resolve().parents[2]
+          / "frontend/ios/ios/ViewModels/NotificationSettingsViewModel.swift")
+    assert vm.exists(), f"missing {vm}"
+    src = re.sub(r"//[^\n]*", "", vm.read_text())
 
-    view = (repo / "frontend/ios/ios/Views/Screens/NotificationsSettingsView.swift").read_text()
-    body = view[view.index("var body: some View"):]
-    rendered = set(re.findall(r'isOn:\s*\$(\w+)', body))
-    storage = dict(re.findall(r'@AppStorage\("(notify_\w+)"\)\s*private var (\w+)', view))
-    rendered_keys = {k for k, var in storage.items() if var in rendered}
-
-    assert rendered_keys, "no rendered toggles found — regex drifted"
-    assert rendered_keys <= wired, (
-        f"these toggles are visible but nothing sends them: {sorted(rendered_keys - wired)}. "
-        f"A control that stores a preference nothing reads tells the user something is "
-        f"happening when nothing is — wire a sender first, or hide the row."
+    start = src.find("static let groups")
+    assert start != -1, (
+        "NotificationSettingsViewModel.groups is gone — it is the declared manifest of "
+        "every rendered notification toggle, and this guard has nothing to read without it"
     )
+    # Slice from the literal's OPENING bracket, never the declaration: the type
+    # annotation `[NotificationGroupSpec]` contains a `]` that would truncate the block
+    # to nothing — the classic way this kind of guard goes silently vacuous.
+    open_at = src.index("= [", start)
+    block = src[open_at: src.index("\n    ]", open_at)]
+
+    keys = set(re.findall(r'key:\s*"(notify_\w+)"', block))
+    keys |= set(re.findall(r'masterKey:\s*"(notify_\w+)"', block))
+    return keys
+
+
+def test_only_wired_preference_keys_have_visible_toggles():
+    """A visible toggle must do what it says.
+
+    Every key rendered on the Notifications screen must be owned by a registered
+    `NotificationKind` (or be one of their group masters). A control that stores a
+    preference NOTHING reads tells the user something is happening when nothing is —
+    which is the state twelve of the original thirteen toggles were in, and the reason
+    their UI had to be hidden.
+    """
+    from app.services.notification_kinds import NOTIFICATION_KINDS
+
+    wired = set()
+    for kind in NOTIFICATION_KINDS.values():
+        wired.add(kind.preference_key)
+        if kind.master_preference_key:
+            wired.add(kind.master_preference_key)
+    assert wired, "the notification registry is empty — nothing can be wired"
+
+    rendered = _rendered_preference_keys()
+    assert rendered, "no rendered toggles found — the manifest scan drifted"
+    assert rendered <= wired, (
+        f"these toggles are visible but no NotificationKind claims them: "
+        f"{sorted(rendered - wired)}. Wire a sender first, or remove the row."
+    )
+
+
+def test_every_wired_preference_key_has_a_visible_toggle():
+    """The OTHER direction, and the one that actually shipped.
+
+    Push went live on 2026-08-01 while `FeatureFlags.notificationPreferencesEnabled` was
+    still false, so for a week users received alerts with NO in-app way to turn them off.
+    Their only recourse was iOS Settings, which kills every notification type at once —
+    and iOS never re-prompts once they do.
+
+    A registered kind with no row on this screen recreates exactly that.
+    """
+    from app.services.notification_kinds import NOTIFICATION_KINDS
+
+    wired = set()
+    for kind in NOTIFICATION_KINDS.values():
+        wired.add(kind.preference_key)
+        if kind.master_preference_key:
+            wired.add(kind.master_preference_key)
+
+    rendered = _rendered_preference_keys()
+    assert wired <= rendered, (
+        f"these kinds SEND but have no visible toggle: {sorted(wired - rendered)}. "
+        f"Users would get those alerts with no in-app way to opt out — add a row to "
+        f"NotificationSettingsViewModel.groups in the same change as the sender."
+    )
+
+
+def test_the_manifest_scan_is_not_vacuous():
+    """Mutation check on the parser, per `project_source_scan_guard_vacuity`.
+
+    A guard that has never been seen failing is a guard that passes vacuously. This
+    feeds the real parser doctored input and asserts it notices — proving the regex
+    reads the manifest rather than matching something incidental, and that comments are
+    genuinely stripped.
+    """
+    import re
+
+    sample = '''
+    static let groups: [NotificationGroupSpec] = [
+        NotificationGroupSpec(
+            id: "x", title: "X", subtitle: "", icon: "bell",
+            masterKey: "notify_master",
+            rows: [
+                // NotificationToggleSpec(key: "notify_ghost", ...)  <- a comment
+                NotificationToggleSpec(key: "notify_real", title: "R", subtitle: "s"),
+            ]
+        ),
+    ]
+    '''
+    stripped = re.sub(r"//[^\n]*", "", sample)
+    open_at = stripped.index("= [", stripped.find("static let groups"))
+    block = stripped[open_at: stripped.index("\n    ]", open_at)]
+
+    keys = set(re.findall(r'key:\s*"(notify_\w+)"', block))
+    keys |= set(re.findall(r'masterKey:\s*"(notify_\w+)"', block))
+    # The commented-out ghost must NOT appear; the real row and the master must.
+    assert keys == {"notify_real", "notify_master"}, keys

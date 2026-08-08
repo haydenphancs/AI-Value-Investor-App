@@ -17,8 +17,14 @@ struct ProfileView: View {
     @State private var showSignIn = false
     /// Working copy for the display-name editor, so cancelling leaves the profile alone.
     @State private var editedName = ""
-    /// Presents the upgrade / plan paywall (from the Upgrade card + Add Credits).
+    /// Presents the subscription paywall — the Upgrade card ONLY.
+    ///
+    /// Split from `showBuyCredits` deliberately: the two used to share one flag, so
+    /// repointing "Add Credits" at the credit packs would have taken the Upgrade card with
+    /// it and left Profile with no way to change plan at all.
     @State private var showPaywall = false
+    /// Presents the consumable credit packs — the "+ Add Credits" pill.
+    @State private var showBuyCredits = false
 
     var body: some View {
         NavigationStack {
@@ -91,6 +97,10 @@ struct ProfileView: View {
         }
         .sheet(isPresented: $showPaywall) {
             PaywallView()
+                .environment(\.appState, appState)
+        }
+        .sheet(isPresented: $showBuyCredits) {
+            BuyCreditsView()
                 .environment(\.appState, appState)
         }
         .onChange(of: appState.auth.status) { _, newStatus in
@@ -233,7 +243,7 @@ struct ProfileView: View {
                         Spacer()
 
                         Button(action: {
-                            showPaywall = true
+                            showBuyCredits = true
                         }) {
                             HStack(spacing: AppSpacing.xs) {
                                 Image(systemName: "plus")
@@ -343,9 +353,24 @@ struct ProfileView: View {
                     settingsRowDivider
                 }
 
-                // Notifications — hidden until a delivery pipeline exists. Every toggle
-                // in there currently writes a preference that nothing reads
-                // (`push_service.send_to_user` has zero callers). See FeatureFlags.
+                // Notification history. A push that arrives while the phone is face-down
+                // is otherwise gone: before this the app kept no record of what fired.
+                NavigationLink {
+                    NotificationInboxView()
+                } label: {
+                    ProfileSettingsRowContent(
+                        icon: "tray.full.fill",
+                        iconColor: AppColors.textSecondary,
+                        title: "Notification History"
+                    )
+                }
+
+                settingsRowDivider
+
+                // Notification PREFERENCES. The flag used to gate this because every
+                // toggle wrote a preference nothing read; each one now has a real sender
+                // behind it, and both directions of that invariant are pinned by
+                // `test_push_preference_typing.py`.
                 if FeatureFlags.notificationPreferencesEnabled {
                     NavigationLink {
                         NotificationsSettingsView()

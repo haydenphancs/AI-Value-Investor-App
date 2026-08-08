@@ -9,6 +9,11 @@
 import SwiftUI
 
 struct ETFDetailView: View {
+    /// The bell in `TickerDetailHeader` renders ONLY when `onNotificationTapped`
+    /// is non-nil. Every detail screen passed `nil`, so it had never rendered —
+    /// this is what it was waiting for.
+    @State private var showPriceAlerts = false
+
     @StateObject private var viewModel: ETFDetailViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var showSearch = false
@@ -60,7 +65,7 @@ struct ETFDetailView: View {
                     onSearchTapped: handleSearchTapped,
                     // nil until price alerts ship — hides the bell rather than
                     // showing a control whose handler was a print().
-                    onNotificationTapped: nil,
+                    onNotificationTapped: { showPriceAlerts = true },
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
@@ -164,6 +169,9 @@ struct ETFDetailView: View {
             // The price+chart area shows a shimmer skeleton until data loads.
         }
         .navigationBarHidden(true)
+        .sheet(isPresented: $showPriceAlerts) {
+            PriceAlertsSheet(ticker: etfSymbol, assetType: "etf")
+        }
         // Audio collapses to the top status island while this asset screen is open, keeping the
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)

@@ -46,11 +46,24 @@ final class StoreKitService: ObservableObject {
     enum ProductID {
         static let proMonthly = "com.phan.caydex.pro.monthly"
         static let maxMonthly = "com.phan.caydex.max.monthly"
-        static let all: [String] = [proMonthly, maxMonthly]
+
+        /// CONSUMABLE credit packs. The prefix matters: the backend routes a verified
+        /// transaction to the credit path by product-id prefix (`IAP_CREDIT_PACK_PREFIX`),
+        /// so a pack whose id does not start with `com.phan.caydex.credits.` is diagnosed as
+        /// an unmapped SUBSCRIPTION and refused.
+        static let creditsStarter = "com.phan.caydex.credits.starter"
+        static let creditsPlus = "com.phan.caydex.credits.plus"
+        static let creditsPower = "com.phan.caydex.credits.power"
+        static let creditsMega = "com.phan.caydex.credits.mega"
+
+        static let subscriptions: [String] = [proMonthly, maxMonthly]
+        static let creditPacks: [String] = [creditsStarter, creditsPlus, creditsPower, creditsMega]
+        /// One `Product.products(for:)` round-trip loads both families.
+        static let all: [String] = subscriptions + creditPacks
     }
 
     enum PurchaseOutcome: Sendable, Equatable {
-        case success(tier: String)
+        case success(PurchaseApplied)
         /// The user dismissed the sheet. Not an error; never surfaced as one.
         case cancelled
         /// Ask to Buy / Screen Time — Apple will deliver later via `Transaction.updates`.
@@ -121,10 +134,10 @@ final class StoreKitService: ObservableObject {
             if products.isEmpty {
                 // Distinguish "Apple returned nothing" from "we haven't asked yet". Usually
                 // means the products aren't configured, or no StoreKit config in DEBUG.
-                productLoadError = "No subscription options are available right now."
+                productLoadError = "No purchase options are available right now."
             }
         } catch {
-            productLoadError = "Couldn't load subscription options. Please try again."
+            productLoadError = "Couldn't load purchase options. Please try again."
             #if DEBUG
             print("🔴 [StoreKit] product load failed: \(error)")
             #endif
@@ -150,18 +163,43 @@ final class StoreKitService: ObservableObject {
         return products.first { $0.id == id }
     }
 
+    /// The loaded consumable products, keyed by id, for the Buy Credits screen.
+    ///
+    /// A filtered view rather than a second `@Published` array: one source of truth for what
+    /// Apple returned means the two screens cannot disagree about which products exist.
+    func creditPackProduct(id: String) -> Product? {
+        products.first { $0.id == id }
+    }
+
     // MARK: - Purchase
 
     /// Run the purchase sheet and, on success, hand the signed transaction to the backend.
     ///
     /// Throws only for genuine failures. Cancellation returns `.cancelled` because a user
     /// tapping "Cancel" is not an error and must not raise an alert.
-    func purchase(_ product: Product) async throws -> PurchaseOutcome {
+    ///
+    /// `accountID` is the signed-in user's id, stamped onto the purchase as StoreKit's
+    /// `appAccountToken` and returned by Apple INSIDE the signed payload. It is the only thing
+    /// that can catch a first delivery landing in the wrong session: user A buys, the verify
+    /// call fails so the transaction stays unfinished, A signs out, B signs in on the same
+    /// device, and `Transaction.updates` redelivers into B's session. There is no prior
+    /// purchase row for the server's dedup check to catch that, so without the token B is
+    /// credited for what A paid. The caller supplies it because this service deliberately
+    /// holds no `AppState` reference.
+    func purchase(_ product: Product, accountID: String? = nil) async throws -> PurchaseOutcome {
         isPurchasing = true
         purchasingProductID = product.id
         defer {
             isPurchasing = false
             purchasingProductID = nil
+        }
+
+        var options: Set<Product.PurchaseOption> = []
+        // A non-UUID id (or none) simply omits the option — Apple requires a UUID here, and a
+        // purchase that cannot carry the token must still be allowed to complete. The server
+        // treats an absent token as "unproven but permitted" and logs it.
+        if let accountID, let token = UUID(uuidString: accountID) {
+            options.insert(.appAccountToken(token))
         }
 
         // `product.purchase()` presents Apple's payment sheet, and a failure to PRESENT it
@@ -174,7 +212,7 @@ final class StoreKitService: ObservableObject {
         // rendered `errorMessage` while the catalog was absent, showed the user nothing at all.
         let result: Product.PurchaseResult
         do {
-            result = try await product.purchase()
+            result = try await product.purchase(options: options)
         } catch {
             #if DEBUG
             let ns = error as NSError
@@ -187,11 +225,11 @@ final class StoreKitService: ObservableObject {
 
         switch result {
         case .success(let verification):
-            let tier = try await handle(verificationResult: verification, origin: "purchase")
-            // A nil tier here means the backend accepted it but reported nothing usable;
+            let applied = try await handle(verificationResult: verification, origin: "purchase")
+            // A nil result here means the backend accepted it but reported nothing usable;
             // treat as pending rather than claiming success we can't substantiate.
-            guard let tier else { return .pending }
-            return .success(tier: tier)
+            guard let applied else { return .pending }
+            return .success(applied)
 
         case .userCancelled:
             return .cancelled
@@ -231,12 +269,18 @@ final class StoreKitService: ObservableObject {
 
     /// Send a signed transaction to the backend and finish it only once recorded.
     ///
-    /// Returns the tier the backend applied, or nil when the transaction was unverified or
-    /// not something we act on.
+    /// Returns what the backend applied, or nil when the transaction was unverified or not
+    /// something we act on.
+    ///
+    /// Handles BOTH product families. That is the point: subscriptions and consumable credit
+    /// packs differ only in what the server does with them, while the parts that are easy to
+    /// get wrong — never finishing an unverified transaction, finishing only AFTER the server
+    /// has recorded it, finishing a terminal 409 so Apple stops redelivering, and announcing
+    /// the change — are identical and must not be duplicated into a second code path.
     @discardableResult
     private func handle(
         verificationResult: VerificationResult<Transaction>, origin: String
-    ) async throws -> String? {
+    ) async throws -> PurchaseApplied? {
         switch verificationResult {
         case .unverified(_, let error):
             // Apple itself could not verify this. Do NOT forward it and do NOT finish it —
@@ -251,9 +295,9 @@ final class StoreKitService: ObservableObject {
             // verifies — deliberately not the decoded fields, which the client could edit.
             let signed = String(decoding: transaction.jsonRepresentation, as: UTF8.self)
 
-            let tier: String
+            let applied: PurchaseApplied
             do {
-                tier = try await AccountRepository.shared
+                applied = try await AccountRepository.shared
                     .verifyPurchase(signedTransaction: signed)
             } catch {
                 // TERMINAL failures must be FINISHED, not retried.
@@ -308,7 +352,35 @@ final class StoreKitService: ObservableObject {
             // injecting one would mean changing `configure(...)` in iosApp.swift. `AppState`
             // subscribes to this in its own initialiser.
             NotificationCenter.default.post(name: .caydexEntitlementChanged, object: nil)
-            return tier
+            return applied
         }
+    }
+
+    // MARK: - Unfinished-transaction recovery
+
+    /// Re-submit every transaction Apple still considers unfinished.
+    ///
+    /// This is the restore mechanism for CONSUMABLES. `restorePurchases()` above cannot do it:
+    /// `Transaction.currentEntitlements` excludes consumables by design, so a credit pack that
+    /// was paid for but never recorded — the app was killed mid-purchase, the network dropped,
+    /// or `verifyPurchase` was refused because the user was signed out — is invisible to it.
+    /// `Transaction.unfinished` is where those live.
+    ///
+    /// Safe to call repeatedly: the server's grant is idempotent per transaction id, so a
+    /// re-submission of something already recorded returns "replay" and grants nothing.
+    ///
+    /// Returns how many were successfully applied.
+    @discardableResult
+    func drainUnfinishedTransactions() async -> Int {
+        // One at a time rather than a task group: this runs at sign-in and on every Buy
+        // Credits load, and a user with several stranded transactions would otherwise fire
+        // that many concurrent `POST /billing/verify` calls at once.
+        var applied = 0
+        for await unfinished in Transaction.unfinished {
+            if (try? await handle(verificationResult: unfinished, origin: "unfinished")) != nil {
+                applied += 1
+            }
+        }
+        return applied
     }
 }

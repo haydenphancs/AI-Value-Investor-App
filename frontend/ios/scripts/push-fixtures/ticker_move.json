@@ -1,0 +1,18 @@
+{
+  "aps": {
+    "alert": {
+      "title": "NVDA",
+      "body": "Down 9.2% \u2014 far more than NVDA usually moves."
+    },
+    "sound": "default",
+    "thread-id": "watchlist",
+    "interruption-level": "active",
+    "category": "watchlist",
+    "badge": 1
+  },
+  "kind": "ticker_move",
+  "route": "ticker",
+  "ticker": "NVDA",
+  "asset_type": "stock",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

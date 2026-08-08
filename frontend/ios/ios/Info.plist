@@ -34,6 +34,10 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<!-- Lets the app be woken to keep the badge in step with the server's unread
+		     count. Without it iOS still delivers alert pushes, but the app can never
+		     reconcile a badge for a notification the user never opened. -->
+		<string>remote-notification</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict>

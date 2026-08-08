@@ -373,6 +373,14 @@ class ResearchService:
                 f"(persona={persona_key}, ticker={ticker})"
             )
 
+            await self._notify_report_ready(
+                report_id=report_id,
+                user_id=user_id,
+                ticker=ticker,
+                persona=persona,
+                persona_key=persona_key,
+            )
+
         except Exception as e:
             logger.error(f"Report generation failed: {e}", exc_info=True)
             self._update_status(
@@ -380,6 +388,81 @@ class ResearchService:
                 error_message=f"Research failed: {str(e)[:400]}"
             )
             raise
+
+    # ── Report-ready push ─────────────────────────────────────────────────
+
+    async def _notify_report_ready(
+        self,
+        *,
+        report_id: str,
+        user_id: str,
+        ticker: str,
+        persona: Any,
+        persona_key: str,
+    ) -> None:
+        """Tell the user their report is done.
+
+        A deep report takes minutes. The client polls `/research/reports/{id}/status`
+        every 3s for at most 3 minutes and then gives up — so a user who backgrounds the
+        app mid-run has no way to learn it finished except by opening the app and
+        looking. This is the notification with the clearest justification in the whole
+        system: they pressed a button, paid 20 credits, and asked to be told.
+
+        PLACEMENT IS THE CORRECTNESS ARGUMENT, and it is why this is not a scheduled job:
+
+          * AFTER the conditional completion write. If the reconciliation sweep already
+            claimed and refunded this report, that write is a no-op and the function has
+            already returned — so a refunded report can never notify.
+          * AFTER the `DegradedReportError` raise. A degraded report is refunded, not
+            delivered, and never reaches here.
+
+        Do NOT move this earlier "to notify sooner". Earlier means notifying about
+        reports that are about to be refunded.
+
+        Never raises: a push failure must not turn a delivered report into a failed one.
+        The `except` in `generate_report` stamps status='failed' and re-raises, which
+        triggers the refund — so an escaping push error would refund a report the user
+        actually received.
+        """
+        try:
+            from app.services.notification_kinds import KIND_RESEARCH_COMPLETE
+            from app.services.push_dispatch_service import get_push_dispatch_service
+
+            symbol = (ticker or "").upper()
+            # `display_name` is the LENS label ("The Quality Compounder"), not a person's
+            # name — "Your The Quality Compounder report" does not parse, so it is used
+            # as a standalone prefix rather than inlined into a possessive.
+            lens = (getattr(persona, "display_name", "") or "").strip()
+            await get_push_dispatch_service().notify_users(
+                [user_id],
+                kind=KIND_RESEARCH_COMPLETE,
+                title=f"{symbol} analysis is ready",
+                # Informational, never directive. This copy is a surface a regulator
+                # reads (FINRA/SEC name push notifications explicitly as a digital-
+                # engagement practice), so it states what happened and says nothing
+                # about what to do with it — no "consider", no "act now", no verdict.
+                body=(
+                    f"{lens} — tap to read the full report."
+                    if lens else "Tap to read your full report."
+                ),
+                # The report id is unique, so this is once-EVER with no date component —
+                # unlike the market-event keys, a regenerated report is a different row
+                # and legitimately notifies again.
+                dedup_key=f"report:{report_id}",
+                route={
+                    # FLAT SCALARS ONLY — iOS AnyCodable yields "" for anything nested.
+                    "route": "report",
+                    "report_id": str(report_id),
+                    "ticker": symbol,
+                    "asset_type": "stock",
+                },
+            )
+        except Exception as e:
+            logger.warning(
+                "Report-ready push failed for report=%s user=%s ticker=%s (%s: %s) — "
+                "the report itself was delivered normally",
+                report_id, user_id, ticker, type(e).__name__, e,
+            )
 
     # ── Status Helper ─────────────────────────────────────────────────────
 

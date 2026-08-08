@@ -461,3 +461,175 @@ async def refresh_industry_overrides(
     except Exception as e:
         logger.error(f"Manual industry override refresh failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to refresh industry overrides: {e}")
+
+
+# ── Notification verification ────────────────────────────────────────────────
+#
+# The hard question about a notification system is not "does APNs work" — it is
+# "would THIS sender pick the right people, and if it skipped someone, why?".
+# That decision is where the bugs live, and until now it was unobservable: the
+# Simulator cannot receive remote push, `main.py` skips every background job in
+# local dev, and the old `push_send_log` recorded only (user, key, timestamp).
+#
+# These two endpoints close that gap, cheapest first:
+#   * /preview — runs the audience selector and the full decision ladder
+#     (child preference AND group master → per-category cap → quiet hours) and
+#     returns the per-user verdict WITHOUT claiming or sending anything. Safe to
+#     run against production repeatedly; it writes nothing.
+#   * /test — the real path to the CALLING ADMIN's own devices only. The only
+#     thing that proves the APNs leg, the entitlement, and the tap route on a
+#     physical phone.
+
+
+@router.post("/notifications/preview")
+async def preview_notification(
+    kind: str,
+    ticker: Optional[str] = None,
+    limit: int = 25,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    user: dict = Depends(get_current_user_or_guest),
+):
+    """Dry-run a notification's AUDIENCE and DECISIONS. Writes nothing, sends nothing.
+
+    Args:
+        kind: a `NotificationKind` key, e.g. `ticker_move`, `earnings_upcoming`.
+        ticker: required for the ticker-fan-out kinds; selects the watchers.
+        limit: cap on the number of per-user verdicts returned.
+
+    Returns the resolved audience size plus a per-user `{send, reason}`, where
+    `reason` is one of `ok`, `preference_off:<key>`, `cap_reached:<category>:<n>`,
+    or `quiet_hours` (with the wake time). That vocabulary is what makes "I didn't
+    get my alert" answerable.
+    """
+    _authorize_admin(user, x_admin_token)
+
+    from datetime import datetime, timezone
+
+    from app.services.notification_kinds import NOTIFICATION_KINDS, get_kind
+    from app.services.push_dispatch_service import get_push_dispatch_service
+
+    try:
+        nkind = get_kind(kind)
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown kind {kind!r}; registered: {sorted(NOTIFICATION_KINDS)}",
+        )
+
+    service = get_push_dispatch_service()
+    now = datetime.now(timezone.utc)
+
+    if ticker:
+        audience = await asyncio.to_thread(service.watchers_of, ticker)
+    else:
+        # No ticker: preview against the caller alone. Enumerating every user would be
+        # both slow and pointless — the interesting question for a non-fan-out kind is
+        # "what would I get?".
+        audience = [user["id"]] if user and user.get("id") else []
+
+    if not audience:
+        return {
+            "kind": kind, "ticker": ticker, "audience": 0,
+            "note": "no recipients — for a ticker kind this means nobody watches it",
+            "decisions": [],
+        }
+
+    recipients = await asyncio.to_thread(service.resolve_recipients, audience, nkind, now)
+
+    decisions = []
+    would_send = 0
+    for uid in audience[:max(limit, 0)]:
+        recipient = recipients.get(uid)
+        if recipient is None:
+            continue
+        d = service.decide(recipient, nkind, now)
+        would_send += 1 if d.send else 0
+        decisions.append({
+            "user_id": uid,
+            "send": d.send,
+            "reason": d.reason,
+            "deliver_after": d.deliver_after.isoformat() if d.deliver_after else None,
+            "devices": len(recipient.devices),
+            "category_sent_today": recipient.category_sent_today,
+        })
+
+    return {
+        "kind": kind,
+        "ticker": ticker,
+        "category": nkind.category,
+        "preference_key": nkind.preference_key,
+        "master_preference_key": nkind.master_preference_key,
+        "interruption_level": nkind.interruption_level,
+        "audience": len(audience),
+        "would_send_in_sample": would_send,
+        "sampled": len(decisions),
+        "decisions": decisions,
+    }
+
+
+@router.post("/notifications/test")
+async def test_notification(
+    kind: str,
+    title: str = "Caydex test",
+    body: str = "If you can read this, push is working end to end.",
+    ticker: Optional[str] = None,
+    dedup_suffix: str = "manual",
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    user: dict = Depends(get_current_user_or_guest),
+):
+    """Send a REAL notification through the full pipeline, to the calling admin only.
+
+    Deliberately restricted to `user["id"]`: a test-send endpoint that accepts an
+    arbitrary recipient is a spam primitive behind one credential. Verifying someone
+    else's device means signing in as them.
+
+    `dedup_suffix` makes the key unique per invocation — without it the second call
+    conflicts on the claim and silently does nothing, which reads exactly like a
+    broken APNs configuration.
+
+    Honours `PUSH_DRY_RUN`: with it on, the ledger row is written and no APNs POST is
+    made, so this is safe to call before Apple is configured.
+    """
+    _authorize_admin(user, x_admin_token)
+
+    if not user or not user.get("id") or user.get("is_guest"):
+        # The X-Admin-Token path authorizes without identifying anyone, so there is no
+        # device to send to. Say so plainly rather than returning a confusing sent=0.
+        raise HTTPException(
+            status_code=400,
+            detail="test-send requires a signed-in admin (the X-Admin-Token path has "
+                   "no associated device); sign in and retry",
+        )
+
+    from app.services.notification_kinds import NOTIFICATION_KINDS, get_kind
+    from app.services.push_dispatch_service import get_push_dispatch_service
+
+    try:
+        get_kind(kind)
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown kind {kind!r}; registered: {sorted(NOTIFICATION_KINDS)}",
+        )
+
+    route = {"ticker": (ticker or "AAPL").upper()}
+    sent = await get_push_dispatch_service().notify_users(
+        [user["id"]],
+        kind=kind,
+        title=title,
+        body=body,
+        dedup_key=f"admintest:{kind}:{dedup_suffix}",
+        route=route,
+    )
+    return {
+        "kind": kind,
+        "user_id": user["id"],
+        "sent": sent,
+        "dry_run": settings.PUSH_DRY_RUN,
+        "note": (
+            "sent=0 with dry_run=false usually means: no registered device, the "
+            "preference is off, the category cap is reached, quiet hours deferred it, "
+            "or this dedup_suffix was already used. Call /notifications/preview for "
+            "the exact reason."
+        ),
+    }

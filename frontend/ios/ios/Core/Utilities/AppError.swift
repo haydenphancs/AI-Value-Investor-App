@@ -423,6 +423,25 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "WATCHLIST_UNAVAILABLE" {
                 return .apiError(code: code, message: message)
             }
+            // 503 NOTIFICATIONS_UNAVAILABLE: the inbox (or the price-alert list) could not
+            // be READ. Same hazard as WATCHLIST_UNAVAILABLE and for the same reason it is
+            // not an empty 200 — "you have no notifications" and "we couldn't reach them"
+            // are indistinguishable in the UI, and rendering the second as the first is a
+            // failure nobody reports. Surface the backend's retry copy verbatim.
+            if code == "NOTIFICATIONS_UNAVAILABLE" {
+                return .apiError(code: code, message: message)
+            }
+            // 409 PRICE_ALERT_LIMIT_REACHED: the request was well-formed and the ACCOUNT is
+            // the conflict. `.validationFailed` gets `.fixInput`, which is right — the user
+            // must delete an alert — where a retry button could never succeed.
+            if code == "PRICE_ALERT_LIMIT_REACHED" {
+                return .validationFailed(message: message)
+            }
+            // 404 PRICE_ALERT_NOT_FOUND: deleted on another device, or never theirs.
+            // `.notFound` renders "goBack" rather than a retry that cannot help.
+            if code == "PRICE_ALERT_NOT_FOUND" {
+                return .notFound(resource: "price alert")
+            }
             // 403 AUTH_FORBIDDEN: authenticated, just not permitted. A typed `.forbidden` rather
             // than a generic `.apiError` so it gets "Access Denied" + `.goBack` instead of a
             // retry button that can never succeed — and, critically, so it is NOT an auth error

@@ -11,12 +11,21 @@ so all mutations target `used` and read `remaining` afterward.
 """
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from app.config import settings
 from app.database import get_supabase
 
 logger = logging.getLogger(__name__)
+
+
+class PackGrantConflict(Exception):
+    """The submitted consumable transaction is already recorded against a DIFFERENT
+    account. Terminal — ownership of an Apple transaction never moves — so the caller
+    must answer 409 PURCHASE_ALREADY_LINKED rather than a retryable status. A 503 here
+    tells StoreKit to keep the transaction unfinished and redeliver it on every launch,
+    forever, for something that can never succeed.
+    """
 
 
 class CreditServiceUnavailable(Exception):
@@ -245,6 +254,155 @@ class CreditService:
             f"remaining={remaining}"
         )
         return int(remaining)
+
+    # ── Purchased pool (consumable credit packs) ───────────────────────────
+    # A SECOND, never-expiring balance. App Store Guideline 3.1.1 forbids purchased
+    # credits expiring, so these never touch `total`/`used` — the three tier RPCs
+    # (ensure_credit_period / grant_tier_upgrade / revoke_tier_credits) would each
+    # destroy or mishandle them. See migration 117.
+
+    def grant_purchased(
+        self,
+        *,
+        user_id: str,
+        transaction_id: str,
+        product_id: str,
+        credits: int,
+        environment: str = "Production",
+        original_transaction_id: Optional[str] = None,
+        price_cents: Optional[int] = None,
+        app_account_token: Optional[str] = None,
+        purchased_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Grant a verified consumable purchase, exactly once.
+
+        Wraps the `add_purchased_credits` RPC (migration 117), whose idempotency is an
+        `INSERT ... ON CONFLICT DO NOTHING` on `credit_purchases (environment,
+        transaction_id)` in the SAME transaction as the balance update. Safe to call as
+        often as StoreKit redelivers, which is every app launch until the client calls
+        `Transaction.finish()`.
+
+        Returns the RPC's outcome dict: `{"outcome": "granted"|"replay", "credits": N,
+        "spendable": N}`. Both are SUCCESS — `replay` is the common case and is what tells
+        the client it may finish the transaction.
+
+        Raises:
+          * `PackGrantConflict` — the transaction belongs to another account (→ 409).
+          * `CreditServiceUnavailable` — transient RPC failure, OR an `invalid` outcome.
+            Both must surface as retryable: the user has ALREADY BEEN CHARGED by Apple, so
+            the client must leave the transaction unfinished and let it redeliver. Never
+            convert either into a success.
+        """
+        try:
+            result = self.supabase.rpc(
+                "add_purchased_credits",
+                {
+                    "p_transaction_id": transaction_id,
+                    "p_user_id": user_id,
+                    "p_product_id": product_id,
+                    "p_credits": credits,
+                    "p_environment": environment,
+                    "p_original_transaction_id": original_transaction_id,
+                    "p_price_cents": price_cents,
+                    "p_app_account_token": app_account_token,
+                    "p_purchased_at": purchased_at,
+                },
+            ).execute()
+        except Exception as e:
+            # UNLIKE precharge, this is safe to retry blindly: the RPC is idempotent by
+            # transaction id, so a committed-but-lost response is repaired by the next
+            # delivery rather than double-granting.
+            logger.error(
+                "add_purchased_credits RPC failed for user=%s txn=%s product=%s "
+                "credits=%s (%s: %s) — user WAS charged by Apple; client must leave the "
+                "transaction unfinished so StoreKit redelivers. If this is "
+                "PGRST202/undefined function, migration 117 has not been applied.",
+                user_id, transaction_id, product_id, credits, type(e).__name__, e,
+            )
+            raise CreditServiceUnavailable(
+                f"add_purchased_credits RPC failed for user={user_id}"
+            ) from e
+
+        payload = result.data if isinstance(result.data, dict) else {}
+        outcome = payload.get("outcome")
+
+        if outcome == "conflict":
+            logger.warning(
+                "Credit pack txn=%s submitted by user=%s but owned by user=%s — refusing",
+                transaction_id, user_id, payload.get("owner_user_id"),
+            )
+            raise PackGrantConflict(
+                f"transaction {transaction_id} is bound to another account"
+            )
+
+        if outcome not in ("granted", "replay"):
+            # `invalid` (guest sentinel, missing id, non-positive credits) or an
+            # unrecognised shape. The user paid, so this must NOT read as success.
+            logger.error(
+                "add_purchased_credits returned %r for user=%s txn=%s product=%s "
+                "credits=%s — purchase NOT applied",
+                payload or result.data, user_id, transaction_id, product_id, credits,
+            )
+            raise CreditServiceUnavailable(
+                f"add_purchased_credits rejected txn={transaction_id}: {outcome!r}"
+            )
+
+        logger.info(
+            "Credit pack %s for user=%s txn=%s product=%s (+%s credits, spendable=%s)",
+            outcome, user_id, transaction_id, product_id,
+            payload.get("credits"), payload.get("spendable"),
+        )
+        return payload
+
+    def revoke_purchased(
+        self, *, transaction_id: str, environment: str = "Production"
+    ) -> Optional[Dict[str, Any]]:
+        """Claw back a REFUNDED credit pack. Best-effort; never raises.
+
+        Wraps `revoke_purchased_credits` (migration 117). Idempotent, so Apple's up-to-5
+        REFUND redeliveries are free. Floors at `purchased_used`: credits already spent are
+        a business loss, not something to model as a negative balance.
+
+        Never raises because the caller is the App Store webhook — raising there returns a
+        non-2xx, which makes Apple redeliver a notification we may already have applied.
+        """
+        try:
+            result = self.supabase.rpc(
+                "revoke_purchased_credits",
+                {
+                    "p_transaction_id": transaction_id,
+                    "p_environment": environment,
+                },
+            ).execute()
+        except Exception as e:
+            logger.error(
+                "REVOKE LEAK: revoke_purchased_credits RPC failed for txn=%s (%s: %s) — "
+                "the refunded user keeps their unspent purchased credits; manual "
+                "correction may be needed. If PGRST202, migration 117 is not applied.",
+                transaction_id, type(e).__name__, e,
+            )
+            return None
+
+        payload = result.data if isinstance(result.data, dict) else {}
+        reclaimed = payload.get("reclaimed")
+        if payload.get("outcome") == "revoked" and reclaimed == 0:
+            # Bought, spent in full, then refunded: arithmetically correct (we floor at
+            # `purchased_used`) but a real, unpriced business exposure. Apple's mechanism
+            # for contesting this is CONSUMPTION_REQUEST, which needs an App Store Server
+            # API client this repo does not have. Logged distinctly so the exposure is
+            # measurable before deciding to build one.
+            logger.warning(
+                "PACK REFUNDED AFTER FULL CONSUMPTION: txn=%s reclaimed 0 credits — "
+                "the pack was entirely spent before the refund landed",
+                transaction_id,
+            )
+        else:
+            logger.info(
+                "Credit pack revoke txn=%s outcome=%s reclaimed=%s spendable=%s",
+                transaction_id, payload.get("outcome"), reclaimed,
+                payload.get("spendable"),
+            )
+        return payload
 
     def refund_ledgered(
         self,

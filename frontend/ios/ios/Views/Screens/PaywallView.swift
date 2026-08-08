@@ -123,6 +123,10 @@ struct PaywallView: View {
         }
         .task {
             Analytics.shared.track(.paywallShown)
+            // Stamped onto the purchase as StoreKit's `appAccountToken`, so a transaction
+            // redelivered into a different signed-in session can be refused server-side
+            // rather than crediting whoever happens to be signed in when Apple retries.
+            viewModel.accountID = appState.user.profile?.id
             await viewModel.load()
         }
     }

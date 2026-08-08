@@ -181,6 +181,18 @@ struct iosApp: App {
                         authService: authService
                     )
                 }
+                // Authoritative unread count, broadcast from wherever it was last
+                // observed: an inbox load, a mark-read, or a badge arriving on a push.
+                // Routed through NotificationCenter rather than written directly because
+                // the inbox ViewModel is an ObservableObject with no AppState reference,
+                // and reaching for a global inside it would break the "dependencies
+                // arrive via init" rule.
+                .onReceive(NotificationCenter.default.publisher(
+                    for: .caydexNotificationUnreadChanged
+                )) { note in
+                    guard let count = note.userInfo?["count"] as? Int, count >= 0 else { return }
+                    appState.unreadNotificationCount = count
+                }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                     #if DEBUG
                     AppearanceProbe.dump("foreground")
@@ -379,8 +391,13 @@ struct RootView: View {
         // "Upgrade" button on an INSUFFICIENT_CREDITS error (402, action: "upgrade")
         // just closed the toast — the one moment a user is most ready to pay. Same for
         // "Sign In" on a 401. Both now actually go somewhere.
+        // A 402 INSUFFICIENT_CREDITS lands here. It goes to Buy Credits rather than the
+        // subscription paywall: the user was mid-action and wants to finish it, and a one-tap
+        // top-up unblocks them in seconds where a $14.99/mo commitment is where they bounce.
+        // BuyCreditsView carries a "See plans" button, so the subscription stays discoverable
+        // without being forced.
         .sheet(isPresented: $showPaywallFromError) {
-            PaywallView()
+            BuyCreditsView()
                 .environment(\.appState, appState)
         }
         .sheet(isPresented: $showSignInFromError) {

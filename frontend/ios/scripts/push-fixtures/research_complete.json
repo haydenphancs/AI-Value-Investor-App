@@ -1,0 +1,19 @@
+{
+  "aps": {
+    "alert": {
+      "title": "AAPL analysis is ready",
+      "body": "The Quality Compounder \u2014 tap to read the full report."
+    },
+    "sound": "default",
+    "thread-id": "app",
+    "interruption-level": "active",
+    "category": "app",
+    "badge": 2
+  },
+  "kind": "research_complete",
+  "route": "report",
+  "report_id": "11111111-1111-1111-1111-111111111111",
+  "ticker": "AAPL",
+  "asset_type": "stock",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

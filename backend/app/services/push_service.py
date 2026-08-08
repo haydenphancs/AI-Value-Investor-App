@@ -136,23 +136,49 @@ class PushService:
         title: str,
         body: str,
         data: Optional[Dict[str, Any]] = None,
+        devices: Optional[List[dict]] = None,
+        interruption_level: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        collapse_id: Optional[str] = None,
+        category: Optional[str] = None,
+        badge: Optional[int] = None,
     ) -> int:
         """Send an alert push to every device the user has registered.
 
         Returns the number of pushes accepted by APNs. No-op (returns 0) when push
         is disabled or the user has no tokens. Never raises — a push failure must
         not break whatever action triggered it.
+
+        `devices` lets a caller that has ALREADY batched the token lookup pass it in
+        (`PushDispatchService` reads every recipient's tokens in one `.in_()` query).
+        Omitted, the per-user read below still runs, so the single-recipient path and
+        the existing tests are unchanged.
+
+        The APNs-shaping arguments all come from the `NotificationKind` registry and are
+        optional so a caller that supplies none gets byte-identical behaviour to before:
+          * `interruption_level` — `passive` lets iOS batch for battery (right for a
+            Form 4); `time-sensitive` pierces Focus (right for a threshold the user
+            typed in themselves) but is SILENTLY DOWNGRADED without the
+            com.apple.developer.usernotifications.time-sensitive entitlement.
+          * `thread_id` — iOS groups the notification stack by this, so a busy day is
+            one collapsible stack per topic instead of N stacks of one.
+          * `collapse_id` — APNs REPLACES an undelivered notification with the same id
+            rather than queueing both. Hard-truncated to 64 bytes below: APNs rejects a
+            longer one with a 400, which would drop the whole send.
+          * `badge` — server-computed unread count. Never incremented client-side, or it
+            drifts the moment a notification is delivered and never opened.
         """
         if not self.enabled:
             logger.info("Push disabled (APNs not configured) — skipping send to %s", user_id)
             return 0
 
-        # OFF-THREAD. The Supabase SDK is synchronous, and this runs inside the Updates
-        # sweeper's async loop — a blocking DB round-trip here stalls the ENTIRE event loop,
-        # i.e. every in-flight request in the process, once per recipient of every alert.
-        # `push_dispatch_service.py` already wraps all four of its Supabase calls this way;
-        # this module was the one that did not. CLAUDE.md invariant #6.
-        devices = await asyncio.to_thread(self._device_tokens_for, user_id)
+        if devices is None:
+            # OFF-THREAD. The Supabase SDK is synchronous, and this runs inside the Updates
+            # sweeper's async loop — a blocking DB round-trip here stalls the ENTIRE event loop,
+            # i.e. every in-flight request in the process, once per recipient of every alert.
+            # `push_dispatch_service.py` already wraps all four of its Supabase calls this way;
+            # this module was the one that did not. CLAUDE.md invariant #6.
+            devices = await asyncio.to_thread(self._device_tokens_for, user_id)
         if not devices:
             return 0
 
@@ -160,9 +186,21 @@ class PushService:
         if not jwt_token:
             return 0
 
-        payload: Dict[str, Any] = {
-            "aps": {"alert": {"title": title, "body": body}, "sound": "default"}
+        aps: Dict[str, Any] = {
+            "alert": {"title": title, "body": body},
+            "sound": "default",
         }
+        if interruption_level:
+            aps["interruption-level"] = interruption_level
+        if thread_id:
+            aps["thread-id"] = thread_id
+        if category:
+            aps["category"] = category
+        # `badge: 0` is meaningful (it CLEARS the badge), so test for None, not falsiness.
+        if badge is not None and badge >= 0:
+            aps["badge"] = badge
+
+        payload: Dict[str, Any] = {"aps": aps}
         if data:
             payload.update(data)
 
@@ -171,6 +209,17 @@ class PushService:
             "apns-topic": settings.APNS_BUNDLE_ID,
             "apns-push-type": "alert",
         }
+        if collapse_id:
+            # 64 BYTES, not 64 characters — a multi-byte ticker or company name would
+            # otherwise slip past a len() check and 400 the entire send. Truncate on the
+            # encoded form and decode back, dropping any partial trailing sequence.
+            headers["apns-collapse-id"] = (
+                collapse_id.encode("utf-8")[:64].decode("utf-8", errors="ignore")
+            )
+        # 5 = "power considerations": iOS may batch delivery. Correct for a passive
+        # background signal, and materially kinder to battery than waking the device for
+        # a 13F filing. 10 = deliver immediately, the default for everything else.
+        headers["apns-priority"] = "5" if interruption_level == "passive" else "10"
 
         accepted = 0
         try:

@@ -40,14 +40,23 @@ and **Purposes**. Answer *Used for tracking = No* for every row.
 | Identifiers → **Device ID** | Yes | App Functionality | Random per-install UUID in the Keychain, sent as `X-Guest-Id` (`GuestIdentity.swift`). Rate limiting + pre-sign-in learning progress |
 | Financial Info → **Other Financial Info** | Yes | App Functionality | Self-entered share counts / position values for the diversification score (`portfolio_holdings.shares`, `market_value`) |
 | User Content → **Other User Content** | Yes | App Functionality | Chat messages, report ratings and written feedback |
+| User Content → **Photos or Videos** | Yes | App Functionality | Optional screenshot the user attaches to a Help Us Improve bug report, emailed to support@. Out-of-process `PhotosPicker`, one image at a time, visible in the composer before it sends |
 | Usage Data → **Product Interaction** | Yes | App Functionality | Watchlist contents, lesson/book completion, bookmarks, followed entities |
 | Diagnostics → **Crash Data** | **No** | App Functionality | Sentry. `sendDefaultPii = false` and `SentrySDK.setUser` is never called, so crash reports carry no identity |
+
+Note on the non-obvious one:
+
+- **Photos or Videos** — selected as of the Help Us Improve screen. It is optional and
+  user-initiated: nothing is read unless the user picks an image, and they see it in the
+  mail composer before sending. `PhotosPicker` is out-of-process, so there is no
+  permission prompt and no `NSPhotoLibraryUsageDescription` — but the image still
+  reaches us by email, which is why it is declared.
 
 ### Do NOT select these — verified absent
 
 Payment Info · Credit Info · Precise Location · Coarse Location · Physical Address ·
 Phone Number · Other Contact Info · Health · Fitness · Sensitive Info · Contacts ·
-Photos or Videos · Audio Data · Gameplay Content · Customer Support · Emails or Text
+Audio Data · Gameplay Content · Customer Support · Emails or Text
 Messages · Search History · Browsing History · Advertising Data · Performance Data ·
 Other Diagnostic Data · Purchases
 

@@ -41,16 +41,23 @@ struct LibraryBookCard: View {
                     }
 
                     // Mastered checkmark badge
+                    //
+                    // `gainFill`, not `gain` — the two are BYTE-EQUAL (asserted by
+                    // `test_each_adaptive_fill_is_byte_equal_to_its_text_counterpart`), so this
+                    // badge does not change colour. What changes is the ink: `gain` is a TEXT
+                    // token, so no fill rule was in jurisdiction here and the white glyph sat at
+                    // 2.28:1 on #22C55E in dark. Naming the fill token puts the pair under
+                    // `carries: .onFill` and takes the checkmark to 7.79.
                     if isMastered {
                         ZStack {
                             Circle()
-                                .fill(AppColors.gain)
+                                .fill(AppColors.gainFill)
                                 .frame(width: 24, height: 24)
-                                
+
 
                             Image(systemName: "checkmark")
                                 .font(AppTypography.iconXS).fontWeight(.bold)
-                                .foregroundColor(AppColors.textOnAccent)
+                                .foregroundColor(AppColors.textOnFill)
                         }
                         .offset(x: 6, y: -6)
                     }

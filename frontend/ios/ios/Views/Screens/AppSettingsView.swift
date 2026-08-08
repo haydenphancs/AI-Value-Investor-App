@@ -110,19 +110,12 @@ struct AppSettingsView: View {
 
     private var aiResearchSection: some View {
         settingsGroup(title: "AI & Research", icon: "brain") {
-            HStack {
-                settingsLabel(title: "Default Analyst", subtitle: "Pre-selected for new research")
-                Spacer()
-                Picker("Analyst", selection: $defaultPersona) {
-                    ForEach(AnalysisPersona.allCases) { persona in
-                        Text(persona.name).tag(persona.key)
-                    }
-                }
-                .tint(AppColors.primaryBlue)
-            }
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.vertical, AppSpacing.md)
-            .background(AppColors.cardBackground)
+            settingsPickerRow(
+                title: "Default Analyst",
+                subtitle: "Pre-selected for new research",
+                options: AnalysisPersona.allCases.map { ($0.key, $0.compactName) },
+                selection: $defaultPersona
+            )
         }
     }
 
@@ -130,19 +123,12 @@ struct AppSettingsView: View {
 
     private var playbackSection: some View {
         settingsGroup(title: "Playback", icon: "headphones") {
-            HStack {
-                settingsLabel(title: "Default Speed", subtitle: "For book & lesson narration")
-                Spacer()
-                Picker("Speed", selection: $playbackSpeedRaw) {
-                    ForEach(PlaybackSpeed.allCases) { speed in
-                        Text(speed.label).tag(speed.rawValue)
-                    }
-                }
-                .tint(AppColors.primaryBlue)
-            }
-            .padding(.horizontal, AppSpacing.lg)
-            .padding(.vertical, AppSpacing.md)
-            .background(AppColors.cardBackground)
+            settingsPickerRow(
+                title: "Default Speed",
+                subtitle: "For book & lesson narration",
+                options: PlaybackSpeed.allCases.map { ($0.rawValue, $0.label) },
+                selection: $playbackSpeedRaw
+            )
 
             SettingsToggleRow(
                 title: "Autoplay Next",
@@ -410,6 +396,76 @@ struct AppSettingsView: View {
         }
     }
 
+    /// A settings row whose value is chosen from a menu.
+    ///
+    /// Replaces two near-identical `HStack { label; Spacer(); Picker }` blocks, and fixes the
+    /// layout they shared. A stock menu `Picker` renders its value at BODY size on a greedy
+    /// single line — fine for "1x", wrong for "The Everyday Growth Hunter" (26 chars). The
+    /// value wrapped to two lines, the label block sat vertically centred against it, and the
+    /// row read as unbalanced with the value competing with the title for weight.
+    ///
+    /// A `Menu` with an explicit label gives the control `Picker` does not:
+    ///
+    /// * **One step down the type scale.** `bodySmall`, not `body` — a settings value is
+    ///   secondary to the row it belongs to, and at equal size the eye cannot tell which is
+    ///   which. This is a per-view repoint, not a token change (`project_typography_system`).
+    /// * **Top-aligned, not centred.** The title and the value's first line share a line, so a
+    ///   value that wraps grows downward instead of pushing the label off-centre.
+    /// * **Two lines, right-aligned, with a scale floor.** These names cannot truncate
+    ///   readably — "The Everyday Grow…" is useless — so they wrap, and `minimumScaleFactor`
+    ///   absorbs the rest at large Dynamic Type instead of clipping.
+    /// * **`layoutPriority` on the label** so the value never squeezes the title into wrapping;
+    ///   the value takes the leftover width. Deliberately not a fixed `maxWidth`, which would
+    ///   clip at accessibility sizes.
+    private func settingsPickerRow<Value: Hashable>(
+        title: String,
+        subtitle: String,
+        options: [(value: Value, label: String)],
+        selection: Binding<Value>
+    ) -> some View {
+        HStack(alignment: .top, spacing: AppSpacing.md) {
+            settingsLabel(title: title, subtitle: subtitle)
+                .layoutPriority(1)
+
+            Spacer(minLength: AppSpacing.sm)
+
+            Menu {
+                // `ForEach(options.indices)` rather than `id: \.value` — Swift has no key paths
+                // into tuples, so a labelled-tuple array cannot be iterated by member.
+                ForEach(options.indices, id: \.self) { index in
+                    let option = options[index]
+                    Button {
+                        selection.wrappedValue = option.value
+                    } label: {
+                        // The tick is what makes this read as a picker rather than a list of
+                        // actions — the stock Picker draws it for free and a Menu does not.
+                        if option.value == selection.wrappedValue {
+                            Label(option.label, systemImage: "checkmark")
+                        } else {
+                            Text(option.label)
+                        }
+                    }
+                }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: AppSpacing.xs) {
+                    Text(options.first { $0.value == selection.wrappedValue }?.label ?? "")
+                        .font(AppTypography.bodySmall)
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(AppTypography.iconXS)
+                }
+                .foregroundColor(AppColors.primaryBlue)
+            }
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.md)
+        .background(AppColors.cardBackground)
+    }
+
     @ViewBuilder
     private func actionRow(title: String, subtitle: String, systemImage: String) -> some View {
         HStack {
@@ -427,13 +483,10 @@ struct AppSettingsView: View {
 
     // MARK: - Helpers
 
-    private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-    }
-
-    private var buildNumber: String {
-        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
-    }
+    // Both come from `AppInfo`, not a local copy: these were byte-identical in two screens
+    // and a third variant in APIClient, and the feedback report needs them too.
+    private var appVersion: String { AppInfo.appVersion }
+    private var buildNumber: String { AppInfo.buildNumber }
 
     private func openManageSubscription() {
         // Deliberately NOT the in-app browser: this is an App Store deep link that must be

@@ -21,8 +21,16 @@
     * Performance Data — Sentry runs with tracesSampleRate = 0.0, so none is sent.
     * Purchase History — no StoreKit purchase flow exists yet. ADD IT when IAP ships
       (plan Phase 8), or the manifest becomes inaccurate.
-    * Precise/Coarse Location, Health, Contacts, Photos, Audio Data — all verified
-      absent from the codebase.
+    * Precise/Coarse Location, Health, Contacts, Audio Data — all verified absent
+      from the codebase.
+
+  Photos or Videos IS declared, as of the Help Us Improve screen: the user may attach a
+  screenshot to a bug report, which is emailed to support@. It is optional, user-initiated,
+  and the image is visible in the composer before it sends. `PhotosPicker` runs out of
+  process, so no NSPhotoLibraryUsageDescription is needed and no prompt is shown — but the
+  DATA still reaches us, and that is what this key is about.
+  `tests/test_ios_feedback_flow.py::test_photos_usage_and_the_privacy_filing_agree` fails
+  the build if this and the code ever disagree, in either direction.
 -->
 <plist version="1.0">
 <dict>
@@ -110,6 +118,23 @@
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeOtherUserContent</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+
+		<!-- Screenshot the user optionally attaches to a Help Us Improve bug report. It is
+		     picked one image at a time via the out-of-process PhotosPicker, shown in the mail
+		     composer before sending, and reaches us only because the user sends it. Never
+		     scanned, never uploaded in the background, never used for anything else. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePhotosorVideos</string>
 			<key>NSPrivacyCollectedDataTypeLinked</key>
 			<true/>
 			<key>NSPrivacyCollectedDataTypeTracking</key>

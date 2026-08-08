@@ -868,9 +868,7 @@ struct AnyCodable: Decodable, @unchecked Sendable {
 }
 
 // MARK: - Bundle Extension
-
-extension Bundle {
-    nonisolated var appVersion: String {
-        infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-    }
-}
+//
+// `Bundle.appVersion` moved to `Core/Utilities/AppInfo.swift`, which is now the single home
+// for build and device facts. It is still used here for the `X-App-Version` header; it just
+// lives next to `buildNumber` and the device model instead of being split across two files.

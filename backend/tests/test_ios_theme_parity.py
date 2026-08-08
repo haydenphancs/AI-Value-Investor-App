@@ -153,7 +153,12 @@ _DECL = re.compile(
 _SPEC = re.compile(
     r'TokenSpec\(\s*"(\w+)"\s*,\s*(\w+)\s*,\s*\.(\w+)\s*'
     r'(?:,\s*on:\s*(\[[^\]]*\]|TokenSpec\.contentSurfaces(?:\s*\+\s*\[[^\]]*\])?))?'
-    r'(?:\s*,\s*carriesOnAccentText:\s*(true|false))?\s*\)',
+    # Accepts BOTH spellings during the fill inversion: the legacy Bool and the
+    # `carries: .onAccent|.onFill` enum that replaces it. The enum exists because two
+    # fill families now coexist permanently — `gainFill`/`lossFill` are ADAPTIVE and carry
+    # near-black ink in dark, the rest stay frozen and carry white — so a Bool can no
+    # longer say which ink a fill is contractually required to hold.
+    r'(?:\s*,\s*(?:carriesOnAccentText:\s*(true|false)|carries:\s*\.(\w+)))?\s*\)',
     re.S,
 )
 
@@ -181,18 +186,36 @@ def _surface_registry(palette: str, manifest: str) -> dict[str, Token]:
     return registry
 
 
+# `TokenSpec.carries` names WHICH ink a fill is contractually required to hold. Two
+# families now coexist and they are not interchangeable:
+#
+#   .onFill    `gainFill`/`lossFill` — ADAPTIVE (equal to `gain`/`loss`), so in dark they
+#              are bright and the ink must be near-black `textOnFill` (7.79 / 6.41).
+#              White on them would be 2.28 / 2.77.
+#   .onAccent  the five frozen fills + the server `.fill` role — dark in both modes, ink
+#              is white `textOnAccent`. Near-black on frozen `primaryFill` is only 3.35,
+#              which is exactly why ONE ink cannot serve both.
+#
+# `test_fill_ink_enum_matches_the_swift` pins this against the Swift enum by identity.
+_FILL_INK_TOKEN = {"onAccent": "textOnAccent", "onFill": "textOnFill"}
+
+
 def _specs(manifest: str) -> list[dict]:
     out = []
     for m in _SPEC.finditer(manifest):
-        name, ident, role, surfaces_expr, carries = m.groups()
+        name, ident, role, surfaces_expr, carries_bool, carries_enum = m.groups()
         if surfaces_expr is None:
             surfaces = list(_CONTENT_SURFACES)
         elif "TokenSpec.contentSurfaces" in surfaces_expr:
             surfaces = list(_CONTENT_SURFACES) + re.findall(r'"(\w+)"', surfaces_expr)
         else:
             surfaces = re.findall(r'"(\w+)"', surfaces_expr)
+        # `carries` is the NAME of the ink this fill must hold, or None for a non-fill.
+        # The legacy Bool means `textOnAccent`; the enum names its family explicitly.
+        carries = (_FILL_INK_TOKEN.get(carries_enum) if carries_enum
+                   else ("textOnAccent" if carries_bool == "true" else None))
         out.append({"name": name, "ident": ident, "role": role,
-                    "surfaces": surfaces, "carries": carries == "true"})
+                    "surfaces": surfaces, "carries": carries})
     return out
 
 
@@ -323,14 +346,19 @@ def _measure_all() -> tuple[int, list[tuple]]:
         token = tokens[spec["name"]]
         for style in ("light", "dark"):
             if spec["carries"]:
-                # A FILL: run it the other way round, exactly as `run()` does — is
-                # `textOnAccent` legible ON this? Floor 4.5 regardless of the declared role.
+                # A FILL: run it the other way round, exactly as `run()` does — is the ink
+                # this fill DECLARES legible ON it? Floor 4.5 regardless of the declared role.
+                # The ink is resolved from the spec, not hardcoded: `gainFill`/`lossFill`
+                # carry `textOnFill` (near-black in dark) while the frozen fills carry
+                # `textOnAccent` (white), and measuring the wrong one is silently backwards.
+                ink_name = spec["carries"]
                 fill = _composite(token.rgb(style), token.alpha(style), _rgb("FFFFFF"))
-                ink = tokens["textOnAccent"].rgb(style)
+                ink_tok = tokens[ink_name]
+                ink = _composite(ink_tok.rgb(style), ink_tok.alpha(style), fill)
                 measured = _ratio(ink, fill)
                 checked += 1
                 if measured < 4.5:
-                    failures.append((style, "textOnAccent", spec["name"], measured, 4.5))
+                    failures.append((style, ink_name, spec["name"], measured, 4.5))
                 continue
 
             required = _FLOOR[spec["role"]]
@@ -585,11 +613,43 @@ def test_no_bare_swiftui_colours_as_ink_or_opaque_fill():
 # not two. Removing them from this tuple is what makes the map load-bearing rather than
 # decorative: `_with_aliases` puts them back into the match regex, and `_canon` maps the
 # capture to `primaryFill` before it is compared.
-_FILL_TOKENS = ("primaryFill", "gainFill", "lossFill", "cautionFill", "accentCyanFill",
-                "alertPurpleFill", "alertOrangeFill",
-                "gainGraphic", "lossGraphic", "cautionGraphic", "accentGraphic",
-                "primaryGraphic")
-_BANNED_ON_FILL = ("textPrimary", "textSecondary", "textMuted", "textInverse")
+#
+# ── TWO FAMILIES, and they require DIFFERENT ink ─────────────────────────────
+#
+# `gainFill`/`lossFill` are ADAPTIVE — byte-equal to `gain`/`loss`, so in dark they are
+# bright (#22C55E / #F87171) and their ink must be near-black `textOnFill` (7.79 / 6.41).
+# The other five stay frozen-dark in both modes and keep white `textOnAccent`.
+#
+# ONE INK CANNOT SERVE BOTH: `textOnFill`'s dark arm on the frozen `primaryFill` #2563EB
+# is 3.35, and `textOnAccent` on the adaptive dark arms is 2.28 / 2.77 — WORSE than the
+# 2.28 defect the original `*Fill` migration was written to fix. So a site inked with the
+# wrong family's token is a real regression, not a style nit, and the rule below runs
+# once per family with that family's required and banned inks.
+_INVERSE_INK_FILLS = ("gainFill", "lossFill")
+_ONACCENT_INK_FILLS = ("primaryFill", "cautionFill", "accentCyanFill",
+                       "alertPurpleFill", "alertOrangeFill",
+                       "gainGraphic", "lossGraphic", "cautionGraphic", "accentGraphic",
+                       "primaryGraphic")
+_FILL_TOKENS = _INVERSE_INK_FILLS + _ONACCENT_INK_FILLS
+
+# Wrong on ANY fill whatever its family: these invert against a fill that does not.
+# `textPrimary` is #FFFFFF in dark and #111827 in light — the exact opposite polarity.
+_ALWAYS_BANNED_ON_FILL = ("textPrimary", "textSecondary", "textMuted")
+
+# {family: (accepted inks, additionally banned inks)}.
+#
+# Each family accepts EXACTLY ONE ink. `textOnAccent` on an adaptive fill is 2.28/2.77 in
+# dark and `textOnFill` on a frozen one is 3.35 — both are real regressions, so neither
+# family may borrow the other's token. (During the sweep that produced this state the
+# inverse family temporarily accepted both; that relaxation is gone, and
+# `test_neither_fill_family_accepts_the_other_family_ink` proves it stays gone.)
+_FILL_INK = {
+    "inverse":  (("textOnFill",),   ("textInverse", "textOnAccent")),
+    "onaccent": (("textOnAccent",), ("textInverse", "textOnFill")),
+}
+_FILL_FAMILY = {"inverse": _INVERSE_INK_FILLS, "onaccent": _ONACCENT_INK_FILLS}
+
+_BANNED_ON_FILL = _ALWAYS_BANNED_ON_FILL + ("textInverse",)
 
 
 # ── Same-file parameter resolution ───────────────────────────────────────────
@@ -682,43 +742,429 @@ def test_fill_token_scanner_finds_the_known_sites():
     assert _canon("chipSelectedBackground") == "primaryFill"
 
 
-def test_text_tokens_never_sit_on_a_fill():
-    """Ink on a `*Fill` is `textOnAccent`, always. A text token there inverts against a fill
-    that does not: `textPrimary` is #FFFFFF in dark and #0F172A in light."""
-    # Alias-expanded on BOTH sides: `tabBarUnselected` and `chartAxisLabel` are `textMuted`,
-    # and `chipSelectedBackground`/`borderFocus` are `primaryFill` — all four were invisible
-    # to this rule while it matched canonical names only.
-    banned = re.compile(rf"AppColors\.({'|'.join(_with_aliases(_BANNED_ON_FILL))})\b")
-    fill = re.compile(rf"AppColors\.({'|'.join(_with_aliases(_FILL_TOKENS))})\b")
+def _fill_ink_matchers(family: str, banned_extra: tuple):
+    """The three invariant regexes, built ONCE per family rather than once per file.
+
+    Hoisted deliberately. These are 20-branch alias-expanded alternations, and rebuilding
+    them inside the per-file function thrashed `re`'s 512-entry compile cache against the
+    per-file `bound_re` patterns — every file evicted them and forced a recompile. Measured
+    238s versus 6s for the module.
+
+    Alias-expanded on BOTH sides: `tabBarUnselected` and `chartAxisLabel` are `textMuted`,
+    and `chipSelectedBackground`/`borderFocus` are `primaryFill` — all four were invisible
+    while this matched canonical names only.
+    """
+    banned = re.compile(
+        rf"AppColors\.({'|'.join(_with_aliases(_ALWAYS_BANNED_ON_FILL + banned_extra))})\b")
+    fill = re.compile(rf"AppColors\.({'|'.join(_with_aliases(_FILL_FAMILY[family]))})\b")
     # Look BACKWARD from the fill only. SwiftUI applies `.foregroundColor` before
     # `.background` on the same view, so ink that appears AFTER a fill belongs to a
     # different view — which is what made a symmetric window flag the price label on a
     # card two lines below an unrelated "CURRENT" badge.
-    ink_modifier = re.compile(rf"\.{_MODIFIER}\(")
+    return banned, fill, re.compile(rf"\.{_MODIFIER}\(")
+
+
+def _fill_ink_violations(family: str, accepted: tuple, banned_extra: tuple) -> list[str]:
+    """Ink sitting on a fill of `family` that is not one of `accepted`, across the tree."""
+    matchers = _fill_ink_matchers(family, banned_extra)
+    return [v for path in _swift_files()
+            for v in _fill_ink_violations_in(_rel(path), _code_lines(path), family,
+                                             accepted, banned_extra, matchers)]
+
+
+def _fill_ink_violations_in(rel: str, lines, family: str, accepted: tuple,
+                            banned_extra: tuple, matchers=None) -> list[str]:
+    """One file's worth of the above. Split out so the positive control can drive the REAL
+    scanner over synthetic Swift instead of restating a constant — see
+    `test_the_fill_ink_rule_fires_on_each_family`, which is what this refactor exists for.
+    """
+    banned, fill, ink_modifier = matchers or _fill_ink_matchers(family, banned_extra)
+    fills = _FILL_FAMILY[family]
+    # A fill reached through a same-file-bound identifier counts as a fill. Without this,
+    # `MoversToggle`'s `.background(isActive ? active : .clear)` — where `active` is bound
+    # to `gainFill`/`lossFill` — is invisible, and reverting its ink to `textPrimary`
+    # passes every guard.
+    bound = {n: t for n, t in _color_bindings(lines).items() if t & set(fills)}
+    bound_re = (re.compile(rf"\.(?:background|fill)\(.*\b({'|'.join(map(re.escape, bound))})\b")
+                if bound else None)
     violations = []
+    for idx, (lineno, line) in enumerate(lines):
+        if not (fill.search(line) or (bound_re and bound_re.search(line))):
+            continue
+        for wlineno, wline in lines[max(0, idx - 6):idx + 1]:
+            if not (banned.search(wline) and ink_modifier.search(wline)):
+                continue   # a stroke or a border is not ink
+            # A ternary that already names an ACCEPTED ink has chosen correctly: the
+            # banned token is the UNSELECTED arm, sitting on a plain surface.
+            if any(ok in wline for ok in accepted):
+                continue
+            violations.append(
+                f"[{family}] {rel}:{wlineno}: {wline.strip()}  (fill on line {lineno})")
+    return violations
+
+
+def test_text_tokens_never_sit_on_a_fill():
+    """Ink on a fill must be the ink that fill DECLARES — `textOnFill` for the adaptive
+    `gainFill`/`lossFill`, `textOnAccent` for the frozen five. A text token on either
+    inverts against a fill that does not: `textPrimary` is #FFFFFF in dark, #111827 in light.
+    """
+    violations = []
+    for family, (accepted, banned_extra) in _FILL_INK.items():
+        violations += _fill_ink_violations(family, accepted, banned_extra)
+    assert not violations, "\n".join(sorted(set(violations)))
+
+
+def test_neither_fill_family_accepts_the_other_family_ink():
+    """The two families are not interchangeable, and this is the assertion that says so.
+
+    It also pins the END of the sweep: while `gainFill`/`lossFill` were being migrated the
+    inverse family temporarily accepted `textOnAccent` too, and a relaxation that is never
+    removed is a guard that silently does nothing.
+    """
+    assert _FILL_INK["inverse"][0] == ("textOnFill",), \
+        "the inverse family still accepts a second ink — the sweep relaxation was left in"
+    assert _FILL_INK["onaccent"][0] == ("textOnAccent",)
+    assert "textOnAccent" in _FILL_INK["inverse"][1]
+    assert "textOnFill" in _FILL_INK["onaccent"][1]
+    # `textInverse` stays banned on BOTH. Its value equals `textOnFill` today, but it is
+    # ink for `surfaceInverse` (a toast), not for a fill — a role confusion even when the
+    # bytes happen to match.
+    assert all("textInverse" in banned for _, banned in _FILL_INK.values())
+
+
+def test_the_fill_ink_rule_fires_on_each_family():
+    """Positive control. This ban rule is the ONLY thing standing between the tree and a
+    2.28:1 regression, so "it passes" is not evidence — it has to be shown to fail.
+
+    Drives the REAL scanner, which is what `_fill_ink_violations_in` was split out for. The
+    previous version of this test recomputed `ink in banned and not any(ok == ink ...)` in
+    its own body and never called the scanner at all: a broken `banned` regex, a dead
+    `ink_modifier`, or a mis-sized window would have left all six probes green while the rule
+    itself silently stopped matching anything. That is the exact failure mode this module's
+    header warns about, sitting inside the test written to prevent it.
+    """
+    probes = [
+        # (family, fill token, ink token, must fire?)
+        ("inverse",  "gainFill",    "textOnAccent", True),   # white on bright green = 2.28
+        ("inverse",  "gainFill",    "textOnFill",   False),
+        ("inverse",  "lossFill",    "textPrimary",  True),   # the pre-existing ban survives
+        ("inverse",  "gainFill",    "textInverse",  True),   # right value, wrong role
+        ("onaccent", "primaryFill", "textOnFill",   True),   # near-black on frozen = 3.35
+        ("onaccent", "primaryFill", "textOnAccent", False),
+        # Alias expansion on BOTH sides — the reason `_with_aliases` is called twice in
+        # `_fill_ink_matchers`. The fill is reached through `chipSelectedBackground`
+        # (= primaryFill) and the ink through `tabBarUnselected` / `chartAxisLabel`
+        # (= textMuted); all three were invisible to this rule before the alias map.
+        ("onaccent", "chipSelectedBackground", "tabBarUnselected", True),
+        ("inverse",  "gainFill",               "chartAxisLabel",   True),
+    ]
+    for family, fill, ink, should_fire in probes:
+        accepted, banned_extra = _FILL_INK[family]
+        src = (f'Text("x")\n'
+               f'    .foregroundColor(AppColors.{ink})\n'
+               f'    .background(AppColors.{fill})')
+        lines = [(i + 1, l) for i, l in enumerate(src.splitlines())]
+        fired = _fill_ink_violations_in("Probe.swift", lines, family, accepted, banned_extra)
+        assert bool(fired) == should_fire, \
+            f"{family}: `{ink}` on `{fill}` expected fire={should_fire}, got {fired}"
+
+
+def test_each_adaptive_fill_is_byte_equal_to_its_text_counterpart():
+    """`gainFill`/`lossFill` duplicate `gain`/`loss` rather than aliasing them, so the two
+    declarations can drift apart with nothing to notice. The duplication is deliberate —
+    aliasing would delete the `*Fill` NAME that every rule in this module keys on, and with
+    it the reverse measurement that justifies the whole design — so the equality is asserted
+    instead of assumed. Both arms, byte-for-byte."""
+    tokens = _declared_tokens(_sections()[0])
+    for fill, text in (("gainFill", "gain"), ("lossFill", "loss")):
+        a, b = tokens[fill], tokens[text]
+        assert (a.light, a.light_a, a.dark, a.dark_a) == (b.light, b.light_a, b.dark, b.dark_a), \
+            f"{fill} has drifted from {text}: {a.light}/{a.dark} vs {b.light}/{b.dark}"
+    # ...and the frozen five must NOT be adaptive, or they silently joined the wrong family.
+    for fill in ("primaryFill", "cautionFill", "accentCyanFill",
+                 "alertPurpleFill", "alertOrangeFill"):
+        t = tokens[fill]
+        assert t.light == t.dark, f"{fill} became adaptive but still declares carries: .onAccent"
+
+
+# A member whose VALUE is a fill — `InvestorLevel.fillColor`, `QualityBand.fillColor`,
+# `levelColors`, the whale avatar palette. None of these is reachable by the direct rule:
+# `RatingBadge` inks at :54 while its fill comes from a model 100 lines away, and
+# `TechnicalLevelIndicator` puts its ink AFTER its fill inside a `ZStack`. Those are exactly
+# the sites the user complained about, so without this they have no regression guard at all.
+_FILL_MEMBER = re.compile(r"\b(?:var|let)\s+(\w*(?:[Ff]illColor|fillColors|levelColors))\b")
+
+
+def test_every_fill_valued_member_has_a_paired_ink_member():
+    """A member that resolves to a MIX of adaptive and frozen fills cannot be inked with a
+    single token, so it must expose a sibling ink member whose cases mirror it.
+
+    This is the guard for the fragility the two-family split introduces: "both halves must
+    change together" became three halves, and three halves do not survive on discipline.
+    """
+    expected = {
+        "Models/LearnModels.swift":        [("fillColor", "fillInk"),
+                                            ("iconFillColor", "iconFillInk")],
+        "Models/TickerReportModels.swift": [("fillColor", "fillInk")],
+        "Views/Atoms/TechnicalLevelIndicator.swift": [("levelColors", "levelInks")],
+        "Views/Screens/WhaleProfileView.swift":      [("backgroundColor", "backgroundInk")],
+        "Views/Atoms/RatingBadge.swift":             [("backgroundColor", "foregroundInk")],
+        # STORED, not computed — `TrendingAnalysis` is a struct assigned at four construction
+        # sites rather than an enum switching on itself. The pairing requirement is identical;
+        # only `test_a_stored_ink_member_covers_every_family_its_fill_member_spans` can check
+        # its VALUES, because a stored property has no body to read.
+        "Models/ResearchModels.swift":               [("iconFillColor", "iconFillInk")],
+    }
+    missing = []
+    for rel, pairs in expected.items():
+        src = (_IOS / rel).read_text()
+        for fill_member, ink_member in pairs:
+            if fill_member not in src:
+                missing.append(f"{rel}: `{fill_member}` is gone — update this test, do not delete it")
+            elif ink_member not in src:
+                missing.append(f"{rel}: `{fill_member}` has no paired `{ink_member}` — "
+                               f"its ink cannot be right for both fill families")
+    assert not missing, "\n".join(missing)
+
+
+def _member_body(lines, start_idx) -> str:
+    """Brace-matched body of the member declared at `start_idx`, or the bracket-matched
+    array literal for a `let x: [Color] = [...]`."""
+    joined = "\n".join(w for _, w in lines[start_idx:start_idx + 30])
+    # Whichever delimiter opens FIRST is this member's. Trying `{` before `[`
+    # unconditionally picks up a `{` belonging to a LATER declaration and then returns
+    # nothing for every `let x: [Color] = [...]` — which silently emptied the resolver.
+    # Start AFTER the `=` on the declaration line. Otherwise the `[Color]` TYPE ANNOTATION
+    # in `let x: [Color] = [...]` is the first bracket found and the body comes back as
+    # the literal string "[Color]" — which resolved to zero tokens and emptied the whole
+    # resolver while every test still passed.
+    eol = joined.find("\n")
+    eq = joined.find("=", 0, eol if eol > 0 else len(joined))
+    origin = eq + 1 if eq >= 0 else 0
+    candidates = [(joined.find(o, origin), o, c) for o, c in (("{", "}"), ("[", "]"))
+                  if joined.find(o, origin) >= 0]
+    if not candidates:
+        return ""
+    i, opener, closer = min(candidates)
+    depth = 0
+    for j in range(i, len(joined)):
+        if joined[j] == opener:
+            depth += 1
+        elif joined[j] == closer:
+            depth -= 1
+            if depth == 0:
+                return joined[i:j + 1]
+    return ""
+
+
+_MEMBER_DECL = re.compile(r"^\s*(?:private\s+|static\s+)*(?:var|let)\s+(\w+)\s*:?\s*(?:Color|\[Color\])?\s*[={]")
+
+
+def _fill_valued_members(lines) -> dict[str, set]:
+    """{memberName: set of canonical fill tokens its body resolves to}.
+
+    This is what makes the user's own three sites guardable at all: `RatingBadge` inks
+    100 lines away from its fill, and `TechnicalLevelIndicator` inks AFTER its fill inside
+    a `ZStack`, so neither is reachable by a backward window over literal tokens.
+    """
+    out = {}
+    for i, (_, line) in enumerate(lines):
+        m = _MEMBER_DECL.match(line)
+        if not m:
+            continue
+        body = _member_body(lines, i)
+        toks = {_canon(t) for t in re.findall(r"AppColors\.(\w+)", body)} & set(_FILL_TOKENS)
+        if toks:
+            out[m.group(1)] = toks
+    return out
+
+
+def test_a_fill_valued_member_is_inked_correctly_for_its_family():
+    """A member that resolves to fills must be inked to match.
+
+    Purely-adaptive → `textOnFill`. Purely-frozen → `textOnAccent`. **MIXED → no literal
+    ink token is correct at all**, because one token cannot be right for both halves; the
+    ink must itself be a member that switches alongside the fill.
+    """
+    ink_re = re.compile(rf"\.{_MODIFIER}\(|\.tint\(")
+    literal_ink = re.compile(r"AppColors\.(textOnAccent|textOnFill|textInverse)\b")
+    adaptive, frozen = set(_INVERSE_INK_FILLS), set(_ONACCENT_INK_FILLS)
+
+    # GLOBAL, not per-file. The sites this rule exists for consume a member declared
+    # somewhere else entirely — `InvestorJourneySection` renders `track.level.fillColor`
+    # and `MoneyMoveCard` renders `moneyMove.iconFillColor`, both declared in
+    # `Models/LearnModels.swift`. A per-file map sees neither, which is how the first
+    # draft of this rule passed a mutation that reverted the user's own button.
+    #
+    # Two types declaring the same member name merge into one set. That is conservative in
+    # the safe direction: a merged set is MORE likely to look mixed, and "mixed" is the
+    # strictest verdict.
+    members: dict[str, set] = {}
+    for path in _swift_files():
+        for name, toks in _fill_valued_members(_code_lines(path)).items():
+            members.setdefault(name, set()).update(toks)
+
+    violations = []
+    use = re.compile(rf"\.(?:background|fill)\(\s*[\w.]*?\b({'|'.join(map(re.escape, members))})\b")
     for path in _swift_files():
         lines = _code_lines(path)
-        # A fill reached through a same-file-bound identifier counts as a fill. Without
-        # this, `MoversToggle`'s `.background(isActive ? active : .clear)` — where `active`
-        # is bound to `gainFill`/`lossFill` — is invisible, and reverting its ink to
-        # `textPrimary` passes every guard.
-        bound = {n: t for n, t in _color_bindings(lines).items()
-                 if t & set(_FILL_TOKENS)}
-        bound_re = (re.compile(rf"\.(?:background|fill)\(.*\b({'|'.join(map(re.escape, bound))})\b")
-                    if bound else None)
         for idx, (lineno, line) in enumerate(lines):
-            if not (fill.search(line) or (bound_re and bound_re.search(line))):
+            m = use.search(line)
+            if not m:
                 continue
-            for wlineno, wline in lines[max(0, idx - 6):idx + 1]:
-                if not (banned.search(wline) and ink_modifier.search(wline)):
-                    continue   # a stroke or a border is not ink
-                # A ternary that already names `textOnAccent` has chosen correctly: the
-                # banned token is the UNSELECTED arm, sitting on a plain surface.
-                if "textOnAccent" in wline:
+            toks = members[m.group(1)]
+            is_mixed = bool(toks & adaptive) and bool(toks & frozen)
+            want = "textOnFill" if toks & adaptive else "textOnAccent"
+            # Bidirectional: the ZStack idiom puts the ink AFTER the surface.
+            for wlineno, wline in lines[max(0, idx - 8):idx + 9]:
+                if not ink_re.search(wline):
                     continue
-                violations.append(
-                    f"{_rel(path)}:{wlineno}: {wline.strip()}  (fill on line {lineno})")
+                lit = literal_ink.search(wline)
+                if not lit:
+                    continue           # a member-valued ink — correct by construction
+                if is_mixed:
+                    violations.append(
+                        f"{_rel(path)}:{wlineno}: `{m.group(1)}` spans BOTH fill families "
+                        f"({sorted(toks)}), so the literal `{lit.group(1)}` is wrong for half "
+                        f"of them — the ink must be a paired member")
+                elif lit.group(1) != want:
+                    violations.append(
+                        f"{_rel(path)}:{wlineno}: `{m.group(1)}` is {sorted(toks)}, which "
+                        f"requires `{want}`, but the ink is `{lit.group(1)}`")
     assert not violations, "\n".join(sorted(set(violations)))
+
+
+def test_a_paired_ink_member_names_both_inks():
+    """Anti-vacuity for the pairing. A `fillInk` that returned `textOnAccent` for EVERY
+    case would satisfy "a paired member exists" while re-introducing 2.28:1 on the adaptive
+    cases — and the direct rule cannot see it, because the ink is a member. Assert per
+    MEMBER BODY, not per file: `LearnModels` contains `textOnFill` somewhere regardless."""
+    expected = {
+        "Models/LearnModels.swift":                  ("fillInk", "iconFillInk"),
+        "Models/TickerReportModels.swift":           ("fillInk",),
+        "Views/Atoms/TechnicalLevelIndicator.swift": ("levelInks",),
+        "Views/Screens/WhaleProfileView.swift":      ("backgroundInk",),
+        "Views/Atoms/RatingBadge.swift":             ("foregroundInk",),
+    }
+    problems = []
+    for rel, members in expected.items():
+        lines = _code_lines(_IOS / rel)
+        for want in members:
+            # `var` OR `let` — `levelInks` is a stored array, not a computed property.
+            idx = next((i for i, (_, l) in enumerate(lines)
+                        if re.match(rf"^\s*(?:private\s+)?(?:var|let)\s+{want}\b", l)), None)
+            if idx is None:
+                problems.append(f"{rel}: `{want}` is gone")
+                continue
+            body = _member_body(lines, idx)
+            for ink in ("textOnFill", "textOnAccent"):
+                if ink not in body:
+                    problems.append(
+                        f"{rel}:`{want}` never returns `{ink}` — it spans both fill "
+                        f"families, so a single ink for every case is a regression")
+    assert not problems, "\n".join(problems)
+
+
+def _stored_ink_pair_problems(rel: str, bindings: dict) -> list[str]:
+    """Family-coverage check for a same-file `XFillColor` / `XFillInk` STORED pair."""
+    adaptive, frozen = set(_INVERSE_INK_FILLS), set(_ONACCENT_INK_FILLS)
+    out = []
+    for name, fills in sorted(bindings.items()):
+        if not name.endswith("FillColor"):
+            continue
+        inks = bindings.get(f"{name[:-len('Color')]}Ink")
+        if inks is None or not fills & (adaptive | frozen):
+            continue
+        if fills & adaptive and "textOnFill" not in inks:
+            out.append(f"{rel}: `{name}` is assigned {sorted(fills & adaptive)} (ADAPTIVE) but "
+                       f"its paired ink is only {sorted(inks)} — white on those is 2.28/2.77")
+        if fills & frozen and "textOnAccent" not in inks:
+            out.append(f"{rel}: `{name}` is assigned {sorted(fills & frozen)} (FROZEN) but its "
+                       f"paired ink is only {sorted(inks)} — near-black on those is 3.35")
+        if (stray := inks - {"textOnFill", "textOnAccent"}):
+            out.append(f"{rel}: `{name}`'s paired ink is assigned {sorted(stray)}, which is not "
+                       f"a contract ink for a fill")
+    return out
+
+
+def test_a_stored_ink_member_covers_every_family_its_fill_member_spans():
+    """The pairing rule for a STORED ink, which the test above structurally cannot reach.
+
+    `test_a_paired_ink_member_names_both_inks` reads a member BODY, so it only works for a
+    computed `var … { switch self }`. `TrendingAnalysis.iconFillInk` is a plain `let` assigned
+    at four construction sites and has no body at all — setting every one of them to
+    `textOnAccent` would restore 2.28:1 on the adaptive case with the whole suite still green,
+    because no other rule looks at an argument label.
+
+    Resolved through `_color_bindings` (the real production resolver) and asserted by FAMILY
+    COVERAGE: a fill member spanning both families must have an ink member naming both inks.
+    """
+    checked, problems = [], []
+    for path in _swift_files():
+        bindings = _color_bindings(_code_lines(path))
+        found = _stored_ink_pair_problems(_rel(path), bindings)
+        problems += found
+        checked += [n for n in bindings if n.endswith("FillColor")
+                    and f"{n[:-len('Color')]}Ink" in bindings]
+    assert "iconFillColor" in checked, \
+        f"the TrendingAnalysis pair no longer resolves — the binding resolver may be dead: {checked}"
+    assert not problems, "\n".join(problems)
+
+
+def test_the_stored_ink_pair_rule_fires_on_the_regression_it_exists_for():
+    """Positive control, driven through the REAL `_color_bindings` resolver on synthetic Swift
+    rather than through a hand-built dict — the distinction that made the old
+    `test_the_fill_ink_rule_fires_on_each_family` theater."""
+    def problems(*args: str) -> list[str]:
+        src = ("struct X {\n"
+               "    let iconFillColor: Color\n"
+               "    let iconFillInk: Color\n"
+               "}\n"
+               + "".join(f"X({a})\n" for a in args))
+        lines = [(i + 1, l) for i, l in enumerate(src.splitlines())]
+        return _stored_ink_pair_problems("Probe.swift", _color_bindings(lines))
+
+    # Every site white, including the adaptive one — the exact silent regression.
+    assert problems("iconFillColor: AppColors.gainFill, iconFillInk: AppColors.textOnAccent",
+                    "iconFillColor: AppColors.primaryFill, iconFillInk: AppColors.textOnAccent")
+    # Every site near-black, including the frozen ones — the mirror image.
+    assert problems("iconFillColor: AppColors.gainFill, iconFillInk: AppColors.textOnFill",
+                    "iconFillColor: AppColors.primaryFill, iconFillInk: AppColors.textOnFill")
+    # A non-contract ink on a fill.
+    assert problems("iconFillColor: AppColors.gainFill, iconFillInk: AppColors.textPrimary")
+    # Correct: each family gets its own ink.
+    assert not problems("iconFillColor: AppColors.gainFill, iconFillInk: AppColors.textOnFill",
+                        "iconFillColor: AppColors.primaryFill, iconFillInk: AppColors.textOnAccent")
+
+
+def test_fill_member_resolver_is_not_vacuous():
+    """Both rules above match zero lines on a clean tree, so a dead `_fill_valued_members`
+    is indistinguishable from success. Pin the real population and the known members."""
+    found = {}
+    for path in _swift_files():
+        m = _fill_valued_members(_code_lines(path))
+        if m:
+            found[_rel(path)] = m
+    assert len(found) >= 8, f"only {len(found)} files with fill-valued members"
+    assert found.get("Models/LearnModels.swift", {}).get("fillColor") == {"gainFill", "primaryFill",
+                                                                         "alertPurpleFill", "cautionFill"}
+    assert "levelColors" in found.get("Views/Atoms/TechnicalLevelIndicator.swift", {})
+    assert "fillColor" in found.get("Models/TickerReportModels.swift", {})
+
+
+def test_fill_ink_enum_matches_the_swift():
+    """`_FILL_INK_TOKEN` mirrors `AppColors.FillInk`. A case added in Swift and forgotten
+    here silently resolves to `None`, and `_measure_all` then skips that fill entirely —
+    a token that looks measured and is not."""
+    src = _APPTHEME.read_text()
+    block = src[src.index("enum FillInk"):src.index("struct TokenSpec")]
+    cases = set(re.findall(r"case (\w+)$", block, re.M))
+    assert cases == set(_FILL_INK_TOKEN), \
+        f"FillInk cases {cases} vs python {set(_FILL_INK_TOKEN)}"
+    # And each case must name a token that actually exists.
+    tokens = _declared_tokens(_sections()[0])
+    for ink in _FILL_INK_TOKEN.values():
+        assert ink in tokens, f"{ink} is not a declared token"
 
 
 # Graphic-role tokens: the five `*Graphic` plus every chart series. theme-lint rule 4 named
@@ -1283,6 +1729,383 @@ def test_arm_matching_is_still_load_bearing():
     without = undeclared(arm_matching=False)
     assert without, "arm matching is exempting nothing — it may have become dead code"
     assert all(i == "textMuted" and s == "toggleSelectedBackground" for _, i, s in without), without
+
+
+# ── 6b. Ink measured against the surface it ACTUALLY sits on ─────────────────
+#
+# WHY. Every rule above keys on a token NAME: `_FILL_TOKENS` lists seven `*Fill` and five
+# `*Graphic` names, and `_ink_on_surface_pairings` keys on `surfaceRegistry`. The two blind
+# spots below are sites that render exactly the defect those rules exist for, while naming
+# a token that appears in neither list.
+#
+#   (1) A TRANSLUCENT ARM. `_fill_ink_violations` matches `AppColors.lossFill` on the line
+#       and demands `textOnFill`. `ReportsSelectionBar` painted
+#       `isEnabled ? lossFill : lossFill.opacity(0.4)` — right for the opaque arm, and for
+#       the faded one a 2.12:1 near-black on the #713D44 composite, where the white it
+#       replaced measured 8.56. The guard did not merely MISS that; it REQUIRED it. The
+#       disabled arm covers `isDeleting`, so the spinner and its label went near-invisible
+#       exactly while the user watched the delete run.
+#
+#   (2) A TEXT-FAMILY TOKEN USED AS AN OPAQUE SURFACE. `Circle().fill(AppColors.gain)` under
+#       `textOnAccent` is 2.28:1 in dark — byte-identical to `.fill(AppColors.gainFill)`,
+#       which every rule here would have caught.
+#       `test_each_adaptive_fill_is_byte_equal_to_its_text_counterpart` asserts that equality
+#       directly, so the caught site and the missed one differ by a name and nothing else.
+#
+# ANCHOR ON THE INK, NOT ON A WIDER TOKEN LIST. Adding `gain`/`loss` to `_FILL_TOKENS` is the
+# obvious move and it is wrong: `_fill_ink_violations` treats any line containing the token as
+# a fill site, and `AppColors.gain` has 277 references that are legitimately INK. Anchor
+# instead on `textOnAccent`/`textOnFill`/`textInverse` — tokens that exist for no purpose
+# except sitting on a fill — and then measure whatever surface is painted nearby. Two
+# STRUCTURAL gates rather than a name list: the ink must be a contract ink, and the surface
+# must be inside a `.fill(`/`.background(`. Tinted chips (`bearish.opacity(0.15)` under
+# `bearish` ink, 25 sites) are excluded by the first gate without a carve-out, because their
+# ink is a sentiment token and never a contract ink.
+_CONTRACT_INKS = ("textOnAccent", "textOnFill", "textInverse")
+_CONTRACT_INK = re.compile(rf"AppColors\.({'|'.join(_CONTRACT_INKS)})\b")
+
+# Stricter than `_MEMBER_DECL`, which makes both the `:` and the type optional and therefore
+# matches every `let x = …` local — 154 names, mostly `x`, `y`, `w`, `radius`. `_MEMBER_DECL`
+# is left untouched so `_fill_valued_members` and its three tests are unaffected.
+_SURFACE_MEMBER_DECL = re.compile(
+    r"^\s*(?:private\s+|fileprivate\s+|internal\s+|public\s+|static\s+)*"
+    r"(?:var|let)\s+(\w+)\s*:\s*(?:Color|\[Color\])\s*[={]")
+
+
+def _surface_tokens() -> tuple:
+    """Tokens that can be painted as an opaque surface under a contract ink: every
+    `.text`-role token (which already includes all seven fills) plus the `*Graphic` five.
+
+    DERIVED from the manifest rather than hand-listed, so a new accent token joins
+    jurisdiction the day it is declared rather than the day someone remembers to add it.
+    """
+    specs = _specs(_sections()[2])
+    return tuple(sorted({s["name"] for s in specs if s["role"] == "text"} | set(_FILL_TOKENS)))
+
+
+def _surface_arms(text: str, surfaces) -> list[tuple[str, float]]:
+    """EVERY (canonical token, inline alpha) painted on one line — not just the first.
+
+    `finditer`, not `search`, and that is the single most important line in this section.
+    `isEnabled ? AppColors.lossFill : AppColors.lossFill.opacity(0.4)` under a `search`
+    returns only the OPAQUE arm, which measures 6.41 and passes — the rule would ship
+    green having never once looked at the arm that was broken.
+    `test_surface_arm_scanner_reads_every_arm` pins both arms so that cannot regress.
+    """
+    pat = re.compile(rf"AppColors\.({'|'.join(_with_aliases(surfaces))})\b"
+                     rf"(?:\s*\.opacity\(\s*([\d.]+)\s*\))?")
+    return [(_canon(m.group(1)), float(m.group(2) or 1.0)) for m in pat.finditer(text)]
+
+
+def _surface_valued_members(lines, surfaces) -> dict[str, set]:
+    """{memberName: canonical surface tokens it resolves to} within ONE file.
+
+    Two sources, unioned. A computed/stored member with an explicit `: Color` annotation
+    whose body names surface tokens; and a stored property bound at same-file call sites,
+    via the existing `_color_bindings`. The second is what reaches
+    `TrendingAnalysis.iconBackgroundColor` — a plain `let` with no body at all, assigned
+    `primaryBlue` / `gain` / `alertPurple` at three construction sites in its own file.
+    """
+    out: dict[str, set] = {}
+    allowed = set(surfaces)
+    for i, (_, line) in enumerate(lines):
+        if not (m := _SURFACE_MEMBER_DECL.match(line)):
+            continue
+        toks = {_canon(t) for t in _APPCOLOR.findall(_member_body(lines, i))} & allowed
+        if toks:
+            out.setdefault(m.group(1), set()).update(toks)
+    for name, toks in _color_bindings(lines).items():
+        if toks & allowed:
+            out.setdefault(name, set()).update(toks & allowed)
+    return out
+
+
+def _surface_ink_pairs(lines, member_names) -> list[tuple]:
+    """(inkLineno, inkToken, surfLineno, surfToken|None, alpha, member|None).
+
+    BIDIRECTIONAL, like `test_a_fill_valued_member_is_inked_correctly_for_its_family`: the
+    `ZStack` idiom puts the ink AFTER the surface it sits on (`LibraryBookCard` paints the
+    circle then inks the glyph six lines later), while a modifier chain puts it before.
+
+    ±6 is MEASURED, not guessed: ±4 misses `LibraryBookCard` by two lines, ±8 pulls in
+    `LessonCompletionCard`'s sibling view. It is also the window `_fill_ink_violations`
+    already uses, so there is one number here and not two.
+
+    Pure — takes `lines`, so synthetic Swift can drive it. `#Preview` is skipped exactly as
+    `_ink_on_surface_pairings` and `_color_bindings` do: a preview may paint a combination
+    production never renders.
+    """
+    preview = next((i for i, (_, l) in enumerate(lines) if l.startswith("#Preview")), len(lines))
+    body = lines[:preview]
+    surfaces = _surface_tokens()
+    # The trailing `\)` is load-bearing: it excludes `.fill(x.member.opacity(0.2))`, which is
+    # a legitimate same-hue wash chip and not a saturated tile.
+    member_re = (re.compile(rf"\.(?:fill|background)\(\s*[\w.]*?\b"
+                            rf"({'|'.join(map(re.escape, sorted(member_names)))})\b\s*\)")
+                 if member_names else None)
+    out = []
+    for idx, (lineno, line) in enumerate(body):
+        if not (_INK_MOD.search(line) and _CONTRACT_INK.search(line)):
+            continue
+        inks = set(_CONTRACT_INK.findall(line))
+        for slineno, sline in body[max(0, idx - 6):idx + 7]:
+            if not _BG_MOD.search(sline):
+                continue
+            for ink in sorted(inks):
+                for tok, alpha in _surface_arms(sline, surfaces):
+                    out.append((lineno, ink, slineno, tok, alpha, None))
+                if member_re and (m := member_re.search(sline)):
+                    out.append((lineno, ink, slineno, None, 1.0, m.group(1)))
+    return out
+
+
+def _page_base(tokens, style: str) -> tuple:
+    """The page itself, flattened onto white. Every surface below composites onto this.
+
+    The `background` token rather than `cardBackground`: it is the darker of the two in dark
+    (#171B26 vs #1E2330), so a faded fill over it lands closer to the ink and the verdict is
+    the conservative one.
+    """
+    page = tokens["background"]
+    return _composite(page.rgb(style), page.alpha(style), (1.0, 1.0, 1.0))
+
+
+def _on_surface(tokens, ink: str, surf: str, alpha: float, style: str) -> float:
+    """Contrast of `ink` on `surf` faded to `alpha` over the page."""
+    surface = _resolved(tokens[surf], style, _page_base(tokens, style), alpha)
+    return _ratio(_resolved(tokens[ink], style, surface), surface)
+
+
+def _opaque_surface_violations(rel, lines, members_by_source, tokens) -> list[str]:
+    """Rule A. A contract ink on an OPAQUE surface must clear 4.5 in both appearances.
+
+    An absolute floor is safe here precisely because the surface is opaque: there is no
+    compositing to model, so there is no modelling assumption that could be wrong.
+
+    A member-valued surface is flagged only when EVERY declaring source fails. Member names
+    merge globally (`_fill_valued_members` accepts the same at :949), and `iconBackgroundColor`
+    is declared by two unrelated types — under a plain union, fixing one would leave the other
+    site red forever on tokens it never renders.
+    """
+    out = []
+    for ilineno, ink, slineno, tok, alpha, member in _surface_ink_pairs(lines, members_by_source):
+        if alpha < 1:
+            continue
+        if tok is not None:
+            bad = {s: r for s in ("light", "dark")
+                   if (r := _on_surface(tokens, ink, tok, 1.0, s)) < 4.5}
+            if bad:
+                out.append(f"{rel}:{ilineno}: `{ink}` on `{tok}` (painted line {slineno}) is "
+                           + ", ".join(f"{r:.2f} {s}" for s, r in sorted(bad.items()))
+                           + " — below 4.5")
+            continue
+        sources = members_by_source.get(member, {})
+        failing = {src: sorted(t for t in toks
+                               if min(_on_surface(tokens, ink, t, 1.0, s)
+                                      for s in ("light", "dark")) < 4.5)
+                   for src, toks in sources.items()}
+        if sources and all(failing.values()):
+            worst = sorted({t for v in failing.values() for t in v})
+            # Name a couple of declaring files, not all of them. `color` is declared in 48
+            # places and merges into one set here, so the full list is noise; what actually
+            # diagnoses the site is WHICH tokens it resolves to.
+            named = sorted(sources)[:3]
+            more = f" (+{len(sources) - len(named)} more)" if len(sources) > len(named) else ""
+            out.append(f"{rel}:{ilineno}: `{ink}` on `{member}` (painted line {slineno}) — every "
+                       f"declaring source resolves to text-family tokens, not fills: {worst}. "
+                       f"Declared in {named}{more}. Pair the fill with a matching ink member.")
+    return out
+
+
+def _faded_fill_violations(rel, lines, members_by_source, tokens, contracts) -> list[str]:
+    """Rule B. A FADED fill must still deserve the ink its `carries:` contract names.
+
+    RELATIVE, not an absolute floor, and that distinction is the whole rule. Fading any fill
+    toward the page eventually breaks an absolute floor in one appearance or the other —
+    `primaryFill@0.4` under white measures 1.93 in LIGHT, worse than the defect this exists
+    for — so an absolute rule would redden the three safe precedents (`SignInView`,
+    `ChangePasswordView`, `ForgotPasswordView`) and teach everyone to ignore it.
+
+    Instead: flatten the faded surface, measure BOTH family inks on it, and fire only when the
+    declared ink is no longer the better of the two. The fade has then moved the surface into
+    the other family's territory and the `carries:` contract has become a lie.
+
+    Silent in LIGHT by CONSTRUCTION, not by carve-out: `textOnFill` and `textOnAccent` share
+    the #FFFFFF light arm, so the comparison is a tie there and the rule cannot speak. If the
+    palette ever splits them, the rule starts working in light for free — and
+    `test_the_faded_fill_rule_fires_on_the_regression_it_exists_for` asserts that identity so
+    the change forces a deliberate look rather than passing unnoticed.
+    """
+    out = []
+    for ilineno, ink, slineno, tok, alpha, _ in _surface_ink_pairs(lines, members_by_source):
+        if alpha >= 1 or tok is None or (declared := contracts.get(tok)) is None:
+            continue
+        other = next(i for i in _FILL_INK_TOKEN.values() if i != declared)
+        for style in ("light", "dark"):
+            mine = _on_surface(tokens, declared, tok, alpha, style)
+            theirs = _on_surface(tokens, other, tok, alpha, style)
+            if mine < 4.5 and theirs > mine * 1.2:
+                out.append(
+                    f"{rel}:{ilineno}: `{tok}` faded to {alpha} (painted line {slineno}) declares "
+                    f"`{declared}`, which measures {mine:.2f} {style} — but `{other}` measures "
+                    f"{theirs:.2f}. The fade moved this surface into the other family; ink and "
+                    f"surface must fade together instead.")
+    return out
+
+
+def _members_by_source() -> dict[str, dict[str, set]]:
+    """{memberName: {declaringFile: canonical surface tokens}} across the tree.
+
+    Per-source rather than merged — see `_opaque_surface_violations`.
+    """
+    surfaces = _surface_tokens()
+    out: dict[str, dict[str, set]] = {}
+    for path in _swift_files():
+        for name, toks in _surface_valued_members(_code_lines(path), surfaces).items():
+            out.setdefault(name, {})[_rel(path)] = toks
+    return out
+
+
+def test_surface_arm_scanner_reads_every_arm():
+    """The `finditer`-not-`search` trap, pinned. A `search` here returns the opaque arm of
+    the ternary, measures 6.41, passes — and the faded arm that was actually broken is never
+    looked at. This assertion is the difference between a rule and a decoration."""
+    surfaces = _surface_tokens()
+    assert _surface_arms(
+        ".fill(isEnabled ? AppColors.lossFill : AppColors.lossFill.opacity(0.4))", surfaces
+    ) == [("lossFill", 1.0), ("lossFill", 0.4)]
+    # Aliases resolve, and `gain` must not shadow `gainFill` in the alternation.
+    assert _surface_arms(".fill(AppColors.bullish)", surfaces) == [("gain", 1.0)]
+    assert _surface_arms(".fill(AppColors.gainFill)", surfaces) == [("gainFill", 1.0)]
+    assert _surface_arms(".fill(AppColors.cardBackground)", surfaces) == []
+
+
+def test_contract_ink_surface_scanner_is_not_vacuous():
+    """Every population this section decides on, asserted non-trivial. A scanner that
+    quietly stops matching turns both rules below permanently green."""
+    surfaces = _surface_tokens()
+    assert len(surfaces) >= 20, surfaces
+    # The derived set must still contain the tokens the two defects were painted with — a
+    # manifest role edit must not silently empty jurisdiction.
+    assert {"gain", "loss", "caution", "primaryBlue", "alertPurple",
+            "gainFill", "lossFill"} <= set(surfaces), surfaces
+
+    members = _members_by_source()
+    pairs, files, faded = [], set(), 0
+    for path in _swift_files():
+        found = _surface_ink_pairs(_code_lines(path), members)
+        if found:
+            files.add(_rel(path))
+        pairs += found
+        faded += sum(1 for p in found if p[4] < 1)
+    assert len(members) >= 30, f"only {len(members)} surface-valued members"
+    assert len(pairs) >= 30, f"only {len(pairs)} ink/surface candidate pairs"
+    assert len(files) >= 15, f"only {len(files)} files"
+    assert faded >= 1, "no translucent surface candidates — rule B has nothing to decide on"
+
+
+def test_the_opaque_surface_rule_fires_on_the_regression_it_exists_for():
+    """Positive control driving the PRODUCTION scanner, not a restatement of a constant.
+
+    The rule it replaces (`test_the_fill_ink_rule_fires_on_each_family`, below) recomputed a
+    dict lookup in its own body and never called the scanner at all, so a broken regex or a
+    mis-sized window would have left all six of its probes green. These probes go through
+    `_surface_ink_pairs` -> `_surface_arms` -> `_on_surface`, so they fail if any link breaks.
+    """
+    tokens = _declared_tokens(_sections()[0])
+
+    def fires(src: str, members=None) -> list:
+        lines = [(i + 1, l) for i, l in enumerate(src.splitlines())]
+        return _opaque_surface_violations("Probe.swift", lines, members or {}, tokens)
+
+    # The LibraryBookCard shape: a text-family token painted as a tile, ink six lines later.
+    assert fires("""
+        ZStack {
+            Circle()
+                .fill(AppColors.gain)
+                .frame(width: 24, height: 24)
+            Image(systemName: "checkmark")
+                .foregroundColor(AppColors.textOnAccent)
+        }
+    """), "white on #22C55E is 2.28 in dark and must fire"
+    # ...and through an ALIAS, so the alias map stays load-bearing here too.
+    assert fires("""
+        Circle().fill(AppColors.bullish)
+        Text("x").foregroundColor(AppColors.textOnAccent)
+    """), "the alias path is dead"
+    # The TrendingAnalysisRow shape: the surface is a member declared elsewhere.
+    assert fires(
+        'RoundedRectangle().fill(analysis.iconBackgroundColor)\n'
+        '    .foregroundColor(AppColors.textOnAccent)',
+        {"iconBackgroundColor": {"Models/X.swift": {"gain"}}},
+    ), "the member path is dead"
+    # The fix must be silent.
+    assert not fires("""
+        Circle().fill(AppColors.gainFill)
+        Image(systemName: "checkmark").foregroundColor(AppColors.textOnFill)
+    """)
+    # A text token used as INK on a card is the common, correct case and must never fire.
+    assert not fires('Text("x").foregroundColor(AppColors.gain)\n'
+                     '    .background(AppColors.cardBackground)')
+    # A member whose OTHER declaring source is fine is not flagged — the merge mitigation.
+    assert not fires(
+        'RoundedRectangle().fill(analysis.iconBackgroundColor)\n'
+        '    .foregroundColor(AppColors.textOnAccent)',
+        {"iconBackgroundColor": {"Models/X.swift": {"gain"},
+                                 "Models/Y.swift": {"primaryFill"}}},
+    )
+
+
+def test_the_faded_fill_rule_fires_on_the_regression_it_exists_for():
+    """Positive control for rule B, plus the assumption that makes it safe in light."""
+    tokens = _declared_tokens(_sections()[0])
+    contracts = {s["name"]: s["carries"] for s in _specs(_sections()[2]) if s["carries"]}
+
+    def fires(src: str) -> list:
+        lines = [(i + 1, l) for i, l in enumerate(src.splitlines())]
+        return _faded_fill_violations("Probe.swift", lines, {}, tokens, contracts)
+
+    assert fires('Text("Delete").foregroundColor(AppColors.textOnFill)\n'
+                 '    .background(Capsule().fill(isEnabled ? AppColors.lossFill '
+                 ': AppColors.lossFill.opacity(0.4)))'), \
+        "the ReportsSelectionBar regression must fire"
+    # The three safe precedents: white on a fill fading toward a dark page only improves.
+    assert not fires('Text("Sign In").foregroundColor(AppColors.textOnAccent)\n'
+                     '    .background(canSubmit ? AppColors.primaryFill '
+                     ': AppColors.primaryFill.opacity(0.4))')
+    # A tinted chip never reaches the rule at all — its ink is not a contract ink.
+    assert not fires('Text("x").foregroundColor(AppColors.bearish)\n'
+                     '    .background(AppColors.bearish.opacity(0.15))')
+    # WHY the rule is silent in light, asserted rather than assumed. If the palette ever
+    # splits these, this fails and forces someone to re-examine the light leg instead of
+    # letting it stay quietly dead.
+    assert tokens["textOnFill"].light == tokens["textOnAccent"].light, \
+        "the two contract inks no longer tie in light — rule B can now speak there, re-check it"
+    assert tokens["textOnFill"].dark != tokens["textOnAccent"].dark
+
+
+def test_a_contract_ink_measures_against_the_surface_it_actually_sits_on():
+    """Rule A over the tree: an opaque surface under a contract ink must clear 4.5."""
+    tokens = _declared_tokens(_sections()[0])
+    members = _members_by_source()
+    violations = []
+    for path in _swift_files():
+        violations += _opaque_surface_violations(
+            _rel(path), _code_lines(path), members, tokens)
+    assert not violations, "\n".join(sorted(set(violations)))
+
+
+def test_a_faded_fill_still_deserves_the_ink_its_contract_declares():
+    """Rule B over the tree: fading a fill must not hand it to the other family's ink."""
+    tokens = _declared_tokens(_sections()[0])
+    contracts = {s["name"]: s["carries"] for s in _specs(_sections()[2]) if s["carries"]}
+    assert len(contracts) == 7, f"expected seven fills with a carries: contract, got {contracts}"
+    members = _members_by_source()
+    violations = []
+    for path in _swift_files():
+        violations += _faded_fill_violations(
+            _rel(path), _code_lines(path), members, tokens, contracts)
+    assert not violations, "\n".join(sorted(set(violations)))
 
 
 # ── 7. The shell rules that stayed in the shell ──────────────────────────────

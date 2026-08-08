@@ -50,7 +50,7 @@ struct MoversToggle: View {
                 // for a card, and on `toggleSelectedBackground` they measured 4.34 / 4.44
                 // light and 3.73 dark — this was the app's only sentiment-on-control-
                 // surface pairing. `textOnAccent` on gainFill/lossFill is 5.42 / 5.55.
-                .foregroundColor(isActive ? AppColors.textOnAccent : AppColors.textMuted)
+                .foregroundColor(isActive ? AppColors.textOnFill : AppColors.textMuted)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(isActive ? active : Color.clear)

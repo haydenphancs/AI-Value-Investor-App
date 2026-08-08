@@ -122,6 +122,22 @@ struct AppColors {
     /// gradients). Constant white by design in both modes.
     static let textOnAccent = Color(lightHex: "FFFFFF", darkHex: "FFFFFF", boostsUnderIncreasedContrast: false)
 
+    /// Ink on an ADAPTIVE fill — `gainFill` / `lossFill`, which are byte-equal to
+    /// `gain` / `loss` and therefore BRIGHT in dark. White on those is 2.28 / 2.77;
+    /// this flips to near-black in dark and measures 7.79 / 6.41.
+    ///
+    /// Byte-identical to `textInverse` today and named separately on purpose, the same
+    /// way `cardBackgroundNested` is named separately from `cardBackgroundLight`:
+    /// `textInverse` is ink on `surfaceInverse` (a toast), this is ink on a saturated
+    /// fill. The intent differs and they may diverge — and keeping them distinct is what
+    /// lets `test_text_tokens_never_sit_on_a_fill` still BAN `textInverse` on a fill as
+    /// the role confusion it is, while requiring this one.
+    ///
+    /// `.decorative` in the manifest for exactly the reason `textOnAccent` is: its
+    /// contrast IS verified, in REVERSE, by every `carries: .onFill` spec — the only
+    /// direction that means anything for an ink token.
+    static let textOnFill = Color(lightHex: "FFFFFF", darkHex: "111827", boostsUnderIncreasedContrast: false)
+
     /// Text on `surfaceInverse`.
     static let textInverse = Color(lightHex: "FFFFFF", darkHex: "111827", boostsUnderIncreasedContrast: false)
 
@@ -157,26 +173,43 @@ struct AppColors {
     static let accentCyan = Color(lightHex: "0E7490", darkHex: "06B6D4")
     static let accentYellow = Color(lightHex: "8F6100", darkHex: "FACC15")
 
-    // ━━━ FILLS — saturated backgrounds that WHITE TEXT sits on ━━━
+    // ━━━ FILLS — saturated backgrounds that carry ink ━━━
     //
     // Buttons, selected chips, badges, destructive actions.
     //
-    // THE RULE: a fill token is that colour's LIGHT-mode text value, used in
-    // BOTH modes. That falls straight out of the maths — a value chosen to give
-    // 4.5:1 as dark ink on white is, by definition, dark enough to give 4.5:1
-    // under white ink. One value, both jobs, no second calibration.
+    // ⚠️ TWO FAMILIES. They are NOT interchangeable, and each declares its ink in
+    // `auditManifest` via `carries:`.
     //
-    // They cannot share the text tokens, because the two roles pull in opposite
-    // directions in dark mode: text-on-a-dark-surface wants a LIGHT colour
-    // (primaryBlue #60A5FA), but white-on-that collapses to 2.24:1.
+    // (a) FROZEN + `textOnAccent` (white) — primaryFill, cautionFill, accentCyanFill,
+    //     alertPurpleFill, alertOrangeFill. A frozen fill is that colour's LIGHT-mode
+    //     text value used in BOTH modes, which falls straight out of the maths: a value
+    //     chosen to give 4.5:1 as dark ink on white is, by definition, dark enough to
+    //     give 4.5:1 UNDER white ink. One value, both jobs, no second calibration.
+    //
+    // (b) ADAPTIVE + `textOnFill` (white in light, near-black in dark) — gainFill and
+    //     lossFill, which are byte-equal to `gain`/`loss`. Freezing them was correct for
+    //     contrast and wrong for the product: the Learn tab ended up with a BRIGHT green
+    //     progress bar (a 3:1 graphic, so it may be light) sitting beside a DARK green
+    //     "Resume Lessons" button — one hue at two lightnesses, 2.9x apart, in one card.
+    //     Darkening the INK instead of the fill fixes the look and improves contrast:
+    //     `textOnFill` on gain is 5.42 light / 7.79 dark, on loss 5.55 / 6.41, and the
+    //     tile-vs-card step goes 2.89 -> 6.89.
+    //
+    // WHY ONE INK CANNOT SERVE BOTH: `textOnFill`'s dark arm on the frozen primaryFill
+    // #2563EB is 3.35:1, and `textOnAccent` on the adaptive dark arms is 2.28 / 2.77 —
+    // WORSE than the defect below that created this whole family. A site inked with the
+    // other family's token is a real regression. `test_text_tokens_never_sit_on_a_fill`
+    // enforces the split per family.
     //
     // These were silently broken app-wide before, in BOTH modes:
     //   white on primaryBlue #3B82F6  = 3.68:1  (15 buttons)
     //   white on bearish    #EF4444   = 3.35:1  (4 destructive buttons)
     //   white on bullish    #22C55E   = 2.28:1
     static let primaryFill = Color(lightHex: "2563EB", darkHex: "2563EB")
-    static let gainFill = Color(lightHex: "0F7A3D", darkHex: "0F7A3D")
-    static let lossFill = Color(lightHex: "CC1F1F", darkHex: "CC1F1F")
+    /// ADAPTIVE — byte-equal to `gain`. Carries `textOnFill`, NOT `textOnAccent`.
+    static let gainFill = Color(lightHex: "0F7A3D", darkHex: "22C55E")
+    /// ADAPTIVE — byte-equal to `loss`. Carries `textOnFill`, NOT `textOnAccent`.
+    static let lossFill = Color(lightHex: "CC1F1F", darkHex: "F87171")
     static let cautionFill = Color(lightHex: "9A6100", darkHex: "9A6100")
     static let accentCyanFill = Color(lightHex: "0E7490", darkHex: "0E7490")
     /// Purple fill for a saturated tile carrying `textOnAccent` ink. The text-role
@@ -356,6 +389,20 @@ extension AppColors {
         case decorative
     }
 
+    /// Which ink a FILL is contractually required to carry. An enum rather than the old
+    /// `carriesOnAccentText: Bool` because two families now coexist and a Bool cannot say
+    /// which: `textOnFill`'s dark arm on the frozen `primaryFill` is 3.35:1 and
+    /// `textOnAccent` on the adaptive `gainFill` is 2.28:1, so the wrong one is a real
+    /// regression in either direction.
+    enum FillInk: String {
+        /// White in both modes — the five FROZEN fills, and the server `.fill` role.
+        case onAccent
+        /// White in light, near-black in dark — the ADAPTIVE `gainFill` / `lossFill`.
+        case onFill
+
+        var color: Color { self == .onAccent ? AppColors.textOnAccent : AppColors.textOnFill }
+    }
+
     struct TokenSpec {
         let name: String
         let color: Color
@@ -363,17 +410,17 @@ extension AppColors {
         /// Keys into `surfaceRegistry` this token is contractually allowed on.
         let surfaces: [String]
         /// Set when a token is a FILL and the check runs the other way round:
-        /// assert `textOnAccent` is legible ON it.
-        let carriesOnAccentText: Bool
+        /// assert the ink named here is legible ON it. `nil` = not a fill.
+        let carries: FillInk?
 
         init(_ name: String, _ color: Color, _ role: TokenRole,
              on surfaces: [String] = TokenSpec.contentSurfaces,
-             carriesOnAccentText: Bool = false) {
+             carries: FillInk? = nil) {
             self.name = name
             self.color = color
             self.role = role
             self.surfaces = surfaces
-            self.carriesOnAccentText = carriesOnAccentText
+            self.carries = carries
         }
 
         /// The surfaces content can land on. `cardBackgroundLight` binds.
@@ -443,6 +490,7 @@ extension AppColors {
         let textMuted = AppColors.textMuted
         let textDisabled = AppColors.textDisabled
         let textOnAccent = AppColors.textOnAccent
+        let textOnFill = AppColors.textOnFill
         let textInverse = AppColors.textInverse
         let gain = AppColors.gain
         let loss = AppColors.loss
@@ -542,13 +590,13 @@ extension AppColors {
         TokenSpec("aiRampEnd", aiRampEnd, .text),
 
         // Fills — checked in REVERSE: is on-accent text legible ON this?
-        TokenSpec("primaryFill", primaryFill, .text, on: [], carriesOnAccentText: true),
-        TokenSpec("gainFill", gainFill, .text, on: [], carriesOnAccentText: true),
-        TokenSpec("lossFill", lossFill, .text, on: [], carriesOnAccentText: true),
-        TokenSpec("cautionFill", cautionFill, .text, on: [], carriesOnAccentText: true),
-        TokenSpec("accentCyanFill", accentCyanFill, .text, on: [], carriesOnAccentText: true),
-        TokenSpec("alertPurpleFill", alertPurpleFill, .text, on: [], carriesOnAccentText: true),
-        TokenSpec("alertOrangeFill", alertOrangeFill, .text, on: [], carriesOnAccentText: true),
+        TokenSpec("primaryFill", primaryFill, .text, on: [], carries: .onAccent),
+        TokenSpec("gainFill", gainFill, .text, on: [], carries: .onFill),
+        TokenSpec("lossFill", lossFill, .text, on: [], carries: .onFill),
+        TokenSpec("cautionFill", cautionFill, .text, on: [], carries: .onAccent),
+        TokenSpec("accentCyanFill", accentCyanFill, .text, on: [], carries: .onAccent),
+        TokenSpec("alertPurpleFill", alertPurpleFill, .text, on: [], carries: .onAccent),
+        TokenSpec("alertOrangeFill", alertOrangeFill, .text, on: [], carries: .onAccent),
 
         // Graphic role — 3:1.
         TokenSpec("gainGraphic", gainGraphic, .graphic, on: ["background", "cardBackground"]),
@@ -615,6 +663,9 @@ extension AppColors {
         // `carriesOnAccentText` fill above, which is the only direction that
         // means anything for it.
         TokenSpec("textOnAccent", textOnAccent, .decorative),
+        // Ink on the two ADAPTIVE fills. `.decorative` for the same reason as
+        // `textOnAccent`: verified in REVERSE by every `carries: .onFill` spec.
+        TokenSpec("textOnFill", textOnFill, .decorative),
     ]
 }
 

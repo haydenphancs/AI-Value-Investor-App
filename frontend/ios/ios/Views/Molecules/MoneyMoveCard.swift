@@ -28,7 +28,7 @@ struct MoneyMoveCard: View {
 
                             Image(systemName: moneyMove.iconName)
                                 .font(AppTypography.iconMedium).fontWeight(.semibold)
-                                .foregroundColor(AppColors.textOnAccent)
+                                .foregroundColor(moneyMove.iconFillInk)
                         }
                     } else {
                         // Compact headphones badge on narrated moves (See-All). Reserve the slot so

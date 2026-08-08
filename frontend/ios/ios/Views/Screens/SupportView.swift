@@ -51,7 +51,9 @@ struct SupportView: View {
     @State private var emailUnavailable = false
     @State private var didCopy = false
 
-    static let supportEmail = "support@caydexinvest.com"
+    /// Defined in `AppInfo`, not here — three screens reference it now, and the one that
+    /// bounced (`feedback@`) did so because there were two places to get it wrong.
+    static let supportEmail = AppInfo.supportEmail
 
     var body: some View {
         LegalDocumentView(
@@ -77,38 +79,19 @@ struct SupportView: View {
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // The address is ALWAYS selectable, whether or not a mail client exists — so this
-            // screen is useful on a device that cannot send mail at all.
-            Text(Self.supportEmail)
-                .font(AppTypography.bodyEmphasis)
-                .foregroundColor(AppColors.primaryBlue)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            // Always selectable, whether or not a mail client exists — so this screen is
+            // useful on a device that cannot send mail at all.
+            SupportAddressText()
 
             if emailUnavailable {
                 // Degraded, in place. `openInSystem` has already raised the toast; this is the
-                // part that actually helps.
-                Text("No email app is set up on this device. Copy the address and write to us from wherever you read mail.")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button {
-                    UIPasteboard.general.string = Self.supportEmail
-                    didCopy = true
-                } label: {
-                    Label(didCopy ? "Copied" : "Copy address",
-                          systemImage: didCopy ? "checkmark" : "doc.on.doc")
-                        .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(AppColors.textOnAccent)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, AppSpacing.md)
-                        .background(
-                            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                                .fill(AppColors.primaryFill)
-                        )
-                }
-                .buttonStyle(PlainButtonStyle())
+                // part that actually helps. Shared with FeedbackView so there is one
+                // implementation of the "no mail client" contract.
+                MailUnavailableCard(
+                    payload: Self.supportEmail,
+                    message: "No email app is set up on this device. Copy the address and write to us from wherever you read mail.",
+                    action: .copy(label: "Copy address")
+                )
             } else {
                 Button {
                     guard let url = URL(

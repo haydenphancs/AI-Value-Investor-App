@@ -484,12 +484,21 @@ enum WhaleTradeAction: String, Codable {
     case bought = "BOUGHT"
     case sold = "SOLD"
 
-    var color: Color {
+    /// The badge SURFACE. `*Fill`, not `bullish`/`bearish` — its only consumer is
+    /// `TradeActionBadge`, which paints this behind ink, and the text tokens are bright in
+    /// dark, so white on them measured 2.28 / 2.77. Named `actionFillColor` rather than the
+    /// bare `fillColor` because the theme guards merge fill-valued members by BARE NAME
+    /// across the tree, and the existing global `fillColor` spans both fill families.
+    ///
+    /// Both arms are ADAPTIVE, so the ink is uniformly `AppColors.textOnFill` — see the badge.
+    /// Replaced a `color` returning the text family; it had exactly one call site and leaving
+    /// it in place would just be a trap for the next person to paint a badge with.
+    var actionFillColor: Color {
         switch self {
         case .bought:
-            return AppColors.bullish
+            return AppColors.gainFill
         case .sold:
-            return AppColors.bearish
+            return AppColors.lossFill
         }
     }
 }

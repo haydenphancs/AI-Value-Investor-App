@@ -19,13 +19,6 @@ struct ProfileView: View {
     @State private var editedName = ""
     /// Presents the upgrade / plan paywall (from the Upgrade card + Add Credits).
     @State private var showPaywall = false
-    /// Set when the feedback `mailto:` cannot be opened (no Mail app — always true on the
-    /// Simulator). Drives an ALERT rather than relying on the global toast: `AppActions` does
-    /// raise one, but `ToastView` is an `.overlay` on `RootView` (iosApp.swift) and this screen
-    /// is presented as a `.fullScreenCover` ABOVE it, so that toast is drawn behind the cover
-    /// and the user never sees it. Verified on the Simulator — the report fired and nothing
-    /// appeared. An alert presents in this screen's own context, so it does.
-    @State private var feedbackMailUnavailable = false
 
     var body: some View {
         NavigationStack {
@@ -95,14 +88,6 @@ struct ProfileView: View {
             Button("Save") { viewModel.saveDisplayName(editedName) }
         } message: {
             Text("This is the name shown on your profile.")
-        }
-        .alert("No Email App", isPresented: $feedbackMailUnavailable) {
-            Button("Copy Address") {
-                UIPasteboard.general.string = SupportView.supportEmail
-            }
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("This device has no app set up to send email. Write to \(SupportView.supportEmail) from wherever you read mail.")
         }
         .sheet(isPresented: $showPaywall) {
             PaywallView()
@@ -383,14 +368,19 @@ struct ProfileView: View {
 
                 settingsRowDivider
 
-                // Feedback
-                ProfileSettingsRow(
-                    icon: "bubble.left.and.bubble.right.fill",
-                    iconColor: AppColors.textSecondary,
-                    title: "Help Us Improve",
-                    showChevron: true
-                ) {
-                    openFeedback()
+                // Feedback — a native screen, like every other row in this card.
+                //
+                // Was a bare `mailto:` with a fixed subject and no body: it did nothing at all
+                // on a device with no mail client, and where it did work it dropped the user
+                // into an empty compose window, so the reports that arrived were untriageable.
+                NavigationLink {
+                    FeedbackView()
+                } label: {
+                    ProfileSettingsRowContent(
+                        icon: "bubble.left.and.bubble.right.fill",
+                        iconColor: AppColors.textSecondary,
+                        title: "Help Us Improve"
+                    )
                 }
             }
             .background(AppColors.cardBackground)
@@ -545,34 +535,16 @@ struct ProfileView: View {
         return AppColors.primaryBlue
     }
 
-    private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-    }
+    // Both come from `AppInfo`, not a local copy: these were byte-identical in two screens
+    // and a third variant in APIClient, and the feedback report needs them too.
+    private var appVersion: String { AppInfo.appVersion }
+    private var buildNumber: String { AppInfo.buildNumber }
 
-    private var buildNumber: String {
-        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
-    }
-
-    // Feedback still hands off to Mail — `SFSafariViewController` accepts http/https ONLY, so
-    // a `mailto:` cannot go through the in-app browser. What it must NOT do is call
-    // `UIApplication.shared.open(url)` bare: that discards the result, and the Simulator has no
-    // Mail app, so the row silently did nothing. `openInSystem` reports the failure instead.
-    //
-    // Help & Support no longer lives here at all — it is `SupportView`, a native screen, which
-    // is why there is only one handler left.
-
-    private func openFeedback() {
-        // `support@`, NOT `feedback@`. Cloudflare Email Routing carries only support@,
-        // copyright@ and privacy@ (LAUNCH_CHECKLIST §2) — feedback@ has no route, so every
-        // message sent from this button bounced or vanished. The subject line keeps the two
-        // streams separable in the one inbox.
-        guard let url = URL(
-            string: "mailto:\(SupportView.supportEmail)?subject=App%20Feedback"
-        ) else { return }
-        openInSystem(url, action: "open your email app") {
-            feedbackMailUnavailable = true
-        }
-    }
+    // No mail handler lives on this screen any more. Both rows that used to own one are now
+    // native screens — Help & Support is `SupportView`, Help Us Improve is `FeedbackView` —
+    // and the mail hand-off happens there, through `MFMailComposeViewController`, which can be
+    // asked up front whether the device can send mail at all. That is what a bare `mailto:`
+    // could never do, and why both rows silently did nothing on the Simulator for so long.
 }
 
 // MARK: - Tier Badge

@@ -19,15 +19,20 @@ struct TrendingAnalysisRow: View {
                 // Category Icon
                 ZStack {
                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .fill(analysis.iconBackgroundColor)
+                        // `iconFillColor`, not `iconBackgroundColor`. The earlier fix here
+                        // corrected the INK (from `textPrimary`, which inverted against a fill
+                        // that does not) but left the SURFACE as the text-safe token — and the
+                        // text-safe values lighten in dark, so white sat at 2.24–2.54:1 across
+                        // the three local themes. Both halves have to move together.
+                        .fill(analysis.iconFillColor)
                         .frame(width: 44, height: 44)
 
                     Image(systemName: analysis.systemIconName)
                         .font(AppTypography.iconMedium).fontWeight(.semibold)
-                        // Ink on a `.fill`-clamped tile is `textOnAccent`, never
-                        // `textPrimary` — the latter is #FFFFFF in dark and #0F172A in
-                        // light, so it inverted against a fill that does not.
-                        .foregroundColor(AppColors.textOnAccent)
+                        // Paired with the fill, because this member spans BOTH families:
+                        // `gainFill` is adaptive and needs near-black, the frozen fills need
+                        // white. A literal token would be wrong for one of them.
+                        .foregroundColor(analysis.iconFillInk)
                 }
 
                 // Text Content

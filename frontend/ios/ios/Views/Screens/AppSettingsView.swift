@@ -28,6 +28,11 @@ struct AppSettingsView: View {
     @State private var isRestoring = false
     @State private var restoreMessage: String?
     @State private var cacheSize = "Calculating..."
+    /// Set when the App Store subscriptions deep link cannot be opened (the Simulator has no
+    /// App Store). An ALERT, not the global toast: `ToastView` is an `.overlay` on `RootView`
+    /// and this screen sits inside the Account `.fullScreenCover`, so a toast raised from here
+    /// is drawn behind the cover and never seen. Verified on the Simulator.
+    @State private var appStoreUnavailable = false
 
     /// Third-party AI processing consent. 5.1.1(ii)/5.1.2 require an accessible way to
     /// withdraw consent, so it is surfaced here rather than only at the first-send gate.
@@ -70,6 +75,11 @@ struct AppSettingsView: View {
                 let ok = await AppLockManager.shared.setEnabled(newValue)
                 if newValue && !ok { appLockEnabled = false }  // enable cancelled → revert
             }
+        }
+        .alert("No App Store", isPresented: $appStoreUnavailable) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("This device can't open the App Store. Manage your subscription in iOS Settings → your name → Subscriptions.")
         }
         .alert("Clear Cache", isPresented: $showClearCacheConfirmation) {
             Button("Cancel", role: .cancel) {}
@@ -426,8 +436,13 @@ struct AppSettingsView: View {
     }
 
     private func openManageSubscription() {
-        if let url = URL(string: "https://apps.apple.com/account/subscriptions") {
-            UIApplication.shared.open(url)
+        // Deliberately NOT the in-app browser: this is an App Store deep link that must be
+        // handled by the App Store app, and `SFSafariViewController` would render a sign-in
+        // wall instead. It does go through `openInSystem` so a device that cannot open it —
+        // the Simulator has no App Store — says so rather than doing nothing.
+        guard let url = URL(string: "https://apps.apple.com/account/subscriptions") else { return }
+        openInSystem(url, action: "open the App Store") {
+            appStoreUnavailable = true
         }
     }
 

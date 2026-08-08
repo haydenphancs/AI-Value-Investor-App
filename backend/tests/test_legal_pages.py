@@ -250,13 +250,16 @@ _IOS_LEGAL_SCREENS = [
     "DisclaimerAcknowledgementView.swift",
     "TermsOfUseView.swift",
     "PrivacyPolicyView.swift",
+    # Added with the screen itself: it describes the personas, so it is exactly the kind of
+    # copy that reintroduces a real investor's name.
+    "SupportView.swift",
 ]
 
 _IOS_SCREENS_DIR = _BACKEND.parent / "frontend" / "ios" / "ios" / "Views" / "Screens"
 
 
 def _swift_user_facing_strings(path: Path) -> str:
-    """Concatenate the double-quoted string literals in a Swift file.
+    r"""Concatenate the double-quoted string literals in a Swift file.
 
     Crude on purpose. Identifiers like `.warrenBuffett` and asset names like
     `"icon_persona_buffett"` are NOT user-facing, and the persona enum legitimately keys on
@@ -264,15 +267,79 @@ def _swift_user_facing_strings(path: Path) -> str:
     prose only, and the callers below scope it to the four legal screens. A blanket scan of
     `Views/` would fire on the whale trackers, which name real 13F filers as a matter of
     public record and are correct to do so.
+
+    Two escaping traps, both of which silently made this return the wrong thing:
+
+    1. A raw `\n` must be excluded from the character class. Without it the match runs from one
+       literal's CLOSING quote to the next literal's OPENING quote — i.e. it returns the Swift
+       code between the strings instead of the strings, which makes every assertion here pass
+       on nothing.
+    2. **A literal containing ANY backslash escape was skipped entirely.** The old pattern was
+       `"([^"\\\n]{12,})"`, whose class excludes `\`, so the match simply failed on those
+       literals rather than truncating — they became invisible. Measured when this was found:
+       **11 skipped literals in `TermsOfUseView.swift` and 11 in `PrivacyPolicyView.swift`**,
+       because those files write smart quotes as `\u{201C}` — the Terms intro paragraph and the
+       "personas are simulations" paragraph were both unscanned. `DisclaimersView.swift` hid
+       its warranty disclaimer the same way, via `\"as is\"`.
+
+       That is a real hole, not a tidiness one: `test_in_app_legal_screen_names_no_real_investor`
+       exists because a real investor's name shipped in this exact prose, and it was reading
+       text with those paragraphs removed. A name inside any smart-quoted paragraph would not
+       have been seen.
+
+    So escapes are now matched AND decoded — `\u{201C}` becomes a real quote character, so an
+    assertion can match prose as written rather than as escaped.
     """
     import re
 
     text = path.read_text(encoding="utf-8")
-    # `\n` must be excluded from the character class. Without it the match runs from one
-    # literal's CLOSING quote to the next literal's OPENING quote — i.e. it returns the Swift
-    # code between the strings instead of the strings, which silently makes every assertion
-    # here test nothing.
-    return "\n".join(re.findall(r'"([^"\\\n]{12,})"', text))
+    # `(?:[^"\\\n]|\\.)` — an ordinary char, OR a backslash and whatever it escapes. That keeps
+    # the literal's own closing quote unambiguous (`\"` is consumed by the second branch) while
+    # no longer discarding the literal wholesale.
+    raw = re.findall(r'"((?:[^"\\\n]|\\.){12,})"', text)
+
+    def _unescape(s: str) -> str:
+        s = re.sub(r"\\u\{([0-9A-Fa-f]{1,8})\}", lambda m: chr(int(m.group(1), 16)), s)
+        return s.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
+
+    return "\n".join(_unescape(s) for s in raw)
+
+
+def test_the_swift_scanner_sees_escaped_literals():
+    r"""Anti-vacuity for the scanner itself — every cross-surface assertion below is only as
+    good as what this returns.
+
+    The original pattern `"([^"\\\n]{12,})"` skipped any literal containing a backslash, so a
+    paragraph written with `\u{201C}` smart quotes was invisible **in full**. That silently
+    hid 11 literals in `TermsOfUseView.swift` and 11 in `PrivacyPolicyView.swift`, including
+    the Terms intro and the "personas are educational simulations" paragraph — the very prose
+    `test_in_app_legal_screen_names_no_real_investor` exists to police.
+
+    Proven by mutation when this was fixed: planting "Warren Buffett" inside that escaped
+    paragraph left the old scanner reporting no match, while the current one fails the build.
+    """
+    src = (
+        'let a = "plain paragraph, long enough to match"\n'
+        'let b = "smart \\u{201C}quoted\\u{201D} paragraph naming Warren Buffett"\n'
+        'let c = "escaped \\"as is\\" warranty disclaimer text"\n'
+    )
+    tmp = _BACKEND / "tests" / "_scanner_probe.swift"
+    tmp.write_text(src, encoding="utf-8")
+    try:
+        out = _swift_user_facing_strings(tmp)
+    finally:
+        tmp.unlink()
+
+    assert "plain paragraph" in out, "the ordinary case regressed"
+    assert "Warren Buffett" in out, (
+        "a literal carrying a \\u{...} escape is invisible again — the smart-quoted paragraphs "
+        "in Terms and Privacy would go unscanned, which is how a real investor's name could sit "
+        "in shipped prose with every guard green"
+    )
+    assert "“" in out and "”" in out, (
+        "escapes must be DECODED, not just matched, so assertions can compare prose as written"
+    )
+    assert '"as is"' in out, 'an escaped \\" literal is still being dropped'
 
 
 @pytest.mark.parametrize("screen", _IOS_LEGAL_SCREENS)
@@ -310,6 +377,74 @@ def test_in_app_terms_carry_the_same_two_prongs_as_the_web_terms():
     assert "general and impersonal" in prose
     assert "hold no positions" in prose
     assert "no fiduciary or advisory relationship" in prose
+
+
+def test_in_app_support_screen_mirrors_the_served_page(client):
+    """`SupportView.swift` is the THIRD hand-maintained mirror, and the least protected one.
+
+    `test_served_copy_matches_the_authored_original` is parametrized over privacy and terms
+    only, because `documents/legal/support.html` does not exist — `support.html` lives solely
+    under `backend/app/templates/legal/`. So there is no byte-level sync between the native
+    screen and the served page at all, and the load-bearing claims have to be asserted on both
+    sides or they drift apart silently.
+
+    Asserting on BOTH sides is the point. Checking only the Swift file would let the web page
+    rot; checking only the page would let the screen rot. These are the claims where a
+    divergence is a legal or factual problem rather than a wording difference.
+    """
+    path = _IOS_SCREENS_DIR / "SupportView.swift"
+    if not path.is_file():
+        pytest.skip(f"{path} not present")
+
+    native = _swift_user_facing_strings(path).lower()
+    served = client.get("/support").text.lower()
+
+    claims = [
+        # The disclaimer that makes the whole product lawful to ship.
+        "not investment advice",
+        "broker-dealer",
+        "general and impersonal",
+        "hold no positions",
+        # Factual claims a user could act on.
+        "not a price target",
+        "45 days",                  # the 13F lag
+        "reportaproblem.apple.com",  # refunds are Apple's, not ours
+        "14.99",
+        "39.99",
+        # Apple requires account deletion to be discoverable (5.1.1(v)).
+        "delete account",
+    ]
+    for claim in claims:
+        assert claim in native, f"SupportView.swift lost the claim {claim!r}"
+        assert claim in served, f"support.html lost the claim {claim!r}"
+
+
+def test_the_support_screen_does_not_depend_on_a_mail_app(client):
+    """The bug this screen exists to fix.
+
+    `Profile → Help & Support` used to be a bare `mailto:` opened with no completion handler.
+    The Simulator ships no Mail app, so the row did nothing at all — silently, in every build.
+    The screen must therefore surface the address as TEXT, not only behind a mail hand-off.
+    """
+    path = _IOS_SCREENS_DIR / "SupportView.swift"
+    if not path.is_file():
+        pytest.skip(f"{path} not present")
+    src = path.read_text(encoding="utf-8")
+
+    assert 'supportEmail = "support@caydexinvest.com"' in src, (
+        "the support address must be a literal on the screen. Cloudflare Email Routing carries "
+        "support@ and copyright@ only — feedback@ has no route and silently bounced."
+    )
+    assert ".textSelection(.enabled)" in src, (
+        "the address must be selectable, so the screen is useful on a device that cannot send "
+        "mail at all — which is the entire failure being fixed"
+    )
+    assert "UIPasteboard.general.string" in src, "no copy affordance for the address"
+    # And the mail button must degrade rather than no-op: `openInSystem`'s onFailure closure.
+    assert "openInSystem(" in src and "emailUnavailable = true" in src, (
+        "the Email button must route through openInSystem and flip to the copyable state on "
+        "failure; a bare UIApplication.shared.open here would reproduce the original bug"
+    )
 
 
 def test_a_missing_page_404s_rather_than_500s(client, monkeypatch, tmp_path):

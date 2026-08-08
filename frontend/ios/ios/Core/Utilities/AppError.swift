@@ -57,6 +57,21 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// forever, against a condition that can never resolve.
     case purchaseAlreadyLinked(message: String)
 
+    /// No installed app can handle a URL we tried to open — `mailto:` with no mail client,
+    /// an App Store link on a device without the App Store, and so on.
+    ///
+    /// Its own case rather than `.unknown`: this is a KNOWN failure mode with a specific,
+    /// actionable message, and root invariant #3 is that a known failure must never land on
+    /// generic copy. `.unknown` would say "An unexpected error occurred. Please try again."
+    /// and offer `.retry` — but retrying is guaranteed to fail again, because nothing on the
+    /// device can service the URL. `.contactSupport` is equally wrong when the link that
+    /// failed *is* the contact-support link.
+    ///
+    /// This existed because every `UIApplication.shared.open` in the app discarded its
+    /// result. `Profile → Help & Support` therefore did nothing at all on the Simulator,
+    /// which ships no Mail app — no UI, no log, for the entire life of the file.
+    case noAppToOpenURL(what: String)
+
     // API errors (from backend)
     case apiError(code: String, message: String)
 
@@ -79,6 +94,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .validationFailed: return "validation"
         case .rateLimited: return "rate_limited"
         case .purchaseAlreadyLinked: return "purchase_already_linked"
+        case .noAppToOpenURL: return "no_app_to_open_url"
         case .apiError(let code, _): return "api_\(code)"
         case .unknown: return "unknown"
         }
@@ -114,6 +130,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Too Many Requests"
         case .purchaseAlreadyLinked:
             return "Purchase Linked Elsewhere"
+        case .noAppToOpenURL:
+            return "Can’t Open That Here"
         case .apiError:
             return "Error"
         case .unknown:
@@ -159,6 +177,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return msg
         case .purchaseAlreadyLinked(let message):
             return message
+        case .noAppToOpenURL(let what):
+            return "This device has no app set up to open \(what)."
         case .rateLimited(let seconds):
             return "Please wait \(seconds) seconds before trying again."
         case .apiError(_, let msg):
@@ -196,6 +216,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // StoreKit transaction alive across every launch.
         case .purchaseAlreadyLinked:
             return .contactSupport
+        // NOT .retry: nothing on the device can service the URL, so a retry is guaranteed to
+        // fail. NOT .contactSupport either — the link that failed may BE contact support.
+        case .noAppToOpenURL:
+            return .goBack
         case .apiError, .unknown:
             return .retry
         }
@@ -545,6 +569,7 @@ extension AppError {
         case .validationFailed:    return "validation_failed"
         case .rateLimited:         return "rate_limited"
         case .purchaseAlreadyLinked: return "purchase_already_linked"
+        case .noAppToOpenURL:      return "no_app_to_open_url"
         // The backend's ErrorCode enum is already a stable machine-readable
         // vocabulary, so it is safe as a dimension. The message is not.
         case .apiError(let code, _): return code

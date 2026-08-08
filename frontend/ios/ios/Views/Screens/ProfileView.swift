@@ -19,6 +19,13 @@ struct ProfileView: View {
     @State private var editedName = ""
     /// Presents the upgrade / plan paywall (from the Upgrade card + Add Credits).
     @State private var showPaywall = false
+    /// Set when the feedback `mailto:` cannot be opened (no Mail app — always true on the
+    /// Simulator). Drives an ALERT rather than relying on the global toast: `AppActions` does
+    /// raise one, but `ToastView` is an `.overlay` on `RootView` (iosApp.swift) and this screen
+    /// is presented as a `.fullScreenCover` ABOVE it, so that toast is drawn behind the cover
+    /// and the user never sees it. Verified on the Simulator — the report fired and nothing
+    /// appeared. An alert presents in this screen's own context, so it does.
+    @State private var feedbackMailUnavailable = false
 
     var body: some View {
         NavigationStack {
@@ -88,6 +95,14 @@ struct ProfileView: View {
             Button("Save") { viewModel.saveDisplayName(editedName) }
         } message: {
             Text("This is the name shown on your profile.")
+        }
+        .alert("No Email App", isPresented: $feedbackMailUnavailable) {
+            Button("Copy Address") {
+                UIPasteboard.general.string = SupportView.supportEmail
+            }
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("This device has no app set up to send email. Write to \(SupportView.supportEmail) from wherever you read mail.")
         }
         .sheet(isPresented: $showPaywall) {
             PaywallView()
@@ -393,14 +408,20 @@ struct ProfileView: View {
             ProfileSectionHeader(title: "About & Legal", icon: "info.circle.fill")
 
             VStack(spacing: 0) {
-                // Help & Support
-                ProfileSettingsRow(
-                    icon: "questionmark.circle.fill",
-                    iconColor: AppColors.textSecondary,
-                    title: "Help & Support",
-                    showChevron: true
-                ) {
-                    openSupport()
+                // Help & Support — a native screen, like the four rows below it.
+                //
+                // This was a bare `mailto:` handler, which meant the row did NOTHING on the
+                // Simulator (no Mail app to hand off to) and on any device without a mail
+                // account. It was also the only row here that tried to leave the app. Email is
+                // still offered, inside SupportView, on a screen that works without it.
+                NavigationLink {
+                    SupportView()
+                } label: {
+                    ProfileSettingsRowContent(
+                        icon: "questionmark.circle.fill",
+                        iconColor: AppColors.textSecondary,
+                        title: "Help & Support"
+                    )
                 }
 
                 settingsRowDivider
@@ -532,25 +553,24 @@ struct ProfileView: View {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 
-    // The two `mailto:` handlers below deliberately use `UIApplication.shared.open`
-    // (not the in-app browser): `SFSafariViewController` accepts http/https ONLY, so a
-    // mailto: must hand off to Mail. Terms/Privacy now open native in-app screens
-    // (TermsOfUseView / PrivacyPolicyView), so there is no longer an in-app web browser
-    // on this screen.
+    // Feedback still hands off to Mail — `SFSafariViewController` accepts http/https ONLY, so
+    // a `mailto:` cannot go through the in-app browser. What it must NOT do is call
+    // `UIApplication.shared.open(url)` bare: that discards the result, and the Simulator has no
+    // Mail app, so the row silently did nothing. `openInSystem` reports the failure instead.
+    //
+    // Help & Support no longer lives here at all — it is `SupportView`, a native screen, which
+    // is why there is only one handler left.
 
     private func openFeedback() {
         // `support@`, NOT `feedback@`. Cloudflare Email Routing carries only support@,
         // copyright@ and privacy@ (LAUNCH_CHECKLIST §2) — feedback@ has no route, so every
         // message sent from this button bounced or vanished. The subject line keeps the two
         // streams separable in the one inbox.
-        if let url = URL(string: "mailto:support@caydexinvest.com?subject=App%20Feedback") {
-            UIApplication.shared.open(url)
-        }
-    }
-
-    private func openSupport() {
-        if let url = URL(string: "mailto:support@caydexinvest.com?subject=Support%20Request") {
-            UIApplication.shared.open(url)
+        guard let url = URL(
+            string: "mailto:\(SupportView.supportEmail)?subject=App%20Feedback"
+        ) else { return }
+        openInSystem(url, action: "open your email app") {
+            feedbackMailUnavailable = true
         }
     }
 }

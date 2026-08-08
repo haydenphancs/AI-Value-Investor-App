@@ -17,11 +17,32 @@ struct LegalSection: Identifiable {
     let paragraphs: [String]
 }
 
-struct LegalDocumentView: View {
+/// - Note: `Header` is an optional slot between the intro and the numbered sections, for a
+///   document that needs something *actionable* up top — `SupportView` puts its contact card
+///   there. It defaults to `EmptyView`, so `TermsOfUseView` / `PrivacyPolicyView` construct this
+///   exactly as before and infer `Header == EmptyView`. Extending this scaffold rather than
+///   hand-rolling a third layout keeps the card styling, scroll behaviour, navigation title and
+///   theming identical across all the long-form screens.
+struct LegalDocumentView<Header: View>: View {
     let title: String
     let lastUpdated: String
     let intro: String
     let sections: [LegalSection]
+    @ViewBuilder var header: () -> Header
+
+    init(
+        title: String,
+        lastUpdated: String,
+        intro: String,
+        sections: [LegalSection],
+        @ViewBuilder header: @escaping () -> Header = { EmptyView() }
+    ) {
+        self.title = title
+        self.lastUpdated = lastUpdated
+        self.intro = intro
+        self.sections = sections
+        self.header = header
+    }
 
     var body: some View {
         ZStack {
@@ -41,6 +62,8 @@ struct LegalDocumentView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.horizontal, AppSpacing.lg)
+
+                    header()
 
                     ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
                         legalCard(index: index + 1, section: section)

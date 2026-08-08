@@ -444,7 +444,7 @@ private struct MoneyMovesCategorySectionHeader: View {
 
                 Image(systemName: category.iconName)
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
-                    .foregroundColor(AppColors.textOnAccent)
+                    .foregroundColor(category.iconFillInk)
             }
 
             // Title and subtitle

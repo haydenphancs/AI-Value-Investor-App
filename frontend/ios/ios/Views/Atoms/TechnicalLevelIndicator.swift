@@ -11,6 +11,10 @@ struct TechnicalLevelIndicator: View {
     let level: Int
     let isActive: Bool
     let activeColor: Color
+    /// Ink for `activeColor`. Defaults to `textOnAccent` for the frozen fills; the row
+    /// below passes `textOnFill` for the levels backed by the ADAPTIVE gain/loss fills.
+    /// One ink cannot serve both — see `AppColors.textOnFill`.
+    var activeInk: Color = AppColors.textOnAccent
 
     var body: some View {
         ZStack {
@@ -25,7 +29,7 @@ struct TechnicalLevelIndicator: View {
                 // `textPrimary` it inverted with the appearance and 4 of the 5
                 // active states failed AA in each mode — dark-navy "1" on dark
                 // red in light, white "4" on light green in dark.
-                .foregroundColor(isActive ? AppColors.textOnAccent : AppColors.textMuted)
+                .foregroundColor(isActive ? activeInk : AppColors.textMuted)
         }
     }
 }
@@ -46,6 +50,16 @@ struct TechnicalLevelIndicatorsRow: View {
         AppColors.gainFill       // Strong Buy
     ]
 
+    /// Paired ink, index-for-index with `levelColors`. `lossFill`/`gainFill` are ADAPTIVE
+    /// and need near-black in dark; `cautionFill` is frozen and needs white.
+    private let levelInks: [Color] = [
+        AppColors.textOnFill,    // Strong Sell  (lossFill)
+        AppColors.textOnFill,    // Sell         (lossFill)
+        AppColors.textOnAccent,  // Hold         (cautionFill, frozen)
+        AppColors.textOnFill,    // Buy          (gainFill)
+        AppColors.textOnFill     // Strong Buy   (gainFill)
+    ]
+
     var body: some View {
         HStack(spacing: 0) {
             ForEach(1...5, id: \.self) { level in
@@ -54,7 +68,8 @@ struct TechnicalLevelIndicatorsRow: View {
                     TechnicalLevelIndicator(
                         level: level,
                         isActive: level == activeLevel,
-                        activeColor: levelColors[level - 1]
+                        activeColor: levelColors[level - 1],
+                        activeInk: levelInks[level - 1]
                     )
                     
                     // Label with fixed height to keep circles aligned

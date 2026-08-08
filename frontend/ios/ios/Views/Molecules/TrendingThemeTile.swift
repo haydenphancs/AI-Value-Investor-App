@@ -48,7 +48,7 @@ struct TrendingThemeTile: View {
             if !theme.changeText.isEmpty {
                 Text(theme.changeText)
                     .font(AppTypography.captionEmphasis)
-                    .foregroundColor(AppColors.textOnAccent)
+                    .foregroundColor(AppColors.textOnFill)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
                     .background(

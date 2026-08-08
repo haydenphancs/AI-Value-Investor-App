@@ -41,6 +41,26 @@ struct RatingBadge: View {
         }
     }
 
+    /// Ink for `backgroundColor`, mirroring its branches EXACTLY. `gainFill`/`lossFill`
+    /// are ADAPTIVE (bright in dark) and need near-black `textOnFill`; `primaryFill` and
+    /// `cautionFill` are frozen and need white. One ink cannot serve both — near-black on
+    /// frozen `primaryFill` is 3.35:1.
+    private var foregroundInk: Color {
+        if maxRating >= 100 {
+            return QualityBand.forScore(Int(rating.rounded())).fillInk
+        }
+        let ratio = rating / maxRating
+        if ratio >= 0.8 {
+            return AppColors.textOnFill      // gainFill
+        } else if ratio >= 0.6 {
+            return AppColors.textOnAccent    // primaryFill (frozen)
+        } else if ratio >= 0.4 {
+            return AppColors.textOnAccent    // cautionFill (frozen)
+        } else {
+            return AppColors.textOnFill      // lossFill
+        }
+    }
+
     private var formattedText: String {
         if maxRating >= 100 {
             return String(format: "%.0f", rating)
@@ -51,7 +71,7 @@ struct RatingBadge: View {
     var body: some View {
         Text(formattedText)
             .font(AppTypography.captionEmphasis)
-            .foregroundColor(AppColors.textOnAccent)
+            .foregroundColor(foregroundInk)
             .padding(.horizontal, AppSpacing.sm)
             .padding(.vertical, AppSpacing.xs)
             .background(backgroundColor)

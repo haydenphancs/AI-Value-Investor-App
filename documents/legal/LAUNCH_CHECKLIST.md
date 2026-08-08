@@ -661,7 +661,16 @@ No longer blocked — your existing Individual account can create this record (s
 - [ ] Privacy Policy URL → `https://caydexinvest.com/privacy`
 - [ ] Support URL → `https://caydexinvest.com/support`
 - [ ] **App Privacy questionnaire** → read straight from
-      `documents/legal/app-privacy-answers.md`. Eight data types, tracking = No
+      `documents/legal/app-privacy-answers.md`. **Nine** data types, tracking = No.
+      ⚠️ The ninth is **User Content → Photos or Videos** (Linked = Yes, purpose = App
+      Functionality), added 2026-08-07 with the Help Us Improve screen: the user can attach a
+      screenshot to a bug report, which is emailed to `support@`. It is optional and
+      user-initiated, and `PhotosPicker` runs out of process so there is no permission prompt —
+      but the image reaches us, so it is declared. The code and the two machine-readable
+      surfaces are pinned together by
+      `tests/test_ios_feedback_flow.py::test_photos_usage_and_the_privacy_filing_agree`, which
+      fails the build if they disagree **in either direction**; this ASC answer is the one part
+      no test can reach, so it is on you.
 - [ ] Category: Finance. **Age rating: 17+.** ⚠️ This line said **4+** until 2026-08-07 and that
       was an inconsistency App Review reads as carelessness: `documents/legal/terms.html:41`
       (mirrored verbatim in `Views/Screens/TermsOfUseView.swift:27`) requires users to be **18

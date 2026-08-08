@@ -49,7 +49,7 @@ struct ManageTickersSheet: View {
                         Spacer()
                         Text(errorMessage)
                             .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textOnAccent)
+                            .foregroundColor(AppColors.textOnFill)
                             .padding(AppSpacing.md)
                             .background(AppColors.lossFill)
                             .cornerRadius(AppCornerRadius.medium)

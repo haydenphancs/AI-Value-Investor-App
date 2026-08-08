@@ -90,11 +90,23 @@ struct AnalysisPersona: Identifiable, Hashable {
     /// PersonaCard used to split `name` itself into first-word / last-word, which read
     /// correctly while names were real people ("Warren" / "Buffett") and became
     /// "The" / "Compounder" once the personas were renamed to style names.
-    var cardNameLines: (top: String, bottom: String) {
-        var words = name.split(separator: " ").map(String.init)
-        if words.count > 1, words[0].caseInsensitiveCompare("the") == .orderedSame {
-            words.removeFirst()
+    /// `name` without the leading article — "The Quality Compounder" → "Quality Compounder".
+    ///
+    /// For anywhere the name sits inline beside a label and cannot afford 22–26 characters.
+    /// The General Settings "Default Analyst" row is the case that prompted it: at full length
+    /// the two longest truncated to "The Everyday Growth H…", which names nothing. Dropping the
+    /// article buys 4 characters and costs no meaning — the same trade `cardNameLines` already
+    /// makes, which is why that now shares this instead of repeating the rule.
+    var compactName: String {
+        let words = name.split(separator: " ").map(String.init)
+        guard words.count > 1, words[0].caseInsensitiveCompare("the") == .orderedSame else {
+            return name
         }
+        return words.dropFirst().joined(separator: " ")
+    }
+
+    var cardNameLines: (top: String, bottom: String) {
+        let words = compactName.split(separator: " ").map(String.init)
         guard let last = words.last else { return ("", name) }
         return (words.dropLast().joined(separator: " "), last)
     }
@@ -335,9 +347,30 @@ struct TrendingAnalysis: Identifiable, Hashable {
     let interestPercent: Int
     let iconName: String
     let systemIconName: String
+
+    /// TEXT-safe. Read as a foreground and as a 20%-alpha wash — `TrendingAnalysisDetailView`
+    /// inks the hero glyph and the stat-card icons with it and washes the hero circle behind
+    /// it. NOT a tile surface: see `iconFillColor`.
     let iconBackgroundColor: Color
 
-    init(title: String, description: String, companies: [TrendingCompany], interestPercent: Int, iconName: String, systemIconName: String, iconBackgroundColor: Color) {
+    /// The same hue as a SATURATED TILE that ink sits on — `TrendingAnalysisRow`'s 44×44
+    /// icon square.
+    ///
+    /// Split from `iconBackgroundColor` rather than replacing it, exactly as
+    /// `LessonCategory.iconBackgroundColor`/`iconFillColor` and `AnalysisPersona.accentColor`/
+    /// `accentFill` already are, and for the same measured reason: the two roles pull in
+    /// OPPOSITE directions in dark. The text-safe values LIGHTEN there, so white on
+    /// `primaryBlue` #60A5FA is 2.24:1, on `gain` #22C55E 2.28:1, on `alertPurple` #C084FC
+    /// 2.64:1 — which is what the row was rendering, because it painted the text token.
+    let iconFillColor: Color
+
+    /// The ink `iconFillColor` requires. Stored rather than derived because this member spans
+    /// BOTH fill families — `gainFill` is adaptive and needs near-black, the frozen fills need
+    /// white — and a `Color` value cannot be asked at runtime which family it came from.
+    /// One ink cannot serve both: near-black on frozen `primaryFill` is 3.35:1.
+    let iconFillInk: Color
+
+    init(title: String, description: String, companies: [TrendingCompany], interestPercent: Int, iconName: String, systemIconName: String, iconBackgroundColor: Color, iconFillColor: Color, iconFillInk: Color) {
         self.id = UUID()
         self.title = title
         self.description = description
@@ -346,6 +379,8 @@ struct TrendingAnalysis: Identifiable, Hashable {
         self.iconName = iconName
         self.systemIconName = systemIconName
         self.iconBackgroundColor = iconBackgroundColor
+        self.iconFillColor = iconFillColor
+        self.iconFillInk = iconFillInk
     }
 
     static func == (lhs: TrendingAnalysis, rhs: TrendingAnalysis) -> Bool {
@@ -387,7 +422,9 @@ struct TrendingAnalysis: Identifiable, Hashable {
             interestPercent: 127,
             iconName: "icon_trending_ai",
             systemIconName: "brain.head.profile",
-            iconBackgroundColor: AppColors.primaryBlue
+            iconBackgroundColor: AppColors.primaryBlue,
+            iconFillColor: AppColors.primaryFill,
+            iconFillInk: AppColors.textOnAccent
         ),
         TrendingAnalysis(
             title: "Clean Energy Sector",
@@ -405,7 +442,10 @@ struct TrendingAnalysis: Identifiable, Hashable {
             interestPercent: 89,
             iconName: "icon_trending_energy",
             systemIconName: "bolt.fill",
-            iconBackgroundColor: AppColors.gain
+            iconBackgroundColor: AppColors.gain,
+            // The one ADAPTIVE case here, hence near-black ink rather than white.
+            iconFillColor: AppColors.gainFill,
+            iconFillInk: AppColors.textOnFill
         ),
         TrendingAnalysis(
             title: "Quantum Computing",
@@ -421,7 +461,9 @@ struct TrendingAnalysis: Identifiable, Hashable {
             interestPercent: 156,
             iconName: "icon_trending_quantum",
             systemIconName: "atom",
-            iconBackgroundColor: AppColors.alertPurple
+            iconBackgroundColor: AppColors.alertPurple,
+            iconFillColor: AppColors.alertPurpleFill,
+            iconFillInk: AppColors.textOnAccent
         )
     ]
 }
@@ -833,11 +875,18 @@ extension TrendingAnalysis {
             interestPercent: item.interestPercent,
             iconName: "",
             systemIconName: item.systemIconName,
-            // `.fill`: drawn as a saturated 44×44 tile carrying `textOnAccent` ink in
-            // `TrendingAnalysisRow`. Under `.graphic` this was the worst site in the app —
-            // the clamp BRIGHTENS in dark, which is right for a chart dot on a card and
-            // backwards under white ink.
-            iconBackgroundColor: Color(themedHex: item.iconBackgroundColor, role: .fill, fallback: AppColors.primaryFill)
+            // ONE server hex, clamped TWICE — once per role, because this value is read as
+            // both. Previously it was clamped `.fill` only, on the grounds that
+            // `TrendingAnalysisRow` paints it as a saturated 44×44 tile; that left
+            // `TrendingAnalysisDetailView` inking its hero glyph and stat-card icons with a
+            // `.fill`-clamped colour, which is the same role confusion pointing the other
+            // way. The row now takes `iconFillColor` and the detail view keeps the text-safe
+            // arm, so each clamp matches the job it is used for.
+            iconBackgroundColor: Color(themedHex: item.iconBackgroundColor, role: .text, fallback: AppColors.primaryBlue),
+            iconFillColor: Color(themedHex: item.iconBackgroundColor, role: .fill, fallback: AppColors.primaryFill),
+            // `.fill` guarantees white clears 4.5 ON the result, which is what that clamp is
+            // FOR — so the server arm is always the frozen family's ink.
+            iconFillInk: AppColors.textOnAccent
         )
     }
 }

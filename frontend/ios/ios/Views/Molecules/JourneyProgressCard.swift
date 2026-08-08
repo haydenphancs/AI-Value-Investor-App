@@ -73,12 +73,17 @@ struct JourneyProgressCard: View {
             Button(action: {
                 onContinue?()
             }) {
+                // `fillColor`/`fillInk`, not `color` — `InvestorLevel.color` is the TEXT
+                // family (gain/primaryBlue/alertPurple/caution), which is bright in dark, so
+                // white on it measured 2.24–2.64 across all four levels. This is the same
+                // button as `InvestorJourneySection`'s, which was already corrected; the copy
+                // here kept the old spelling.
                 Text("Resume Lessons")
                     .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(AppColors.textOnAccent)
+                    .foregroundColor(track.level.fillInk)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, AppSpacing.md)
-                    .background(track.level.color)
+                    .background(track.level.fillColor)
                     .cornerRadius(AppCornerRadius.medium)
             }
             .buttonStyle(PlainButtonStyle())

@@ -162,6 +162,18 @@ enum QualityBand {
         case .distressed:         return AppColors.lossFill
         }
     }
+
+    /// The ink `fillColor` requires, mirroring that switch CASE FOR CASE.
+    /// `gainFill`/`lossFill` are ADAPTIVE (bright in dark) and need near-black
+    /// `textOnFill`; the frozen fills need white `textOnAccent`. One ink cannot
+    /// serve both — near-black on frozen `primaryFill` is 3.35:1 and white on the
+    /// adaptive dark arms is 2.28/2.77.
+    var fillInk: Color {
+        switch self {
+        case .excellent, .strong, .distressed: return AppColors.textOnFill
+        case .fair, .weak:                     return AppColors.textOnAccent
+        }
+    }
 }
 
 struct ReportQualityRating {

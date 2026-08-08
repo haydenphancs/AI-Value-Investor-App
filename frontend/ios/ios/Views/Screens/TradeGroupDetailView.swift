@@ -399,12 +399,16 @@ struct TradeActionBadge: View {
     let action: WhaleTradeAction
 
     var body: some View {
+        // `textOnFill` on `actionFillColor`: both arms of that member are the ADAPTIVE
+        // gain/loss fills, which are bright in dark, so the white this used to carry sat at
+        // 2.28 (BOUGHT) / 2.77 (SOLD). It read as a fill-family pairing but the surface was
+        // the TEXT family, which is why no fill rule was in jurisdiction.
         Text(action.rawValue)
             .font(AppTypography.caption).fontWeight(.bold)
-            .foregroundColor(AppColors.textOnAccent)
+            .foregroundColor(AppColors.textOnFill)
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.xs)
-            .background(action.color)
+            .background(action.actionFillColor)
             .cornerRadius(AppCornerRadius.small)
     }
 }

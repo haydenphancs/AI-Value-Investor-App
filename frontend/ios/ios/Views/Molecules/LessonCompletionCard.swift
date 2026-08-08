@@ -115,7 +115,7 @@ struct LessonCompletionCard: View {
             // Checkmark icon
             Image(systemName: "checkmark")
                 .font(AppTypography.iconJumbo).fontWeight(.bold)
-                .foregroundColor(AppColors.textOnAccent)
+                .foregroundColor(AppColors.textOnFill)
         }
     }
 

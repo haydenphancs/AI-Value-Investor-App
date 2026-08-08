@@ -123,14 +123,20 @@ enum ThemeContrastAudit {
             for spec in AppColors.auditManifest {
                 let required = floor(for: spec.role)
 
-                // A fill is checked in reverse: is on-accent text legible ON it?
-                if spec.carriesOnAccentText {
+                // A fill is checked in reverse: is the ink it DECLARES legible ON it?
+                //
+                // The ink comes from `spec.carries`, not a hardcoded `textOnAccent`.
+                // Two families exist: the frozen fills carry white, while the adaptive
+                // `gainFill`/`lossFill` carry near-black `textOnFill` in dark. Measuring
+                // the wrong one is silently backwards — white on the adaptive dark arms
+                // is 2.28/2.77 and near-black on a frozen fill is 3.35.
+                if let ink = spec.carries {
                     let fill = resolve(spec.color, style)
-                    let onAccent = resolve(AppColors.textOnAccent, style)
-                    let measured = ratio(onAccent, fill)
+                    let inkColor = resolve(ink.color, style)
+                    let measured = ratio(inkColor, fill)
                     if measured < 4.5 {
                         failures.append(Failure(style: styleName,
-                                               token: "textOnAccent",
+                                               token: ink.rawValue,
                                                surface: spec.name,
                                                measured: measured,
                                                required: 4.5))
@@ -348,6 +354,17 @@ enum ThemeContrastAudit {
             ("shadowCard", "shadowAmbient", AppColors.shadowCard, AppColors.shadowAmbient),
             ("cardBackgroundNested", "cardBackground",
              AppColors.cardBackgroundNested, AppColors.cardBackground),
+            // The two ADAPTIVE fills. Making them adaptive was justified entirely by
+            // "light mode does not move" — a frozen fill's value already WAS its text
+            // counterpart's light arm, so only the dark arm changed. That claim is
+            // unfalsifiable by inspection (light and dark are separate arms of one
+            // declaration) and unfalsifiable by screenshot (the app's own content
+            // changes between runs), so it is asserted here instead.
+            ("gainFill", "gain", AppColors.gainFill, AppColors.gain),
+            ("lossFill", "loss", AppColors.lossFill, AppColors.loss),
+            // Same for the ink: `textOnFill` must stay white in LIGHT, exactly as
+            // `textOnAccent` is, or every fill site it was swapped onto moves in light.
+            ("textOnFill", "textOnAccent", AppColors.textOnFill, AppColors.textOnAccent),
         ]
 
         var failures = pairs.compactMap { pair -> Failure? in

@@ -53,11 +53,12 @@ private struct SwatchRow: View {
     /// same reason. A preview that is permanently part-red is a preview people learn to
     /// ignore, which is worse than not having one.
     private var measurement: (ratio: Double, floor: Double, against: String)? {
-        if swatch.spec.carriesOnAccentText {
-            // A FILL: the check runs the other way round — is `textOnAccent` legible ON it?
-            return (ThemeContrastAudit.ratio(resolve(AppColors.textOnAccent),
-                                             resolve(swatch.color)),
-                    4.5, "textOnAccent on it")
+        if let ink = swatch.spec.carries {
+            // A FILL: the check runs the other way round — is the ink it DECLARES legible
+            // ON it? `gainFill`/`lossFill` declare `textOnFill` (near-black in dark);
+            // the frozen fills declare `textOnAccent`.
+            return (ThemeContrastAudit.ratio(resolve(ink.color), resolve(swatch.color)),
+                    4.5, "\(ink.rawValue) on it")
         }
         let floor = ThemeContrastAudit.floor(for: swatch.role)
         guard floor > 0 else { return nil }

@@ -425,26 +425,46 @@ def test_the_support_screen_does_not_depend_on_a_mail_app(client):
     `Profile → Help & Support` used to be a bare `mailto:` opened with no completion handler.
     The Simulator ships no Mail app, so the row did nothing at all — silently, in every build.
     The screen must therefore surface the address as TEXT, not only behind a mail hand-off.
-    """
-    path = _IOS_SCREENS_DIR / "SupportView.swift"
-    if not path.is_file():
-        pytest.skip(f"{path} not present")
-    src = path.read_text(encoding="utf-8")
 
-    assert 'supportEmail = "support@caydexinvest.com"' in src, (
-        "the support address must be a literal on the screen. Cloudflare Email Routing carries "
-        "support@ and copyright@ only — feedback@ has no route and silently bounced."
-    )
-    assert ".textSelection(.enabled)" in src, (
-        "the address must be selectable, so the screen is useful on a device that cannot send "
+    The behaviour now lives in a shared molecule (`MailUnavailableCard.swift`) because a third
+    screen — FeedbackView — needed the identical degradation and hand-rolling it again was how
+    the first two variants came to differ. So this asserts the behaviour AT the component, and
+    that each mail-CTA screen actually uses it. Pinning the literals inside `SupportView.swift`
+    (as an earlier revision did) would fail the moment the logic is correctly shared, which is
+    the wrong incentive — a guard should survive the refactor it is meant to protect.
+    """
+    shared = _IOS_SCREENS_DIR.parent / "Molecules" / "MailUnavailableCard.swift"
+    if not shared.is_file():
+        pytest.skip(f"{shared} not present")
+    molecule = shared.read_text(encoding="utf-8")
+
+    assert ".textSelection(.enabled)" in molecule, (
+        "the address must be selectable, so a screen is useful on a device that cannot send "
         "mail at all — which is the entire failure being fixed"
     )
-    assert "UIPasteboard.general.string" in src, "no copy affordance for the address"
-    # And the mail button must degrade rather than no-op: `openInSystem`'s onFailure closure.
-    assert "openInSystem(" in src and "emailUnavailable = true" in src, (
-        "the Email button must route through openInSystem and flip to the copyable state on "
-        "failure; a bare UIApplication.shared.open here would reproduce the original bug"
+    assert "UIPasteboard.general.string" in molecule, "no copy affordance for the address"
+
+    # One address, defined once. Cloudflare Email Routing carries support@ and copyright@ only —
+    # feedback@ has NO route and silently bounced every message sent to it.
+    app_info = _IOS_SCREENS_DIR.parent.parent / "Core" / "Utilities" / "AppInfo.swift"
+    assert app_info.is_file(), "AppInfo.swift is the home for the support address"
+    assert 'supportEmail = "support@caydexinvest.com"' in app_info.read_text(encoding="utf-8"), (
+        "the support address must be defined in AppInfo, and must be support@"
     )
+
+    # Every screen with a mail CTA must actually USE the shared degradation, not re-roll it.
+    for screen in ("SupportView.swift", "FeedbackView.swift"):
+        path = _IOS_SCREENS_DIR / screen
+        if not path.is_file():
+            continue
+        src = path.read_text(encoding="utf-8")
+        assert "MailUnavailableCard(" in src, (
+            f"{screen} has a mail CTA but does not use MailUnavailableCard — a hand-rolled "
+            f"copy is how the two existing variants drifted apart"
+        )
+        assert "UIPasteboard.general.string" not in src, (
+            f"{screen} re-implements the copy affordance instead of using the shared molecule"
+        )
 
 
 def test_a_missing_page_404s_rather_than_500s(client, monkeypatch, tmp_path):

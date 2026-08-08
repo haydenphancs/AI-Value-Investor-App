@@ -87,7 +87,7 @@ struct InvestorJourneySection: View {
                         }) {
                             Text("Resume Lessons")
                                 .font(AppTypography.bodyEmphasis)
-                                .foregroundColor(AppColors.textOnAccent)
+                                .foregroundColor(track.level.fillInk)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, AppSpacing.md)
                                 .background(track.level.fillColor)
@@ -149,7 +149,7 @@ struct InvestorJourneySection: View {
 
                         Image(systemName: level.iconName)
                             .font(AppTypography.iconMedium).fontWeight(.semibold)
-                            .foregroundColor(isActive || isCompleted ? AppColors.textOnAccent : AppColors.textMuted)
+                            .foregroundColor(isActive || isCompleted ? level.fillInk : AppColors.textMuted)
                     }
                 }
 

@@ -218,6 +218,18 @@ struct WhaleAvatarView: View {
         return colors[abs(name.hashValue) % colors.count]
     }
 
+    /// Ink for `backgroundColor`, index-for-index with the palette above. Slots 1 and 5
+    /// are the ADAPTIVE `gainFill`/`lossFill` and need near-black in dark; the other four
+    /// are frozen and need white. One ink cannot serve both — see `AppColors.textOnFill`.
+    private var backgroundInk: Color {
+        let inks: [Color] = [
+            AppColors.textOnAccent, AppColors.textOnFill,
+            AppColors.textOnAccent, AppColors.textOnAccent,
+            AppColors.textOnAccent, AppColors.textOnFill,
+        ]
+        return inks[abs(name.hashValue) % inks.count]
+    }
+
     var body: some View {
         if category == .institutions, let url = avatarURL, let imageURL = URL(string: url) {
             AsyncImage(url: imageURL) { phase in
@@ -251,7 +263,7 @@ struct WhaleAvatarView: View {
             .overlay(
                 Text(initials)
                     .font(.system(size: size * 0.38, weight: .bold))
-                    .foregroundColor(AppColors.textOnAccent)
+                    .foregroundColor(backgroundInk)
             )
     }
 }

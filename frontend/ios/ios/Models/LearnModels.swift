@@ -56,6 +56,18 @@ enum InvestorLevel: String, CaseIterable {
         }
     }
 
+    /// The ink `fillColor` requires, mirroring that switch CASE FOR CASE.
+    /// `gainFill`/`lossFill` are ADAPTIVE (bright in dark) and need near-black
+    /// `textOnFill`; the frozen fills need white `textOnAccent`. One ink cannot
+    /// serve both — near-black on frozen `primaryFill` is 3.35:1 and white on the
+    /// adaptive dark arms is 2.28/2.77.
+    var fillInk: Color {
+        switch self {
+        case .foundation: return AppColors.textOnFill
+        case .analyst, .strategist, .master: return AppColors.textOnAccent
+        }
+    }
+
     var index: Int {
         switch self {
         case .foundation: return 0
@@ -153,6 +165,18 @@ enum MoneyMoveCategory: String, CaseIterable {
         case .battles: return AppColors.alertPurpleFill
         }
     }
+
+    /// The ink `iconFillColor` requires, mirroring that switch CASE FOR CASE.
+    /// `gainFill`/`lossFill` are ADAPTIVE (bright in dark) and need near-black
+    /// `textOnFill`; the frozen fills need white `textOnAccent`. One ink cannot
+    /// serve both — near-black on frozen `primaryFill` is 3.35:1 and white on the
+    /// adaptive dark arms is 2.28/2.77.
+    var iconFillInk: Color {
+        switch self {
+        case .blueprints, .valueTraps: return AppColors.textOnFill
+        case .battles: return AppColors.textOnAccent
+        }
+    }
 }
 
 // MARK: - Money Move
@@ -179,6 +203,11 @@ struct MoneyMove: Identifiable {
     }
 
     /// Saturated-tile variant — pair with `AppColors.textOnAccent`. See the category.
+    /// Mirrors `iconFillColor` — see `MoneyMoveCategory.iconFillInk`.
+    var iconFillInk: Color {
+        category.iconFillInk
+    }
+
     var iconFillColor: Color {
         category.iconFillColor
     }

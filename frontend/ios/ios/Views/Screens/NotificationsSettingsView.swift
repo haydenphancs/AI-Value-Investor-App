@@ -4,75 +4,96 @@
 //
 //  Screen: notification preferences.
 //
-//  ⚠️ ONE TOGGLE SHIPS, DELIBERATELY.
+//  THE INVARIANT, IN BOTH DIRECTIONS:
 //
-//  This screen used to render 13 toggles across four groups (Earnings, Market, Smart Money,
-//  App Activity). Exactly ONE of them is wired to anything that sends:
+//    * every visible toggle has a real sender behind it, and
+//    * every registered sender has a visible toggle.
 //
-//      updates_insight_sweeper.py:423  notify_watchers(preference_key: "notify_watchlist_changes")
-//        -> push_dispatch_service.py:283  preference_enabled(user_id, key)
-//          -> push_dispatch_service.py:305  PushService.send_to_user(...)
+//  Both are pinned by `backend/tests/test_push_preference_typing.py` against
+//  `NotificationSettingsViewModel.groups` and `notification_kinds.NOTIFICATION_KINDS`.
+//  Each direction has already failed in production:
 //
-//  The other twelve wrote an @AppStorage key, synced it to the backend, and were read by
-//  nothing. That is the exact failure `FeatureFlags.notificationPreferencesEnabled` was
-//  invented to prevent — "a toggle that stores a preference nothing ever reads" — so shipping
-//  all 13 to un-hide the working one would have recreated it at a larger scale.
+//    * Twelve of the original thirteen toggles stored a preference NOTHING read, so they
+//      had to be hidden — a control that tells the user something is happening when
+//      nothing is.
+//    * Then push shipped while the screen was still hidden, so users received alerts with
+//      no in-app way to turn them off — only iOS Settings, which kills every type at once
+//      and never re-prompts.
 //
-//  The flag is now TRUE because push genuinely delivers (all four APNS_* signing vars are set
-//  in production and the sweeper has called notify_watchers since 2026-08-01). Leaving it
-//  false meant users were prompted for permission during onboarding, received alerts, and had
-//  NO in-app way to turn them off — only iOS Settings, which kills every type at once and
-//  never re-prompts.
+//  The rows live in the ViewModel's declarative `groups` manifest, not here, so the
+//  source-scan guard reads one list rather than parsing SwiftUI.
 //
-//  TO RESTORE A GROUP: wire its key to a real sender first (a `preference_key=` argument on a
-//  notify_* call), then add its rows back here. The keys below are still synced by
-//  SettingsSyncManager and still honoured by push_dispatch_service.preference_enabled, so
-//  nothing else needs changing.
+//  ⚠️ `preferenceDefaults` / `preferenceStringDefaults` below are the DECLARED SOURCE OF
+//  TRUTH for what an untouched preference means. `SettingsSyncManager.currentBlob()` omits
+//  any key the user has never set, so for most users the BACKEND default is what the
+//  toggle means — and `notification_kinds.preference_defaults()` mirrors these exactly.
 //
 
 import SwiftUI
+import UserNotifications
 
 struct NotificationsSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var viewModel = NotificationSettingsViewModel()
 
-    // MARK: - Notification Toggles
+    // MARK: - Declared defaults
 
-    /// The ONLY preference with a sender behind it. `preference_enabled` defaults to TRUE when
-    /// the key is absent (push_dispatch_service.py:118), so this default matches the backend —
-    /// a user who never opens this screen is opted in, and flipping it off is honoured.
-    @AppStorage("notify_watchlist_changes") private var watchlistChanges: Bool = true
-
-    /// Declared default for EVERY notification preference key — including the twelve whose UI
-    /// is hidden pending a sender.
-    ///
-    /// These keys did not stop existing when their toggles were hidden: `SettingsSyncManager`
-    /// still syncs them, and `PushDispatchService.preference_enabled` still reads them. So the
-    /// defaults still have to be recorded somewhere, and the `@AppStorage` declarations that
-    /// used to carry them are gone.
+    /// Declared default for every BOOLEAN notification preference key.
     ///
     /// ⚠️ The backend MIRRORS the false entries in `PushDispatchService._PREFERENCE_DEFAULTS`.
-    /// A blanket `true` there was wrong for exactly these two: `currentBlob()` omits any key
-    /// the user never touched, so a user with no stored value would be opted INTO something
-    /// the UI shows as off the moment a dispatcher is wired up.
-    /// `tests/test_push_preference_typing.py` pins the two sides together.
+    /// A blanket `true` there was wrong for exactly these: `currentBlob()` omits any key the
+    /// user never touched, so a user with no stored value would be opted INTO something the
+    /// UI shows as off.
     static let preferenceDefaults: [String: Bool] = [
-        // Live — rendered above.
+        // Watchlist
         "notify_watchlist_changes": true,
+        "notify_price_alerts": true,
 
-        // Hidden pending a sender. Keep the values; they are what a user would get if the
-        // corresponding dispatcher were wired up tomorrow.
+        // Earnings
         "notify_earnings_alerts": true,
-        "notify_earnings_surprises": true,
         "notify_earnings_upcoming": true,
+        "notify_earnings_surprises": true,
+
+        // Smart Money
+        "notify_smart_money": true,
+        "notify_smart_money_whale": true,
+        "notify_smart_money_insider": true,
+        // Ships OFF: 13F data is up to 45 days stale by the time it is public, and one
+        // filing touches dozens of positions — the easiest signal in the app to over-send.
+        "notify_smart_money_institutional": false,
+
+        // App activity
+        "notify_research_complete": true,
+
+        // Quiet hours ship OFF: a delivery schedule the user never asked for is a
+        // notification silently withheld, and "why didn't I get it?" is the hardest
+        // question to answer about a push system.
+        "notify_quiet_hours_enabled": false,
+
+        // ── Synced but NOT rendered ─────────────────────────────────────────────
+        // The "Market" group never got a sender. These keys are still synced by
+        // SettingsSyncManager and still read by `preference_enabled`, so their defaults
+        // must be declared — dropping `notify_market_volatility` here would silently opt
+        // a user INTO something the (absent) UI declares as off. Mirrored in
+        // `notification_kinds.LEGACY_PREFERENCE_DEFAULTS`.
         "notify_market_alerts": true,
         "notify_market_macro": true,
         "notify_market_volatility": false,
         "notify_market_sector": true,
-        "notify_smart_money": true,
-        "notify_smart_money_whale": true,
-        "notify_smart_money_insider": true,
-        "notify_smart_money_institutional": false,
-        "notify_research_complete": true,
+    ]
+
+    /// Declared default for every NON-Bool notification preference.
+    ///
+    /// Split from `preferenceDefaults` rather than widening it: that map's `[String: Bool]`
+    /// type is what makes "which toggles ship off?" readable on both sides of the contract,
+    /// and `_PREFERENCE_DEFAULTS` mirrors only its false entries.
+    ///
+    /// `notify_timezone` deliberately has NO static default — it is the device's own
+    /// `TimeZone.current.identifier`, written on first change. The backend falls back to ET
+    /// when it is absent, which is what every user got before quiet hours existed.
+    static let preferenceStringDefaults: [String: String] = [
+        "notify_quiet_start": "22:00",
+        "notify_quiet_end": "07:00",
     ]
 
     var body: some View {
@@ -82,29 +103,17 @@ struct NotificationsSettingsView: View {
 
             ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: AppSpacing.xxl) {
-                    // App Activity — the only group with a live sender behind it.
-                    notificationGroup(
-                        title: "App Activity",
-                        subtitle: "Watchlist updates",
-                        icon: "app.badge.fill",
-                        iconColor: AppColors.alertPurple,
-                        masterToggle: .constant(true),
-                        showMasterToggle: false
-                    ) {
-                        NotificationToggleRow(
-                            title: "Watchlist Price Changes",
-                            subtitle: "Unusual moves in stocks you track",
-                            isOn: $watchlistChanges
-                        )
+                    NotificationPermissionBanner(status: viewModel.permission) {
+                        viewModel.requestPermissionIfNeeded()
                     }
 
-                    Text("More notification types will appear here as they go live. "
-                         + "To turn off all notifications, use iOS Settings › Caydex.")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, AppSpacing.xl)
+                    ForEach(NotificationSettingsViewModel.groups) { group in
+                        groupCard(group)
+                    }
+
+                    quietHoursCard
+
+                    footer
 
                     Spacer()
                         .frame(height: AppSpacing.xxxl)
@@ -116,50 +125,60 @@ struct NotificationsSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppColors.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        // Ask for push permission when the user opens Notifications (iOS prompts once).
-        .onAppear { PushNotificationManager.shared.requestAuthorization() }
-        // Sync the toggles to the backend when leaving (no-op for guests).
-        .onDisappear { SettingsSyncManager.shared.push() }
+        .task {
+            viewModel.load()
+            await viewModel.refreshPermission()
+        }
+        // Re-read on foreground: the user may have just changed the permission in iOS
+        // Settings, and coming back to a stale banner telling them to do what they just
+        // did is worse than showing nothing.
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.willEnterForegroundNotification
+        )) { _ in
+            Task { await viewModel.refreshPermission() }
+        }
+        // Belt and braces behind the ViewModel's debounced sync. `push()` no-ops when
+        // nothing is dirty, so this costs nothing on a screen the user only read.
+        .onDisappear { viewModel.pushNow() }
     }
 
-    // MARK: - Notification Group Builder
+    // MARK: - Group card
 
     @ViewBuilder
-    private func notificationGroup<Content: View>(
-        title: String,
-        subtitle: String,
-        icon: String,
-        iconColor: Color,
-        masterToggle: Binding<Bool>,
-        showMasterToggle: Bool = true,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
+    private func groupCard(_ group: NotificationGroupSpec) -> some View {
+        let suppressed = viewModel.isSuppressedByMaster(group)
+        // A denied system permission dims EVERY row: a live-looking toggle that iOS is
+        // guaranteed to override is the most confusing state this screen can present.
+        let blocked = viewModel.systemNotificationsBlocked
+
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            // Group Header with master toggle
             HStack(spacing: AppSpacing.md) {
-                Image(systemName: icon)
+                Image(systemName: group.icon)
                     .font(AppTypography.iconMedium)
-                    .foregroundColor(iconColor)
+                    .foregroundColor(AppColors.alertPurple)
                     .frame(width: 36, height: 36)
-                    .background(iconColor.opacity(0.15))
+                    .background(AppColors.alertPurple.opacity(0.15))
                     .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
 
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                    Text(title)
+                    Text(group.title)
                         .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
-                    Text(subtitle)
+                    Text(group.subtitle)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
                 }
 
                 Spacer()
 
-                if showMasterToggle {
-                    Toggle("", isOn: masterToggle)
+                if let master = group.masterKey {
+                    Toggle("", isOn: viewModel.binding(for: master))
                         .labelsHidden()
                         .tint(AppColors.primaryBlue)
+                        .disabled(blocked)
+                        .opacity(blocked ? 0.4 : 1)
+                        .accessibilityLabel("\(group.title) notifications")
                 }
             }
             .padding(AppSpacing.lg)
@@ -168,9 +187,18 @@ struct NotificationsSettingsView: View {
                     .cardFill()
             )
 
-            // Sub-toggles
             VStack(spacing: 1) {
-                content()
+                ForEach(group.rows) { row in
+                    NotificationToggleRow(
+                        title: row.title,
+                        subtitle: row.subtitle,
+                        isOn: viewModel.binding(for: row.key),
+                        disabled: suppressed || blocked,
+                        disabledReason: blocked
+                            ? "Notifications are off for Caydex in iOS Settings"
+                            : (suppressed ? "Turn on \(group.title) to enable this" : nil)
+                    )
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
             // Card on the page background: an edge in light, nothing in dark.
@@ -178,39 +206,112 @@ struct NotificationsSettingsView: View {
         }
         .padding(.horizontal, AppSpacing.lg)
     }
-}
 
-// MARK: - Notification Toggle Row
+    // MARK: - Quiet hours
 
-struct NotificationToggleRow: View {
-    let title: String
-    let subtitle: String
-    @Binding var isOn: Bool
-    var disabled: Bool = false
+    @ViewBuilder
+    private var quietHoursCard: some View {
+        let blocked = viewModel.systemNotificationsBlocked
 
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text(title)
-                    .font(AppTypography.body)
-                    .foregroundColor(disabled ? AppColors.textMuted : AppColors.textPrimary)
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack(spacing: AppSpacing.md) {
+                Image(systemName: "moon.fill")
+                    .font(AppTypography.iconMedium)
+                    .foregroundColor(AppColors.accentCyan)
+                    .frame(width: 36, height: 36)
+                    .background(AppColors.accentCyan.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.medium))
 
-                Text(subtitle)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
+                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    Text("Quiet Hours")
+                        .font(AppTypography.bodyEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text("Hold alerts until morning")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
 
-            Spacer()
+                Spacer()
 
-            Toggle("", isOn: $isOn)
+                Toggle("", isOn: Binding(
+                    get: { viewModel.quietHoursEnabled },
+                    set: { viewModel.setQuietHoursEnabled($0) }
+                ))
                 .labelsHidden()
                 .tint(AppColors.primaryBlue)
-                .disabled(disabled)
-                .opacity(disabled ? 0.4 : 1)
+                .disabled(blocked)
+                .opacity(blocked ? 0.4 : 1)
+                .accessibilityLabel("Quiet hours")
+            }
+            .padding(AppSpacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                    .cardFill()
+            )
+
+            if viewModel.quietHoursEnabled {
+                VStack(spacing: 1) {
+                    timeRow("From", selection: Binding(
+                        get: { viewModel.quietStart },
+                        set: { viewModel.setQuietStart($0) }
+                    ))
+                    timeRow("Until", selection: Binding(
+                        get: { viewModel.quietEnd },
+                        set: { viewModel.setQuietEnd($0) }
+                    ))
+                }
+                .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                .cardBorder(cornerRadius: AppCornerRadius.large)
+
+                Text(
+                    viewModel.quietWindowIsDegenerate
+                        // The backend treats start == end as DISABLED rather than as
+                        // "always quiet" — silencing the app forever with no error is the
+                        // worse reading. Say so here so the user finds out on this screen
+                        // instead of by never receiving a notification.
+                        ? "Start and end are the same, so quiet hours are off. "
+                          + "Pick two different times."
+                        : "Alerts that arrive in this window are held and delivered when it "
+                          + "ends — nothing is lost. Price alerts you set yourself and "
+                          + "\u{201C}report ready\u{201D} still come through immediately."
+                )
+                .font(AppTypography.caption)
+                .foregroundColor(
+                    viewModel.quietWindowIsDegenerate ? AppColors.caution : AppColors.textMuted
+                )
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, AppSpacing.xs)
+            }
         }
         .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
+    }
+
+    @ViewBuilder
+    private func timeRow(_ label: String, selection: Binding<Date>) -> some View {
+        HStack {
+            Text(label)
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textPrimary)
+            Spacer()
+            DatePicker("", selection: selection, displayedComponents: .hourAndMinute)
+                .labelsHidden()
+                .accessibilityLabel("Quiet hours \(label)")
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.sm)
         .background(AppColors.cardBackground)
+    }
+
+    // MARK: - Footer
+
+    private var footer: some View {
+        Text("Caydex limits how many alerts you get per day in each category, so a busy "
+             + "market doesn't fill your lock screen.")
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textSecondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, AppSpacing.xl)
     }
 }
 

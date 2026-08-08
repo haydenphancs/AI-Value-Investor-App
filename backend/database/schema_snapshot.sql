@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict x4abWVVy50ModbKyfxCnWkMa1P1RCgJy6m7YecwyubLB8fhcT2DnDGdDscdXqpA
+\restrict 5z9fxHg5NcSHY8TOenSpfSkvSThGUGrx2RUbxzzr0unN08bGHc2TGHCW6wUvflR
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -6279,38 +6279,6 @@ ALTER SEQUENCE public.updates_insight_state_id_seq OWNED BY public.updates_insig
 
 
 --
--- Name: user_book_progress; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.user_book_progress (
-    id bigint NOT NULL,
-    user_id uuid NOT NULL,
-    curriculum_order integer NOT NULL,
-    core_number integer NOT NULL,
-    completed_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: user_book_progress_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.user_book_progress_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: user_book_progress_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.user_book_progress_id_seq OWNED BY public.user_book_progress.id;
-
-
---
 -- Name: user_bookmarks; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7156,13 +7124,6 @@ ALTER TABLE ONLY public.signals_cache ALTER COLUMN id SET DEFAULT nextval('publi
 --
 
 ALTER TABLE ONLY public.updates_insight_state ALTER COLUMN id SET DEFAULT nextval('public.updates_insight_state_id_seq'::regclass);
-
-
---
--- Name: user_book_progress id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_book_progress ALTER COLUMN id SET DEFAULT nextval('public.user_book_progress_id_seq'::regclass);
 
 
 --
@@ -8266,22 +8227,6 @@ ALTER TABLE ONLY public.updates_insight_state
 
 ALTER TABLE ONLY public.sector_benchmarks
     ADD CONSTRAINT uq_sector_industry_metric_period UNIQUE (sector, industry, metric_name, period_type, period_label);
-
-
---
--- Name: user_book_progress user_book_progress_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_book_progress
-    ADD CONSTRAINT user_book_progress_pkey PRIMARY KEY (id);
-
-
---
--- Name: user_book_progress user_book_progress_user_id_curriculum_order_core_number_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_book_progress
-    ADD CONSTRAINT user_book_progress_user_id_curriculum_order_core_number_key UNIQUE (user_id, curriculum_order, core_number);
 
 
 --
@@ -9835,13 +9780,6 @@ CREATE INDEX idx_updates_insight_state_due ON public.updates_insight_state USING
 --
 
 CREATE INDEX idx_updates_insight_state_watch ON public.updates_insight_state USING btree (watch_count DESC);
-
-
---
--- Name: idx_user_book_progress_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_user_book_progress_user ON public.user_book_progress USING btree (user_id);
 
 
 --
@@ -12174,47 +12112,6 @@ CREATE POLICY updates_insight_state_service_all ON public.updates_insight_state 
 
 
 --
--- Name: user_book_progress; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_book_progress ENABLE ROW LEVEL SECURITY;
-
---
--- Name: user_book_progress user_book_progress_delete_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_delete_own ON public.user_book_progress FOR DELETE TO authenticated USING ((auth.uid() = user_id));
-
-
---
--- Name: user_book_progress user_book_progress_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_insert_own ON public.user_book_progress FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: user_book_progress user_book_progress_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_select_own ON public.user_book_progress FOR SELECT TO authenticated USING ((auth.uid() = user_id));
-
-
---
--- Name: user_book_progress user_book_progress_service_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_service_all ON public.user_book_progress TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: user_book_progress user_book_progress_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_update_own ON public.user_book_progress FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
-
-
---
 -- Name: user_bookmarks; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -12755,5 +12652,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict x4abWVVy50ModbKyfxCnWkMa1P1RCgJy6m7YecwyubLB8fhcT2DnDGdDscdXqpA
+\unrestrict 5z9fxHg5NcSHY8TOenSpfSkvSThGUGrx2RUbxzzr0unN08bGHc2TGHCW6wUvflR
 

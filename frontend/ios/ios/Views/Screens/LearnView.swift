@@ -84,8 +84,9 @@ struct LearnContentView: View {
             BookDetailView(book: book)
                 .environmentObject(audioManager)
         }
+        // The Learn card's "Add More Credits" → buy credits, not the subscription paywall.
         .sheet(isPresented: $showPaywall) {
-            PaywallView()
+            BuyCreditsView()
                 .environment(\.appState, appState)
         }
         .fullScreenCover(isPresented: $showProfile) {

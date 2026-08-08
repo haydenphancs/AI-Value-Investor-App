@@ -238,6 +238,19 @@ class Settings(BaseSettings):
     # Kept in config rather than the DB so a typo can't silently grant the wrong tier.
     IAP_PRODUCT_PRO_MONTHLY: str = "com.phan.caydex.pro.monthly"
     IAP_PRODUCT_MAX_MONTHLY: str = "com.phan.caydex.max.monthly"
+    # CONSUMABLE credit packs ("Buy Credits"). How many credits each pack grants lives in the
+    # `credit_packs` DB table, NOT here — deliberately mirroring how tier allocations live in
+    # `plan_credits` rather than in config. One source of truth per concern: config owns the
+    # product IDENTITY (a typo must not silently map a purchase to the wrong product), the DB
+    # owns the AMOUNT (tunable without a deploy).
+    #
+    # The prefix is what makes a product id *recognisable* as a pack before any DB lookup, so
+    # an unmapped id still raises UnknownProduct instead of being silently treated as a tier.
+    IAP_CREDIT_PACK_PREFIX: str = "com.phan.caydex.credits."
+    # Hard ceiling on a single grant. `credit_packs.credits` is a DB value and this is the one
+    # thing standing between a bad row (or a bad hand-edit in Studio) and an unbounded credit
+    # mint on a verified purchase. Sized well above the largest real pack (1,200).
+    IAP_MAX_PACK_CREDITS: int = 10_000
     # Shared secret Apple echoes in App Store Server Notifications, if configured. When set,
     # the webhook additionally requires it — defence in depth on top of JWS verification.
     IAP_WEBHOOK_SHARED_SECRET: Optional[str] = None
@@ -262,7 +275,50 @@ class Settings(BaseSettings):
     #
     # Deliberately low. A user who genuinely wants every move has the Updates tab;
     # push is for the handful worth an interruption.
+    #
+    # NOTE: this is now the WATCHLIST category's cap specifically, not a global one.
+    # Per-category ceilings live in `notification_kinds.CATEGORY_DAILY_CAPS`; this knob
+    # is threaded through `category_cap()` so an operator who had already tuned it keeps
+    # the behaviour they configured instead of finding it silently inert. <= 0 disables.
     PUSH_MAX_ALERTS_PER_USER_PER_DAY: int = 3
+
+    # ── Notification pipeline ─────────────────────────────────────────────────
+    # Global dry run. Runs the ENTIRE dispatch pipeline — audience, child+master
+    # preference, per-category cap, quiet hours, the dedup claim, the ledger/inbox row,
+    # the badge count — and replaces ONLY the APNs POST with a log line and
+    # push_state='dry_run'.
+    #
+    # Two jobs, both load-bearing:
+    #   1. It makes every sender exercisable locally with no Apple configuration and no
+    #      physical device, which is the only way "does this notification actually fire?"
+    #      is answerable before shipping. The Simulator cannot reach APNs.
+    #   2. It is the GLOBAL KILL SWITCH. One env var stops all pushes while leaving the
+    #      in-app inbox fully working, so a misbehaving sender degrades instead of
+    #      needing a rollback.
+    PUSH_DRY_RUN: bool = False
+
+    # `main.py` skips EVERY background task when ENVIRONMENT == "development" (Railway
+    # owns them), which means no notification sender can be exercised locally at all.
+    # This spawns ONLY the notification loops in local dev, leaving the FMP-heavy
+    # pre-warmers off so a laptop does not burn the quota.
+    RUN_NOTIFICATION_JOBS_LOCALLY: bool = False
+
+    # How long a `notification_job_state.claim_at` may sit before another instance may
+    # steal it. Sized well above the slowest sender (insider, ~200 FMP calls) so a slow
+    # run is never stolen mid-flight, and low enough that a hard-killed instance frees
+    # the job within a quarter hour.
+    NOTIFICATION_JOB_STALE_SECONDS: int = 900
+
+    # Quiet-hours flush cadence. Runs 24/7 (NOT gated on market hours — a European
+    # user's 07:00 quiet-end is 01:00 ET, when the market sweeper is asleep).
+    NOTIFICATION_DISPATCH_INTERVAL_SECONDS: int = 60
+    # Rows handed out per flush cycle. Bounded so one instance cannot claim the whole
+    # backlog while another idles.
+    NOTIFICATION_DISPATCH_BATCH: int = 100
+    # A notification deferred longer than this is marked `failed` and never sent.
+    # A 14-hour-late "AAPL moved 8%" is misinformation, not a notification — the inbox
+    # row survives, so the information is not lost, only the buzz.
+    NOTIFICATION_MAX_DEFER_HOURS: int = 12
 
     # Gemini quota (429) handling. Instead of skipping retries on a rate-limit
     # error, back off and retry a bounded number of times — paired with the

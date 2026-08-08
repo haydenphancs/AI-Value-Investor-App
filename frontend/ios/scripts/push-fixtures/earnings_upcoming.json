@@ -1,0 +1,18 @@
+{
+  "aps": {
+    "alert": {
+      "title": "MSFT reports earnings",
+      "body": "MSFT is scheduled to report tomorrow after market close."
+    },
+    "sound": "default",
+    "thread-id": "earnings",
+    "interruption-level": "active",
+    "category": "earnings",
+    "badge": 3
+  },
+  "kind": "earnings_upcoming",
+  "route": "ticker",
+  "ticker": "MSFT",
+  "asset_type": "stock",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

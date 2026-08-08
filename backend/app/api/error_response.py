@@ -69,6 +69,23 @@ class ErrorCode(str, Enum):
     # On a fresh install that is close to nothing — and it propagates everywhere.
     SETTINGS_UNAVAILABLE = "SETTINGS_UNAVAILABLE"
 
+    # The notification inbox could not be READ. Same reasoning as the two above:
+    # an EMPTY inbox and a BROKEN inbox look identical to a user, and "No
+    # notifications yet" rendered over a database error is the kind of failure
+    # nobody reports because it looks exactly like the intended empty state.
+    NOTIFICATIONS_UNAVAILABLE = "NOTIFICATIONS_UNAVAILABLE"
+
+    # The caller is at their price-alert quota. Distinct from INVALID_INPUT because
+    # the input was fine — the ACCOUNT is full — so the client action is "remove one",
+    # not "fix what you typed". Collapsing them would surface a form-validation error
+    # on a form with nothing wrong in it.
+    PRICE_ALERT_LIMIT_REACHED = "PRICE_ALERT_LIMIT_REACHED"
+
+    # The alert id is not this caller's (or is gone). 404 rather than 403 on purpose:
+    # a 403 would CONFIRM the id exists and belongs to someone else, which is an
+    # enumeration oracle. "Not found" is true from this caller's perspective either way.
+    PRICE_ALERT_NOT_FOUND = "PRICE_ALERT_NOT_FOUND"
+
     # ── Research-flow specific ───────────────────────────────────────
     REPORT_NOT_FOUND = "REPORT_NOT_FOUND"
     REPORT_NOT_READY = "REPORT_NOT_READY"
@@ -77,6 +94,13 @@ class ErrorCode(str, Enum):
     # condition can never clear — which is why it must not share a code with the retryable
     # billing failures. See PurchaseBoundToAnotherAccount in iap_service.py.
     PURCHASE_ALREADY_LINKED = "PURCHASE_ALREADY_LINKED"
+    # Distinct from the above, and the distinction is money. PURCHASE_ALREADY_LINKED means we
+    # HAVE the transaction recorded against another account — somebody was credited, and the
+    # client is right to finish it. PURCHASE_ACCOUNT_MISMATCH means the transaction's
+    # `appAccountToken` names a different account and we recorded NOTHING, so NOBODY has been
+    # credited. Finishing that one destroys a purchase the user paid for, with no redelivery
+    # left to repair it — the client must keep it unfinished until the right account signs in.
+    PURCHASE_ACCOUNT_MISMATCH = "PURCHASE_ACCOUNT_MISMATCH"
     TOO_MANY_CONCURRENT_REPORTS = "TOO_MANY_CONCURRENT_REPORTS"
     # Global overload backstop — distinct from the per-user cap above. The
     # whole service is at capacity, not just this user. 409 (not 429) so iOS
@@ -192,6 +216,15 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.SETTINGS_UNAVAILABLE: (
         "We couldn't load your settings right now. They'll sync automatically in a moment."
     ),
+    ErrorCode.NOTIFICATIONS_UNAVAILABLE: (
+        "We couldn't load your notifications right now. Pull to refresh in a moment."
+    ),
+    ErrorCode.PRICE_ALERT_LIMIT_REACHED: (
+        "You've reached your price-alert limit. Remove one to add another."
+    ),
+    ErrorCode.PRICE_ALERT_NOT_FOUND: (
+        "That price alert no longer exists."
+    ),
     ErrorCode.REPORT_NOT_FOUND: (
         "That report no longer exists."
     ),
@@ -204,6 +237,10 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.PURCHASE_ALREADY_LINKED: (
         "This subscription is already linked to a different Caydex account. Sign in with "
         "that account, or contact support if you think this is wrong."
+    ),
+    ErrorCode.PURCHASE_ACCOUNT_MISMATCH: (
+        "This purchase was made from a different Caydex account. Sign in with that account "
+        "and it will be applied — nothing has been lost."
     ),
     # Number-free default so the cap value never drifts here; the endpoint
     # overrides user_message with the live cap (e.g. "up to 4 at once").
@@ -264,12 +301,21 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     # NOT "retry_later": retrying can never succeed, and telling the client to wait is what
     # left StoreKit redelivering the transaction on every launch forever.
     ErrorCode.PURCHASE_ALREADY_LINKED: "contact_support",
+    # `sign_in`, NOT `contact_support`: the purchase is intact and un-granted, and signing in
+    # as the buying account is the action that claims it.
+    ErrorCode.PURCHASE_ACCOUNT_MISMATCH: "sign_in",
     ErrorCode.TOO_MANY_CONCURRENT_REPORTS: "retry_later",
     ErrorCode.SYSTEM_BUSY: "retry_later",
     ErrorCode.CHAT_MESSAGE_TOO_LONG: "fix_input",
     ErrorCode.CHAT_DAILY_LIMIT_REACHED: "retry_later",
     ErrorCode.WATCHLIST_UNAVAILABLE: "retry_later",
     ErrorCode.SETTINGS_UNAVAILABLE: "retry_later",
+    ErrorCode.NOTIFICATIONS_UNAVAILABLE: "retry_later",
+    # NOT retry_later: retrying changes nothing until the user deletes an alert.
+    ErrorCode.PRICE_ALERT_LIMIT_REACHED: "fix_input",
+    # PRICE_ALERT_NOT_FOUND deliberately has NO action, matching THEME_NOT_FOUND: there
+    # is nothing for the user to do, and "none" is not one of the iOS `ErrorAction`
+    # cases — it would decode as an unknown action rather than as no action.
     # `sign_in` maps to iOS `ErrorAction.signIn`, whose button opens SignInView.
     ErrorCode.AUTH_REQUIRED: "sign_in",
     ErrorCode.AUTH_TOKEN_INVALID: "sign_in",
@@ -311,6 +357,9 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # 409 conflict — a terminal 4xx, so the client finishes the transaction instead of
     # treating it as a transient 5xx and retrying forever.
     ErrorCode.PURCHASE_ALREADY_LINKED: 409,
+    # Also 409 and also terminal for THIS account — but the client must NOT finish the
+    # transaction, because no account has been credited for it yet. See the ErrorCode comment.
+    ErrorCode.PURCHASE_ACCOUNT_MISMATCH: 409,
     # 409 (NOT 429): iOS APIClient intercepts 429 before decoding the body and
     # shows a generic "wait 60s", discarding our user_message. 409 falls
     # through to the structured-body decode so the cap copy is surfaced.
@@ -329,6 +378,11 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # to tell "couldn't read your settings" from "you have no settings yet" — the
     # second opens its push gate, the first must not.
     ErrorCode.SETTINGS_UNAVAILABLE: 503,
+    # Retryable, and distinguishable from "you have no notifications yet".
+    ErrorCode.NOTIFICATIONS_UNAVAILABLE: 503,
+    # 409, not 400: the request was well-formed and the state is the conflict.
+    ErrorCode.PRICE_ALERT_LIMIT_REACHED: 409,
+    ErrorCode.PRICE_ALERT_NOT_FOUND: 404,
     # 401 for all four credential failures — NOT 403.
     #
     # FastAPI's `HTTPBearer(auto_error=True)` answers a MISSING or malformed Authorization

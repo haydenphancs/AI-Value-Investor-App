@@ -80,6 +80,11 @@ final class PaywallViewModel: ObservableObject {
         store.product(for: tier) != nil
     }
 
+    /// The signed-in user's id, stamped onto the purchase as StoreKit's `appAccountToken` so a
+    /// transaction redelivered into a different session can be refused server-side. Set by the
+    /// view from `AppState`; nil for a guest, who cannot reach a purchase anyway.
+    var accountID: String?
+
     func purchase(tier: String) async {
         Analytics.shared.track(.paywallPurchaseStarted, ["tier": .string(tier)])
         purchaseError = nil
@@ -95,10 +100,10 @@ final class PaywallViewModel: ObservableObject {
         }
 
         do {
-            switch try await store.purchase(product) {
-            case .success(let appliedTier):
-                Analytics.shared.track(.purchaseCompleted, ["tier": .string(appliedTier)])
-                purchasedTier = appliedTier
+            switch try await store.purchase(product, accountID: accountID) {
+            case .success(let applied):
+                Analytics.shared.track(.purchaseCompleted, ["tier": .string(applied.tier)])
+                purchasedTier = applied.tier
             case .cancelled:
                 break   // user dismissed the sheet — not an error
             case .pending:

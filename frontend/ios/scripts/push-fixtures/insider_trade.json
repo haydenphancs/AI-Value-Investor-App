@@ -1,0 +1,18 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Insider activity in ORCL",
+      "body": "Safra Catz sold $2.4M of ORCL."
+    },
+    "sound": "default",
+    "thread-id": "smart_money",
+    "interruption-level": "passive",
+    "category": "smart_money",
+    "badge": 5
+  },
+  "kind": "insider_trade",
+  "route": "ticker",
+  "ticker": "ORCL",
+  "asset_type": "stock",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

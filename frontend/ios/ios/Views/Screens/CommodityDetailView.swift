@@ -9,6 +9,11 @@
 import SwiftUI
 
 struct CommodityDetailView: View {
+    /// The bell in `TickerDetailHeader` renders ONLY when `onNotificationTapped`
+    /// is non-nil. Every detail screen passed `nil`, so it had never rendered —
+    /// this is what it was waiting for.
+    @State private var showPriceAlerts = false
+
     @StateObject private var viewModel: CommodityDetailViewModel
     @StateObject private var chatViewModel = ChatViewModel()
     @Environment(\.dismiss) private var dismiss
@@ -61,7 +66,7 @@ struct CommodityDetailView: View {
                     onSearchTapped: handleSearchTapped,
                     // nil until price alerts ship — hides the bell rather than
                     // showing a control whose handler was a print().
-                    onNotificationTapped: nil,
+                    onNotificationTapped: { showPriceAlerts = true },
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
@@ -165,6 +170,9 @@ struct CommodityDetailView: View {
             // The price+chart area shows a shimmer skeleton until data loads.
         }
         .navigationBarHidden(true)
+        .sheet(isPresented: $showPriceAlerts) {
+            PriceAlertsSheet(ticker: commoditySymbol, assetType: "commodity")
+        }
         // Audio collapses to the top status island while this asset screen is open, keeping the
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)

@@ -1,0 +1,18 @@
+{
+  "aps": {
+    "alert": {
+      "title": "NVDA earnings are out",
+      "body": "EPS beat consensus by 12%. Tap for the full picture."
+    },
+    "sound": "default",
+    "thread-id": "earnings",
+    "interruption-level": "active",
+    "category": "earnings",
+    "badge": 4
+  },
+  "kind": "earnings_result",
+  "route": "ticker",
+  "ticker": "NVDA",
+  "asset_type": "stock",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

@@ -13,11 +13,13 @@
 2. [Architecture Overview](#2-architecture-overview)
 3. [Data Flow Architecture](#3-data-flow-architecture)
 4. [State Management Strategy (iOS)](#4-state-management-strategy-ios)
+4b. [Presentation Layer & Theming (iOS)](#4b-presentation-layer--theming-ios)
 5. [Agent Orchestration Pattern](#5-agent-orchestration-pattern)
 6. [Error Handling Strategy](#6-error-handling-strategy)
 7. [Caching & Performance](#7-caching--performance)
 8. [API Contract Standards](#8-api-contract-standards)
 9. [Security Architecture](#9-security-architecture)
+9b. [Monetization — Credits, Entitlements & In-App Purchase](#9b-monetization--credits-entitlements--in-app-purchase)
 10. [Recommendations & Critique](#10-recommendations--critique)
 
 ---
@@ -977,6 +979,13 @@ final class ResearchViewModel {
 > success". Chat = 1 credit, report = 20; guests (shared sentinel) are a credit
 > no-op governed by the daily-turn budget + rate limits. The `BIZ_*` enum below is
 > retained only as an illustrative sketch.
+>
+> **Updated 2026-08-08 (migrations 117/118, applied):** the balance is now **two pools** —
+> granted (monthly, expires) and purchased (consumable IAP, never expires per App Store
+> Guideline 3.1.1). `spend_credits` drains granted first; `refund_credits` reverses the
+> **recorded split** of the original spend, so **a refund must pass the same `ref_id` its
+> charge used** or it silently destroys paid credits. The 402's `action="upgrade"` now opens
+> **Buy Credits**, not the subscription paywall. Full model in **[§9b](#9b-monetization--credits-entitlements--in-app-purchase)**.
 
 > **Auth errors — IMPLEMENTED 2026-08-02.** The `AUTH_*` codes and the central exception
 > handler sketched below as "recommended" now exist, with flat string names like the rest of
@@ -1544,6 +1553,14 @@ Retry-After: 60                 # Seconds to wait (on 429)
 > must stay gated or the gate is cosmetic — they cost the same on a cache miss. Everything else
 > is guest-capable by design. The iOS mirror is `APIEndpoint.authPolicy`, and
 > `tests/test_ios_auth_policy_parity.py` fails the build if the two disagree.
+>
+> **Storefronts split catalog from purchase.** `GET /billing/plans` and
+> `GET /billing/credit-packs` are `.public` — both screens must render before we know who is
+> looking, and neither exposes anything Apple's storefront doesn't. `POST /billing/verify` is
+> `.signInRequired` for both product families, and for consumables that gate is load-bearing
+> rather than tidy: Apple does not restore them, so credits bought against a per-install guest
+> identity would be stranded on an install the user can wipe. See
+> [§9b.4](#9b4-restore-and-why-buying-requires-an-account).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1644,6 +1661,160 @@ chat send-error through `AppError.from(_:)`.
 
 ---
 
+## 9b. Monetization — Credits, Entitlements & In-App Purchase
+
+*(Added 2026-08-08, when consumable credit packs shipped. Numbered `9b` rather than renumbering
+sections 10+, following the `4b` precedent.)*
+
+Two products, two mechanisms, one balance:
+
+| Product | Apple type | Grants | Expires? |
+|---|---|---|---|
+| Pro / Max | auto-renewable subscription | a monthly credit **allocation** + a tier | yes — use-it-or-lose-it |
+| Credit packs | **consumable** | a fixed number of credits | **never** |
+
+### 9b.1 The two-pool invariant
+
+> **App Store Review Guideline 3.1.1: "Any credits or in-game currencies purchased via in-app
+> purchase may not expire, and you should make sure you have a restore mechanism for any
+> restorable in-app purchases."**
+
+`user_credits` therefore holds **two** balances, and purchased credits **cannot** live in
+`total`/`used`. Three shipped RPCs write that pair, and each one destroys or mishandles a
+cash-bought balance:
+
+| RPC | What it does to `total` | Effect on a purchased balance |
+|---|---|---|
+| `ensure_credit_period` (mig. 100) | hard-reset to the tier allocation each ET month | **deletes it** — the 3.1.1 violation |
+| `grant_tier_upgrade` (mig. 112) | `IF alloc <= total THEN` no-op | a user holding the 1,200-credit pack sits at 1,250, so **buying Pro grants zero** |
+| `revoke_tier_credits` (mig. 114) | floors `total` on a refunded **subscription** | erases a separately-bought pack |
+
+Migration **117** adds `purchased_total` / `purchased_used` plus a generated
+`spendable = (total - used) + (purchased_total - purchased_used)`. Those three functions are
+**deliberately not modified** — they are column-explicit, so isolation is structural rather than
+maintained by care. `remaining` keeps its original meaning (granted only); `spendable` is the real
+balance. *(A generated column may not reference `remaining`, which is itself generated — the
+expression is written out, and must stay that way.)*
+
+### 9b.2 Spend order and refund order are not inverses
+
+Migration **118** teaches `spend_credits` / `refund_credits` about both pools.
+
+- **Spend drains GRANTED first**, then purchased. That is what makes "your purchased credits never
+  expire" literally true rather than merely technically true.
+- **Refund reverses the RECORDED split** of the original spend, read from
+  `credit_transactions.granted_delta` / `purchased_delta` (added in 117) matched on
+  `(user_id, ref_id, delta = -amount)`.
+
+Both simple orderings are wrong, and both are tempting:
+
+- *Purchased-first* is a **laundering loop**. Granted 50 unspent, purchased fully spent: a
+  20-credit report drains granted, fails, and the refund hands 20 back to the permanent pool —
+  converting expiring credits into permanent ones, free, repeatable on any user-inducible failure,
+  draining the whole monthly allocation every month. Capping at `purchased_used` does **not** fix
+  it; that bounds each conversion, not how many.
+- *Granted-first* is worse: it converts purchased → granted, which `ensure_credit_period` then
+  wipes. That literally expires credits the user paid for.
+
+> ⚠️ **Consequence for every refund call site: pass the `ref_id` ITS CHARGE USED.** A mismatch is
+> no longer cosmetic — it misses the split lookup, takes the granted-first fallback, and destroys
+> paid credits. This shipped once: `research_reconciliation_service` refunded with `report_id`
+> while `research.py` charges with the ticker, putting every reconciled report failure on that
+> path. Pinned by `test_research_reconciliation.py::test_refund_is_keyed_by_ticker_to_match_the_charge`.
+> The fallback itself (granted-first) is retained only for pre-117 ledger rows, which carry no split.
+
+### 9b.3 Exactly-once granting
+
+The existing `/billing/verify` idempotency does **not** transfer to consumables. It works for
+subscriptions because "credits come from the monthly allocation rather than per-delivery, so a
+replay cannot mint credits" — both halves are false for a pack, which *must* mint credits per
+delivery while `Transaction.updates` redelivers on every app launch.
+
+- Dedup key is `credit_purchases (environment, transaction_id)` UNIQUE. **`transactionId`, not
+  `originalTransactionId`** — each consumable purchase mints a fresh one, so reusing the
+  subscription path's coalescing would collapse ten purchases into one grant. `environment` is in
+  the key because sandbox and production id spaces are not guaranteed disjoint, and it must never
+  be NULL (`app_store._to_dict` drops `None`, so it defaults).
+- The grant is `INSERT ... ON CONFLICT DO NOTHING` **in the same transaction as** the balance
+  update. The conflict *is* the idempotency — no read-then-write window.
+- **A replay returns SUCCESS.** That is what lets iOS call `Transaction.finish()`; an error there
+  strands the transaction forever (the failure `PURCHASE_ALREADY_LINKED` / 409 exists to end).
+  `credits_granted` is 0 on a replay so the client never claims credits the user can't find.
+- Routing is by product-id **prefix** (`IAP_CREDIT_PACK_PREFIX`), so a pack retired from the
+  catalog is still diagnosed as a pack. `tier_for_product` is untouched and still raises
+  `UnknownProduct` for anything unmapped. `apply_transaction` (subscriptions) is likewise
+  untouched — consumables got a **sibling**, `apply_consumable_transaction`, not a branch inside
+  it, so the subscription path's two rounds of money-bug fixes are provably unaffected.
+- The **credit amount** is read server-side from `credit_packs` and bounded by
+  `IAP_MAX_PACK_CREDITS` — never taken from the client, never inferred from the product id.
+
+**Cross-account protection has two layers**, because they catch different cases. A *second*
+delivery of a transaction we already own is caught by the dedup row → 409. A *first* delivery into
+someone else's session (A buys, verify fails, A signs out, B signs in, StoreKit redelivers) has no
+prior row at all — only StoreKit's `appAccountToken`, stamped by the client and returned inside
+Apple's signed payload, proves who paid.
+
+### 9b.4 Restore, and why buying requires an account
+
+Apple does **not** restore consumables — `Transaction.currentEntitlements` excludes them. The
+server ledger *is* the restore mechanism, and the client-side sweep is `Transaction.unfinished`
+(`StoreKitService.drainUnfinishedTransactions()`), called from the Buy Credits screen and from
+`AppState.onAuthenticated`.
+
+That is also why `POST /billing/verify` is `.signInRequired` and the purchase button is gated
+**in front of** the StoreKit sheet, not behind it: guest identity here is per-install and
+rotatable, so credits bought as a guest would be stranded on an install the user can wipe. The
+**catalog** (`GET /billing/credit-packs`) is `.public`, matching `GET /billing/plans` — the screen
+must render before we know who is looking.
+
+### 9b.5 Wire contract
+
+`GET /users/me/credits` returns the **combined** position in `total` / `used` / `remaining`, plus
+`granted_remaining` / `purchased_remaining` as a breakdown. Combined because three independent iOS
+decoders read this shape and two hard-`decode` all three keys; reporting granted-only would show 0
+to a user holding purchased credits and leave the Generate button disabled — the feature failing
+silently. Those three keys must stay present and non-optional.
+
+> ⚠️ `resets_at` describes the **granted pool only**. Any UI rendering it next to `remaining`
+> ("Renews Aug 31") is telling the user their purchased credits expire — use
+> `purchased_remaining` to qualify that copy. This is a compliance requirement, not polish.
+
+Everything added to `UserCreditsResponse` and `VerifyPurchaseResponse` is **defaulted/optional**,
+and `GET /users/me/credits` selects `*` rather than a column list, so the code degrades cleanly
+if it deploys before the migration is applied. `credits_response_from_rows` builds the response
+field-by-field and must **never** go back to `UserCreditsResponse(**row)`: Pydantic v2 ignores
+extra keys, so the splat would silently serve the granted-only balance with no exception and no log.
+
+### 9b.6 Known, accepted gaps
+
+- **`CONSUMPTION_REQUEST` is not answered.** Apple asks for consumption data within 12h to
+  adjudicate a refund; replying needs an App Store Server API client (signed JWT + ASC key) that
+  this repo does not have. The webhook answers 200 with a distinct log line — a non-2xx would make
+  Apple retry for days. Consequence: Apple decides those refunds without our input.
+- **Refund after full consumption reclaims 0.** `revoke_purchased_credits` floors at
+  `purchased_used`, which is correct (spent credits are a business loss, and `spendable` must never
+  go negative) but exploitable as a business rule. Logged distinctly so the exposure is measurable
+  before deciding to build the API client above.
+- **`REFUND_REVERSED` is not automated** — logged loudly, restored by hand.
+
+### 9b.7 Pricing
+
+Packs are priced strictly **above** the subscription per-credit rate so a top-up never undercuts a
+plan: Starter $1.99/90 · Plus $4.99/250 · Power $9.99/550 · Mega $19.99/1,200 (1.77× → 1.33× Pro's
+$0.0125/credit). Mega deliberately mirrors Pro's monthly allowance so the upsell is self-evident.
+A 402 `INSUFFICIENT_CREDITS` routes to Buy Credits rather than the paywall — the user is mid-action,
+and plans stay one tap away from inside that screen.
+
+> **Open item, tracked here because it moves the margin floor:** the tier allocations were sized
+> against "~17 Gemini calls per report", a figure still repeated in five source files. The real
+> count is **20–26**, and `thinking_budget` is never set on the report path, so thinking tokens bill
+> uncapped at the output rate. Worst-case report COGS is closer to **$0.09–0.15** than the
+> documented $0.05–0.06, pulling Pro's worst-case margin from ~72% toward ~30–47%. The pack ladder
+> is unaffected (packs stay higher-margin by construction); the **subscription** allocations need a
+> re-check, and capping `thinking_budget` is the cheapest lever.
+
+---
+
 ## 10. Recommendations & Critique
 
 ### 10.1 Current Architecture Strengths
@@ -1730,8 +1901,106 @@ Phase 4: Scale & Observability
 
 4. **Nice to Have**
    - [ ] WebSocket endpoint for real-time progress
-   - [ ] Push notifications for completed reports
-   - [ ] Background app refresh for watchlist updates
+   - [x] Push notifications for completed reports — **SHIPPED** (see §11)
+   - [x] Background app refresh for watchlist updates — **SHIPPED** as a server-side
+         sweeper + push rather than client background refresh (see §11)
+
+---
+
+## 11. Notification System (IMPLEMENTED 2026-08-08)
+
+The push subsystem post-dates the rest of this document. Migrations **102** (device
+tokens + user settings), **109** (dedup ledger), **119** (notification events),
+**120** (job claim) and **125** (price alerts) define its storage.
+
+### 11.1 The registry is the single source of truth
+
+`backend/app/services/notification_kinds.py` declares every notification the app can
+send, and nothing else may invent one. Each `NotificationKind` carries its preference
+key, its group master, its absent-value default, its cap category, its APNs
+interruption level and thread id, and whether it respects quiet hours.
+
+Two invariants are pinned by `tests/test_push_preference_typing.py`, and each has
+already failed in production:
+
+| Invariant | The failure it prevents |
+|---|---|
+| every VISIBLE toggle has a registered kind | 12 of the original 13 toggles wrote a preference nothing read, so their UI had to be hidden |
+| every REGISTERED kind has a visible toggle | push shipped 2026-08-01 with the screen hidden — users got alerts with no in-app opt-out, only iOS Settings, which kills every type at once and never re-prompts |
+
+Shipped kinds: `ticker_move`, `research_complete`, `earnings_upcoming`,
+`earnings_result`, `insider_trade`, `whale_13f` (ships **off**), `congress_trade`,
+`price_alert`.
+
+### 11.2 Decision ladder (order is load-bearing)
+
+    audience → child preference AND group master → per-CATEGORY daily cap
+             → quiet hours (DEFER, never drop) → dedup claim → APNs POST
+
+* The **cap is checked BEFORE the claim** so a suppressed alert does not burn that
+  key's dedup slot and silently cost the user tomorrow's alert too.
+* The **claim is an INSERT before the send** (`UNIQUE(user_id, dedup_key)`), so a
+  retry, a re-trip, or two overlapping Railway instances cannot double-buzz. A failed
+  claim round-trip means DO NOT SEND: if we cannot prove an alert is unsent, we don't
+  send it.
+* Caps are **per category** (`watchlist` 3, `earnings` 4, `smart_money` 3,
+  `price_alert` 10, `app` uncapped) and roll at the **user's** midnight, not ET.
+
+### 11.3 Three clocks, never interchanged
+
+| Clock | Used for |
+|---|---|
+| `trading_date_et()` | dedup buckets — "the same market event" is a property of the market |
+| `datetime.now(timezone.utc)` | retention sweeps |
+| the user's `notify_timezone` | per-category cap rolls and quiet hours |
+
+Migration 089 exists because two of these were mixed once already.
+
+### 11.4 Senders
+
+| Sender | Schedule | FMP cost | Claim |
+|---|---|---|---|
+| report ready | inline, after the conditional completion write | 0 | dedup key only |
+| earnings (upcoming + result) | hourly wake, acts after 16:00 ET | **1 call/day** (one market-wide window serves both passes) | `claim_notification_job` |
+| insider Form 4 | hourly wake, acts after 18:00 ET | ~200/day (top-200 watchlist) | same job |
+| whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
+| price alerts | 60s, `session_phase() != "closed"` | 1 batch-quote/cycle | none — the dedup key is the lock |
+
+Report-ready is placed AFTER the conditional completion write and AFTER the
+`DegradedReportError` raise, so a refunded report can never notify.
+
+### 11.5 Quiet hours DEFER, they never drop
+
+A notification inside the window is claimed and parked (`push_state='deferred'`,
+`deliver_after`), so the in-app inbox has it immediately and only the buzz waits. A
+dedicated **24/7** loop flushes it — not the Updates sweeper, which is gated on
+`is_market_active()` and would be asleep when a European user's 07:00 arrives.
+Cross-instance safety via `claim_due_notifications` + `FOR UPDATE SKIP LOCKED`. Rows
+parked past `NOTIFICATION_MAX_DEFER_HOURS` are failed, not sent: a 14-hour-late
+"AAPL moved 8%" is misinformation.
+
+`research_complete` and `price_alert` bypass quiet hours — both answer something the
+user explicitly asked for minutes earlier.
+
+### 11.6 Verification without a device
+
+`notification_events` records one row per notification DECIDED, not merely delivered,
+so "did it fire, for whom, and why not" is a SQL query. Layered:
+
+1. `PUSH_DRY_RUN` — full pipeline, no APNs POST. Also the global kill switch.
+2. `RUN_NOTIFICATION_JOBS_LOCALLY` — the blanket local-dev skip excluded every sender.
+3. `POST /admin/notifications/preview` — audience + per-user verdict, writes nothing.
+4. `POST /admin/notifications/test` — real send, calling admin's devices only.
+5. `xcrun simctl push` — the entire client half (categories, interruption level,
+   routing, badge, cold launch) with no backend and no device.
+
+### 11.7 Regulatory posture
+
+FINRA and the SEC name push notifications explicitly as a supervised digital-engagement
+practice, and the FCA measured an 11% trading-volume increase from push alone. Copy is
+therefore **informational, never directive**, and every template lives in the registry
+or one sender module so the whole surface is auditable in one place. Every category is
+individually opt-out-able in-app, and frequency is capped per category.
 
 ---
 

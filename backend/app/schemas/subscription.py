@@ -24,6 +24,29 @@ class PlanCatalogResponse(BaseModel):
     chat_cost: int            # credits per chat turn (settings.CHAT_CREDIT_COST)
 
 
+class CreditPackResponse(BaseModel):
+    """One consumable credit pack, from the `credit_packs` config table.
+
+    `credits` is authoritative — it is the same value `add_purchased_credits` grants, so what
+    the screen promises can never disagree with what lands in the balance. `price_cents` /
+    `price_label` are a FALLBACK only: the price actually charged is Apple's localized
+    `displayPrice`, which the client reads from StoreKit.
+    """
+
+    product_id: str           # must match App Store Connect exactly
+    display_name: str         # storefront label ("Starter" | "Plus" | ...)
+    credits: int
+    price_cents: int          # USD cents, display fallback only
+    price_label: str          # precomputed ("$4.99")
+    sort_order: int = 0
+
+
+class CreditPackCatalogResponse(BaseModel):
+    packs: List[CreditPackResponse]
+    report_cost: int          # credits per report (settings.REPORT_CREDIT_COST)
+    chat_cost: int            # credits per chat turn (settings.CHAT_CREDIT_COST)
+
+
 class SubscriptionResponse(BaseModel):
     tier: str
     display_name: str
@@ -54,3 +77,20 @@ class VerifyPurchaseResponse(BaseModel):
     # True when this transaction had already been applied (StoreKit replays on launch,
     # restore re-submits). Useful for client logs; not an error.
     was_replay: bool = False
+
+    # ── Consumable credit packs ────────────────────────────────────────────────────────────
+    # EVERY field below is DEFAULTED, because a shipped iOS build decodes this response and
+    # `VerifyPurchaseResponse` in SubscriptionModels.swift synthesizes its init — an
+    # undefaulted addition would make older clients fail to decode a purchase they just paid
+    # for. Adding, never changing, is the rule for this shape.
+    #
+    # `tier` above stays the user's real WINNING tier even on the pack path: the client
+    # surfaces it as the purchase result, so returning "free" for a pack bought by a Pro
+    # subscriber would render as a demotion.
+    kind: str = "subscription"          # "subscription" | "credit_pack"
+    # Credits actually added by THIS delivery. 0 on a replay — the client must not claim
+    # "1,200 credits added" for something the user can check against their balance.
+    credits_granted: int = 0
+    # The user's full spendable balance after applying this transaction (granted + purchased),
+    # so the success screen can show a number without racing the balance refresh.
+    credits_spendable: Optional[int] = None

@@ -64,6 +64,16 @@ final class PushNotificationManager {
             do {
                 let granted = try await UNUserNotificationCenter.current()
                     .requestAuthorization(options: [.alert, .badge, .sound])
+                // The single most important number in the push funnel: iOS prompts ONCE,
+                // so the grant rate is a one-shot measurement and a denial is permanent
+                // until the user goes to Settings themselves. Without it there is no way
+                // to tell "our copy is bad" from "nobody is being asked".
+                //
+                // The outcome is computed OUTSIDE the props literal on purpose: an inline
+                // ternary puts `"granted" :` inside the dictionary, which the prop-key
+                // source scan in `test_analytics_ingest.py` reads as a second key.
+                let outcome = granted ? "granted" : "denied"
+                Analytics.shared.track(.pushPermissionResult, ["reason": .string(outcome)])
                 if granted {
                     UIApplication.shared.registerForRemoteNotifications()
                 }
@@ -71,14 +81,26 @@ final class PushNotificationManager {
                 #if DEBUG
                 print("⚠️ [Push] authorization request failed: \(error.localizedDescription)")
                 #endif
+                Analytics.shared.track(.pushPermissionResult, ["reason": "error"])
             }
         }
     }
 
-    /// A notification was TAPPED. Hands the target to AppState; the Home tab
-    /// consumes it and presents the ticker.
+    /// A notification was TAPPED. Hands the resolved destination to AppState; the Home
+    /// tab consumes it and presents the right screen.
+    ///
+    /// Both properties are set in lockstep: `pendingPushRoute` is the one that carries the
+    /// asset type (so a crypto alert opens the crypto screen), and `pendingPushTicker` is
+    /// kept so any existing reader keeps working.
+    func handleTap(route: NotificationRoute) {
+        appState?.pendingPushRoute = route
+        appState?.pendingPushTicker = route.symbol
+    }
+
+    /// Legacy entry point, kept so a caller that only has a symbol still works. Resolves
+    /// through the same router, which defaults the asset type to `.stock`.
     func handleTap(ticker: String) {
-        appState?.pendingPushTicker = ticker.uppercased()
+        handleTap(route: .ticker(symbol: ticker.uppercased(), assetType: .stock))
     }
 
     /// Called by the AppDelegate with the raw APNs token.

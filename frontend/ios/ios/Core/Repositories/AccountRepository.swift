@@ -21,12 +21,13 @@ protocol AccountRepositoryProtocol: Sendable {
     func updateProfile(displayName: String?, avatarUrl: String?) async throws -> UserProfile
     func fetchCredits() async throws -> CreditInfo
     func fetchPlanCatalog() async throws -> PlanCatalog
+    func fetchCreditPackCatalog() async throws -> CreditPackCatalog
     func fetchSubscription() async throws -> SubscriptionDTO
     func fetchSettings() async throws -> [String: PreferenceValue]
     func updateSettings(_ preferences: [String: PreferenceValue]) async throws -> [String: PreferenceValue]
     func registerDevice(token: String, environment: String?) async throws -> Bool
     func unregisterDevice(token: String) async throws -> Bool
-    func verifyPurchase(signedTransaction: String) async throws -> String
+    func verifyPurchase(signedTransaction: String) async throws -> PurchaseApplied
     func claimGuestData() async throws -> ClaimGuestDataResult
 }
 
@@ -46,17 +47,21 @@ final class AccountRepository: AccountRepositoryProtocol {
         try await apiClient.request(endpoint: .getCurrentUser, responseType: UserProfile.self)
     }
 
-    /// POST /billing/verify — hand an Apple-signed transaction to the server and return the
-    /// tier it applied.
+    /// POST /billing/verify — hand an Apple-signed transaction to the server and return what
+    /// it applied.
     ///
-    /// Only the signed blob is sent. The tier comes back from the server's verification of
+    /// Only the signed blob is sent. Everything that comes back — the tier for a subscription,
+    /// the credits for a consumable pack — is derived from the server's verification of
     /// Apple's signature, so the client never asserts what it bought.
-    func verifyPurchase(signedTransaction: String) async throws -> String {
+    ///
+    /// Returns `PurchaseApplied` rather than a bare tier string: a credit pack grants credits
+    /// and leaves the tier alone, so a tier string cannot tell a $19.99 top-up from a no-op.
+    func verifyPurchase(signedTransaction: String) async throws -> PurchaseApplied {
         let response = try await apiClient.request(
             endpoint: .verifyPurchase(signedTransaction: signedTransaction),
             responseType: VerifyPurchaseResponse.self
         )
-        return response.tier
+        return PurchaseApplied(from: response)
     }
 
     /// PATCH /users/me. The endpoint and its `UpdateProfileRequest` schema already
@@ -76,6 +81,18 @@ final class AccountRepository: AccountRepositoryProtocol {
 
     func fetchPlanCatalog() async throws -> PlanCatalog {
         try await apiClient.request(endpoint: .getPlanCatalog, responseType: PlanCatalog.self)
+    }
+
+    /// GET /billing/credit-packs — the consumable catalog behind the Buy Credits screen.
+    ///
+    /// The CREDIT COUNT comes from here rather than from StoreKit, because `Product` has no
+    /// such field: hardcoding it in the app (or parsing it out of a localized description)
+    /// would let a server-side config change make the screen lie about what the user gets.
+    /// The PRICE goes the other way — Apple's localized `displayPrice` wins.
+    func fetchCreditPackCatalog() async throws -> CreditPackCatalog {
+        try await apiClient.request(
+            endpoint: .getCreditPackCatalog, responseType: CreditPackCatalog.self
+        )
     }
 
     func fetchSubscription() async throws -> SubscriptionDTO {

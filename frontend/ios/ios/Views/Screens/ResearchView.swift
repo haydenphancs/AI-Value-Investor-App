@@ -79,8 +79,9 @@ struct ResearchContentView: View {
             } message: {
                 Text("This can't be undone.")
             }
+            // "Add More Credits" → buy credits, not the subscription paywall. See ContentView.
             .sheet(isPresented: $viewModel.showCreditsSheet) {
-                PaywallView()
+                BuyCreditsView()
                     .environment(\.appState, appState)
             }
             .sheet(isPresented: $viewModel.showPersonasSheet) {

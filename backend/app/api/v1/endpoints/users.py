@@ -36,6 +36,16 @@ from app.services.user_settings_service import (
     PreferencesUnreadable,
     PreferencesEmptyAfterSanitize,
 )
+from app.schemas.notifications import (
+    MarkReadRequest,
+    MarkReadResponse,
+    NotificationListResponse,
+)
+from app.services.notification_inbox_service import (
+    DEFAULT_PAGE,
+    NotificationInboxUnavailable,
+    get_notification_inbox_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +59,40 @@ def credits_response_from_rows(rows: list) -> UserCreditsResponse:
     seeds a row; this is the rare first-touch safety net). A transient READ ERROR is
     NOT handled here — the caller must surface it as retryable, never fabricate a
     balance (a masked error would show a Pro user "50" and mis-drive the UI).
+
+    ⚠️ Built FIELD BY FIELD, not `UserCreditsResponse(**row)`. The splat was correct while the
+    row and the response were the same four columns, but `user_credits` now carries a second
+    pool (`purchased_total` / `purchased_used`, migration 117) and Pydantic v2 IGNORES extra
+    keys — so a splat would silently serve the GRANTED-ONLY balance with no exception and no
+    log. A user who just paid $9.99 would see their old balance and a disabled Generate button.
+
+    Also tolerant of the columns being ABSENT: this endpoint must keep working if the code
+    deploys before migration 117 is applied (`.get(..., 0)` — the same posture
+    `iap_service._EVENT_AT_COLUMN` takes for `subscriptions.last_event_at`).
     """
     if not rows:
-        return UserCreditsResponse(total=50, used=0, remaining=50)
-    return UserCreditsResponse(**rows[0])
+        return UserCreditsResponse(
+            total=50, used=0, remaining=50,
+            granted_remaining=50, purchased_remaining=0,
+        )
+
+    row = rows[0]
+    granted_total = int(row.get("total") or 0)
+    granted_used = int(row.get("used") or 0)
+    purchased_total = int(row.get("purchased_total") or 0)
+    purchased_used = int(row.get("purchased_used") or 0)
+
+    granted_remaining = granted_total - granted_used
+    purchased_remaining = purchased_total - purchased_used
+
+    return UserCreditsResponse(
+        total=granted_total + purchased_total,
+        used=granted_used + purchased_used,
+        remaining=granted_remaining + purchased_remaining,
+        resets_at=row.get("resets_at"),
+        granted_remaining=granted_remaining,
+        purchased_remaining=purchased_remaining,
+    )
 
 
 @router.get("/me", response_model=UserResponse)
@@ -92,9 +132,13 @@ async def get_user_credits(
     # limit(1) (not single()) so a genuine "no row" is an empty list, distinct from a
     # transient read error which raises. We must NOT launder a transient error into a
     # fabricated Free balance — that would show a real user the wrong credits.
+    # `select("*")` rather than an explicit column list: naming `purchased_total` here would
+    # 500 every credits read if this deploys before migration 117 is applied, and the ordering
+    # of a hand-applied migration versus a deploy is not guaranteed. The row is 9 small columns
+    # and `credits_response_from_rows` defaults anything missing.
     try:
         result = supabase.table("user_credits").select(
-            "total, used, remaining, resets_at"
+            "*"
         ).eq("user_id", user["id"]).limit(1).execute()
     except Exception as e:
         logger.error(
@@ -654,3 +698,70 @@ async def delete_account(
 
     logger.info("Account deleted for user=%s (storage + unlinked rows + cascade)", user_id)
     return {"deleted": True}
+
+
+# ── Notification inbox ───────────────────────────────────────────────────────
+#
+# `notification_events` is written by the dispatcher BEFORE delivery is attempted, so
+# these endpoints see every notification the system decided to send — including ones
+# that were deferred by quiet hours or that found no registered device. That is the
+# point: a push that arrives while the phone is face-down is gone, and before this
+# table the app had no record of what fired.
+#
+# Auth-only (`get_current_user`), matching /me/settings and /me/devices. Push never
+# reaches a guest — `device_tokens` is FK-bound to public.users — so a guest inbox
+# would be permanently empty by construction.
+
+
+@router.get("/me/notifications", response_model=NotificationListResponse)
+async def list_my_notifications(
+    limit: int = DEFAULT_PAGE,
+    before: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """Newest-first page of this user's notifications, plus the unread count.
+
+    `before` is a KEYSET cursor (the `created_at` of the last item on the previous
+    page), not an offset: rows arrive continuously at the head, so an offset page 2
+    would repeat or skip whenever a notification landed between requests.
+
+    A read failure is 503 NOTIFICATIONS_UNAVAILABLE, never an empty 200 — an empty
+    inbox and a broken inbox look identical to a user, and "No notifications yet"
+    rendered over a database error is a failure nobody reports.
+    """
+    try:
+        return await asyncio.to_thread(
+            get_notification_inbox_service().list_for_user,
+            user["id"], limit=limit, before=before,
+        )
+    except NotificationInboxUnavailable as e:
+        return make_error_response(
+            ErrorCode.NOTIFICATIONS_UNAVAILABLE,
+            message=str(e),
+        )
+
+
+@router.post("/me/notifications/read", response_model=MarkReadResponse)
+async def mark_my_notifications_read(
+    request: MarkReadRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Mark specific notifications (or all of them) as read.
+
+    Ownership is enforced by scoping every write to `user_id` IN ADDITION to the id
+    filter. Filtering on `id` alone would be an IDOR — one user clearing another's
+    badge — and because the backend holds the service-role key, that in-code filter is
+    the effective wall rather than RLS (SYSTEM_DESIGN_GUIDELINES §9).
+    """
+    service = get_notification_inbox_service()
+    try:
+        updated = await asyncio.to_thread(
+            service.mark_read, user["id"], ids=request.ids, mark_all=request.all
+        )
+    except NotificationInboxUnavailable as e:
+        return make_error_response(
+            ErrorCode.NOTIFICATIONS_UNAVAILABLE,
+            message=str(e),
+        )
+    unread = await asyncio.to_thread(service.unread_count, user["id"])
+    return MarkReadResponse(updated=updated, unread_count=unread)

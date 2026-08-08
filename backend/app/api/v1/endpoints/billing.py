@@ -22,6 +22,7 @@ from app.integrations.app_store import (
     verify_signed_transaction,
 )
 from app.schemas.subscription import (
+    CreditPackResponse, CreditPackCatalogResponse,
     PlanResponse, PlanCatalogResponse,
     VerifyPurchaseRequest, VerifyPurchaseResponse,
 )
@@ -45,6 +46,23 @@ async def get_plans():
     plans = SubscriptionService().get_plan_catalog()
     return PlanCatalogResponse(
         plans=[PlanResponse(**p) for p in plans],
+        report_cost=settings.REPORT_CREDIT_COST,
+        chat_cost=settings.CHAT_CREDIT_COST,
+    )
+
+
+@router.get("/credit-packs", response_model=CreditPackCatalogResponse)
+async def get_credit_packs():
+    """Public consumable credit-pack catalog. No auth — same reasoning as `/plans`: the
+    Buy Credits screen must render before we know who is looking, and nothing here is
+    sensitive (it is the same pricing Apple shows on the storefront).
+
+    Only the CATALOG is public. Buying is `POST /verify`, which is sign-in-required —
+    consumables are not restorable by Apple, so credits have to attach to a real account
+    or a reinstall loses money the user actually spent."""
+    packs = SubscriptionService().get_credit_pack_catalog()
+    return CreditPackCatalogResponse(
+        packs=[CreditPackResponse(**p) for p in packs],
         report_cost=settings.REPORT_CREDIT_COST,
         chat_cost=settings.CHAT_CREDIT_COST,
     )
@@ -113,9 +131,12 @@ async def verify_purchase(
             ),
         )
 
-    # 2. Apply the entitlement.
+    # 2. Apply it. `apply_verified_transaction` routes on the VERIFIED payload's productId:
+    # a subscription reconciles the tier, a consumable credit pack grants credits exactly
+    # once against `credit_purchases (environment, transaction_id)`. Both return the same
+    # summary shape, and every error arm below serves both.
     try:
-        result = get_iap_service().apply_transaction(user_id, payload)
+        result = get_iap_service().apply_verified_transaction(user_id, payload)
     except UnknownProduct as e:
         # Verified but unmapped: a REAL purchase we can't price. The user paid, so this is
         # ours to fix — loud log, honest message, no silent free tier.
@@ -161,6 +182,11 @@ async def verify_purchase(
         status=result["status"],
         current_period_end=result["current_period_end"],
         was_replay=result["was_replay"],
+        # Defaulted `.get`s so the subscription path — which does not set them — keeps its
+        # exact previous response, and so this line cannot break if a future branch omits one.
+        kind=result.get("kind", "subscription"),
+        credits_granted=result.get("credits_granted", 0),
+        credits_spendable=result.get("credits_spendable"),
     )
 
 

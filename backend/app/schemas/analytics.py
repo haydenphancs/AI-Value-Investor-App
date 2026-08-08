@@ -61,6 +61,26 @@ ALLOWED_EVENTS: frozenset[str] = frozenset({
     # `background_sync_failed` is best-effort sync (settings, push registration, guest claim).
     "mutation_failed",
     "background_sync_failed",
+    # Consumable credit packs ("Buy Credits"). Kept separate from the `paywall_*` /
+    # `purchase_completed` trio rather than folded into it: a top-up and a subscription are
+    # different decisions with different funnels, and merging them would make the
+    # subscription conversion rate — the number the pricing model is built on — unreadable.
+    "credit_pack_shown",
+    "credit_pack_purchase_started",
+    "credit_pack_purchased",
+    # Push funnel. Nothing measured notifications at all before the overhaul, so the two
+    # questions that decide whether a category is worth sending — "does anyone tap it?"
+    # and "how many people turn them off?" — were unanswerable.
+    #
+    # ⚠️ MUST stay in step with `Analytics.Event` on iOS. An unknown name is DROPPED here
+    # rather than rejected, so a one-sided addition shows up as a permanently empty metric
+    # with no error anywhere.
+    "push_received",
+    "push_opened",
+    "push_permission_result",
+    "push_register_failed",
+    "notification_inbox_opened",
+    "price_alert_created",
 })
 
 
@@ -83,6 +103,9 @@ ALLOWED_PROP_KEYS: frozenset[str] = frozenset({
     "action",     # mutation_failed — a fixed infinitive phrase from the call site
     "op",         # background_sync_failed — fixed operation name
     "code",       # both — AppError.analyticsCode, never the message
+    "product_id",  # credit_pack_* — a fixed App Store product id, 6 possible values
+    "route",      # push_opened — the destination FAMILY (ticker/report/inbox),
+                  # never a symbol or a report id
 })
 
 

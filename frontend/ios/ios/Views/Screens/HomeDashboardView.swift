@@ -23,6 +23,7 @@ struct HomeDashboardView: View {
     @Binding var selectedTab: HomeTab
 
     @State private var showSearch = false
+    @State private var showNotificationInbox = false
     @State private var showProfile = false
     @State private var selectedTicker: MarketTicker?
     /// Which Daily Scanner card is expanded (nil = none). Owned here so a tap
@@ -107,29 +108,54 @@ struct HomeDashboardView: View {
                 .environment(appState)
                 .environment(\.appState, appState)
         }
-        .onChange(of: appState.pendingPushTicker, initial: true) {
+        .onChange(of: appState.pendingPushRoute, initial: true) {
             // `initial: true` is load-bearing, not cosmetic. On a COLD launch from a
-            // notification tap, AppDelegate sets pendingPushTicker before this view
+            // notification tap, AppDelegate sets the pending route before this view
             // has ever rendered — and a plain .onChange only fires on a CHANGE after
             // first render, so the tap was silently dropped in exactly the scenario
             // the tap handler exists for. Warm-foreground taps worked, which is why
-            // it would have survived manual testing.
+            // it would have survived manual testing. DO NOT "clean this up".
             //
-            // Consume the tap: open the ticker, then CLEAR it so the same tap can't
-            // re-present after the sheet is dismissed.
-            guard let ticker = appState.pendingPushTicker, !ticker.isEmpty else { return }
-            // Only the symbol and type matter — TickerDetailView loads everything
-            // else. The placeholder numbers are never rendered; the cover switches on
-            // `type` and the detail screen fetches by symbol.
-            selectedTicker = MarketTicker(
-                name: ticker,
-                symbol: ticker,
-                type: .stock,
-                price: 0,
-                changePercent: 0,
-                sparklineData: []
-            )
-            appState.pendingPushTicker = nil
+            // Consume the tap: open the destination, then CLEAR it so the same tap
+            // can't re-present after the sheet is dismissed.
+            guard let route = appState.pendingPushRoute else { return }
+            defer {
+                appState.pendingPushRoute = nil
+                appState.pendingPushTicker = nil
+            }
+            switch route {
+            case .ticker(let symbol, let assetType):
+                // ASSET TYPE FROM THE PAYLOAD. This used to be a hardcoded `.stock`,
+                // so a crypto or ETF alert opened TickerDetailView and rendered stock
+                // fundamentals for the wrong kind of asset.
+                //
+                // Only the symbol and type matter — the detail screen loads everything
+                // else. The placeholder numbers are never rendered.
+                selectedTicker = MarketTicker(
+                    name: symbol,
+                    symbol: symbol,
+                    type: assetType,
+                    price: 0,
+                    changePercent: 0,
+                    sparklineData: []
+                )
+            case .report(_, let ticker):
+                guard let ticker, !ticker.isEmpty else { showNotificationInbox = true; return }
+                selectedTicker = MarketTicker(
+                    name: ticker, symbol: ticker, type: .stock,
+                    price: 0, changePercent: 0, sparklineData: []
+                )
+            case .inbox:
+                // A payload we could not route. The inbox at least SHOWS the
+                // notification, which beats a tap that appears to do nothing.
+                showNotificationInbox = true
+            }
+        }
+        .fullScreenCover(isPresented: $showNotificationInbox) {
+            NavigationStack {
+                NotificationInboxView()
+                    .environment(appState)
+            }
         }
         .fullScreenCover(item: $selectedTicker) { ticker in
             NavigationStack {

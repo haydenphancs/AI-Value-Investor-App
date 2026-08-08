@@ -118,9 +118,13 @@ def test_the_catalog_error_path_still_exists():
 
 
 def test_the_purchase_call_logs_the_nserror_domain_and_code():
-    body = _func_body(_read(_SERVICE), "func purchase(_ product: Product) async throws -> PurchaseOutcome {")
+    # The signature gained `accountID:` when consumable credit packs landed (it becomes
+    # StoreKit's `appAccountToken`), so this anchors on the stable prefix rather than the full
+    # line. Still exact enough to fail if the method is renamed or removed — which is what the
+    # guard is for — and `_func_body` bounds the window to this method alone.
+    body = _func_body(_read(_SERVICE), "func purchase(_ product: Product")
 
-    assert "do {" in body and "result = try await product.purchase()" in body, (
+    assert "do {" in body and "result = try await product.purchase(" in body, (
         "product.purchase() must be wrapped so a presentation failure can be logged; a bare "
         "`try await` sends it straight to AppError.unknown with no diagnostic"
     )

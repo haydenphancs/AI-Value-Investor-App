@@ -9,15 +9,24 @@ import SwiftUI
 
 struct CustomTabBar: View {
     @Binding var selectedTab: HomeTab
+    /// Unread notifications, badged on the Updates tab — the closest thing the app has
+    /// to a notification surface. Device-global state, so `AppState` resets it when a
+    /// session ends; otherwise the next account inherits the previous user's count.
+    var unreadNotifications: Int = 0
 
     var body: some View {
         HStack(spacing: 0) {
             ForEach(HomeTab.allCases, id: \.self) { tab in
-                TabBarItem(tab: tab, isSelected: selectedTab == tab) {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        selectedTab = tab
-                    }
-                }
+                TabBarItem(
+                    tab: tab,
+                    isSelected: selectedTab == tab,
+                    onTap: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedTab = tab
+                        }
+                    },
+                    badgeCount: tab == .updates ? unreadNotifications : 0
+                )
             }
         }
         .padding(.top, AppSpacing.md)

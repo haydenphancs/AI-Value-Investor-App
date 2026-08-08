@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict LVonfhT1zWdBUIMvl9y0skeAS9pBVFy6BhCG3glaVIWVjwYpcQojtKN8FaoKqQb
+\restrict 5z9fxHg5NcSHY8TOenSpfSkvSThGUGrx2RUbxzzr0unN08bGHc2TGHCW6wUvflR
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1290,6 +1290,95 @@ $$;
 
 
 --
+-- Name: grant_tier_upgrade(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.grant_tier_upgrade(p_user_id uuid) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    _GUEST      CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_tier      public.user_tier;
+    v_alloc     INTEGER;
+    v_row       public.user_credits%ROWTYPE;
+    v_now_et    TIMESTAMP;
+    v_next_reset TIMESTAMPTZ;
+    v_delta     INTEGER;
+BEGIN
+    -- Never touch the shared guest bucket. It is a fixed sentinel (seeded 100000 by
+    -- 046_seed_guest_user.sql) that keeps the signed-out app from being walled out; it is
+    -- not a balance, is never metered, and must not be reset. Same guard as
+    -- ensure_credit_period.
+    IF p_user_id = _GUEST THEN
+        RETURN 0;
+    END IF;
+
+    -- Resolve tier -> monthly allocation. `reconcile_user_tier` has already mirrored the
+    -- winning tier onto users.tier before calling this, so this reads the NEW tier.
+    SELECT u.tier INTO v_tier FROM public.users u WHERE u.id = p_user_id;
+    IF v_tier IS NULL THEN
+        v_tier := 'free';
+    END IF;
+    SELECT monthly_credits INTO v_alloc FROM public.plan_credits WHERE tier = v_tier;
+    IF v_alloc IS NULL THEN
+        v_alloc := 0;
+    END IF;
+
+    v_now_et     := (now() AT TIME ZONE 'America/New_York');
+    v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
+                        AT TIME ZONE 'America/New_York';
+
+    -- Lock the balance row so a concurrent verify + webhook for the same purchase cannot
+    -- both observe the pre-grant total and both raise it.
+    SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
+
+    IF NOT FOUND THEN
+        -- No balance row yet (upgrade before the first credit read). Create it at the new
+        -- tier's allocation. ON CONFLICT DO NOTHING mirrors ensure_credit_period: FOR UPDATE
+        -- cannot lock a row that does not exist, so two first-touch calls can both land here.
+        INSERT INTO public.user_credits (user_id, total, used, resets_at, updated_at)
+        VALUES (p_user_id, v_alloc, 0, v_next_reset, NOW())
+        ON CONFLICT (user_id) DO NOTHING;
+
+        IF FOUND THEN
+            INSERT INTO public.credit_transactions
+                (user_id, delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, v_alloc, 'tier_upgrade',
+                    to_char(v_now_et, 'YYYY-MM'), v_alloc);
+            RETURN v_alloc;
+        END IF;
+
+        SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
+        IF NOT FOUND THEN
+            RETURN 0;
+        END IF;
+    END IF;
+
+    -- The whole fix, and the whole replay guard, is this comparison. An upgrade raises the
+    -- ceiling; a replay or a downgrade finds nothing to do.
+    IF v_alloc <= v_row.total THEN
+        RETURN (v_row.total - v_row.used);
+    END IF;
+
+    v_delta := v_alloc - v_row.total;
+
+    UPDATE public.user_credits
+       SET total      = v_alloc,
+           updated_at = NOW()
+     WHERE user_id = p_user_id;
+
+    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
+    VALUES (p_user_id, v_delta, 'tier_upgrade',
+            to_char(v_now_et, 'YYYY-MM'), v_alloc - v_row.used);
+
+    RETURN (v_alloc - v_row.used);
+END;
+$$;
+
+
+--
 -- Name: handle_new_auth_user(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1533,6 +1622,67 @@ BEGIN
 
     -- No row (never claimed this month) => nothing to release.
     RETURN COALESCE(v_count, 0);
+END;
+$$;
+
+
+--
+-- Name: revoke_tier_credits(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.revoke_tier_credits(p_user_id uuid) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    _GUEST      CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_free      INTEGER;
+    v_row       public.user_credits%ROWTYPE;
+    v_floor     INTEGER;
+    v_delta     INTEGER;
+    v_now_et    TIMESTAMP;
+BEGIN
+    -- Same guard as grant_tier_upgrade / ensure_credit_period: the shared guest bucket is a
+    -- fixed sentinel seeded 100000 by 046_seed_guest_user.sql, not a balance. Never meter it.
+    IF p_user_id = _GUEST THEN
+        RETURN 0;
+    END IF;
+
+    SELECT monthly_credits INTO v_free FROM public.plan_credits WHERE tier = 'free';
+    IF v_free IS NULL THEN
+        v_free := 0;
+    END IF;
+
+    -- Lock so a concurrent REFUND retry and a verify cannot both read the pre-revoke total.
+    SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
+    IF NOT FOUND THEN
+        -- No balance row: nothing was ever granted, so nothing to take back.
+        RETURN 0;
+    END IF;
+
+    -- Floor at `used` so `remaining` (a GENERATED column, total - used) can never go negative.
+    -- Spent credits are not recoverable; this only reclaims the UNSPENT balance.
+    v_floor := GREATEST(v_free, v_row.used);
+
+    -- Idempotent: a replayed REFUND finds total already at the floor.
+    IF v_row.total <= v_floor THEN
+        RETURN (v_row.total - v_row.used);
+    END IF;
+
+    v_delta  := v_floor - v_row.total;          -- negative
+    v_now_et := (now() AT TIME ZONE 'America/New_York');
+
+    UPDATE public.user_credits
+       SET total      = v_floor,
+           updated_at = NOW()
+     WHERE user_id = p_user_id;
+
+    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
+    VALUES (p_user_id, v_delta, 'tier_revoked',
+            to_char(v_now_et, 'YYYY-MM'), v_floor - v_row.used);
+
+    RETURN (v_floor - v_row.used);
 END;
 $$;
 
@@ -5953,8 +6103,16 @@ CREATE TABLE public.subscriptions (
     original_transaction_id text,
     current_period_end timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_event_at timestamp with time zone
 );
+
+
+--
+-- Name: COLUMN subscriptions.last_event_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.subscriptions.last_event_at IS 'Apple''s signedDate from the most recently APPLIED App Store Server Notification. The ordering key for out-of-order redeliveries — NOT expiresDate, which describes which period a transaction is about rather than when Apple asserted it. NULL for rows last written by the client verify path, which carries no signedDate. See migration 114.';
 
 
 --
@@ -6121,38 +6279,6 @@ ALTER SEQUENCE public.updates_insight_state_id_seq OWNED BY public.updates_insig
 
 
 --
--- Name: user_book_progress; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.user_book_progress (
-    id bigint NOT NULL,
-    user_id uuid NOT NULL,
-    curriculum_order integer NOT NULL,
-    core_number integer NOT NULL,
-    completed_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: user_book_progress_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.user_book_progress_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: user_book_progress_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.user_book_progress_id_seq OWNED BY public.user_book_progress.id;
-
-
---
 -- Name: user_bookmarks; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6193,7 +6319,7 @@ CREATE TABLE public.user_credits (
 -- Name: TABLE user_credits; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.user_credits IS 'Per-user credit balance for AI research generation';
+COMMENT ON TABLE public.user_credits IS 'Credit balances. SERVICE-ROLE ONLY: every write goes through a SECURITY DEFINER RPC (spend_credits / refund_credits / ensure_credit_period / grant_tier_upgrade / revoke_tier_credits). Do not GRANT to anon or authenticated — `remaining` is a generated column and the invariants live in those functions, not in constraints. See migration 115.';
 
 
 --
@@ -6292,7 +6418,8 @@ CREATE TABLE public.users (
     tier public.user_tier DEFAULT 'free'::public.user_tier NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    password_changed_at timestamp with time zone
+    password_changed_at timestamp with time zone,
+    is_admin boolean DEFAULT false NOT NULL
 );
 
 
@@ -6315,6 +6442,13 @@ COMMENT ON COLUMN public.users.tier IS 'Subscription tier: free (default), pro, 
 --
 
 COMMENT ON COLUMN public.users.password_changed_at IS 'When the account password was last changed. Any app JWT whose `iat` predates this is rejected, so a password reset invalidates sessions an attacker may hold. NULL = never changed since signup (no restriction).';
+
+
+--
+-- Name: COLUMN users.is_admin; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.users.is_admin IS 'Grants access to /api/v1/admin/*. Set manually — never by registration, signup trigger, or any application code path. See migration 113.';
 
 
 --
@@ -6990,13 +7124,6 @@ ALTER TABLE ONLY public.signals_cache ALTER COLUMN id SET DEFAULT nextval('publi
 --
 
 ALTER TABLE ONLY public.updates_insight_state ALTER COLUMN id SET DEFAULT nextval('public.updates_insight_state_id_seq'::regclass);
-
-
---
--- Name: user_book_progress id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_book_progress ALTER COLUMN id SET DEFAULT nextval('public.user_book_progress_id_seq'::regclass);
 
 
 --
@@ -8100,22 +8227,6 @@ ALTER TABLE ONLY public.updates_insight_state
 
 ALTER TABLE ONLY public.sector_benchmarks
     ADD CONSTRAINT uq_sector_industry_metric_period UNIQUE (sector, industry, metric_name, period_type, period_label);
-
-
---
--- Name: user_book_progress user_book_progress_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_book_progress
-    ADD CONSTRAINT user_book_progress_pkey PRIMARY KEY (id);
-
-
---
--- Name: user_book_progress user_book_progress_user_id_curriculum_order_core_number_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_book_progress
-    ADD CONSTRAINT user_book_progress_user_id_curriculum_order_core_number_key UNIQUE (user_id, curriculum_order, core_number);
 
 
 --
@@ -9672,13 +9783,6 @@ CREATE INDEX idx_updates_insight_state_watch ON public.updates_insight_state USI
 
 
 --
--- Name: idx_user_book_progress_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_user_book_progress_user ON public.user_book_progress USING btree (user_id);
-
-
---
 -- Name: idx_user_credits_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9697,6 +9801,13 @@ CREATE INDEX idx_user_learn_progress_lookup ON public.user_learn_progress USING 
 --
 
 CREATE INDEX idx_users_email ON public.users USING btree (email);
+
+
+--
+-- Name: idx_users_is_admin; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_users_is_admin ON public.users USING btree (id) WHERE is_admin;
 
 
 --
@@ -10954,13 +11065,6 @@ CREATE POLICY credits_service_all ON public.user_credits USING ((auth.role() = '
 
 
 --
--- Name: user_credits credits_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY credits_update_own ON public.user_credits FOR UPDATE USING ((auth.uid() = user_id));
-
-
---
 -- Name: crypto_coin_id_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -12008,47 +12112,6 @@ CREATE POLICY updates_insight_state_service_all ON public.updates_insight_state 
 
 
 --
--- Name: user_book_progress; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_book_progress ENABLE ROW LEVEL SECURITY;
-
---
--- Name: user_book_progress user_book_progress_delete_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_delete_own ON public.user_book_progress FOR DELETE TO authenticated USING ((auth.uid() = user_id));
-
-
---
--- Name: user_book_progress user_book_progress_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_insert_own ON public.user_book_progress FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: user_book_progress user_book_progress_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_select_own ON public.user_book_progress FOR SELECT TO authenticated USING ((auth.uid() = user_id));
-
-
---
--- Name: user_book_progress user_book_progress_service_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_service_all ON public.user_book_progress TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: user_book_progress user_book_progress_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_book_progress_update_own ON public.user_book_progress FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
-
-
---
 -- Name: user_bookmarks; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -12589,5 +12652,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict LVonfhT1zWdBUIMvl9y0skeAS9pBVFy6BhCG3glaVIWVjwYpcQojtKN8FaoKqQb
+\unrestrict 5z9fxHg5NcSHY8TOenSpfSkvSThGUGrx2RUbxzzr0unN08bGHc2TGHCW6wUvflR
 

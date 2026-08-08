@@ -1,0 +1,414 @@
+//
+//  BuyCreditsView.swift
+//  ios
+//
+//  Buy Credits — one-off CONSUMABLE credit packs.
+//
+//  Every "Add More Credits" affordance used to open `PaywallView`, the Free/Pro/Max
+//  subscription sheet. That is the wrong destination for someone who has just run out
+//  mid-task: they want to finish the thing they were doing, not commit to a monthly plan.
+//  This screen sells credits directly and keeps the plans one tap away.
+//
+//  Two things on this screen are compliance, not decoration:
+//
+//  1. **Purchased credits never expire** (App Store Guideline 3.1.1), while the monthly
+//     allowance resets. The balance header therefore splits the two, and the reset date is
+//     only shown against the part that actually resets — a "Renews Aug 31" label sitting over
+//     a total that includes purchased credits tells the user something untrue.
+//
+//  2. **Restore** exists because Apple does not restore consumables. `Transaction`
+//     `currentEntitlements` excludes them, so the server ledger IS the restore mechanism and
+//     the button drains `Transaction.unfinished` instead.
+//
+
+import SwiftUI
+
+struct BuyCreditsView: View {
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appState) private var appState
+
+    @StateObject private var viewModel = BuyCreditsViewModel()
+    /// Nested `ObservableObject` changes don't propagate through the view model, so the
+    /// per-pack "Processing…" state needs its own observation. Same reason `PaywallView`
+    /// observes it directly.
+    @ObservedObject private var store = StoreKitService.shared
+
+    // MARK: - Alert bindings
+    //
+    // Optional-backed so each alert has exactly one source of truth and clearing it is the
+    // dismissal. Mirrors PaywallView.
+
+    private var purchaseSucceeded: Binding<Bool> {
+        Binding(
+            get: { viewModel.grantedCredits != nil },
+            set: { if !$0 { viewModel.grantedCredits = nil } }
+        )
+    }
+
+    private var purchaseFailed: Binding<Bool> {
+        Binding(
+            get: { viewModel.purchaseError != nil },
+            set: { if !$0 { viewModel.purchaseError = nil } }
+        )
+    }
+
+    private var restoreFinished: Binding<Bool> {
+        Binding(
+            get: { viewModel.restoreMessage != nil },
+            set: { if !$0 { viewModel.restoreMessage = nil } }
+        )
+    }
+
+    private var credits: CreditInfo? { appState.user.credits }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                AppColors.background.ignoresSafeArea()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: AppSpacing.xl) {
+                        balanceHeader
+                        whatCreditsBuy
+
+                        if !appState.auth.isAuthenticated {
+                            signInGate
+                        } else if !viewModel.packs.isEmpty {
+                            VStack(spacing: AppSpacing.md) {
+                                ForEach(viewModel.packs) { pack in
+                                    packCard(pack)
+                                }
+                            }
+                            neverExpiresNote
+                        } else if viewModel.isLoading {
+                            ProgressView()
+                                .tint(AppColors.primaryBlue)
+                                .padding(.top, AppSpacing.xxl)
+                        } else if let error = viewModel.errorMessage {
+                            errorView(error)
+                        }
+
+                        seePlansButton
+                        legalLinks
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.top, AppSpacing.lg)
+                    .padding(.bottom, AppSpacing.xxxl)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text("Add Credits")
+                        .font(AppTypography.headingSmall)
+                        .foregroundColor(AppColors.textPrimary)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: { dismiss() }) {
+                        Image(systemName: "xmark")
+                            .font(AppTypography.iconSmall).fontWeight(.semibold)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                }
+            }
+            .toolbarBackground(AppColors.background, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .alert("Credits added", isPresented: purchaseSucceeded) {
+                Button("Done", role: .cancel) { dismiss() }
+            } message: {
+                Text("\(viewModel.grantedCredits ?? 0) credits are now in your balance. "
+                     + "They never expire.")
+            }
+            .alert("Already added", isPresented: $viewModel.alreadyApplied) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                // A replayed delivery. Claiming "N credits added" here would be a number the
+                // user can check against their balance and find false.
+                Text("This purchase had already been applied to your account, so your balance "
+                     + "is unchanged.")
+            }
+            .alert("Waiting for approval", isPresented: $viewModel.isPendingApproval) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("This purchase needs approval before it completes. Once approved, your "
+                     + "credits will be added automatically.")
+            }
+            .alert("Restore Purchases", isPresented: restoreFinished) {
+                Button("OK", role: .cancel) { viewModel.restoreMessage = nil }
+            } message: {
+                Text(viewModel.restoreMessage ?? "")
+            }
+            .alert("Purchase Failed", isPresented: purchaseFailed) {
+                Button("OK", role: .cancel) { viewModel.purchaseError = nil }
+            } message: {
+                Text(viewModel.purchaseError ?? "")
+            }
+            .sheet(isPresented: $viewModel.showPlans) {
+                // Presented ON TOP of this screen rather than dismiss-then-represent: the
+                // cross-presentation dance is where SwiftUI drops the second sheet.
+                // PaywallView dismisses itself on success, popping back here.
+                PaywallView()
+                    .environment(\.appState, appState)
+            }
+        }
+        .task {
+            Analytics.shared.track(.creditPackShown)
+            // Stamped onto the purchase as StoreKit's `appAccountToken`, so a transaction
+            // redelivered into a different signed-in session can be refused server-side.
+            viewModel.accountID = appState.user.profile?.id
+            await viewModel.load()
+        }
+    }
+
+    // MARK: - Balance
+
+    private var balanceHeader: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Image(systemName: "creditcard.fill")
+                .font(.system(size: 32))
+                .foregroundColor(AppColors.alertOrange)
+
+            Text("\(credits?.remaining ?? 0)")
+                .font(AppTypography.dataHero)
+                .foregroundColor(AppColors.textPrimary)
+            Text("credits available")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+
+            balanceBreakdown
+        }
+    }
+
+    /// Splits the balance so the reset date is attached ONLY to the part that resets.
+    /// Rendering "Renews Aug 31" over a total that includes purchased credits would tell the
+    /// user their paid credits expire — which Guideline 3.1.1 forbids them from doing.
+    @ViewBuilder
+    private var balanceBreakdown: some View {
+        if let credits {
+            let purchased = credits.purchasedCredits
+            let monthly = credits.grantedRemaining ?? credits.remaining
+            HStack(spacing: AppSpacing.xs) {
+                Text("\(monthly) monthly")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                if purchased > 0 {
+                    Text("·")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                    Text("\(purchased) purchased")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.gain)
+                }
+            }
+        }
+    }
+
+    private var whatCreditsBuy: some View {
+        Text("Each AI report costs \(viewModel.reportCost) credits · each Cay AI question "
+             + "costs \(viewModel.chatCost).")
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textMuted)
+            .multilineTextAlignment(.center)
+    }
+
+    // MARK: - Pack card
+
+    private func packCard(_ pack: CreditPackDTO) -> some View {
+        let reports = viewModel.reportCost > 0 ? pack.credits / viewModel.reportCost : 0
+        let isThisPack = viewModel.isPurchasing(pack)
+        return VStack(alignment: .leading, spacing: AppSpacing.md) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(pack.displayName)
+                    .font(AppTypography.heading)
+                    .foregroundColor(AppColors.textPrimary)
+                Spacer()
+                // Apple's localized price wins whenever products have loaded. The catalog's
+                // USD `priceLabel` is only a fallback — showing "$9.99" while Apple charges
+                // €10.99 is a refund request and an App Review note.
+                Text(viewModel.displayPrice(for: pack) ?? pack.priceLabel)
+                    .font(AppTypography.headingSmall)
+                    .foregroundColor(AppColors.textPrimary)
+            }
+
+            HStack(spacing: AppSpacing.xs) {
+                Image(systemName: "creditcard.fill")
+                    .font(AppTypography.iconTiny)
+                    .foregroundColor(AppColors.alertOrange)
+                Text("\(pack.credits) credits")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textSecondary)
+                if reports > 0 {
+                    Text("· ~\(reports) reports")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+            }
+
+            Button {
+                Task { await viewModel.purchase(pack) }
+            } label: {
+                Text(isThisPack ? "Processing…" : "Buy")
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textOnAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.md)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .fill(AppColors.primaryFill)
+                    )
+            }
+            // Every button disables while ANY purchase is in flight — two concurrent StoreKit
+            // sheets is not a state worth supporting — but only the one being bought says
+            // "Processing…", so the screen never claims to be buying two packs at once.
+            .disabled(store.isPurchasing)
+            .opacity(store.isPurchasing && !isThisPack ? 0.45 : 1)
+        }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .cardFill()
+        )
+    }
+
+    private var neverExpiresNote: some View {
+        Text("Purchased credits never expire. Your monthly credits reset each month.")
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textMuted)
+            .multilineTextAlignment(.center)
+    }
+
+    // MARK: - Plans
+
+    private var seePlansButton: some View {
+        Button {
+            viewModel.showPlans = true
+        } label: {
+            HStack(spacing: AppSpacing.xs) {
+                Text("Need credits every month? See plans")
+                    .font(AppTypography.bodySmallEmphasis)
+                Image(systemName: "chevron.right")
+                    .font(AppTypography.iconTiny)
+            }
+            .foregroundColor(AppColors.primaryBlue)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, AppSpacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                    .cardFill()
+            )
+        }
+        .disabled(store.isPurchasing)
+    }
+
+    /// Shown INSTEAD of the pack list when the caller is signed out.
+    ///
+    /// The gate has to be in front of the StoreKit sheet, not behind it. `verifyPurchase` is
+    /// `.signInRequired`, so `APIClient` refuses the call — but only AFTER Apple has already
+    /// charged the card. A subscription survives that (it is restorable); a consumable does
+    /// not, because guest identity here is per-install and rotatable, so the credits would be
+    /// stranded on an install the user can wipe. Hence: no purchase button at all until there
+    /// is a real account to attach them to.
+    private var signInGate: some View {
+        VStack(spacing: AppSpacing.md) {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .font(AppTypography.iconXL)
+                .foregroundColor(AppColors.primaryBlue)
+            Text("Sign in to buy credits")
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textPrimary)
+            Text("Credits are tied to your account so they follow you across devices and "
+                 + "survive reinstalling the app.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+            Button {
+                dismiss()
+                appState.requestSignIn(for: "buy credits")
+            } label: {
+                Text("Sign In")
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textOnAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.md)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .fill(AppColors.primaryFill)
+                    )
+            }
+        }
+        .padding(AppSpacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                .cardFill()
+        )
+    }
+
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: AppSpacing.sm) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(AppTypography.iconMedium)
+                .foregroundColor(AppColors.neutral)
+            Text(message)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+            Button("Try Again") {
+                Task { await viewModel.load() }
+            }
+            .font(AppTypography.bodyEmphasis)
+            .foregroundColor(AppColors.primaryBlue)
+        }
+        .padding(.top, AppSpacing.xxl)
+    }
+
+    // MARK: - Legal
+
+    private var legalLinks: some View {
+        VStack(spacing: AppSpacing.xs) {
+            // Apple does NOT restore consumables — `Transaction.currentEntitlements` excludes
+            // them — so this drains `Transaction.unfinished` instead. That is what recovers a
+            // pack the user paid for when the app was killed mid-purchase or they were signed
+            // out when Apple delivered it.
+            Button {
+                Task { await viewModel.restore() }
+            } label: {
+                Text("Restore Purchases")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.primaryBlue)
+            }
+            .disabled(store.isPurchasing)
+            .padding(.bottom, AppSpacing.xs)
+
+            HStack(spacing: AppSpacing.xs) {
+                NavigationLink {
+                    TermsOfUseView()
+                } label: {
+                    Text("Terms of Use")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+                Text("·")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                NavigationLink {
+                    PrivacyPolicyView()
+                } label: {
+                    Text("Privacy Policy")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+            }
+            Text("Credit packs are a one-time purchase, not a subscription.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.top, AppSpacing.sm)
+    }
+}
+
+#Preview {
+    BuyCreditsView()
+        .environment(\.appState, AppState())
+}

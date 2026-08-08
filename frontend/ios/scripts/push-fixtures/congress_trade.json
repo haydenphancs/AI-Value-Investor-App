@@ -1,0 +1,18 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Pelosi bought NVDA, AAPL, MSFT",
+      "body": "Disclosed activity totalling $1.5M \u2013 $3.0M on your watchlist."
+    },
+    "sound": "default",
+    "thread-id": "smart_money",
+    "interruption-level": "passive",
+    "category": "smart_money",
+    "badge": 6
+  },
+  "kind": "congress_trade",
+  "route": "ticker",
+  "ticker": "NVDA",
+  "asset_type": "stock",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

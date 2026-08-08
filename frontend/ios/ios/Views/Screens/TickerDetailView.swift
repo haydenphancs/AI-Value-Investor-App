@@ -8,6 +8,11 @@
 import SwiftUI
 
 struct TickerDetailView: View {
+    /// The bell in `TickerDetailHeader` renders ONLY when `onNotificationTapped`
+    /// is non-nil. Every detail screen passed `nil`, so it had never rendered —
+    /// this is what it was waiting for.
+    @State private var showPriceAlerts = false
+
     @StateObject private var viewModel: TickerDetailViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var showUpgradesDowngrades = false
@@ -67,7 +72,7 @@ struct TickerDetailView: View {
                     onSearchTapped: handleSearchTapped,
                     // nil until price alerts ship — hides the bell rather than
                     // showing a control whose handler was a print().
-                    onNotificationTapped: nil,
+                    onNotificationTapped: { showPriceAlerts = true },
                     onFavoriteTapped: { viewModel.toggleFavorite() },
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
@@ -198,6 +203,9 @@ struct TickerDetailView: View {
             // fast core, then the full overview, arrives.
         }
         .navigationBarHidden(true)
+        .sheet(isPresented: $showPriceAlerts) {
+            PriceAlertsSheet(ticker: tickerSymbol, assetType: "stock")
+        }
         // Audio collapses to the top status island while this stock screen is open, keeping the
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)

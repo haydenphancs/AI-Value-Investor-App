@@ -234,6 +234,26 @@ struct ProfileView: View {
                     }
                     .frame(height: 8)
 
+                    // Purchased credits, when there are any.
+                    //
+                    // Shown as its own row rather than folded into the bar above, because the
+                    // two behave differently and the difference is the whole point: the bar and
+                    // its reset date describe the MONTHLY allowance, while these were bought
+                    // with real money and — per App Store Guideline 3.1.1 — never expire.
+                    // Counting them in "Monthly Credits N/M · Resets on <date>" told the user
+                    // the opposite.
+                    if viewModel.purchasedCredits > 0 {
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: "infinity")
+                                .font(AppTypography.iconTiny)
+                                .foregroundColor(AppColors.gain)
+                            Text("+\(viewModel.purchasedCredits) purchased · never expire")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.gain)
+                            Spacer()
+                        }
+                    }
+
                     // Reset Date + Add Credits
                     HStack {
                         Text(viewModel.creditResetLabel)

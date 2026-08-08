@@ -65,14 +65,36 @@ final class BuyCreditsViewModel: ObservableObject {
     var reportCost: Int { catalog?.reportCost ?? AnalysisCost.standard.credits }
     var chatCost: Int { catalog?.chatCost ?? 1 }
 
-    var packs: [CreditPackDTO] { catalog?.packs ?? [] }
+    /// Packs Apple will actually sell.
+    ///
+    /// Filtered against the loaded `Product`s rather than shown raw. The catalog is a DB table
+    /// and StoreKit is App Store Connect: a row present in one and not the other renders a card
+    /// with a USD-only price and a Buy button that can only ever say "That pack isn't available
+    /// right now". Showing a price we cannot charge is the part that matters.
+    var packs: [CreditPackDTO] {
+        (catalog?.packs ?? []).filter { store.creditPackProduct(id: $0.productId) != nil }
+    }
+
+    /// True when the backend offers packs but Apple returned none of them — a configuration
+    /// drift the user must not be left staring at an empty screen over.
+    var hasUnpurchasablePacks: Bool {
+        !(catalog?.packs ?? []).isEmpty && packs.isEmpty
+    }
 
     func load() async {
         isLoading = true
         errorMessage = nil
-        async let catalogTask: Void = loadCatalog()
-        async let productsTask: Void = store.loadProducts()
-        _ = await (catalogTask, productsTask)
+        // Catalog FIRST, so the StoreKit request can include any pack the backend added that
+        // this build does not hardcode. Serialising these two costs one round-trip and buys
+        // a storefront that cannot drift from the server's.
+        await loadCatalog()
+        await store.loadProducts(
+            extraProductIDs: (catalog?.packs ?? []).map(\.productId)
+        )
+        if hasUnpurchasablePacks && errorMessage == nil {
+            errorMessage = store.productLoadError
+                ?? "Credit packs aren't available on this device right now. Please try again."
+        }
         isLoading = false
 
         // Recover any purchase that was paid for but never recorded — killed mid-purchase,
@@ -80,10 +102,19 @@ final class BuyCreditsViewModel: ObservableObject {
         // are invisible to `restorePurchases()` (`Transaction.currentEntitlements` excludes
         // them), so this is the only path that repairs them. Idempotent server-side, and
         // deliberately AFTER the load so it cannot delay the screen appearing.
-        if await store.drainUnfinishedTransactions() > 0 {
-            restoreMessage = "We found a purchase that hadn't been applied yet and added it "
-                + "to your balance."
+        let drained = await store.drainUnfinishedTransactions()
+        if drained.creditsGranted > 0 {
+            restoreMessage = "We found a purchase that hadn't been applied yet and added "
+                + "\(drained.creditsGranted) credits to your balance."
+        } else if drained.allFailed {
+            // Apple handed us transactions and NONE could be applied. Silence here is what
+            // leaves a user who has paid staring at an unchanged balance with no explanation.
+            restoreMessage = "We found a purchase that hasn't been applied yet, but couldn't "
+                + "complete it: \(AppError.from(drained.lastError ?? AppError.unknown(message: "The purchase couldn't be applied. Please try again.")).message)"
         }
+        // drained.applied > 0 with creditsGranted == 0 is a REPLAY the server had already
+        // recorded — the balance is already correct, so saying "we added credits" would be a
+        // claim the user can check and find false. Stay silent.
     }
 
     private func loadCatalog() async {
@@ -157,8 +188,24 @@ final class BuyCreditsViewModel: ObservableObject {
         restoreMessage = nil
         let packs = await store.drainUnfinishedTransactions()
         let subs = await store.restorePurchases()
-        restoreMessage = (packs + subs) > 0
-            ? "Restored your purchases."
-            : "Nothing to restore — this Apple Account has no unapplied purchases."
+        let seen = packs.seen + subs.seen
+        let applied = packs.applied + subs.applied
+
+        if applied > 0 {
+            let credits = packs.creditsGranted + subs.creditsGranted
+            restoreMessage = credits > 0
+                ? "Restored your purchases and added \(credits) credits."
+                : "Restored your purchases."
+        } else if seen > 0 {
+            // THE case the old `Int` return could not express. Apple returned purchases and
+            // every submission failed, and the message said "Nothing to restore" — telling a
+            // user with an active subscription or an unapplied pack that they never bought
+            // anything, and giving them no reason to contact support.
+            let err = AppError.from(packs.lastError ?? subs.lastError ?? AppError.unknown(message: "The purchase couldn't be applied. Please try again."))
+            restoreMessage = "We found \(seen) purchase\(seen == 1 ? "" : "s") but couldn't "
+                + "apply \(seen == 1 ? "it" : "them"): \(err.message)"
+        } else {
+            restoreMessage = "Nothing to restore — this Apple Account has no unapplied purchases."
+        }
     }
 }

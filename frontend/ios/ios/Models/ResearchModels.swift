@@ -313,11 +313,41 @@ struct AnalysisFeature: Identifiable {
 
 // MARK: - Credit Balance
 struct CreditBalance {
+    /// The full spendable balance — both pools.
     let credits: Int
     let renewalDate: Date
+    /// Credits that will survive the reset (bought as consumable IAP). 0 when the backend
+    /// predates the split, which is correct there: no packs existed, so none were permanent.
+    let purchasedCredits: Int
 
-    var formattedRenewalDate: String {
-        "Renews \(ResearchFormatters.mediumDateFormatter.string(from: renewalDate))"
+    /// Credits that actually expire at `renewalDate`.
+    var monthlyCredits: Int { max(credits - purchasedCredits, 0) }
+
+    /// "Renews <date>" — or `nil` when NOTHING here renews.
+    ///
+    /// Optional on purpose. This string used to be unconditional and was rendered directly
+    /// beneath the full balance, so a user who bought a 1,200-credit pack was told those
+    /// credits renew — i.e. expire. App Store Guideline 3.1.1 forbids purchased credits
+    /// expiring, so stating that they do is both false and a review risk. Callers that have a
+    /// purchased component should render `purchasedSummary` alongside.
+    var formattedRenewalDate: String? {
+        guard monthlyCredits > 0 else { return nil }
+        return "Renews \(ResearchFormatters.mediumDateFormatter.string(from: renewalDate))"
+    }
+
+    /// "N never expire" — the honest counterpart, or nil when there is no purchased balance.
+    var purchasedSummary: String? {
+        purchasedCredits > 0 ? "\(purchasedCredits) never expire" : nil
+    }
+
+    /// One line describing the whole balance truthfully, whatever the mix.
+    var compositionSummary: String {
+        switch (formattedRenewalDate, purchasedSummary) {
+        case let (.some(renews), .some(kept)): return "\(monthlyCredits) \(renews.lowercased()) · \(kept)"
+        case let (.some(renews), .none):       return renews
+        case let (.none, .some(kept)):         return kept
+        case (.none, .none):                   return "No credits remaining"
+        }
     }
 
     /// PREVIEW ONLY. No shipping code path may fall back to this — a fabricated
@@ -326,7 +356,8 @@ struct CreditBalance {
     /// render nothing until a real balance arrives.
     static let mock = CreditBalance(
         credits: 47,
-        renewalDate: Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date()
+        renewalDate: Calendar.current.date(byAdding: .month, value: 1, to: Date()) ?? Date(),
+        purchasedCredits: 0
     )
 }
 
@@ -794,7 +825,9 @@ extension CreditBalance {
     static func from(_ response: BackendCreditsResponse) -> CreditBalance {
         CreditBalance(
             credits: response.remaining,
-            renewalDate: Self.parseResetDate(response.resetsAt)
+            renewalDate: Self.parseResetDate(response.resetsAt),
+            // 0 when the backend predates the split — correct, since no packs existed then.
+            purchasedCredits: response.purchasedRemaining ?? 0
         )
     }
 
@@ -805,7 +838,8 @@ extension CreditBalance {
     static func from(_ info: CreditInfo) -> CreditBalance {
         CreditBalance(
             credits: info.remaining,
-            renewalDate: Self.parseResetDate(info.resetsAt)
+            renewalDate: Self.parseResetDate(info.resetsAt),
+            purchasedCredits: info.purchasedCredits
         )
     }
 

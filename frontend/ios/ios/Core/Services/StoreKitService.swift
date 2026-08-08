@@ -123,11 +123,20 @@ final class StoreKitService: ObservableObject {
 
     // MARK: - Products
 
-    func loadProducts() async {
+    /// Load the App Store products.
+    ///
+    /// `extraProductIDs` lets a caller add ids that came from the BACKEND catalog. The pack
+    /// list is a DB table, so a pack added server-side is rendered by `BuyCreditsView`
+    /// immediately — but if we only ever ask Apple for the four hardcoded ids, that new pack
+    /// has no `Product`: its price falls back to the USD-only catalog string and its Buy button
+    /// dead-ends on "That pack isn't available right now". Asking for the union keeps the two
+    /// catalogs from drifting.
+    func loadProducts(extraProductIDs: [String] = []) async {
         isLoadingProducts = true
         productLoadError = nil
         do {
-            let loaded = try await Product.products(for: ProductID.all)
+            let requested = Array(Set(ProductID.all + extraProductIDs))
+            let loaded = try await Product.products(for: requested)
             // Cheapest first so the paywall order is stable regardless of what StoreKit
             // returns; `Product.products(for:)` does not guarantee request order.
             products = loaded.sorted { $0.price < $1.price }
@@ -253,16 +262,25 @@ final class StoreKitService: ObservableObject {
     /// your subscription" from "nothing to restore" — the latter is the common case for
     /// someone who never subscribed, and showing a generic success there is confusing.
     @discardableResult
-    func restorePurchases() async -> Int {
-        var restored = 0
+    func restorePurchases() async -> SweepResult {
+        var result = SweepResult()
         // `currentEntitlements` is the source for restore: it holds only ACTIVE
         // entitlements, unlike `Transaction.all` which includes expired history.
         for await entitlement in Transaction.currentEntitlements {
-            if (try? await handle(verificationResult: entitlement, origin: "restore")) != nil {
-                restored += 1
+            result.seen += 1
+            // `catch`, not `try?`. Swallowing here is what made "Restore Purchases" answer
+            // "No previous purchases found for this Apple Account" to a user whose
+            // entitlements Apple DID return but whose every submission failed — telling
+            // someone with an active subscription that they never bought anything.
+            do {
+                if try await handle(verificationResult: entitlement, origin: "restore") != nil {
+                    result.applied += 1
+                }
+            } catch {
+                result.record(error, op: "iap_restore")
             }
         }
-        return restored
+        return result
     }
 
     // MARK: - Verification hand-off
@@ -313,6 +331,14 @@ final class StoreKitService: ObservableObject {
                 // (The backend previously returned 503 SYSTEM_BUSY here, which made this
                 // indistinguishable from a real outage. It now returns 409
                 // PURCHASE_ALREADY_LINKED, which is what makes this branch possible.)
+                //
+                // ⚠️ ONLY `.purchaseAlreadyLinked` finishes here, and the exclusion is
+                // load-bearing. `.purchaseAccountMismatch` (409 PURCHASE_ACCOUNT_MISMATCH) is
+                // ALSO terminal for this account, but the server refused BEFORE recording
+                // anything — no `credit_purchases` row, nobody credited. Finishing that one
+                // would delete a purchase the user paid for, with no redelivery left to repair
+                // it. It must fall through to the "leave unfinished" branch below, so the same
+                // transaction is redelivered and granted once the buying account signs in.
                 if case .purchaseAlreadyLinked = AppError.from(error) {
                     await transaction.finish()
                     #if DEBUG
@@ -371,16 +397,58 @@ final class StoreKitService: ObservableObject {
     ///
     /// Returns how many were successfully applied.
     @discardableResult
-    func drainUnfinishedTransactions() async -> Int {
+    func drainUnfinishedTransactions() async -> SweepResult {
         // One at a time rather than a task group: this runs at sign-in and on every Buy
         // Credits load, and a user with several stranded transactions would otherwise fire
         // that many concurrent `POST /billing/verify` calls at once.
-        var applied = 0
+        var result = SweepResult()
         for await unfinished in Transaction.unfinished {
-            if (try? await handle(verificationResult: unfinished, origin: "unfinished")) != nil {
-                applied += 1
+            result.seen += 1
+            do {
+                if let applied = try await handle(verificationResult: unfinished,
+                                                  origin: "unfinished") {
+                    result.applied += 1
+                    result.creditsGranted += applied.creditsGranted
+                }
+            } catch {
+                result.record(error, op: "iap_drain_unfinished")
             }
         }
-        return applied
+        return result
+    }
+
+    /// Outcome of a sweep over Apple's transactions.
+    ///
+    /// Replaces a bare `Int`, which could not distinguish the three states a user needs told
+    /// apart — "you had nothing to restore", "we restored N", and "we found N and every one of
+    /// them FAILED". The old code collapsed all three with `try?`, so a user whose purchases
+    /// could not be applied was told "Nothing to restore" while their money sat unclaimed.
+    struct SweepResult: Sendable {
+        /// Transactions Apple handed us.
+        var seen = 0
+        /// Of those, how many the backend accepted.
+        var applied = 0
+        /// Credits actually added (0 for subscriptions, and 0 for a replay).
+        var creditsGranted = 0
+        /// The last failure, for the user-facing message.
+        var lastError: Error?
+
+        /// True when Apple gave us transactions and NONE could be applied — the state that
+        /// must never render as "nothing to restore".
+        var allFailed: Bool { seen > 0 && applied == 0 }
+
+        mutating func record(_ error: Error, op: String) {
+            lastError = error
+            // Release-visible. `.claude/rules/auth.md` §6 bans `#if DEBUG`-only reporting on a
+            // user-initiated path: a release build that says nothing is exactly how a whole
+            // class of silent failures survived unnoticed.
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string(op),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
+            #if DEBUG
+            print("🔴 [StoreKit] \(op) failed: \(AppError.from(error).message)")
+            #endif
+        }
     }
 }

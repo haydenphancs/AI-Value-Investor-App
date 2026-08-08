@@ -38,6 +38,23 @@
 	<array>
 		<string>webcredentials:caydexinvest.com</string>
 	</array>
+	<!-- Time Sensitive Notifications. REQUIRED for the `price_alert` kind, which ships
+	     `aps.interruption-level = "time-sensitive"` so a threshold the USER set themselves
+	     breaks through Focus and Do Not Disturb. Every other kind is `active` or `passive`
+	     and needs nothing here.
+
+	     ⚠️ FAILS SILENTLY WITHOUT THIS. iOS does not error, log, or reject the push — it
+	     just downgrades the level to `active`, so the notification arrives normally and is
+	     suppressed by Focus exactly like a routine one. There is no runtime signal at all.
+
+	     ⚠️ Requires the "Time Sensitive Notifications" capability on the App ID in the
+	     Developer portal as well. The entitlement here is only half of it; a build signed
+	     against a profile whose App ID lacks the capability FAILS TO SIGN.
+
+	     Verify: iOS Settings › Notifications › Caydex shows a "Time Sensitive Notifications"
+	     toggle ONLY when this entitlement is present in the installed build. -->
+	<key>com.apple.developer.usernotifications.time-sensitive</key>
+	<true/>
 	<key>aps-environment</key>
 	<string>production</string>
 </dict>

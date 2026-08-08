@@ -1084,6 +1084,12 @@ struct CreditInfo: Codable, Sendable {
     /// type can hit a Railway instance that predates the two-pool split.
     let grantedRemaining: Int?
     let purchasedRemaining: Int?
+    /// The GRANTED pool's own totals. A `used / total` fraction is only meaningful within one
+    /// pool — `total`/`used` above are lifetime-inclusive of every pack ever bought, so a
+    /// monthly quota bar drawn from them never fills and cannot be read as "40 of your 50 this
+    /// month".
+    let grantedTotal: Int?
+    let grantedUsed: Int?
 
     /// Credits that will survive the next monthly reset. 0 (not nil) when the backend has not
     /// told us, so callers can render honestly without special-casing.
@@ -1091,11 +1097,30 @@ struct CreditInfo: Codable, Sendable {
     /// Whether any part of this balance actually expires at `resetsAt`.
     var hasExpiringCredits: Bool { (grantedRemaining ?? remaining) > 0 }
 
+    /// The MONTHLY quota only — what `resetsAt` actually describes. Falls back to the combined
+    /// figures when talking to a backend that predates the split, which is exactly right there:
+    /// before credit packs existed the combined balance WAS the monthly one.
+    var monthlyTotal: Int { grantedTotal ?? total }
+    var monthlyUsed: Int { grantedUsed ?? used }
+    var monthlyRemaining: Int { grantedRemaining ?? remaining }
+
+    /// Fraction of the MONTHLY allowance consumed, clamped to 0...1.
+    ///
+    /// Computed from the granted pool alone. Drawn from the combined `used / total` it is
+    /// nonsense: buy a 1,200-credit pack on the Free tier and the bar reads 0/1250 forever,
+    /// implying a monthly quota 25x the real one.
+    var monthlyUsageFraction: Double {
+        guard monthlyTotal > 0 else { return 0 }
+        return min(max(Double(monthlyUsed) / Double(monthlyTotal), 0), 1)
+    }
+
     enum CodingKeys: String, CodingKey {
         case total, used, remaining
         case resetsAt = "resets_at"
         case grantedRemaining = "granted_remaining"
         case purchasedRemaining = "purchased_remaining"
+        case grantedTotal = "granted_total"
+        case grantedUsed = "granted_used"
     }
 }
 

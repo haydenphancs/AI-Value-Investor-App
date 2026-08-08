@@ -127,9 +127,36 @@ class ResearchViewModel: ObservableObject {
 
         // Search is handled by the dedicated TargetSearchSheet — no debounce here.
 
+        // Adopt a purchase the moment the backend records it.
+        //
+        // This ViewModel keeps its OWN `creditBalance` (it has no `AppState` reference), and it
+        // was written only by `loadCredits()` from init / `refresh()` / a completed report. So
+        // buying credits from this very tab left the balance at its pre-purchase value: the
+        // Generate button stayed disabled and the "insufficient credits" copy stayed on screen
+        // until a manual pull-to-refresh or a relaunch. The most likely reaction to paying and
+        // seeing nothing change is a refund request, or a second purchase.
+        //
+        // `.caydexEntitlementChanged` is the single funnel `StoreKitService` posts from for BOTH
+        // interactive purchases and `Transaction.updates` replays, so this also covers a pack
+        // that lands while the app is backgrounded.
+        entitlementObserver = NotificationCenter.default.addObserver(
+            forName: .caydexEntitlementChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.loadCredits() }
+        }
+
         // Fetch real data from backend
         Task { [weak self] in
             await self?.loadBackendData()
+        }
+    }
+
+    /// Token for the `.caydexEntitlementChanged` observer, removed on deinit.
+    private var entitlementObserver: NSObjectProtocol?
+
+    deinit {
+        if let entitlementObserver {
+            NotificationCenter.default.removeObserver(entitlementObserver)
         }
     }
 

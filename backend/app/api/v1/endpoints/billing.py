@@ -28,6 +28,7 @@ from app.schemas.subscription import (
 )
 from app.services.iap_service import (
     IAPError,
+    PurchaseAccountMismatch,
     PurchaseBoundToAnotherAccount,
     UnknownProduct,
     get_iap_service,
@@ -149,6 +150,21 @@ async def verify_purchase(
                 "That purchase went through but we couldn't match it to a plan. "
                 "Contact support and we'll apply it."
             ),
+        )
+    except PurchaseAccountMismatch as e:
+        # MUST precede the `PurchaseBoundToAnotherAccount` arm below — it is a subclass, and
+        # the money consequence is opposite. Nothing was recorded and nobody was credited, so
+        # the client must keep the transaction UNFINISHED: when the buying account signs in,
+        # StoreKit redelivers it and the same call grants it. Finishing it here (which
+        # PURCHASE_ALREADY_LINKED tells the client to do) would delete a purchase the user paid
+        # for, with no redelivery left to repair it.
+        logger.warning(
+            "IAP: user=%s submitted a transaction whose appAccountToken names another "
+            "account: %s", user_id, e,
+        )
+        return make_error_response(
+            ErrorCode.PURCHASE_ACCOUNT_MISMATCH,
+            message="Transaction belongs to a different account",
         )
     except PurchaseBoundToAnotherAccount as e:
         # TERMINAL — must precede the generic `IAPError` arm below.

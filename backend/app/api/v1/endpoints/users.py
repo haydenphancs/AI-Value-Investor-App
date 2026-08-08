@@ -74,6 +74,7 @@ def credits_response_from_rows(rows: list) -> UserCreditsResponse:
         return UserCreditsResponse(
             total=50, used=0, remaining=50,
             granted_remaining=50, purchased_remaining=0,
+            granted_total=50, granted_used=0,
         )
 
     row = rows[0]
@@ -92,6 +93,8 @@ def credits_response_from_rows(rows: list) -> UserCreditsResponse:
         resets_at=row.get("resets_at"),
         granted_remaining=granted_remaining,
         purchased_remaining=purchased_remaining,
+        granted_total=granted_total,
+        granted_used=granted_used,
     )
 
 

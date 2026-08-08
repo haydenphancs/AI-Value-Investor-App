@@ -320,16 +320,96 @@ def test_second_delivery_by_another_account_is_terminal_not_retryable(sb):
     assert sb.purchased_total == before
 
 
+@pytest.mark.parametrize("revocation", [
+    {"revocationDate": 1_700_000_000_000},
+    {"revocationReason": 0},          # a REAL Apple value, and falsy — a truthiness check misses it
+    {"revocationReason": 1},
+])
+def test_an_already_revoked_consumable_is_never_granted(sb, revocation):
+    """Apple refunded it — granting would hand the user their money back AND the credits.
+
+    No race is needed to reach this: `Transaction.updates` redelivers unfinished transactions on
+    every launch, so one refunded while unfinished arrives carrying its revocation. And the
+    webhook cannot clean up afterwards — `revoke_purchased_credits` returns `unknown` and writes
+    no tombstone when the REFUND lands before any `credit_purchases` row exists, so a late first
+    grant has nothing to collide with.
+
+    The subscription path got this free via `status_for_transaction`; the consumable path never
+    read revocation at all.
+    """
+    with pytest.raises(svc.UnknownProduct):
+        _service(sb).apply_verified_transaction(_USER, _pack_txn(**revocation))
+
+    assert sb.purchased_total == 0
+    assert "add_purchased_credits" not in sb.rpc_names(), "no grant may be attempted"
+
+
+def test_revocation_is_checked_before_the_catalog_read(sb):
+    """A revoked purchase must be refused without touching the DB — and must be diagnosed as
+    REVOKED even for a product that is no longer in the catalog."""
+    sb._fail.add("credit_packs")
+    with pytest.raises(svc.UnknownProduct) as exc:
+        _service(sb).apply_verified_transaction(
+            _USER, _pack_txn(revocationDate=1_700_000_000_000)
+        )
+    assert "revoked" in str(exc.value).lower(), \
+        "a revoked transaction must not be reported as an unreadable catalog"
+
+
 def test_first_delivery_into_a_different_session_is_refused_via_app_account_token(sb):
     """The case the dedup row CANNOT catch: A buys, the verify call fails, A signs out, B signs
     in on the same device, and `Transaction.updates` redelivers into B's session. There is no
     prior row, so `appAccountToken` — stamped by the client and returned inside Apple's SIGNED
     payload — is the only evidence of who actually paid."""
-    with pytest.raises(svc.PurchaseBoundToAnotherAccount):
+    with pytest.raises(svc.PurchaseAccountMismatch):
         _service(sb).apply_verified_transaction(
             _OTHER, _pack_txn(appAccountToken=_USER)
         )
     assert sb.purchased_total == 0
+    assert "add_purchased_credits" not in sb.rpc_names(), "nothing may be recorded"
+
+
+def test_the_two_409_cases_are_distinct_exceptions():
+    """They demand OPPOSITE client handling, and conflating them destroys purchases.
+
+    `PurchaseBoundToAnotherAccount` = the transaction IS recorded against another account.
+    Somebody was credited, it can never clear, so iOS finishes it and Apple stops redelivering.
+
+    `PurchaseAccountMismatch` = refused BEFORE any grant; no row, nobody credited. If iOS
+    finishes THAT one, a purchase the user paid for is gone with no redelivery to repair it.
+
+    The subclass relationship is deliberate (both are "not your purchase"), which is exactly why
+    `billing.py` must catch the mismatch arm FIRST — pinned below.
+    """
+    assert issubclass(svc.PurchaseAccountMismatch, svc.PurchaseBoundToAnotherAccount)
+    assert svc.PurchaseAccountMismatch is not svc.PurchaseBoundToAnotherAccount
+
+
+def test_billing_catches_the_mismatch_arm_before_its_parent():
+    """Order matters because it is a subclass: a `PurchaseBoundToAnotherAccount` arm placed
+    first would swallow the mismatch and return PURCHASE_ALREADY_LINKED, telling iOS to finish
+    a transaction nobody was credited for."""
+    import inspect
+    from app.api.v1.endpoints import billing
+
+    src = inspect.getsource(billing.verify_purchase)
+    mismatch = src.index("except PurchaseAccountMismatch")
+    parent = src.index("except PurchaseBoundToAnotherAccount")
+    assert mismatch < parent, (
+        "PurchaseAccountMismatch must be caught BEFORE PurchaseBoundToAnotherAccount — it is a "
+        "subclass, so the parent arm would otherwise swallow it"
+    )
+
+
+def test_the_mismatch_code_is_a_distinct_terminal_409():
+    from app.api.error_response import ErrorCode, _DEFAULT_STATUS, _DEFAULT_ACTIONS
+
+    assert _DEFAULT_STATUS[ErrorCode.PURCHASE_ACCOUNT_MISMATCH] == 409
+    assert _DEFAULT_STATUS[ErrorCode.PURCHASE_ALREADY_LINKED] == 409
+    # Different ACTION: the purchase is intact and claimable by signing in as its buyer, so
+    # "contact support" would be wrong advice.
+    assert _DEFAULT_ACTIONS[ErrorCode.PURCHASE_ACCOUNT_MISMATCH] == "sign_in"
+    assert _DEFAULT_ACTIONS[ErrorCode.PURCHASE_ALREADY_LINKED] == "contact_support"
 
 
 def test_matching_app_account_token_grants_normally(sb):

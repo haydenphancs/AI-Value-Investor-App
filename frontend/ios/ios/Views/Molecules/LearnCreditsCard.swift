@@ -43,7 +43,10 @@ struct LearnCreditsCard: View {
                         .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                 }
 
-                Text(balance.formattedRenewalDate)
+                // See CreditsBalanceCard: the balance above is COMBINED, so an unconditional
+                // "Renews <date>" claims purchased credits expire — which Guideline 3.1.1
+                // forbids them from doing.
+                Text(balance.compositionSummary)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textOnAccent.opacity(0.8))
             }

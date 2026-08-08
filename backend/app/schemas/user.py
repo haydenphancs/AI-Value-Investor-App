@@ -47,6 +47,12 @@ class UserCreditsResponse(BaseModel):
     # builds decode this response without them.
     granted_remaining: int = 0
     purchased_remaining: int = 0
+    # The GRANTED pool's own totals. Needed because a "used / total" fraction is only
+    # meaningful within one pool: `total` and `used` above are lifetime-inclusive of every
+    # pack the user has ever bought, so a Profile bar drawn from them shows a monthly quota
+    # that never fills and can never be read as "you have used 40 of your 50 this month".
+    granted_total: int = 0
+    granted_used: int = 0
 
 
 class UpdateProfileRequest(BaseModel):

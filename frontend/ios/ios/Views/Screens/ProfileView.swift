@@ -247,8 +247,13 @@ struct ProfileView: View {
                             .background(
                                 Capsule()
                                     .fill(
+                                        // `alertOrangeFill`, not `alertOrange`. The ink here was
+                                        // already right; the SURFACE was the adaptive text token,
+                                        // which lightens to #F97316 in dark where white on it is
+                                        // 2.80. The mirror of the Upgrade card below — that one
+                                        // is broken in light, this one was broken in dark.
                                         LinearGradient(
-                                            colors: [AppColors.alertOrange, AppColors.alertOrange],
+                                            colors: [AppColors.alertOrangeFill, AppColors.alertOrangeFill],
                                             startPoint: .leading,
                                             endPoint: .trailing
                                         )
@@ -684,28 +689,34 @@ struct CreditInfoPill: View {
 // MARK: - Upgrade Card
 
 struct UpgradeCard: View {
+    // `alertOrangeFill` (#C2410C both modes), never `alertOrange` — the ink below is constant
+    // white, and a fill that lightens in dark drops it to 2.80.
     private let gradientColors = [
-        AppColors.alertOrange,
-        AppColors.alertOrange
+        AppColors.alertOrangeFill,
+        AppColors.alertOrangeFill
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack {
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    // `textOnAccent` (constant white), NOT `textPrimary` — that is #0F172A in
+                    // LIGHT and #FFFFFF in dark, so it inverted against a fill that did not and
+                    // rendered near-black on orange at 3.43:1 in light. 5.18 now, both modes.
+                    // ⚠️ No `.opacity()`: white at 0.8 on this fill is 3.85, below AA.
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "bolt.fill")
                             .font(AppTypography.iconSmall)
-                            .foregroundColor(AppColors.textPrimary)
+                            .foregroundColor(AppColors.textOnAccent)
 
                         Text("Upgrade Plan")
                             .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(AppColors.textPrimary)
+                            .foregroundColor(AppColors.textOnAccent)
                     }
 
                     Text("Unlock your investing potential with priority AI and advanced analytics.")
                         .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textPrimary.opacity(0.8))
+                        .foregroundColor(AppColors.textOnAccent)
                         .lineLimit(2)
                 }
 
@@ -713,7 +724,7 @@ struct UpgradeCard: View {
 
                 Image(systemName: "chevron.right")
                     .font(AppTypography.iconSmall).fontWeight(.semibold)
-                    .foregroundColor(AppColors.textPrimary.opacity(0.8))
+                    .foregroundColor(AppColors.textOnAccent)
             }
         }
         .padding(AppSpacing.lg)

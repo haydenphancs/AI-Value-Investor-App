@@ -908,6 +908,7 @@ def test_every_fill_valued_member_has_a_paired_ink_member():
         "Models/TickerReportModels.swift": [("fillColor", "fillInk")],
         "Views/Atoms/TechnicalLevelIndicator.swift": [("levelColors", "levelInks")],
         "Views/Screens/WhaleProfileView.swift":      [("backgroundColor", "backgroundInk")],
+        "Views/Atoms/UserAvatar.swift":              [("backgroundColor", "backgroundInk")],
         "Views/Atoms/RatingBadge.swift":             [("backgroundColor", "foregroundInk")],
         # STORED, not computed — `TrendingAnalysis` is a struct assigned at four construction
         # sites rather than an enum switching on itself. The pairing requirement is identical;
@@ -1044,6 +1045,7 @@ def test_a_paired_ink_member_names_both_inks():
         "Models/TickerReportModels.swift":           ("fillInk",),
         "Views/Atoms/TechnicalLevelIndicator.swift": ("levelInks",),
         "Views/Screens/WhaleProfileView.swift":      ("backgroundInk",),
+        "Views/Atoms/UserAvatar.swift":              ("backgroundInk",),
         "Views/Atoms/RatingBadge.swift":             ("foregroundInk",),
     }
     problems = []
@@ -1771,6 +1773,19 @@ _SURFACE_MEMBER_DECL = re.compile(
     r"^\s*(?:private\s+|fileprivate\s+|internal\s+|public\s+|static\s+)*"
     r"(?:var|let)\s+(\w+)\s*:\s*(?:Color|\[Color\])\s*[={]")
 
+# An UNTYPED array literal — `private let gradientColors = [` — which Swift infers as [Color].
+# Kept separate from `_SURFACE_MEMBER_DECL` rather than relaxing its `:\s*Color` requirement:
+# dropping the annotation there would re-admit every `let x = …` local, which is the exact
+# looseness that makes `_MEMBER_DECL` unusable here. Anchoring on `= [` keeps it to array
+# literals, and the body still has to resolve to real tokens before the name is recorded.
+_GRADIENT_MEMBER_DECL = re.compile(
+    r"^\s*(?:private\s+|fileprivate\s+|internal\s+|public\s+|static\s+)*"
+    r"(?:var|let)\s+(\w+)\s*=\s*\[")
+
+# A stroke is not a fill. Ink never sits ON an outline, so a token reached through one must not
+# be measured as this view's surface.
+_STROKE_MOD = re.compile(r"\.(?:strokeBorder|stroke|border)\s*\(")
+
 
 def _surface_tokens() -> tuple:
     """Tokens that can be painted as an opaque surface under a contract ink: every
@@ -1814,6 +1829,16 @@ def _surface_valued_members(lines, surfaces) -> dict[str, set]:
         toks = {_canon(t) for t in _APPCOLOR.findall(_member_body(lines, i))} & allowed
         if toks:
             out.setdefault(m.group(1), set()).update(toks)
+    # An UNTYPED array literal of tokens — `private let gradientColors = [AppColors.x, …]`.
+    # Neither regex above sees it (both require an explicit `: Color` / `: [Color]`), and it is
+    # the single most common way a saturated surface is declared in this codebase: five promo
+    # cards and both credit cards paint their background from exactly this shape.
+    for i, (_, line) in enumerate(lines):
+        if not (m := _GRADIENT_MEMBER_DECL.match(line)):
+            continue
+        toks = {_canon(t) for t in _APPCOLOR.findall(_member_body(lines, i))} & allowed
+        if toks:
+            out.setdefault(m.group(1), set()).update(toks)
     for name, toks in _color_bindings(lines).items():
         if toks & allowed:
             out.setdefault(name, set()).update(toks & allowed)
@@ -1848,11 +1873,25 @@ def _surface_ink_pairs(lines, member_names) -> list[tuple]:
         if not (_INK_MOD.search(line) and _CONTRACT_INK.search(line)):
             continue
         inks = set(_CONTRACT_INK.findall(line))
-        for slineno, sline in body[max(0, idx - 6):idx + 7]:
+        lo = max(0, idx - 6)
+        for off, (slineno, sline) in enumerate(body[lo:idx + 7]):
             if not _BG_MOD.search(sline):
                 continue
+            # A `LinearGradient` puts its tokens on the lines AFTER the `.background(` — nine
+            # promo cards, avatars and CTAs paint their surface exactly that way, and reading
+            # only the opening line saw none of them. Same for any `.fill(` left open.
+            text = sline
+            if "Gradient" in sline or sline.count("(") > sline.count(")"):
+                # A STROKE IS NOT A FILL — the same distinction `_fill_ink_violations` makes on
+                # the ink side. `BookCoreDetailView`'s Complete button backs itself with a
+                # `Group { if isCompleted { strokeBorder(textMuted) } else { fill(primaryFill) } }`,
+                # and a raw join swept the outline branch in and paired `textOnAccent` (the
+                # *other* arm) against `textMuted` for a phantom 2.54. Dropping stroke lines
+                # leaves gradient colour arrays — which are bare `AppColors.x,` lines — intact.
+                text = "\n".join(w for _, w in body[lo + off:lo + off + 7]
+                                 if not _STROKE_MOD.search(w))
             for ink in sorted(inks):
-                for tok, alpha in _surface_arms(sline, surfaces):
+                for tok, alpha in _surface_arms(text, surfaces):
                     out.append((lineno, ink, slineno, tok, alpha, None))
                 if member_re and (m := member_re.search(sline)):
                     out.append((lineno, ink, slineno, None, 1.0, m.group(1)))
@@ -2054,6 +2093,49 @@ def test_the_opaque_surface_rule_fires_on_the_regression_it_exists_for():
         {"iconBackgroundColor": {"Models/X.swift": {"gain"},
                                  "Models/Y.swift": {"primaryFill"}}},
     )
+
+    # ── The GRADIENT shape ──────────────────────────────────────────────────
+    # Nine promo cards, avatars and CTAs painted their surface with an INLINE multi-line
+    # `LinearGradient` whose tokens sit on the lines AFTER the `.background(`. Reading only
+    # the opening line saw none of them, so every one shipped: white on `alertOrange`
+    # (#F97316 dark) is 2.80, on `accentCyan` 2.43, on `primaryBlue` 2.24.
+    assert fires("""
+        Text("Choose Pro")
+            .foregroundColor(AppColors.textOnAccent)
+            .background(
+                LinearGradient(
+                    colors: [AppColors.alertOrange, AppColors.alertOrange],
+                    startPoint: .leading, endPoint: .trailing
+                )
+            )
+    """), "the inline-gradient surface path is dead"
+    # ...and the fix — the frozen `*Fill` counterpart — must be silent.
+    assert not fires("""
+        Text("Choose Pro")
+            .foregroundColor(AppColors.textOnAccent)
+            .background(
+                LinearGradient(
+                    colors: [AppColors.alertOrangeFill, AppColors.alertOrangeFill],
+                    startPoint: .leading, endPoint: .trailing
+                )
+            )
+    """)
+    # A STROKE inside the expanded window is an outline, not this view's surface. Without the
+    # filter, the `strokeBorder` arm of a two-branch background paired with the ink from the
+    # OTHER arm and reported a phantom 2.54 on `BookCoreDetailView`'s Complete button.
+    assert not fires("""
+        Text("Complete")
+            .foregroundColor(isCompleted ? AppColors.textSecondary : AppColors.textOnAccent)
+            .background(
+                Group {
+                    if isCompleted {
+                        RoundedRectangle().strokeBorder(AppColors.textMuted, lineWidth: 1.5)
+                    } else {
+                        RoundedRectangle().fill(AppColors.primaryFill)
+                    }
+                }
+            )
+    """), "a strokeBorder is being measured as a fill"
 
 
 def test_the_faded_fill_rule_fires_on_the_regression_it_exists_for():

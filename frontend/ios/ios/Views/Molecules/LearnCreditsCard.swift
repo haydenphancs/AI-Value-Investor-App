@@ -11,37 +11,41 @@ struct LearnCreditsCard: View {
     let balance: CreditBalance
     var onAddCredits: (() -> Void)?
 
+    // `alertOrangeFill` (#C2410C in BOTH modes), never `alertOrange` — see CreditsBalanceCard,
+    // which this card duplicates almost line for line.
     private let gradientColors = [
-        AppColors.alertOrange,
-        AppColors.alertOrange
+        AppColors.alertOrangeFill,
+        AppColors.alertOrangeFill
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Header
+            // Header — `textOnAccent`, not `textPrimary`: the latter is #0F172A in LIGHT and
+            // #FFFFFF in dark, so it inverted against a fill that did not (3.43 light).
+            // ⚠️ No `.opacity()` on the card body — white at 0.8 is 3.85 here, below AA.
             Text("Credit Balance")
                 .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.textPrimary)
+                .foregroundColor(AppColors.textOnAccent)
 
             Text("Manage your research credits")
                 .font(AppTypography.caption)
-                .foregroundColor(AppColors.textPrimary.opacity(0.8))
+                .foregroundColor(AppColors.textOnAccent)
 
-            // Credits Display
+            // Credits Display — on a 0.2 black scrim, so 0.8 still clears AA (5.21).
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 HStack(alignment: .lastTextBaseline, spacing: AppSpacing.sm) {
                     Text("\(balance.credits)")
                         .font(AppTypography.dataHero)
-                        .foregroundColor(AppColors.textPrimary)
+                        .foregroundColor(AppColors.textOnAccent)
 
                     Text("credits")
                         .font(AppTypography.body)
-                        .foregroundColor(AppColors.textPrimary.opacity(0.8))
+                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                 }
 
                 Text(balance.formattedRenewalDate)
                     .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textPrimary.opacity(0.7))
+                    .foregroundColor(AppColors.textOnAccent.opacity(0.8))
             }
             .padding(AppSpacing.lg)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -61,12 +65,15 @@ struct LearnCreditsCard: View {
                     Text("Add More Credits")
                         .font(AppTypography.bodySmallEmphasis)
                 }
-                .foregroundColor(AppColors.alertOrange)
+                // Inverse CTA: constant-white button carrying the brand orange, 5.18 both modes.
+                // Was `alertOrange` on `textPrimary` — BOTH halves inverted, giving a near-black
+                // button with rust text in light (3.43).
+                .foregroundColor(AppColors.alertOrangeFill)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, AppSpacing.md)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .fill(AppColors.textPrimary)
+                        .fill(AppColors.textOnAccent)
                 )
             }
             .buttonStyle(PlainButtonStyle())

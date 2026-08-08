@@ -17,8 +17,10 @@ struct CayAIAvatar: View {
             .foregroundColor(AppColors.textOnAccent)
             .frame(width: size, height: size)
             .background(
+                // `*Fill`, not the text tokens — the glyph above is constant-white
+                // `textOnAccent`, and the text tokens lighten in dark (2.24 / 2.43 there).
                 LinearGradient(
-                    colors: [AppColors.primaryBlue, AppColors.accentCyan],
+                    colors: [AppColors.primaryFill, AppColors.accentCyanFill],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )

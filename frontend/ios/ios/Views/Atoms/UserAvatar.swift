@@ -19,18 +19,37 @@ struct UserAvatar: View {
         return "\(firstInitial)\(lastInitial)"
     }
 
+    /// `*Fill`, not the text tokens. This circle carries ink, and the text family LIGHTENS in
+    /// dark — white on `gain` #22C55E is 2.28, on `primaryBlue` #60A5FA 2.24. Each `*Fill` is
+    /// its text token's LIGHT arm frozen, so light mode is byte-identical.
     private var backgroundColor: Color {
         // Generate consistent color based on name
         let colors: [Color] = [
-            AppColors.primaryBlue,
-            AppColors.gain,
-            AppColors.alertOrange,
-            AppColors.alertPurple,
-            AppColors.accentCyan,
-            AppColors.loss
+            AppColors.primaryFill,
+            AppColors.gainFill,
+            AppColors.alertOrangeFill,
+            AppColors.alertPurpleFill,
+            AppColors.accentCyanFill,
+            AppColors.lossFill
         ]
         let index = abs(name.hashValue) % colors.count
         return colors[index]
+    }
+
+    /// Ink for `backgroundColor`, INDEX FOR INDEX with the palette above. Slots 1 and 5 are the
+    /// ADAPTIVE `gainFill`/`lossFill` and need near-black in dark; the other four are frozen and
+    /// need white. One ink cannot serve both — near-black on frozen `primaryFill` is 3.35.
+    /// Mirrors `WhaleAvatarView.backgroundInk`, which is the same construction.
+    private var backgroundInk: Color {
+        let inks: [Color] = [
+            AppColors.textOnAccent,
+            AppColors.textOnFill,
+            AppColors.textOnAccent,
+            AppColors.textOnAccent,
+            AppColors.textOnAccent,
+            AppColors.textOnFill
+        ]
+        return inks[abs(name.hashValue) % inks.count]
     }
 
     var body: some View {
@@ -50,7 +69,7 @@ struct UserAvatar: View {
                     .overlay(
                         Text(initials)
                             .font(.system(size: size * 0.4, weight: .semibold))
-                            .foregroundColor(AppColors.textPrimary)
+                            .foregroundColor(backgroundInk)
                     )
             }
         }

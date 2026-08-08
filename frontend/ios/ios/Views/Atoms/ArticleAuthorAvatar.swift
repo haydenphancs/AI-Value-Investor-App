@@ -32,10 +32,13 @@ struct ArticleAuthorAvatar: View {
                 // Initials fallback with gradient
                 Circle()
                     .fill(
+                        // `*Fill`, not the text tokens — the initials below are constant-white
+                        // `textOnAccent`, and both text tokens lighten in dark (primaryBlue
+                        // #60A5FA 2.24, alertPurple #C084FC 2.64).
                         LinearGradient(
                             colors: [
-                                AppColors.primaryBlue,
-                                AppColors.alertPurple
+                                AppColors.primaryFill,
+                                AppColors.alertPurpleFill
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing

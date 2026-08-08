@@ -23,14 +23,17 @@ struct AIDeepResearchButton: View {
                 Text(title)
                     .font(AppTypography.bodyEmphasis)
             }
-            .foregroundColor(AppColors.textPrimary)
+            // `textOnAccent` on `*Fill`, matching `NewAnalysisButton` — this is the same button.
+            // Was `textPrimary` (#0F172A light / #FFFFFF dark) on the adaptive text tokens, so
+            // BOTH halves moved: near-black on a dark blue-cyan gradient in light.
+            .foregroundColor(AppColors.textOnAccent)
             .frame(maxWidth: .infinity)
             .padding(.vertical, AppSpacing.lg)
             .background(
                 LinearGradient(
                     colors: [
-                        AppColors.primaryBlue,
-                        AppColors.accentCyan
+                        AppColors.primaryFill,
+                        AppColors.accentCyanFill
                     ],
                     startPoint: .leading,
                     endPoint: .trailing

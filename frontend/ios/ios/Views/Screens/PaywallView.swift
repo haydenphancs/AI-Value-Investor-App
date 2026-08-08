@@ -239,8 +239,11 @@ struct PaywallView: View {
                     .background(
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                             .fill(
+                                // `alertOrangeFill`, not `alertOrange`: this button carries
+                                // constant-white `textOnAccent`, and the text token lightens to
+                                // #F97316 in dark where white on it is 2.80. 5.18 both modes now.
                                 LinearGradient(
-                                    colors: [AppColors.alertOrange, AppColors.alertOrange],
+                                    colors: [AppColors.alertOrangeFill, AppColors.alertOrangeFill],
                                     startPoint: .leading, endPoint: .trailing
                                 )
                             )

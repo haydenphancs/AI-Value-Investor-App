@@ -60,6 +60,16 @@ final class AudioManager: ObservableObject {
     @Published private(set) var isCompactMode: Bool = false  // True when collapsed to the top status island
     @Published var isPlayerHiddenByScroll: Bool = false  // True when scroll-based hiding is active
 
+    /// True once the CURRENT episode has actually been started by the user (play / resume), false
+    /// while it is merely PREPARED by `load(_:)`.
+    ///
+    /// The distinction exists because `load(_:)` parks `playbackState` at `.paused` so resume is
+    /// instant — indistinguishable, to every player-visibility gate, from "the user paused it".
+    /// Without this the player appears unbidden; see `hasActiveEpisode`. Reset by `load(_:)` (new
+    /// episode, not yet started) and `stop()` (episode cleared); deliberately NOT reset by
+    /// `pause()` / `pauseForExternalAudio()`, where the player must stay on screen to resume from.
+    @Published private(set) var hasStartedPlayback: Bool = false
+
     // Compact-mode is requested by several independent drivers (Wiser chat-bar focus, each stock
     // screen's lifetime, ChatTabView). Track them as a reason set keyed by a stable per-screen token
     // so they can't stomp each other and so duplicate appear/disappear or focus on/off are idempotent.
@@ -86,8 +96,14 @@ final class AudioManager: ObservableObject {
     /// a 404 / expired Storage URL used to unmount the whole player, so the audio appeared to simply
     /// VANISH mid-tap and the retry affordance (the play button → `togglePlayPause` → `.error` case)
     /// became unreachable. Keeping the episode mounted is what makes that retry reachable.
+    ///
+    /// It ALSO requires `hasStartedPlayback`, because `load(_:)` prepares an episode without playing
+    /// it and parks the state at `.paused` — which `PlaybackState.isActive` reports as active. The
+    /// book reader loads the narration on `.onAppear` purely so the play button is instant, so
+    /// merely OPENING a chapter and closing it again used to leave the mini player sitting on the
+    /// book screen (and every other surface) for audio the user never started.
     var hasActiveEpisode: Bool {
-        currentEpisode != nil && (playbackState.isActive || isPlaybackErrored)
+        currentEpisode != nil && hasStartedPlayback && (playbackState.isActive || isPlaybackErrored)
     }
 
     /// The user-facing failure message while the current episode is in `.error`, for any surface that
@@ -475,6 +491,8 @@ final class AudioManager: ObservableObject {
         duration = episode.duration
         currentTime = 0
         playbackState = .paused
+        // PREPARED, not started — keep the player UI off screen until the user actually plays.
+        hasStartedPlayback = false
 
         // Prepare (but don't start) a real player when narration is available.
         if let urlString = episode.audioUrl, let url = URL(string: urlString) {
@@ -497,6 +515,7 @@ final class AudioManager: ObservableObject {
         duration = episode.duration
         currentTime = 0
         playbackState = .loading
+        hasStartedPlayback = true
 
         if let urlString = episode.audioUrl, let url = URL(string: urlString) {
             // Real playback via AVPlayer (the periodic time observer drives currentTime/duration).
@@ -535,6 +554,7 @@ final class AudioManager: ObservableObject {
         duration = episode.duration
         currentTime = max(0, startAt)
         playbackState = .loading
+        hasStartedPlayback = true
 
         if let urlString = episode.audioUrl, let url = URL(string: urlString) {
             activateAudioSession()
@@ -563,6 +583,9 @@ final class AudioManager: ObservableObject {
         // Play tapped after the episode finished (e.g. from the Lock Screen) → restart from the top.
         if duration > 0, currentTime >= duration - 0.5 { currentTime = 0 }
         playbackState = .playing
+        // This is the path a PREPARED episode takes on its first play (togglePlayPause → .paused →
+        // resume), so it is what reveals the player for a `load(_:)`-ed episode.
+        hasStartedPlayback = true
         if let player {
             activateAudioSession()
             player.playImmediately(atRate: Float(playbackSpeed.rawValue))
@@ -663,6 +686,7 @@ final class AudioManager: ObservableObject {
         currentTime = 0
         duration = 0
         showFullScreenPlayer = false
+        hasStartedPlayback = false
 
         // Drop any compact-mode requests so a later, unrelated episode doesn't inherit a stale
         // "collapsed to island" state. Screens re-assert compact on their next appear/focus.

@@ -13,6 +13,11 @@ struct GlobalMiniPlayer: View {
     @EnvironmentObject private var audioManager: AudioManager
     @State private var dragOffset: CGFloat = 0
 
+    /// Gap left below the capsule. Defaults to the spacing that suits the player floating above a
+    /// tab bar; screens that stack it directly on top of the Ask Cay AI bar pass a tighter value,
+    /// since the chat bar supplies its own bottom inset and the two otherwise read as far apart.
+    var bottomSpacing: CGFloat = AppSpacing.md
+
     // Layout constants
     private let playerWidthRatio: CGFloat = 0.88 // 88% of screen width
     private let playerHeight: CGFloat = 60
@@ -90,7 +95,7 @@ struct GlobalMiniPlayer: View {
             progressBar(width: playerWidth)
         }
         .shadow(color: AppColors.shadowKey, radius: 24, y: 12)
-        .padding(.bottom, AppSpacing.md)
+        .padding(.bottom, bottomSpacing)
         .contentShape(Rectangle())
         .onTapGesture {
             audioManager.expandPlayer()

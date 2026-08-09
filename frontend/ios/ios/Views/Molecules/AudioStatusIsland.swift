@@ -183,6 +183,10 @@ private struct WaveformBar: View {
     }
     .environmentObject(AudioManager.shared)
     .onAppear {
+        // Start then pause: `load` alone leaves the episode merely PREPARED, which no longer mounts
+        // the player (see AudioManager.hasActiveEpisode). "Paused" here means paused BY THE USER.
         AudioManager.shared.load(.sampleMoneyMoves)
+        AudioManager.shared.resume()
+        AudioManager.shared.pause()
     }
 }

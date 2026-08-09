@@ -114,12 +114,15 @@ struct BookDetailView: View {
             .allowsHitTesting(headerOpacity > 0.5)
 
             // Bottom Ask AI bar
-            VStack {
+            // spacing: 0 — the implicit VStack default stacked ON TOP of the player's own bottom
+            // padding here, so this screen sat noticeably further from the chat bar than the reader
+            // and the article screen, which both pin it to 0. The gap is the player's alone now.
+            VStack(spacing: 0) {
                 Spacer()
 
                 // Bottom mini player — hidden when collapsed to the top island (chat-bar focused).
                 if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
-                    GlobalMiniPlayer()
+                    GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 

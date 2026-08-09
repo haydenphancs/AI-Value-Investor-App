@@ -321,7 +321,7 @@ struct BookCoreDetailView: View {
                 // Global Mini Player (show if audio was playing or user started playback);
                 // hidden when collapsed to the top island (chat-bar focused).
                 if shouldShowPlayer && audioManager.hasActiveEpisode && !audioManager.isPlayerHiddenByScroll && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
-                    GlobalMiniPlayer()
+                    GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 

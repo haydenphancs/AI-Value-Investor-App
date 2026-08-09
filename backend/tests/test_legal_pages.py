@@ -13,6 +13,7 @@ deploy context, and that they still match the authored originals.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -475,3 +476,123 @@ def test_a_missing_page_404s_rather_than_500s(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main_mod, "_LEGAL_DIR", tmp_path)
     r = client.get("/privacy")
     assert r.status_code == 404
+
+
+# ── Credit-pack non-expiry (App Store Guideline 3.1.1) ───────────────────────
+#
+# Purchased credits are a CONSUMABLE. 3.1.1 forbids expiring them, `user_credits` keeps them in
+# a second pool that `ensure_credit_period` deliberately never touches (migration 117), and
+# `BuyCreditsView` tells the buyer they "never expire".
+#
+# Three surfaces said the opposite, flatly and without qualification: the Terms of Use (which
+# is the App Store EULA, linked from the purchase sheet), the Help & Support page, and the
+# paywall. "Unused credits do not roll over" / "Unused credits reset monthly" describes the
+# MONTHLY pool and is true of it — but stated over the whole credit system it asserts that a
+# balance the user paid for expires, which is both a compliance problem and a false statement
+# about what the code does.
+#
+# Both directions are pinned: the unqualified claim must not come back, AND the carve-out must
+# be present. A one-way ban would be satisfied by deleting the sentence entirely.
+
+_CREDIT_COPY_SURFACES = [
+    _BACKEND / "app" / "templates" / "legal" / "terms.html",
+    _BACKEND / "app" / "templates" / "legal" / "support.html",
+    _IOS_SCREENS_DIR / "TermsOfUseView.swift",
+    _IOS_SCREENS_DIR / "SupportView.swift",
+    _IOS_SCREENS_DIR / "PaywallView.swift",
+]
+
+# Phrases that assert expiry over the WHOLE credit system rather than the monthly pool.
+_UNQUALIFIED_EXPIRY_CLAIMS = (
+    "unused credits do not roll over",
+    "unused credits reset monthly",
+    "unused credits expire",
+    "credits reset each month",
+)
+
+
+def _prose_only(path: Path) -> str:
+    """The file's user-facing text, with COMMENTS REMOVED.
+
+    ⚠️ Load-bearing, and it caught itself: the first version of this guard scanned the raw
+    source, and the comment added ABOVE the corrected paywall string — which quotes the old
+    wording to explain why it was wrong — tripped the assertion. A guard that fires on its own
+    rationale is unusable, and the usual "fix" (softening the pattern) is how these go vacuous.
+
+    Whole-line comments only, deliberately. Stripping a TRAILING `//` would mangle every URL
+    literal (`"https://…"`), and a mangled literal is the invisible-input failure mode this
+    suite has already been bitten by once.
+    """
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
+            out.append("")
+        else:
+            out.append(line)
+    text = "\n".join(out)
+    # HTML comments too, for the served pages.
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    return text.lower()
+
+
+@pytest.mark.parametrize(
+    "path", _CREDIT_COPY_SURFACES, ids=lambda p: p.name
+)
+def test_no_surface_claims_purchased_credits_expire(path):
+    if not path.is_file():
+        pytest.skip(f"{path.name} is absent")
+    # Collapse the wrapping so a claim split across source lines is still caught — the HTML
+    # copies wrap mid-sentence, which is exactly how a phrase-level grep goes vacuous.
+    flat = " ".join(_prose_only(path).split())
+    for claim in _UNQUALIFIED_EXPIRY_CLAIMS:
+        assert claim not in flat, (
+            f"{path.name} states \"{claim}\" without qualifying it to the MONTHLY pool. "
+            f"Purchased credits are a consumable and App Store Guideline 3.1.1 forbids "
+            f"expiring them; `ensure_credit_period` never touches that pool."
+        )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        _BACKEND / "app" / "templates" / "legal" / "terms.html",
+        _BACKEND / "app" / "templates" / "legal" / "support.html",
+        _IOS_SCREENS_DIR / "TermsOfUseView.swift",
+        _IOS_SCREENS_DIR / "SupportView.swift",
+    ],
+    ids=lambda p: p.name,
+)
+def test_the_binding_copy_discloses_that_credit_packs_do_not_expire(path):
+    """The other direction. Removing the false sentence is not enough — a user buying a pack
+    from a sheet that links these documents has to be able to READ that it does not expire."""
+    if not path.is_file():
+        pytest.skip(f"{path.name} is absent")
+    flat = " ".join(path.read_text(encoding="utf-8").lower().split())
+    assert "credit pack" in flat, f"{path.name} never mentions credit packs at all"
+    assert "do not expire" in flat or "never expire" in flat, (
+        f"{path.name} does not state that purchased credits do not expire"
+    )
+
+
+def test_the_published_effective_dates_agree_across_every_mirror():
+    """`Last updated` is the date a reader relies on, and it lives in FOUR places per document
+    (authored HTML, served HTML, the in-app Swift mirror). It was never bumped for the
+    2026-08-07 collected-data change, so all three privacy copies still claimed July 29 while
+    describing a category added nine days later.
+    """
+    import re
+
+    for doc, screen in (("terms", "TermsOfUseView.swift"), ("privacy", "PrivacyPolicyView.swift")):
+        served = (_BACKEND / "app" / "templates" / "legal" / f"{doc}.html").read_text(encoding="utf-8")
+        html_dates = re.findall(r"Last updated:\s*([A-Z][a-z]+ \d{1,2}, \d{4})", served)
+        assert html_dates, f"{doc}.html has no 'Last updated' line"
+
+        swift = (_IOS_SCREENS_DIR / screen).read_text(encoding="utf-8")
+        swift_dates = re.findall(r'lastUpdated:\s*"([^"]+)"', swift)
+        assert swift_dates, f"{screen} has no lastUpdated"
+
+        assert html_dates[0] == swift_dates[0], (
+            f"{doc}: served page says {html_dates[0]!r} but {screen} says {swift_dates[0]!r} — "
+            f"the in-app mirror and the published page must state the same effective date"
+        )

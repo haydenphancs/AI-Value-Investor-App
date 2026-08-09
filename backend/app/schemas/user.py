@@ -1,6 +1,6 @@
 """User request/response schemas matching DB users + user_credits tables."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 
@@ -55,6 +55,30 @@ class UserCreditsResponse(BaseModel):
     granted_used: int = 0
 
 
+#: Longest display name we will store. Generous for a real name, and small enough that the
+#: value is safe to render in a fixed-height row, log, and embed in a support report.
+DISPLAY_NAME_MAX_LENGTH = 64
+#: Practical ceiling for an avatar URL. Well above any real CDN URL.
+AVATAR_URL_MAX_LENGTH = 2048
+
+
 class UpdateProfileRequest(BaseModel):
-    display_name: Optional[str] = None
-    avatar_url: Optional[str] = None
+    """`PATCH /users/me`.
+
+    ⚠️ BOTH FIELDS ARE BOUNDED, and that is not decoration. `users.display_name` is a bare
+    `text` column with no CHECK, `model_dump(exclude_none=True)` fed the value straight into
+    the UPDATE, and the request-body cap middleware in `main.py` covers only `/me/settings`.
+    So any caller holding a valid token could store a multi-megabyte display name — which is
+    then re-read by `get_current_user` on EVERY authenticated request (it does `select("*")`)
+    and echoed into the profile response, the report PDF byline, and the support report. One
+    write, permanent cost on every subsequent request by that user.
+
+    `min_length=1` on the name because `exclude_none=True` only drops `None`: an empty string
+    is a real value and would have blanked the name to "" — which the iOS side then renders as
+    an empty row rather than falling back to "Investor" (that fallback is `nil`-only).
+    """
+
+    display_name: Optional[str] = Field(
+        default=None, min_length=1, max_length=DISPLAY_NAME_MAX_LENGTH
+    )
+    avatar_url: Optional[str] = Field(default=None, max_length=AVATAR_URL_MAX_LENGTH)

@@ -14,7 +14,7 @@ struct TermsOfUseView: View {
     var body: some View {
         LegalDocumentView(
             title: "Terms of Use",
-            lastUpdated: "July 29, 2026",
+            lastUpdated: "August 8, 2026",
             intro: "These Terms of Use (\u{201C}Terms\u{201D}) govern your access to and use of the Caydex mobile application and related services (the \u{201C}App\u{201D}), operated by Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}). By downloading, accessing, or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.",
             sections: Self.sections
         )
@@ -55,7 +55,8 @@ struct TermsOfUseView: View {
         LegalSection(
             heading: "Credits, Subscriptions & Billing",
             paragraphs: [
-                "The App uses a credit system for AI features (for example, AI reports and Cay AI chat). Paid subscription tiers provide a monthly allocation of credits. Unused credits do not roll over: your allowance resets at the start of each calendar month, US Eastern Time. If you upgrade mid-month your allowance is raised to the new tier immediately, and credits already spent that month remain spent.",
+                "The App uses a credit system for AI features (for example, AI reports and Cay AI chat). Paid subscription tiers provide a monthly allocation of credits. Unused monthly credits do not roll over: your monthly allowance resets at the start of each calendar month, US Eastern Time. If you upgrade mid-month your allowance is raised to the new tier immediately, and credits already spent that month remain spent.",
+                "Credit packs are separate. Credits you buy as a one-time credit pack are held in a separate balance, do not expire, and are not reset by the monthly renewal. Your monthly allowance is spent first, so a pack is only drawn on once that month's allowance is used up.",
                 "Subscriptions are billed through your Apple App Store account. Payment is charged at confirmation of purchase, and subscriptions renew automatically for the same period and price unless canceled at least 24 hours before the end of the current period. You can manage or cancel subscriptions in your App Store account settings; deleting the App does not cancel a subscription.",
                 "Except where required by applicable law or the App Store\u{2019}s policies, purchases and credits are non-refundable. Prices and allocations may change prospectively; changes will not affect a billing period already paid for."
             ]

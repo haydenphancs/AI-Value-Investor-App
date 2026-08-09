@@ -3,6 +3,11 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional
 
+# The display-name bound lives with the profile schema that owns the column, and is imported
+# rather than restated: signup and PATCH /users/me write the SAME `users.display_name`, so two
+# independent literals would drift and leave the unauthenticated route as the loose one.
+from app.schemas.user import DISPLAY_NAME_MAX_LENGTH
+
 # Minimum password length. NIST SP 800-63B guidance favours length over composition
 # rules, so there is deliberately no "must contain a symbol" requirement — those push
 # users toward predictable substitutions without adding real entropy.
@@ -33,7 +38,10 @@ class SignInRequest(BaseModel):
 class SignUpRequest(BaseModel):
     email: EmailStr
     password: str
-    display_name: str
+    # Same bound as `UpdateProfileRequest.display_name`, and imported from there so the two
+    # cannot drift: this is the SAME column, reached by an UNAUTHENTICATED route, so leaving it
+    # open here would make the bound on the authenticated one pointless.
+    display_name: str = Field(min_length=1, max_length=DISPLAY_NAME_MAX_LENGTH)
 
     @field_validator("password")
     @classmethod

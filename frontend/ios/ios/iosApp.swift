@@ -126,6 +126,12 @@ struct iosApp: App {
 
                     AppearanceManager.applyStored()
 
+                    // Raise the lock window if we launched locked. `AppLockManager.init` cannot
+                    // do it — no scene exists yet at singleton-init time — and this is the first
+                    // point where one is guaranteed. Idempotent, so the `didBecomeActive` call
+                    // below can repeat it without a second window.
+                    AppLockManager.shared.syncLockWindow()
+
                     #if DEBUG
                     AppearanceProbe.dump("task-post")
                     Task { await AppearanceProbe.runTransitionSelfTestIfRequested() }
@@ -209,6 +215,11 @@ struct iosApp: App {
                     // system. It is cheap insurance: an O(scenes × windows) loop.
                     AppearanceManager.applyStored()
 
+                    // Same gap, for the lock: a scene that reconnected while we were suspended
+                    // has no lock window, and `didEnterBackground` already set `isLocked`. This
+                    // is what puts the cover back up before the user sees the content.
+                    AppLockManager.shared.syncLockWindow()
+
                     // Re-probe localhost vs Railway each time app comes to foreground.
                     // Handles: started/stopped localhost while app was backgrounded.
                     Task { await ServerEnvironmentManager.shared.resolve() }
@@ -282,7 +293,9 @@ struct iosApp: App {
 /// Root view that handles auth state and navigation
 struct RootView: View {
     @Environment(AppState.self) private var appState
-    @State private var appLock = AppLockManager.shared
+    // No `AppLockManager` observation here any more: the lock is a `UIWindow` owned by the
+    // manager, not a view in this tree. Observing it would re-render the root on every lock
+    // transition for no reason. See the note where the overlay used to be.
 
     /// Read so the tree re-evaluates when the user's text size changes. NOT debug-only,
     /// unlike `colorScheme` below.
@@ -447,15 +460,16 @@ struct RootView: View {
                     .zIndex(890)
             }
         }
-        .overlay {
-            // App Lock cover — sits above everything until the user authenticates.
-            if appLock.isLocked {
-                AppLockView()
-                    .transition(.opacity)
-                    .zIndex(1000)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: appLock.isLocked)
+        // ⚠️ NO App Lock overlay here, deliberately.
+        //
+        // It used to be `.overlay { if appLock.isLocked { AppLockView().zIndex(1000) } }`, and
+        // that could not work: a `.fullScreenCover` / `.sheet` is a separate presented
+        // UIViewController drawn ABOVE this whole hierarchy, and `zIndex` only orders siblings
+        // WITHIN a hierarchy. So the lock rendered behind every modal in the app — background
+        // the app with Account or Cay AI chat open, return, and the content sat there readable.
+        // The privacy control failed open in the ordinary case.
+        //
+        // `AppLockManager` now owns a `UIWindow` at `.alert + 1`. See the header of that file.
     }
 }
 

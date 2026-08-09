@@ -207,8 +207,8 @@ async def test_a_failure_PART_WAY_THROUGH_still_returns_rather_than_raises():
 
     assert "error" in res, "a mid-claim write failure must be reported, not raised"
     assert res["claimed"] == {
-        "watchlist_items": 0, "portfolios": 0, "learn_progress": 0,
-        "research_reports": 0, "chat_sessions": 0,
+        "watchlist_items": 0, "portfolios": 0, "portfolios_merged": 0,
+        "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
     }
 
 
@@ -225,12 +225,16 @@ async def test_response_shape_matches_the_ios_decoder(guest_id):
     store = {"watchlist_items": [], "portfolios": [], "user_learn_progress": [], "chat_sessions": []}
     res = await _claim(_SB(store), guest_id)
 
-    assert set(res) <= {"claimed", "skipped", "error"}, "unexpected top-level key for the iOS decoder"
+    # `failed` joins the optional extras: it accompanies `error` on a partial claim and names
+    # which table steps did not run. Swift ignores unknown keys, so this is additive.
+    assert set(res) <= {"claimed", "skipped", "error", "failed"}, \
+        "unexpected top-level key for the iOS decoder"
     assert "claimed" in res
     assert {"watchlist_items", "portfolios"} <= set(res["claimed"]), \
         "the iOS DTO declares these non-optional — never drop one"
     assert set(res["claimed"]) == {
-        "watchlist_items", "portfolios", "learn_progress", "research_reports", "chat_sessions",
+        "watchlist_items", "portfolios", "portfolios_merged",
+        "learn_progress", "research_reports", "chat_sessions",
     }
     assert all(isinstance(v, int) for v in res["claimed"].values())
 
@@ -394,6 +398,170 @@ async def test_no_guest_learn_rows_is_a_clean_zero():
     res = await _claim(_SB(store), "install-A")
 
     assert res["claimed"] == {
-        "watchlist_items": 1, "portfolios": 0, "learn_progress": 0,
-        "research_reports": 0, "chat_sessions": 0,
+        "watchlist_items": 1, "portfolios": 0, "portfolios_merged": 0,
+        "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
     }
+
+
+# ── The portfolio name collision ─────────────────────────────────────────────
+#
+# `test_portfolios_move_too` above passes VACUOUSLY: `_SB` models no constraints, so it
+# cannot see that `portfolios_user_id_name_key UNIQUE (user_id, name)` exists. The real
+# table has it, and `_seed_default_portfolio` inserts a portfolio literally named
+# "Holdings" for EVERY identity — the guest bucket included. So the unconditional
+# `UPDATE ... SET user_id` raised 23505 for a large class of users, and because all five
+# steps shared one `try`, the three steps AFTER portfolios never ran: Learn progress,
+# research reports and chat sessions were silently left in the guest partition while the
+# endpoint answered 200.
+#
+# These tests use a fake that DOES model the constraints, so they fail against the old code.
+
+
+class _ConstraintViolation(Exception):
+    """Shaped like postgrest's unique-violation APIError."""
+
+    def __init__(self, constraint: str):
+        super().__init__(
+            f'duplicate key value violates unique constraint "{constraint}"'
+        )
+        self.code = "23505"
+
+
+class _ConstrainedQ(_Q):
+    """`_Q` plus the UNIQUE constraints the live schema actually declares.
+
+    Only UPDATE is checked: it is the only op in `claim_guest_data` that can move a row
+    into a colliding key.
+    """
+
+    _UNIQUE = {
+        "portfolios": ("user_id", "name"),
+        "portfolio_items": ("portfolio_id", "ticker"),
+        "watchlist_items": ("user_id", "ticker"),
+        "user_learn_progress": ("user_id", "content_type", "item_key"),
+    }
+
+    def execute(self):
+        cols = self._UNIQUE.get(self.table)
+        if self._op == "update" and cols:
+            rows = self.store.setdefault(self.table, [])
+            kind, col, val = self._filter
+            match = (
+                (lambda r: r.get(col) == val) if kind == "eq"
+                else (lambda r: r.get(col) in val)
+            )
+            hit = [r for r in rows if match(r)]
+            seen = {tuple(r.get(c) for c in cols) for r in rows if not match(r)}
+            for r in hit:
+                key = tuple({**r, **self._payload}.get(c) for c in cols)
+                if key in seen:
+                    raise _ConstraintViolation(
+                        f"{self.table}_{'_'.join(cols)}_key"
+                    )
+                seen.add(key)
+        return super().execute()
+
+
+class _ConstrainedSB(_SB):
+    def table(self, name):
+        return _ConstrainedQ(self.store, self.log, name)
+
+
+def _collision_store(bucket):
+    """A guest and an account that BOTH have the default "Holdings" portfolio."""
+    return {
+        "watchlist_items": [],
+        "portfolios": [
+            {"id": "g1", "user_id": bucket, "name": "Holdings"},
+            {"id": "a1", "user_id": _USER["id"], "name": "Holdings"},
+        ],
+        "portfolio_items": [
+            {"id": "gi1", "portfolio_id": "g1", "ticker": "NVDA"},
+            {"id": "gi2", "portfolio_id": "g1", "ticker": "AAPL"},
+            {"id": "ai1", "portfolio_id": "a1", "ticker": "AAPL"},
+        ],
+        "user_learn_progress": [
+            {"id": 1, "user_id": bucket, "content_type": "money_move", "item_key": "m1"},
+        ],
+        "research_reports": [{"id": "r1", "user_id": bucket}],
+        "chat_sessions": [{"id": "c1", "user_id": bucket}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_constrained_fake_really_models_the_unique_index():
+    """NON-VACUITY. If this passes without raising, every test below is meaningless."""
+    bucket = guest_user_id_for("install-A")
+    sb = _ConstrainedSB(_collision_store(bucket))
+
+    # Exactly what the OLD code did: move every guest portfolio unconditionally.
+    with pytest.raises(_ConstraintViolation):
+        sb.table("portfolios").update({"user_id": _USER["id"]}).in_("id", ["g1"]).execute()
+
+
+@pytest.mark.asyncio
+async def test_a_portfolio_name_collision_does_not_abort_the_later_steps():
+    """THE regression. Learn / reports / chats sit AFTER portfolios in the claim order."""
+    bucket = guest_user_id_for("install-A")
+    store = _collision_store(bucket)
+
+    res = await _claim(_ConstrainedSB(store), "install-A")
+
+    assert res["claimed"]["learn_progress"] == 1, "collision ate the Learn step"
+    assert res["claimed"]["research_reports"] == 1, "collision ate the reports step"
+    assert res["claimed"]["chat_sessions"] == 1, "collision ate the chat step"
+    assert "error" not in res, "a handled collision must not report a failure"
+
+
+@pytest.mark.asyncio
+async def test_guest_holdings_are_merged_into_the_accounts_same_named_portfolio():
+    bucket = guest_user_id_for("install-A")
+    store = _collision_store(bucket)
+
+    res = await _claim(_ConstrainedSB(store), "install-A")
+
+    # The guest portfolio is gone; the account's survives.
+    assert [p["id"] for p in store["portfolios"]] == ["a1"]
+    # Its unique ticker came across; the duplicate kept the ACCOUNT's row and the guest
+    # copy was dropped rather than stranded.
+    by_ticker = {i["ticker"]: i for i in store["portfolio_items"]}
+    assert by_ticker["NVDA"]["portfolio_id"] == "a1", "guest holding was not carried over"
+    assert by_ticker["AAPL"]["id"] == "ai1", "duplicate ticker should keep the account's row"
+    assert len(store["portfolio_items"]) == 2, "a duplicate item was stranded"
+    # Counted as a merge, not a move: the row was deleted, not re-pointed.
+    assert res["claimed"]["portfolios"] == 0
+    assert res["claimed"]["portfolios_merged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_non_colliding_portfolio_still_moves_wholesale():
+    bucket = guest_user_id_for("install-A")
+    store = _collision_store(bucket)
+    store["portfolios"].append({"id": "g2", "user_id": bucket, "name": "Watchlist Ideas"})
+
+    res = await _claim(_ConstrainedSB(store), "install-A")
+
+    moved = [p for p in store["portfolios"] if p["id"] == "g2"][0]
+    assert moved["user_id"] == _USER["id"]
+    assert res["claimed"]["portfolios"] == 1
+    assert res["claimed"]["portfolios_merged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_one_broken_table_does_not_abort_the_others():
+    """Step isolation, independent of the portfolio case."""
+    bucket = guest_user_id_for("install-A")
+
+    class _BreakLearn(_ConstrainedSB):
+        def table(self, name):
+            if name == "user_learn_progress":
+                raise RuntimeError("relation is being vacuumed")
+            return super().table(name)
+
+    store = _collision_store(bucket)
+    res = await _claim(_BreakLearn(store), "install-A")
+
+    assert res["claimed"]["research_reports"] == 1, "a broken table aborted a later one"
+    assert res["claimed"]["chat_sessions"] == 1
+    assert res.get("error") == "PartialClaim"
+    assert res.get("failed") == ["user_learn_progress"]

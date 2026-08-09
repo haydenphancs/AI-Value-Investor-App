@@ -4,6 +4,7 @@ Frontend: GET /users/me, GET /users/me/credits, PATCH /users/me
 """
 
 import asyncio
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from supabase import Client
@@ -50,6 +51,10 @@ from app.services.notification_inbox_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def credits_response_from_rows(rows: list) -> UserCreditsResponse:
@@ -265,6 +270,35 @@ async def unregister_device(
     return DeviceRegisterResponse(registered=not ok)
 
 
+def _merge_portfolio_items(supabase: Client, source_id: str, target_id: str) -> None:
+    """Move a guest portfolio's holdings into an account portfolio of the same name.
+
+    Deduped on `portfolio_items_portfolio_id_ticker_key UNIQUE (portfolio_id, ticker)`: a
+    ticker the target already holds keeps the ACCOUNT's row (it carries the shares the user
+    entered while signed in, which is the more considered figure) and the guest row is
+    dropped rather than stranded. Everything else is re-pointed, so the holdings survive.
+    """
+    guest_items = (
+        supabase.table("portfolio_items").select("id,ticker")
+        .eq("portfolio_id", source_id).execute().data or []
+    )
+    if not guest_items:
+        return
+    owned_tickers = {
+        r["ticker"] for r in (
+            supabase.table("portfolio_items").select("ticker")
+            .eq("portfolio_id", target_id).execute().data or []
+        )
+    }
+    movable = [r["id"] for r in guest_items if r.get("ticker") not in owned_tickers]
+    if movable:
+        supabase.table("portfolio_items").update({"portfolio_id": target_id}) \
+            .in_("id", movable).execute()
+    dupes = [r["id"] for r in guest_items if r.get("ticker") in owned_tickers]
+    if dupes:
+        supabase.table("portfolio_items").delete().in_("id", dupes).execute()
+
+
 @router.post("/me/claim-guest-data")
 async def claim_guest_data(
     user: dict = Depends(get_current_user),
@@ -304,19 +338,21 @@ async def claim_guest_data(
     if not x_guest_id or bucket == GUEST_USER_ID:
         return {
             "claimed": {
-                "watchlist_items": 0, "portfolios": 0, "learn_progress": 0,
-                "research_reports": 0, "chat_sessions": 0,
+                "watchlist_items": 0, "portfolios": 0, "portfolios_merged": 0,
+                "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
             },
             "skipped": "no per-install guest id",
         }
 
     user_id = user["id"]
     claimed = {
-        "watchlist_items": 0, "portfolios": 0, "learn_progress": 0,
-        "research_reports": 0, "chat_sessions": 0,
+        "watchlist_items": 0, "portfolios": 0, "portfolios_merged": 0,
+        "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
     }
+    # Per-step failures. One table must never abort the ones after it — see `_claim`.
+    step_failures: dict[str, str] = {}
 
-    def _claim() -> None:
+    def _claim_watchlist() -> None:
         # ── watchlist: skip tickers the account already holds ──────────────
         guest_rows = (
             supabase.table("watchlist_items").select("id,ticker")
@@ -339,17 +375,56 @@ async def claim_guest_data(
             if dupes:
                 supabase.table("watchlist_items").delete().in_("id", dupes).execute()
 
-        # ── portfolios: no unique constraint on name, so move them all. Their
-        #    portfolio_items ride along (FK is to portfolios.id, not to the user).
-        pf = (
-            supabase.table("portfolios").select("id")
+    def _claim_portfolios() -> None:
+        # ── portfolios: dedupe on NAME, then move. ──────────────────────────
+        #
+        # ⚠️ `portfolios` HAS a unique constraint: `portfolios_user_id_name_key
+        # UNIQUE (user_id, name)`. The comment that used to sit here said the opposite and
+        # the code moved every row unconditionally, so the UPDATE raised 23505 — and because
+        # the whole `_claim()` body shared ONE try, that exception skipped the three steps
+        # after it. Learn progress, research reports and chat sessions were silently never
+        # claimed.
+        #
+        # And the collision is not rare, it is the DEFAULT: `_seed_default_portfolio`
+        # (portfolios.py) lazily inserts a portfolio literally named "Holdings" on the first
+        # `GET /portfolios` for EVERY identity — the guest bucket included. So any user who
+        # opened the Assets tab as a guest and had also opened it while signed in (a previous
+        # session on this device, another device, or a `.restoring` window that sent requests
+        # tokenless) hit it.
+        #
+        # Merge rather than rename: "Holdings" means "everything I own" to the user, and two
+        # portfolios with that name is not a state they asked for. `portfolio_items` FKs to
+        # `portfolios.id`, so re-pointing the ITEMS carries the holdings across — deduped on
+        # `portfolio_items_portfolio_id_ticker_key UNIQUE (portfolio_id, ticker)`, with the
+        # account's own row winning, the same rule the watchlist and Learn steps use.
+        guest_pf = (
+            supabase.table("portfolios").select("id,name")
             .eq("user_id", bucket).execute().data or []
         )
-        if pf:
-            supabase.table("portfolios").update({"user_id": user_id}) \
-                .in_("id", [r["id"] for r in pf]).execute()
-            claimed["portfolios"] = len(pf)
+        if guest_pf:
+            owned_pf = {
+                r["name"]: r["id"] for r in (
+                    supabase.table("portfolios").select("id,name")
+                    .eq("user_id", user_id).execute().data or []
+                )
+            }
+            movable = [r["id"] for r in guest_pf if r.get("name") not in owned_pf]
+            if movable:
+                supabase.table("portfolios").update({"user_id": user_id}) \
+                    .in_("id", movable).execute()
+                claimed["portfolios"] = len(movable)
 
+            for row in guest_pf:
+                target_id = owned_pf.get(row.get("name"))
+                if not target_id:
+                    continue
+                _merge_portfolio_items(supabase, row["id"], target_id)
+                # The now-empty guest portfolio is dropped rather than stranded on a bucket
+                # nothing reads — same as the watchlist and Learn duplicates.
+                supabase.table("portfolios").delete().eq("id", row["id"]).execute()
+                claimed["portfolios_merged"] += 1
+
+    def _claim_learn() -> None:
         # ── Learn progress: completions AND book bookmarks live in one table,
         #    discriminated by content_type. Dedupe on (content_type, item_key) —
         #    UNIQUE(user_id, content_type, item_key) means re-pointing a row the
@@ -379,6 +454,7 @@ async def claim_guest_data(
             if dupes:
                 supabase.table("user_learn_progress").delete().in_("id", dupes).execute()
 
+    def _claim_reports() -> None:
         # ── research reports: move them wholesale ──────────────────────────
         #    Migration 110 partitions these per install too, so without this a guest who
         #    generated a report and THEN signed up would find their Reports tab empty —
@@ -404,6 +480,7 @@ async def claim_guest_data(
             }).in_("id", [r["id"] for r in guest_reports]).execute()
             claimed["research_reports"] = len(guest_reports)
 
+    def _claim_chats() -> None:
         # ── chat sessions (migration 111) ──────────────────────────────────
         #    Same argument as reports: someone who asked Cay AI about a ticker and THEN
         #    signed up would find their history empty. `chat_messages` rides along — it
@@ -419,9 +496,40 @@ async def claim_guest_data(
             ).execute()
             claimed["chat_sessions"] = len(guest_chats)
 
+    def _claim() -> None:
+        """Run every step, isolated.
+
+        These five used to share ONE `try`, so the FIRST table to raise skipped every table
+        after it — and the order is not arbitrary: portfolios sits second, and it raised 23505
+        on a name collision for a large class of users (see `_claim_portfolios`). The three
+        steps behind it — Learn progress, research reports, chat sessions — were the ones that
+        silently never ran, and the endpoint still answered 200.
+
+        Isolating per step means one broken table costs that table only. Each failure is
+        recorded and reported; `claim-guest-data` is best-effort by design (the user is already
+        signed in, so this must never 500), but best-effort has to mean "tried them all".
+        """
+        for name, step in (
+            ("watchlist_items", _claim_watchlist),
+            ("portfolios", _claim_portfolios),
+            ("user_learn_progress", _claim_learn),
+            ("research_reports", _claim_reports),
+            ("chat_sessions", _claim_chats),
+        ):
+            try:
+                step()
+            except Exception as e:  # noqa: BLE001 — recorded and surfaced by the caller
+                step_failures[name] = f"{type(e).__name__}: {e}"
+                logger.error(
+                    "Guest-data claim: %s step failed for user=%s bucket=%s: %s: %s",
+                    name, user_id, bucket, type(e).__name__, e, exc_info=True,
+                )
+
     try:
         await asyncio.to_thread(_claim)
     except Exception as e:
+        # The per-step handler above catches everything a step can raise, so reaching here
+        # means the driver itself failed (a thread-dispatch problem, not a table).
         logger.error(
             "Guest-data claim failed for user=%s bucket=%s: %s: %s",
             user_id, bucket, type(e).__name__, e, exc_info=True,
@@ -429,14 +537,27 @@ async def claim_guest_data(
         # Never fatal: the user IS signed in. Report honestly instead of 500ing.
         return {"claimed": claimed, "error": f"{type(e).__name__}"}
 
+    if step_failures:
+        logger.error(
+            "Guest-data claim partially failed for user=%s: %s",
+            user_id, ", ".join(sorted(step_failures)),
+        )
+        # `error` keeps the shape iOS already decodes (it drives the "we couldn't move your
+        # saved tickers" warning); `failed` names the tables for the logs and future clients.
+        return {
+            "claimed": claimed,
+            "error": "PartialClaim",
+            "failed": sorted(step_failures),
+        }
+
     if any(claimed.values()):
         # Report EVERY counter: a claim that moved only reports used to log nothing at all.
         logger.info(
-            "Guest-data claim for user=%s: %d watchlist row(s), %d portfolio(s), "
-            "%d learn-progress row(s), %d research report(s), %d chat session(s)",
+            "Guest-data claim for user=%s: %d watchlist row(s), %d portfolio(s) moved, "
+            "%d merged, %d learn-progress row(s), %d research report(s), %d chat session(s)",
             user_id, claimed["watchlist_items"], claimed["portfolios"],
-            claimed["learn_progress"], claimed["research_reports"],
-            claimed["chat_sessions"],
+            claimed["portfolios_merged"], claimed["learn_progress"],
+            claimed["research_reports"], claimed["chat_sessions"],
         )
     return {"claimed": claimed}
 
@@ -447,10 +568,33 @@ async def update_profile(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Update current user profile (display_name, avatar_url)."""
+    """Update current user profile (display_name, avatar_url).
+
+    Lengths are bounded on the schema (see `UpdateProfileRequest`); the trim happens here
+    because a name that is ALL whitespace passes `min_length=1` and would blank the row.
+    """
     update_data = request.model_dump(exclude_none=True)
+
+    if "display_name" in update_data:
+        trimmed = update_data["display_name"].strip()
+        if not trimmed:
+            return make_error_response(
+                ErrorCode.INVALID_INPUT,
+                message="display_name was empty after trimming",
+                user_message="Please enter a name.",
+            )
+        update_data["display_name"] = trimmed
+
     if not update_data:
-        raise HTTPException(status_code=400, detail="No fields to update")
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message="no updatable fields in the request",
+            user_message="Nothing to update.",
+        )
+
+    # `users.updated_at` defaults to now() on INSERT only — there is no trigger — so without
+    # this the column claims the row has not changed since signup.
+    update_data["updated_at"] = _now_iso()
 
     result = supabase.table("users").update(update_data).eq(
         "id", user["id"]
@@ -675,9 +819,17 @@ async def delete_account(
             "still reach the remaining data. Failed targets: %s",
             user_id, ", ".join(sorted(failures)),
         )
-        raise HTTPException(
-            status_code=500,
-            detail="Couldn't fully delete your account. Please try again.",
+        # Structured, not a bare string: a bare `detail` renders as `{"detail": ...}`, and
+        # `APIClient.validateResponse`'s 5xx arm has no `detail` fallback (only the 4xx arm
+        # does). So this carefully-worded message was DISCARDED and the user saw a generic
+        # transient server error for an operation that is neither transient nor complete —
+        # their account still exists and they were not told.
+        return make_error_response(
+            ErrorCode.ACCOUNT_DELETE_INCOMPLETE,
+            message=f"partial deletion; failed targets: {', '.join(sorted(failures))}",
+            # Flat scalars only — iOS `AnyCodable` decodes String/Int/Double/Bool and
+            # silently yields "" for anything else, so this is a joined string, not a list.
+            details={"failed": ", ".join(sorted(failures))},
         )
 
     # 3. Identity row + every FK-linked child table.
@@ -694,9 +846,12 @@ async def delete_account(
             "Account deletion failed at the auth step for user=%s: %s: %s",
             user_id, type(e).__name__, e,
         )
-        raise HTTPException(
-            status_code=500,
-            detail="Couldn't delete your account. Please try again.",
+        # Same contract as the partial-failure branch above. Storage and the un-FK'd tables
+        # have already been purged at this point, so the account is genuinely half-deleted —
+        # "please try again" is right, and the user must know it still exists.
+        return make_error_response(
+            ErrorCode.ACCOUNT_DELETE_INCOMPLETE,
+            message=f"auth-step deletion failed: {type(e).__name__}",
         )
 
     logger.info("Account deleted for user=%s (storage + unlinked rows + cascade)", user_id)

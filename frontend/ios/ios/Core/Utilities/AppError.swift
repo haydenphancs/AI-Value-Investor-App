@@ -458,6 +458,28 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "NOTIFICATIONS_UNAVAILABLE" {
                 return .apiError(code: code, message: message)
             }
+            // 503 SETTINGS_UNAVAILABLE: the synced preference blob could not be READ. The
+            // third member of the same family, and it was the one missing a branch. Same
+            // contract: it must never look like "you have no settings", because
+            // `SettingsSyncManager` gates its FULL-REPLACE push on "the server state is
+            // known" — an empty 200 there opens that gate on a session whose blob was never
+            // seen and the next push overwrites ~23 keys with whatever this device holds.
+            if code == "SETTINGS_UNAVAILABLE" {
+                return .apiError(code: code, message: message)
+            }
+            // 500 ACCOUNT_DELETE_INCOMPLETE: the deletion got part way and STOPPED, and the
+            // auth row was deliberately kept so a retry can reach the rest — which means the
+            // account still exists. That is the one thing the user has to be told, and it is
+            // exactly what a generic `.serverError` does not say.
+            //
+            // This arm is reachable at all only because the backend now sends the structured
+            // body: `validateResponse`'s 5xx branch decodes `APIErrorResponse` but has NO
+            // `{"detail": ...}` fallback (only the 4xx branch does), so the previous
+            // bare-string `HTTPException` was thrown away and rendered as a transient
+            // "something went wrong" for an operation that is neither transient nor complete.
+            if code == "ACCOUNT_DELETE_INCOMPLETE" {
+                return .apiError(code: code, message: message)
+            }
             // 409 PRICE_ALERT_LIMIT_REACHED: the request was well-formed and the ACCOUNT is
             // the conflict. `.validationFailed` gets `.fixInput`, which is right — the user
             // must delete an alert — where a retry button could never succeed.

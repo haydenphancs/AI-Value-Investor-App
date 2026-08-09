@@ -25,6 +25,8 @@ import re
 from pathlib import Path
 
 import pytest
+import json
+
 from fastapi import HTTPException
 
 from app.api.v1.endpoints import users as users_ep
@@ -136,6 +138,24 @@ async def _delete(sb, user_id=_USER_ID):
 
 # ── Happy path ────────────────────────────────────────────────────────────────
 
+
+def _assert_incomplete(res):
+    """The deletion refused to finish, in the structured shape iOS decodes.
+
+    It used to `raise HTTPException(500, "Couldn't fully delete your account…")`, whose body
+    renders as `{"detail": ...}` — and `APIClient.validateResponse`'s 5xx arm has NO `detail`
+    fallback (only the 4xx arm does), so that message was DISCARDED and the user saw a generic
+    transient server error for an operation that is neither transient nor complete. Their
+    account still existed and nothing said so.
+    """
+    assert res.status_code == 500, f"expected 500, got {res.status_code}"
+    body = json.loads(res.body)
+    assert body["error_code"] == "ACCOUNT_DELETE_INCOMPLETE", body
+    # The one thing the user must be told: the account is still here.
+    assert "still" in body["user_message"].lower(), body["user_message"]
+    return body
+
+
 @pytest.mark.asyncio
 async def test_deletes_every_unlinked_table():
     sb = FakeSupabase()
@@ -228,9 +248,7 @@ async def test_a_failed_table_purge_keeps_the_auth_row(table):
     """If any target fails, the identity row must survive so a retry can still reach the
     remaining data. Deleting it anyway would strand that data permanently."""
     sb = FakeSupabase(fail={table: "boom"})
-    with pytest.raises(HTTPException) as ei:
-        await _delete(sb)
-    assert ei.value.status_code == 500
+    _assert_incomplete(await _delete(sb))
     assert not [e for e in sb.log if e[0] == "auth.delete_user"], (
         "auth row was deleted despite an incomplete purge"
     )
@@ -239,8 +257,7 @@ async def test_a_failed_table_purge_keeps_the_auth_row(table):
 @pytest.mark.asyncio
 async def test_one_failing_table_does_not_abandon_the_others():
     sb = FakeSupabase(fail={"chat_usage_budget": "boom"})
-    with pytest.raises(HTTPException):
-        await _delete(sb)
+    _assert_incomplete(await _delete(sb))
     attempted = {t for kind, t, *_ in sb.log if kind == "table.delete"}
     all_purged = (
         set(users_ep._UNLINKED_USER_TABLES)
@@ -253,18 +270,14 @@ async def test_one_failing_table_does_not_abandon_the_others():
 @pytest.mark.parametrize("op", ["list", "remove"])
 async def test_a_storage_failure_keeps_the_auth_row(op):
     sb = FakeSupabase(fail={op: "boom"})
-    with pytest.raises(HTTPException) as ei:
-        await _delete(sb)
-    assert ei.value.status_code == 500
+    _assert_incomplete(await _delete(sb))
     assert not [e for e in sb.log if e[0] == "auth.delete_user"]
 
 
 @pytest.mark.asyncio
-async def test_auth_step_failure_surfaces_as_500():
+async def test_auth_step_failure_surfaces_as_a_structured_500():
     sb = FakeSupabase(fail={"auth": "boom"})
-    with pytest.raises(HTTPException) as ei:
-        await _delete(sb)
-    assert ei.value.status_code == 500
+    _assert_incomplete(await _delete(sb))
 
 
 # ── A dropped table must not break deletion ───────────────────────────────────
@@ -319,9 +332,7 @@ async def test_a_genuine_purge_failure_still_aborts():
         "Server disconnected without sending a response",
     ):
         sb = FakeSupabase(fail={victim: message})
-        with pytest.raises(HTTPException) as ei:
-            await _delete(sb)
-        assert ei.value.status_code == 500, f"should have aborted on: {message}"
+        _assert_incomplete(await _delete(sb)), f"should have aborted on: {message}"
         assert not any(kind == "auth.delete_user" for kind, *_ in sb.log), (
             "the auth row must be KEPT when a purge fails, so a retry can still reach the data"
         )

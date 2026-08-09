@@ -49,8 +49,18 @@ struct ProfileView: View {
                         // Section 4: About & Legal
                         aboutSection
 
-                        // Section 5: Sign Out (only when signed in)
-                        if viewModel.isAuthenticated {
+                        // Section 5: Sign Out.
+                        //
+                        // Shown during `.restoring` too. This is the app's ONLY sign-out
+                        // control, and a user whose session is stuck healing is exactly the
+                        // one most likely to want it — hiding it strands them. `signOut()`
+                        // tolerates a failed backend call (it resets local state first and
+                        // fires `/auth/logout` in the background), so it works offline.
+                        //
+                        // Credits deliberately stay hidden while restoring: the balance on
+                        // screen would be stale and "+ Add Credits" opens a purchase flow that
+                        // needs a live token.
+                        if viewModel.isAuthenticated || viewModel.isRestoring {
                             signOutSection
                         }
 
@@ -82,9 +92,29 @@ struct ProfileView: View {
                 viewModel.loadData()
             }
         }
+        // Account is a `.fullScreenCover`, and the root's error toast / toast overlays are drawn
+        // BEHIND one — so every failure raised on this screen was invisible. See
+        // `ErrorPresentationHost`. This must stay on the cover's root view.
+        .errorPresentationHost()
         .sheet(isPresented: $showSignIn) {
             SignInView()
                 .environment(appState)
+        }
+        // A failed rename / credit load used to set `viewModel.errorMessage` and stop there —
+        // nothing read it, so the alert simply closed and the old name stayed. `.claude/rules/
+        // auth.md` §6 bans exactly that on a user-initiated mutation. An ALERT rather than the
+        // shared toast because both live inside this cover; the host above fixes the toast for
+        // errors raised by SHARED machinery, but a ViewModel-local failure belongs to the screen.
+        .alert(
+            "Something went wrong",
+            isPresented: Binding(
+                get: { viewModel.errorMessage != nil },
+                set: { if !$0 { viewModel.clearError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) { viewModel.clearError() }
+        } message: {
+            Text(viewModel.errorMessage ?? "")
         }
         .alert("Display Name", isPresented: $viewModel.isEditingName) {
             TextField("Your name", text: $editedName)
@@ -141,13 +171,26 @@ struct ProfileView: View {
                                 Text(viewModel.displayName)
                                     .font(AppTypography.titleCompact)
                                     .foregroundColor(AppColors.textPrimary)
-                                Image(systemName: "pencil")
-                                    .font(AppTypography.iconXS)
-                                    .foregroundColor(AppColors.textMuted)
+                                // `isSavingName` was published and never read, so the rename
+                                // looked instantaneous and a slow save looked like nothing had
+                                // happened — which is how a FAILED one was indistinguishable
+                                // from a no-op. The alert dismisses on tap; this is the only
+                                // signal that the write is still in flight.
+                                if viewModel.isSavingName {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(AppColors.textMuted)
+                                } else {
+                                    Image(systemName: "pencil")
+                                        .font(AppTypography.iconXS)
+                                        .foregroundColor(AppColors.textMuted)
+                                }
                             }
                         }
                         .buttonStyle(.plain)
+                        .disabled(viewModel.isSavingName)
                         .accessibilityLabel("Edit display name. Currently \(viewModel.displayName)")
+                        .accessibilityValue(viewModel.isSavingName ? "Saving" : "")
 
                         Text(viewModel.email)
                             .font(AppTypography.bodySmall)
@@ -159,6 +202,33 @@ struct ProfileView: View {
                     Text(viewModel.memberSince)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
+                } else if viewModel.isRestoring {
+                    // We HOLD a credential we could not validate. Not a guest — telling this
+                    // user to "sign in to unlock monthly credits" for the account they already
+                    // have is the failure `.claude/rules/auth.md` §5 exists to prevent. Keep the
+                    // last-known identity on screen and say what is actually happening.
+                    VStack(spacing: AppSpacing.xs) {
+                        Text(viewModel.displayName)
+                            .font(AppTypography.titleCompact)
+                            .foregroundColor(AppColors.textPrimary)
+
+                        HStack(spacing: AppSpacing.xs) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(AppColors.textMuted)
+                            Text("Reconnecting…")
+                                .font(AppTypography.bodySmall)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
+
+                        Text("You're still signed in. We'll refresh your account as soon as the connection is back.")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Reconnecting. You are still signed in as \(viewModel.displayName).")
                 } else {
                     // Guest: prompt to sign in.
                     VStack(spacing: AppSpacing.xs) {
@@ -346,26 +416,47 @@ struct ProfileView: View {
                                         Text(mode.rawValue)
                                             .font(AppTypography.caption)
                                     }
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, AppSpacing.xs)
+                                    // 44pt, per the HIG minimum and WCAG 2.2 SC 2.5.8. The
+                                    // chip was ~22pt tall — an 11pt caption plus a 4pt pad —
+                                    // because nothing here sized it; `contentShape` makes the
+                                    // whole frame tappable rather than just the glyphs.
+                                    .frame(maxWidth: .infinity, minHeight: 44)
                                     .background(
                                         Capsule()
+                                            // The app's audited segmented-control tokens,
+                                            // not a hand-composited `textMuted.opacity(0.3)`.
+                                            // An alpha-composited pair is invisible to
+                                            // `ThemeContrastAudit` (which resolves declared
+                                            // tokens against declared surfaces), so it could
+                                            // never be proven — these two are, and the
+                                            // manifest already pins `textPrimary` on
+                                            // `toggleSelectedBackground` at 14.18 / 10.31.
                                             .fill(viewModel.appearanceMode == mode
-                                                  ? AppColors.textMuted.opacity(0.3)
+                                                  ? AppColors.toggleSelectedBackground
                                                   : Color.clear)
                                     )
+                                    .contentShape(Capsule())
                                     .foregroundColor(viewModel.appearanceMode == mode
                                                      ? AppColors.textPrimary
                                                      : AppColors.textMuted)
                                 }
                                 .buttonStyle(PlainButtonStyle())
+                                // VoiceOver could not tell these three apart: selection was
+                                // carried ONLY by fill and ink shade, so all three read as
+                                // plain buttons and the current mode was unannounced.
+                                .accessibilityAddTraits(
+                                    viewModel.appearanceMode == mode ? [.isButton, .isSelected] : [.isButton]
+                                )
                             }
                         }
                         .padding(2)
                         .background(
                             Capsule()
-                                .fill(AppColors.textMuted.opacity(0.1))
+                                .fill(AppColors.toggleBackground)
                         )
+                        // One control, not three loose buttons.
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Appearance")
                     }
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.vertical, AppSpacing.md)

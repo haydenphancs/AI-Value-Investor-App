@@ -278,7 +278,12 @@ struct PaywallView: View {
     }
 
     private func costNote(_ catalog: PlanCatalog) -> some View {
-        Text("Each AI report costs \(catalog.reportCost) credits · each Cay AI chat costs \(catalog.chatCost). Unused credits reset monthly.")
+        // "Unused credits reset monthly" was true of the MONTHLY pool and false of the app:
+        // purchased credits are a consumable and App Store Guideline 3.1.1 forbids expiring
+        // them (`ensure_credit_period` never touches that pool). Said next to a purchase CTA,
+        // the unqualified version told the buyer their pack would be wiped at month end.
+        // Phrased as "allowance resets" so the sentence names the thing that actually resets.
+        Text("Each AI report costs \(catalog.reportCost) credits · each Cay AI chat costs \(catalog.chatCost). Your monthly allowance resets at the start of each month; credits you buy as a pack never expire.")
             .font(AppTypography.caption)
             .foregroundColor(AppColors.textMuted)
             .multilineTextAlignment(.center)

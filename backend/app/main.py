@@ -1037,7 +1037,11 @@ _MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
 # PDF through this same stack, so a blanket body cap would be a new failure mode on
 # routes that legitimately stream. Scoped to the JSON write routes that take a
 # client-authored document.
-_BODY_CAPPED_PATH_SUFFIXES = ("/me/settings",)
+# `/users/me` joins the list because `PATCH /users/me` writes `display_name` into a bare `text`
+# column that `get_current_user` re-reads (via `select("*")`) on EVERY authenticated request.
+# The Pydantic bound is the real guard; this is the cheap outer one that rejects the body before
+# it is parsed at all.
+_BODY_CAPPED_PATH_SUFFIXES = ("/me/settings", "/users/me")
 
 
 @app.middleware("http")

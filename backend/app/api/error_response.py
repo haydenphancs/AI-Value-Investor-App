@@ -75,6 +75,17 @@ class ErrorCode(str, Enum):
     # nobody reports because it looks exactly like the intended empty state.
     NOTIFICATIONS_UNAVAILABLE = "NOTIFICATIONS_UNAVAILABLE"
 
+    # Account deletion got PART WAY and stopped. The auth row is deliberately kept so a
+    # retry can still reach the rest, which means the account STILL EXISTS — and that is
+    # the one thing the user has to be told. Both 500 paths in `delete_account` used to
+    # raise a bare-string `HTTPException`, so the carefully-worded detail never reached
+    # iOS at all: `validateResponse`'s 5xx arm has no `{"detail": ...}` fallback (only the
+    # 4xx arm does), so it threw a generic `.serverError`, which `AppError` renders as a
+    # transient "try again" — for an operation that is neither transient nor complete.
+    # Distinct from SYSTEM_BUSY because retrying is exactly right here, but the user must
+    # not be left believing their data is gone when it is not.
+    ACCOUNT_DELETE_INCOMPLETE = "ACCOUNT_DELETE_INCOMPLETE"
+
     # The caller is at their price-alert quota. Distinct from INVALID_INPUT because
     # the input was fine — the ACCOUNT is full — so the client action is "remove one",
     # not "fix what you typed". Collapsing them would surface a form-validation error
@@ -219,6 +230,10 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.NOTIFICATIONS_UNAVAILABLE: (
         "We couldn't load your notifications right now. Pull to refresh in a moment."
     ),
+    ErrorCode.ACCOUNT_DELETE_INCOMPLETE: (
+        "We couldn't finish deleting your account, so it's still here. "
+        "Some data may already have been removed. Please try again."
+    ),
     ErrorCode.PRICE_ALERT_LIMIT_REACHED: (
         "You've reached your price-alert limit. Remove one to add another."
     ),
@@ -311,6 +326,9 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.WATCHLIST_UNAVAILABLE: "retry_later",
     ErrorCode.SETTINGS_UNAVAILABLE: "retry_later",
     ErrorCode.NOTIFICATIONS_UNAVAILABLE: "retry_later",
+    # Retrying is the right action AND it is safe: the purge is idempotent and the auth
+    # row was kept precisely so a second attempt can reach whatever survived.
+    ErrorCode.ACCOUNT_DELETE_INCOMPLETE: "retry_later",
     # NOT retry_later: retrying changes nothing until the user deletes an alert.
     ErrorCode.PRICE_ALERT_LIMIT_REACHED: "fix_input",
     # PRICE_ALERT_NOT_FOUND deliberately has NO action, matching THEME_NOT_FOUND: there
@@ -380,6 +398,8 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.SETTINGS_UNAVAILABLE: 503,
     # Retryable, and distinguishable from "you have no notifications yet".
     ErrorCode.NOTIFICATIONS_UNAVAILABLE: 503,
+    # 500, not 503: this is our own partial write, not an upstream being unavailable.
+    ErrorCode.ACCOUNT_DELETE_INCOMPLETE: 500,
     # 409, not 400: the request was well-formed and the state is the conflict.
     ErrorCode.PRICE_ALERT_LIMIT_REACHED: 409,
     ErrorCode.PRICE_ALERT_NOT_FOUND: 404,

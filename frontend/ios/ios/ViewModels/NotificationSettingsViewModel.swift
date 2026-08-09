@@ -267,10 +267,16 @@ final class NotificationSettingsViewModel: ObservableObject {
         let defaults = UserDefaults.standard
         defaults.set(Self.hhmm(from: quietStart), forKey: "notify_quiet_start")
         defaults.set(Self.hhmm(from: quietEnd), forKey: "notify_quiet_end")
-        // The backend needs the DEVICE's zone to know when 22:00 is. Written on every
-        // change rather than once, so a user who moves country is not left with quiet
-        // hours anchored to where they signed up.
-        defaults.set(TimeZone.current.identifier, forKey: "notify_timezone")
+        // The backend needs the DEVICE's zone to know when 22:00 is.
+        //
+        // This is no longer the ONLY writer, and it could not be: it runs only when the user
+        // touches a quiet-hours control, so a user who never opened this card never sent a
+        // timezone at all and the backend fell back to ET — for their quiet window AND for the
+        // daily-cap roll, which every notification is judged against whether or not quiet
+        // hours are on. `SettingsSyncManager.refreshDeviceTimezone()` now owns the lifecycle
+        // (launch, foreground, `NSSystemTimeZoneDidChange`); this call stays because writing it
+        // in the same step as the times it qualifies is what makes the pair consistent.
+        SettingsSyncManager.shared.refreshDeviceTimezone()
     }
 
     // MARK: Sync

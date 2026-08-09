@@ -29,13 +29,31 @@ struct AnalysisDescriptionCard: View {
                 .frame(width: 4)
 
             // Content
+            //
+            // TYPE SCALE — deliberately one step BELOW the app-wide reading ladder, and
+            // that is a considered exception rather than drift. Do not "restore" it to
+            // body/bodySmallEmphasis without re-reading this.
+            //
+            // This card sits directly under the three persona chips, whose name is 12
+            // (`labelSmall`) and tagline 11 (`caption`) because they are compact chrome
+            // (`lineLimit(1)` + `minimumScaleFactor`). At the documented prose size of 15
+            // this paragraph became the largest text on the screen — the DESCRIPTION of the
+            // thing you picked out-weighing the thing itself — and it also landed a point
+            // ABOVE its own title, which inverts the rule that a header is never smaller
+            // than its prose.
+            //
+            // Fixed by lowering both together (title 14→13, prose 15→14) so the block
+            // recedes toward the chips it belongs to while keeping the header above the
+            // body. Repointed PER VIEW, never by editing the shared tokens: `body` alone
+            // backs prose across the app, and `label`/`caption` back hundreds of chart and
+            // table usages.
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 Text(styleTitle)
-                    .font(AppTypography.bodySmallEmphasis)
+                    .font(AppTypography.labelEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
                 Text(persona.description)
-                    .font(AppTypography.body)
+                    .font(AppTypography.bodySmall)
                     .foregroundColor(AppColors.textSecondary)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)

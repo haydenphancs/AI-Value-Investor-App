@@ -24,6 +24,7 @@ import logging
 
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.database import get_supabase
+from app.utils.period_labels import filing_period_display
 from app.services._whale_common import (
     parse_congress_amount_dollars,
     parse_congress_amount_bounds,
@@ -31,6 +32,14 @@ from app.services._whale_common import (
     format_amount_range,
     snapshot_db_row,
     calc_13f_trade_dollars,
+    AnnualReturn,
+    compute_13f_cagr,
+    compute_ticker_cagr,
+    return_label_for,
+    unavailable_return_label,
+    RETURN_OK,
+    RETURN_INSUFFICIENT,
+    RETURN_UNAVAILABLE,
 )
 from app.schemas.whale import (
     TrendingWhaleResponse,
@@ -749,12 +758,9 @@ class WhaleService:
             or ""
         )
 
-        portfolio_value = float(
-            (snapshot or {}).get("total_value")
-            or whale.get("portfolio_value")
-            or 0
-        )
-        ytd_return = float(whale.get("ytd_return") or 0)
+        disclosure = self._stat_disclosure(whale, snapshot)
+        portfolio_value = disclosure["portfolio_value"]
+        ytd_return = disclosure["ytd_return"]
 
         # `x or ""` not .get(k, ""): NULL columns arrive as existing keys with
         # None — .get defaults never apply, and None fails the str fields.
@@ -777,7 +783,12 @@ class WhaleService:
             is_following=is_following,
             data_source=whale.get("data_source") or "",
             return_source=whale.get("return_source") or "",
-            return_label=whale.get("return_label") or "",
+            return_label=disclosure["return_label"],
+            return_status=disclosure["return_status"],
+            return_window_years=disclosure["return_window_years"],
+            portfolio_status=disclosure["portfolio_status"],
+            portfolio_as_of=disclosure["portfolio_as_of"],
+            filing_date=disclosure["filing_date"],
         )
 
         return profile
@@ -2394,97 +2405,140 @@ class WhaleService:
 
     # ── Sync to Denormalized Tables ──────────────────────────────────
 
-    async def _compute_ticker_cagr(
-        self, ticker: str
-    ) -> Optional[float]:
-        """Compute long-term CAGR from a stock's max price change + IPO date."""
+    async def _compute_ticker_cagr(self, ticker: str) -> AnnualReturn:
+        """FMP I/O only — the annualization itself lives in `_whale_common`.
+
+        This is the associated public vehicle's SHARE PRICE since inception
+        (BRK-A, PSH.L, ARKK, IEP, MKL), not a 13F figure. The caller labels it
+        with the ticker so the screen never implies it describes the 13F sleeve
+        in the tile beside it.
+        """
         try:
             price_change = await self.fmp.get_stock_price_change(ticker)
-            max_return = price_change.get("max")
-            if max_return is None or max_return <= -100:
-                return None
+            max_return = (price_change or {}).get("max")
 
-            # Get IPO date from company profile
             profiles = await self.fmp.get_company_profiles_batch([ticker])
-            if not profiles:
-                return None
-            ipo_date_str = profiles[0].get("ipoDate")
+            ipo_date_str = (profiles[0].get("ipoDate") if profiles else None)
             if not ipo_date_str:
-                return None
+                return AnnualReturn(None, None, "", RETURN_UNAVAILABLE)
 
             ipo_date = datetime.strptime(ipo_date_str, "%Y-%m-%d")
             years = (datetime.now() - ipo_date).days / 365.25
             if years < 1:
-                return None
+                # Less than a full year of trading — annualizing it would
+                # extrapolate a partial year into a "per year" claim.
+                return AnnualReturn(None, None, "", RETURN_INSUFFICIENT)
 
-            total_multiplier = 1 + max_return / 100
-            if total_multiplier <= 0:
-                return None
-            cagr = (total_multiplier ** (1 / years) - 1) * 100
-            return round(cagr, 1)
+            return compute_ticker_cagr(max_return, years)
         except Exception as e:
             logger.warning("Ticker CAGR failed for %s: %s", ticker, e)
-            return None
+            return AnnualReturn(None, None, "", RETURN_UNAVAILABLE)
 
     async def _compute_best_annual_return(
         self,
         whale: Dict,
         perf_list: List[Dict],
-    ) -> Tuple[Optional[float], str, str]:
-        """Tiered annual return: associated ticker CAGR → 13F avg → N/A.
+    ) -> AnnualReturn:
+        """Tiered annual return: associated-ticker CAGR → 13F CAGR → none.
 
-        Returns: (return_value, return_source, return_label)
+        Returns an `AnnualReturn` rather than a bare float so the caller can
+        tell "no usable history" (which may clear a stored value) apart from
+        "could not read" (which must not), and so the window travels with the
+        number instead of being discarded.
         """
-        # Tier 1: Associated ticker CAGR
         ticker = whale.get("associated_ticker")
         if ticker:
-            cagr = await self._compute_ticker_cagr(ticker)
-            if cagr is not None:
-                return cagr, "stock_cagr", f"{ticker} CAGR"
+            result = await self._compute_ticker_cagr(ticker)
+            if result.is_ok:
+                return result
 
-        # Tier 2: 13F portfolio CAGR (compound annualized)
-        cagr = self._compute_avg_annual_return(perf_list)
-        if cagr is not None:
-            return cagr, "13f_avg", "13F Portfolio CAGR"
-
-        return None, "", ""
+        return compute_13f_cagr(perf_list)
 
     @staticmethod
-    def _compute_avg_annual_return(perf_list: List[Dict]) -> Optional[float]:
-        """Compute compound annualized return (CAGR) from year-end 13F records.
+    def _compute_avg_annual_return(perf_list: List[Dict]) -> AnnualReturn:
+        """Delegate to the shared helper — see `_whale_common.compute_13f_cagr`.
 
-        Takes Q4 (Dec 31) snapshots' 1-year performance as calendar-year
-        returns, then compounds them geometrically to produce a true CAGR
-        over the observed history. Rejects corrupt/impossible inputs: a yearly
-        return <= -100% is impossible for a long-only 13F portfolio (you can't
-        lose more than 100%), and >= 500% is treated as an extreme outlier.
-        Admitting sub-(-100%) values would let an even count of them multiply
-        to a spuriously POSITIVE product that slips past the product<=0 guard.
+        Kept as a named method because the call sites read better with it, but
+        it must stay a one-liner: this function having its OWN copy of the
+        formula is precisely how it drifted from `hydrate_whales` (different
+        outlier floor, different caption) in the first place.
         """
-        if not perf_list:
-            return None
+        return compute_13f_cagr(perf_list)
 
-        year_end_returns = [
-            d["performancePercentage1year"]
-            for d in perf_list
-            if d.get("date", "").endswith("-12-31")
-            and d.get("performancePercentage1year") is not None
-            and -100 < d["performancePercentage1year"] < 500
-        ]
 
-        if not year_end_returns:
-            # Fallback: use latest 1-year return if no year-ends available
-            latest = perf_list[0] if perf_list else {}
-            val = latest.get("performancePercentage1year")
-            if val is not None and -100 < val < 500:
-                return round(float(val), 2)
-            return None
+    @staticmethod
+    def _stat_disclosure(
+        whale: Dict[str, Any], snapshot: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Both stat tiles' values AND whether they can be believed.
 
-        product = math.prod(1 + r / 100 for r in year_end_returns)
-        if product <= 0:
-            return None
-        cagr = (product ** (1 / len(year_end_returns)) - 1) * 100
-        return round(cagr, 2)
+        A static method rather than inline arithmetic because the old inline
+        version — two `or 0` coercions — was untestable without Supabase, and it
+        hid a real defect: a NULL `ytd_return` became `0.0`, which iOS rendered
+        as a confident GREEN "+0.0%". "We have no data" and "this whale was
+        flat" were the same pixels.
+
+        ⚠️ `is None`, NOT falsy. A genuine 0.0% year is real data and must stay
+        `ok`; `or 0` cannot tell it apart from a missing column.
+
+        `ytd_return` / `portfolio_value` still go out as plain numbers even when
+        unbelievable, and that is deliberate: the shipped iOS DTO declares them
+        non-Optional `Double`, so a JSON null would fail the WHOLE profile
+        decode on every installed build. The sibling `*_status` fields carry the
+        truth for clients new enough to read them.
+        """
+        raw_value = (snapshot or {}).get("total_value")
+        if raw_value is None:
+            raw_value = whale.get("portfolio_value")
+        try:
+            portfolio_value = float(raw_value) if raw_value is not None else 0.0
+        except (TypeError, ValueError):
+            portfolio_value = 0.0
+        portfolio_status = (
+            RETURN_OK if portfolio_value > 0 else RETURN_UNAVAILABLE
+        )
+
+        raw_return = whale.get("ytd_return")
+        stored_status = (whale.get("return_status") or "").strip()
+        if stored_status:
+            return_status = stored_status
+        else:
+            # Row predates migration 127. Trust the legacy value if there is
+            # one, so nothing blanks during the rollout window.
+            return_status = RETURN_OK if raw_return is not None else RETURN_INSUFFICIENT
+        try:
+            ytd_return = float(raw_return) if raw_return is not None else 0.0
+        except (TypeError, ValueError):
+            ytd_return, return_status = 0.0, RETURN_INSUFFICIENT
+
+        # A legacy row can be `ok` with no window; the client then omits the
+        # "· N-yr" suffix rather than blanking an otherwise good number.
+        window = whale.get("return_window_years")
+        try:
+            return_window_years = int(window) if window is not None else None
+        except (TypeError, ValueError):
+            return_window_years = None
+
+        stored_label = (whale.get("return_label") or "").strip()
+        return_label = (
+            stored_label
+            if return_status == RETURN_OK
+            else unavailable_return_label(return_status)
+        )
+
+        return {
+            "portfolio_value": portfolio_value,
+            "portfolio_status": portfolio_status,
+            "portfolio_as_of": filing_period_display(
+                (snapshot or {}).get("filing_period") or ""
+            )
+            or None,
+            "filing_date": (snapshot or {}).get("filing_date") or None,
+            "ytd_return": ytd_return,
+            "return_status": return_status,
+            "return_window_years": return_window_years,
+            "return_label": return_label,
+        }
 
     async def _sync_to_whale_tables(
         self,
@@ -2523,23 +2577,37 @@ class WhaleService:
                 "sentiment_summary": sentiment,
             }
 
-            # Compute best annual return (tiered: ticker CAGR → 13F avg)
+            # Annual return. ONE branch, not a fork on `associated_ticker` —
+            # the fork is why two different captions existed for the same
+            # computation inside a single file (see `return_label_for`).
+            # `_compute_best_annual_return` already tiers, and that helper is
+            # the only thing allowed to name the result.
             perf_list = perf_data if isinstance(perf_data, list) else []
-            if whale and whale.get("associated_ticker"):
-                ret_val, ret_source, ret_label = await self._compute_best_annual_return(
-                    whale, perf_list
-                )
-            else:
-                ret_val = self._compute_avg_annual_return(perf_list)
-                ret_source = "13f_avg" if ret_val is not None else ""
-                ret_label = "13F Portfolio Avg." if ret_val is not None else ""
+            result = await self._compute_best_annual_return(whale or {}, perf_list)
 
-            if ret_val is not None:
-                whale_update["ytd_return"] = ret_val
-            if ret_source:
-                whale_update["return_source"] = ret_source
-            if ret_label:
-                whale_update["return_label"] = ret_label
+            # WRITE THE JUDGEMENT, INCLUDING A NEGATIVE ONE. The old code wrote
+            # `if ret_val is not None`, so a bogus value — e.g. one the deleted
+            # 1-year fallback produced — could never be cleared: recomputing it
+            # as None simply skipped the write and left the bad number in place
+            # forever. Now anything except an upstream MISS overwrites.
+            #
+            # `unavailable` is the one status that must not: it means we could
+            # not read FMP, and an outage must never blank a good stored value.
+            if result.status != RETURN_UNAVAILABLE:
+                whale_update["ytd_return"] = result.value
+                whale_update["return_source"] = result.source
+                whale_update["return_window_years"] = result.window_years
+                whale_update["return_status"] = result.status
+                whale_update["return_label"] = (
+                    return_label_for(
+                        result.source, (whale or {}).get("associated_ticker")
+                    )
+                    if result.is_ok
+                    # Sent so ALREADY-SHIPPED clients, which render this string
+                    # verbatim under a green "+0.0%" and cannot be taught the
+                    # em-dash, at least stop captioning that zero as a CAGR.
+                    else unavailable_return_label(result.status)
+                )
             sb.table("whales").update(whale_update).eq("id", whale_id).execute()
         except Exception as e:
             logger.error("[sync] whale record update failed for %s: %s", whale_id, e)

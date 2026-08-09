@@ -31,6 +31,19 @@ struct WhaleProfile: Identifiable, Codable {
     var isFollowing: Bool
     let dataSource: String
     let returnLabel: String
+    /// Stat-tile provenance (migration 127). Declared AFTER `returnLabel` with
+    /// defaults so the memberwise init keeps the sample fixtures compiling —
+    /// the trick `firmName` already documents above.
+    ///
+    /// `WhaleProfile` is never decoded from JSON (only built by
+    /// `WhaleProfileDTO.toWhaleProfile()`), so the non-Optional-with-default
+    /// Codable trap does not apply here. It very much does on the DTO.
+    var returnSource: String = ""
+    var returnStatus: String = ""
+    var returnWindowYears: Int? = nil
+    var portfolioStatus: String = ""
+    var portfolioAsOf: String? = nil
+    var filingDate: String? = nil
 
     // MARK: - Formatted Properties
 
@@ -56,6 +69,53 @@ struct WhaleProfile: Identifiable, Codable {
     var isPositiveReturn: Bool {
         displayedYTDReturn >= 0
     }
+
+    // MARK: - Stat-tile honesty
+    //
+    // The screen used to print a percent unconditionally. A NULL return arrived
+    // as 0.0 and rendered as a confident GREEN "+0.0%", so "we have no data" and
+    // "this whale was flat" were the same pixels. These predicates are what let
+    // the tile decline to draw a number — and, like `displayedYTDReturn` above,
+    // one predicate drives BOTH the value and its caption so they cannot disagree.
+
+    /// `""` means the row predates migration 127 — trust the legacy value rather
+    /// than blanking a good number during rollout.
+    var hasDisplayableReturn: Bool {
+        returnStatus.isEmpty ? !returnLabel.isEmpty : returnStatus == "ok"
+    }
+
+    /// "13F Portfolio CAGR · 5-yr". The window matters: a 2-year and a 10-year
+    /// figure used to render identically because it was computed and discarded.
+    var returnCaption: String {
+        let base = returnLabel.isEmpty ? "Avg. Annual Return" : returnLabel
+        guard let years = returnWindowYears, years > 1 else { return base }
+        return "\(base) · \(years)-yr"
+    }
+
+    /// Caption under the em-dash. Distinguishes "not enough history" (a judgement
+    /// about this whale) from "unavailable" (we could not read the source).
+    var returnUnavailableCaption: String {
+        returnStatus == "unavailable" ? "Return data unavailable" : "Not enough history"
+    }
+
+    var hasDisplayablePortfolioValue: Bool {
+        portfolioStatus.isEmpty ? portfolioValue > 0 : portfolioStatus == "ok"
+    }
+
+    /// "13F Equity Portfolio · Q2 2026" — the quarter stamp is what stops a
+    /// snapshot up to ~4.5 months old from reading as a live balance.
+    var portfolioCaption: String {
+        guard let quarter = portfolioAsOf, !quarter.isEmpty else {
+            return "13F Equity Portfolio"
+        }
+        return "13F Equity Portfolio · \(quarter)"
+    }
+
+    /// True for the five whales with an `associated_ticker` (BRK-A, PSH.L, ARKK,
+    /// IEP, MKL). Their percent is that vehicle's SHARE PRICE since inception —
+    /// a different data source from the 13F tile beside it, which the caption
+    /// and the info sheet both have to say out loud.
+    var isStockProxyReturn: Bool { returnSource == "stock_cagr" }
 
     var isCongressional: Bool {
         if dataSource.contains("congressional") { return true }

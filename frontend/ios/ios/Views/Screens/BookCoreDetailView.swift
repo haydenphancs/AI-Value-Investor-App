@@ -25,9 +25,26 @@ struct BookCoreDetailView: View {
     // Track if user initiated playback from this view or if it was already playing
     @State private var shouldShowPlayer: Bool = false
 
-    // True while we're programmatically scrolling to follow the narration, so the scroll-driven
-    // player hide/show logic ignores it (read-along auto-scroll shouldn't hide the mini player).
+    // True while we're programmatically scrolling — following the narration, or jumping to the top
+    // on a core switch — so the scroll-driven player hide/show logic ignores it (our own scrolling
+    // shouldn't hide the mini player).
     @State private var isAutoScrolling: Bool = false
+
+    /// Monotonic token for programmatic scrolls. Every `beginProgrammaticScroll` bumps it, and the
+    /// clear it schedules only fires if it still owns the newest token. Without this, two scrolls
+    /// closer together than the settle window (Next-Next taps; a read-along hop landing on a core
+    /// switch) let the EARLIER one's clear unset the flag mid-flight of the LATER one — re-arming
+    /// `hidePlayerByScroll()` against a scroll the user never made.
+    @State private var autoScrollGeneration: Int = 0
+
+    /// Set while a core switch settles. The scroll view is already back at the top, but the offset
+    /// PreferenceKey keeps reporting the OLD mid-page value for a frame or two while the new core
+    /// lays out. Believing it drives `headerOpacity` 0 → 1 → 0 and flashes the sticky mini header in
+    /// and straight back out, so we pin the reported offset to 0 across that window.
+    @State private var isPinnedToTop: Bool = false
+
+    /// Scroll anchor for "the very top of the reader" — see the header spacer in `body`.
+    private static let coreTopAnchorID = "coreTop"
 
     /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
@@ -160,9 +177,14 @@ struct BookCoreDetailView: View {
             ScrollViewReader { scrollProxy in
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    // Header spacer for back button area
+                    // Header spacer for back button area. Carries the scroll anchor for
+                    // `scrollToTop`: it's a child of this plain VStack, NOT of the LazyVStack below,
+                    // so it is always realized and `scrollTo` can reach it even when the reader is
+                    // parked at the bottom of a long core with every section row recycled away.
+                    // (`Color.clear` holds no state, so giving it an explicit identity is free.)
                     Color.clear
                         .frame(height: 60)
+                        .id(Self.coreTopAnchorID)
 
                     // Chapter header
                     CoreDetailHeaderSection(
@@ -223,11 +245,46 @@ struct BookCoreDetailView: View {
                 // Follow the narration: gently center the block being read, without tripping the
                 // scroll-driven player hide. Only while actually playing.
                 guard audioManager.isPlaying, let idx = newValue else { return }
-                isAutoScrolling = true
+                beginProgrammaticScroll(settleAfter: 0.6)
                 withAnimation(.easeInOut(duration: 0.4)) {
-                    scrollProxy.scrollTo("readAlongBlock-\(idx)", anchor: .center)
+                    // The FIRST narrated block sits directly under the chapter header, so centering
+                    // it shoves the header off screen the moment a core starts being read. Anchor to
+                    // the top instead. This also makes the auto-advance case order-independent: when
+                    // the narration crosses into the next core, THIS handler and the core-switch
+                    // handler below both fire in the same update pass with no defined ordering — and
+                    // now they agree on the destination instead of fighting over it.
+                    if idx == readAlongBySection.keys.min() {
+                        scrollProxy.scrollTo(Self.coreTopAnchorID, anchor: .top)
+                    } else {
+                        scrollProxy.scrollTo("readAlongBlock-\(idx)", anchor: .center)
+                    }
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { isAutoScrolling = false }
+            }
+            .onChange(of: currentContent.chapterNumber) { _, _ in
+                // A new core must open at the TOP. `currentContent` is swapped IN PLACE, so the
+                // ScrollView keeps its identity and therefore its content offset — without this, the
+                // next core opens scrolled to wherever the previous one was left (which, since
+                // "Complete & Continue" sits at the very bottom, is every single time).
+                //
+                // This lives INSIDE the ScrollViewReader closure because it needs `scrollProxy`; the
+                // sibling `.onChange(of: currentContent.chapterNumber)` on the outer ZStack (audio
+                // loading) has no access to it. Keying on the core number rather than calling from
+                // each navigate function covers EVERY path in one place: Next / Prev,
+                // "Complete & Continue", the player's "Read" jump, and the narration auto-advance.
+                beginProgrammaticScroll(pinTop: true, settleAfter: 0.35)
+                scrollToTop(scrollProxy)
+
+                // The core swapped underneath VoiceOver's focused element; without an explicit
+                // screen-change notification the focus lands non-deterministically.
+                UIAccessibility.post(notification: .screenChanged, argument: currentContent.chapterTitle)
+
+                // Re-baseline the scroll-derived UI here rather than in the three navigate functions:
+                // there, the next preference tick (still reporting the OLD offset, because the scroll
+                // view hasn't physically moved yet) overwrote these immediately and flashed the
+                // sticky mini header in and back out. `isPinnedToTop` is what makes the reset stick.
+                scrollOffset = 0
+                previousScrollOffset = 0
+                audioManager.resetScrollHiding()
             }
             }
 
@@ -318,6 +375,11 @@ struct BookCoreDetailView: View {
         .onChange(of: currentContent.chapterNumber) {
             // Same single book file across cores — only load if it isn't already active, so
             // swiping between cores never interrupts ongoing playback.
+            //
+            // NOTE: the scroll-to-top on a core switch is a SEPARATE handler on the same value,
+            // inside the ScrollViewReader closure above (it needs `scrollProxy`, which doesn't
+            // reach out here). Don't consolidate the two — this one can't move inside the reader
+            // without dragging `.globalAudioOverlay` / `.aiChatCover` scope with it.
             ensureBookEpisodeLoaded()
         }
         .onChange(of: audioManager.currentTime) { oldTime, newTime in
@@ -329,11 +391,69 @@ struct BookCoreDetailView: View {
     }
 
     // MARK: - Scroll Handling
+
+    /// Jump the reader to the very top, unanimated.
+    ///
+    /// The callers mutate `currentContent` inside `withAnimation(.easeInOut(duration: 0.3))`, and the
+    /// `.onChange` action runs inside that same transaction — so a bare `scrollTo` INHERITS the 0.3s
+    /// curve and the page visibly races upward past every paragraph instead of cutting.
+    /// `withTransaction` REPLACES the ambient transaction (it doesn't merge), so an empty one clears
+    /// the inherited animation; `disablesAnimations` is the flag the UIScrollView behind SwiftUI
+    /// reads, matching the idiom in TickerChartView / GrowthChartSheet / ChartSettingsSheet.
+    ///
+    /// Called twice on purpose (same shape as EarningsTimelineChart): the synchronous call lands
+    /// before the frame is committed when layout is already valid, and the `main.async` retry covers
+    /// the case where the new core's content is still being rebuilt. Because the anchor is the FIRST
+    /// child, both calls resolve to the same destination (offset 0) no matter how tall the new core
+    /// is — so the retry can never fight the first call, and a shorter core's contentOffset clamp
+    /// (which clamps toward 0) can't fight it either.
+    private func scrollToTop(_ proxy: ScrollViewProxy) {
+        func jump() {
+            var transaction = Transaction()
+            transaction.animation = nil
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo(Self.coreTopAnchorID, anchor: .top)
+            }
+        }
+        jump()
+        DispatchQueue.main.async { jump() }
+    }
+
+    /// Open a window in which reported scroll offsets are treated as OURS, not the user's: the mini
+    /// player never hides, and when `pinTop` the reported offset is ignored in favour of 0.
+    ///
+    /// The generation token is what makes overlapping scrolls safe. The previous shape — a bare
+    /// `isAutoScrolling = true` paired with an unconditional `asyncAfter { isAutoScrolling = false }`
+    /// — let two scrolls 0.3s apart have the FIRST one's clear land mid-flight of the SECOND and
+    /// re-arm the hide/show logic against a scroll the user never made.
+    private func beginProgrammaticScroll(pinTop: Bool = false, settleAfter: Double) {
+        autoScrollGeneration &+= 1
+        let generation = autoScrollGeneration
+        isAutoScrolling = true
+        // Assign rather than only-set-on-true: the pin asserts "we are heading to offset 0", so a
+        // scroll that is NOT heading there (the read-along centring a mid-core block) must clear an
+        // in-flight pin. Otherwise a narration hop landing inside a core switch's window would keep
+        // reporting 0 while the content sat mid-page, freezing the sticky header for the remainder.
+        isPinnedToTop = pinTop
+        DispatchQueue.main.asyncAfter(deadline: .now() + settleAfter) {
+            guard generation == autoScrollGeneration else { return }
+            isAutoScrolling = false
+            isPinnedToTop = false
+        }
+    }
+
     private func handleScrollChange(newOffset: CGFloat) {
-        // Ignore programmatic read-along scrolling so it doesn't hide the mini player.
+        // Ignore programmatic scrolling (read-along follow, core-switch jump-to-top) so it doesn't
+        // hide the mini player. During a core switch we also DISBELIEVE the reported offset: the
+        // scroll view is already at the top, but the PreferenceKey still reports the old mid-page
+        // value for a frame or two, which would drive headerOpacity 0 → 1 → 0 and flash the sticky
+        // mini header. The read-along path deliberately does NOT pin — its offset reports are real,
+        // and freezing headerOpacity for 0.6s there would strand the mini header.
         if isAutoScrolling {
-            previousScrollOffset = newOffset
-            scrollOffset = newOffset
+            let effective = isPinnedToTop ? 0 : newOffset
+            previousScrollOffset = effective
+            scrollOffset = effective
             return
         }
         let scrollDelta = newOffset - previousScrollOffset
@@ -416,9 +536,14 @@ struct BookCoreDetailView: View {
             progress.markCompleted(order: book.curriculumOrder, core: currentContent.chapterNumber)
         }
 
-        // If there's a next core, navigate to it after a delay
+        // If there's a next core, navigate to it after a delay.
         if hasNextCore {
+            // Capture the core this tap completed: if the learner taps "Next" (or the narration
+            // auto-advances) inside the 1.5s window, this delayed hop would fire ON TOP of that and
+            // skip a core entirely. Only advance if we're still where the tap left us.
+            let completedCore = currentContent.chapterNumber
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                guard currentContent.chapterNumber == completedCore else { return }
                 navigateToNextCore()
             }
         }
@@ -426,35 +551,31 @@ struct BookCoreDetailView: View {
 
     // MARK: - Actions
     private func handleCloseTapped() {
-        print("🔴 DEBUG: Close button tapped")
         dismiss()
     }
-    
+
     private func handleBackTapped() {
-        print("🔵 DEBUG: Back button tapped")
         guard hasPreviousCore else {
             dismiss()
             return
         }
         navigateToPreviousCore()
     }
-    
+
     private func handleNextTapped() {
-        print("🟢 DEBUG: Next button tapped")
         guard hasNextCore else { return }
         navigateToNextCore()
     }
-    
+
     private func navigateToPreviousCore() {
         let previousIndex = currentCoreIndex - 1
         guard previousIndex >= 0, let newContent = allCores[previousIndex].getDetailContent(for: book) else { return }
         withAnimation(.easeInOut(duration: 0.3)) {
             currentContent = newContent
         }
-        // Reset scroll position and show audio player
-        scrollOffset = 0
-        previousScrollOffset = 0
-        audioManager.resetScrollHiding()
+        // Scroll reset + player un-hide are centralised in the .onChange(of:
+        // currentContent.chapterNumber) inside the ScrollViewReader — it's the only place with a
+        // scroll proxy, and doing it here only zeroed the tracking vars, never the real offset.
     }
 
     /// Jump the reading view to a specific core — used by the full-screen player's "Read" button to
@@ -466,9 +587,7 @@ struct BookCoreDetailView: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             currentContent = content
         }
-        scrollOffset = 0
-        previousScrollOffset = 0
-        audioManager.resetScrollHiding()
+        // Scroll reset + player un-hide: see navigateToPreviousCore.
     }
 
     private func navigateToNextCore() {
@@ -477,10 +596,7 @@ struct BookCoreDetailView: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             currentContent = newContent
         }
-        // Reset scroll position and show audio player
-        scrollOffset = 0
-        previousScrollOffset = 0
-        audioManager.resetScrollHiding()
+        // Scroll reset + player un-hide: see navigateToPreviousCore.
     }
     
     private func handleAISend() {

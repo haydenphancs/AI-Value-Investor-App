@@ -62,8 +62,20 @@ final class HomeRepository: HomeRepositoryProtocol {
             // Same tile shape as the pulse strip, so the same mapper. `spark` arrives
             // empty by design (a per-ticker intraday series would be one call each on
             // the most-visited screen), which the card already handles.
-            watchlist: (dto.watchlist ?? []).map(mapPulse)
+            watchlist: (dto.watchlist ?? []).map(mapPulse),
+            watchlistTitle: watchlistTitle(dto.watchlistTitle)
         )
+    }
+
+    /// The active group's name, or the label this section always showed.
+    ///
+    /// Two things land on the fallback: a backend that predates migration 126 (sends no
+    /// key at all) and a name that is present but blank. The second matters because the
+    /// header is the only text in that row — an empty string renders as a bare star icon
+    /// floating over the cards, which reads as a layout bug rather than a missing name.
+    private static func watchlistTitle(_ raw: String?) -> String {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Your Watchlist" : trimmed
     }
 
     private static func mapPulse(_ dto: MarketPulseItemDTO) -> MarketPulseItem {
@@ -389,9 +401,10 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             scanners: [Self.movers, Self.heavyTraffic, Self.skepticalMoney],
             signals: Self.signals,
             themes: Self.themes,
-            // Mock/preview only — the live path fills this from the signed-in or
-            // per-install watchlist.
-            watchlist: Array(Self.pulse.prefix(3))
+            // Mock/preview only — the live path fills this from the caller's active
+            // group (or their master watchlist when they have none).
+            watchlist: Array(Self.pulse.prefix(3)),
+            watchlistTitle: "Holdings"
         )
     }
 

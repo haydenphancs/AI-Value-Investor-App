@@ -173,6 +173,29 @@ def test_every_response_is_json_serializable_with_allow_nan_false():
     json.dumps(tabs.model_dump(), allow_nan=False)
 
 
+# ── the tab bar's group + plan-gate envelope ──────────────────────────
+
+IOS_TABS_ENVELOPE_KEYS = {"tabs", "group_name", "locked_count", "tier_required"}
+
+
+def test_tabs_envelope_keys_match_ios_dto():
+    """The strip gained three fields when it started following the active group and
+    enforcing a plan limit. iOS decodes with explicit CodingKeys and no
+    `.convertFromSnakeCase`, so these literal names are the contract."""
+    dumped = UpdatesTabsResponse().model_dump()
+    assert set(dumped.keys()) == IOS_TABS_ENVELOPE_KEYS
+
+
+def test_tabs_envelope_defaults_are_the_ungated_state():
+    """Additive + defaulted, so a response built without them — and an already-shipped
+    client that ignores them — behaves exactly as before the gate existed. A
+    `locked_count` defaulting to anything but 0 would render a phantom upsell chip."""
+    tabs = UpdatesTabsResponse()
+    assert tabs.group_name is None
+    assert tabs.locked_count == 0
+    assert tabs.tier_required is None
+
+
 # ── worst-case cache rows through the real mapper ─────────────────────
 
 WORST_CASE_ROWS = [

@@ -44,7 +44,9 @@ struct UpdatesView: View {
                     UpdatesTabBar(
                         tabs: viewModel.filterTabs,
                         selectedTab: $viewModel.selectedTab,
-                        onManageAssets: handleManageAssets
+                        lockedCount: viewModel.lockedTickerCount,
+                        onManageAssets: handleManageAssets,
+                        onLockedTap: { viewModel.showPaywall = true }
                     )
 
                     // Static "Live News" Header (non-scrolling, stays at top)
@@ -140,6 +142,13 @@ struct UpdatesView: View {
                     }
                 )
             }
+            // A PLAN gate, so the plan sheet — NOT the `BuyCreditsView` route that a 402
+            // takes. That one answers "you ran out of credits" with a one-tap top-up;
+            // buying credits would not reveal a single extra ticker here.
+            .sheet(isPresented: $viewModel.showPaywall) {
+                PaywallView()
+                    .environment(\.appState, appState)
+            }
             .alert(
                 "Couldn't update your tickers",
                 isPresented: Binding(
@@ -156,6 +165,7 @@ struct UpdatesView: View {
             .sheet(isPresented: $showManageAssetsSheet) {
                 ManageAssetsSheet(
                     tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
+                    groupName: viewModel.groupName,
                     onDismiss: { showManageAssetsSheet = false },
                     onAddTicker: { ticker in
                         Task { await viewModel.addTicker(ticker) }
@@ -314,6 +324,10 @@ struct UpdatesView: View {
 // MARK: - Manage Assets Sheet
 struct ManageAssetsSheet: View {
     let tickers: [NewsFilterTab]
+    /// The active group's name, so this sheet, Home's watchlist header and the Tracking
+    /// tab all call the same list by the same word. Nil when the user has no active
+    /// group and the chips fell back to their master watchlist.
+    var groupName: String?
     var onDismiss: (() -> Void)?
     var onAddTicker: ((String) -> Void)?
     var onRemoveTicker: ((String) -> Void)?
@@ -383,7 +397,12 @@ struct ManageAssetsSheet: View {
                     }
 
                     Section {
-                        Text("Swipe left to remove a ticker from your watchlist.")
+                        // Spell out the blast radius. Removing here is a full watchlist
+                        // delete, not just "take this chip off the strip" — and now that
+                        // Home and Tracking follow the same list, the row disappears from
+                        // three screens at once. A swipe gesture reads much lighter than
+                        // that, so the copy has to carry the difference.
+                        Text("Swipe left to remove a ticker. It comes off your watchlist and every list it's in.")
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textMuted)
                             .listRowBackground(Color.clear)
@@ -392,7 +411,7 @@ struct ManageAssetsSheet: View {
                 .listStyle(InsetGroupedListStyle())
                 .scrollContentBackground(.hidden)
             }
-            .navigationTitle("Your Tickers")
+            .navigationTitle(groupName ?? "Your Tickers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

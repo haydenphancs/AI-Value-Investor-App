@@ -187,3 +187,11 @@ class HomeDashboardResponse(BaseModel):
     # right shape and iOS already decodes it — `spark` is empty here, as the pulse
     # tiles already permit, since per-ticker intraday series would cost one call each.
     watchlist: List[MarketPulseItemResponse] = []
+    # The heading the strip renders under: the user's ACTIVE GROUP name (migration 126), so
+    # renaming "Holdings" → "Tech" on Tracking retitles this section too. Server-supplied
+    # because the group name is server state; the label used to be a hardcoded Swift literal,
+    # which is precisely why the two screens could disagree.
+    #
+    # Defaulted rather than Optional so an already-shipped client that ignores the field and a
+    # user with no active group both land on the exact string this section always showed.
+    watchlist_title: str = "Your Watchlist"

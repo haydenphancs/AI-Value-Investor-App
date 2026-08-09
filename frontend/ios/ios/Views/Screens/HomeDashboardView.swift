@@ -221,6 +221,7 @@ struct HomeDashboardView: View {
                     // rendering a header over nothing.
                     if !data.watchlist.isEmpty {
                         YourWatchlistSection(
+                            title: data.watchlistTitle,
                             items: data.watchlist,
                             onTap: openPulse
                         )

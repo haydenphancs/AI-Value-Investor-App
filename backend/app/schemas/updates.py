@@ -42,6 +42,18 @@ class UpdatesTabResponse(BaseModel):
 
 class UpdatesTabsResponse(BaseModel):
     tabs: List[UpdatesTabResponse] = Field(default_factory=list)
+    # The name of the active group the ticker pills came from (migration 126), so this
+    # strip, Home's watchlist section and the Tracking tab all say the same word. None
+    # when the user has no active group and the pills fell back to the master watchlist.
+    group_name: Optional[str] = None
+    # How many of the group's tickers the caller's PLAN is hiding. 0 for everyone who
+    # can see their whole group. iOS renders a single "+N more" upsell chip from this,
+    # so the number the user is shown comes from the code that enforced it.
+    locked_count: int = 0
+    # The plan that would reveal them ('pro' | 'premium'), or None when nothing is
+    # locked or the caller is already on the top tier. Sent so the client does not carry
+    # its own copy of the tier ladder.
+    tier_required: Optional[str] = None
 
 
 # ── AI Insights card ──────────────────────────────────────────────────

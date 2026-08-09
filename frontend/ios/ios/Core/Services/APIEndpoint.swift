@@ -196,6 +196,11 @@ enum APIEndpoint: Sendable {
     case setPortfolioTickers(id: String, tickers: [String])
     case setPortfolioHoldings(id: String, items: [HoldingUpdateItem])
     case reorderPortfolios(ids: [String])
+    /// Make this the user's active group — the one Home, Updates and Tracking follow.
+    /// Server-side (migration 126) because the selection has to outlive the device: it
+    /// used to be a local `UserDefaults` string, so the backend could not make the other
+    /// two screens follow it and switching groups did not sync across devices.
+    case activatePortfolio(id: String)
     /// Server-computed diversification health score for one portfolio.
     case getPortfolioInsightsForPortfolio(id: String)
 
@@ -457,6 +462,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/portfolios/\(id)/holdings"
         case .reorderPortfolios:
             return "/api/v1/portfolios/reorder"
+        case .activatePortfolio(let id):
+            return "/api/v1/portfolios/\(id)/activate"
         case .getPortfolioInsightsForPortfolio(let id):
             return "/api/v1/portfolios/\(id)/insights"
 
@@ -588,6 +595,7 @@ enum APIEndpoint: Sendable {
 
         case .bulkUpdateHoldings,
              .renamePortfolio, .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios,
+             .activatePortfolio,
              .updateMySettings:
             return .PUT
 
@@ -962,7 +970,11 @@ enum APIEndpoint: Sendable {
 
         case .getPortfolios, .createPortfolio, .renamePortfolio, .deletePortfolio,
              .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios,
+             .activatePortfolio,
              .getPortfolioInsightsForPortfolio:
+            // Guest-allowed like every sibling: groups are cheap, are the caller's own
+            // data, and are claimable on sign-up (auth.md §1a). `get_watchlist_identity`
+            // resolves a signed-out caller to their per-install partition.
             return .guestAllowed
 
         case .listChatSessions, .createChatSession, .sendChatMessage, .streamChatMessage,

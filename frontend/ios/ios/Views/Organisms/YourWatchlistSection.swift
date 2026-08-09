@@ -23,6 +23,14 @@
 import SwiftUI
 
 struct YourWatchlistSection: View {
+    /// The heading, SERVER-supplied: the name of the user's active group, so renaming
+    /// "Holdings" → "Tech" on the Tracking tab retitles this section too. It was a
+    /// hardcoded literal here, which is precisely how Home could say "Your Watchlist"
+    /// over a set of tickers the Tracking tab called something else.
+    ///
+    /// Defaulted so previews and any caller that has not been updated still compile to
+    /// the exact string this section always showed.
+    var title: String = "Your Watchlist"
     let items: [MarketPulseItem]
     var onTap: ((MarketPulseItem) -> Void)? = nil
 
@@ -32,10 +40,14 @@ struct YourWatchlistSection: View {
                 Image(systemName: "star.fill")
                     .font(AppTypography.iconXS)
                     .foregroundColor(AppColors.primaryBlue)
-                Text("Your Watchlist")
+                Text(title)
                     .font(AppTypography.labelEmphasis)
                     .foregroundColor(AppColors.textPrimary)
-                Spacer()
+                    // A user-named group can be up to 60 characters; without this a long
+                    // name wraps the header and pushes the card strip down the screen.
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: AppSpacing.sm)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, 10)
@@ -52,7 +64,20 @@ struct YourWatchlistSection: View {
     }
 }
 
-#Preview {
+#Preview("Default title") {
     YourWatchlistSection(items: MockHomeRepository.pulse)
         .background(AppColors.background)
+}
+
+#Preview("Named group") {
+    YourWatchlistSection(title: "Tech", items: MockHomeRepository.pulse)
+        .background(AppColors.background)
+}
+
+#Preview("Long group name") {
+    YourWatchlistSection(
+        title: "Dividend Aristocrats I Am Watching Very Closely",
+        items: MockHomeRepository.pulse
+    )
+    .background(AppColors.background)
 }

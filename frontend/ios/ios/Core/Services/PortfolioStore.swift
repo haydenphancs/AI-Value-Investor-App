@@ -5,8 +5,12 @@
 //  Server-backed observable store for the named portfolios that group tickers
 //  on the Tracking screen. The list of portfolios, their ticker membership,
 //  and per-portfolio holding values (shares / market_value) live on the
-//  backend; only the active-portfolio selection is persisted in UserDefaults
-//  so the user sees the same view across app restarts.
+//  backend — INCLUDING which group is active (migration 126). That selection used
+//  to be a device-local UserDefaults string, which meant the server could not build
+//  Home's watchlist section or the Updates ticker chips from it, so those two
+//  screens never followed the group the user picked and the choice did not sync
+//  across devices. The UserDefaults key survives only as a cold-start hint for the
+//  window before the first successful `GET /portfolios`.
 //
 //  Mutation strategy:
 //    - Portfolio CRUD (create / rename / delete / reorder) talks to the server
@@ -70,7 +74,17 @@ final class PortfolioStore: ObservableObject {
                 .map { $0.toPortfolio() }
                 .sorted { $0.sortOrder < $1.sortOrder }
             self.portfolios = loaded
-            ensureActiveSelection()
+            // The SERVER decides which group is active (migration 126). Home and the
+            // Updates chips read it straight from the database, so if this device kept
+            // its own opinion the three surfaces would disagree — which is the entire
+            // class of bug this change exists to remove. The local key is now only a
+            // cold-start hint for the window before the first successful load.
+            if let serverActive = loaded.first(where: \.isActive) {
+                activePortfolioId = serverActive.id
+                UserDefaults.standard.set(serverActive.id, forKey: Self.activeIdKey)
+            } else {
+                ensureActiveSelection()
+            }
             print("[PortfolioStore] ✅ Loaded \(loaded.count) portfolios from API")
         } catch {
             print("[PortfolioStore] ❌ Load failed: \(error)")
@@ -79,10 +93,46 @@ final class PortfolioStore: ObservableObject {
 
     // MARK: - Active selection
 
-    func setActivePortfolio(_ id: String) {
+    /// Switch the active group, optimistically and then on the server.
+    ///
+    /// The switch has to reach the backend: Home's watchlist section and the Updates
+    /// ticker chips are built server-side from `portfolios.is_active`, so a local-only
+    /// change would move the Tracking tab and leave the other two showing the previous
+    /// group. It also makes the selection follow the user across devices.
+    ///
+    /// Optimistic in memory, reverted on failure, and never silent — a user-initiated
+    /// mutation that fails must say so (auth.md §6). Note what is NOT done here: the
+    /// UserDefaults write is deferred until the server confirms, because persisting an
+    /// optimistic value would make a switch the server never received survive a kill.
+    func setActivePortfolio(_ id: String) async {
         guard portfolios.contains(where: { $0.id == id }) else { return }
+        guard id != activePortfolioId else { return }
+
+        let previous = activePortfolioId
         activePortfolioId = id
-        UserDefaults.standard.set(id, forKey: Self.activeIdKey)
+        applyActiveFlag(id)
+
+        do {
+            _ = try await apiClient.request(
+                endpoint: .activatePortfolio(id: id),
+                responseType: PortfolioDTO.self
+            )
+            UserDefaults.standard.set(id, forKey: Self.activeIdKey)
+        } catch {
+            activePortfolioId = previous
+            applyActiveFlag(previous)
+            AppActions.shared.reportMutationFailure(
+                error, action: "switch to that list"
+            )
+        }
+    }
+
+    /// Keep the in-memory `isActive` flags consistent with `activePortfolioId`.
+    /// Exactly one row is active, so this clears every other one.
+    private func applyActiveFlag(_ id: String?) {
+        for index in portfolios.indices {
+            portfolios[index].isActive = (portfolios[index].id == id)
+        }
     }
 
     /// If the persisted active id is gone (deleted on another device, first
@@ -127,7 +177,12 @@ final class PortfolioStore: ObservableObject {
         let new = dto.toPortfolio()
         portfolios.append(new)
         portfolios.sort { $0.sortOrder < $1.sortOrder }
-        setActivePortfolio(new.id)
+        // The server deliberately does NOT auto-activate a new group — doing it there
+        // would move Home and Updates as a side effect of an action that only said "make
+        // a new list". Switching is the CLIENT's call, and here the user just created it,
+        // so switching is what they meant. `new.isActive` is already true when this was
+        // their first group, and the guard makes that a no-op.
+        await setActivePortfolio(new.id)
         return new
     }
 

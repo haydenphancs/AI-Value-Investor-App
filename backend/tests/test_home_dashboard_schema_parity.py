@@ -52,6 +52,11 @@ _RESPONSE_KEYS = {
     # The one USER-SCOPED section (migration 108 / Phase 4). Every key above is
     # identical for every caller; this one is not.
     "watchlist",
+    # The heading that section renders under — the user's ACTIVE GROUP name
+    # (migration 126). Server-supplied because the group name is server state; it
+    # used to be a hardcoded Swift literal, which is exactly why Home could say
+    # "Your Watchlist" while Tracking said "Holdings" over a different set of tickers.
+    "watchlist_title",
 }
 
 

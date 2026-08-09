@@ -194,6 +194,11 @@ def test_strict_endpoints_are_signInRequired(case_name):
         "getPortfolios", "createPortfolio", "renamePortfolio", "deletePortfolio",
         "setPortfolioTickers", "setPortfolioHoldings", "reorderPortfolios",
         "getPortfolioInsightsForPortfolio",
+        # Switching the active group (migration 126). Guest-capable like every sibling —
+        # `get_watchlist_identity` resolves a signed-out caller to their per-install
+        # partition. Gating it would freeze guests on whichever group they were seeded
+        # with, on the tab that exists to organise their tickers.
+        "activatePortfolio",
         "getUserCredits", "trackEvents",
     ],
 )

@@ -64,6 +64,10 @@ class PortfolioResponse(BaseModel):
     items: List[PortfolioItemResponse]
     created_at: datetime
     updated_at: datetime
+    # Exactly one of the user's portfolios is active (migration 126). It is what Home and
+    # Updates follow, so it is server state now — it used to be a device-local UserDefaults
+    # string, which is why those two screens could never track the group the user picked.
+    is_active: bool = False
 
 
 class PortfolioListResponse(BaseModel):
@@ -118,6 +122,7 @@ def _row_to_portfolio(row: dict, items: List[PortfolioItemResponse]) -> Portfoli
         items=items,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        is_active=bool(row.get("is_active") or False),
     )
 
 
@@ -200,9 +205,19 @@ def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
         or []
     )
 
+    # Seeded ACTIVE: this is the user's only group, so it is by definition the one Home,
+    # Updates and Tracking should follow. Leaving it inactive would leave every surface
+    # falling back until the user happened to open Tracking and pick one.
     portfolio_row = (
         supabase.table("portfolios")
-        .insert({"user_id": user_id, "name": "Holdings", "sort_order": 0})
+        .insert(
+            {
+                "user_id": user_id,
+                "name": "Holdings",
+                "sort_order": 0,
+                "is_active": True,
+            }
+        )
         .execute()
         .data[0]
     )
@@ -320,6 +335,33 @@ def _name_taken(
     return False
 
 
+def _ensure_active_portfolio(supabase: Client, user_id: str) -> Optional[str]:
+    """Guarantee the user has exactly one active group; return its id.
+
+    Delegates to the `ensure_active_portfolio` RPC (migration 126) rather than doing a
+    read-then-write here: the promotion has to be atomic, and PostgREST cannot express
+    "activate the first one only if none is active" in a single statement. The RPC is a
+    no-op when a group is already active, so calling it on the common path is cheap.
+
+    Best-effort by design. Home and Updates both degrade honestly when no group is
+    active, so a failed heal must not fail the request that noticed it — but it is
+    logged, because a persistently unhealed user silently loses the group-aware
+    behaviour on two screens.
+    """
+    try:
+        result = supabase.rpc(
+            "ensure_active_portfolio", {"p_user_id": user_id}
+        ).execute()
+        return str(result.data) if result.data else None
+    except Exception as e:
+        logger.warning(
+            "ensure_active_portfolio failed for user=%s (%s: %s) — "
+            "Home/Updates will fall back to the master watchlist",
+            user_id, type(e).__name__, e,
+        )
+        return None
+
+
 # ── Endpoints ───────────────────────────────────────────────────────
 
 
@@ -339,6 +381,15 @@ async def list_portfolios(
         portfolios = _fetch_user_portfolios(supabase, user["id"])
     else:
         portfolios = _backfill_lone_empty_portfolio(supabase, user["id"], portfolios)
+
+    # Heal a user with groups but none active: every row predating migration 126's backfill,
+    # anything the backfill missed, and the window after a delete whose heal failed. This is
+    # the one endpoint every client calls on launch, so it is the natural repair point — and
+    # the check is local (no round-trip) on the overwhelmingly common healthy path.
+    if portfolios and not any(p.is_active for p in portfolios):
+        if _ensure_active_portfolio(supabase, user["id"]):
+            portfolios = _fetch_user_portfolios(supabase, user["id"])
+
     return PortfolioListResponse(portfolios=portfolios)
 
 
@@ -369,12 +420,34 @@ async def create_portfolio(
     )
     next_order = (existing[0]["sort_order"] + 1) if existing else 0
 
+    # Creating a group does NOT switch to it — that would move Home and Updates out from
+    # under the user as a side effect of an action that only said "make a new list", and
+    # the new group is empty, so all three surfaces would go blank. The client activates
+    # explicitly when the user picks it. The sole exception is the very first group, which
+    # has to be active or the user has none.
     row = (
         supabase.table("portfolios")
-        .insert({"user_id": user["id"], "name": name, "sort_order": next_order})
+        .insert(
+            {
+                "user_id": user["id"],
+                "name": name,
+                "sort_order": next_order,
+                "is_active": False,
+            }
+        )
         .execute()
         .data[0]
     )
+
+    # Insert-then-heal rather than `is_active: not existing` on the insert itself. Two
+    # concurrent first-creates would BOTH compute `not existing == True` and collide on
+    # idx_portfolios_one_active_per_user — a 500 on a plain "New Portfolio" tap. Unlike
+    # the seed path, distinct names mean the unique-name constraint does not serialise
+    # them. The RPC is idempotent and no-ops when another caller already claimed it.
+    if not existing:
+        if _ensure_active_portfolio(supabase, user["id"]) == str(row["id"]):
+            row["is_active"] = True
+
     return _row_to_portfolio(row, [])
 
 
@@ -466,7 +539,56 @@ async def delete_portfolio(
     supabase.table("portfolios").delete().eq("user_id", user["id"]).eq(
         "id", portfolio_id
     ).execute()
+
+    # Deleting the ACTIVE group would otherwise leave the user with none, and Home plus
+    # Updates would silently fall back to the whole master watchlist under a stale label.
+    # Promote a survivor immediately. Unconditional because it is a cheap no-op when the
+    # deleted group was not the active one.
+    _ensure_active_portfolio(supabase, user["id"])
+    invalidate_feed_cache(user["id"])
     return {"message": "Portfolio deleted"}
+
+
+@router.put("/{portfolio_id}/activate", response_model=PortfolioResponse)
+async def activate_portfolio(
+    portfolio_id: str,
+    user: dict = Depends(get_watchlist_identity),
+    supabase: Client = Depends(get_supabase),
+):
+    """Make this the user's active group — the one Home, Updates and Tracking follow.
+
+    Server-side because it has to be: the selection used to live in a device-local
+    `UserDefaults` string, so the backend could not make the other two screens follow it,
+    and switching groups on one device did not follow the user to another.
+    """
+    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+
+    try:
+        switched = supabase.rpc(
+            "set_active_portfolio",
+            {"p_user_id": user["id"], "p_portfolio_id": portfolio_id},
+        ).execute().data
+    except Exception as e:
+        logger.error(
+            "set_active_portfolio failed for user=%s portfolio=%s: %s: %s",
+            user["id"], portfolio_id, type(e).__name__, e, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503, detail="Could not switch groups. Please try again."
+        )
+
+    if not switched:
+        # The RPC re-checks ownership under a row lock, so this is the narrow window where
+        # the portfolio was deleted between the 404 check above and the switch.
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    # Home reads the group directly, but Tracking's assets feed is cached per user for 30s
+    # and is scoped by the active group — without this the user switches groups and the
+    # Assets tab keeps showing the previous one until the TTL lapses.
+    invalidate_feed_cache(user["id"])
+
+    row = _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+    return _row_to_portfolio(row, _fetch_portfolio_items(supabase, portfolio_id))
 
 
 @router.put("/{portfolio_id}/tickers", response_model=PortfolioResponse)

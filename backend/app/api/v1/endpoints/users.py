@@ -410,8 +410,17 @@ async def claim_guest_data(
             }
             movable = [r["id"] for r in guest_pf if r.get("name") not in owned_pf]
             if movable:
-                supabase.table("portfolios").update({"user_id": user_id}) \
-                    .in_("id", movable).execute()
+                # ⚠️ `is_active` must be cleared IN THE SAME UPDATE that re-points the row.
+                # `idx_portfolios_one_active_per_user` (migration 126) is a partial UNIQUE
+                # index on `user_id WHERE is_active`, and a guest who used the Assets tab
+                # always has an active group — so moving it onto an account that also has
+                # one raises 23505. That is the exact failure mode this whole block was
+                # rewritten to fix once already: one shared `try` means the exception
+                # skips every later claim step, silently losing Learn progress, research
+                # reports and chat sessions.
+                supabase.table("portfolios").update(
+                    {"user_id": user_id, "is_active": False}
+                ).in_("id", movable).execute()
                 claimed["portfolios"] = len(movable)
 
             for row in guest_pf:
@@ -423,6 +432,24 @@ async def claim_guest_data(
                 # nothing reads — same as the watchlist and Learn duplicates.
                 supabase.table("portfolios").delete().eq("id", row["id"]).execute()
                 claimed["portfolios_merged"] += 1
+
+            # The account's own active group wins (this is a no-op when it has one). It only
+            # promotes when the account had NO groups at all and everything was claimed —
+            # which is the common case for someone who browsed as a guest and then signed up,
+            # and without it Home and Updates would both fall back to the master watchlist
+            # under a generic label for a user who plainly has a group.
+            try:
+                supabase.rpc(
+                    "ensure_active_portfolio", {"p_user_id": user_id}
+                ).execute()
+            except Exception as e:
+                # Best-effort: `GET /portfolios` repairs this on the next launch. Never let it
+                # abort the remaining claim steps — that is the 23505 lesson above.
+                logger.warning(
+                    "claim: ensure_active_portfolio failed for user=%s (%s: %s) — "
+                    "GET /portfolios will heal it",
+                    user_id, type(e).__name__, e,
+                )
 
     def _claim_learn() -> None:
         # ── Learn progress: completions AND book bookmarks live in one table,

@@ -797,10 +797,16 @@ class TrackingViewModel: ObservableObject {
     // MARK: - Portfolio Actions
 
     func setActivePortfolio(_ id: String) {
-        portfolioStore.setActivePortfolio(id)
-        // The diversification score is per-portfolio — re-fetch it for the
-        // newly active portfolio so the card doesn't show a stale score.
-        Task { await loadPortfolioInsights() }
+        Task {
+            // The switch now round-trips to the server, because Home's watchlist section
+            // and the Updates ticker chips are built from `portfolios.is_active` — a
+            // local-only change would move this tab and leave those two behind.
+            await portfolioStore.setActivePortfolio(id)
+            // The diversification score is per-portfolio — re-fetch it for the
+            // newly active portfolio so the card doesn't show a stale score. Awaited
+            // AFTER the switch so it cannot score the group we just navigated away from.
+            await loadPortfolioInsights()
+        }
     }
 
     func openNewPortfolioSheet() {

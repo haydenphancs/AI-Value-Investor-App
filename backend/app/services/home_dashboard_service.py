@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.services.active_group_service import (
+    ActiveGroupUnavailable,
+    fetch_ticker_metadata,
+    get_active_group,
+)
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
 from app.services.asset_class import trades_extended_hours
@@ -150,12 +155,16 @@ _FLOAT_TTL_SECONDS = 86_400                 # 24h in-mem float cache (float move
 # batch-quote fan-out over the deduped union of every active theme's tickers.
 _THEMES_CACHE_TTL_SECONDS = 600             # 10 min — editorial rows + intraday % move slowly
 _THEMES_CACHE_KEY = "themes"
-# The user's own watchlist strip: one Supabase read + one batch quote, so it is the
-# fastest section here. Tighter timeout than the others because it must never be
-# what makes Home feel slow.
-_WATCHLIST_BUILD_TIMEOUT_SECONDS = 5
+# The user's own watchlist strip: a small number of indexed Supabase reads plus one
+# batch quote, so it is still the fastest section here. Tighter timeout than the others
+# because it must never be what makes Home feel slow. Raised 5 → 6 when the strip became
+# group-aware (one extra indexed read for the active group, one for its membership).
+_WATCHLIST_BUILD_TIMEOUT_SECONDS = 6
 # A glanceable strip, not the Tracking tab. Bounds the batch-quote fan-out too.
 _WATCHLIST_MAX_TILES = 12
+# Shown when the user has no active group to name the strip after — the label this
+# section carried unconditionally before migration 126.
+_WATCHLIST_DEFAULT_TITLE = "Your Watchlist"
 
 _THEMES_BUILD_TIMEOUT_SECONDS = 8           # never let a cold themes build block the dashboard
 _THEMES_TABLE = "trending_themes"
@@ -655,6 +664,7 @@ class HomeDashboardService:
             self._get_watchlist_guarded(user_id),
         )
         status_text, is_open = _market_status()
+        watchlist_title, watchlist_tiles = watchlist
         return HomeDashboardResponse(
             market_status_text=status_text,
             market_is_open=is_open,
@@ -662,15 +672,16 @@ class HomeDashboardService:
             scanners=scanners,
             signals=signals,
             themes=themes,
-            watchlist=watchlist,
+            watchlist=watchlist_tiles,
+            watchlist_title=watchlist_title,
         )
 
     # ── Your Watchlist (user-scoped) ──────────────────────────────────
 
     async def _get_watchlist_guarded(
         self, user_id: Optional[str]
-    ) -> List[MarketPulseItemResponse]:
-        """The caller's own watchlist tiles, or [] for an anonymous/failed read.
+    ) -> Tuple[str, List[MarketPulseItemResponse]]:
+        """The caller's active-group tiles and the title to render them under.
 
         DELIBERATELY NOT CACHED. Every other section on this screen uses a
         CLASS-LEVEL cache shared by all callers; keying one of those by user is how
@@ -687,7 +698,7 @@ class HomeDashboardService:
         from app.dependencies import GUEST_USER_ID
 
         if not user_id or user_id == GUEST_USER_ID:
-            return []
+            return _WATCHLIST_DEFAULT_TITLE, []
         try:
             return await asyncio.wait_for(
                 self._build_watchlist(user_id),
@@ -701,30 +712,72 @@ class HomeDashboardService:
                 "Home watchlist strip unavailable for user=%s: %s: %s",
                 user_id, type(exc).__name__, exc,
             )
-            return []
+            return _WATCHLIST_DEFAULT_TITLE, []
 
-    async def _build_watchlist(self, user_id: str) -> List[MarketPulseItemResponse]:
-        """Newest-added tickers + one batch quote. No sparkline: a per-ticker
-        intraday series is one FMP call each, which would turn the most-visited
-        screen into N+1 calls for a section that is a glanceable strip."""
-        def _read() -> List[Dict[str, Any]]:
-            return (
-                get_supabase().table("watchlist_items")
-                .select("ticker, company_name, asset_type, added_at")
-                .eq("user_id", user_id)
-                .order("added_at", desc=True)
-                .limit(_WATCHLIST_MAX_TILES)
-                .execute()
-                .data
-                or []
+    async def _build_watchlist(
+        self, user_id: str
+    ) -> Tuple[str, List[MarketPulseItemResponse]]:
+        """The active group's tickers + one batch quote, under the group's own name.
+
+        No sparkline: a per-ticker intraday series is one FMP call each, which would turn
+        the most-visited screen into N+1 calls for a section that is a glanceable strip.
+
+        FALLBACK LADDER — each step degrades to something honest, and every degradation is
+        logged, because "user has no tickers" and "we could not read their group" render
+        identically and only the log can tell them apart:
+
+          1. active group with members  → its tickers, titled with its name
+          2. active group but empty     → no tiles, still titled with its name (the user
+                                          emptied THAT group; showing the master watchlist
+                                          under its name would be a lie)
+          3. no active group / read failed → master watchlist, titled "Your Watchlist"
+
+        Step 3 is the pre-migration-126 behaviour, kept so a user mid-backfill, a client
+        that has never opened Tracking, and a Supabase blip all still get a useful strip.
+        """
+        title = _WATCHLIST_DEFAULT_TITLE
+        symbols: List[str] = []
+        rows: List[Dict[str, Any]] = []
+
+        group = None
+        try:
+            group = await get_active_group(user_id)
+        except ActiveGroupUnavailable as exc:
+            logger.warning(
+                "Home strip: active group unreadable for user=%s (%s) — "
+                "falling back to the master watchlist",
+                user_id, exc,
             )
 
-        rows = await asyncio.to_thread(_read)
-        symbols = list(dict.fromkeys(
-            str(r["ticker"]).upper() for r in rows if r.get("ticker")
-        ))
+        if group is not None:
+            title = group.name or _WATCHLIST_DEFAULT_TITLE
+            # First N in the user's OWN arrangement (portfolio_items.position), not
+            # alphabetically and not by recency — this strip mirrors what they see on
+            # Tracking, so it has to honour the order they put things in.
+            symbols = group.tickers[:_WATCHLIST_MAX_TILES]
+            if not symbols:
+                logger.info(
+                    "Home strip: active group %s is empty for user=%s — rendering no tiles",
+                    group.id, user_id,
+                )
+                return title, []
+            meta = await fetch_ticker_metadata(user_id, symbols)
+            rows = [
+                {"ticker": sym, **(meta.get(sym) or {})}
+                for sym in symbols
+            ]
+        else:
+            logger.info(
+                "Home strip: no active group for user=%s — falling back to the master watchlist",
+                user_id,
+            )
+            rows = await asyncio.to_thread(self._read_master_watchlist, user_id)
+            symbols = list(dict.fromkeys(
+                str(r["ticker"]).upper() for r in rows if r.get("ticker")
+            ))
+
         if not symbols:
-            return []
+            return title, []
 
         quotes: Dict[str, Dict[str, Any]] = {}
         try:
@@ -762,7 +815,21 @@ class HomeDashboardService:
                 previous_close=_finite_float(q.get("previousClose")),
                 spark=[],
             ))
-        return tiles
+        return title, tiles
+
+    @staticmethod
+    def _read_master_watchlist(user_id: str) -> List[Dict[str, Any]]:
+        """Fallback source: the user's newest-added watchlist rows (pre-126 behaviour)."""
+        return (
+            get_supabase().table("watchlist_items")
+            .select("ticker, company_name, asset_type, added_at")
+            .eq("user_id", user_id)
+            .order("added_at", desc=True)
+            .limit(_WATCHLIST_MAX_TILES)
+            .execute()
+            .data
+            or []
+        )
 
     # ── Market Pulse (cache-aside) ────────────────────────────────────
 

@@ -52,6 +52,26 @@ final class UpdatesViewModel: ObservableObject {
     @Published var watchlistError: String?
     @Published var showFilterSheet: Bool = false
 
+    // MARK: - Active group + plan gate
+
+    /// Name of the active group the pills came from, so the Manage sheet can title itself
+    /// with the same word Home and Tracking use. Nil when the user has no active group.
+    @Published private(set) var groupName: String?
+    /// How many of the group's tickers the user's plan is hiding. Drives the single
+    /// "+N more" upsell chip; 0 means render nothing at all.
+    @Published private(set) var lockedTickerCount: Int = 0
+    /// The plan that would unlock them, straight from the server so the client never
+    /// carries a second copy of the tier ladder.
+    @Published private(set) var tierRequiredForMoreTickers: String?
+    /// Presents the plan paywall. A PLAN gate, so `PaywallView` — not the credits-driven
+    /// `BuyCreditsView` route, which answers a 402 with a one-tap top-up.
+    @Published var showPaywall: Bool = false
+
+    /// Copy for the upsell chip. "Max" is the display name for the `premium` tier key.
+    var lockedTickerLabel: String {
+        "+\(lockedTickerCount) more"
+    }
+
     /// Distinct source names present in the loaded feed — drives the filter
     /// sheet, instead of a hardcoded list that may match nothing.
     @Published private(set) var availableSources: [String] = []
@@ -244,6 +264,12 @@ final class UpdatesViewModel: ObservableObject {
                 responseType: UpdatesTabsResponse.self
             )
             let tabs = response.tabs.map { NewsFilterTab(dto: $0) }
+            // Group + plan state travels with the pills, so it is applied even on the
+            // empty-tabs path below — otherwise a Free user whose group is entirely
+            // locked would see no chips AND no way to find out why.
+            groupName = response.groupName
+            lockedTickerCount = max(0, response.lockedCount)
+            tierRequiredForMoreTickers = response.tierRequired
             guard !tabs.isEmpty else {
                 print("⚠️ UpdatesVM: /updates/tabs returned no tabs")
                 if filterTabs.isEmpty { filterTabs = [Self.marketTabFallback] }
@@ -252,7 +278,7 @@ final class UpdatesViewModel: ObservableObject {
             }
             filterTabs = tabs
             selectedTab = tabs.first { $0.scope == previousScope } ?? tabs.first
-            print("✅ UpdatesVM: Loaded \(tabs.count) tabs (selected: \(selectedTab?.scope ?? "none"))")
+            print("✅ UpdatesVM: Loaded \(tabs.count) tabs (selected: \(selectedTab?.scope ?? "none"), locked: \(lockedTickerCount))")
         } catch {
             let appError = AppError.from(error)
             print("⚠️ UpdatesVM: Failed to load tabs: \(appError.message)")

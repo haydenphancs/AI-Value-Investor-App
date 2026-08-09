@@ -356,6 +356,30 @@ struct UpdatesTabDTO: Codable, Sendable {
 
 struct UpdatesTabsResponse: Codable, Sendable {
     let tabs: [UpdatesTabDTO]
+    /// The name of the ACTIVE GROUP the ticker pills came from (migration 126), so this
+    /// strip, Home's watchlist section and the Tracking tab all say the same word. Nil
+    /// when the user has no active group and the pills fell back to the master watchlist.
+    ///
+    /// ⚠️ `var`-with-default, never `let x: T = default`. Swift's synthesised Codable
+    /// SILENTLY never decodes the latter when the name is in `CodingKeys` — it compiles,
+    /// warns nothing, and the field keeps its default forever (the bug that shipped on
+    /// `StockNewsArticle.sourceLogoUrl`). Defaults also keep a backend that predates the
+    /// gate decoding cleanly.
+    var groupName: String? = nil
+    /// How many of the group's tickers this user's PLAN is hiding. 0 for everyone who can
+    /// see their whole group — and 0 is what suppresses the upsell chip entirely.
+    var lockedCount: Int = 0
+    /// The plan that would reveal them ("pro" | "premium"), or nil when nothing is locked
+    /// or the caller is already on the top tier. Sent so the client never carries its own
+    /// copy of the tier ladder.
+    var tierRequired: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case tabs
+        case groupName = "group_name"
+        case lockedCount = "locked_count"
+        case tierRequired = "tier_required"
+    }
 }
 
 struct PriceMoveDTO: Codable, Sendable {

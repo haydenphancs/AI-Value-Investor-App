@@ -194,6 +194,10 @@ struct HomeDashboardData {
     /// anonymous caller, and empty when the backend read degraded; either way the
     /// view hides the section rather than rendering a header over nothing.
     let watchlist: [MarketPulseItem]
+    /// The heading that section renders under: the name of the user's ACTIVE GROUP, so
+    /// this screen, the Updates chips and the Tracking tab all say the same word. Falls
+    /// back to "Your Watchlist" when the user has no active group.
+    let watchlistTitle: String
 }
 
 // MARK: - Live wire models (DTOs)
@@ -220,6 +224,9 @@ struct HomeDashboardResponseDTO: Decodable {
     /// pulse tile shape; `spark` is always empty here (a per-ticker intraday series
     /// would be one API call each on the most-visited screen).
     let watchlist: [MarketPulseItemDTO]?
+    /// The active group's name (migration 126). Optional so a backend that predates it
+    /// decodes nil and the repository falls back to the label this section always showed.
+    let watchlistTitle: String?
 
     enum CodingKeys: String, CodingKey {
         case marketStatusText = "market_status_text"
@@ -229,6 +236,7 @@ struct HomeDashboardResponseDTO: Decodable {
         case signals
         case themes
         case watchlist
+        case watchlistTitle = "watchlist_title"
     }
 }
 

@@ -32,6 +32,16 @@ from app.dependencies import (
     get_current_user_or_guest,
     get_watchlist_identity,
 )
+from app.services.active_group_service import (
+    ActiveGroupUnavailable,
+    fetch_ticker_metadata,
+    get_active_group,
+)
+from app.services.entitlements import (
+    required_tier_for_more_tickers,
+    select_visible_tickers,
+    updates_ticker_limit,
+)
 from app.integrations.fmp import get_fmp_client
 from app.schemas.updates import (
     AIInsightCardResponse,
@@ -81,12 +91,21 @@ async def get_updates_tabs(
     # someone else's tickers — and hide their own.
     user: dict = Depends(get_watchlist_identity),
 ):
-    """Filter pills for the Updates tab bar: 'Market' plus the user's watchlist.
+    """Filter pills for the Updates tab bar: 'Market' plus the user's ACTIVE GROUP.
 
     Deliberately lighter than ``GET /tracking/assets``, which also builds
     sparklines, alerts and portfolio math this strip would discard. One
     ``batch-quote`` call resolves every pill's change % (plus the index) —
     not one call per ticker.
+
+    The pills follow the active group (migration 126) rather than reading
+    ``watchlist_items`` directly, so this strip, Home's watchlist section and the
+    Tracking tab always show the same tickers under the same name. A user who wants
+    only a few tickers here makes a small group and activates it — the control already
+    exists on Tracking, so there is no fourth list to maintain.
+
+    HOW MANY pills is the caller's PLAN. See ``entitlements.UPDATES_TICKER_LIMITS``
+    for why that ladder is packaging rather than cost recovery.
     """
     user_id = user["id"]
     supabase = get_supabase()
@@ -102,23 +121,72 @@ async def get_updates_tabs(
         )
         return result.data or []
 
+    group_name: Optional[str] = None
+    group = None
     try:
-        rows = await asyncio.to_thread(_read_watchlist)
-    except Exception as e:
-        logger.error(
-            "Updates tabs: watchlist read failed for user=%s: %s: %s",
-            user_id, type(e).__name__, e, exc_info=True,
+        group = await get_active_group(user_id)
+    except ActiveGroupUnavailable as e:
+        # Fall through to the master watchlist rather than showing Market-only: the
+        # pills are the screen's navigation, and losing them is worse than showing a
+        # superset for one request.
+        logger.warning(
+            "Updates tabs: active group unreadable for user=%s (%s) — "
+            "falling back to the master watchlist",
+            user_id, e,
         )
-        # The Market tab alone is still a usable screen — degrade rather than
-        # failing the whole tab bar.
-        rows = []
 
-    tickers = [
-        str(r["ticker"]).upper()
-        for r in rows
-        if r.get("ticker") and _valid_scope(str(r["ticker"]).upper())
-    ]
-    tickers = list(dict.fromkeys(tickers))
+    # `rows` supplies the DISPLAY fields (company name, logo). It is populated only for
+    # the tickers that survive the plan gate below — resolving it earlier would be both
+    # wasteful and, on the group path, WRONG: group membership arrives in the user's own
+    # `position` order while the gate selects alphabetically, so a metadata slice taken by
+    # position and a visible set chosen alphabetically are different sets, and every
+    # ticker in the difference would render with no company name.
+    rows: List[Dict[str, Any]] = []
+    if group is not None:
+        group_name = group.name or None
+        all_tickers = [t for t in group.tickers if _valid_scope(t)]
+    else:
+        logger.info(
+            "Updates tabs: no active group for user=%s — falling back to the master watchlist",
+            user_id,
+        )
+        try:
+            rows = await asyncio.to_thread(_read_watchlist)
+        except Exception as e:
+            logger.error(
+                "Updates tabs: watchlist read failed for user=%s: %s: %s",
+                user_id, type(e).__name__, e, exc_info=True,
+            )
+            # The Market tab alone is still a usable screen — degrade rather than
+            # failing the whole tab bar.
+            rows = []
+        all_tickers = [
+            str(r["ticker"]).upper()
+            for r in rows
+            if r.get("ticker") and _valid_scope(str(r["ticker"]).upper())
+        ]
+
+    all_tickers = list(dict.fromkeys(all_tickers))
+
+    # ── Plan gate ────────────────────────────────────────────────────
+    # TRUNCATE, never 402. An over-limit group is not an error the user made: it is the
+    # ordinary state after a downgrade, or after adding tickers on Tracking (which is
+    # free and must stay free). Refusing the request would take away a working screen.
+    limit = updates_ticker_limit(user.get("tier"))
+    tickers = select_visible_tickers(all_tickers, limit)
+    locked_count = max(0, len(all_tickers) - len(tickers))
+    tier_required = (
+        required_tier_for_more_tickers(user.get("tier")) if locked_count else None
+    )
+    if locked_count:
+        logger.info(
+            "Updates tabs: user=%s tier=%s sees %d/%d group tickers (%d locked)",
+            user_id, user.get("tier"), len(tickers), len(all_tickers), locked_count,
+        )
+
+    if group is not None and tickers:
+        meta = await fetch_ticker_metadata(user_id, tickers)
+        rows = [{"ticker": t, **(meta.get(t) or {})} for t in tickers]
 
     quotes: Dict[str, Dict[str, Any]] = {}
     try:
@@ -181,7 +249,12 @@ async def get_updates_tabs(
         "Updates tabs for user=%s: %d pills (%d quoted)",
         user_id, len(tabs), len(quotes),
     )
-    return UpdatesTabsResponse(tabs=tabs)
+    return UpdatesTabsResponse(
+        tabs=tabs,
+        group_name=group_name,
+        locked_count=locked_count,
+        tier_required=tier_required,
+    )
 
 
 # ── Feed ──────────────────────────────────────────────────────────────

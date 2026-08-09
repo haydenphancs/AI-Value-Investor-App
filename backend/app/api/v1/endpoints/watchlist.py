@@ -110,38 +110,59 @@ async def add_to_watchlist(
         # missing from the feed. A stale cached feed here means the just-added
         # ticker reads as an orphan and gets deleted again — the add undoes itself.
         invalidate_feed_cache(user_id)
-        _write_through_to_lone_portfolio(supabase, user_id, ticker)
+        _write_through_to_active_portfolio(supabase, user_id, ticker)
         return item
     except Exception as exc:
         logger.error("[Watchlist] DB error inserting %s: %s", ticker, exc)
         raise HTTPException(status_code=500, detail=f"Failed to add {ticker} to watchlist: {exc}")
 
 
-def _write_through_to_lone_portfolio(supabase: Client, user_id: str, ticker: str) -> None:
-    """Mirror a watchlist add into the user's single portfolio, if they have exactly one.
+def _write_through_to_active_portfolio(supabase: Client, user_id: str, ticker: str) -> None:
+    """Mirror a watchlist add into the user's ACTIVE group.
 
-    The Tracking/Assets tab renders a PORTFOLIO, not the watchlist — `filteredAssets` intersects
-    the feed with `activePortfolio.tickers`. But most add paths (onboarding, the Updates tab, the
-    detail-screen star) write ONLY `watchlist_items`; just two, both inside the Tracking tab
-    itself, also add to a portfolio. So a ticker added anywhere else appears in Updates and is
-    invisible on the very tab named "Tracking" — with no error and no way to tell why.
+    The Tracking/Assets tab renders a GROUP, not the watchlist — `filteredAssets` intersects
+    the feed with the active portfolio's tickers. But most add paths (onboarding, the Updates
+    tab, the detail-screen star) write ONLY `watchlist_items`; just two, both inside the
+    Tracking tab itself, also add to a group. So a ticker added anywhere else appeared in
+    Updates and was invisible on the very tab named "Tracking" — with no error and no way to
+    tell why.
 
-    Scoped to the ONE-portfolio case on purpose. A user with several portfolios has made an
-    explicit choice about where things go, and the Tracking search already targets the ACTIVE
-    portfolio; silently also dropping it into the first one would be wrong. With a single
-    portfolio there is no ambiguity — it is the only place the ticker could be meant for.
+    This used to be scoped to the ONE-group case (`_write_through_to_lone_portfolio`), because
+    with several groups the server had no idea which one the user meant: the selection lived in
+    a device-local `UserDefaults` string. Migration 126 put it in the database, so the ambiguity
+    is gone and the narrow scope became the bug — a user's second group was exactly the point at
+    which adds started silently vanishing from Tracking. Now that Home and Updates ALSO follow
+    the active group, a ticker that skipped the write-through would be invisible on all three
+    surfaces while sitting in the watchlist, so this is what keeps "everything you add shows up
+    where you added it" true by construction.
 
     Best-effort: the watchlist row is already committed and IS the source of truth. A failure
     here must never fail the add — it degrades to the pre-existing behaviour, which the
     `GET /portfolios` backfill then repairs.
     """
     try:
-        portfolios = (
-            supabase.table("portfolios").select("id").eq("user_id", user_id).execute().data or []
+        active = (
+            supabase.table("portfolios")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+            .data
+            or []
         )
-        if len(portfolios) != 1:
+        if not active:
+            # No active group yet (a user whose first `GET /portfolios` has not run, or a
+            # row the 126 backfill has not reached). `_seed_default_portfolio` /
+            # `ensure_active_portfolio` populate from the watchlist, so this ticker is not
+            # lost — it arrives when the group is created.
+            logger.info(
+                "[Watchlist] No active group for user=%s — %s stays watchlist-only until "
+                "GET /portfolios seeds one",
+                user_id, ticker,
+            )
             return
-        portfolio_id = portfolios[0]["id"]
+        portfolio_id = active[0]["id"]
 
         existing = (
             supabase.table("portfolio_items")
@@ -161,7 +182,7 @@ def _write_through_to_lone_portfolio(supabase: Client, user_id: str, ticker: str
             ignore_duplicates=True,
         ).execute()
         logger.info(
-            "[Watchlist] Mirrored %s into the user's sole portfolio %s", ticker, portfolio_id
+            "[Watchlist] Mirrored %s into the user's active group %s", ticker, portfolio_id
         )
     except Exception as e:  # noqa: BLE001 — never fail the add for a mirror
         logger.warning(

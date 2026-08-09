@@ -10,7 +10,11 @@ import SwiftUI
 struct UpdatesTabBar: View {
     let tabs: [NewsFilterTab]
     @Binding var selectedTab: NewsFilterTab?
+    /// How many of the user's group tickers their plan is hiding. 0 renders nothing —
+    /// a user who can see their whole group must not be told they are missing something.
+    var lockedCount: Int = 0
     var onManageAssets: (() -> Void)?
+    var onLockedTap: (() -> Void)?
 
     var body: some View {
         HStack(spacing: AppSpacing.sm) {
@@ -26,6 +30,13 @@ struct UpdatesTabBar: View {
                                 selectedTab = tab
                             }
                         }
+                    }
+
+                    // Trailing, after the pills the user CAN open, so the strip reads as
+                    // "here is your list, and here is the rest of it" rather than as a
+                    // wall in front of the feature.
+                    if lockedCount > 0 {
+                        LockedTickersChip(count: lockedCount) { onLockedTap?() }
                     }
                 }
                 .padding(.horizontal, AppSpacing.lg)

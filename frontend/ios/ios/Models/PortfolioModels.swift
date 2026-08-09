@@ -38,6 +38,12 @@ struct Portfolio: Identifiable, Equatable {
     var name: String
     var sortOrder: Int
     var items: [PortfolioItem]
+    /// Exactly one of the user's portfolios is active, and it is what Home's watchlist
+    /// section and the Updates ticker chips follow (migration 126). This used to be a
+    /// device-local `UserDefaults` string, which is why those two screens could never
+    /// track the group the user picked — and why switching groups on one device did not
+    /// follow the user to another.
+    var isActive: Bool = false
 
     /// Convenience for code that only needs the ticker list (display, alert
     /// filtering, etc.) and doesn't care about per-item holdings.
@@ -74,10 +80,17 @@ struct PortfolioDTO: Codable {
     let name: String
     let sortOrder: Int
     let items: [PortfolioItemDTO]
+    /// ⚠️ `var`, not `let`. Swift's synthesised Codable SILENTLY never decodes a
+    /// `let x: T = default` whose name is in `CodingKeys` — it compiles, warns nothing,
+    /// and the field stays at its default forever. That exact bug shipped once already on
+    /// `StockNewsArticle.sourceLogoUrl`. A `var` with a default DOES `decodeIfPresent`,
+    /// which is what keeps this tolerant of a backend that predates migration 126.
+    var isActive: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case id, name, items
         case sortOrder = "sort_order"
+        case isActive = "is_active"
     }
 
     func toPortfolio() -> Portfolio {
@@ -85,7 +98,8 @@ struct PortfolioDTO: Codable {
             id: id,
             name: name,
             sortOrder: sortOrder,
-            items: items.map { $0.toItem() }
+            items: items.map { $0.toItem() },
+            isActive: isActive
         )
     }
 }

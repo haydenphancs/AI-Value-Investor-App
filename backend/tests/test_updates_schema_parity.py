@@ -36,6 +36,11 @@ from app.services.news_cache_service import MARKET_SCOPE
 # Exact key sets the Swift CodingKeys declare.
 IOS_TAB_KEYS = {
     "scope", "title", "company_name", "change_percent", "logo_url", "is_market_tab",
+    # Whether the caller's PLAN hides this ticker's feed. Locked tickers are still sent —
+    # they are the user's own watchlist symbols, and the plan gates the aggregated feed,
+    # not the right to see or manage your own list. The chip strip filters on this; the
+    # Manage-Assets sheet deliberately does not.
+    "is_locked",
 }
 IOS_INSIGHT_KEYS = {
     "scope", "headline", "bullets", "sentiment", "badge", "article_count",

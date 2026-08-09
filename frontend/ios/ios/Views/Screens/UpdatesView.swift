@@ -42,9 +42,15 @@ struct UpdatesView: View {
 
                     // Tab Bar with tickers
                     UpdatesTabBar(
-                        tabs: viewModel.filterTabs,
+                        // Only the tabs this plan can OPEN. `filterTabs` carries the whole
+                        // group so the Manage sheet below can list every ticker the user
+                        // owns — managing your own watchlist is free.
+                        tabs: viewModel.openableTabs,
                         selectedTab: $viewModel.selectedTab,
-                        lockedCount: viewModel.lockedTickerCount,
+                        // Gated on `showsUpgradeChip`, not on the count: a top-tier
+                        // subscriber over the ceiling has a positive locked count and
+                        // nothing left to buy.
+                        lockedCount: viewModel.showsUpgradeChip ? viewModel.lockedTickerCount : 0,
                         onManageAssets: handleManageAssets,
                         onLockedTap: { viewModel.showPaywall = true }
                     )
@@ -128,6 +134,18 @@ struct UpdatesView: View {
                 guard isActiveTab else { return }
                 await viewModel.loadIfNeeded()
             }
+            // The active group changed on the Tracking tab. `loadIfNeeded()` cannot serve
+            // this: it early-returns on `hasLoadedOnce`, which latches once and is never
+            // reset, and this screen is opacity-mounted so the latch survives every tab
+            // switch. Without an explicit signal the chips and the manage sheet's title
+            // stayed on the previous group for the whole process.
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: PortfolioStore.activeGroupDidChangeNotification
+                )
+            ) { _ in
+                Task { await viewModel.reloadForActiveGroupChange() }
+            }
             .onChange(of: viewModel.selectedTab) { oldValue, newValue in
                 if let newTab = newValue {
                     viewModel.selectTab(newTab)
@@ -164,7 +182,11 @@ struct UpdatesView: View {
             }
             .sheet(isPresented: $showManageAssetsSheet) {
                 ManageAssetsSheet(
-                    tickers: viewModel.filterTabs.filter { !$0.isMarketTab },
+                    // EVERY ticker in the group, locked ones included. Feeding this the
+                    // gated strip showed a Free user 1 of their 20 tickers, left the other
+                    // 19 with no swipe-to-remove row anywhere, and made re-adding one
+                    // surface a bare 409 for a ticker they could not see.
+                    tickers: viewModel.manageableTickers,
                     groupName: viewModel.groupName,
                     onDismiss: { showManageAssetsSheet = false },
                     onAddTicker: { ticker in
@@ -363,6 +385,16 @@ struct ManageAssetsSheet: View {
                                 }
 
                                 Spacer()
+
+                                // Explains why this ticker has no chip in the strip. The
+                                // row is still fully manageable — removing it is free —
+                                // so this is an annotation, not a disabled state.
+                                if ticker.isLocked {
+                                    Image(systemName: "lock.fill")
+                                        .font(AppTypography.iconXS)
+                                        .foregroundColor(AppColors.textMuted)
+                                        .accessibilityLabel("Feed locked on your plan")
+                                }
 
                                 if let change = ticker.formattedChange {
                                     Text(change)

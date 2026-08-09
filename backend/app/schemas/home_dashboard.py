@@ -195,3 +195,9 @@ class HomeDashboardResponse(BaseModel):
     # Defaulted rather than Optional so an already-shipped client that ignores the field and a
     # user with no active group both land on the exact string this section always showed.
     watchlist_title: str = "Your Watchlist"
+    # True when `watchlist_title` names a real GROUP the user owns, rather than the generic
+    # fallback label. It is the only way the client can tell an EMPTY GROUP ("Crypto", just
+    # created, no tickers yet) from a user with no tickers at all — the two are both an
+    # empty `watchlist`, and iOS hides the section entirely for the second. Without this,
+    # creating a list made the whole Home strip vanish with nothing to explain it.
+    watchlist_is_group: bool = False

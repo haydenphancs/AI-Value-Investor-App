@@ -44,6 +44,10 @@ struct NewsFilterTab: Identifiable, Equatable {
     var scope: String = UpdatesScope.market
     var companyName: String? = nil
     var logoURL: URL? = nil
+    /// The caller's plan hides this ticker's FEED. It still appears in the Manage-Assets
+    /// sheet — that sheet manages the user's own list, which is free — and is filtered out
+    /// of the chip strip, where a single "+N more" chip stands in for all of them.
+    var isLocked: Bool = false
 
     var isPositive: Bool {
         // Compare the ROUNDED value: -0.04 renders as "0.0%" but would be
@@ -344,6 +348,12 @@ struct UpdatesTabDTO: Codable, Sendable {
     let changePercent: Double?
     let logoUrl: String?
     let isMarketTab: Bool?
+    /// True when the caller's plan hides this ticker's feed. Locked tickers ARE sent —
+    /// they are the user's own watchlist symbols, and the plan gates the aggregated feed,
+    /// not the right to see or manage your own list. Optional so a backend predating the
+    /// gate decodes (a non-Optional default would throw `keyNotFound` — see
+    /// `UpdatesTabsResponse.lockedCount`).
+    let isLocked: Bool?
 
     enum CodingKeys: String, CodingKey {
         case scope, title
@@ -351,6 +361,7 @@ struct UpdatesTabDTO: Codable, Sendable {
         case changePercent = "change_percent"
         case logoUrl = "logo_url"
         case isMarketTab = "is_market_tab"
+        case isLocked = "is_locked"
     }
 }
 
@@ -360,14 +371,19 @@ struct UpdatesTabsResponse: Codable, Sendable {
     /// strip, Home's watchlist section and the Tracking tab all say the same word. Nil
     /// when the user has no active group and the pills fell back to the master watchlist.
     ///
-    /// ⚠️ `var`-with-default, never `let x: T = default`. Swift's synthesised Codable
-    /// SILENTLY never decodes the latter when the name is in `CodingKeys` — it compiles,
-    /// warns nothing, and the field keeps its default forever (the bug that shipped on
-    /// `StockNewsArticle.sourceLogoUrl`). Defaults also keep a backend that predates the
-    /// gate decoding cleanly.
+    /// Optional because it is genuinely absent for a user with no active group — and,
+    /// like the two below, on any backend deployment that predates this gate.
     var groupName: String? = nil
     /// How many of the group's tickers this user's PLAN is hiding. 0 for everyone who can
     /// see their whole group — and 0 is what suppresses the upsell chip entirely.
+    ///
+    /// ⚠️ Tolerated by the hand-written `init(from:)` below, NOT by this default. Swift
+    /// synthesises `decodeIfPresent` **only for Optional properties**: a non-Optional
+    /// `var x: T = default` in `CodingKeys` still emits a plain `decode(...)` and THROWS
+    /// `keyNotFound`. Verified with `swiftc`. The Optional siblings tolerate absence for
+    /// free; this one did not, and it fails the WHOLE response — so an app build that
+    /// reached users before the backend deploy (or after a Railway rollback) would lose
+    /// every ticker chip, leaving the Market pill alone with only a `print` to show for it.
     var lockedCount: Int = 0
     /// The plan that would reveal them ("pro" | "premium"), or nil when nothing is locked
     /// or the caller is already on the top tier. Sent so the client never carries its own
@@ -379,6 +395,14 @@ struct UpdatesTabsResponse: Codable, Sendable {
         case groupName = "group_name"
         case lockedCount = "locked_count"
         case tierRequired = "tier_required"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tabs = try container.decode([UpdatesTabDTO].self, forKey: .tabs)
+        groupName = try container.decodeIfPresent(String.self, forKey: .groupName)
+        lockedCount = try container.decodeIfPresent(Int.self, forKey: .lockedCount) ?? 0
+        tierRequired = try container.decodeIfPresent(String.self, forKey: .tierRequired)
     }
 }
 
@@ -619,5 +643,8 @@ extension NewsFilterTab {
         self.scope = dto.scope
         self.companyName = dto.companyName
         self.logoURL = URL(string: dto.logoUrl ?? "")
+        // A backend predating the gate sends nothing → nothing is locked, which is
+        // exactly how that backend behaves.
+        self.isLocked = dto.isLocked ?? false
     }
 }

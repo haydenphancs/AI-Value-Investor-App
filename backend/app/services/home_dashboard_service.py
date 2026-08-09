@@ -664,7 +664,7 @@ class HomeDashboardService:
             self._get_watchlist_guarded(user_id),
         )
         status_text, is_open = _market_status()
-        watchlist_title, watchlist_tiles = watchlist
+        watchlist_title, watchlist_is_group, watchlist_tiles = watchlist
         return HomeDashboardResponse(
             market_status_text=status_text,
             market_is_open=is_open,
@@ -674,14 +674,15 @@ class HomeDashboardService:
             themes=themes,
             watchlist=watchlist_tiles,
             watchlist_title=watchlist_title,
+            watchlist_is_group=watchlist_is_group,
         )
 
     # ── Your Watchlist (user-scoped) ──────────────────────────────────
 
     async def _get_watchlist_guarded(
         self, user_id: Optional[str]
-    ) -> Tuple[str, List[MarketPulseItemResponse]]:
-        """The caller's active-group tiles and the title to render them under.
+    ) -> Tuple[str, bool, List[MarketPulseItemResponse]]:
+        """The caller's active-group tiles, the title, and whether that title names a group.
 
         DELIBERATELY NOT CACHED. Every other section on this screen uses a
         CLASS-LEVEL cache shared by all callers; keying one of those by user is how
@@ -698,7 +699,7 @@ class HomeDashboardService:
         from app.dependencies import GUEST_USER_ID
 
         if not user_id or user_id == GUEST_USER_ID:
-            return _WATCHLIST_DEFAULT_TITLE, []
+            return _WATCHLIST_DEFAULT_TITLE, False, []
         try:
             return await asyncio.wait_for(
                 self._build_watchlist(user_id),
@@ -712,11 +713,11 @@ class HomeDashboardService:
                 "Home watchlist strip unavailable for user=%s: %s: %s",
                 user_id, type(exc).__name__, exc,
             )
-            return _WATCHLIST_DEFAULT_TITLE, []
+            return _WATCHLIST_DEFAULT_TITLE, False, []
 
     async def _build_watchlist(
         self, user_id: str
-    ) -> Tuple[str, List[MarketPulseItemResponse]]:
+    ) -> Tuple[str, bool, List[MarketPulseItemResponse]]:
         """The active group's tickers + one batch quote, under the group's own name.
 
         No sparkline: a per-ticker intraday series is one FMP call each, which would turn
@@ -736,6 +737,7 @@ class HomeDashboardService:
         that has never opened Tracking, and a Supabase blip all still get a useful strip.
         """
         title = _WATCHLIST_DEFAULT_TITLE
+        is_group = False
         symbols: List[str] = []
         rows: List[Dict[str, Any]] = []
 
@@ -751,6 +753,9 @@ class HomeDashboardService:
 
         if group is not None:
             title = group.name or _WATCHLIST_DEFAULT_TITLE
+            # Even a blank-named group is still a GROUP: the section must announce itself
+            # rather than vanish, or creating a list reads as the strip breaking.
+            is_group = True
             # First N in the user's OWN arrangement (portfolio_items.position), not
             # alphabetically and not by recency — this strip mirrors what they see on
             # Tracking, so it has to honour the order they put things in.
@@ -760,7 +765,7 @@ class HomeDashboardService:
                     "Home strip: active group %s is empty for user=%s — rendering no tiles",
                     group.id, user_id,
                 )
-                return title, []
+                return title, is_group, []
             meta = await fetch_ticker_metadata(user_id, symbols)
             rows = [
                 {"ticker": sym, **(meta.get(sym) or {})}
@@ -777,7 +782,7 @@ class HomeDashboardService:
             ))
 
         if not symbols:
-            return title, []
+            return title, is_group, []
 
         quotes: Dict[str, Dict[str, Any]] = {}
         try:
@@ -815,7 +820,7 @@ class HomeDashboardService:
                 previous_close=_finite_float(q.get("previousClose")),
                 spark=[],
             ))
-        return title, tiles
+        return title, is_group, tiles
 
     @staticmethod
     def _read_master_watchlist(user_id: str) -> List[Dict[str, Any]]:

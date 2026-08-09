@@ -38,6 +38,16 @@ class UpdatesTabResponse(BaseModel):
     change_percent: Optional[float] = None
     logo_url: Optional[str] = None
     is_market_tab: bool = False
+    # True when the caller's PLAN is hiding this ticker's feed.
+    #
+    # Locked tickers are still SENT, because they are the user's own watchlist symbols and
+    # the plan gates the aggregated news feed, not the right to see or manage your own
+    # list. The tab strip renders only the unlocked ones (plus one "+N more" chip); the
+    # Manage-Assets sheet renders all of them, so a Free user can still remove the tickers
+    # they own and the add-duplicate guard still recognises them. Feeding that sheet the
+    # gated list instead made 19 of a 20-ticker group unreachable and turned re-adding one
+    # into a 409 for a ticker the user could not see.
+    is_locked: bool = False
 
 
 class UpdatesTabsResponse(BaseModel):

@@ -57,6 +57,10 @@ _RESPONSE_KEYS = {
     # used to be a hardcoded Swift literal, which is exactly why Home could say
     # "Your Watchlist" while Tracking said "Holdings" over a different set of tickers.
     "watchlist_title",
+    # Distinguishes an EMPTY GROUP from a user with no tickers — both are an empty
+    # `watchlist`, and iOS hides the section for the second. Without it, creating a new
+    # list made the whole Home strip vanish with nothing to explain it.
+    "watchlist_is_group",
 }
 
 

@@ -80,17 +80,38 @@ struct PortfolioDTO: Codable {
     let name: String
     let sortOrder: Int
     let items: [PortfolioItemDTO]
-    /// ⚠️ `var`, not `let`. Swift's synthesised Codable SILENTLY never decodes a
-    /// `let x: T = default` whose name is in `CodingKeys` — it compiles, warns nothing,
-    /// and the field stays at its default forever. That exact bug shipped once already on
-    /// `StockNewsArticle.sourceLogoUrl`. A `var` with a default DOES `decodeIfPresent`,
-    /// which is what keeps this tolerant of a backend that predates migration 126.
+    /// Absent on any backend that predates migration 126.
+    ///
+    /// ⚠️ The tolerance comes from the hand-written `init(from:)` below, NOT from the
+    /// default value. Swift synthesises `decodeIfPresent` **only for Optional
+    /// properties**: a non-Optional `var x: T = default` whose name is in `CodingKeys`
+    /// still emits a plain `decode(...)` and THROWS `keyNotFound` when the key is
+    /// missing. Verified empirically with `swiftc` — the sibling trap already on this
+    /// codebase's record (`let x: T = default`, which silently never decodes at all)
+    /// invites exactly the wrong conclusion about the `var` form.
+    ///
+    /// It matters here because `PortfolioDTO` is the element type of
+    /// `PortfolioListResponseDTO`, so ONE missing key fails the whole `GET /portfolios`
+    /// decode; `loadPortfolios()` swallows that with a `print` and leaves `portfolios`
+    /// empty, so the user watches every group vanish with no error shown —
+    /// indistinguishable from a total data wipe.
     var isActive: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case id, name, items
         case sortOrder = "sort_order"
         case isActive = "is_active"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        sortOrder = try container.decode(Int.self, forKey: .sortOrder)
+        items = try container.decode([PortfolioItemDTO].self, forKey: .items)
+        // The one tolerant field. A pre-126 backend omits it, and `false` is the honest
+        // reading — nothing is active — after which `ensureActiveSelection()` picks locally.
+        isActive = try container.decodeIfPresent(Bool.self, forKey: .isActive) ?? false
     }
 
     func toPortfolio() -> Portfolio {

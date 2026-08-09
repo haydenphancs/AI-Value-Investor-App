@@ -18,6 +18,13 @@ struct EditPortfolioSheet: View {
 
     @State private var pendingDelete: Portfolio?
     @State private var errorMessage: String?
+    /// Drives the push into `PortfolioDetailEditor` (where renaming lives). State-driven
+    /// rather than a `NavigationLink` because this list runs in permanent edit mode, which
+    /// disables link navigation — see the row builder.
+    ///
+    /// The ID rather than the `Portfolio`: `navigationDestination(item:)` requires
+    /// `Hashable`, and holding the value would also pin a stale copy across a rename.
+    @State private var editingPortfolioId: String?
 
     private var portfolios: [Portfolio] {
         viewModel.portfolioStore.portfolios
@@ -69,11 +76,25 @@ struct EditPortfolioSheet: View {
         List {
             Section {
                 ForEach(portfolios) { portfolio in
-                    NavigationLink {
-                        PortfolioDetailEditor(viewModel: viewModel, portfolio: portfolio)
+                    // A BUTTON driving `navigationDestination`, not a `NavigationLink`.
+                    //
+                    // This list forces `editMode = .active` (below) so rows always show
+                    // their reorder grips and delete buttons — and SwiftUI DISABLES
+                    // NavigationLink navigation while edit mode is active, by design: in
+                    // edit mode a row tap is meant to select, not push. The row therefore
+                    // did nothing when tapped, and since renaming lives one level down
+                    // inside `PortfolioDetailEditor`, RENAMING A GROUP WAS UNREACHABLE —
+                    // caught on the simulator, not by the build.
+                    //
+                    // That matters more than it used to: the group's name is now the
+                    // heading Home renders and the title of the Updates manage sheet, so
+                    // "rename your list" is the entry point to the whole feature.
+                    Button {
+                        editingPortfolioId = portfolio.id
                     } label: {
                         portfolioRow(portfolio)
                     }
+                    .buttonStyle(.plain)
                     .listRowBackground(AppColors.cardBackground)
                 }
                 .onMove(perform: handleMove)
@@ -90,6 +111,13 @@ struct EditPortfolioSheet: View {
         .scrollContentBackground(.hidden)
         .background(AppColors.background)
         .environment(\.editMode, Binding<EditMode>.constant(.active))
+        .navigationDestination(item: $editingPortfolioId) { id in
+            // Resolved from the LIVE list, so the editor reflects a rename that happened
+            // while it was open rather than a snapshot taken at push time.
+            if let portfolio = portfolios.first(where: { $0.id == id }) {
+                PortfolioDetailEditor(viewModel: viewModel, portfolio: portfolio)
+            }
+        }
     }
 
     // MARK: - Toolbar

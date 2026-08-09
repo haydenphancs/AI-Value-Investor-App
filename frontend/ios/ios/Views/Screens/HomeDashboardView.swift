@@ -100,6 +100,20 @@ struct HomeDashboardView: View {
             guard isActiveTab else { return }
             Task { await viewModel.loadIfStale() }
         }
+        // The active group changed on the Tracking tab. A FORCED reload, not
+        // `loadIfStale()`: the staleness window is 300s and the auto-refresh tick is 60s,
+        // so the ordinary path would keep rendering the previous group's tiles under the
+        // previous group's NAME — a header that is affirmatively wrong, not merely stale,
+        // now that it is the server-supplied group name instead of a fixed literal.
+        // Tabs are opacity-mounted, so this VM survives the tab switch and nothing else
+        // would invalidate it.
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: PortfolioStore.activeGroupDidChangeNotification
+            )
+        ) { _ in
+            Task { await viewModel.load() }
+        }
         .sheet(isPresented: $showSearch) {
             SearchView()
         }
@@ -219,7 +233,12 @@ struct HomeDashboardView: View {
                     // global sections buried the only personalized content. Hidden
                     // when empty (a new user, or a degraded read) rather than
                     // rendering a header over nothing.
-                    if !data.watchlist.isEmpty {
+                    // Shown when there are tiles, AND when the user's active group is
+                    // simply empty. The second case matters because creating a list
+                    // switches to it: without this the entire strip vanished the moment a
+                    // user tapped "New List", which reads as the screen breaking rather
+                    // than as "this list has nothing in it yet".
+                    if !data.watchlist.isEmpty || data.watchlistIsGroup {
                         YourWatchlistSection(
                             title: data.watchlistTitle,
                             items: data.watchlist,

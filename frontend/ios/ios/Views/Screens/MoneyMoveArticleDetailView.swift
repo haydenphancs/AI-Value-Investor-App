@@ -134,7 +134,7 @@ struct MoneyMoveArticleDetailView: View {
 
                 // Bottom mini player — hidden when collapsed to the top island (chat-bar focused).
                 if audioManager.hasActiveEpisode && !audioManager.showFullScreenPlayer && !audioManager.isCompactMode {
-                    GlobalMiniPlayer()
+                    GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 

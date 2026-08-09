@@ -135,6 +135,33 @@ class WhaleProfileResponse(BaseModel):
     return_source: str = ""
     return_label: str = ""
 
+    # ── Stat-tile provenance (migration 127) ─────────────────────────
+    #
+    # ⚠️ EVERY FIELD BELOW MUST STAY DEFAULTED, for two independent reasons:
+    #
+    #   1. `whale_profile_cache` replays assembled JSON back through this model
+    #      (`WhaleProfileResponse(**row["profile_json"])`), so a REQUIRED field
+    #      would 500 every cached profile for up to 24h after deploy.
+    #   2. iOS decodes this shape; a field it cannot find must not be fatal.
+    #
+    # ⚠️ And `ytd_return` / `portfolio_value` above must stay NON-Optional
+    # `float`. The shipped `WhaleProfileDTO` declares them non-Optional `Double`
+    # with their keys in `CodingKeys`, so a JSON `null` throws `typeMismatch`
+    # and fails the WHOLE profile decode on every installed build. The status
+    # fields below are how "don't believe this number" travels instead.
+
+    # ok | insufficient_history | unavailable. "" = a row written before 127,
+    # which the client treats as "trust the legacy value".
+    return_status: str = ""
+    # Calendar years compounded into `ytd_return`. None => not a multi-year
+    # CAGR, so the client omits the "· N-yr" suffix instead of inventing one.
+    return_window_years: Optional[int] = None
+    portfolio_status: str = ""
+    # "Q2 2026" — the quarter the 13F snapshot describes. None for congressional
+    # filers, who report on a monthly cadence and have no 13F quarter.
+    portfolio_as_of: Optional[str] = None
+    filing_date: Optional[str] = None
+
 
 # ── Activity feed ────────────────────────────────────────────────────
 

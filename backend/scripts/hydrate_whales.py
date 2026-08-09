@@ -50,6 +50,13 @@ from app.services._whale_common import (  # noqa: E402
     sum_amount_bounds,
     format_amount_range,
     snapshot_db_row,
+    AnnualReturn,
+    compute_13f_cagr,
+    compute_ticker_cagr,
+    return_label_for,
+    unavailable_return_label,
+    RETURN_UNAVAILABLE,
+    RETURN_INSUFFICIENT,
 )
 from app.services.agents.persona_config import _IDENTITY_RULE  # noqa: E402
 
@@ -165,17 +172,19 @@ class WhaleHydrator:
             # (e.g. PSH.L, ARKK), we can still compute its Tier-1 CAGR
             # even without 13F holdings.
             if whale.get("associated_ticker"):
-                ytd_return, return_source, return_label = (
-                    await self._compute_ytd_return(
-                        whale_id, 0.0, [], whale=whale
-                    )
+                result = await self._compute_ytd_return(
+                    whale_id, 0.0, [], whale=whale
                 )
-                if ytd_return is not None:
+                if result.is_ok:
                     try:
                         self.sb.table("whales").update({
-                            "ytd_return": ytd_return,
-                            "return_source": return_source,
-                            "return_label": return_label,
+                            "ytd_return": result.value,
+                            "return_source": result.source,
+                            "return_window_years": result.window_years,
+                            "return_status": result.status,
+                            "return_label": return_label_for(
+                                result.source, whale.get("associated_ticker")
+                            ),
                         }).eq("id", whale_id).execute()
                         logger.info(
                             "  %s — ticker-only return updated: %s%% (%s)",
@@ -243,7 +252,7 @@ class WhaleHydrator:
         )
 
         # Step 7: Compute ytd_return + risk profile
-        ytd_return, return_source, return_label = await self._compute_ytd_return(
+        annual_return = await self._compute_ytd_return(
             whale_id, total_value, perf_data_list, whale=whale
         )
         risk_profile = self._compute_risk_profile(
@@ -268,8 +277,8 @@ class WhaleHydrator:
 
         if not self.dry_run:
             await self._persist(
-                whale_id, snapshot, ytd_return, risk_profile,
-                return_source=return_source, return_label=return_label,
+                whale_id, snapshot, annual_return, risk_profile,
+                associated_ticker=whale.get("associated_ticker"),
             )
 
         self.stats["processed"] += 1
@@ -1226,58 +1235,34 @@ class WhaleHydrator:
         total_value: float,
         perf_data: Any,
         whale: Optional[Dict] = None,
-    ) -> Tuple[Optional[float], str, str]:
-        """Compute best annual return with tiered approach.
+    ) -> AnnualReturn:
+        """Best annual return: associated-ticker CAGR → 13F CAGR → none.
 
-        Tier 1: Associated ticker CAGR (for investors with public vehicles)
-        Tier 2: 13F year-end average (for hedge funds)
-        Tier 3: N/A
-
-        Returns: (return_value, return_source, return_label)
+        FMP I/O only. Every piece of arithmetic lives in
+        `app.services._whale_common`, which is the whole point: this function
+        and `whale_service._compute_avg_annual_return` were independent copies
+        of one formula and had drifted to DIFFERENT outlier floors (-200 here
+        vs -100 there) and different captions for the same number — and this
+        copy is the one that actually runs in production.
         """
-        # Tier 1: Associated ticker CAGR
         ticker = (whale or {}).get("associated_ticker")
         if ticker:
             try:
                 price_change = await self.fmp.get_stock_price_change(ticker)
-                max_return = price_change.get("max")
-                if max_return is not None and max_return > -100:
-                    profiles = await self.fmp.get_company_profiles_batch([ticker])
-                    if profiles:
-                        ipo_str = profiles[0].get("ipoDate")
-                        if ipo_str:
-                            ipo_date = datetime.strptime(ipo_str, "%Y-%m-%d")
-                            years = (datetime.now() - ipo_date).days / 365.25
-                            if years >= 1:
-                                total = 1 + max_return / 100
-                                if total > 0:
-                                    cagr = round((total ** (1 / years) - 1) * 100, 1)
-                                    return cagr, "stock_cagr", f"{ticker} CAGR"
+                max_return = (price_change or {}).get("max")
+                profiles = await self.fmp.get_company_profiles_batch([ticker])
+                ipo_str = profiles[0].get("ipoDate") if profiles else None
+                if ipo_str:
+                    ipo_date = datetime.strptime(ipo_str, "%Y-%m-%d")
+                    years = (datetime.now() - ipo_date).days / 365.25
+                    if years >= 1:
+                        result = compute_ticker_cagr(max_return, years)
+                        if result.is_ok:
+                            return result
             except Exception as e:
                 logger.warning("  Ticker CAGR failed for %s: %s", ticker, e)
 
-        # Tier 2: 13F portfolio CAGR (geometric mean of year-end returns)
-        perf_list = perf_data if isinstance(perf_data, list) else []
-        if perf_list:
-            year_end_returns = [
-                d["performancePercentage1year"]
-                for d in perf_list
-                if d.get("date", "").endswith("-12-31")
-                and d.get("performancePercentage1year") is not None
-                and -200 < d["performancePercentage1year"] < 500
-            ]
-            if year_end_returns:
-                product = math.prod(1 + r / 100 for r in year_end_returns)
-                if product > 0:
-                    cagr = (product ** (1 / len(year_end_returns)) - 1) * 100
-                    return round(cagr, 2), "13f_avg", "13F Portfolio CAGR"
-
-            latest = perf_list[0]
-            val = latest.get("performancePercentage1year")
-            if val is not None and -200 < val < 500:
-                return round(float(val), 2), "13f_avg", "13F Portfolio CAGR"
-
-        return None, "", ""
+        return compute_13f_cagr(perf_data if isinstance(perf_data, list) else [])
 
     # ── Persistence ──────────────────────────────────────────────────
 
@@ -1285,10 +1270,9 @@ class WhaleHydrator:
         self,
         whale_id: str,
         snapshot: Dict[str, Any],
-        ytd_return: Optional[float],
+        annual_return: AnnualReturn,
         risk_profile: Optional[str] = None,
-        return_source: str = "",
-        return_label: str = "",
+        associated_ticker: Optional[str] = None,
     ):
         """Write to snapshot cache + denormalized tables."""
         sb = self.sb
@@ -1330,12 +1314,27 @@ class WhaleHydrator:
             }
             if snapshot_ok:
                 whale_update["last_hydrated_at"] = datetime.now().isoformat()
-            if ytd_return is not None:
-                whale_update["ytd_return"] = ytd_return
-            if return_source:
-                whale_update["return_source"] = return_source
-            if return_label:
-                whale_update["return_label"] = return_label
+            # WRITE THE JUDGEMENT, INCLUDING A NEGATIVE ONE. The old code wrote
+            # `if ytd_return is not None`, so a bogus value — e.g. one the
+            # deleted 1-year fallback produced — could never be cleared:
+            # recomputing it as None simply skipped the write and left the bad
+            # number in the row forever.
+            #
+            # `unavailable` is the one status that must NOT overwrite: it means
+            # FMP could not be read, and an outage must never blank good data.
+            if annual_return.status != RETURN_UNAVAILABLE:
+                whale_update["ytd_return"] = annual_return.value
+                whale_update["return_source"] = annual_return.source
+                whale_update["return_window_years"] = annual_return.window_years
+                whale_update["return_status"] = annual_return.status
+                whale_update["return_label"] = (
+                    return_label_for(annual_return.source, associated_ticker)
+                    if annual_return.is_ok
+                    # Shipped clients render this verbatim under a green
+                    # "+0.0%" they cannot be taught to suppress; at least stop
+                    # captioning that zero as a CAGR.
+                    else unavailable_return_label(annual_return.status)
+                )
             if risk_profile:
                 whale_update["risk_profile"] = risk_profile
             sb.table("whales").update(whale_update).eq(

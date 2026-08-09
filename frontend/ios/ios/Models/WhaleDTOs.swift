@@ -113,6 +113,15 @@ struct WhaleProfileDTO: Codable {
     let dataSource: String?
     let returnSource: String?
     let returnLabel: String?
+    /// Stat-tile provenance (migration 127). ALL Optional — Swift synthesises
+    /// `decodeIfPresent` only for Optionals, so a non-Optional-with-default would
+    /// throw `keyNotFound` against a backend that predates these fields and fail
+    /// the WHOLE profile decode.
+    let returnStatus: String?
+    let returnWindowYears: Int?
+    let portfolioStatus: String?
+    let portfolioAsOf: String?
+    let filingDate: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name, title, description
@@ -131,6 +140,11 @@ struct WhaleProfileDTO: Codable {
         case dataSource = "data_source"
         case returnSource = "return_source"
         case returnLabel = "return_label"
+        case returnStatus = "return_status"
+        case returnWindowYears = "return_window_years"
+        case portfolioStatus = "portfolio_status"
+        case portfolioAsOf = "portfolio_as_of"
+        case filingDate = "filing_date"
     }
 
     func toWhaleProfile() -> WhaleProfile {
@@ -152,7 +166,17 @@ struct WhaleProfileDTO: Codable {
             sentimentSummary: sentimentSummary,
             isFollowing: isFollowing,
             dataSource: dataSource ?? "",
-            returnLabel: returnLabel ?? ""
+            returnLabel: returnLabel ?? "",
+            // `returnSource` was already decoded and then DROPPED here. The
+            // stat tiles need it: for the five whales with an associated
+            // ticker it is the only signal that the percent is a share-price
+            // CAGR rather than a 13F figure.
+            returnSource: returnSource ?? "",
+            returnStatus: returnStatus ?? "",
+            returnWindowYears: returnWindowYears,
+            portfolioStatus: portfolioStatus ?? "",
+            portfolioAsOf: portfolioAsOf,
+            filingDate: filingDate
         )
     }
 }

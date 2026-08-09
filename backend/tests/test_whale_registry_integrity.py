@@ -85,3 +85,67 @@ def test_categories_and_sources_are_known_values():
             "13f", "congressional_house", "congressional_senate"
         ), e["name"]
         assert (e.get("name") or "").strip() and (e.get("title") or "").strip()
+
+
+# ── Bio copy: no magnitude claim beside a 13F-only tile ──────────────
+#
+# The Whale Profile renders `description` directly ABOVE two stat tiles that
+# show a 13F-only portfolio value and a 13F-derived return. A bio quoting the
+# firm's total AUM ("approximately $100B in total assets") or a headline fund
+# return ("returned 132% in 2009") therefore sits inches from a number computed
+# on a completely different basis — and readers understandably conclude the tile
+# is wrong, or that it represents the person's whole fortune.
+#
+# The fix is the copy, not the tile: 13F genuinely cannot see bonds, cash,
+# private holdings, foreign listings or shorts. This lint keeps the next bio
+# edit from reintroducing the collision.
+
+_MAGNITUDE_PATTERNS = (
+    r"\bAUM\b",
+    r"under management",
+    r"in total assets",
+    r"returned\s+(over\s+)?\d+%",
+    r"\d+%\s+(average\s+)?annual",
+    r"managing (approximately |roughly |over |about )?\$",
+)
+
+# Phrasings deliberately kept because they are SCOPE, not a performance or
+# total-assets claim that competes with the tiles.
+_ALLOWED = {
+    # Ownership breadth of a sovereign fund — describes reach, not a return.
+    "Norges Bank Investment Management",
+    # Medallion's 66% is the single most famous number in the industry and the
+    # bio would be odd without it. It is allowed ONLY because the sentence now
+    # carries every qualifier the collision needs: the fund is named, stated as
+    # closed to outside investors, stated as NOT the 13F book shown here,
+    # attributed ("reported to"), bounded to 1988-2018, and marked before fees.
+    # If that qualification is ever trimmed, remove this entry rather than
+    # keeping the bare percent.
+    "Renaissance Technologies",
+}
+
+
+def test_bios_do_not_put_a_magnitude_claim_next_to_the_13f_tiles():
+    import re
+
+    offenders = []
+    for entry in _load():
+        if entry.get("name") in _ALLOWED:
+            continue
+        description = entry.get("description") or ""
+        for pattern in _MAGNITUDE_PATTERNS:
+            match = re.search(pattern, description, re.IGNORECASE)
+            if match:
+                start = max(0, match.start() - 50)
+                offenders.append(
+                    f"{entry.get('name')}: …{description[start:match.end() + 50]}…"
+                )
+                break
+
+    assert not offenders, (
+        "These bios quote total AUM or a headline fund return, which renders "
+        "directly above a 13F-ONLY portfolio value and a 13F-derived return. "
+        "Rewrite to describe scale or strategy without a competing number "
+        "(e.g. 'one of the world's largest hedge funds by total assets'), or "
+        "add the name to _ALLOWED with a reason:\n  " + "\n  ".join(offenders)
+    )

@@ -325,47 +325,117 @@ struct WhaleDescriptionSection: View {
 struct WhalePortfolioStats: View {
     let profile: WhaleProfile
 
+    @State private var showInfoSheet = false
+
     var body: some View {
-        HStack {
-            // Portfolio Value
-            VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                if profile.isCongressional && profile.currentHoldings.count <= 10 {
-                    Text("N/A")
-                        .font(AppTypography.titleLarge)
+        VStack(alignment: .leading, spacing: AppSpacing.sm) {
+            HStack {
+                // ── Portfolio value ──────────────────────────────────
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    if profile.isCongressional && profile.currentHoldings.count <= 10 {
+                        Text("N/A")
+                            .font(AppTypography.titleLarge)
+                            .foregroundColor(AppColors.textMuted)
+                    } else if profile.hasDisplayablePortfolioValue {
+                        Text(profile.formattedPortfolioValue)
+                            .font(AppTypography.titleLarge)
+                            .foregroundColor(AppColors.textPrimary)
+                    } else {
+                        Text("—")
+                            .font(AppTypography.titleLarge)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+
+                    Text(portfolioCaption)
+                        .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
-                } else {
-                    Text(profile.formattedPortfolioValue)
-                        .font(AppTypography.titleLarge)
-                        .foregroundColor(AppColors.textPrimary)
                 }
 
-                Text(profile.isCongressional
-                     ? (profile.currentHoldings.count <= 10 ? "Limited Data" : "Est. from Trades")
-                     : "13F Equity Portfolio")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
+                Spacer()
 
-            Spacer()
+                // ── Annual return ────────────────────────────────────
+                VStack(alignment: .trailing, spacing: AppSpacing.xs) {
+                    if profile.isCongressional {
+                        Text("N/A")
+                            .font(AppTypography.titleLarge)
+                            .foregroundColor(AppColors.textMuted)
+                    } else if profile.hasDisplayableReturn {
+                        Text(profile.formattedYTDReturn)
+                            .font(AppTypography.titleLarge)
+                            .foregroundColor(
+                                profile.isPositiveReturn
+                                    ? AppColors.bullish : AppColors.bearish
+                            )
+                    } else {
+                        // The em-dash replaces a green "+0.0%" that a NULL return
+                        // used to produce — missing data reading as a flat year.
+                        // Deliberately the SAME muted treatment the congressional
+                        // branch above uses, so this introduces no new vocabulary.
+                        Text("—")
+                            .font(AppTypography.titleLarge)
+                            .foregroundColor(AppColors.textMuted)
+                    }
 
-            // Annual Return
-            VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-                if profile.isCongressional {
-                    Text("N/A")
-                        .font(AppTypography.titleLarge)
+                    Text(returnCaption)
+                        .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
-                } else {
-                    Text(profile.formattedYTDReturn)
-                        .font(AppTypography.titleLarge)
-                        .foregroundColor(profile.isPositiveReturn ? AppColors.bullish : AppColors.bearish)
+                        .multilineTextAlignment(.trailing)
                 }
-
-                Text(profile.returnLabel.isEmpty ? "Avg. Annual Return" : profile.returnLabel)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
             }
+
+            // One qualifier spanning BOTH tiles, not an icon per tile. Most
+            // readers never open a sheet, so the scope has to be legible without
+            // tapping: a 13F is US-listed stock positions, never total wealth.
+            Button {
+                showInfoSheet = true
+            } label: {
+                HStack(alignment: .top, spacing: AppSpacing.xs) {
+                    Image(systemName: "info.circle")
+                        .font(AppTypography.iconXS)
+                    Text(qualifierText)
+                        .font(AppTypography.caption)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .foregroundColor(AppColors.textMuted)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .accessibilityLabel("What these numbers mean")
         }
         .padding(AppSpacing.lg)
+        .sheet(isPresented: $showInfoSheet) {
+            WhalePortfolioStatsInfoSheet(profile: profile)
+        }
+    }
+
+    private var portfolioCaption: String {
+        if profile.isCongressional {
+            return profile.currentHoldings.count <= 10
+                ? "Limited Data" : "Est. from Trades"
+        }
+        return profile.hasDisplayablePortfolioValue
+            ? profile.portfolioCaption : "Not available"
+    }
+
+    private var returnCaption: String {
+        if profile.isCongressional { return "Avg. Annual Return" }
+        return profile.hasDisplayableReturn
+            ? profile.returnCaption : profile.returnUnavailableCaption
+    }
+
+    private var qualifierText: String {
+        if profile.isCongressional {
+            return "Estimated from disclosed trade ranges — not total wealth."
+        }
+        if profile.isStockProxyReturn {
+            // Naming the vehicle is the whole point: the left tile is a 13F
+            // sleeve and the right one is a share price. Two different sources,
+            // side by side, previously with nothing saying so.
+            return "U.S.-listed stock positions from this filer's latest 13F — "
+                + "not total wealth. The return is a share price, not the 13F book."
+        }
+        return "U.S.-listed stock positions from this filer's latest 13F — not total wealth."
     }
 }
 

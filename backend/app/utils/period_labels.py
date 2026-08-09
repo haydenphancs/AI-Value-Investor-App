@@ -19,6 +19,7 @@ display strings.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -99,3 +100,25 @@ def latest_filed_13f_quarter(
             quarter = 4
             year -= 1
     return year, quarter
+
+
+_FILING_PERIOD_RE = re.compile(r"^(\d{4})-Q([1-4])$")
+
+
+def filing_period_display(period: str) -> str:
+    """``"2026-Q2"`` → ``"Q2 2026"``. Anything else → ``""``.
+
+    Used to date-stamp the Whale Profile's 13F portfolio tile, so the reader can
+    see that a figure captioned "13F Equity Portfolio" is a quarter-end snapshot
+    up to ~4.5 months old rather than a live balance.
+
+    ⚠️ The strict regex is load-bearing, not defensive habit. Congressional
+    snapshots write their period as ``YYYY-MM`` (``now.strftime("%Y-%m")``), and
+    a looser parse would render one of those as a 13F quarter — inventing a
+    filing that does not exist for a politician who never files a 13F. Returning
+    "" makes the caller omit the stamp, which is the honest outcome.
+    """
+    match = _FILING_PERIOD_RE.match(str(period or "").strip())
+    if not match:
+        return ""
+    return f"Q{match.group(2)} {match.group(1)}"

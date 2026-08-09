@@ -47,6 +47,29 @@ final class PortfolioStore: ObservableObject {
     private let apiClient: APIClient
     private static let activeIdKey = "TrackingView.activePortfolioId"
 
+    /// Posted whenever the ACTIVE GROUP changes identity or name.
+    ///
+    /// Home and Updates now build their content server-side from `portfolios.is_active`,
+    /// but both cache aggressively and neither observes this store: Updates latches
+    /// `hasLoadedOnce` and never re-reads its tabs for the rest of the process, and Home's
+    /// `loadIfStale` no-ops inside a 300s window. Without a signal, switching groups on
+    /// Tracking left Home showing the OLD group's name over the OLD group's tiles and
+    /// Updates showing the old group's chips — an affirmatively wrong label, not just
+    /// stale prices, since the header stopped being a hardcoded literal.
+    ///
+    /// A notification rather than shared state because the two screens own independent
+    /// ViewModels with their own lifecycles, and `PortfolioStore` is deliberately not in
+    /// `AppState`.
+    static let activeGroupDidChangeNotification = Notification.Name(
+        "PortfolioStore.activeGroupDidChange"
+    )
+
+    private func announceActiveGroupChange() {
+        NotificationCenter.default.post(
+            name: Self.activeGroupDidChangeNotification, object: nil
+        )
+    }
+
     var activePortfolio: Portfolio? {
         portfolios.first { $0.id == activePortfolioId }
     }
@@ -118,6 +141,10 @@ final class PortfolioStore: ObservableObject {
                 responseType: PortfolioDTO.self
             )
             UserDefaults.standard.set(id, forKey: Self.activeIdKey)
+            // Only AFTER the server confirms. Announcing optimistically would make Home
+            // and Updates re-fetch against the OLD server state and cache the old group
+            // again, right before the revert below puts the UI back.
+            announceActiveGroupChange()
         } catch {
             activePortfolioId = previous
             applyActiveFlag(previous)
@@ -196,14 +223,28 @@ final class PortfolioStore: ObservableObject {
         if let index = portfolios.firstIndex(where: { $0.id == id }) {
             portfolios[index] = updated
         }
+        // Renaming the ACTIVE group changes the header Home renders and the title of the
+        // Updates manage sheet, both server-supplied. Without this they keep the old name
+        // for up to 5 minutes / the rest of the session respectively.
+        if id == activePortfolioId {
+            announceActiveGroupChange()
+        }
         return updated
     }
 
     func deletePortfolio(id: String) async throws {
+        let wasActive = activePortfolioId == id
         try await apiClient.request(endpoint: .deletePortfolio(id: id))
         portfolios.removeAll { $0.id == id }
-        if activePortfolioId == id {
-            ensureActiveSelection()
+        if wasActive {
+            // The SERVER already promoted a replacement (`ensure_active_portfolio`, called
+            // from `delete_portfolio`). Re-read rather than guessing locally: the two used
+            // to pick independently — the server orders by (sort_order, created_at, id),
+            // this client only by sortOrder — so a tie left Tracking following one group
+            // while Home and Updates rendered another, with nothing to reconcile them
+            // until the next relaunch.
+            await loadPortfolios()
+            announceActiveGroupChange()
         }
     }
 

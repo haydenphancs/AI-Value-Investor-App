@@ -52,13 +52,23 @@ struct YourWatchlistSection: View {
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, 10)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(items) { item in
-                        MarketPulseCard(item: item) { onTap?(item) }
+            if items.isEmpty {
+                // The caller only renders this section with no items when the active
+                // GROUP is empty — a list the user just created. Saying so beats the
+                // section disappearing, which is what it did before and read as a bug.
+                Text("No tickers in this list yet.")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .padding(.horizontal, AppSpacing.lg)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(items) { item in
+                            MarketPulseCard(item: item) { onTap?(item) }
+                        }
                     }
+                    .padding(.horizontal, AppSpacing.lg)
                 }
-                .padding(.horizontal, AppSpacing.lg)
             }
         }
     }

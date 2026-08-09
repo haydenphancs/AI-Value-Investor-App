@@ -62,8 +62,9 @@ final class HomeRepository: HomeRepositoryProtocol {
             // Same tile shape as the pulse strip, so the same mapper. `spark` arrives
             // empty by design (a per-ticker intraday series would be one call each on
             // the most-visited screen), which the card already handles.
-            watchlist: (dto.watchlist ?? []).map(mapPulse),
-            watchlistTitle: watchlistTitle(dto.watchlistTitle)
+            watchlist: (dto.watchlist ?? []).map(mapWatchlistTile),
+            watchlistTitle: watchlistTitle(dto.watchlistTitle),
+            watchlistIsGroup: dto.watchlistIsGroup ?? false
         )
     }
 
@@ -76,6 +77,31 @@ final class HomeRepository: HomeRepositoryProtocol {
     private static func watchlistTitle(_ raw: String?) -> String {
         let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? "Your Watchlist" : trimmed
+    }
+
+    /// Watchlist tiles are labelled with the SYMBOL ("ORCL"), not the company name
+    /// ("Oracle Corporation").
+    ///
+    /// Market Pulse wants the opposite — "S&P 500" is what that instrument is called, and
+    /// "^GSPC" would be noise — which is why this is a second mapper rather than a change
+    /// to `mapPulse`. The two strips share `MarketPulseCard`, so the choice has to be made
+    /// here at the mapping boundary and not in the view: the card stays dumb and renders
+    /// whatever `name` it is handed.
+    ///
+    /// Symbols also fit. The card is a fixed-width tile in a horizontal strip, so a long
+    /// company name truncates and several holdings can read as the same clipped prefix.
+    private static func mapWatchlistTile(_ dto: MarketPulseItemDTO) -> MarketPulseItem {
+        let tile = mapPulse(dto)
+        return MarketPulseItem(
+            name: dto.symbol,          // the ONLY difference from a pulse tile
+            symbol: tile.symbol,
+            type: tile.type,
+            priceText: tile.priceText,
+            changeText: tile.changeText,
+            isPositive: tile.isPositive,
+            spark: tile.spark,
+            previousClose: tile.previousClose
+        )
     }
 
     private static func mapPulse(_ dto: MarketPulseItemDTO) -> MarketPulseItem {
@@ -404,7 +430,8 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             // Mock/preview only — the live path fills this from the caller's active
             // group (or their master watchlist when they have none).
             watchlist: Array(Self.pulse.prefix(3)),
-            watchlistTitle: "Holdings"
+            watchlistTitle: "Holdings",
+            watchlistIsGroup: true
         )
     }
 

@@ -68,8 +68,18 @@ def _patch(monkeypatch, *, group=None, group_raises=False, watchlist=(),
 
 
 def _tabs(resp):
-    """Ticker scopes only — the Market pill is always present and never gated."""
+    """EVERY ticker scope the response carries, locked or not, in the GROUP's own order.
+
+    This is the Manage-Assets sheet's source. The plan gates which feeds you can OPEN, not
+    which of your own watchlist tickers you may see and remove — feeding that sheet the
+    gated list showed a Free user 1 of their 20 tickers with no way to remove the other 19.
+    """
     return [t.scope for t in resp.tabs if not t.is_market_tab]
+
+
+def _openable(resp):
+    """The scopes the chip strip renders — what this caller's plan lets them open."""
+    return [t.scope for t in resp.tabs if not t.is_market_tab and not t.is_locked]
 
 
 def _group(tickers, name="Holdings"):
@@ -139,7 +149,11 @@ async def test_free_sees_the_alphabetically_first_ticker_only(monkeypatch):
     """The stated product rule, end to end: BDU, DIF, BDX → BDU."""
     _patch(monkeypatch, group=_group(["BDU", "DIF", "BDX"]))
     resp = await up.get_updates_tabs(user=_user("free"))
-    assert _tabs(resp) == ["BDU"]
+    assert _openable(resp) == ["BDU"]
+    # The other two are still SENT, just locked — the manage sheet needs them. The wire
+    # keeps the GROUP's order (portfolio_items.position); only the plan SELECTION is
+    # alphabetical, so the sheet lists tickers the way the user arranged them.
+    assert _tabs(resp) == ["BDU", "DIF", "BDX"]
     assert resp.locked_count == 2
     assert resp.tier_required == "pro"
 
@@ -149,7 +163,7 @@ async def test_the_free_pick_does_not_depend_on_group_order(monkeypatch):
     for order in (["BDU", "DIF", "BDX"], ["BDX", "DIF", "BDU"], ["DIF", "BDU", "BDX"]):
         _patch(monkeypatch, group=_group(order))
         resp = await up.get_updates_tabs(user=_user("free"))
-        assert _tabs(resp) == ["BDU"], f"order {order} changed the visible chip"
+        assert _openable(resp) == ["BDU"], f"order {order} changed the visible chip"
 
 
 @pytest.mark.asyncio
@@ -158,12 +172,13 @@ async def test_pro_and_max_see_more(monkeypatch):
     _patch(monkeypatch, group=_group(tickers))
 
     pro = await up.get_updates_tabs(user=_user("pro"))
-    assert len(_tabs(pro)) == 15
+    assert len(_openable(pro)) == 15
+    assert len(_tabs(pro)) == 30, "locked tickers must still be sent for the manage sheet"
     assert pro.locked_count == 15
     assert pro.tier_required == "premium"
 
     mx = await up.get_updates_tabs(user=_user("premium"))
-    assert len(_tabs(mx)) == 30
+    assert len(_openable(mx)) == 30
     assert mx.locked_count == 0
     assert mx.tier_required is None
 
@@ -174,7 +189,7 @@ async def test_nothing_is_locked_when_the_group_fits(monkeypatch):
     ticker must not be told they are missing something."""
     _patch(monkeypatch, group=_group(["ORCL"]))
     resp = await up.get_updates_tabs(user=_user("free"))
-    assert (_tabs(resp), resp.locked_count, resp.tier_required) == (["ORCL"], 0, None)
+    assert (_openable(resp), resp.locked_count, resp.tier_required) == (["ORCL"], 0, None)
 
 
 @pytest.mark.asyncio
@@ -184,10 +199,10 @@ async def test_an_unknown_tier_is_gated_as_free_not_ungated(monkeypatch):
     _patch(monkeypatch, group=_group(["BDU", "DIF"]))
     for tier in (None, "", "enterprise", "max"):
         resp = await up.get_updates_tabs(user={"id": _USER, "tier": tier})
-        assert _tabs(resp) == ["BDU"], f"tier {tier!r} was not gated as free"
+        assert _openable(resp) == ["BDU"], f"tier {tier!r} was not gated as free"
 
     missing = await up.get_updates_tabs(user={"id": _USER})
-    assert _tabs(missing) == ["BDU"]
+    assert _openable(missing) == ["BDU"]
 
 
 @pytest.mark.asyncio
@@ -196,7 +211,7 @@ async def test_a_downgrade_truncates_rather_than_erroring(monkeypatch):
     user can still legitimately use, over a state they did not create in this request."""
     _patch(monkeypatch, group=_group([f"T{i:02d}" for i in range(20)]))
     resp = await up.get_updates_tabs(user=_user("free"))
-    assert len(_tabs(resp)) == 1
+    assert len(_openable(resp)) == 1
     assert resp.locked_count == 19
 
 
@@ -207,7 +222,7 @@ async def test_the_gate_also_applies_on_the_watchlist_fallback(monkeypatch):
     _patch(monkeypatch, group=None,
            watchlist=[{"ticker": "BDU"}, {"ticker": "DIF"}, {"ticker": "BDX"}])
     resp = await up.get_updates_tabs(user=_user("free"))
-    assert _tabs(resp) == ["BDU"]
+    assert _openable(resp) == ["BDU"]
     assert resp.locked_count == 2
 
 
@@ -313,37 +328,44 @@ async def test_visible_pills_carry_their_company_name(monkeypatch):
     resp = await up.get_updates_tabs(user=_user("premium"))
     pills = [t for t in resp.tabs if not t.is_market_tab]
 
-    assert [p.scope for p in pills] == [f"T{i:02d}" for i in range(30)]
+    assert len(pills) == up._MAX_TABS, "the wire stays bounded by _MAX_TABS"
     missing = [p.scope for p in pills if not p.company_name]
-    assert not missing, f"visible pills lost their display name: {missing}"
+    assert not missing, f"pills lost their display name: {missing}"
 
 
 @pytest.mark.asyncio
-async def test_only_visible_tickers_have_metadata_resolved(monkeypatch):
-    """A Free user must not cost a metadata lookup over 30 symbols to render one pill."""
+async def test_metadata_is_one_bounded_query_for_the_whole_strip(monkeypatch):
+    """Locked tickers ship too — the manage sheet needs them — so metadata covers the whole
+    bounded slice. What must hold is that it stays ONE query and never exceeds `_MAX_TABS`
+    symbols however large the group, which is why sending the locked ones costs nothing."""
     asked = []
 
     async def _spy(_uid, tickers):
         asked.append(list(tickers))
         return {}
 
-    _patch(monkeypatch, group=_group([f"T{i:02d}" for i in range(30)]))
+    _patch(monkeypatch, group=_group([f"T{i:03d}" for i in range(120)]))
     monkeypatch.setattr(up, "fetch_ticker_metadata", _spy)
     await up.get_updates_tabs(user=_user("free"))
-    assert asked == [["T00"]]
+
+    assert len(asked) == 1, "metadata must be a single query, never per-ticker"
+    assert len(asked[0]) == up._MAX_TABS
 
 
 @pytest.mark.asyncio
-async def test_only_visible_tickers_are_quoted(monkeypatch):
-    """A Free user must not cost an FMP fan-out over 30 symbols to render one pill."""
+async def test_quotes_are_one_bounded_call_for_the_whole_strip(monkeypatch):
+    """`/tabs` is one chunked batch-quote call regardless of symbol count — the reason the
+    plan ladder is packaging rather than cost recovery. Bounded all the same."""
     asked = []
 
     class _FMP:
         async def get_batch_quotes_bulk(self, symbols):
-            asked.extend(symbols)
+            asked.append(list(symbols))
             return []
 
-    _patch(monkeypatch, group=_group([f"T{i:02d}" for i in range(30)]))
+    _patch(monkeypatch, group=_group([f"T{i:03d}" for i in range(120)]))
     monkeypatch.setattr(up, "get_fmp_client", lambda: _FMP())
     await up.get_updates_tabs(user=_user("free"))
+
     assert len(asked) == 1
+    assert len(asked[0]) == up._MAX_TABS

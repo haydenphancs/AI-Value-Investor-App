@@ -198,6 +198,10 @@ struct HomeDashboardData {
     /// this screen, the Updates chips and the Tracking tab all say the same word. Falls
     /// back to "Your Watchlist" when the user has no active group.
     let watchlistTitle: String
+    /// True when `watchlistTitle` names a real group the user owns. The ONLY way to tell an
+    /// empty GROUP ("Crypto", just created) from a user with no tickers at all — both are an
+    /// empty `watchlist`, and the section hides itself for the second.
+    let watchlistIsGroup: Bool
 }
 
 // MARK: - Live wire models (DTOs)
@@ -227,6 +231,9 @@ struct HomeDashboardResponseDTO: Decodable {
     /// The active group's name (migration 126). Optional so a backend that predates it
     /// decodes nil and the repository falls back to the label this section always showed.
     let watchlistTitle: String?
+    /// Optional so a backend predating migration 126 decodes as "not a group" — which is
+    /// exactly how that backend behaves.
+    let watchlistIsGroup: Bool?
 
     enum CodingKeys: String, CodingKey {
         case marketStatusText = "market_status_text"
@@ -237,6 +244,7 @@ struct HomeDashboardResponseDTO: Decodable {
         case themes
         case watchlist
         case watchlistTitle = "watchlist_title"
+        case watchlistIsGroup = "watchlist_is_group"
     }
 }
 

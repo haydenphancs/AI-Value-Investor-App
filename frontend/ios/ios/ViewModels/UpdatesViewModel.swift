@@ -72,6 +72,30 @@ final class UpdatesViewModel: ObservableObject {
         "+\(lockedTickerCount) more"
     }
 
+    /// Tabs the chip strip renders — everything the plan lets the user open.
+    ///
+    /// `filterTabs` carries the WHOLE group, locked entries included, because the
+    /// Manage-Assets sheet is fed from it and managing your own watchlist is free. Only
+    /// the strip filters; conflating the two is what made a Free user's sheet show one
+    /// ticker out of twenty with no way to remove the rest.
+    var openableTabs: [NewsFilterTab] {
+        filterTabs.filter { !$0.isLocked }
+    }
+
+    /// Every ticker in the group, locked or not — the Manage-Assets sheet's source, and
+    /// the set the add-duplicate guard has to test against.
+    var manageableTickers: [NewsFilterTab] {
+        filterTabs.filter { !$0.isMarketTab }
+    }
+
+    /// Whether an upgrade would actually reveal anything. `lockedTickerCount > 0` alone is
+    /// NOT the test: a top-tier subscriber whose group exceeds the ceiling has a positive
+    /// locked count and `tier_required == nil`, and showing them a lock chip opens a
+    /// paywall whose only tappable option is a DOWNGRADE.
+    var showsUpgradeChip: Bool {
+        lockedTickerCount > 0 && tierRequiredForMoreTickers != nil
+    }
+
     /// Distinct source names present in the loaded feed — drives the filter
     /// sheet, instead of a hardcoded list that may match nothing.
     @Published private(set) var availableSources: [String] = []
@@ -200,6 +224,21 @@ final class UpdatesViewModel: ObservableObject {
         isRefreshing = false
     }
 
+    /// Re-read the tab strip because the ACTIVE GROUP changed on another tab.
+    ///
+    /// Distinct from `refresh()` on purpose: that one is pull-to-refresh and shows the
+    /// spinner, which would be a lie here — the user is not on this screen. It re-reads
+    /// tabs and re-selects, but keeps the per-scope article cache, since the ARTICLES for
+    /// a scope are unaffected by which group it belongs to. Only membership changed.
+    func reloadForActiveGroupChange() async {
+        await loadTabs()
+        // `loadTabs` re-points `selectedTab` at a scope the new group actually contains
+        // (falling back to Market), so the feed below can never be the old group's.
+        if let tab = selectedTab {
+            await loadFeed(for: tab, force: false)
+        }
+    }
+
     func selectTab(_ tab: NewsFilterTab) {
         selectedTab = tab
         Task { await loadFeed(for: tab, force: false) }
@@ -277,7 +316,10 @@ final class UpdatesViewModel: ObservableObject {
                 return
             }
             filterTabs = tabs
-            selectedTab = tabs.first { $0.scope == previousScope } ?? tabs.first
+            // Selection can only land on a tab whose feed the plan actually allows —
+            // otherwise a downgrade would leave the user parked on a locked scope with no
+            // chip to navigate away from.
+            selectedTab = openableTabs.first { $0.scope == previousScope } ?? openableTabs.first
             print("✅ UpdatesVM: Loaded \(tabs.count) tabs (selected: \(selectedTab?.scope ?? "none"), locked: \(lockedTickerCount))")
         } catch {
             let appError = AppError.from(error)

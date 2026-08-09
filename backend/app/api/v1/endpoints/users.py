@@ -398,8 +398,17 @@ async def claim_guest_data(
         # `portfolio_items_portfolio_id_ticker_key UNIQUE (portfolio_id, ticker)`, with the
         # account's own row winning, the same rule the watchlist and Learn steps use.
         guest_pf = (
-            supabase.table("portfolios").select("id,name")
+            supabase.table("portfolios").select("id,name,is_active")
             .eq("user_id", bucket).execute().data or []
+        )
+        # Which group the guest was actually LOOKING at. Worth carrying over: the claim
+        # moves rows with `is_active` cleared (it must — see below), and the heal at the
+        # end then promotes by (sort_order, created_at, id), i.e. "Holdings". So a guest
+        # who created "Tech", activated it, and then signed up would silently land back on
+        # Holdings, with Home's header, the Updates chips AND the Tracking tab all
+        # switching under them and nothing saying why.
+        guest_active_id = next(
+            (str(r["id"]) for r in guest_pf if r.get("is_active")), None
         )
         if guest_pf:
             owned_pf = {
@@ -433,15 +442,28 @@ async def claim_guest_data(
                 supabase.table("portfolios").delete().eq("id", row["id"]).execute()
                 claimed["portfolios_merged"] += 1
 
-            # The account's own active group wins (this is a no-op when it has one). It only
-            # promotes when the account had NO groups at all and everything was claimed —
-            # which is the common case for someone who browsed as a guest and then signed up,
-            # and without it Home and Updates would both fall back to the master watchlist
-            # under a generic label for a user who plainly has a group.
+            # Restore the guest's own selection when it survived the move AND the account
+            # had no active group of its own; otherwise fall back to the heal, which the
+            # account's existing choice wins outright.
+            #
+            # `set_active_portfolio` is safe to call unconditionally here: it clears any
+            # other active row for this user in the same transaction, so it cannot trip the
+            # unique index no matter what the account already had.
             try:
-                supabase.rpc(
-                    "ensure_active_portfolio", {"p_user_id": user_id}
-                ).execute()
+                account_has_active = bool(
+                    supabase.table("portfolios").select("id")
+                    .eq("user_id", user_id).eq("is_active", True).limit(1)
+                    .execute().data
+                )
+                if guest_active_id and not account_has_active and guest_active_id in movable:
+                    supabase.rpc(
+                        "set_active_portfolio",
+                        {"p_user_id": user_id, "p_portfolio_id": guest_active_id},
+                    ).execute()
+                else:
+                    supabase.rpc(
+                        "ensure_active_portfolio", {"p_user_id": user_id}
+                    ).execute()
             except Exception as e:
                 # Best-effort: `GET /portfolios` repairs this on the next launch. Never let it
                 # abort the remaining claim steps — that is the 23505 lesson above.

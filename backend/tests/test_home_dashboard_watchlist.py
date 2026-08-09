@@ -104,8 +104,8 @@ def _group(name="Holdings", tickers=("AAPL",)):
 async def test_anonymous_caller_gets_no_watchlist():
     """No user id → empty. Never a fallback to someone else's list."""
     svc = _service(rows=[{"ticker": "AAPL"}], quotes=[_Q("AAPL")])
-    assert await svc._get_watchlist_guarded(None) == (_DEFAULT_TITLE, [])
-    assert await svc._get_watchlist_guarded("") == (_DEFAULT_TITLE, [])
+    assert await svc._get_watchlist_guarded(None) == (_DEFAULT_TITLE, False, [])
+    assert await svc._get_watchlist_guarded("") == (_DEFAULT_TITLE, False, [])
 
 
 @pytest.mark.asyncio
@@ -119,7 +119,7 @@ async def test_the_strip_is_never_cached_across_users():
 
     async def _spy(user_id):
         calls.append(user_id)
-        return (_DEFAULT_TITLE, [])
+        return (_DEFAULT_TITLE, False, [])
 
     svc._build_watchlist = _spy
     await svc._get_watchlist_guarded("user-1")
@@ -132,14 +132,14 @@ async def test_the_strip_is_never_cached_across_users():
 @pytest.mark.asyncio
 async def test_supabase_failure_degrades_to_empty_not_error():
     svc = _service(read_raises=True)
-    assert await svc._get_watchlist_guarded("user-1") == (_DEFAULT_TITLE, [])
+    assert await svc._get_watchlist_guarded("user-1") == (_DEFAULT_TITLE, False, [])
 
 
 @pytest.mark.asyncio
 async def test_quote_failure_drops_tiles_rather_than_fabricating_prices():
     """A fabricated 0.00 on the user's OWN holdings is worse than no tile."""
     svc = _service(rows=[{"ticker": "AAPL"}], quotes_raise=True)
-    assert await svc._get_watchlist_guarded("user-1") == (_DEFAULT_TITLE, [])
+    assert await svc._get_watchlist_guarded("user-1") == (_DEFAULT_TITLE, False, [])
 
 
 @pytest.mark.asyncio
@@ -154,7 +154,7 @@ async def test_a_slow_build_times_out_into_an_empty_section():
     original = mod._WATCHLIST_BUILD_TIMEOUT_SECONDS
     mod._WATCHLIST_BUILD_TIMEOUT_SECONDS = 0.05
     try:
-        assert await svc._get_watchlist_guarded("user-1") == (_DEFAULT_TITLE, [])
+        assert await svc._get_watchlist_guarded("user-1") == (_DEFAULT_TITLE, False, [])
     finally:
         mod._WATCHLIST_BUILD_TIMEOUT_SECONDS = original
 
@@ -167,7 +167,7 @@ async def test_empty_watchlist_returns_empty_without_calling_fmp():
         raise AssertionError("should not quote an empty watchlist")
 
     svc.fmp.get_batch_quotes_bulk = _boom
-    assert await svc._build_watchlist("user-1") == (_DEFAULT_TITLE, [])
+    assert await svc._build_watchlist("user-1") == (_DEFAULT_TITLE, False, [])
 
 
 # ── the active group drives the strip ────────────────────────────────────────
@@ -180,7 +180,7 @@ async def test_the_strip_follows_the_active_group_and_takes_its_name():
         meta={"ORCL": {"company_name": "Oracle Corporation", "asset_type": "stock"}},
         quotes=[_Q("ORCL"), _Q("PLUG")],
     )
-    title, tiles = await svc._build_watchlist("user-1")
+    title, _is_group, tiles = await svc._build_watchlist("user-1")
     assert title == "Tech"
     assert [t.symbol for t in tiles] == ["ORCL", "PLUG"]
     assert tiles[0].name == "Oracle Corporation"
@@ -194,7 +194,7 @@ async def test_group_order_is_preserved_not_re_sorted():
         group=_group(tickers=["ZZZ", "AAA", "MMM"]),
         quotes=[_Q("ZZZ"), _Q("AAA"), _Q("MMM")],
     )
-    _, tiles = await svc._build_watchlist("user-1")
+    _, _is_group, tiles = await svc._build_watchlist("user-1")
     assert [t.symbol for t in tiles] == ["ZZZ", "AAA", "MMM"]
 
 
@@ -207,14 +207,14 @@ async def test_an_empty_group_keeps_its_name_and_shows_nothing():
         rows=[{"ticker": "AAPL"}],
         quotes=[_Q("AAPL")],
     )
-    assert await svc._build_watchlist("user-1") == ("Tech", [])
+    assert await svc._build_watchlist("user-1") == ("Tech", True, [])
 
 
 @pytest.mark.asyncio
 async def test_a_group_with_a_blank_name_falls_back_to_the_default_title():
     """A header rendering an empty string is worse than the generic label."""
     svc = _service(group=_group(name="", tickers=["AAPL"]), quotes=[_Q("AAPL")])
-    title, tiles = await svc._build_watchlist("user-1")
+    title, _is_group, tiles = await svc._build_watchlist("user-1")
     assert title == _DEFAULT_TITLE
     assert [t.symbol for t in tiles] == ["AAPL"]
 
@@ -223,7 +223,7 @@ async def test_a_group_with_a_blank_name_falls_back_to_the_default_title():
 async def test_no_active_group_falls_back_to_the_master_watchlist():
     """Pre-126 behaviour, kept for a user mid-backfill or one who never opened Tracking."""
     svc = _service(group=None, rows=[{"ticker": "AAPL"}], quotes=[_Q("AAPL")])
-    title, tiles = await svc._build_watchlist("user-1")
+    title, _is_group, tiles = await svc._build_watchlist("user-1")
     assert title == _DEFAULT_TITLE
     assert [t.symbol for t in tiles] == ["AAPL"]
 
@@ -232,7 +232,7 @@ async def test_no_active_group_falls_back_to_the_master_watchlist():
 async def test_an_unreadable_group_falls_back_rather_than_blanking_the_section():
     """A Supabase blip on the groups table must not read as "you have no tickers"."""
     svc = _service(group_raises=True, rows=[{"ticker": "AAPL"}], quotes=[_Q("AAPL")])
-    title, tiles = await svc._build_watchlist("user-1")
+    title, _is_group, tiles = await svc._build_watchlist("user-1")
     assert title == _DEFAULT_TITLE
     assert [t.symbol for t in tiles] == ["AAPL"]
 
@@ -242,7 +242,7 @@ async def test_a_group_ticker_with_no_watchlist_row_still_renders_as_its_symbol(
     """`set_portfolio_tickers` enforces portfolio_items ⊆ watchlist_items, so a metadata
     miss means a repair path failed — degrade to the bare symbol, never drop the tile."""
     svc = _service(group=_group(tickers=["ORCL"]), meta={}, quotes=[_Q("ORCL")])
-    _, tiles = await svc._build_watchlist("user-1")
+    _, _is_group, tiles = await svc._build_watchlist("user-1")
     assert [(t.symbol, t.name, t.type) for t in tiles] == [("ORCL", "ORCL", "stock")]
 
 
@@ -260,7 +260,7 @@ async def test_nan_and_infinite_quotes_are_dropped():
             _Q("INFP", pct=float("inf")),
         ],
     )
-    _, tiles = await svc._build_watchlist("user-1")
+    _, _is_group, tiles = await svc._build_watchlist("user-1")
     assert [t.symbol for t in tiles] == ["GOOD"]
 
 
@@ -272,7 +272,7 @@ async def test_nan_quotes_are_dropped_on_the_group_path_too():
         group=_group(tickers=["GOOD", "NANP"]),
         quotes=[_Q("GOOD"), _Q("NANP", price=float("nan"))],
     )
-    _, tiles = await svc._build_watchlist("user-1")
+    _, _is_group, tiles = await svc._build_watchlist("user-1")
     assert [t.symbol for t in tiles] == ["GOOD"]
 
 
@@ -280,14 +280,14 @@ async def test_nan_quotes_are_dropped_on_the_group_path_too():
 async def test_tickers_without_a_quote_are_dropped():
     svc = _service(rows=[{"ticker": "AAPL"}, {"ticker": "DELISTED"}],
                    quotes=[_Q("AAPL")])
-    _, tiles = await svc._build_watchlist("user-1")
+    _, _is_group, tiles = await svc._build_watchlist("user-1")
     assert [t.symbol for t in tiles] == ["AAPL"]
 
 
 @pytest.mark.asyncio
 async def test_duplicate_tickers_are_deduped():
     svc = _service(rows=[{"ticker": "AAPL"}, {"ticker": "aapl"}], quotes=[_Q("AAPL")])
-    _, tiles = await svc._build_watchlist("user-1")
+    _, _is_group, tiles = await svc._build_watchlist("user-1")
     assert [t.symbol for t in tiles] == ["AAPL"]
 
 
@@ -297,7 +297,7 @@ async def test_tile_carries_company_name_and_asset_type():
         rows=[{"ticker": "BTC", "company_name": "Bitcoin", "asset_type": "crypto"}],
         quotes=[_Q("BTC", price=64000.0, pct=-1.2, prev=64800.0)],
     )
-    t = (await svc._build_watchlist("user-1"))[1][0]
+    t = (await svc._build_watchlist("user-1"))[2][0]
     assert (t.name, t.type, t.price, t.change_percent) == ("Bitcoin", "crypto", 64000.0, -1.2)
     assert t.previous_close == 64800.0
     assert t.spark == []   # no per-ticker intraday call for a glanceable strip
@@ -309,7 +309,7 @@ async def test_tile_count_is_bounded():
 
     many = [{"ticker": f"T{i}"} for i in range(50)]
     svc = _service(rows=many, quotes=[_Q(f"T{i}") for i in range(50)])
-    _, tiles = await svc._build_watchlist("user-1")
+    _, _is_group, tiles = await svc._build_watchlist("user-1")
     assert len(tiles) <= mod._WATCHLIST_MAX_TILES
 
 
@@ -321,7 +321,7 @@ async def test_tile_count_is_bounded_on_the_group_path_too():
         group=_group(tickers=[f"T{i}" for i in range(50)]),
         quotes=[_Q(f"T{i}") for i in range(50)],
     )
-    _, tiles = await svc._build_watchlist("user-1")
+    _, _is_group, tiles = await svc._build_watchlist("user-1")
     assert len(tiles) <= mod._WATCHLIST_MAX_TILES
     # And it is the FIRST N of the user's own order, not an arbitrary slice.
     assert [t.symbol for t in tiles] == [f"T{i}" for i in range(mod._WATCHLIST_MAX_TILES)]
@@ -376,4 +376,4 @@ async def test_the_shared_guest_sentinel_is_not_treated_as_a_user():
     from app.dependencies import GUEST_USER_ID
 
     svc = _service(rows=[{"ticker": "SOMEONE_ELSES"}], quotes=[_Q("SOMEONE_ELSES")])
-    assert await svc._get_watchlist_guarded(GUEST_USER_ID) == (_DEFAULT_TITLE, [])
+    assert await svc._get_watchlist_guarded(GUEST_USER_ID) == (_DEFAULT_TITLE, False, [])

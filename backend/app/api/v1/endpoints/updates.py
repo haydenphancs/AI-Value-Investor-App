@@ -173,16 +173,28 @@ async def get_updates_tabs(
     # ordinary state after a downgrade, or after adding tickers on Tracking (which is
     # free and must stay free). Refusing the request would take away a working screen.
     limit = updates_ticker_limit(user.get("tier"))
-    tickers = select_visible_tickers(all_tickers, limit)
-    locked_count = max(0, len(all_tickers) - len(tickers))
+    visible = select_visible_tickers(all_tickers, limit)
+    visible_set = set(visible)
+    locked_count = max(0, len(all_tickers) - len(visible))
     tier_required = (
         required_tier_for_more_tickers(user.get("tier")) if locked_count else None
     )
     if locked_count:
         logger.info(
             "Updates tabs: user=%s tier=%s sees %d/%d group tickers (%d locked)",
-            user_id, user.get("tier"), len(tickers), len(all_tickers), locked_count,
+            user_id, user.get("tier"), len(visible), len(all_tickers), locked_count,
         )
+
+    # EVERY ticker is emitted, each flagged with whether the plan hides its feed. The
+    # gate decides what the caller can READ, not what they are allowed to see or manage:
+    # these are their own watchlist symbols. Sending only the visible ones made the
+    # Manage-Assets sheet — which is fed this same list — show 1 of a 20-ticker group,
+    # left the other 19 with no swipe-to-remove row anywhere on that screen, and made the
+    # client's add-duplicate guard miss them so re-adding one surfaced a bare 409.
+    #
+    # Cost is unchanged: `/tabs` is ONE chunked batch-quote call and ONE metadata query
+    # regardless of how many symbols they cover. `_MAX_TABS` still bounds both.
+    tickers = all_tickers[:_MAX_TABS]
 
     if group is not None and tickers:
         meta = await fetch_ticker_metadata(user_id, tickers)
@@ -242,6 +254,7 @@ async def get_updates_tabs(
                 change_percent=_change(t),
                 logo_url=row.get("logo_url"),
                 is_market_tab=False,
+                is_locked=t not in visible_set,
             )
         )
 

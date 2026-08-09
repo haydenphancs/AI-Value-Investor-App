@@ -15,7 +15,7 @@ struct PrivacyPolicyView: View {
     var body: some View {
         LegalDocumentView(
             title: "Privacy Policy",
-            lastUpdated: "July 29, 2026",
+            lastUpdated: "August 8, 2026",
             // The summary is deliberately FIRST and in the intro rather than as a numbered
             // section: "we don't sell your data" is the single thing users most want to know,
             // and burying it in §5 (where it lived) meant almost nobody ever read it. The

@@ -155,8 +155,23 @@ final class SettingsSyncManager {
         ) { _ in
             Task { @MainActor in
                 SettingsSyncManager.shared.resumeSyncIfNeeded(trigger: "foreground")
+                // The device may have crossed a timezone while we were backgrounded — a
+                // flight is exactly when quiet hours matter and exactly when nothing else
+                // would have written the new zone.
+                SettingsSyncManager.shared.refreshDeviceTimezone()
             }
         }
+        // Same value, the other way it can change: the OS zone moved while we were running
+        // (automatic time zone catching up, or the user changing it in Settings).
+        NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in
+                SettingsSyncManager.shared.refreshDeviceTimezone()
+            }
+        }
+        // And once now, so a user who never opens the quiet-hours card still sends one.
+        refreshDeviceTimezone()
     }
 
     /// "Something changed — do we owe the server anything?"
@@ -284,6 +299,25 @@ final class SettingsSyncManager {
                     return
                 }
                 redriveDepth = 0
+                // ⚠️ SNAPSHOT BEFORE APPLYING. `pendingKeys` holds key NAMES only — the VALUES
+                // live in UserDefaults — and `apply(prefs)` writes the SERVER's values into that
+                // same store. So reading `currentBlob()` after the apply returned the value the
+                // apply had just written, and the "local wins" replay below re-asserted the
+                // server's own value over itself.
+                //
+                // Concretely: user turns "My Price Alerts" off while the hydrate is gated
+                // (offline launch, or a 503 from GET /users/me/settings). `deferLocalChange()`
+                // marks the key dirty with `false` in UserDefaults. The retried hydrate lands
+                // carrying `true`; `apply` wrote `true` back; `currentBlob()` then read `true`;
+                // the override wrote `true`; `push()` PUT `true`; and the confirm-filter found
+                // blob == local, so the key was dropped from `pendingKeys` and nothing ever
+                // retried. The toggle flipped back on, on every one of the user's devices, with
+                // no error surfaced anywhere — the exact failure the comment in `push()` says
+                // was fixed.
+                let dirty = pendingKeys
+                let localOverrides: [String: PreferenceValue] = dirty.isEmpty
+                    ? [:]
+                    : currentBlob().filter { dirty.contains($0.key) }
                 // Record the server's blob VERBATIM before applying it, so the next PUT can
                 // preserve keys this build does not know about (see `lastServerBlob`).
                 lastServerBlob = prefs
@@ -296,14 +330,12 @@ final class SettingsSyncManager {
                 // so one appearance tap made on an un-hydrated launch also re-asserted 17
                 // stale toggles over the server's newer values. Replaying a diff means an
                 // edit on device A can no longer resurrect device B's superseded settings.
-                let dirty = pendingKeys
-                if !dirty.isEmpty {
-                    // `pendingKeys = []` used to live here, and it was the same silent lost
-                    // edit as the one in push(): if the push below then failed, those keys
-                    // were gone and the NEXT hydrate overwrote the user's values with the
-                    // stale server blob. Only a CONFIRMED push clears a key now.
-                    applyLocalOverrides(currentBlob().filter { dirty.contains($0.key) })
-                }
+                //
+                // `pendingKeys = []` does NOT live here, and that is deliberate: it was the same
+                // silent lost edit as the one in push(). If the push below then failed, those
+                // keys were gone and the NEXT hydrate overwrote the user's values with the stale
+                // server blob. Only a CONFIRMED push clears a key.
+                applyLocalOverrides(localOverrides)
                 hasHydrated = true   // safe to push now (server state is known)
                 cancelSyncRetry()    // a success, and the only thing that resets the ladder
                 if deferredPushPending || !dirty.isEmpty {
@@ -439,6 +471,21 @@ final class SettingsSyncManager {
         // including keys a NEWER app version added and this one has never heard of.
         var blob = lastServerBlob
         for (key, value) in currentBlob() { blob[key] = value }
+        // ⚠️ RECORD WHAT THIS PUT CARRIES **BEFORE** IT GOES OUT.
+        //
+        // Only the two DEFERRED paths above ever marked a key dirty, so on the ordinary
+        // authenticated + hydrated path — every settings change the app actually makes —
+        // `pendingKeys` stayed empty and `deferredPushPending` stayed false. When the PUT then
+        // failed, `scheduleSyncRetry` armed the ladder, the rung fired `resumeSyncIfNeeded`,
+        // and that found `hasHydrated == true` with nothing pending and did NOTHING. The whole
+        // retry ladder was inert for exactly the case it exists to cover: a healthy session
+        // whose one push happened to fail on a blip. The user's change stayed local-only, and
+        // the next hydrate overwrote it with the stale server blob.
+        //
+        // Marking here also closes a kill-mid-request hole: `pendingKeys` is durable, so a
+        // jetsam between this line and the response replays the change on the next launch.
+        // Costs nothing on success — the confirm-filter below drops every key the server took.
+        pendingKeys.formUnion(changedKeysVsServer())
         // Same identity race the hydrate path guards: capture the epoch before the Task, so a
         // sign-out + sign-in that lands between here and the token being attached cannot PUT
         // account A's blob with account B's credential.
@@ -503,23 +550,62 @@ final class SettingsSyncManager {
         }
     }
 
-    /// Remember that the local store has moved ahead of the server, and which keys moved.
+    /// Keys whose CURRENT local value differs from the last blob the server confirmed.
+    ///
+    /// THE one definition of "dirty" in this file. `deferLocalChange()` uses it to park a change
+    /// that could not be sent, `push()` uses it to record what a PUT is carrying, and the
+    /// confirm-filter in `push()`'s success branch is its exact inverse — so a key is retained
+    /// iff the server does not yet hold its value, under one rule rather than three.
     ///
     /// Diffed against the last confirmed server blob rather than snapshotting everything, so a
     /// replay re-asserts only what this device actually changed. When no server blob is known
     /// yet (fresh install, never hydrated) every present key counts as dirty — which is the
     /// correct reading there: nothing on the server can be superseded by them.
-    private func deferLocalChange() {
+    private func changedKeysVsServer() -> Set<String> {
         let local = currentBlob()
         let server = lastServerBlob
-        let changed = local.filter { key, value in server[key] != value }.keys
-        pendingKeys = pendingKeys.union(changed)
+        return Set(local.filter { key, value in server[key] != value }.keys)
+    }
+
+    /// Remember that the local store has moved ahead of the server, and which keys moved.
+    private func deferLocalChange() {
+        pendingKeys.formUnion(changedKeysVsServer())
         deferredPushPending = true
     }
 
     /// Keys this build owns. Anything else the server sends is NOT written to UserDefaults.
     private static var syncedKeys: Set<String> {
         Set(boolKeys).union(stringKeys).union(doubleKeys)
+    }
+
+    /// SEND-ONLY keys: pushed up, never written back down.
+    ///
+    /// `notify_timezone` is DEVICE-derived (`TimeZone.current.identifier`) but the preference
+    /// blob is ACCOUNT-scoped, so applying the server's value means the last device to sync
+    /// dictates the zone for all of them — a user with a phone in London and an iPad in New
+    /// York gets quiet hours and the daily-cap roll evaluated in whichever one synced last,
+    /// on both. Sending it and refusing to apply it makes the rule "the device you are
+    /// actually using wins", which is the only reading that matches what the value means.
+    ///
+    /// (One account still resolves to ONE timezone server-side — `user_settings` has no
+    /// per-device row and `device_tokens` has no tz column — so this is last-launch-wins, not
+    /// per-device. That is a schema limit, recorded here so it is a decision and not a bug.)
+    static let applyExcludedKeys: Set<String> = ["notify_timezone"]
+
+    /// Write the device's current timezone if it has changed, and mark it for the next push.
+    ///
+    /// Called on launch and on `NSSystemTimeZoneDidChange`. It used to be written ONLY from
+    /// `NotificationSettingsViewModel.writeQuietTimes()`, i.e. only when the user touched a
+    /// quiet-hours control — so a user who never opened that card never sent one at all, and
+    /// the backend fell back to ET for their cap roll and quiet window. A user who moved
+    /// country kept the zone they signed up in.
+    func refreshDeviceTimezone() {
+        let current = TimeZone.current.identifier
+        guard defaults.string(forKey: "notify_timezone") != current else { return }
+        defaults.set(current, forKey: "notify_timezone")
+        pendingKeys.insert("notify_timezone")
+        deferredPushPending = true
+        push()   // self-gates on auth + hydration
     }
 
     // MARK: - Blob <-> UserDefaults
@@ -575,6 +661,9 @@ final class SettingsSyncManager {
                 #endif
                 continue
             }
+
+            // Send-only: this device's own value is the correct one. See `applyExcludedKeys`.
+            if Self.applyExcludedKeys.contains(key) { continue }
 
             // `appearance_mode` is the one synced key this layer has SEMANTICS for, and a bad
             // value is silently destructive: both readers coalesce an unparseable value to

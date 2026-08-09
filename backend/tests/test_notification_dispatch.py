@@ -583,7 +583,11 @@ async def test_the_flush_re_checks_the_daily_cap(monkeypatch):
     svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
     svc.unread_counts_bulk = lambda ids: {"u1": 0}
     svc._preferences_bulk = lambda ids: {"u1": {}}
-    svc.alerts_sent_today = lambda uid, category=None: 0
+    # `_category_counts_bulk`, NOT `alerts_sent_today`: the latter has no production
+    # caller any more, so stubbing it here would leave this test controlling nothing
+    # (svc.supabase is None, so the real read fails open to 0 and the assertion below
+    # would pass for the wrong reason).
+    svc._category_counts_bulk = lambda ids, category, cutoffs: {uid: 0 for uid in ids}
     states = []
     svc.mark_state = lambda uid, key, state, **kw: states.append((state, kw.get("error")))
 
@@ -608,7 +612,11 @@ async def test_the_flush_re_checks_the_preference():
     svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
     svc.unread_counts_bulk = lambda ids: {"u1": 0}
     svc._preferences_bulk = lambda ids: {"u1": {"notify_watchlist_changes": False}}
-    svc.alerts_sent_today = lambda uid, category=None: 0
+    # `_category_counts_bulk`, NOT `alerts_sent_today`: the latter has no production
+    # caller any more, so stubbing it here would leave this test controlling nothing
+    # (svc.supabase is None, so the real read fails open to 0 and the assertion below
+    # would pass for the wrong reason).
+    svc._category_counts_bulk = lambda ids, category, cutoffs: {uid: 0 for uid in ids}
     states = []
     svc.mark_state = lambda uid, key, state, **kw: states.append((state, kw.get("error")))
 
@@ -638,8 +646,125 @@ async def test_the_flush_does_NOT_re_check_quiet_hours():
         qh.PREF_QUIET_END: "23:59",
         qh.PREF_TIMEZONE: "America/New_York",
     }}
-    svc.alerts_sent_today = lambda uid, category=None: 0
+    # `_category_counts_bulk`, NOT `alerts_sent_today`: the latter has no production
+    # caller any more, so stubbing it here would leave this test controlling nothing
+    # (svc.supabase is None, so the real read fails open to 0 and the assertion below
+    # would pass for the wrong reason).
+    svc._category_counts_bulk = lambda ids, category, cutoffs: {uid: 0 for uid in ids}
     svc.mark_state = lambda *a, **k: None
 
     stats = await svc.flush_deferred()
     assert stats["sent"] == 1, "a flushed row must not be re-deferred"
+
+
+# ── the flush charges the cap against the RIGHT clock ────────────────────────
+#
+# §11.3 names three clocks that must never be interchanged. The per-category daily cap rolls
+# at the USER's midnight (`notify_timezone`); ET is the dedup/ops clock.
+#
+# `dispatch` got this right at the claim path. `flush_deferred` did NOT: it called
+# `alerts_sent_today`, which anchors on ET midnight — directly under a comment claiming it used
+# "the user's own day boundary, not ET". For a Tokyo user the ET boundary lands at 14:00 local,
+# so alerts already sent that morning were charged to the previous day and the cap over-sent.
+# That is the "a Tokyo user's daily budget resets at 2pm" failure in this file's own docstring,
+# still live on the flush path.
+#
+# These assert the CUTOFF and the CATEGORY the counter is asked for, rather than a delivery
+# outcome, because `flush_deferred` reads `datetime.now(timezone.utc)` internally — an outcome
+# test would depend on the wall clock at the moment the suite runs.
+
+
+def _deferred_row(kind, key="k", user="u1"):
+    return {
+        "user_id": user, "dedup_key": key, "kind": kind,
+        "title": "T", "body": "B", "route": {},
+        "claimed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _flush_svc(push, rows, preferences):
+    svc = _svc(push)
+    svc._claim_due = lambda limit: rows
+    svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
+    svc.unread_counts_bulk = lambda ids: {"u1": 0}
+    svc._preferences_bulk = lambda ids: {"u1": preferences}
+    svc.mark_state = lambda *a, **k: None
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_the_flush_charges_the_cap_against_the_users_own_midnight():
+    seen = {}
+
+    def _counts(ids, category, cutoffs):
+        seen.update(cutoffs)
+        return {uid: 0 for uid in ids}
+
+    svc = _flush_svc(
+        _FakePush(),
+        [_deferred_row(KIND_TICKER_MOVE)],
+        {qh.PREF_TIMEZONE: "Asia/Tokyo"},
+    )
+    svc._category_counts_bulk = _counts
+
+    await svc.flush_deferred()
+
+    assert "u1" in seen, "the flush never asked for a per-user cutoff"
+    now = datetime.now(timezone.utc)
+    tokyo_midnight = qh.local_day_start_utc(now, TOKYO)
+    et_midnight = qh.local_day_start_utc(now, ET)
+    # Non-vacuity: if the two clocks agreed right now, this test would prove nothing.
+    assert tokyo_midnight != et_midnight, "pick a moment where the two day-starts differ"
+    assert seen["u1"] == tokyo_midnight, (
+        f"cap charged against {seen['u1']} — the user's midnight is {tokyo_midnight}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_flush_counts_each_category_separately():
+    """The budget cache was keyed on the USER alone while the value is per-CATEGORY, so a
+    second category reused the first one's count — an earnings row judged against the
+    watchlist budget."""
+    asked = []
+
+    def _counts(ids, category, cutoffs):
+        asked.append(category)
+        return {uid: 0 for uid in ids}
+
+    svc = _flush_svc(
+        _FakePush(),
+        [
+            _deferred_row(KIND_TICKER_MOVE, key="a"),        # watchlist
+            _deferred_row(KIND_EARNINGS_UPCOMING, key="b"),  # earnings
+        ],
+        {},
+    )
+    svc._category_counts_bulk = _counts
+
+    await svc.flush_deferred()
+
+    assert sorted(asked) == ["earnings", "watchlist"], (
+        f"each category needs its own count; asked for {asked}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_flush_asks_once_per_user_and_category_not_once_per_row():
+    """The cache still has to work: three watchlist rows are ONE count read, then charged
+    locally as the batch delivers."""
+    asked = []
+
+    def _counts(ids, category, cutoffs):
+        asked.append(category)
+        return {uid: 0 for uid in ids}
+
+    svc = _flush_svc(
+        _FakePush(),
+        [_deferred_row(KIND_TICKER_MOVE, key=f"k{i}") for i in range(3)],
+        {},
+    )
+    svc._category_counts_bulk = _counts
+
+    await svc.flush_deferred()
+
+    assert asked == ["watchlist"], f"one read per (user, category) expected; got {asked}"

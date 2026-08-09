@@ -166,7 +166,8 @@ struct SupportView: View {
             heading: "Subscriptions, credits and billing",
             paragraphs: [
                 "Caydex is free to use for research. AI features (report generation and Cay AI chat) consume credits. Free accounts receive a monthly credit allowance; Caydex Pro ($14.99/month) and Caydex Max ($39.99/month) are optional auto-renewable subscriptions with larger monthly allowances.",
-                "Unused credits do not roll over. Your allowance resets at the start of each calendar month (US Eastern Time). If you upgrade mid-month, your allowance is raised to the new tier immediately, and credits already spent that month remain spent."
+                "Unused monthly credits do not roll over. Your monthly allowance resets at the start of each calendar month (US Eastern Time). If you upgrade mid-month, your allowance is raised to the new tier immediately, and credits already spent that month remain spent.",
+                "Credit packs are separate. Credits you buy as a one-time credit pack are held in a separate balance, do not expire, and are not reset by the monthly renewal. Your monthly allowance is spent first, so a pack is only drawn on once that month's allowance is used up."
             ]
         ),
         LegalSection(

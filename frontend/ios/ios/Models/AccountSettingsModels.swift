@@ -121,12 +121,24 @@ struct ClaimGuestDataResult: Codable, Sendable {
         /// backend deploys independently, so a rollback must not turn into a decode throw on
         /// the sign-in path.
         let researchReports: Int?
+        /// Chat sessions (migration 111). The backend has ALWAYS returned this key and this DTO
+        /// simply never declared it, so `didClaimAnything` answered false for a guest whose only
+        /// carried-over work was a Cay AI conversation. Optional for the same
+        /// independent-deploy reason as the two above.
+        let chatSessions: Int?
+        /// Guest portfolios MERGED into an account portfolio of the same name rather than
+        /// re-pointed — the "Holdings" case, which is the common one. Counted separately from
+        /// `portfolios` because the row is deleted rather than moved, so folding it into that
+        /// counter would make the log read as if a portfolio had been carried across intact.
+        let portfoliosMerged: Int?
 
         enum CodingKeys: String, CodingKey {
             case watchlistItems = "watchlist_items"
             case portfolios
             case learnProgress = "learn_progress"
             case researchReports = "research_reports"
+            case chatSessions = "chat_sessions"
+            case portfoliosMerged = "portfolios_merged"
         }
     }
 
@@ -138,7 +150,9 @@ struct ClaimGuestDataResult: Codable, Sendable {
     var didClaimAnything: Bool {
         claimed.watchlistItems > 0
             || claimed.portfolios > 0
+            || (claimed.portfoliosMerged ?? 0) > 0
             || (claimed.learnProgress ?? 0) > 0
             || (claimed.researchReports ?? 0) > 0
+            || (claimed.chatSessions ?? 0) > 0
     }
 }

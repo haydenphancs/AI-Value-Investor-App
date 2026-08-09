@@ -251,11 +251,16 @@ struct NotificationsSettingsView: View {
 
             if viewModel.quietHoursEnabled {
                 VStack(spacing: 1) {
-                    timeRow("From", selection: Binding(
+                    // `blocked` is passed through, like every Toggle on this screen. Without
+                    // it these two were the ONLY live-looking, fully interactive controls left
+                    // when iOS notifications are denied — the user could carefully set a quiet
+                    // window that cannot possibly take effect, next to rows dimmed to 0.4 for
+                    // exactly that reason.
+                    timeRow("From", blocked: blocked, selection: Binding(
                         get: { viewModel.quietStart },
                         set: { viewModel.setQuietStart($0) }
                     ))
-                    timeRow("Until", selection: Binding(
+                    timeRow("Until", blocked: blocked, selection: Binding(
                         get: { viewModel.quietEnd },
                         set: { viewModel.setQuietEnd($0) }
                     ))
@@ -287,7 +292,11 @@ struct NotificationsSettingsView: View {
     }
 
     @ViewBuilder
-    private func timeRow(_ label: String, selection: Binding<Date>) -> some View {
+    private func timeRow(
+        _ label: String,
+        blocked: Bool,
+        selection: Binding<Date>
+    ) -> some View {
         HStack {
             Text(label)
                 .font(AppTypography.body)
@@ -300,6 +309,10 @@ struct NotificationsSettingsView: View {
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.sm)
         .background(AppColors.cardBackground)
+        .disabled(blocked)
+        // Dim the whole row, matching `NotificationToggleRow`. Never by swapping a fill:
+        // that hides the site from the theme greps and can invert the ink.
+        .opacity(blocked ? 0.4 : 1)
     }
 
     // MARK: - Footer

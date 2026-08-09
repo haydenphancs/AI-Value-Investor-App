@@ -48,7 +48,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -650,7 +650,19 @@ class PushDispatchService:
     # ── how many already ─────────────────────────────────────────────
 
     def alerts_sent_today(self, user_id: str, category: Optional[str] = None) -> int:
-        """How many alerts this user has already received today (single-user read).
+        """How many alerts this user has already received today, anchored on **ET midnight**.
+
+        ⚠️ DO NOT USE THIS FOR A CAP DECISION. Use `_category_counts_bulk` with cutoffs from
+        `quiet_hours.local_day_start_utc`. The per-category daily cap rolls at the USER's
+        midnight (`notify_timezone`), not ET — §11.3 of the system design names the three
+        clocks and this one is the RETENTION/ops clock, not the cap clock.
+
+        That distinction is not academic: `flush_deferred` called this, and for a user in
+        Asia/Tokyo the ET boundary falls at 14:00 local, so alerts they had already been sent
+        that morning were counted against the previous day and the cap silently over-delivered.
+
+        Kept as an ops/diagnostic read (and for its fail-open contract, pinned by
+        `test_a_failed_count_read_fails_open`). It has NO production caller.
 
         Counts by `sent_at`, not by parsing the dedup key: the key's shape is the
         caller's business and changes as alert kinds are added, but "when did we buzz
@@ -982,9 +994,30 @@ class PushDispatchService:
         #     the exact "ten notifications in one morning" failure the cap exists to
         #     prevent, arriving through the back door.
         preferences = await asyncio.to_thread(self._preferences_bulk, user_ids)
-        # Counted ONCE up front and incremented locally as this batch delivers, so a
-        # single flush cannot exceed the ceiling within itself.
-        charged: Dict[str, int] = {}
+        # Each user's OWN midnight, expressed in UTC — the same rule `dispatch` uses at the
+        # claim path. §11.3 of the system design names three clocks that must never be
+        # interchanged, and the cap day is the one anchored to `notify_timezone`.
+        flush_cutoffs: Dict[str, datetime] = {
+            uid: qh.local_day_start_utc(now, qh.resolve_timezone(preferences.get(uid) or {}))
+            for uid in user_ids
+        }
+        # Counted ONCE up front per (user, CATEGORY) and incremented locally as this batch
+        # delivers, so a single flush cannot exceed the ceiling within itself.
+        #
+        # ⚠️ TWO bugs lived in this counter, and both let a capped user be over-sent.
+        #
+        # 1. It called `alerts_sent_today`, which anchors on ET midnight — despite the comment
+        #    here claiming it used "the user's own day boundary, not ET". For a user in
+        #    Asia/Tokyo (UTC+9) the ET boundary lands at 14:00 local, so alerts sent between
+        #    their real midnight and 14:00 were counted against the PREVIOUS day's budget. A
+        #    quiet-hours flush at 07:00 JST saw a count of 0 for a user who had already been
+        #    sent their three, and delivered anyway.
+        # 2. It was keyed on the USER ALONE while the count it stores is per-CATEGORY. A user
+        #    with deferred rows in two categories had the first category's count reused for
+        #    the second — so an earnings row could be judged against the watchlist budget.
+        #
+        # Keyed on the pair now, and read through the timezone-aware bulk counter.
+        charged: Dict[Tuple[str, str], int] = {}
 
         for row in rows:
             uid, key = row.get("user_id"), row.get("dedup_key")
@@ -1020,17 +1053,23 @@ class PushDispatchService:
                 continue
 
             prefs = preferences.get(uid) or {}
-            if uid not in charged:
-                # The user's own day boundary, not ET — same rule the claim path uses.
-                charged[uid] = await asyncio.to_thread(
-                    self.alerts_sent_today, uid, nkind.category
+            budget_key = (uid, nkind.category)
+            if budget_key not in charged:
+                # The user's own day boundary, not ET — the same helper, and the same
+                # cutoffs, the claim path uses.
+                counts = await asyncio.to_thread(
+                    self._category_counts_bulk,
+                    [uid],
+                    nkind.category,
+                    {uid: flush_cutoffs.get(uid, now)},
                 )
+                charged[budget_key] = counts.get(uid, 0)
             recipient = _Recipient(
                 user_id=uid,
                 preferences=prefs,
                 devices=devices.get(uid, []),
                 unread=unread.get(uid, 0),
-                category_sent_today=charged[uid],
+                category_sent_today=charged[budget_key],
             )
 
             # Re-run preference + cap ONLY. Quiet hours are deliberately NOT re-checked:
@@ -1058,7 +1097,7 @@ class PushDispatchService:
                     # Charge it locally so the rest of THIS batch sees the new total.
                     # Re-reading per row would be N queries and would still race the
                     # `mark_state` write that stamps `sent_at`.
-                    charged[uid] = charged.get(uid, 0) + 1
+                    charged[budget_key] = charged.get(budget_key, 0) + 1
                 elif not recipient.devices:
                     stats["no_device"] += 1
                 else:

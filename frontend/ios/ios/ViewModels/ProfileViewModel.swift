@@ -90,10 +90,45 @@ class ProfileViewModel: BaseViewModel {
               let date = Self.parseISODate(resetsAt) else {
             return "Renews monthly"
         }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return "Resets on \(formatter.string(from: date))"
+        return "Resets on \(Self.resetDateFormatter.string(from: date))"
     }
+
+    /// `"MMM d"` for the monthly reset — pinned to a Gregorian, English locale AND to ET.
+    ///
+    /// Both halves were missing and both are wrong without them:
+    ///
+    /// * NO LOCALE means the pattern resolves against the DEVICE's calendar. On a phone set to
+    ///   Thai (Buddhist), Japanese (era) or an Islamic calendar, "MMM d" renders that calendar's
+    ///   month and day — a date the user cannot reconcile with anything else in the app, since
+    ///   every other date here is Gregorian.
+    /// * NO TIME ZONE means the UTC instant is rendered in the DEVICE's zone. The reset boundary
+    ///   is written by `ensure_credit_period` as a next-month boundary in ET, so anyone west of
+    ///   ET saw the day BEFORE the one their credits actually renew.
+    ///
+    /// `en_US_POSIX` is the fixed-format locale: it is the one guaranteed not to be re-interpreted
+    /// by a user's regional settings. Mirrors `HomeRepository`, which already does this for the
+    /// same pattern.
+    private static let resetDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = TimeZone(identifier: "America/New_York")
+        f.dateFormat = "MMM d"
+        return f
+    }()
+
+    /// `"MMM yyyy"` for "Member since". Same reasoning as `resetDateFormatter`, except the
+    /// anchor is UTC: `users.created_at` is a plain timestamptz with no business timezone
+    /// attached. Without the locale a Japanese-calendar device renders the ERA year — "Member
+    /// since 8月 8" rather than "Member since Aug 2026".
+    private static let memberSinceFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "MMM yyyy"
+        return f
+    }()
 
     /// Parse an ISO-8601 timestamp tolerant of fractional seconds (Postgres/Supabase
     /// timestamptz may or may not include them).
@@ -125,9 +160,7 @@ class ProfileViewModel: BaseViewModel {
         // seconds — a plain formatter with .withFractionalSeconds fails on whole-second
         // values this backend emits, silently degrading to "Member since 2024-03").
         if let date = Self.parseISODate(createdAt) {
-            let displayFormatter = DateFormatter()
-            displayFormatter.dateFormat = "MMM yyyy"
-            return "Member since \(displayFormatter.string(from: date))"
+            return "Member since \(Self.memberSinceFormatter.string(from: date))"
         }
         return "Member since \(createdAt.prefix(7))"
     }
@@ -140,6 +173,19 @@ class ProfileViewModel: BaseViewModel {
     /// screen shows a Sign In affordance instead of the identity/credit blocks.
     var isAuthenticated: Bool {
         appState?.auth.isAuthenticated ?? false
+    }
+
+    /// We hold a credential we could not validate yet. NOT a guest.
+    ///
+    /// `.claude/rules/auth.md` §5: `.restoring` "renders like a guest but says 'Reconnecting'
+    /// and keeps trying. Do not collapse it into `.unauthenticated`." This screen did exactly
+    /// that — it branched on `isAuthenticated`, which is `.authenticated` only — so a signed-in
+    /// user on a flaky connection was shown the word "Guest" and invited to "Sign in to sync
+    /// your account and unlock monthly credits", for an account they already have. `.restoring`
+    /// is entered on every transient network failure and every launch on a poor connection, so
+    /// this is the ordinary case, not an edge one.
+    var isRestoring: Bool {
+        appState?.auth.status == .restoring
     }
 
     // MARK: - Activity Stats
@@ -224,6 +270,11 @@ class ProfileViewModel: BaseViewModel {
         //
         // `ResearchViewModel.loadCredits()` has carried this guard since the same bug was found
         // there; Profile is the other caller and was missed.
+        //
+        // ⚠️ `.restoring` is NOT the signed-out case. We hold a credential that is healing, so
+        // clearing here would blank a balance the user can currently see — and `restoreSession`
+        // re-runs this once the token is re-armed anyway. Skip, don't wipe.
+        if isRestoring { return }
         guard appState?.auth.isAuthenticated == true else {
             appState?.user.credits = nil
             return

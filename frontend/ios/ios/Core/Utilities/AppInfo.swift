@@ -45,6 +45,29 @@ enum AppInfo {
     static var appVersion: String { Bundle.main.appVersion }
     static var buildNumber: String { Bundle.main.buildNumber }
 
+    /// The App Store's NUMERIC app id (the `id` in `apps.apple.com/app/id123456789`).
+    ///
+    /// ⚠️ PLACEHOLDER — fill this in once App Store Connect assigns the record. It is empty on
+    /// purpose rather than a fake number: `reviewURL` returns nil while it is blank, and the
+    /// "Rate the App" row falls back to `requestReview()` alone. A made-up id would deep-link
+    /// every user to somebody else's app.
+    ///
+    /// This is a NUMBER, not the bundle id. Digits only.
+    static let appStoreAppID = ""
+
+    /// Deep link to the App Store review sheet, or nil until `appStoreAppID` is set.
+    ///
+    /// Why this exists at all: `requestReview()` is rate-limited by iOS to three prompts per
+    /// 365 days and is documented as "may not display". As the ONLY behaviour behind a row the
+    /// user deliberately tapped, that makes it a dead tap for most people most of the time —
+    /// a button that silently does nothing. `SKStoreReviewController` is for moments the APP
+    /// chooses; a user asking to leave a review should be taken there.
+    static var reviewURL: URL? {
+        let id = appStoreAppID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id.allSatisfy(\.isNumber) else { return nil }
+        return URL(string: "https://apps.apple.com/app/id\(id)?action=write-review")
+    }
+
     static var osVersion: String {
         "iOS \(UIDevice.current.systemVersion)"
     }

@@ -63,9 +63,17 @@ struct NotificationInboxView: View {
             viewModel.load()
         }
         .refreshable { viewModel.load() }
-        .onChange(of: viewModel.unreadCount, initial: true) { _, count in
-            appState.unreadNotificationCount = count
-        }
+        // ⚠️ NO `.onChange(of: viewModel.unreadCount, initial: true)` here.
+        //
+        // It was a SECOND writer of `appState.unreadNotificationCount`, and `initial: true`
+        // made it publish the ViewModel's placeholder `0` on appear — BEFORE any page had
+        // loaded. Opening the inbox therefore cleared the tab badge immediately, and if the
+        // load then failed (offline, 503 NOTIFICATIONS_UNAVAILABLE) it stayed cleared: the
+        // user's unread notifications were still unread, with nothing on screen saying so.
+        //
+        // The ViewModel already routes every REAL count through
+        // `AppState.notificationUnreadDidChange(_:)` (load, next page, mark-read, mark-all),
+        // which `iosApp` observes. One writer, and it only ever fires on data that exists.
         // One tap opens one screen: the route is cleared by the presentation, matching
         // how the push deep-link chain consumes `pendingPushRoute`.
         .fullScreenCover(item: Binding(

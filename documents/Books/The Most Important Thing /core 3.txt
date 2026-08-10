@@ -15,4 +15,4 @@ The Action Plan
 
 Force the Fundamental View: When looking at an asset's chart, ignore purely speculative technical indicators. Instead, enable permitted overlays like Historical P/E Ratios or "Fair Value" Corridors to see if the current price has completely severed ties with historical reality.
 
-Interrogate the AI: Open the Wiser tab, which serves as your education hub. Use the interactive chat functionality to ask the Caudex agent directly: "Is this company's current valuation justified by its historical cash flow?". Force the system to strip away the narrative.
+Interrogate the AI: Open the Wiser tab, which serves as your education hub. Use the interactive chat functionality to ask the Caydex agent directly: "Is this company's current valuation justified by its historical cash flow?". Force the system to strip away the narrative.

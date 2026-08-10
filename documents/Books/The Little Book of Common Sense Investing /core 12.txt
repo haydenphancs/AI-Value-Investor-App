@@ -19,7 +19,7 @@ These digital advisors are even more dangerous because they are unregulated and 
 On the flip side, we now have "Robo-Advisors" and AI. The modern solution isn't necessarily a human; it is often a piece of software. An AI doesn't panic. It doesn't have an ego. It doesn't need to "churn" your account to prove it's working. Your own pocket device can now run the same "Deep Research" that a junior analyst at Goldman Sachs used to do. The democratization of data means the "information edge" your advisor claimed to have is gone.
 
 Action Plan:
-The "Second Opinion" Protocol (Deep Research): Next time your advisor (or a YouTube guru) pitches a stock, don't just nod. Open your Research tab and run a report using the Warren Buffett Persona. The Instruction: Compare the AI report's unbiased "Cons" list with the advisor's pitch. If the advisor glossed over the risks that the AI found in seconds, you know that Caudex has your back.
+The "Second Opinion" Protocol (Deep Research): Next time your advisor (or a YouTube guru) pitches a stock, don't just nod. Open your Research tab and run a report using the Warren Buffett Persona. The Instruction: Compare the AI report's unbiased "Cons" list with the advisor's pitch. If the advisor glossed over the risks that the AI found in seconds, you know that Caydex has your back.
 
 The "Jargon" Detector:
 If an advisor suggests a complex product like an "Indexed Annuity" or a "Structured Note," open the Chat Tab. The Instruction: Type: "Explain the fees and downside caps of [Product Name] like I'm 12." The AI will strip away the sales language. If the product sounds like a trap after the translation, be careful!

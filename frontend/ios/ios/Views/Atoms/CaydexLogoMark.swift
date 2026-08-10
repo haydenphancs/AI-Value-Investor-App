@@ -31,9 +31,17 @@ import SwiftUI
 struct CaydexLogoMark: View {
     let size: CGFloat
 
-    /// Apple's superellipse icon ratio. 36pt → 8pt, matching the header's
-    /// previous hand-tuned value, and it stays proportional as the mark scales.
-    private var cornerRadius: CGFloat { size * 0.2237 }
+    /// Apple's superellipse icon ratio, as a fraction of the side.
+    ///
+    /// Shared rather than private because the header's profile avatar sits directly
+    /// opposite this mark and is deliberately cut to the SAME silhouette — two
+    /// hand-typed `0.2237`s in different files is exactly the drift this atom was
+    /// created to stop.
+    static let iconCornerRatio: CGFloat = 0.2237
+
+    /// 36pt → 8pt, matching the header's previous hand-tuned value, and it stays
+    /// proportional as the mark scales.
+    private var cornerRadius: CGFloat { size * Self.iconCornerRatio }
 
     init(size: CGFloat) {
         self.size = size

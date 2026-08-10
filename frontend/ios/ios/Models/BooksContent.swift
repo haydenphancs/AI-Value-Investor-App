@@ -1541,7 +1541,7 @@ extension CoreChapterContent {
                         content: .actionPlan([
                             ActionStep(
                                 title: "Establish Your \"Enough\"",
-                                description: "Navigate to the Wiser tab, use the AI chat to document what \"enough\" looks like for your actual life—not your internet persona. Let Caudex AI help you visualize your future and write down the specific lifestyle you are trying to fund. Once your system is engineered to hit that specific target, the noise of other people's money becomes entirely irrelevant.",
+                                description: "Navigate to the Wiser tab, use the AI chat to document what \"enough\" looks like for your actual life—not your internet persona. Let Caydex AI help you visualize your future and write down the specific lifestyle you are trying to fund. Once your system is engineered to hit that specific target, the noise of other people's money becomes entirely irrelevant.",
                                 isCompleted: false
                             ),
                         ])
@@ -2125,7 +2125,7 @@ extension CoreChapterContent {
                             ),
                             ActionStep(
                                 title: "Chat with the Cold Truth",
-                                description: "When an internet guru promises a revolutionary new paradigm that \"changes the rules of investing,\" open the Wiser tab to chat with Caudex AI, with a simple question: \"Has this kind of market narrative happened before, and how does it usually end?\". Let the vector-stored logic of history throw cold water on the hot mirage.",
+                                description: "When an internet guru promises a revolutionary new paradigm that \"changes the rules of investing,\" open the Wiser tab to chat with Caydex AI, with a simple question: \"Has this kind of market narrative happened before, and how does it usually end?\". Let the vector-stored logic of history throw cold water on the hot mirage.",
                                 isCompleted: false
                             ),
                         ])
@@ -4390,7 +4390,7 @@ extension CoreChapterContent {
                         content: .actionPlan([
                             ActionStep(
                                 title: "The \"Second Opinion\" Protocol (Deep Research)",
-                                description: "Next time your advisor (or a YouTube guru) pitches a stock, don't just nod. Open your Research tab and run a report using the Warren Buffett Persona. The Instruction: Compare the AI report's unbiased \"Cons\" list with the advisor's pitch. If the advisor glossed over the risks that the AI found in seconds, you know that Caudex has your back.",
+                                description: "Next time your advisor (or a YouTube guru) pitches a stock, don't just nod. Open your Research tab and run a report using the Warren Buffett Persona. The Instruction: Compare the AI report's unbiased \"Cons\" list with the advisor's pitch. If the advisor glossed over the risks that the AI found in seconds, you know that Caydex has your back.",
                                 isCompleted: false
                             ),
                         ])
@@ -5710,7 +5710,7 @@ extension CoreChapterContent {
                         content: .actionPlan([
                             ActionStep(
                                 title: "Document the Tantrum",
-                                description: "The next time a world-class asset on your watchlist drops 10% in a week, open the your note. Write down the exact news headline that triggered the panic. Then, ask Caudex AI one question: \"Did this event permanently damage the cash-generating power of the business, or is Mr. Market just having a bad day?\" If it is merely a mood swing, you have found your target.",
+                                description: "The next time a world-class asset on your watchlist drops 10% in a week, open the your note. Write down the exact news headline that triggered the panic. Then, ask Caydex AI one question: \"Did this event permanently damage the cash-generating power of the business, or is Mr. Market just having a bad day?\" If it is merely a mood swing, you have found your target.",
                                 isCompleted: false
                             ),
                         ])
@@ -6173,7 +6173,7 @@ extension CoreChapterContent {
                             ),
                             ActionStep(
                                 title: "Interrogate the AI",
-                                description: "Open the Wiser tab, which serves as your education hub. Use the interactive chat functionality to ask the Caudex agent directly: \"Is this company's current valuation justified by its historical cash flow?\". Force the system to strip away the narrative.",
+                                description: "Open the Wiser tab, which serves as your education hub. Use the interactive chat functionality to ask the Caydex agent directly: \"Is this company's current valuation justified by its historical cash flow?\". Force the system to strip away the narrative.",
                                 isCompleted: false
                             ),
                         ])
@@ -6512,7 +6512,7 @@ extension CoreChapterContent {
                         content: .actionPlan([
                             ActionStep(
                                 title: "The \"Devil’s Advocate\" Prompt",
-                                description: "Whenever you feel absolute certainty that a popular stock is a guaranteed winner, open your Chat with Caudex. The Instruction: Type exactly this: \"Give me the most brutal, pessimistic bear case for [Ticker]. Tell me exactly how and why this company will fail.\" Force the AI to aggressively disagree with your optimism before you make a decision.",
+                                description: "Whenever you feel absolute certainty that a popular stock is a guaranteed winner, open your Chat with Caydex. The Instruction: Type exactly this: \"Give me the most brutal, pessimistic bear case for [Ticker]. Tell me exactly how and why this company will fail.\" Force the AI to aggressively disagree with your optimism before you make a decision.",
                                 isCompleted: false
                             ),
                         ])
@@ -6905,7 +6905,7 @@ extension CoreChapterContent {
                         content: .actionPlan([
                             ActionStep(
                                 title: "The \"Infrastructure\" Check",
-                                description: "Open your Chat tab and ask Caudex to identify the \"unsexy\" infrastructure providers for any hyped sector on your watchlist. Focus on companies that provide the power, land, or basic protocols required for that industry to function, ensuring your floor is supported by physical necessity rather than just sentiment.",
+                                description: "Open your Chat tab and ask Caydex to identify the \"unsexy\" infrastructure providers for any hyped sector on your watchlist. Focus on companies that provide the power, land, or basic protocols required for that industry to function, ensuring your floor is supported by physical necessity rather than just sentiment.",
                                 isCompleted: false
                             ),
                         ])

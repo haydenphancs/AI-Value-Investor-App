@@ -264,3 +264,126 @@ def test_the_mask_is_not_a_plausible_ticker():
     masked = _mask_symbol("HONA")
     assert not masked.isalnum()
     assert masked.strip(_MASK_CHAR) == ""
+
+
+# ── the wiring: tier actually reaches the redactor through get_dashboard ─────
+#
+# The unit tests above prove the gate and the redactor in isolation. These prove the
+# one thing neither can: that `GET /home/dashboard` threads the caller's tier all the way
+# down. A correct redactor that nothing calls is the failure mode worth a test.
+
+def _prime_signals_cache():
+    """Seat a known signals payload in the SHARED class-level cache and neutralise the
+    other four dashboard branches, so get_dashboard() resolves entirely from cache."""
+    from app.schemas.home_dashboard import ScannerGroupsResponse, ThemesGroupResponse
+    from app.services.home_dashboard_service import (
+        HomeDashboardService,
+        _SCANNER_CACHE_KEY,
+        _THEMES_CACHE_KEY,
+    )
+    from app.services.signals_service import SignalsService, _SIGNALS_CACHE_KEY
+    import time as _time
+
+    now = _time.time()
+    SignalsService._cache.clear()
+    SignalsService._inflight.clear()
+    SignalsService._cache[_SIGNALS_CACHE_KEY] = (now, _groups())
+
+    HomeDashboardService._cache.clear()
+    HomeDashboardService._inflight.clear()
+    HomeDashboardService._scanner_cache.clear()
+    HomeDashboardService._scanner_cache[_SCANNER_CACHE_KEY] = (now, ScannerGroupsResponse())
+    HomeDashboardService._themes_inflight.clear()
+    HomeDashboardService._themes_cache.clear()
+    HomeDashboardService._themes_cache[_THEMES_CACHE_KEY] = (now, ThemesGroupResponse())
+
+
+class _NoQuotesFMP:
+    """Pulse/watchlist need an FMP client; neither is under test here."""
+
+    async def get_quote(self, *_a, **_k):
+        return None
+
+    async def get_intraday_prices(self, *_a, **_k):
+        return []
+
+    async def get_historical_prices(self, *_a, **_k):
+        return []
+
+    async def get_batch_quotes(self, *_a, **_k):
+        return []
+
+
+def _service():
+    from app.services.home_dashboard_service import HomeDashboardService
+
+    _prime_signals_cache()
+    svc = HomeDashboardService()
+    svc.fmp = _NoQuotesFMP()  # type: ignore[assignment]
+    return svc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tier", ["free", None, "guest-nonsense"])
+async def test_get_dashboard_locks_signals_for_a_free_caller(tier):
+    resp = await _service().get_dashboard(tier=tier)
+    assert resp.signals.congress.is_locked is True
+    assert resp.signals.congress.tier_required == "pro"
+    assert "HONA" not in resp.model_dump_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tier", ["pro", "premium"])
+async def test_get_dashboard_serves_paid_callers_in_full(tier):
+    resp = await _service().get_dashboard(tier=tier)
+    assert resp.signals.congress.is_locked is False
+    assert len(resp.signals.congress.entries) == 10
+    assert resp.signals.congress.entries[0].symbol == "HONA"
+
+
+@pytest.mark.asyncio
+async def test_a_free_request_does_not_poison_the_cache_for_the_next_paid_one():
+    """The end-to-end form of the non-mutation guard, through the real call path: the
+    ORDER of two requests against one shared cache entry must not matter."""
+    svc = _service()
+    await svc.get_dashboard(tier="free")
+    after = await svc.get_dashboard(tier="pro")
+
+    assert after.signals.congress.entries[0].symbol == "HONA"
+    assert len(after.signals.congress.entries) == 10
+    assert after.signals.congress.is_locked is False
+
+
+@pytest.mark.asyncio
+async def test_omitting_tier_defaults_to_locked():
+    """`get_dashboard()` has a defaulted `tier`, so a call site that forgets to pass it
+    must withhold rather than hand the paid surface to everyone."""
+    resp = await _service().get_dashboard()
+    assert resp.signals.congress.is_locked is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "identity,expect_locked",
+    [
+        # A per-install guest, exactly as get_watchlist_identity builds one.
+        ({"id": "guest-uuid", "email": "guest@local", "tier": "free", "is_guest": True}, True),
+        ({"id": "u1", "email": "a@b.c", "tier": "pro", "is_guest": False}, False),
+        ({"id": "u2", "email": "a@b.c", "tier": "premium", "is_guest": False}, False),
+        # A degraded identity dict with no tier key at all must lock, not fall open.
+        ({"id": "u3", "email": "a@b.c"}, True),
+    ],
+)
+async def test_the_endpoint_reads_the_tier_off_the_identity(identity, expect_locked, monkeypatch):
+    """The single line `tier=user.get("tier")` in the endpoint. A correct gate that the
+    HTTP layer never feeds is the failure this pins — and it is invisible in a unit test
+    of the service, which is handed the tier directly."""
+    from app.api.v1.endpoints import home as home_endpoint
+
+    svc = _service()
+    monkeypatch.setattr(home_endpoint, "get_home_dashboard_service", lambda: svc)
+
+    resp = await home_endpoint.get_home_dashboard(user=identity)
+
+    assert resp.signals.congress.is_locked is expect_locked
+    assert ("HONA" in resp.model_dump_json()) is not expect_locked

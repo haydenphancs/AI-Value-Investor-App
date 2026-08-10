@@ -477,7 +477,7 @@ struct WhaleTradesTimelineSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Section Header with "more" button
+            // Section Header with "See All" button
             HStack {
                 Text("Recent Trades")
                     .font(AppTypography.heading)
@@ -488,7 +488,7 @@ struct WhaleTradesTimelineSection: View {
                 Button {
                     onMoreTapped?()
                 } label: {
-                    Text("more")
+                    Text("See All")
                         .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }
@@ -663,7 +663,7 @@ struct MostPopularWhalesSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Header with "more" button
+            // Header with "See All" button
             HStack {
                 Text("Most Popular")
                     .font(AppTypography.heading)
@@ -674,7 +674,7 @@ struct MostPopularWhalesSection: View {
                 Button {
                     onMoreTapped?()
                 } label: {
-                    Text("more")
+                    Text("See All")
                         .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.primaryBlue)
                 }

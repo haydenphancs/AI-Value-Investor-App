@@ -53,9 +53,16 @@ struct GlobalHeaderView: View {
 
 // MARK: - Profile Avatar View
 /// Loads the user's external avatar URL. Falls back to a default silhouette icon.
+///
+/// Cut to a ROUNDED SQUARE, not a circle: in both headers this sits directly across
+/// from `CaydexLogoMark`, and a circle opposite the icon-shaped logo read as two
+/// unrelated marks. It shares the logo's `iconCornerRatio` so the pair keeps one
+/// silhouette at every size.
 struct ProfileAvatarView: View {
     let avatarUrl: String?
     var size: CGFloat = 36
+
+    private var cornerRadius: CGFloat { size * CaydexLogoMark.iconCornerRatio }
 
     var body: some View {
         if let urlString = avatarUrl, let url = URL(string: urlString) {
@@ -66,7 +73,9 @@ struct ProfileAvatarView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: size, height: size)
-                        .clipShape(Circle())
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        )
                 case .failure:
                     fallbackAvatar
                 case .empty:
@@ -80,8 +89,10 @@ struct ProfileAvatarView: View {
         }
     }
 
+    /// Squared to match — `person.crop.circle.fill` would put a circle back on screen
+    /// for every signed-out or image-less user, which is most of them.
     private var fallbackAvatar: some View {
-        Image(systemName: "person.crop.circle.fill")
+        Image(systemName: "person.crop.square.fill")
             .font(.system(size: size))
             .foregroundColor(AppColors.primaryBlue)
     }

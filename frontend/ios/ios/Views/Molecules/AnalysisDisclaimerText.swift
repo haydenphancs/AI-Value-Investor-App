@@ -63,6 +63,22 @@ extension AnalysisDisclaimerText {
             text: "Model estimate under assumptions · not a price target"
         )
     }
+
+    /// For the Book Guides.
+    ///
+    /// Short on purpose: the screen already shows the real title, author and author bio directly
+    /// above this, so the line only has to say the guide is OUR writing rather than the book or an
+    /// authorised edition. It replaced five sentences that also repeated the title and author.
+    ///
+    /// The fuller claims — non-affiliation, whose rights the book is, and that the narration is a
+    /// synthetic voice rather than the author's — live in the "Book Guides" card of
+    /// `DisclaimersView`, which the "Details" link opens. Keep the two in step: this line is the
+    /// summary, that card is the disclosure.
+    static var book: AnalysisDisclaimerText {
+        AnalysisDisclaimerText(
+            text: "Caydex's own study guide · not the book itself"
+        )
+    }
 }
 
 #Preview {
@@ -75,6 +91,7 @@ extension AnalysisDisclaimerText {
             AnalysisDisclaimerText.rating
             AnalysisDisclaimerText.fairValue
             AnalysisDisclaimerText.aiGenerated
+            AnalysisDisclaimerText.book
         }
         .padding()
     }

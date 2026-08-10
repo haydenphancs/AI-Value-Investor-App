@@ -13,6 +13,22 @@ import Combine
 class WhaleService: ObservableObject {
     static let shared = WhaleService()
 
+    /// Posted once the SERVER has confirmed a follow/unfollow — never on the optimistic
+    /// mutation, and that distinction is the whole point of this notification existing.
+    ///
+    /// Consumers here re-fetch a per-user, server-derived feed (`GET /whales/activity`,
+    /// filtered by `whale_follows`). `toggleFollow` returns before its POST is even sent,
+    /// so firing on the optimistic change would let that GET overtake the INSERT: the
+    /// response would still be missing the new whale, and it would land in the backend's
+    /// 10-minute per-user activity cache AFTER `toggle_follow` cleared it — pinning the
+    /// pre-follow feed for ten minutes. Posting from inside the request task is what makes
+    /// the refresh strictly ordered behind the write.
+    ///
+    /// Distinct from `.whaleFollowStateChanged`, which is optimistic, is posted only by
+    /// `WhaleProfileViewModel` (so it misses the Tracking tab and AllWhalesView entirely),
+    /// and carries a payload used to SYNTHESISE a whale row. Different job — don't merge.
+    static let followsDidChangeNotification = Notification.Name("WhaleService.followsDidChange")
+
     // Published set of followed whale IDs
     @Published private(set) var followedWhaleIds: Set<String> = []
 
@@ -102,6 +118,16 @@ class WhaleService: ObservableObject {
                     self.followedWhaleIds.remove(whaleId)
                 }
                 self.saveFollowedWhales()
+
+                // The write has landed and the backend has dropped its activity cache, so
+                // anything derived from the follow SET server-side can now safely re-fetch.
+                // Success branch only: the catch below reverts to the pre-tap state, so
+                // there is no server-side change to go and read.
+                NotificationCenter.default.post(
+                    name: Self.followsDidChangeNotification,
+                    object: nil,
+                    userInfo: ["whaleId": whaleId, "isFollowing": response.isFollowing]
+                )
             } catch {
                 // Revert, and TELL THE USER. The revert was always correct; the silence was the
                 // bug — a `print` in a release build is indistinguishable from the app deciding

@@ -933,12 +933,8 @@ enum APIEndpoint: Sendable {
         case .getUpdatesFeed, .enrichUpdatesNews:
             return .public
 
-        // Whale trade groups take no auth dependency (the list/profile do — see below).
-        case .getWhaleTradeGroups, .getWhaleTradeGroupDetail:
-            return .public
-
-        // Home signal + theme detail are public market data.
-        case .getSignalDetail, .getThemeDetail:
+        // Theme detail is public market data.
+        case .getThemeDetail:
             return .public
 
         // Learn CONTENT is public; Learn PROGRESS is per-identity (see below).
@@ -988,7 +984,15 @@ enum APIEndpoint: Sendable {
         case .getUpdatesTabs, .getHomeFeed, .getHomeDashboard:
             return .guestAllowed
 
-        case .getWhaleList, .getWhaleProfile:
+        // Whales resolve a signed-out caller through `get_watchlist_identity`, so they are
+        // guest-capable — but they are TIER-gated on top of that, which is a different axis:
+        // the roster and the profile header always render, while the paid sections come back
+        // redacted. Trade groups and the signal drill-down moved off `.public` when that gate
+        // landed; they now take the same identity because they serve the same paid data the
+        // profile withholds, and leaving them open made that redaction a curtain, not a gate.
+        case .getWhaleList, .getWhaleProfile,
+             .getWhaleTradeGroups, .getWhaleTradeGroupDetail,
+             .getSignalDetail:
             return .guestAllowed
 
         // ── Sign-in required: the backend uses strict `get_current_user(_id)` ────────────

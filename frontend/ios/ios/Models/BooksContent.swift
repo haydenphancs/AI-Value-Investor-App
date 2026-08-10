@@ -2120,7 +2120,7 @@ extension CoreChapterContent {
                         content: .actionPlan([
                             ActionStep(
                                 title: "Interrogate the Valuation",
-                                description: "Whenever you feel yourself falling in love with a company's narrative, open the Research tab and generate a Deep Research Report. Don't just at the executive summary. Scroll aggressively past the pros and force yourself to read the Valuation Analysis and the cons list first. If the AI flags the stock as severely \"Overvalued\" with a negative margin of safety, and the risk is too high. Think again!",
+                                description: "Whenever you feel yourself falling in love with a company's narrative, open the Research tab and generate a Deep Research Report. Don't stop at the executive summary. Scroll aggressively past the pros and force yourself to read the Valuation Analysis and the cons list first. If the AI flags the stock as severely \"Overvalued\" with a negative margin of safety, the risk is too high. Think again!",
                                 isCompleted: false
                             ),
                             ActionStep(
@@ -2131,7 +2131,7 @@ extension CoreChapterContent {
                         ])
                     )
                 ],
-                audioDurationSeconds: 289,
+                audioDurationSeconds: 288,
                 currentProgress: 0.0
             ),
             12: CoreChapterContent(

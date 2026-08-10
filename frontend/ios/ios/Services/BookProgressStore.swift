@@ -26,6 +26,23 @@ final class BookProgressStore: ObservableObject {
     /// "order-core" keys for every core the learner has completed.
     @Published private(set) var completed: Set<String> = []
 
+    /// Fires with a book's `curriculumOrder` at the instant a completion fills in that book's LAST
+    /// missing core — the "you finished the whole book" moment.
+    ///
+    /// It lives HERE, on the single write funnel, rather than as a was-it-complete-before /
+    /// is-it-complete-now check at a call site, for two reasons:
+    ///
+    ///  • **It cannot lose a race.** `markListenedThrough` is driven on EVERY audio tick by BOTH
+    ///    `BookDetailView` and `BookCoreDetailView` when they are on screen together (see its own
+    ///    doc below), in an order SwiftUI does not define. Whichever lands first does the write; a
+    ///    call-site check in the other then reads "already complete" on both sides of its own call,
+    ///    sees no transition, and the celebration silently never appears — intermittently, so it
+    ///    would pass a hand test about half the time.
+    ///  • **It cannot fire dishonestly.** `merge()` — the hydrate / push-response path — writes to
+    ///    `completed` WITHOUT going through `markCompleted`, so progress arriving from another
+    ///    device can never raise this. Only something the learner just did can.
+    let didFinishBook = PassthroughSubject<Int, Never>()
+
     /// Per-key count of failed pushes. Reconcile batches are ordered by it so a key the server
     /// keeps rejecting sinks to the back: with a backlog larger than `maxReconcilePushes` a
     /// poison prefix would otherwise take the same slots in every batch and strand everything
@@ -76,11 +93,24 @@ final class BookProgressStore: ObservableObject {
     // MARK: - Writes
 
     /// Record a finished core. Idempotent; persists locally and pushes to the backend.
-    func markCompleted(order: Int, core: Int) {
+    ///
+    /// `bookCores` is the full roster of core numbers in this book, and it is what makes
+    /// `didFinishBook` honest. It is checked with `allSatisfy`, NOT against `completedCount` —
+    /// which makes it strictly stronger than `isMastered` above, whose `>=` on a key count would
+    /// call a book finished if a stale key for a core the book no longer has padded the total.
+    /// Pass `[]` only where the caller genuinely has no roster; that just suppresses the event.
+    func markCompleted(order: Int, core: Int, bookCores: [Int]) {
         let k = key(order, core)
         guard !completed.contains(k) else { return }
         completed.insert(k)
         persistLocal()
+        // One-shot by construction: the guard above early-returns on a key we already hold, so once
+        // the roster is satisfied no later write for this book can reach this line again. That also
+        // covers `markListenedThrough`'s loop — if one tick crosses two boundaries, only the write
+        // that fills the last hole satisfies `allSatisfy`.
+        if !bookCores.isEmpty, bookCores.allSatisfy({ isCompleted(order: order, core: $0) }) {
+            didFinishBook.send(order)
+        }
         Task { await self.pushCompletion(k) }
     }
 
@@ -102,10 +132,15 @@ final class BookProgressStore: ObservableObject {
     /// Called every tick by BOTH `BookDetailView` and `BookCoreDetailView` when they are on screen
     /// together. That is harmless: the first call does the work and the second sees a sample that
     /// no longer continues `lastSample`, so it no-ops (and completion is idempotent regardless).
+    ///
+    /// `bookCores` is forwarded to `markCompleted` so a book finished BY LISTENING raises
+    /// `didFinishBook` too. It is deliberately required rather than defaulted: this method has
+    /// exactly two call sites and they are the two racing writers, so a default would let one of
+    /// them silently stop reporting the finish.
     @discardableResult
     func markListenedThrough(order: Int, from: Double, to: Double,
                              coreStarts: [Int: Int], totalSeconds: Int,
-                             seekEpoch: UInt64) -> [Int] {
+                             seekEpoch: UInt64, bookCores: [Int]) -> [Int] {
         let previous = lastSample
         lastSample = (order, to, seekEpoch)
 
@@ -140,7 +175,7 @@ final class BookProgressStore: ObservableObject {
             let trigger = isLast ? Double(totalSeconds) - 0.6
                                  : Double(coreStarts[ordered[i + 1]] ?? totalSeconds)
             if from < trigger, trigger <= to, !isCompleted(order: order, core: core) {
-                markCompleted(order: order, core: core)
+                markCompleted(order: order, core: core, bookCores: bookCores)
                 newly.append(core)
             }
         }

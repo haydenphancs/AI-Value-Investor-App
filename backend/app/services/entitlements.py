@@ -79,6 +79,38 @@ UPDATES_TICKER_LIMITS = {
 # underlying holder data remains free on every ticker's own Holders tab.
 SIGNALS_UNLOCKED_TIERS = frozenset({TIER_PRO, TIER_MAX})
 
+# ── Whales: how many investors an account may TRACK ──────────────────────────────────
+#
+# ``None`` means unlimited (Max). A dict lookup that can legitimately return None is why
+# this is NOT modelled on UPDATES_TICKER_LIMITS' plain-int table — callers must branch on
+# None rather than compare against a sentinel like -1, which reads as a real limit.
+#
+# Browsing is deliberately NOT limited: all 53 whales stay listed, searchable and openable
+# on every tier. What Free gets is one TRACKED whale, and the roster keeps demonstrating
+# what tracking would do — the same 5.1.1(v) posture as the two gates above.
+WHALE_FOLLOW_LIMITS = {
+    TIER_FREE: 1,
+    TIER_PRO: 10,
+    TIER_MAX: None,
+}
+
+# Free's single slot is PRE-ASSIGNED rather than user-chosen, so every free account sees
+# the same worked example and the marketing copy can name it. Matched case-insensitively
+# against `whales.name`; resolution to a uuid lives in whale_service (this module stays
+# I/O-free), which is why changing the free whale is a one-line edit with no migration.
+FREE_TIER_WHALE_NAME = "Bill Gates"
+
+# ── Whales: which profile sections are paid ──────────────────────────────────────────
+#
+# Same floor as signals, and deliberately the same frozenset so the two cannot drift into
+# "Pro unlocks signals but only Max unlocks whales".
+#
+# FREE keeps: header, bio, risk badge, portfolio stats, and Sector Exposure — enough to
+# judge an investor and to see the shape of their book.
+# PAID:       Current Picks (holdings + behaviour summary), Recent Trades (trade groups and
+#             their drill-down), and the AI Sentiment Summary — the position-level detail.
+WHALE_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
+
 
 def normalize_tier(tier: Optional[str]) -> str:
     """Pure: map any incoming tier value onto a known key, defaulting to the least privileged."""
@@ -126,6 +158,44 @@ def required_tier_for_signals(tier: Optional[str]) -> Optional[str]:
     server enforced.
     """
     return None if signals_unlocked(tier) else TIER_PRO
+
+
+def whale_follow_limit(tier: Optional[str]) -> Optional[int]:
+    """Pure: how many whales this tier may track. ``None`` means unlimited.
+
+    Callers MUST branch on None rather than comparing it — ``count >= None`` raises, and a
+    sentinel int would eventually be enforced as a real cap on the tier that has none.
+    """
+    return WHALE_FOLLOW_LIMITS[normalize_tier(tier)]
+
+
+def whale_detail_unlocked(tier: Optional[str]) -> bool:
+    """Pure: may this tier see a whale's holdings, trade groups and sentiment summary?
+
+    False for Free, for guests (whose identity dict hardcodes ``"free"``), and for anything
+    unrecognised — the unknown case must fall CLOSED onto the paid surface.
+    """
+    return normalize_tier(tier) in WHALE_DETAIL_UNLOCKED_TIERS
+
+
+def required_tier_for_whales(tier: Optional[str]) -> Optional[str]:
+    """Pure: the plan that unlocks whale detail + more follows, or None if already unlocked.
+
+    A floor (always Pro), not a ladder walk: Pro already unlocks every gated section, so
+    walking one rung would upsell Max to a Pro user who is not locked out of anything.
+    """
+    return None if whale_detail_unlocked(tier) else TIER_PRO
+
+
+def is_free_tier_whale(name: Optional[str]) -> bool:
+    """Pure: is this the one whale a Free account may track?
+
+    Case- and whitespace-insensitive because the comparison is against a display name that
+    reaches us from a JSON registry and a Postgres column, not an id.
+    """
+    if not isinstance(name, str):
+        return False
+    return name.strip().casefold() == FREE_TIER_WHALE_NAME.casefold()
 
 
 def select_visible_tickers(tickers: Iterable[str], limit: int) -> List[str]:

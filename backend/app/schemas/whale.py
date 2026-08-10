@@ -39,6 +39,13 @@ class TrendingWhaleResponse(BaseModel):
     # the name (one merged profile per 13F filer since migration 080).
     firm_name: Optional[str] = None
 
+    # ── Tier gate (services/entitlements.whale_follow_limit) ─────────
+    # True when THIS caller may not track THIS whale: a Free account outside its
+    # single free slot, or a Pro account already at 10. The row still renders in
+    # full — only the Follow button locks — because the roster is the feature's
+    # own demo. Defaulted so an already-shipped client decodes this unchanged.
+    is_locked: bool = False
+
 
 # ── Whale profile sub-models ────────────────────────────────────────
 
@@ -161,6 +168,23 @@ class WhaleProfileResponse(BaseModel):
     # filers, who report on a monthly cadence and have no 13F quarter.
     portfolio_as_of: Optional[str] = None
     filing_date: Optional[str] = None
+
+    # ── Tier gate (services/entitlements.whale_detail_unlocked) ──────
+    #
+    # When `is_locked`, the POSITION-LEVEL detail has been withheld server-side:
+    # `current_holdings`, `recent_trade_groups`, `recent_trades` come back empty,
+    # `sentiment_summary` blank and `behavior_summary` neutral. Everything a
+    # reader needs to judge the investor stays — header, bio, risk profile, the
+    # stat tiles, and `sector_exposure` — so the profile is a real preview rather
+    # than a wall.
+    #
+    # Defaulted for the same two reasons the provenance block above is: cached
+    # profile JSON predating this field replays through the same model, and iOS
+    # must not treat an absent key as fatal.
+    is_locked: bool = False
+    # "pro" when locked — the plan the server enforced, so the paywall never
+    # carries a second copy of the tier ladder.
+    tier_required: Optional[str] = None
 
 
 # ── Activity feed ────────────────────────────────────────────────────

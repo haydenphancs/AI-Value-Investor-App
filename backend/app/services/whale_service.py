@@ -41,6 +41,16 @@ from app.services._whale_common import (
     RETURN_INSUFFICIENT,
     RETURN_UNAVAILABLE,
 )
+from app.services.entitlements import (
+    FREE_TIER_WHALE_NAME,
+    TIER_FREE,
+    TIER_PRO,
+    is_free_tier_whale,
+    normalize_tier,
+    required_tier_for_whales,
+    whale_detail_unlocked,
+    whale_follow_limit,
+)
 from app.schemas.whale import (
     TrendingWhaleResponse,
     WhaleProfileResponse,
@@ -309,6 +319,153 @@ def _cache_set(cache: Dict, key: str, value: Any) -> None:
             cache.pop(_old, None)
 
 
+# ── Tier redaction (Whales are Pro/Max — entitlements.whale_detail_unlocked) ─────────
+
+# Resolved once per process from `whales.name`. A miss is NOT cached as None: the registry
+# sync may not have run yet on a cold database, and caching that would make the free whale
+# permanently unavailable until the next deploy.
+_free_whale_id: Optional[str] = None
+
+
+def whale_detail_allowed(tier: Optional[str], whale_id: str, sb) -> bool:
+    """May this caller see the position-level detail for THIS whale?
+
+    Paid tiers: always. Free: only for the designated free whale — they get one investor in
+    full so the feature demonstrates itself end to end, rather than a feed whose every row
+    dead-ends in a paywall.
+    """
+    if whale_detail_unlocked(tier):
+        return True
+    free_id = free_tier_whale_id(sb)
+    return free_id is not None and str(whale_id) == str(free_id)
+
+
+def free_tier_whale_id(sb) -> Optional[str]:
+    """The uuid of the one whale a Free account may track, or None if unresolvable.
+
+    Kept out of `entitlements.py` on purpose — that module is pure data + pure functions,
+    and this needs a Supabase read. Returning None must make the caller fail CLOSED (no
+    whale is followable on Free) rather than open.
+    """
+    global _free_whale_id
+    if _free_whale_id is not None:
+        return _free_whale_id
+    try:
+        result = (
+            sb.table("whales")
+            .select("id,name")
+            .ilike("name", FREE_TIER_WHALE_NAME)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
+            logger.warning(
+                "Free-tier whale %r not found in the whales table — Free accounts can "
+                "follow nobody until the registry sync runs",
+                FREE_TIER_WHALE_NAME,
+            )
+            return None
+        _free_whale_id = rows[0]["id"]
+        return _free_whale_id
+    except Exception as e:
+        logger.warning(
+            "Free-tier whale lookup failed (%s: %s) — treating as unresolved",
+            type(e).__name__, e,
+        )
+        return None
+
+
+# A neutral behaviour summary for a locked profile. `behavior_summary` is the one
+# non-defaulted field on WhaleProfileResponse, so it cannot simply be dropped — and
+# blanking it is better than shipping the real one, since the strings it holds
+# ("Accumulating", "Technology") ARE the withheld position detail in prose form.
+_LOCKED_BEHAVIOR = WhaleBehaviorSummaryResponse(
+    action="", primary_focus="", secondary_action="", secondary_focus=""
+)
+
+
+class WhaleFollowLockedException(Exception):
+    """The caller's plan does not allow tracking this whale.
+
+    Carries the numbers so the endpoint can put them in `details` — the error copy stays
+    number-free so the limit lives in exactly one place (`WHALE_FOLLOW_LIMITS`).
+    """
+
+    def __init__(self, tier_required: str, limit: Optional[int], reason: str) -> None:
+        super().__init__(reason)
+        self.tier_required = tier_required
+        self.limit = limit
+        self.reason = reason
+
+
+def _apply_follow_locks(
+    whales: List[TrendingWhaleResponse], tier: Optional[str]
+) -> List[TrendingWhaleResponse]:
+    """Return the roster with ``is_locked`` set per this tier's follow allowance.
+
+    Rules, in order:
+      • already following  → NEVER locked. A user must always be able to unfollow, and a
+        locked button on a whale they already track reads as data loss.
+      • Free               → locked unless it is the designated free whale.
+      • Pro                → locked only once the caller is AT the limit (so the 10th
+        follow is offered and the 11th is not).
+      • Max                → never locked.
+
+    Non-mutating for the same reason `redact_whale_profile` is: the argument is the object
+    in `_whale_list_cache`, and although that cache is per-user, an in-place write would
+    still pin one plan's locks onto that user's next 5 minutes of requests.
+    """
+    limit = whale_follow_limit(tier)
+    if limit is None:
+        return whales                      # Max — unlimited, nothing to lock
+
+    is_free = normalize_tier(tier) == TIER_FREE
+    at_cap = sum(1 for w in whales if w.is_following) >= limit
+
+    out: List[TrendingWhaleResponse] = []
+    for w in whales:
+        if w.is_following:
+            locked = False
+        elif is_free:
+            locked = not is_free_tier_whale(w.name)
+        else:
+            locked = at_cap
+        out.append(w.model_copy(update={"is_locked": True}) if locked else w)
+    return out
+
+
+def redact_whale_profile(
+    profile: WhaleProfileResponse, tier_required: str
+) -> WhaleProfileResponse:
+    """Return a NEW profile with the PAID sections withheld. Never mutates ``profile``.
+
+    Withheld: current_holdings, recent_trade_groups, recent_trades, sentiment_summary,
+    behavior_summary. Kept: header, bio, risk profile, both stat tiles, and sector_exposure
+    — enough to judge the investor and see the shape of the book, so the profile previews
+    the product instead of walling it.
+
+    ⚠️ **Must not mutate.** The argument is routinely the object held in the module-level
+    ``_whale_profile_cache`` — one instance shared by every caller for an hour, as
+    ``_whale_profile_inflight``'s own comment states ("the shared build is
+    follow-state-free; each caller overlays its own per-user follow state"). Stripping it
+    in place would empty the holdings for every PAYING user until the next rebuild, long
+    after the free request that caused it. `model_copy(update=...)` is what
+    `_overlay_follow_state` already uses for the same reason.
+    """
+    return profile.model_copy(
+        update={
+            "current_holdings": [],
+            "recent_trade_groups": [],
+            "recent_trades": [],
+            "sentiment_summary": "",
+            "behavior_summary": _LOCKED_BEHAVIOR,
+            "is_locked": True,
+            "tier_required": tier_required,
+        }
+    )
+
+
 # ── Service ──────────────────────────────────────────────────────────
 
 
@@ -324,12 +481,18 @@ class WhaleService:
         self,
         category: Optional[str] = None,
         user_id: Optional[str] = None,
+        tier: Optional[str] = None,
     ) -> List[TrendingWhaleResponse]:
-        """List whales, optionally filtered by category."""
+        """List whales, optionally filtered by category.
+
+        Every whale is always LISTED — the roster is the feature's own demo and stays free
+        on all tiers. ``tier`` only decides which rows come back with ``is_locked``, i.e.
+        whose Follow button is a paywall.
+        """
         cache_key = f"whales:{category or 'all'}:{user_id or 'anon'}"
         cached = _cache_get(_whale_list_cache, cache_key, WHALE_LIST_CACHE_TTL)
         if cached is not None:
-            return cached
+            return _apply_follow_locks(cached, tier)
 
         sb = get_supabase()
 
@@ -390,8 +553,11 @@ class WhaleService:
             for w in whales
         ]
 
+        # Cached WITHOUT locks, then locked per request on the way out — so a user who
+        # upgrades sees every Follow button unlock immediately instead of waiting out the
+        # 5-minute TTL on a list that was cached under their old plan.
         _cache_set(_whale_list_cache, cache_key, response)
-        return response
+        return _apply_follow_locks(response, tier)
 
     # ── Cache-Aside Constants ───────────────────────────────────────
     PROFILE_CACHE_TTL_HOURS = 24
@@ -401,8 +567,42 @@ class WhaleService:
         whale_id: str,
         user_id: Optional[str] = None,
         force_refresh: bool = False,
+        tier: Optional[str] = None,
     ) -> Optional[WhaleProfileResponse]:
-        """Get full whale profile — 3-tier cache-aside pattern.
+        """Get a whale profile, gated for this caller's plan.
+
+        A THIN wrapper over `_get_whale_profile_ungated`, and the split is deliberate: the
+        builder underneath has FOUR separate success returns (Tier-1 hit, Tier-2 hit,
+        in-flight join, fresh build), and gating them individually meant three of them
+        silently served the paid sections. The Tier-1 hit is the common path, so that miss
+        would have made the gate a no-op within an hour of any profile being opened once.
+        One exit point makes a missed branch impossible rather than merely unlikely.
+        """
+        profile = await self._get_whale_profile_ungated(
+            whale_id=whale_id, user_id=user_id, force_refresh=force_refresh
+        )
+        if profile is None:
+            return None
+        # The designated free whale is exempt: Free gets ONE investor in full, which is the
+        # entire point of designating one. Without this, a Free user could follow Gates and
+        # see his trades in the Recent Trades feed but hit a paywall on every tap into them
+        # — a feed that leads nowhere, and a worked example that never works.
+        if whale_detail_unlocked(tier) or is_free_tier_whale(profile.name):
+            return profile
+        # Copy-on-read, AFTER every cache layer: both tiers store the unredacted build,
+        # which is shared by every caller regardless of plan. See redact_whale_profile.
+        return redact_whale_profile(profile, required_tier_for_whales(tier) or TIER_PRO)
+
+    async def _get_whale_profile_ungated(
+        self,
+        whale_id: str,
+        user_id: Optional[str] = None,
+        force_refresh: bool = False,
+    ) -> Optional[WhaleProfileResponse]:
+        """Build/fetch the FULL profile — no tier gate. Callers must go through
+        `get_whale_profile`; this is the cache machinery only.
+
+        3-tier cache-aside pattern.
 
         Tier 1: In-memory dict (1 hr TTL, lost on restart)
         Tier 2: Supabase whale_profile_cache (24 hr TTL, survives restart)
@@ -794,10 +994,16 @@ class WhaleService:
         return profile
 
     async def get_whale_activity_feed(
-        self, user_id: str
+        self, user_id: str, tier: Optional[str] = None
     ) -> List[WhaleTradeGroupActivityResponse]:
-        """Get recent trade activity from user's followed whales."""
-        cache_key = f"activity:{user_id}"
+        """Get recent trade activity from user's followed whales.
+
+        ``tier`` decides how many of those follows are honoured. Omitting it defaults to
+        Free, so a call site that forgets it withholds rather than over-serves.
+        """
+        # Tier is part of the key: the same user's feed differs by plan, and a shared entry
+        # would serve one plan's feed to the other for up to 10 minutes across an upgrade.
+        cache_key = f"activity:{user_id}:{normalize_tier(tier)}"
         cached = _cache_get(
             _whale_activity_cache, cache_key, WHALE_ACTIVITY_CACHE_TTL
         )
@@ -814,6 +1020,21 @@ class WhaleService:
             .execute()
         )
         whale_ids = [f["whale_id"] for f in (follows.data or [])]
+
+        # Free is one whale, wherever the count is shown — not just on the Follow button.
+        # TRUNCATE, never destroy: rows the plan doesn't cover (from before this gate, or
+        # after a downgrade) stay in `whale_follows` and come straight back on upgrade.
+        # Same rule Updates applies to watchlist tickers.
+        limit = whale_follow_limit(tier)
+        if limit is not None and len(whale_ids) > limit:
+            free_id = free_tier_whale_id(sb)
+            if normalize_tier(tier) == TIER_FREE:
+                whale_ids = [w for w in whale_ids if str(w) == str(free_id)]
+            else:
+                # Pro over its cap (a downgrade from Max): keep a DETERMINISTIC subset so
+                # the feed doesn't reshuffle between requests.
+                whale_ids = sorted(str(w) for w in whale_ids)[:limit]
+
         if not whale_ids:
             return []
 
@@ -936,12 +1157,18 @@ class WhaleService:
         )
 
     async def toggle_follow(
-        self, user_id: str, whale_id: str, follow: bool
+        self, user_id: str, whale_id: str, follow: bool, tier: Optional[str] = None
     ) -> FollowResponse:
-        """Follow or unfollow a whale."""
+        """Follow or unfollow a whale.
+
+        ``tier`` gates FOLLOWING only. Unfollowing is never blocked at any tier — a user
+        who is over a limit (after a downgrade, or from before this gate existed) must
+        always be able to get back under it, and a locked unfollow button would strand them.
+        """
         sb = get_supabase()
 
         if follow:
+            self._assert_may_follow(sb, user_id, whale_id, tier)
             sb.table("whale_follows").upsert(
                 {"user_id": user_id, "whale_id": whale_id},
                 on_conflict="user_id,whale_id",
@@ -968,6 +1195,47 @@ class WhaleService:
         _whale_profile_cache.clear()
 
         return FollowResponse(is_following=follow, followers_count=count)
+
+    def _assert_may_follow(
+        self, sb, user_id: str, whale_id: str, tier: Optional[str]
+    ) -> None:
+        """Raise WhaleFollowLockedException unless this tier may track this whale.
+
+        Re-following a whale the caller ALREADY follows is always allowed — the upsert is
+        idempotent, so refusing it would turn a double-tap into a paywall.
+        """
+        limit = whale_follow_limit(tier)
+        if limit is None:
+            return                                  # Max — unlimited
+
+        required = required_tier_for_whales(tier) or TIER_PRO
+
+        # Free: one designated whale, not one of the caller's choosing.
+        if normalize_tier(tier) == TIER_FREE:
+            free_id = free_tier_whale_id(sb)
+            # Unresolvable free whale → fail CLOSED. An open failure here would hand every
+            # free account unlimited follows the moment a registry sync lagged.
+            if free_id is None or str(whale_id) != str(free_id):
+                raise WhaleFollowLockedException(
+                    required, limit,
+                    f"Free tier may only follow {FREE_TIER_WHALE_NAME}",
+                )
+            return
+
+        existing = (
+            sb.table("whale_follows")
+            .select("whale_id")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        followed = {str(row["whale_id"]) for row in (existing.data or [])}
+        if str(whale_id) in followed:
+            return                                  # idempotent re-follow
+        if len(followed) >= limit:
+            raise WhaleFollowLockedException(
+                required, limit,
+                f"Follow limit reached ({len(followed)}/{limit})",
+            )
 
     async def get_whale_alerts(
         self, user_id: Optional[str] = None

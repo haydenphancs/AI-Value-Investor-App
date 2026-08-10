@@ -12,9 +12,56 @@ import SwiftUI
 struct WhaleProfileView: View {
     @StateObject private var viewModel: WhaleProfileViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appState) private var appState
+    /// A tapped locked section → the plan sheet.
+    @State private var showPaywall = false
 
     init(whaleId: String) {
         _viewModel = StateObject(wrappedValue: WhaleProfileViewModel(whaleId: whaleId))
+    }
+
+    /// A withheld section: the REAL header, then one card explaining what is behind the
+    /// plan. Keeping the header is deliberate — a section that vanished would read as
+    /// "this investor has no trades" rather than "this is paid", which is the difference
+    /// between missing data and an offer.
+    @ViewBuilder
+    private func lockedSection(title: String, message: String) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text(title)
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+
+            Button {
+                showPaywall = true
+            } label: {
+                VStack(spacing: AppSpacing.sm) {
+                    // A TEXT-role token — this glyph must clear 4.5:1 in both appearances.
+                    // A *Graphic token would fail the launch contrast audit.
+                    Image(systemName: "lock.fill")
+                        .font(AppTypography.iconMedium)
+                        .foregroundColor(AppColors.primaryBlue)
+
+                    Text(message)
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("Upgrade to unlock")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, AppSpacing.xl)
+                .padding(.horizontal, AppSpacing.lg)
+                .cardSurface(cornerRadius: AppCornerRadius.large)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(title), locked")
+            .accessibilityHint("Shows upgrade options")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     var body: some View {
@@ -36,38 +83,64 @@ struct WhaleProfileView: View {
                         )
 
                         if !profile.isCongressional {
-                            // Portfolio Stats (13F only)
+                            // Portfolio Stats (13F only) — FREE on every tier. The headline
+                            // book size and return are what make the profile worth opening.
                             WhalePortfolioStats(profile: profile)
 
-                            // Sector Exposure (13F only)
+                            // Sector Exposure (13F only) — FREE on every tier. Shows the
+                            // SHAPE of the book without naming a single position, so it
+                            // previews the paid detail instead of substituting for it.
                             WhaleSectorExposureSection(sectors: profile.sectorExposure)
 
-                            // Current Picks (13F only)
-                            WhaleCurrentPicksSection(
-                                holdings: viewModel.displayedHoldings,
-                                behaviorSummary: profile.behaviorSummary,
-                                onHoldingTapped: { viewModel.viewHolding($0) },
-                                onTopTenTapped: { viewModel.viewMoreHoldings() }
+                            // Current Picks (13F only) — PAID.
+                            if profile.isLocked {
+                                lockedSection(
+                                    title: "Current Picks",
+                                    message: "See every position this investor holds, and how much of the book each one is."
+                                )
+                            } else {
+                                WhaleCurrentPicksSection(
+                                    holdings: viewModel.displayedHoldings,
+                                    behaviorSummary: profile.behaviorSummary,
+                                    onHoldingTapped: { viewModel.viewHolding($0) },
+                                    onTopTenTapped: { viewModel.viewMoreHoldings() }
+                                )
+                            }
+                        }
+
+                        // Recent Trades — PAID. Shown for congressional whales too, which is
+                        // why the lock lives here rather than inside the 13F branch above.
+                        if profile.isLocked {
+                            lockedSection(
+                                title: profile.isCongressional ? "Recently Traded" : "Recent Trades",
+                                message: "See what they bought and sold, when they filed it, and for how much."
+                            )
+                        } else {
+                            WhaleRecentTradesSection(
+                                tradeGroups: viewModel.displayedTradeGroups,
+                                onTradeGroupTapped: { viewModel.viewTradeGroup($0) },
+                                onInfoTapped: { viewModel.showRecentTradesInfo = true }
                             )
                         }
 
-                        // Recent Trades (always shown)
-                        WhaleRecentTradesSection(
-                            tradeGroups: viewModel.displayedTradeGroups,
-                            onTradeGroupTapped: { viewModel.viewTradeGroup($0) },
-                            onInfoTapped: { viewModel.showRecentTradesInfo = true }
-                        )
-
-                        // Sentiment Summary
-                        WhaleSentimentSummary(summary: profile.sentimentSummary)
+                        // Sentiment Summary — PAID.
+                        if profile.isLocked {
+                            lockedSection(
+                                title: "Sentiment Summary",
+                                message: "Read how this investor is positioned right now."
+                            )
+                        } else {
+                            WhaleSentimentSummary(summary: profile.sentimentSummary)
+                        }
 
                         // NOTE: a "See All Holdings - Upgrade to Pro" footer used to sit
-                        // here with an empty action. Removed rather than wired to the
-                        // paywall: holdings are NOT Pro-gated. They're truncated to 10
-                        // for everyone and the existing "Top Ten" control
-                        // (viewMoreHoldings) already reveals the rest for free — so the
-                        // footer advertised a feature that does not exist, and pointing
-                        // it at a paywall would have sold one.
+                        // here with an empty action, and was removed on the grounds that
+                        // holdings were not Pro-gated. That is no longer true — Current
+                        // Picks, Recent Trades and Sentiment Summary are Pro/Max as of the
+                        // whale tier gate, and each locks in place above with the real
+                        // section header intact. The footer stays gone: an upsell per
+                        // withheld section is honest about WHAT is behind the plan, where a
+                        // single trailing button was not attached to anything.
 
                         // Bottom spacing
                         Spacer().frame(height: 40)
@@ -143,6 +216,21 @@ struct WhaleProfileView: View {
                     whaleName: viewModel.profile?.name ?? ""
                 )
             }
+        }
+        // A PLAN gate, so the plan sheet — not the BuyCredits route a 402 takes. No amount
+        // of credits unlocks a section. `.environment(\.appState, appState)` is REQUIRED:
+        // PaywallView reads the custom `\.appState` key and a sheet inherits neither
+        // environment automatically, so without it the sheet resolves that key's default
+        // `AppState()` and highlights the wrong "current plan".
+        .sheet(isPresented: $showPaywall) {
+            PaywallView()
+                .environment(\.appState, appState)
+        }
+        // Refill the moment a purchase lands rather than at next visit. Keyed on the TIER
+        // rather than on the sheet dismissing, so restore-purchases and a background
+        // profile refresh cover it too, and dismissing without buying costs nothing.
+        .onChange(of: appState.user.tier) {
+            viewModel.loadProfile()
         }
     }
 }

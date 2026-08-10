@@ -40,6 +40,11 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
 
     // Business errors
     case insufficientCredits(required: Int, available: Int)
+    /// The caller's PLAN doesn't allow this action (WHALE_FOLLOW_LOCKED, HTTP 403).
+    /// Deliberately not folded into `.insufficientCredits`: that case says "top up" and
+    /// routes to Buy Credits, and no amount of credits unlocks a follow slot or a gated
+    /// section. Same `.upgrade` action, different destination and different sentence.
+    case planUpgradeRequired(message: String)
     case notFound(resource: String)
     case validationFailed(message: String)
     case rateLimited(retryAfter: Int)
@@ -102,6 +107,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .sessionEnded: return "session_ended"
         case .authUnavailable: return "auth_unavailable"
         case .insufficientCredits: return "insufficient_credits"
+        case .planUpgradeRequired: return "plan_upgrade_required"
         case .notFound(let r): return "not_found_\(r)"
         case .validationFailed: return "validation"
         case .rateLimited: return "rate_limited"
@@ -135,6 +141,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Couldn't Verify Account"
         case .insufficientCredits:
             return "Insufficient Credits"
+        case .planUpgradeRequired:
+            return "Upgrade Required"
         case .notFound:
             return "Not Found"
         case .validationFailed:
@@ -186,6 +194,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 return "You don't have enough credits. Upgrade your tier or wait for the monthly reset."
             }
             return "This action requires \(required) credits, but you only have \(available). Upgrade your plan to get more."
+        case .planUpgradeRequired(let message):
+            // The backend's own copy verbatim — it knows WHICH limit was hit and stays
+            // number-free so the plan table is the only place the numbers live.
+            return message.isEmpty
+                ? "Your plan doesn't include this. Upgrade to unlock it."
+                : message
         case .notFound(let resource):
             return "The requested \(resource) could not be found."
         case .validationFailed(let msg):
@@ -221,7 +235,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return .signIn
         case .authUnavailable:
             return .retry
-        case .insufficientCredits:
+        case .insufficientCredits, .planUpgradeRequired:
             return .upgrade
         case .notFound:
             return .goBack
@@ -402,6 +416,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             // action instead of a generic .apiError.
             if code == "INSUFFICIENT_CREDITS" {
                 return .insufficientCredits(required: 0, available: 0)
+            }
+            // A PLAN gate (403), not a balance one. Kept distinct from the credits branch
+            // above because the two send the user to different places: credits → Buy
+            // Credits, this → the plan sheet. Buying credits never unlocks a follow slot.
+            if code == "WHALE_FOLLOW_LOCKED" {
+                return .planUpgradeRequired(message: message)
             }
             // Capacity / back-pressure codes (HTTP 409). SYSTEM_BUSY = the whole
             // service is at capacity; TOO_MANY_CONCURRENT_REPORTS = this user's
@@ -633,6 +653,7 @@ extension AppError {
         case .sessionEnded:        return "session_ended"
         case .authUnavailable:     return "auth_unavailable"
         case .insufficientCredits: return "insufficient_credits"
+        case .planUpgradeRequired: return "plan_upgrade_required"
         case .notFound:            return "not_found"
         case .validationFailed:    return "validation_failed"
         case .rateLimited:         return "rate_limited"

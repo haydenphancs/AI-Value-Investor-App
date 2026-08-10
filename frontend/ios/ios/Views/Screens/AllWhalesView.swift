@@ -41,6 +41,7 @@ private enum WhaleSortOption: String, CaseIterable {
 // MARK: - AllWhalesView
 struct AllWhalesView: View {
     @ObservedObject var viewModel: TrackingViewModel
+    @Environment(\.appState) private var appState
     @State private var selectedFilter: WhaleCategoryFilter = .all
     @State private var sortOption: WhaleSortOption = .followers
     @State private var isSearching: Bool = false
@@ -237,6 +238,12 @@ struct AllWhalesView: View {
                 }
             }
         }
+        // Same VM as the Tracking tab, so the same flag drives the sheet here — the whole
+        // reason the locked-tap decision lives on the ViewModel rather than in a closure.
+        .sheet(isPresented: $viewModel.showWhalePaywall) {
+            PaywallView()
+                .environment(\.appState, appState)
+        }
     }
 
     // MARK: - Search
@@ -276,22 +283,13 @@ struct AllWhalesView: View {
         let trackedNames = Set(viewModel.trackedWhales.map(\.name))
         return whales.map { whale in
             if trackedNames.contains(whale.name) && !whale.isFollowing {
-                // Rebuilds the struct field-by-field — every field must be
-                // threaded through or it silently disappears from followed rows
-                // (id was previously dropped here, breaking profile navigation
-                // for these rows; firmName would have vanished the same way).
-                return TrendingWhale(
-                    id: whale.id,
-                    name: whale.name,
-                    category: whale.category,
-                    avatarName: whale.avatarName,
-                    followersCount: whale.followersCount,
-                    isFollowing: true,
-                    title: whale.title,
-                    description: whale.description,
-                    recentTradeCount: whale.recentTradeCount,
-                    firmName: whale.firmName
-                )
+                // `withFollowing` rather than a hand-written rebuild: this site has already
+                // dropped `id` once (breaking profile navigation for followed rows) and
+                // would have dropped `firmName` the same way. The helper exists so a field
+                // added to TrendingWhale — `isLocked` being the latest — cannot go missing
+                // here silently. It also clears the lock, which is correct: a whale you
+                // follow is never locked, or you could not unfollow it.
+                return whale.withFollowing(true)
             }
             return whale
         }

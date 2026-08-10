@@ -911,8 +911,12 @@ struct TrendingWhale: Identifiable {
     /// Firm a person-fronted whale runs ("Bridgewater Associates" for Ray
     /// Dalio) — always displayed with the name. nil for institutions/politicians.
     let firmName: String?
+    /// This caller's plan does not allow TRACKING this whale. The row renders in full
+    /// either way — only the Follow button becomes a paywall. Never true for a whale the
+    /// user already follows, so unfollowing is always available.
+    let isLocked: Bool
 
-    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0, firmName: String? = nil) {
+    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0, firmName: String? = nil, isLocked: Bool = false) {
         self.id = id
         self.name = name
         self.category = category
@@ -923,6 +927,7 @@ struct TrendingWhale: Identifiable {
         self.description = description
         self.recentTradeCount = recentTradeCount
         self.firmName = firmName
+        self.isLocked = isLocked
     }
 
     /// Returns a copy with `isFollowing` flipped, threading EVERY other field
@@ -940,7 +945,10 @@ struct TrendingWhale: Identifiable {
             title: title,
             description: description,
             recentTradeCount: recentTradeCount,
-            firmName: firmName
+            firmName: firmName,
+            // Following it clears the lock by definition — the server never locks a whale
+            // you already track, so unfollowing stays available.
+            isLocked: following ? false : isLocked
         )
     }
 

@@ -31,6 +31,19 @@ class _FakeQuery:
     def order(self, *a, **k): return self
     def limit(self, *a, **k): return self
 
+    def ilike(self, column, pattern):
+        """Actually APPLIED, unlike the filters above.
+
+        `free_tier_whale_id` resolves the designated free whale by name through this, so a
+        no-op would hand back whichever row happens to be first and the test would pass for
+        the wrong reason. No wildcards are used at the call site, so case-insensitive
+        equality is the whole contract."""
+        needle = str(pattern).strip().casefold()
+        return _FakeQuery([
+            r for r in self._data
+            if str(r.get(column, "")).strip().casefold() == needle
+        ])
+
     def execute(self):
         class _R:
             pass
@@ -47,12 +60,17 @@ class _FakeSupabase:
         return _FakeQuery(self._tables.get(name, []))
 
 
-def _feed(monkeypatch, tables, user_id="u1"):
+def _feed(monkeypatch, tables, user_id="u1", tier="premium"):
+    """Build the feed. Defaults to the UNLIMITED tier because these are data-shape tests —
+    NULL firm names, unicode, orphaned follows, ordering. The plan's follow allowance is a
+    separate axis, exercised in `test_whale_entitlement.py`; leaving it at the default
+    (Free = 1 whale) would silently truncate these fixtures to nothing and turn a real
+    mapping regression into a passing empty list."""
     _whale_activity_cache.clear()
     monkeypatch.setattr(wsvc, "get_supabase", lambda: _FakeSupabase(tables))
     import asyncio
     return asyncio.get_event_loop().run_until_complete(
-        WhaleService().get_whale_activity_feed(user_id)
+        WhaleService().get_whale_activity_feed(user_id, tier=tier)
     )
 
 

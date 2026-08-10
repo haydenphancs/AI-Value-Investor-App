@@ -26,6 +26,10 @@ struct BookDetailView: View {
     @State private var aiInputText: String = ""
     /// Set when the player's "Read" button is tapped — the core whose reading view should open.
     @State private var playerTargetCore: BookCoreChapter?
+    /// See `BookDetailCoreContent.closeBookAfterReader` — the same two-step dismissal, for the
+    /// player's "Read" route into the reader. A SEPARATE flag on purpose: the two covers live on
+    /// different views and must not share one.
+    @State private var closeBookAfterPlayerReader = false
     /// Stable token keying this screen's compact-mode requests + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
     /// Owns the chat conversation for this book so it resumes while the screen is open.
@@ -79,7 +83,10 @@ struct BookDetailView: View {
                         case .about:
                             BookDetailAboutContent(book: book)
                         case .core:
-                            BookDetailCoreContent(book: book)
+                            // `dismiss()` here is presentation-relative, so it closes whichever
+                            // cover presented THIS book — BookLibraryView's or LearnView's. That's
+                            // why neither of those screens needs to know about the finale.
+                            BookDetailCoreContent(book: book, onBookFinished: { dismiss() })
                         }
                     }
 
@@ -169,10 +176,17 @@ struct BookDetailView: View {
             }
         }
         // Player "Read" → open the reading view for the currently-narrated core.
-        .fullScreenCover(item: $playerTargetCore) { chapter in
+        .fullScreenCover(item: $playerTargetCore, onDismiss: {
+            guard closeBookAfterPlayerReader else { return }
+            closeBookAfterPlayerReader = false
+            dismiss()
+        }) { chapter in
             if let content = chapter.getDetailContent(for: book) {
-                BookCoreDetailView(content: content, book: book)
-                    .environmentObject(AudioManager.shared)
+                BookCoreDetailView(content: content, book: book, onFinishedBook: {
+                    closeBookAfterPlayerReader = true
+                    playerTargetCore = nil
+                })
+                .environmentObject(AudioManager.shared)
             }
         }
         .onDisappear {
@@ -186,10 +200,13 @@ struct BookDetailView: View {
                   let info = book.bookAudioInfo else { return }
             var newly: [Int] = []
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                // The roster matters here as much as in the reader: this view and the reader race
+                // for the same tick, and whichever wins performs the write that can finish the book.
                 newly = progress.markListenedThrough(
                     order: book.curriculumOrder, from: oldTime, to: newTime,
                     coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds,
-                    seekEpoch: audioManager.seekEpoch)
+                    seekEpoch: audioManager.seekEpoch,
+                    bookCores: book.coreChapters.map(\.number))
             }
             if !newly.isEmpty {
                 Haptics.success()
@@ -645,7 +662,18 @@ private struct BookDetailAuthorCard: View {
 // MARK: - Core Content
 private struct BookDetailCoreContent: View {
     let book: LibraryBook
+    /// Raised once the reader's whole-book finale has closed the reader — asks the BOOK to close too.
+    var onBookFinished: (() -> Void)?
+
     @State private var selectedChapter: BookCoreChapter?
+
+    /// Set by the reader's finale so `onDismiss` below closes the book as well — but ONLY after the
+    /// reader's own dismissal has actually finished. Dismissing both covers in the same runloop
+    /// turn collapses them into one transition with the reader still drawn on top of it, and can
+    /// leave this nested `item` binding unreconciled (which surfaces as "Attempt to present while a
+    /// presentation is in progress" on the NEXT book open). `onDismiss` is the exact "the first one
+    /// is gone" hook; the flag is what keeps an ordinary X-button close from taking the book with it.
+    @State private var closeBookAfterReader = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.xxl) {
@@ -662,24 +690,28 @@ private struct BookDetailCoreContent: View {
             // (see the note on LibraryBook.sampleData). `DiscussionSection` is kept
             // for when a real review feature exists to feed it.
 
-            // Attribution + non-affiliation. The screen shows the real title, author,
-            // and author bio, so it has to be explicit that this is our own writing
-            // about the book rather than the book itself or an authorised edition.
-            AnalysisDisclaimerText(
-                text: "This guide is Caydex's own summary of the ideas in \(book.title) "
-                    + "by \(book.author). It is not the book, not an abridgement of it, "
-                    + "and not a substitute for reading it. Caydex is not affiliated "
-                    + "with, authorised, or endorsed by the author or publisher. "
-                    + "Narration is AI-generated."
-            )
-            .padding(.top, AppSpacing.md)
+            // Attribution. The screen shows the real title, author and author bio right above
+            // this, so the line has to be explicit that this is our own writing about the book
+            // rather than the book itself or an authorised edition — but it does NOT need to
+            // repeat the title and author to do it, which is what the previous five-sentence
+            // version did. Non-affiliation, whose rights the book is, and the AI narration now
+            // live in the "Book Guides" card of DisclaimersView, which "Details" opens.
+            AnalysisDisclaimerText.book
+                .padding(.top, AppSpacing.md)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.xl)
-        .fullScreenCover(item: $selectedChapter) { chapter in
+        .fullScreenCover(item: $selectedChapter, onDismiss: {
+            guard closeBookAfterReader else { return }
+            closeBookAfterReader = false
+            onBookFinished?()
+        }) { chapter in
             if let content = chapter.getDetailContent(for: book) {
-                BookCoreDetailView(content: content, book: book)
-                    .environmentObject(AudioManager.shared)
+                BookCoreDetailView(content: content, book: book, onFinishedBook: {
+                    closeBookAfterReader = true
+                    selectedChapter = nil
+                })
+                .environmentObject(AudioManager.shared)
             }
         }
     }

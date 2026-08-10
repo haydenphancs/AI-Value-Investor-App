@@ -42,6 +42,34 @@ struct DisclaimersView: View {
                         ]
                     )
 
+                    // Book Guides — the disclosure behind the short "Caydex's own study guide ·
+                    // not the book itself" line on every book screen (AnalysisDisclaimerText.book,
+                    // whose "Details" link opens this document). That line is the summary; this is
+                    // where the full claims live, so keep the two in step.
+                    //
+                    // Two different bodies of law are covered here and they are NOT interchangeable:
+                    // the guides being our own original writing is what keeps them clear of the
+                    // authors' COPYRIGHT (ideas aren't protected, expression is), while naming a
+                    // title and author is TRADEMARK use — permitted as nominative use only while
+                    // nothing implies sponsorship, which is the work bullet 2 does. A disclaimer
+                    // cannot cure a copyright problem; only the writing being genuinely ours can.
+                    //
+                    // ⚠️ Never name a real book or author here as an example.
+                    // `test_legal_pages.py::test_in_app_legal_screen_names_no_real_investor` scans
+                    // this file's string literals and fails on buffett/lynch/munger/dalio/ackman/
+                    // cathie wood/burry — and the library ships books by two of them.
+                    DisclaimerCard(
+                        icon: "books.vertical.fill",
+                        iconColor: AppColors.textSecondary,
+                        title: "Book Guides",
+                        items: [
+                            "Our book guides are Caydex's own writing about the ideas in a published book. They are not the book, not an abridgement of it, and not a substitute for reading it.",
+                            "Caydex is not affiliated with, authorised, or endorsed by any author or publisher. We name a book and its author only to identify the work a guide discusses.",
+                            "The books themselves, their titles, and their authors' rights belong to their respective owners.",
+                            "Narration is an AI-generated voice reading our guide. It is not the author's voice and not an audiobook of the original work."
+                        ]
+                    )
+
                     // Financial Disclaimer
                     DisclaimerCard(
                         icon: "dollarsign.circle",

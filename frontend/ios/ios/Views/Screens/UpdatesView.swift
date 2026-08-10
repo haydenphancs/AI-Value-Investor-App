@@ -62,19 +62,12 @@ struct UpdatesView: View {
                         onFilterTapped: handleFilterTapped
                     )
 
-                    // Keyword filter over the loaded feed. Distinct from the top
-                    // "Search or ask Cay AI" bar: this only narrows the timeline
-                    // that's already on screen (client-side, composes with the
-                    // source/sentiment filter). Shown once there's something to
-                    // filter, or while a keyword is active (so it can be cleared).
-                    if !viewModel.groupedNews.isEmpty || !viewModel.newsSearchText.isEmpty {
-                        SearchBar(
-                            text: $viewModel.newsSearchText,
-                            placeholder: "Filter news…"
-                        )
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.bottom, AppSpacing.sm)
-                    }
+                    // NOTE: the "Filter news…" keyword bar used to sit here, between
+                    // the Live News header and the timeline. It was removed by
+                    // request — the source/sentiment sheet behind the header's filter
+                    // control is now the only way to narrow the feed. The ViewModel's
+                    // `newsSearchText` keyword path is left intact (and inert, since
+                    // nothing sets it) so restoring the bar is a one-block change.
 
                     // Scrollable Content with sticky section headers.
                     //

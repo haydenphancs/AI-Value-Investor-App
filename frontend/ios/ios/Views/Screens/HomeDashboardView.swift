@@ -36,6 +36,9 @@ struct HomeDashboardView: View {
     @State private var signalDetailTarget: SignalDetailTarget?
     /// A tapped Emerging Frontiers theme → its detail screen (hero + companies).
     @State private var themeDetailTarget: ThemeDetailTarget?
+    /// A tapped LOCKED App-Exclusive Signals row → the plan sheet. Signals tickers are a
+    /// Pro/Max surface (backend `entitlements.signals_unlocked`).
+    @State private var showSignalsPaywall = false
 
     /// `repository == nil` → the live `HomeRepository` (the app default).
     /// Pass `MockHomeRepository()` for offline previews / tests.
@@ -200,6 +203,26 @@ struct HomeDashboardView: View {
                 ThemeDetailView(slug: target.slug)
             }
         }
+        // A PLAN gate, so the plan sheet — not the BuyCredits route a 402 takes. Buying
+        // credits would not reveal a single ticker here. Same choice as UpdatesView's
+        // locked-chip gate.
+        //
+        // ⚠️ The `.environment(\.appState, appState)` is REQUIRED, not tidiness. This
+        // screen injects via `@Environment(AppState.self)`, but PaywallView reads the
+        // custom `\.appState` key — a sheet inherits neither automatically, and without
+        // this it silently resolves that key's default `AppState()` and highlights the
+        // wrong "current plan". UpdatesView.swift does the same for the same reason.
+        .sheet(isPresented: $showSignalsPaywall) {
+            PaywallView()
+                .environment(\.appState, appState)
+        }
+        // Unlock the moment the purchase lands rather than at next launch. Keyed on the
+        // TIER rather than on the sheet dismissing, so a restore-purchases or a
+        // background profile refresh re-fetches too — and so dismissing without buying
+        // costs nothing.
+        .onChange(of: appState.user.tier) {
+            Task { await viewModel.refresh() }
+        }
     }
 
     // MARK: - Scrollable content
@@ -264,6 +287,14 @@ struct HomeDashboardView: View {
                             // A tap swallowed by the signals panel/row body is
                             // still OUTSIDE the carousel → collapse its card.
                             onBodyTap: collapseExpandedScanner,
+                            onLockedTap: { _ in
+                                // Collapse whatever else is open first: the paywall is a
+                                // sheet, and returning from it to a still-expanded card
+                                // reads as the tap having done two things.
+                                collapseExpandedSignal()
+                                collapseExpandedScanner()
+                                showSignalsPaywall = true
+                            },
                             expandedSignalID: $expandedSignalID
                         )
                     }

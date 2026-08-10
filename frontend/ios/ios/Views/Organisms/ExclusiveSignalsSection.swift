@@ -49,6 +49,7 @@ struct ExclusiveSignalsSection: View {
                         signal: signal,
                         onLeaderTap: onLeaderTap,
                         onBodyTap: onBodyTap,
+                        onLockedTap: onLockedTap,
                         isExpanded: Binding(
                             get: { expandedSignalID == signal.id },
                             set: { expandedSignalID = $0 ? signal.id : nil }

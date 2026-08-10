@@ -66,13 +66,28 @@ UPDATES_TICKER_LIMITS = {
     TIER_MAX: 30,
 }
 
+# ── Home screen: App-Exclusive Signals (the CAYDEX-badged card) ──────────────────────
+#
+# A FLOOR, not the next-rung ladder `required_tier_for_more_tickers` walks: every paid
+# tier sees the same thing, so a free user is always pointed at Pro — the cheapest plan
+# that unlocks — rather than at "whatever is one step up".
+#
+# What is gated is the TICKER, not the card. All three rows stay on screen with their
+# icon, title, description and aggregate stat ("3 members buying"); only the symbol is
+# withheld, and the drill-down leaders with it. That keeps the same 5.1.1(v) posture as
+# the Updates limit above — the screen still demonstrates what it does, and the
+# underlying holder data remains free on every ticker's own Holders tab.
+SIGNALS_UNLOCKED_TIERS = frozenset({TIER_PRO, TIER_MAX})
+
 
 def normalize_tier(tier: Optional[str]) -> str:
     """Pure: map any incoming tier value onto a known key, defaulting to the least privileged."""
     if not isinstance(tier, str):
         return DEFAULT_TIER
     key = tier.strip().lower()
-    return key if key in UPDATES_TICKER_LIMITS else DEFAULT_TIER
+    # Against TIER_ORDER, not one gate's limit table — there is more than one gate now,
+    # and normalisation must not depend on which of them happens to list every tier.
+    return key if key in TIER_ORDER else DEFAULT_TIER
 
 
 def updates_ticker_limit(tier: Optional[str]) -> int:
@@ -91,6 +106,26 @@ def required_tier_for_more_tickers(tier: Optional[str]) -> Optional[str]:
     if index + 1 >= len(TIER_ORDER):
         return None
     return TIER_ORDER[index + 1]
+
+
+def signals_unlocked(tier: Optional[str]) -> bool:
+    """Pure: may this tier see the App-Exclusive Signals tickers?
+
+    False for Free, for guests (whose identity dict hardcodes ``"free"``), and for any
+    unrecognised value — `normalize_tier` guarantees the unknown case degrades to the
+    least privileged tier rather than falling open on the paid surface.
+    """
+    return normalize_tier(tier) in SIGNALS_UNLOCKED_TIERS
+
+
+def required_tier_for_signals(tier: Optional[str]) -> Optional[str]:
+    """Pure: the plan that unlocks the signals tickers, or None when already unlocked.
+
+    Always Pro for a locked caller — see SIGNALS_UNLOCKED_TIERS on why this is a floor
+    and not a ladder walk. Returned on the wire so the paywall names the same plan the
+    server enforced.
+    """
+    return None if signals_unlocked(tier) else TIER_PRO
 
 
 def select_visible_tickers(tickers: Iterable[str], limit: int) -> List[str]:

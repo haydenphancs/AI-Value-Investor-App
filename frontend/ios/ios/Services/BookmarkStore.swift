@@ -12,7 +12,12 @@
 //  So bookmarking a book on any surface (Library card, Learn "AI-Enabled Books" card, Search,
 //  detail header) reflects everywhere that observes this store.
 //
-//  The list is kept most-recent-first: `mostRecent` drives the Book Library hero-card shortcut.
+//  EXACTLY ONE book is bookmarked at a time: bookmarking a book displaces whatever was bookmarked
+//  before. The bookmark is the "the book I'm reading" marker the Book Library hero card resumes
+//  from, and that card can only point at one book — a second bookmark made it ambiguous. The
+//  storage stays a most-recent-first LIST rather than a single string so the existing sync
+//  machinery (tombstones, reconcile pins, server ordering) still applies unchanged, and so extras
+//  arriving from an older build or another device can be collapsed rather than silently ignored.
 //
 
 import Foundation
@@ -64,6 +69,10 @@ final class BookmarkStore: ObservableObject {
         bookmarkedTitles = UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? []
         pendingRemovals = Set(UserDefaults.standard.stringArray(forKey: Self.pendingRemovalsKey) ?? [])
         reconciledTitles = Set(UserDefaults.standard.stringArray(forKey: Self.reconciledKey) ?? [])
+        // An install made before the one-at-a-time rule still has several saved. Collapse on the
+        // spot (purely local — the tombstones this leaves behind are what `hydrate` turns into the
+        // server-side DELETEs), so the UI never renders two filled bookmarks even for one frame.
+        collapseToSingleBookmark()
     }
 
     // MARK: - Reads
@@ -72,12 +81,18 @@ final class BookmarkStore: ObservableObject {
         bookmarkedTitles.contains(title)
     }
 
-    /// The most-recently bookmarked book (the Book Library hero shortcut opens this), or nil.
+    /// The bookmarked book — there is at most one (the Book Library hero card resumes this), or nil.
     var mostRecent: String? { bookmarkedTitles.first }
 
     // MARK: - Writes
 
     /// Add or remove a bookmark. Updates locally first (instant), then pushes to the backend.
+    ///
+    /// **Exactly one book can be bookmarked at a time** — bookmarking a book un-bookmarks whatever
+    /// else was bookmarked, on every surface at once (Library card, Learn card, Search, the detail
+    /// hero and its sticky header), because they all route through here. The bookmark is the "one
+    /// book I'm reading" marker the Book Library hero card resumes from, so a second one made that
+    /// card ambiguous — it could only ever point at one of them.
     func toggle(_ title: String) {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
@@ -92,14 +107,53 @@ final class BookmarkStore: ObservableObject {
             beginPush(t)
             Task { await self.pushRemove(t); self.endPush(t) }
         } else {
-            bookmarkedTitles.insert(t, at: 0)   // newest first
+            // Everything currently bookmarked is displaced by this tap. They get the SAME tombstone
+            // treatment as an explicit un-bookmark, so a hydrate racing these DELETEs can't
+            // resurrect them and `pushUnsynced` retries any DELETE that fails offline.
+            let displaced = bookmarkedTitles.filter { $0 != t }
+            bookmarkedTitles = [t]
+            pendingRemovals.formUnion(displaced)
             pendingRemovals.remove(t)           // re-bookmarking supersedes any pending removal
+            reconciledTitles.subtract(displaced)
             reconciledTitles.remove(t)          // an explicit tap gives the server a real timestamp
             bumpLocalVersion()
             persistLocal()
             beginPush(t)
-            Task { await self.pushAdd(t); self.endPush(t) }
+            displaced.forEach { beginPush($0) }
+            Task {
+                // Add first: it is the user's intent, and it must land even if a DELETE fails. The
+                // response can't resurrect the displaced titles — `merge` filters tombstones.
+                await self.pushAdd(t)
+                self.endPush(t)
+                for old in displaced {
+                    await self.pushRemove(old)
+                    self.endPush(old)
+                }
+            }
         }
+    }
+
+    /// Collapse a multi-bookmark list down to the single most-recent one, tombstoning the rest.
+    ///
+    /// Needed because "one at a time" is a NEW rule: installs that predate it (and any device still
+    /// running the old build, or a stale server row) carry several bookmarks, and without this they
+    /// would keep rendering several filled bookmark icons forever. Tombstoning rather than plain
+    /// dropping is what makes the cleanup durable — `pushUnsynced` sees each tombstone still present
+    /// server-side on the next hydrate and retries its DELETE, so the extras don't come back.
+    ///
+    /// - Returns: true when it changed something (so callers can skip a redundant persist).
+    @discardableResult
+    private func collapseToSingleBookmark() -> Bool {
+        guard bookmarkedTitles.count > 1 else { return false }
+        let keep = bookmarkedTitles[0]          // most-recent-first, so the head is the live one
+        let displaced = bookmarkedTitles.dropFirst()
+        bookmarkedTitles = [keep]
+        pendingRemovals.formUnion(displaced)
+        reconciledTitles.formIntersection(bookmarkedTitles)
+        bumpLocalVersion()
+        persistLocal()
+        print("[BookmarkStore] collapsed \(displaced.count) extra bookmark(s) — one book at a time")
+        return true
     }
 
     /// Drop every bookmark this device holds locally.
@@ -157,6 +211,11 @@ final class BookmarkStore: ObservableObject {
             let remote = Set(resp.bookmarks)
             merge(resp.bookmarks)
             pruneConfirmedTombstones(remote: remote)
+            // `merge` above already collapsed any extras the server handed back (rows written
+            // before the one-at-a-time rule, or by a device still on the old build) into tombstones.
+            // They survive pruneConfirmedTombstones — it only retires tombstones the server does NOT
+            // have — so pushUnsynced picks them up as `staleTombstones` and DELETEs them right here,
+            // rather than leaving the cleanup to some later hydrate.
             await pushUnsynced(remote: remote)
         } catch {
             // Offline or signed out: keep whatever is local — but a decode/contract or 5xx failure
@@ -326,10 +385,20 @@ final class BookmarkStore: ObservableObject {
             merged.insert(entry.element, at: min(entry.offset, merged.count))
         }
 
-        guard merged != bookmarkedTitles else { return }
+        // Collapse on BOTH paths, including "nothing changed" — the list can already have been
+        // multi-valued before this response arrived. This is the single funnel every server→local
+        // reconciliation passes through (hydrate, pushAdd, pushRemove), so enforcing one-at-a-time
+        // here is what stops a second bookmark leaking in from another device between hydrates:
+        // toggling A while the server still holds C would otherwise merge to [A, C] and sit there
+        // until the next hydrate.
+        guard merged != bookmarkedTitles else {
+            collapseToSingleBookmark()
+            return
+        }
         bookmarkedTitles = merged
         reconciledTitles.formIntersection(bookmarkedTitles)   // keep the pin set bounded by the list
         persistLocal()
+        collapseToSingleBookmark()
     }
 
     private func persistLocal() {

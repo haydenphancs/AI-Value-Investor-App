@@ -38,6 +38,13 @@ from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
 from app.services.asset_class import trades_extended_hours
 from app.services.chart_helper import fetch_chart_data, sparkline_precision
+# Pure tier table — no I/O and no service imports, so this is cycle-safe at module level
+# (unlike signals_service, which imports FROM here and must stay function-local below).
+from app.services.entitlements import (
+    TIER_PRO,
+    required_tier_for_signals,
+    signals_unlocked,
+)
 from app.utils.market_hours import (
     ET as _ET_ZONE,
     SESSION_AFTERHOURS,
@@ -632,7 +639,7 @@ class HomeDashboardService:
     # ── Public API ────────────────────────────────────────────────────
 
     async def get_dashboard(
-        self, user_id: Optional[str] = None
+        self, user_id: Optional[str] = None, tier: Optional[str] = None
     ) -> HomeDashboardResponse:
         """Aggregate the dashboard.
 
@@ -646,12 +653,15 @@ class HomeDashboardService:
         scanner build that misses the 8s guard is never pinned as "empty" inside
         a 5-minute dashboard cache — the scanners appear on the very next request
         as soon as their own background build warms _scanner_cache.
+
+        ``tier`` gates the App-Exclusive Signals tickers only (Pro/Max); omitting it
+        defaults to Free, i.e. locked. Nothing else on this screen is tier-gated.
         """
         # Signals (App-Exclusive) ride in the SAME response as a 3rd branch, each
         # behind its own cache + guard. The import is function-local to avoid a
         # module cycle — signals_service imports `_canonical_symbol`/`_finite_float`
         # from THIS module (same pattern the pre-warmer uses in main.py).
-        from app.services.signals_service import get_signals_service
+        from app.services.signals_service import get_signals_service, redact_signals
 
         pulse, scanners, signals, themes, watchlist = await asyncio.gather(
             self._get_pulse_guarded(),
@@ -663,6 +673,14 @@ class HomeDashboardService:
             # never the whole screen.
             self._get_watchlist_guarded(user_id),
         )
+        # App-Exclusive Signals are a Pro/Max surface. Redact AFTER the gather, per
+        # request: `signals` is the SHARED 45-min cache object, so the gate has to be a
+        # copy-on-read here rather than anything the service bakes into the cache —
+        # a per-tier cache entry, or an in-place edit, would serve one caller's
+        # entitlement to the next. `redact_signals` is pure and does not mutate.
+        if not signals_unlocked(tier):
+            signals = redact_signals(signals, required_tier_for_signals(tier) or TIER_PRO)
+
         status_text, is_open = _market_status()
         watchlist_title, watchlist_is_group, watchlist_tiles = watchlist
         return HomeDashboardResponse(

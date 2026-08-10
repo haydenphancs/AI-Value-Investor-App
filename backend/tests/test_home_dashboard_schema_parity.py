@@ -24,6 +24,8 @@ from app.schemas.home_dashboard import (
     HomeDashboardResponse,
     MarketPulseItemResponse,
     ScannerGroupsResponse,
+    SignalGroupResponse,
+    SignalRowResponse,
     SignalsGroupResponse,
     ThemesGroupResponse,
 )
@@ -36,7 +38,11 @@ from app.services.home_dashboard_service import (
     _intraday_sparkline,
     _market_status,
 )
-from app.services.signals_service import SignalsService, _SIGNALS_CACHE_KEY
+from app.services.signals_service import (
+    SignalsService,
+    _SIGNALS_CACHE_KEY,
+    redact_signals,
+)
 from app.services import home_dashboard_service as hds
 import time as _time
 
@@ -90,6 +96,34 @@ def test_dashboard_response_keys_match_ios_dto():
     assert dumped["signals"] == {"congress": None, "whale": None, "earnings": None}
     # Themes likewise defaults to an empty list → iOS hides the Emerging Frontiers section.
     assert dumped["themes"] == {"themes": []}
+
+
+def test_locked_signals_payload_validates_end_to_end():
+    """A redacted payload has to survive the SAME response model the unlocked one does —
+    this is the guard against the gate shipping a shape iOS crashes on."""
+    groups = SignalsGroupResponse(
+        congress=SignalGroupResponse(
+            kind="congress",
+            entries=[SignalRowResponse(rank=1, symbol="HONA", name="Hona", value=3.0)],
+            as_of_date="2026-08-07",
+        )
+    )
+    redacted = redact_signals(groups, "pro")
+
+    resp = HomeDashboardResponse(
+        market_status_text="Markets Closed",
+        market_is_open=False,
+        pulse=[],
+        signals=redacted,
+    )
+    dumped = resp.model_dump()
+    assert dumped["signals"]["congress"]["is_locked"] is True
+    assert dumped["signals"]["congress"]["tier_required"] == "pro"
+    # The headline entry is still present — iOS derives the card from entries[0], so an
+    # empty list here would make the whole card disappear instead of locking it.
+    assert len(dumped["signals"]["congress"]["entries"]) == 1
+    assert dumped["signals"]["congress"]["entries"][0]["value"] == 3.0
+    assert "HONA" not in resp.model_dump_json()
 
 
 def test_dashboard_response_validates_worst_case_inputs():

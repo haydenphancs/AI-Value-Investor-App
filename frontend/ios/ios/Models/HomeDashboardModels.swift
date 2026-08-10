@@ -153,9 +153,20 @@ struct ExclusiveSignal: Identifiable {
     let subtitle: String
     let iconSystemName: String
     let accent: Color
+    /// The headline ticker — or, when `isLocked`, the server's bullet MASK. The real
+    /// symbol is never sent to a locked caller, so the row's blur is cosmetic on top of
+    /// a server-side redaction rather than the gate itself.
     let topSymbol: String
+    /// Survives the lock: "3 members buying" names no ticker, and it is what makes the
+    /// upgrade feel worth taking.
     let topStat: String
+    /// Empty when `isLocked` — a locked row opens the paywall instead of expanding.
     let leaders: [SignalLeader]
+    /// Signals are a Pro/Max surface (backend `entitlements.signals_unlocked`). Free and
+    /// guest callers still see the card, with the ticker withheld.
+    var isLocked: Bool = false
+    /// How many leaders are behind the lock — for upsell copy ("Unlock all 10").
+    var lockedCount: Int = 0
 }
 
 // MARK: - Emerging Frontiers (Trending Themes)
@@ -339,9 +350,25 @@ struct SignalGroupDTO: Decodable {
     /// Card-level "as of" context (ISO `yyyy-MM-dd`) or nil. Optional → decode-safe.
     let asOfDate: String?
 
+    // ── Tier gate (backend `entitlements.signals_unlocked`) ───────────────────
+    // Optional for the same decode-safety reason as `name` above, and with a second
+    // consequence worth stating: absent → `?? false` → UNLOCKED. A new build talking to
+    // an older backend therefore behaves exactly as it does today, rather than showing a
+    // phantom lock on data it was served in full. Failing open is correct HERE because
+    // the enforcement is server-side — the older backend simply sent the real tickers.
+    let isLocked: Bool?
+    /// The plan that unlocks ("pro"), echoed from the server so the client never carries
+    /// a second copy of the tier ladder.
+    let tierRequired: String?
+    /// Leaders withheld behind the lock.
+    let lockedCount: Int?
+
     enum CodingKeys: String, CodingKey {
         case kind, entries
         case asOfDate = "as_of_date"
+        case isLocked = "is_locked"
+        case tierRequired = "tier_required"
+        case lockedCount = "locked_count"
     }
 }
 

@@ -18,6 +18,9 @@ struct SignalDisclosureRow: View {
     /// The row swallows it so it can't bubble up and collapse THIS row — but the
     /// Home screen still collapses the expanded Daily Scanner card with it.
     var onBodyTap: (() -> Void)? = nil
+    /// Fired INSTEAD of expanding when the signal is locked (Free/guest). Carries the
+    /// kind so the Home screen can attribute the upsell.
+    var onLockedTap: ((String) -> Void)? = nil
 
     /// Lifted to the parent (via `ExclusiveSignalsSection` → the Home screen) so a
     /// tap OUTSIDE the row can collapse it, and only one row expands at a time —
@@ -30,10 +33,21 @@ struct SignalDisclosureRow: View {
     private static let scrollThreshold = 6
     private static let expandedListMaxHeight: CGFloat = 260
 
+    /// Enough to make 2–5 glyphs unreadable at `dataMedium` without smearing so far
+    /// that the chip stops reading as "a ticker is here".
+    private static let lockBlurRadius: CGFloat = 4.5
+
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                withAnimation(.easeInOut(duration: 0.25)) { isExpanded.toggle() }
+                // A locked row never expands: there is nothing behind it to show (the
+                // backend withheld the leaders), so the tap that would have opened it
+                // opens the paywall instead.
+                if signal.isLocked {
+                    onLockedTap?(signal.kind)
+                } else {
+                    withAnimation(.easeInOut(duration: 0.25)) { isExpanded.toggle() }
+                }
             } label: {
                 HStack(spacing: 12) {
                     IconTile(systemName: signal.iconSystemName, accent: signal.accent,
@@ -52,9 +66,9 @@ struct SignalDisclosureRow: View {
                     Spacer(minLength: 6)
 
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(signal.topSymbol)
-                            .font(AppTypography.dataMedium)
-                            .foregroundColor(AppColors.textPrimary)
+                        topSymbolView
+                        // Survives the lock on purpose: "3 members buying" names no
+                        // ticker, and it is what makes the upgrade worth taking.
                         Text(signal.topStat)
                             .font(AppTypography.captionSmall)
                             .foregroundColor(AppColors.textMuted)
@@ -69,8 +83,18 @@ struct SignalDisclosureRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            // Additive (value/hint, not label) so the unlocked row keeps the default
+            // combined announcement and only the locked one gains the explanation. Both
+            // are applied unconditionally — a conditional modifier would change the
+            // view's identity and drop the expand animation.
+            .accessibilityValue(signal.isLocked ? "Ticker locked" : "")
+            .accessibilityHint(signal.isLocked ? "Shows upgrade options" : "")
 
-            if isExpanded {
+            // `&& !signal.isLocked` is defensive, not decorative: the row could already
+            // be expanded when the lock arrives (a session ending mid-scroll, a tier
+            // downgrade on refresh), and without it the previously-served leaders would
+            // stay on screen behind a lock that has already been applied everywhere else.
+            if isExpanded && !signal.isLocked {
                 Group {
                     if signal.leaders.count > Self.scrollThreshold {
                         // Long list → scroll inside a bounded box. A nested ScrollView
@@ -110,6 +134,39 @@ struct SignalDisclosureRow: View {
         // swallowed tap is forwarded via onBodyTap (→ collapses the scanner card).
         .contentShape(Rectangle())
         .onTapGesture { onBodyTap?() }
+    }
+
+    /// The headline ticker, or its locked stand-in.
+    ///
+    /// What is blurred is a bullet MASK the backend substituted, not the real symbol —
+    /// the ticker is withheld server-side (`entitlements.signals_unlocked`), so this blur
+    /// is presentation, not the gate. That ordering matters twice: the paid data never
+    /// reaches a free client to be read out of the response, and if the blur ever failed
+    /// to apply the row would expose "••••" rather than the ticker.
+    @ViewBuilder
+    private var topSymbolView: some View {
+        if signal.isLocked {
+            Text(signal.topSymbol)
+                .font(AppTypography.dataMedium)
+                .foregroundColor(AppColors.textPrimary)
+                .blur(radius: Self.lockBlurRadius)
+                .overlay(
+                    Image(systemName: "lock.fill")
+                        // A TEXT-role token (the one LockedTickersChip uses): this glyph
+                        // has to clear 4.5:1 in both appearances. A *Graphic token would
+                        // fail the launch audit.
+                        .font(AppTypography.iconXS)
+                        .fontWeight(.semibold)
+                        .foregroundColor(AppColors.primaryBlue)
+                )
+                // The blurred mask must not be readable by VoiceOver either — it would
+                // announce the bullets, and the whole subtree needs ONE honest label.
+                .accessibilityHidden(true)
+        } else {
+            Text(signal.topSymbol)
+                .font(AppTypography.dataMedium)
+                .foregroundColor(AppColors.textPrimary)
+        }
     }
 
     // One drill-down leader row — shared by the inline and the bounded-scroll list
@@ -153,18 +210,23 @@ struct SignalDisclosureRow: View {
 private struct SignalDisclosureRowPreviewHost: View {
     @State private var expandedID: ExclusiveSignal.ID?
     var body: some View {
-        VStack(spacing: 9) {
-            ForEach(MockHomeRepository.signals) { signal in
-                SignalDisclosureRow(
-                    signal: signal,
-                    isExpanded: Binding(
-                        get: { expandedID == signal.id },
-                        set: { expandedID = $0 ? signal.id : nil }
+        ScrollView {
+            VStack(spacing: 9) {
+                // Unlocked (Pro/Max) above, locked (Free/guest) below, so the two states
+                // are compared side by side — the blurred chip has to keep the row's
+                // height and trailing alignment identical to the unlocked one.
+                ForEach(MockHomeRepository.signals + MockHomeRepository.lockedSignals) { signal in
+                    SignalDisclosureRow(
+                        signal: signal,
+                        isExpanded: Binding(
+                            get: { expandedID == signal.id },
+                            set: { expandedID = $0 ? signal.id : nil }
+                        )
                     )
-                )
+                }
             }
+            .padding()
         }
-        .padding()
         .background(Color(lightHex: "F5F7FC", darkHex: "1B2233"))
     }
 }

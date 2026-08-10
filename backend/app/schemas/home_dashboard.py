@@ -118,6 +118,18 @@ class SignalGroupResponse(BaseModel):
     #   • earnings → latest report date in the window
     as_of_date: Optional[str] = None
 
+    # ── Tier gate (see services/entitlements.signals_unlocked) ────────────────
+    # When locked, `entries` holds ONE entry whose `symbol` is masked and whose
+    # `value` is intact: iOS renders the stat ("3 members buying") and blurs the
+    # mask. The real tickers are never serialised for a locked caller — the blur
+    # is cosmetic on top of a server-side redaction, not the gate itself.
+    #
+    # All three are DEFAULTED so an already-shipped iOS build, which knows none of
+    # them, decodes this response unchanged.
+    is_locked: bool = False
+    tier_required: Optional[str] = None          # "pro" when locked, else None
+    locked_count: int = 0                        # entries withheld (0 when unlocked)
+
 
 class SignalsGroupResponse(BaseModel):
     """The three App-Exclusive Signal cards. A null group → iOS omits that card."""

@@ -31,10 +31,18 @@ def test_limits_are_monotonic_up_the_ladder():
 
 
 def test_every_known_tier_has_a_limit():
-    """`normalize_tier` keys off UPDATES_TICKER_LIMITS, so a tier in TIER_ORDER but not in
-    the table would silently resolve to free — a paying user downgraded by a typo."""
+    """A tier in TIER_ORDER but missing from the table would raise a KeyError out of
+    `updates_ticker_limit` — a 500 on the tab bar for a paying user, from a typo."""
     for tier in ent.TIER_ORDER:
         assert tier in ent.UPDATES_TICKER_LIMITS
+
+
+def test_normalisation_is_anchored_to_the_ladder_not_to_one_gates_table():
+    """There is more than one gate now (updates chips, signals tickers). `normalize_tier`
+    resolves against TIER_ORDER so adding a gate whose table omits a tier cannot silently
+    downgrade a paying user everywhere else."""
+    for tier in ent.TIER_ORDER:
+        assert ent.normalize_tier(tier) == tier
 
 
 # ── unknown tiers must fall CLOSED, never open ───────────────────────────────

@@ -317,8 +317,9 @@ final class HomeRepository: HomeRepositoryProtocol {
         guard let dto else { return [] }
         var out: [ExclusiveSignal] = []
 
-        if let c = dto.congress, let top = c.entries.first {
-            out.append(ExclusiveSignal(
+        if let c = dto.congress {
+            out.append(contentsOf: signal(
+                from: c,
                 kind: "congress",
                 title: "Congressional Buys",
                 // "this month" matches the backend's 30-day disclosure window
@@ -326,54 +327,82 @@ final class HomeRepository: HomeRepositoryProtocol {
                 subtitle: "Most-bought on Capitol Hill this month",
                 iconSystemName: "building.columns.fill",
                 accent: AppColors.primaryBlue,
-                topSymbol: top.symbol,
-                topStat: "\(Int(top.value)) members buying",
-                leaders: c.entries.map {
-                    SignalLeader(symbol: $0.symbol,
-                                 companyName: CompanyNameFormatter.clean($0.name ?? ""),
-                                 stat: "\(Int($0.value)) buys")
-                }
+                headline: { "\(Int($0.value)) members buying" },
+                leaderStat: { "\(Int($0.value)) buys" }
             ))
         }
 
-        if let w = dto.whale, let top = w.entries.first {
-            out.append(ExclusiveSignal(
+        if let w = dto.whale {
+            out.append(contentsOf: signal(
+                from: w,
                 kind: "whale",
                 title: "Whale Accumulation",
                 subtitle: "Institutions quietly loading up",
                 iconSystemName: "square.3.layers.3d.down.right",
                 accent: AppColors.alertOrange,
-                topSymbol: top.symbol,
                 // Honest fund COUNT (not a $ figure): 13F trade dollars are
                 // implied-price estimates, so a precise "+$2.1B" would overstate
                 // precision. See the plan's whale-source decision.
-                topStat: "\(Int(top.value)) funds adding",
-                leaders: w.entries.map {
-                    SignalLeader(symbol: $0.symbol,
-                                 companyName: CompanyNameFormatter.clean($0.name ?? ""),
-                                 stat: "\(Int($0.value)) funds")
-                }
+                headline: { "\(Int($0.value)) funds adding" },
+                leaderStat: { "\(Int($0.value)) funds" }
             ))
         }
 
-        if let e = dto.earnings, let top = e.entries.first {
-            out.append(ExclusiveSignal(
+        if let e = dto.earnings {
+            out.append(contentsOf: signal(
+                from: e,
                 kind: "earnings",
                 title: "Earnings Shockers",
                 subtitle: earningsSubtitle(e.asOfDate),
                 iconSystemName: "bolt.fill",
                 accent: AppColors.accentYellow,
-                topSymbol: top.symbol,
-                topStat: "\(formatSurprise(top.value)) surprise",
-                leaders: e.entries.map {
-                    SignalLeader(symbol: $0.symbol,
-                                 companyName: CompanyNameFormatter.clean($0.name ?? ""),
-                                 stat: "\(formatSurprise($0.value)) EPS")
-                }
+                headline: { "\(formatSurprise($0.value)) surprise" },
+                leaderStat: { "\(formatSurprise($0.value)) EPS" }
             ))
         }
 
         return out
+    }
+
+    /// One signal card, or none when the group carries no rows to headline (`[]` so the
+    /// caller can `append(contentsOf:)` without a second optional dance).
+    ///
+    /// The lock is a Pro/Max gate applied SERVER-side: a locked group arrives with its
+    /// `symbol` already replaced by a bullet mask and only the headline row present, so
+    /// nothing here needs to hide anything — it carries the flag through so the row can
+    /// blur the mask and route the tap to the paywall. `value` survives redaction, which
+    /// is why `headline` still produces a true "3 members buying" on a locked card.
+    ///
+    /// `leaders` is dropped when locked: the backend sent one masked row, and a list of
+    /// bullets is worse than no list. The row never expands anyway.
+    private static func signal(
+        from group: SignalGroupDTO,
+        kind: String,
+        title: String,
+        subtitle: String,
+        iconSystemName: String,
+        accent: Color,
+        headline: (SignalRowDTO) -> String,
+        leaderStat: (SignalRowDTO) -> String
+    ) -> [ExclusiveSignal] {
+        guard let top = group.entries.first else { return [] }
+        let isLocked = group.isLocked ?? false
+        return [ExclusiveSignal(
+            kind: kind,
+            title: title,
+            subtitle: subtitle,
+            iconSystemName: iconSystemName,
+            accent: accent,
+            topSymbol: top.symbol,
+            topStat: headline(top),
+            leaders: isLocked ? [] : group.entries.map {
+                SignalLeader(symbol: $0.symbol,
+                             companyName: CompanyNameFormatter.clean($0.name ?? ""),
+                             stat: leaderStat($0))
+            },
+            isLocked: isLocked,
+            lockedCount: group.lockedCount ?? 0
+        )]
     }
 
     /// Display cap for the surprise %: past ±200 the raw number (e.g. Nike +555% on a
@@ -591,6 +620,24 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             ]
         ),
     ]
+
+    /// The same three cards as a FREE caller receives them: the backend has already
+    /// replaced each symbol with a bullet mask and withheld the leaders, so the preview
+    /// exercises the real locked shape rather than a client-side approximation of it.
+    static let lockedSignals: [ExclusiveSignal] = signals.map {
+        ExclusiveSignal(
+            kind: $0.kind,
+            title: $0.title,
+            subtitle: $0.subtitle,
+            iconSystemName: $0.iconSystemName,
+            accent: $0.accent,
+            topSymbol: String(repeating: "•", count: min(max($0.topSymbol.count, 2), 5)),
+            topStat: $0.topStat,
+            leaders: [],
+            isLocked: true,
+            lockedCount: 10
+        )
+    }
 
     // MARK: - Emerging Frontiers (themes)
     //

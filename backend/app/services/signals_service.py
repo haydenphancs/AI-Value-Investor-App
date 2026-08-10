@@ -414,6 +414,81 @@ def _earnings_quote_ok(quote: Any) -> bool:
     return market_cap is not None and market_cap >= _EARNINGS_MIN_MARKET_CAP
 
 
+# ── Tier redaction (App-Exclusive Signals are Pro/Max — entitlements.signals_unlocked) ──
+
+_MASK_CHAR = "•"
+_MASK_MIN_LEN = 2
+_MASK_MAX_LEN = 5
+
+
+def _mask_symbol(symbol: Any) -> str:
+    """A same-length bullet mask for a withheld ticker (``"HONA"`` → ``"••••"``).
+
+    Length is preserved (clamped to 2–5) purely so the blurred chip keeps the width it
+    would have had; a ticker's LENGTH is not the paid information, the ticker is. A
+    missing/blank/non-str symbol still yields a mask rather than "" so the row never
+    renders a naked stat with an empty slot above it.
+    """
+    text = symbol.strip() if isinstance(symbol, str) else ""
+    length = min(max(len(text) or 4, _MASK_MIN_LEN), _MASK_MAX_LEN)
+    return _MASK_CHAR * length
+
+
+def _redact_group(
+    group: Optional[SignalGroupResponse], tier_required: str
+) -> Optional[SignalGroupResponse]:
+    """One card, with its ticker withheld. Returns a NEW object; never mutates ``group``."""
+    if group is None:
+        return None
+
+    entries = list(group.entries or [])
+    if not entries:
+        # Nothing to withhold. Flagging an empty card as locked would be a lie the UI
+        # can't render anyway — iOS omits a card with no entries either way.
+        return group.model_copy(deep=True)
+
+    top = entries[0]
+    return SignalGroupResponse(
+        kind=group.kind,
+        # ONE masked entry, not ten. iOS derives the headline from entries[0] and a
+        # locked row can't expand, so the other nine rows are pure leak surface with
+        # nothing to render them. `value` survives verbatim — it is the stat the card
+        # shows ("3 members buying"), and it names no ticker.
+        entries=[
+            SignalRowResponse(
+                rank=top.rank,
+                symbol=_mask_symbol(top.symbol),
+                name="",
+                value=top.value,
+            )
+        ],
+        as_of_date=group.as_of_date,
+        is_locked=True,
+        tier_required=tier_required,
+        locked_count=len(entries),
+    )
+
+
+def redact_signals(
+    groups: SignalsGroupResponse, tier_required: str
+) -> SignalsGroupResponse:
+    """Return a NEW response with every card's ticker masked, for a locked caller.
+
+    ⚠️ **Must never mutate ``groups``.** The argument is normally the object held in
+    the class-level ``SignalsService._cache`` — ONE instance shared by every caller for
+    45 minutes. Redacting it in place would strip the tickers for every PAYING user
+    until the next rebuild, and the damage would survive long past the request that
+    caused it. Every field here is copied into fresh models for that reason; there is a
+    regression test (``test_signals_entitlement.py``) that asserts the input is intact
+    after a call.
+    """
+    return SignalsGroupResponse(
+        congress=_redact_group(groups.congress, tier_required),
+        whale=_redact_group(groups.whale, tier_required),
+        earnings=_redact_group(groups.earnings, tier_required),
+    )
+
+
 # ── Service ─────────────────────────────────────────────────────────────
 
 

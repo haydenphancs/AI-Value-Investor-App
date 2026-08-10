@@ -110,7 +110,13 @@ def test_dashboard_validates_full_scanner_payload():
 # The exact snake_case keys the iOS SignalRowDTO / SignalGroupDTO / SignalGroupsDTO
 # decode (Models/HomeDashboardModels.swift). A drift here = an iOS decode crash.
 _SIGNAL_ROW_KEYS = {"rank", "symbol", "name", "value"}
-_SIGNAL_GROUP_KEYS = {"kind", "entries", "as_of_date"}
+# is_locked / tier_required / locked_count are the Pro-Max gate (entitlements.
+# signals_unlocked). All three are DEFAULTED server-side and OPTIONAL in the Swift DTO,
+# so the contract holds in both directions across a staggered release: an old app decodes
+# the new response, and a new app against an old backend reads them absent → unlocked.
+_SIGNAL_GROUP_KEYS = {
+    "kind", "entries", "as_of_date", "is_locked", "tier_required", "locked_count",
+}
 _SIGNAL_GROUPS_KEYS = {"congress", "whale", "earnings"}
 
 

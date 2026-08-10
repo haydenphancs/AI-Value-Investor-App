@@ -77,7 +77,12 @@ async def get_home_dashboard(
     """
     try:
         service = get_home_dashboard_service()
-        return await service.get_dashboard(user_id=user.get("id"))
+        # `tier` gates the App-Exclusive Signals tickers (Pro/Max). Same dependency
+        # `updates.py` reads it from: a real account carries its own tier, a
+        # per-install guest is hardcoded "free" — so a signed-out caller is locked.
+        return await service.get_dashboard(
+            user_id=user.get("id"), tier=user.get("tier")
+        )
     except Exception as e:
         logger.error(
             "Home dashboard failed: %s: %s", type(e).__name__, e, exc_info=True

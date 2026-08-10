@@ -16,6 +16,9 @@ struct ExclusiveSignalsSection: View {
     /// can't bubble to the Home collapse gesture) — the Home screen collapses the
     /// expanded Daily Scanner card with it, since that tap is outside the carousel.
     var onBodyTap: (() -> Void)? = nil
+    /// Fired when a LOCKED row is tapped (Free/guest) — carries the signal kind. The row
+    /// does not expand; the Home screen answers this with the paywall.
+    var onLockedTap: ((String) -> Void)? = nil
     /// Which signal row is expanded (nil = none). Lifted to the Home screen so a
     /// tap outside the row collapses it; also enforces one-open-at-a-time.
     /// Same pattern as `DailyScannersSection.expandedCardID`.

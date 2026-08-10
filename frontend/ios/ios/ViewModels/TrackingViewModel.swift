@@ -58,8 +58,30 @@ class TrackingViewModel: ObservableObject {
     @Published var allPopularWhales: [TrendingWhale] = []
     @Published var showAllWhales: Bool = false
     @Published var showAllTrades: Bool = false
+    /// The Tracking screen's PREVIEW slice — at most `recentTradesPreviewLimit` trades.
     @Published var groupedWhaleTrades: [GroupedWhaleTrades] = []
+    /// The complete feed, backing `AllRecentTradesView`. Never truncated.
     @Published var allWhaleTrades: [GroupedWhaleTrades] = []
+
+    /// How many trades the Tracking screen's Recent Trades timeline shows before it
+    /// defers to See All. Following 20 whales otherwise buries "Most Popular" under a
+    /// timeline the user has to scroll past every visit.
+    static let recentTradesPreviewLimit = 5
+
+    /// Trades hidden behind the preview cap — drives the "+N more trades" tail row.
+    /// 0 means the preview IS the whole feed, so no tail is drawn.
+    var hiddenRecentTradeCount: Int {
+        let total = allWhaleTrades.reduce(0) { $0 + $1.activities.count }
+        return max(0, total - Self.recentTradesPreviewLimit)
+    }
+
+    /// Pending coalesced activity re-fetch — see `reloadForFollowChange()`.
+    private var activityReloadTask: Task<Void, Never>?
+
+    /// A tapped LOCKED Follow button → the plan sheet. Owned here rather than passed down
+    /// as a closure because the button sits three list layers deep (section → flat/category
+    /// list → card) in two different screens.
+    @Published var showWhalePaywall: Bool = false
 
     // Loading States
     @Published var isLoading: Bool = false
@@ -136,6 +158,22 @@ class TrackingViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Recent Trades is a SERVER-derived feed keyed on the follow set, so unlike the
+        // whale rows above it cannot be patched locally — it has to be re-fetched. Nothing
+        // used to do that, and because ContentView opacity-mounts every tab this ViewModel
+        // survives the whole process: the feed loaded in `init` was the only one the user
+        // ever saw, so a newly-followed whale's trades appeared only after a force-quit.
+        //
+        // Observed HERE rather than in a view's `.onReceive` because WhaleProfileView is
+        // pushed OVER this tab — a follow performed there must still land, and the whales
+        // tab content is not the thing receiving events at that moment.
+        NotificationCenter.default.publisher(for: WhaleService.followsDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.reloadForFollowChange()
+            }
+            .store(in: &cancellables)
+
         // Republish whenever the portfolio store changes so filteredAssets,
         // filteredAlerts, and portfolioDiversificationScore re-render.
         self.portfolioStore.objectWillChange
@@ -151,6 +189,7 @@ class TrackingViewModel: ObservableObject {
 
     deinit {
         priceRefreshTask?.cancel()
+        activityReloadTask?.cancel()
     }
 
     // MARK: - Computed Properties
@@ -571,30 +610,61 @@ class TrackingViewModel: ObservableObject {
             )
             let activities = dtos.map { $0.toWhaleTradeGroupActivity() }
 
-            // Bucket consecutive same-date activities into a single section
-            // so a date header isn't repeated for every whale who traded that
-            // day. The feed is already sorted desc by date on the backend.
-            var grouped: [GroupedWhaleTrades] = []
-            for activity in activities {
-                if let last = grouped.last, last.sectionTitle == activity.formattedDate {
-                    grouped[grouped.count - 1] = GroupedWhaleTrades(
-                        sectionTitle: last.sectionTitle,
-                        activities: last.activities + [activity]
-                    )
-                } else {
-                    grouped.append(GroupedWhaleTrades(
-                        sectionTitle: activity.formattedDate,
-                        activities: [activity]
-                    ))
-                }
-            }
-            self.groupedWhaleTrades = grouped
-            self.allWhaleTrades = grouped
+            // See All keeps everything; the Tracking screen shows only the newest few.
+            // The slice is taken on the FLAT list before bucketing on purpose —
+            // `grouped.prefix(n)` would take n DATE BUCKETS, which is an unbounded
+            // number of trades and not what "5 most recent" means.
+            //
+            // Truncated HERE and stored, never derived in a view's computed property:
+            // `GroupedWhaleTrades.id` is a UUID minted at init and the timeline's ForEach
+            // keys on it, so rebuilding the slice each body pass would hand SwiftUI fresh
+            // identities on every render.
+            self.allWhaleTrades = Self.bucketByDate(activities)
+            self.groupedWhaleTrades = Self.bucketByDate(
+                Array(activities.prefix(Self.recentTradesPreviewLimit))
+            )
 
             print("[TrackingVM] ✅ Loaded \(activities.count) whale activity items from API")
         } catch {
             print("[TrackingVM] ❌ Whale activity failed: \(error)")
             // No sample fallback — leave empty so UI shows empty state
+        }
+    }
+
+    /// Bucket consecutive same-date activities into a single section so a date header
+    /// isn't repeated for every whale who traded that day. The feed arrives already
+    /// sorted desc by date from the backend, so a single pass over neighbours is enough.
+    private static func bucketByDate(
+        _ activities: [WhaleTradeGroupActivity]
+    ) -> [GroupedWhaleTrades] {
+        var grouped: [GroupedWhaleTrades] = []
+        for activity in activities {
+            if let last = grouped.last, last.sectionTitle == activity.formattedDate {
+                grouped[grouped.count - 1] = GroupedWhaleTrades(
+                    sectionTitle: last.sectionTitle,
+                    activities: last.activities + [activity]
+                )
+            } else {
+                grouped.append(GroupedWhaleTrades(
+                    sectionTitle: activity.formattedDate,
+                    activities: [activity]
+                ))
+            }
+        }
+        return grouped
+    }
+
+    /// Re-fetch the activity feed after the SERVER confirmed a follow change.
+    ///
+    /// Coalesced: following three whales in a row posts three notifications, and each
+    /// would otherwise cost a round trip whose result the next one immediately discards.
+    /// Cancelling the pending task collapses a burst into one fetch of the final state.
+    func reloadForFollowChange() {
+        activityReloadTask?.cancel()
+        activityReloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.loadWhaleActivityFeed()
         }
     }
 
@@ -878,6 +948,16 @@ class TrackingViewModel: ObservableObject {
     }
 
     func toggleFollowWhale(_ whale: TrendingWhale) {
+        // PLAN gate before anything else. The server would refuse this follow with
+        // WHALE_FOLLOW_LOCKED anyway, but letting the request go out would spend a round
+        // trip to arrive at a toast — and it would run the optimistic rebuilds below first,
+        // reproducing the exact "row animates in, then snaps back" symptom the sign-in gate
+        // underneath was added to fix. Same reasoning, one rung up.
+        guard !whale.isLocked else {
+            showWhalePaywall = true
+            return
+        }
+
         // Ask the service FIRST. It owns the "does this need an account?" decision (and raises
         // the sign-in prompt), and it returns false when the mutation was never started — so a
         // signed-out tap must not reach the four optimistic list rebuilds below. Doing this
@@ -886,21 +966,11 @@ class TrackingViewModel: ObservableObject {
         guard WhaleService.shared.toggleFollow(whale.id) else { return }
 
         let newFollowing = !whale.isFollowing
-        // Field-by-field rebuild — every TrendingWhale field must be threaded
-        // through or it silently disappears from the row (firmName vanished
-        // here on follow tap before it was added).
-        let updatedWhale = TrendingWhale(
-            id: whale.id,
-            name: whale.name,
-            category: whale.category,
-            avatarName: whale.avatarName,
-            followersCount: whale.followersCount,
-            isFollowing: newFollowing,
-            title: whale.title,
-            description: whale.description,
-            recentTradeCount: whale.recentTradeCount,
-            firmName: whale.firmName
-        )
+        // `withFollowing` rather than a hand-written rebuild: every TrendingWhale field has
+        // to be threaded through or it silently disappears from the row (firmName vanished
+        // here once; `isLocked` is the newest field that would). The helper is the one
+        // place that knows the full field list.
+        let updatedWhale = whale.withFollowing(newFollowing)
 
         // Update isFollowing in-place across all lists
         if let index = popularWhales.firstIndex(where: { $0.id == whale.id }) {
@@ -967,19 +1037,10 @@ class TrackingViewModel: ObservableObject {
             whale.id == whaleId || whale.name == whaleName
         }
 
+        // Same reasoning as `toggleFollowWhale`: one helper owns the full field list, so a
+        // field added to TrendingWhale cannot silently vanish at this site.
         func makeUpdated(_ whale: TrendingWhale, following: Bool) -> TrendingWhale {
-            TrendingWhale(
-                id: whale.id,
-                name: whale.name,
-                category: whale.category,
-                avatarName: whale.avatarName,
-                followersCount: whale.followersCount,
-                isFollowing: following,
-                title: whale.title,
-                description: whale.description,
-                recentTradeCount: whale.recentTradeCount,
-                firmName: whale.firmName
-            )
+            whale.withFollowing(following)
         }
 
         if let index = popularWhales.firstIndex(where: { matches($0) }) {

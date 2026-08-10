@@ -29,6 +29,7 @@ from app.api.error_response import (
     make_error_response,
     ErrorCode,
 )
+from app.services.entitlements import required_tier_for_whales, whale_detail_unlocked
 
 _VALID_SIGNAL_KINDS = {"whale", "congress"}
 
@@ -91,12 +92,31 @@ async def get_home_dashboard(
 
 
 @router.get("/signals/{kind}/{ticker}", response_model=SignalTickerDetailResponse)
-async def get_signal_ticker_detail(kind: str, ticker: str):
+async def get_signal_ticker_detail(
+    kind: str,
+    ticker: str,
+    user: dict = Depends(get_watchlist_identity),
+):
     """Per-ticker drill-down for a Home signal card — WHO bought/added `ticker`,
-    WHEN, HOW MUCH. ``kind`` ∈ {whale, congress}. Public (no auth). The service
-    degrades to an empty holder list rather than failing; only an unexpected
-    error surfaces a structured response.
+    WHEN, HOW MUCH. ``kind`` ∈ {whale, congress}. The service degrades to an empty
+    holder list rather than failing; only an unexpected error surfaces a structured
+    response.
+
+    Paid (Pro/Max). This route used to take no auth dependency at all, which made the
+    signals redaction on `/dashboard` a curtain rather than a gate: the masked ticker was
+    the only thing standing between a free caller and the full holder list, and a guessed
+    symbol walked straight past it. It returns the same 13F/congress position detail the
+    whale profile withholds, so it takes the same gate.
     """
+    if not whale_detail_unlocked(user.get("tier")):
+        return make_error_response(
+            ErrorCode.WHALE_FOLLOW_LOCKED,
+            message="Signal holder detail requires a paid plan",
+            details={
+                "tier_required": required_tier_for_whales(user.get("tier")) or "",
+                "kind": kind,
+            },
+        )
     if kind not in _VALID_SIGNAL_KINDS:
         return make_error_response(
             ErrorCode.INVALID_INPUT,

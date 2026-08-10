@@ -34,6 +34,9 @@ def test_trending_whale_response_keys_match_ios_dto():
         "description",
         "recent_trade_count",
         "firm_name",
+        # Pro/Max follow gate — defaulted here, Optional in the Swift DTO, so a new
+        # backend and an old app (and vice-versa) both keep decoding.
+        "is_locked",
     }
 
 

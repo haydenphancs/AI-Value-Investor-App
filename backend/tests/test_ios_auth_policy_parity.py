@@ -200,6 +200,14 @@ def test_strict_endpoints_are_signInRequired(case_name):
         # with, on the tab that exists to organise their tickers.
         "activatePortfolio",
         "getUserCredits", "trackEvents",
+        # Whales. The roster and profile always resolved a guest through
+        # `get_watchlist_identity`; the trade-group routes and the signal drill-down took NO
+        # dependency at all until the Pro/Max gate landed, and were `.public` here to match.
+        # They now serve the same paid data the profile redacts, so they carry the same
+        # identity — and pinning them here is what stops them drifting back to `.public`,
+        # which would silently reopen the bypass the gate exists to close.
+        "getWhaleList", "getWhaleProfile",
+        "getWhaleTradeGroups", "getWhaleTradeGroupDetail", "getSignalDetail",
     ],
 )
 def test_guest_capable_endpoints_are_not_gated(case_name):

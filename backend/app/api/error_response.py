@@ -101,6 +101,11 @@ class ErrorCode(str, Enum):
     REPORT_NOT_FOUND = "REPORT_NOT_FOUND"
     REPORT_NOT_READY = "REPORT_NOT_READY"
     INSUFFICIENT_CREDITS = "INSUFFICIENT_CREDITS"
+    # The caller's plan does not allow tracking THIS whale — a Free account outside its one
+    # free slot, or a Pro account already at its limit. Deliberately NOT INSUFFICIENT_CREDITS:
+    # that code means "top up", routes iOS to BuyCredits, and buying credits would not let you
+    # follow one more investor. This is a PLAN gate and must reach the plan sheet.
+    WHALE_FOLLOW_LOCKED = "WHALE_FOLLOW_LOCKED"
     # Terminal, NOT retryable. Ownership of an App Store transaction never moves, so this
     # condition can never clear — which is why it must not share a code with the retryable
     # billing failures. See PurchaseBoundToAnotherAccount in iap_service.py.
@@ -249,6 +254,12 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.INSUFFICIENT_CREDITS: (
         "You don't have enough credits. Upgrade your tier or wait for the monthly reset."
     ),
+    # Number-free on purpose: the limit differs per plan, and hardcoding one here is how a
+    # marketing string drifts from the table that actually enforces it. The endpoint sends
+    # the real numbers in `details`.
+    ErrorCode.WHALE_FOLLOW_LOCKED: (
+        "Your plan doesn't include tracking this investor. Upgrade to follow more."
+    ),
     ErrorCode.PURCHASE_ALREADY_LINKED: (
         "This subscription is already linked to a different Caydex account. Sign in with "
         "that account, or contact support if you think this is wrong."
@@ -313,6 +324,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.GEMINI_UNAVAILABLE: "retry_later",
     ErrorCode.REPORT_NOT_READY: "poll_again",
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
+    ErrorCode.WHALE_FOLLOW_LOCKED: "upgrade",
     # NOT "retry_later": retrying can never succeed, and telling the client to wait is what
     # left StoreKit redelivering the transaction on every launch forever.
     ErrorCode.PURCHASE_ALREADY_LINKED: "contact_support",
@@ -372,6 +384,10 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # failures are SYSTEM_BUSY (409, retryable), NEVER this — a DB blip must not tell a
     # paying user they're broke.
     ErrorCode.INSUFFICIENT_CREDITS: 402,
+    # 403, not 402: the credential is fine and nothing needs paying off — the caller simply
+    # isn't allowed this action on their plan (auth.md §2). 402 would also send iOS down the
+    # top-up route, and no amount of credits unlocks a follow slot.
+    ErrorCode.WHALE_FOLLOW_LOCKED: 403,
     # 409 conflict — a terminal 4xx, so the client finishes the transaction instead of
     # treating it as a transient 5xx and retrying forever.
     ErrorCode.PURCHASE_ALREADY_LINKED: 409,

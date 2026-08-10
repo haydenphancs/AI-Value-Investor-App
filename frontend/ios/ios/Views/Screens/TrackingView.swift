@@ -376,6 +376,7 @@ struct AssetsTabContent: View {
 // MARK: - Whales Tab Content
 struct WhalesTabContent: View {
     @ObservedObject var viewModel: TrackingViewModel
+    @Environment(\.appState) private var appState
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -393,6 +394,7 @@ struct WhalesTabContent: View {
                 if !viewModel.groupedWhaleTrades.isEmpty {
                     WhaleTradesTimelineSection(
                         groupedTrades: viewModel.groupedWhaleTrades,
+                        hiddenCount: viewModel.hiddenRecentTradeCount,
                         onActivityTapped: { activity in viewModel.viewTradeGroupDetail(activity) },
                         onMoreTapped: { viewModel.viewMoreRecentTrades() }
                     )
@@ -423,6 +425,13 @@ struct WhalesTabContent: View {
         }
         .navigationDestination(isPresented: $viewModel.showAllTrades) {
             AllRecentTradesView(viewModel: viewModel)
+        }
+        // A tapped LOCKED Follow pill. A PLAN gate, so the plan sheet — buying credits
+        // would not free a tracking slot. `.environment(\.appState, appState)` is REQUIRED:
+        // PaywallView reads the custom `\.appState` key, which a sheet does not inherit.
+        .sheet(isPresented: $viewModel.showWhalePaywall) {
+            PaywallView()
+                .environment(\.appState, appState)
         }
     }
 }
@@ -472,6 +481,9 @@ struct FollowedWhalesRow: View {
 // MARK: - Whale Trades Timeline Section
 struct WhaleTradesTimelineSection: View {
     let groupedTrades: [GroupedWhaleTrades]
+    /// Trades withheld by the preview cap. `> 0` draws the "+N more trades" tail;
+    /// 0 means this IS the whole feed and the timeline ends at its last card.
+    var hiddenCount: Int = 0
     var onActivityTapped: ((WhaleTradeGroupActivity) -> Void)?
     var onMoreTapped: (() -> Void)?
 
@@ -502,21 +514,67 @@ struct WhaleTradesTimelineSection: View {
                 ForEach(Array(groupedTrades.enumerated()), id: \.element.id) { groupIndex, group in
                     ForEach(Array(group.activities.enumerated()), id: \.element.id) { activityIndex, activity in
                         let isFirst = groupIndex == 0 && activityIndex == 0
-                        let isLast = groupIndex == groupedTrades.count - 1
+                        let isFinalCard = groupIndex == groupedTrades.count - 1
                             && activityIndex == group.activities.count - 1
 
                         WhaleTradeTimelineRow(
                             activity: activity,
                             showDate: activityIndex == 0,
                             isFirst: isFirst,
-                            isLast: isLast,
+                            // The rail is drawn PER ROW and suppressed on the last one,
+                            // so the final card must keep its connector when a tail
+                            // follows — otherwise the tail's dot floats detached.
+                            isLast: isFinalCard && hiddenCount == 0,
                             onTapped: { onActivityTapped?(activity) }
                         )
                         .padding(.horizontal, AppSpacing.lg)
                     }
                 }
+
+                if hiddenCount > 0 {
+                    moreTradesRow
+                        .padding(.horizontal, AppSpacing.lg)
+                }
             }
         }
+    }
+
+    /// Tail of a truncated timeline: an open dot continuing the rail, then a tappable
+    /// "+N more trades". Tappable rather than a passive "…" so the affordance is also
+    /// the shortcut — the user doesn't have to scroll back up to the header's See All.
+    ///
+    /// Mirrors `WhaleTradeTimelineRow`'s geometry (20pt rail column, `AppSpacing.md`
+    /// gutter) so the dot lands on the same vertical line as the cards' dots above it.
+    private var moreTradesRow: some View {
+        Button {
+            onMoreTapped?()
+        } label: {
+            HStack(alignment: .top, spacing: AppSpacing.md) {
+                // No connector: this row ends the rail.
+                TimelineDot(isHollow: true)
+                    .frame(width: 20, alignment: .top)
+
+                HStack(spacing: AppSpacing.xs) {
+                    Text("+\(hiddenCount) more trade\(hiddenCount == 1 ? "" : "s")")
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.primaryBlue)
+
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.iconXS)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+                // Nudge the label onto the dot's centre line — the dot is 8pt inside a
+                // 20pt column, top-aligned like every row above.
+                .offset(y: -2)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, AppSpacing.md)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(hiddenCount) more trades")
+        .accessibilityHint("Shows all recent trades")
     }
 }
 
@@ -857,24 +915,71 @@ struct WhaleCard: View {
 
                 Spacer()
 
-                // Follow Button
+                // Follow Button — or a lock, when the plan doesn't allow tracking this
+                // whale. The row itself stays fully browsable and tappable through to the
+                // profile; only this control changes.
+                //
+                // A locked tap still calls `onFollowToggle`: `TrackingViewModel` owns the
+                // decision and raises the paywall, so the three list layers between here
+                // and the screen don't each need a second closure threaded through them.
                 Button {
                     onFollowToggle?()
                 } label: {
-                    Text(whale.isFollowing ? "Following" : "Follow")
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(whale.isFollowing ? AppColors.textSecondary : AppColors.textOnAccent)
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.vertical, AppSpacing.sm)
-                        .background(whale.isFollowing ? AppColors.cardBackgroundLight : AppColors.primaryFill)
-                        .cornerRadius(AppCornerRadius.pill)
+                    WhaleFollowPillLabel(whale: whale)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(
+                    whale.isLocked
+                        ? "Follow \(whale.name), locked"
+                        : (whale.isFollowing ? "Following \(whale.name)" : "Follow \(whale.name)")
+                )
+                .accessibilityHint(whale.isLocked ? "Shows upgrade options" : "")
             }
             .padding(AppSpacing.lg)
             .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Follow Pill Label
+
+/// The Follow / Following / 🔒 pill, shared by `WhaleCard` and `AllWhalesView` so the three
+/// states cannot drift between the two lists that show them side by side.
+///
+/// Locked renders as a lock glyph + "Follow" on the muted surface rather than the saturated
+/// primary fill: a locked control that still looks like the primary call to action invites
+/// a tap that can only be refused.
+struct WhaleFollowPillLabel: View {
+    let whale: TrendingWhale
+
+    var body: some View {
+        HStack(spacing: AppSpacing.xs) {
+            if whale.isLocked {
+                // Text-role token — this glyph must clear 4.5:1 in both appearances.
+                Image(systemName: "lock.fill")
+                    .font(AppTypography.iconXS)
+                    .fontWeight(.semibold)
+                    .foregroundColor(AppColors.primaryBlue)
+            }
+            Text(whale.isFollowing ? "Following" : "Follow")
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(foreground)
+        }
+        .padding(.horizontal, AppSpacing.lg)
+        .padding(.vertical, AppSpacing.sm)
+        .background(background)
+        .cornerRadius(AppCornerRadius.pill)
+    }
+
+    private var foreground: Color {
+        if whale.isLocked { return AppColors.primaryBlue }
+        return whale.isFollowing ? AppColors.textSecondary : AppColors.textOnAccent
+    }
+
+    private var background: Color {
+        if whale.isLocked || whale.isFollowing { return AppColors.cardBackgroundLight }
+        return AppColors.primaryFill
     }
 }
 

@@ -22,6 +22,11 @@ struct BookCoreDetailView: View {
     @ObservedObject private var progress = BookProgressStore.shared
     @State private var audioCompletionCancellable: AnyCancellable?
 
+    /// True while the whole-book finale is up. It also FREEZES the reader's content — see the
+    /// guards in navigateToNextCore / navigateToPreviousCore / jumpReadingToCore.
+    @State private var showBookFinale = false
+    @State private var bookFinishedCancellable: AnyCancellable?
+
     // Track if user initiated playback from this view or if it was already playing
     @State private var shouldShowPlayer: Bool = false
 
@@ -54,16 +59,27 @@ struct BookCoreDetailView: View {
 
     let book: LibraryBook
     let allCores: [BookCoreChapter]
-    
-    init(content: CoreChapterContent, book: LibraryBook) {
+
+    /// Called when the learner taps "Thank you" on the whole-book finale. The presenter is expected
+    /// to close THIS reader and then, once that dismissal has actually finished, close the book
+    /// detail cover underneath it — landing the learner back on whatever opened the book.
+    /// `nil` (previews, or a future entry point that doesn't wire it) degrades to closing just this.
+    let onFinishedBook: (() -> Void)?
+
+    init(content: CoreChapterContent, book: LibraryBook, onFinishedBook: (() -> Void)? = nil) {
         self.book = book
         self.allCores = book.coreChapters
+        self.onFinishedBook = onFinishedBook
         self._currentContent = State(initialValue: content)
     }
-    
+
     private var currentCoreIndex: Int {
         allCores.firstIndex { $0.number == currentContent.chapterNumber } ?? 0
     }
+
+    /// Every core number in this book — the roster `BookProgressStore` judges "the book is
+    /// finished" against. Passed to every completion write this screen makes.
+    private var coreNumbers: [Int] { allCores.map(\.number) }
     
     private var hasPreviousCore: Bool {
         currentCoreIndex > 0
@@ -339,6 +355,12 @@ struct BookCoreDetailView: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: shouldShowPlayer)
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         }
+        // Attached to the outer ZStack, so everything INSIDE it — including the bottom mini player
+        // and the Ask Cay AI bar — sits under the scrim, while the audio chrome added below (the
+        // top status island and the full-screen player) stays above it. That's the right split:
+        // the island only appears while the chat bar is focused, which is impossible behind a
+        // modal scrim, and the full-screen player is only up if the learner opened it deliberately.
+        .overlay { bookFinaleOverlay }
         // Top status island + full-screen player + overlay-host registration (this screen is a
         // fullScreenCover above RootContainerView, whose own overlay would be hidden). "Read" jumps
         // the reading view to the core the narration is currently in.
@@ -364,6 +386,20 @@ struct BookCoreDetailView: View {
                         autoCompleteFinalCore()
                     }
                 }
+
+            // The book's LAST remaining core was just completed — by the button, by the narration
+            // reaching the end of the file, or by the narration playing through it. The store
+            // raises this from the one place all three write, so it doesn't matter which view
+            // performed the write (BookDetailView drives markListenedThrough on the same ticks we
+            // do, in an order SwiftUI doesn't define). Assigning to a single cancellable rather
+            // than a Set is deliberate: .onAppear can fire more than once, and reassignment
+            // cancels the previous subscription, so a double-appear can't double-subscribe.
+            bookFinishedCancellable = progress.didFinishBook
+                .receive(on: DispatchQueue.main)
+                .sink { [self] order in
+                    guard order == book.curriculumOrder else { return }
+                    presentBookFinale()
+                }
         }
         .onDisappear {
             // Reset scroll hiding when leaving the view
@@ -371,6 +407,8 @@ struct BookCoreDetailView: View {
             // Cancel audio completion subscription
             audioCompletionCancellable?.cancel()
             audioCompletionCancellable = nil
+            bookFinishedCancellable?.cancel()
+            bookFinishedCancellable = nil
         }
         .onChange(of: currentContent.chapterNumber) {
             // Same single book file across cores — only load if it isn't already active, so
@@ -388,6 +426,70 @@ struct BookCoreDetailView: View {
             // Follow the audio: if it leaves the core we're viewing, open the next one.
             autoAdvanceReading(from: oldTime, to: newTime)
         }
+    }
+
+    // MARK: - Whole-book finale
+
+    @ViewBuilder
+    private var bookFinaleOverlay: some View {
+        if showBookFinale {
+            ZStack {
+                // Deliberately NOT tap-to-dismiss: the CTA is the only exit, and the reader behind
+                // this is about to be torn down anyway. contentShape + an empty gesture stops stray
+                // taps from landing on the page underneath.
+                AppColors.scrim
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {}
+                    .accessibilityHidden(true)
+
+                BookFinishedCard(
+                    bookTitle: book.title,
+                    message: "All \(allCores.count) cores, start to finish. It's marked mastered in your library.",
+                    ctaTitle: "Thank you",
+                    onCTATapped: handleFinaleThankYou
+                )
+            }
+            .transition(.opacity)
+            // Hides the whole reader from VoiceOver, so swiping can't wander behind the card.
+            .accessibilityAddTraits(.isModal)
+            .zIndex(50)
+        }
+    }
+
+    private func presentBookFinale() {
+        guard !showBookFinale else { return }
+
+        // Quiet the narration. A voice reading on under a "you finished the book" card is jarring,
+        // and this is reachable MID-FILE when the book is finished out of order (the
+        // markListenedThrough path), not only at the end. `pause()` — never `stop()` — keeps the
+        // episode and its position loaded, so the mini player survives the dismiss and can resume.
+        if audioManager.isPlaying, audioManager.currentEpisode?.id == book.audioEpisode.id {
+            audioManager.pause()
+        }
+
+        withAnimation(.easeOut(duration: 0.25)) {
+            showBookFinale = true
+        }
+
+        // The per-core success haptic already fired in whichever completion path got here; this
+        // second, heavier bump lands with the ring closing, so the two read as "core done ✓ …
+        // book done". Both are gated by the user's haptics setting inside Haptics.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { Haptics.impact(.heavy) }
+
+        // The card is modal — move VoiceOver onto it rather than leaving focus on a paragraph
+        // behind the scrim.
+        UIAccessibility.post(notification: .screenChanged, argument: "You finished \(book.title)")
+    }
+
+    private func handleFinaleThankYou() {
+        guard let onFinishedBook else {
+            // Nobody wired the two-cover dismissal (previews, or a future entry point):
+            // at least close the reader rather than trapping the learner behind the scrim.
+            dismiss()
+            return
+        }
+        onFinishedBook()
     }
 
     // MARK: - Scroll Handling
@@ -486,7 +588,7 @@ struct BookCoreDetailView: View {
             newly = progress.markListenedThrough(
                 order: book.curriculumOrder, from: old, to: new,
                 coreStarts: info.coreStartSeconds, totalSeconds: info.totalSeconds,
-                seekEpoch: audioManager.seekEpoch)
+                seekEpoch: audioManager.seekEpoch, bookCores: coreNumbers)
         }
         if !newly.isEmpty {
             Haptics.success()
@@ -518,7 +620,7 @@ struct BookCoreDetailView: View {
         guard let last = allCores.last,
               !progress.isCompleted(order: book.curriculumOrder, core: last.number) else { return }
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-            progress.markCompleted(order: book.curriculumOrder, core: last.number)
+            progress.markCompleted(order: book.curriculumOrder, core: last.number, bookCores: coreNumbers)
         }
         Haptics.success()
     }
@@ -533,7 +635,7 @@ struct BookCoreDetailView: View {
 
         // Mark current core as completed (persists locally + syncs to backend).
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-            progress.markCompleted(order: book.curriculumOrder, core: currentContent.chapterNumber)
+            progress.markCompleted(order: book.curriculumOrder, core: currentContent.chapterNumber, bookCores: coreNumbers)
         }
 
         // If there's a next core, navigate to it after a delay.
@@ -568,6 +670,7 @@ struct BookCoreDetailView: View {
     }
 
     private func navigateToPreviousCore() {
+        guard !showBookFinale else { return }   // frozen behind the finale — see navigateToNextCore
         let previousIndex = currentCoreIndex - 1
         guard previousIndex >= 0, let newContent = allCores[previousIndex].getDetailContent(for: book) else { return }
         withAnimation(.easeInOut(duration: 0.3)) {
@@ -581,6 +684,7 @@ struct BookCoreDetailView: View {
     /// Jump the reading view to a specific core — used by the full-screen player's "Read" button to
     /// snap back to the core the narration is currently in (the read-along highlight resumes there).
     private func jumpReadingToCore(_ number: Int) {
+        guard !showBookFinale else { return }   // frozen behind the finale — see navigateToNextCore
         guard number != currentContent.chapterNumber,
               let chapter = allCores.first(where: { $0.number == number }),
               let content = chapter.getDetailContent(for: book) else { return }
@@ -591,6 +695,15 @@ struct BookCoreDetailView: View {
     }
 
     private func navigateToNextCore() {
+        // While the finale is up the reader's content is FROZEN behind it. "The last REMAINING
+        // core" is not "the last core" — finish out of order and the final hole can be core 5 of
+        // 12, where hasNextCore is true and handleCoreCompletion's 1.5s delayed hop IS scheduled.
+        // Without this the reader would swap to core 6 behind the card, which also trips the
+        // scroll-to-top .onChange and its UIAccessibility screenChanged post, stealing VoiceOver
+        // focus off the card — and would strand the learner on a core they never opened.
+        // Guarding the three navigation funnels covers the delayed hop, the narration's own
+        // auto-advance, and the player's "Read" jump in one concept.
+        guard !showBookFinale else { return }
         let nextIndex = currentCoreIndex + 1
         guard nextIndex < allCores.count, let newContent = allCores[nextIndex].getDetailContent(for: book) else { return }
         withAnimation(.easeInOut(duration: 0.3)) {

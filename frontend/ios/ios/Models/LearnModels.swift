@@ -364,7 +364,6 @@ struct LibraryBook: Identifiable {
     let publishedYear: Int
     let rating: Double
     let curriculumOrder: Int
-    let keyIdeasCount: Int
     let coverGradientStart: String
     let coverGradientEnd: String
 
@@ -395,8 +394,17 @@ struct LibraryBook: Identifiable {
         "Published \(publishedYear)"
     }
 
+    /// The library card's "N Core Ideas" — the SAME cores the detail screen counts, so the two
+    /// screens can never disagree about the same book.
+    ///
+    /// This used to be a hand-typed `keyIdeasCount` stored on every book, and every one of the ten
+    /// was wrong: they ranged from 3 under to 14 over (The Essays of Warren Buffett advertised
+    /// "20 Core Ideas" for a book with 6 cores). The number matched nothing — not the cores, not
+    /// `keyHighlights` (always 4) — so it was invented copy that the detail screen then contradicted.
+    /// Deriving it is the same fix `chapterCount` below already documents: nothing to hand-edit,
+    /// nothing to drift when BooksContent.swift is regenerated.
     var formattedKeyIdeas: String {
-        "\(keyIdeasCount) Core Ideas"
+        "\(chapterCount) Core Ideas"
     }
 
     /// Always the count of authored cores — derived from coreChapters so it can never
@@ -728,7 +736,6 @@ extension LibraryBook {
             publishedYear: 1997,
             rating: 4.7,
             curriculumOrder: 1,
-            keyIdeasCount: 12,
             coverGradientStart: "7C3AED",
             coverGradientEnd: "4C1D95",
             level: .starter,
@@ -763,7 +770,6 @@ extension LibraryBook {
             publishedYear: 1949,
             rating: 4.8,
             curriculumOrder: 2,
-            keyIdeasCount: 18,
             coverGradientStart: "1E3A5F",
             coverGradientEnd: "0F1F35",
             level: .intermediate,
@@ -798,7 +804,6 @@ extension LibraryBook {
             publishedYear: 2020,
             rating: 4.9,
             curriculumOrder: 3,
-            keyIdeasCount: 15,
             coverGradientStart: "059669",
             coverGradientEnd: "064E3B",
             level: .starter,
@@ -833,7 +838,6 @@ extension LibraryBook {
             publishedYear: 1989,
             rating: 4.5,
             curriculumOrder: 4,
-            keyIdeasCount: 14,
             coverGradientStart: "2D4A3E",
             coverGradientEnd: "1A2D25",
             level: .intermediate,
@@ -868,7 +872,6 @@ extension LibraryBook {
             publishedYear: 1958,
             rating: 4.7,
             curriculumOrder: 5,
-            keyIdeasCount: 16,
             coverGradientStart: "4A1E1E",
             coverGradientEnd: "2D1212",
             level: .intermediate,
@@ -903,7 +906,6 @@ extension LibraryBook {
             publishedYear: 2007,
             rating: 4.6,
             curriculumOrder: 6,
-            keyIdeasCount: 10,
             coverGradientStart: "1E40AF",
             coverGradientEnd: "1E3A8A",
             level: .starter,
@@ -938,7 +940,6 @@ extension LibraryBook {
             publishedYear: 1973,
             rating: 4.4,
             curriculumOrder: 7,
-            keyIdeasCount: 13,
             coverGradientStart: "7C2D12",
             coverGradientEnd: "451A03",
             level: .intermediate,
@@ -973,7 +974,6 @@ extension LibraryBook {
             publishedYear: 1997,
             rating: 4.8,
             curriculumOrder: 8,
-            keyIdeasCount: 20,
             coverGradientStart: "B45309",
             coverGradientEnd: "78350F",
             level: .advanced,
@@ -1008,7 +1008,6 @@ extension LibraryBook {
             publishedYear: 2010,
             rating: 4.5,
             curriculumOrder: 9,
-            keyIdeasCount: 9,
             coverGradientStart: "10B981",
             coverGradientEnd: "065F46",
             level: .intermediate,
@@ -1043,7 +1042,6 @@ extension LibraryBook {
             publishedYear: 2011,
             rating: 4.7,
             curriculumOrder: 10,
-            keyIdeasCount: 17,
             coverGradientStart: "581C87",
             coverGradientEnd: "3B0764",
             level: .advanced,

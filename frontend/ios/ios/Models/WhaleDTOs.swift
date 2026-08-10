@@ -23,6 +23,11 @@ struct TrendingWhaleDTO: Codable, Identifiable {
     /// Firm a person-fronted whale runs ("Bridgewater Associates" for Ray
     /// Dalio). Optional — nil for institutions/politicians and old backends.
     let firmName: String?
+    /// This caller's plan does not allow TRACKING this whale (Free outside its one free
+    /// slot, or Pro at its limit). The row still renders in full — only the Follow button
+    /// locks. Optional so an older backend reads as absent → `?? false` → unlocked, i.e.
+    /// exactly today's behaviour rather than a phantom lock.
+    let isLocked: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id, name, category, title, description
@@ -31,6 +36,7 @@ struct TrendingWhaleDTO: Codable, Identifiable {
         case isFollowing = "is_following"
         case recentTradeCount = "recent_trade_count"
         case firmName = "firm_name"
+        case isLocked = "is_locked"
     }
 
     func toTrendingWhale() -> TrendingWhale {
@@ -44,7 +50,8 @@ struct TrendingWhaleDTO: Codable, Identifiable {
             title: title,
             description: description,
             recentTradeCount: recentTradeCount,
-            firmName: firmName
+            firmName: firmName,
+            isLocked: isLocked ?? false
         )
     }
 }
@@ -122,6 +129,15 @@ struct WhaleProfileDTO: Codable {
     let portfolioStatus: String?
     let portfolioAsOf: String?
     let filingDate: String?
+    /// Pro/Max gate. When true the backend has WITHHELD the position-level sections —
+    /// `currentHoldings`, `recentTradeGroups`, `recentTrades` arrive empty,
+    /// `sentimentSummary` blank and `behaviorSummary` neutral — while the header, stat
+    /// tiles and `sectorExposure` are intact. Optional for the same reason as the
+    /// provenance block above: absent must mean unlocked, not a decode failure.
+    let isLocked: Bool?
+    /// The plan that unlocks ("pro"), echoed from the server so the client never carries a
+    /// second copy of the tier ladder.
+    let tierRequired: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name, title, description
@@ -145,6 +161,8 @@ struct WhaleProfileDTO: Codable {
         case portfolioStatus = "portfolio_status"
         case portfolioAsOf = "portfolio_as_of"
         case filingDate = "filing_date"
+        case isLocked = "is_locked"
+        case tierRequired = "tier_required"
     }
 
     func toWhaleProfile() -> WhaleProfile {
@@ -176,7 +194,11 @@ struct WhaleProfileDTO: Codable {
             returnWindowYears: returnWindowYears,
             portfolioStatus: portfolioStatus ?? "",
             portfolioAsOf: portfolioAsOf,
-            filingDate: filingDate
+            filingDate: filingDate,
+            // Absent → unlocked. An older backend served every section in full, so reading
+            // a missing flag as locked would hide data the user is entitled to.
+            isLocked: isLocked ?? false,
+            tierRequired: tierRequired
         )
     }
 }

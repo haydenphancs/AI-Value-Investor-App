@@ -45,6 +45,17 @@ struct WhaleProfile: Identifiable, Codable {
     var portfolioAsOf: String? = nil
     var filingDate: String? = nil
 
+    /// Pro/Max gate (backend `entitlements.whale_detail_unlocked`). True means the
+    /// position-level sections were WITHHELD SERVER-SIDE, so `currentHoldings`,
+    /// `recentTradeGroups`, `recentTrades` are empty and `sentimentSummary` blank by the
+    /// time they reach here — the view locks those sections rather than rendering an
+    /// "empty portfolio", which would read as missing data instead of a paywall.
+    ///
+    /// Defaulted for the same memberwise-init reason as the block above.
+    var isLocked: Bool = false
+    /// The plan that unlocks, echoed from the server.
+    var tierRequired: String? = nil
+
     // MARK: - Formatted Properties
 
     var formattedPortfolioValue: String {

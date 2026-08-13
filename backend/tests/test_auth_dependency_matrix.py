@@ -38,20 +38,25 @@ from app.dependencies import (
     get_identity_only_user,
     get_learn_identity,
     get_optional_user_id,
+    get_profile_identity,
     get_research_identity,
     get_watchlist_identity,
 )
 
-# All four per-install wrappers. `get_chat_identity` was missing from the two parametrized
+# All FIVE per-install wrappers. `get_chat_identity` was missing from the two parametrized
 # tests below — chat is the surface people paste holdings into, and the one migration 111 was
 # written for, so leaving it out of the matrix was the wrong omission to have.
+# `get_profile_identity` (migration 131) joins for the same reason: it partitions the investor
+# profile per install, so it inherits the identical obligations — reject an unverifiable token
+# rather than silently downgrading to guest, and never collapse two installs onto one bucket.
 _IDENTITY_WRAPPERS = [
     get_learn_identity,
     get_research_identity,
     get_watchlist_identity,
     get_chat_identity,
+    get_profile_identity,
 ]
-_IDENTITY_WRAPPER_IDS = ["learn", "research", "watchlist", "chat"]
+_IDENTITY_WRAPPER_IDS = ["learn", "research", "watchlist", "chat", "profile"]
 
 _USER_ID = "11111111-2222-3333-4444-555555555555"
 

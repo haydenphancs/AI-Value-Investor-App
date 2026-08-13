@@ -16,7 +16,18 @@ from app.database import get_auth_client, get_supabase
 from app.dependencies import (
     get_current_user,
     get_current_user_or_guest,  # TEMP: guest fallback
+    get_profile_identity,
     GUEST_USER_ID,
+)
+from app.schemas.investor_profile import (
+    InvestorProfileResponse,
+    UpdateInvestorProfileRequest,
+)
+from app.services.entitlements import required_tier_for_signals, signals_unlocked
+from app.services.user_investor_profile_service import (
+    ProfileUnreadable,
+    get_user_investor_profile_service,
+    is_empty_profile,
 )
 from app.schemas.user import UserResponse, UserCreditsResponse, UpdateProfileRequest
 from app.schemas.subscription import SubscriptionResponse
@@ -243,6 +254,84 @@ async def update_my_settings(
     return UserSettingsResponse(preferences=prefs)
 
 
+def _profile_response(profile: dict, user: dict) -> InvestorProfileResponse:
+    """Shape the stored profile for the wire, including the tier verdict.
+
+    `applied` reuses `entitlements.signals_unlocked` rather than inventing a second
+    tier table — it already normalizes an unknown tier down to free, and guests
+    hardcode "free", so both fall closed. `required_tier` comes from the matching
+    helper so the paywall names exactly the plan the server enforced.
+
+    An all-default profile reports `applied=False` whatever the tier: there is nothing
+    to personalize with, and claiming otherwise would be a lie in the UI.
+    """
+    empty = is_empty_profile(profile)
+    unlocked = signals_unlocked(user.get("tier"))
+    return InvestorProfileResponse(
+        experience_level=profile["experience_level"],
+        explanation_style=profile["explanation_style"],
+        answer_depth=profile["answer_depth"],
+        topics=profile["topics"],
+        learning_goals=profile["learning_goals"],
+        follow_signals=profile["follow_signals"],
+        has_profile=profile.get("has_profile", False),
+        is_empty=empty,
+        profile_version=profile.get("profile_version", 1),
+        consented_at=profile.get("consented_at"),
+        applied=unlocked and not empty,
+        required_tier=required_tier_for_signals(user.get("tier")),
+    )
+
+
+@router.get("/me/investor-profile", response_model=InvestorProfileResponse)
+async def get_my_investor_profile(
+    user: dict = Depends(get_profile_identity),
+):
+    """The reader's learning preferences, plus whether they are being APPLIED.
+
+    Guest-allowed: the profile is captured during first-run onboarding, before an
+    account exists (see `get_profile_identity`).
+
+    A read failure is 503, never an all-defaults 200 — the client would treat defaults
+    as "the server has no profile" and happily overwrite a real row with them. Same
+    distinction `/me/settings` draws for the same reason.
+    """
+    try:
+        profile = get_user_investor_profile_service().get_profile(user["id"])
+    except ProfileUnreadable as e:
+        return make_error_response(ErrorCode.SETTINGS_UNAVAILABLE, message=str(e))
+    return _profile_response(profile, user)
+
+
+@router.put("/me/investor-profile", response_model=InvestorProfileResponse)
+async def update_my_investor_profile(
+    request: UpdateInvestorProfileRequest,
+    user: dict = Depends(get_profile_identity),
+):
+    """Save the reader's learning preferences.
+
+    Partial by design — every field is optional so an onboarding step the user skipped
+    doesn't block the ones they answered. `model_dump(exclude_none=True)` is what makes
+    an omitted field keep its stored/default value instead of being cleared; an
+    intentional clear sends an explicit empty list.
+
+    Saving is allowed on EVERY tier. Whether it is applied is a separate question the
+    response answers, so a Free user sees their answers acknowledged rather than a
+    control that silently does nothing.
+    """
+    payload = request.model_dump(exclude_none=True)
+    consented_at = None
+    if payload.pop("accepted_personalization_terms", False):
+        consented_at = datetime.now(timezone.utc).isoformat()
+    try:
+        profile = get_user_investor_profile_service().upsert_profile(
+            user["id"], payload, consented_at=consented_at,
+        )
+    except ProfileUnreadable as e:
+        return make_error_response(ErrorCode.SETTINGS_UNAVAILABLE, message=str(e))
+    return _profile_response(profile, user)
+
+
 @router.post("/me/devices", response_model=DeviceRegisterResponse)
 async def register_device(
     request: DeviceRegisterRequest,
@@ -350,6 +439,7 @@ async def claim_guest_data(
             "claimed": {
                 "watchlist_items": 0, "portfolios": 0, "portfolios_merged": 0,
                 "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
+                "investor_profile": 0,
             },
             "skipped": "no per-install guest id",
         }
@@ -358,6 +448,7 @@ async def claim_guest_data(
     claimed = {
         "watchlist_items": 0, "portfolios": 0, "portfolios_merged": 0,
         "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
+        "investor_profile": 0,
     }
     # Per-step failures. One table must never abort the ones after it — see `_claim`.
     step_failures: dict[str, str] = {}
@@ -584,6 +675,38 @@ async def claim_guest_data(
             ).execute()
             claimed["chat_sessions"] = len(guest_chats)
 
+    def _claim_investor_profile() -> None:
+        # ── investor profile: the ACCOUNT's own answers win outright. ──────────
+        #
+        # `user_id` is the PRIMARY KEY here, so unlike the watchlist there is at most
+        # one row per side and re-pointing the guest row onto an id that already has
+        # one would raise a unique violation rather than merge. The account's profile
+        # is the more deliberate artifact (edited in Settings, post-signup), so the
+        # guest row is dropped in that case rather than silently overwriting it.
+        #
+        # This step exists because the profile is captured during FIRST-RUN onboarding,
+        # before the account: without it, answering the questions and then signing up
+        # would throw the answers away — the same "signing in costs you data" failure
+        # this endpoint exists to prevent.
+        # No `.limit(1)`: user_id is the PRIMARY KEY, so at most one row can match —
+        # and the sibling claim steps read the same way.
+        guest_row = (
+            supabase.table("user_investor_profile").select("user_id")
+            .eq("user_id", bucket).execute().data or []
+        )
+        if not guest_row:
+            return
+        account_row = (
+            supabase.table("user_investor_profile").select("user_id")
+            .eq("user_id", user_id).execute().data or []
+        )
+        if account_row:
+            supabase.table("user_investor_profile").delete().eq("user_id", bucket).execute()
+            return
+        supabase.table("user_investor_profile").update({"user_id": user_id}) \
+            .eq("user_id", bucket).execute()
+        claimed["investor_profile"] = 1
+
     def _claim() -> None:
         """Run every step, isolated.
 
@@ -603,6 +726,7 @@ async def claim_guest_data(
             ("user_learn_progress", _claim_learn),
             ("research_reports", _claim_reports),
             ("chat_sessions", _claim_chats),
+            ("user_investor_profile", _claim_investor_profile),
         ):
             try:
                 step()
@@ -642,10 +766,12 @@ async def claim_guest_data(
         # Report EVERY counter: a claim that moved only reports used to log nothing at all.
         logger.info(
             "Guest-data claim for user=%s: %d watchlist row(s), %d portfolio(s) moved, "
-            "%d merged, %d learn-progress row(s), %d research report(s), %d chat session(s)",
+            "%d merged, %d learn-progress row(s), %d research report(s), %d chat session(s), "
+            "%d investor profile(s)",
             user_id, claimed["watchlist_items"], claimed["portfolios"],
             claimed["portfolios_merged"], claimed["learn_progress"],
             claimed["research_reports"], claimed["chat_sessions"],
+            claimed["investor_profile"],
         )
     return {"claimed": claimed}
 
@@ -741,6 +867,10 @@ _UNLINKED_USER_TABLES: tuple[str, ...] = (
     # rows the app stores — people paste holdings into them — so an incomplete deletion here
     # is the worst version of that bug.
     "chat_sessions",
+    # migrations/131. Guest-writable, so it never had an FK to cascade from. The row
+    # records how this person prefers to learn and what they read about — squarely the
+    # "profile data" the privacy policy promises deletion removes.
+    "user_investor_profile",
 )
 
 # Same purge, different column. `analytics_events.identity_key` holds the real user id

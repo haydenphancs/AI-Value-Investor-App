@@ -516,6 +516,44 @@ async def get_learn_identity(
     }
 
 
+async def get_profile_identity(
+    authorization: Optional[str] = Header(None),
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
+    supabase: Client = Depends(get_supabase),
+    request: Request = None,
+) -> dict:
+    """Identity for the INVESTOR-PROFILE routes: a real account, else a PER-INSTALL guest.
+
+    Same shape and same justification as :func:`get_learn_identity`, and guest-capable
+    for a specific product reason: the profile is captured during FIRST-RUN onboarding,
+    before an account exists. Gating it on a token would mean the questions can only be
+    asked after sign-up — which is the wrong order for a guest-first funnel and would
+    leave the whole feature with no data for the users most likely to convert.
+
+    Safe because `user_investor_profile.user_id` has NO foreign key (migration 131), so
+    a synthetic per-install uuid5 is a valid owner. It costs nothing per call — no LLM,
+    no upstream — so it sits on the cheap-and-claimable side of the line in
+    .claude/rules/auth.md §1a rather than with the metered surfaces.
+
+    Its own dependency rather than borrowing the Learn or watchlist one: those carry
+    their own table's semantics, and a future change to either must not silently
+    re-partition this one.
+    """
+    user = await get_current_user_or_guest(
+        request=request, authorization=authorization, supabase=supabase
+    )
+    if user.get("id") != GUEST_USER_ID:
+        return {**user, "is_guest": False}   # a real signed-in account always wins
+    return {
+        "id": guest_user_id_for(x_guest_id),
+        "email": "guest@local",
+        "tier": "free",
+        # Never `user["id"] == GUEST_USER_ID` downstream — a per-install id never equals
+        # the sentinel, so that test reads every guest as a paying account.
+        "is_guest": True,
+    }
+
+
 async def get_research_identity(
     authorization: Optional[str] = Header(None),
     x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),

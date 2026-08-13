@@ -99,6 +99,10 @@ ALLOWED_PROP_KEYS: frozenset[str] = frozenset({
     "context",    # chat_sent — ChatContextType enum, never the message body
     "seconds",    # durations
     "count",
+    "prefs",      # onboarding_completed — how many learning-preference questions were
+                  # answered (an Int 0-12). A COUNT, never the answers themselves: the
+                  # chosen topics are the user's own reading interests and have no
+                  # business in the analytics stream.
     "cached",
     "action",     # mutation_failed — a fixed infinitive phrase from the call site
     "op",         # background_sync_failed — fixed operation name

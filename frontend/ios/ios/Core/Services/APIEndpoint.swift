@@ -103,6 +103,8 @@ enum APIEndpoint: Sendable {
     case getMySubscription                                 // current user's entitlement
     case getMySettings                                     // synced preference blob
     case updateMySettings(preferences: [String: PreferenceValue])
+    case getMyInvestorProfile                              // how this reader likes to LEARN
+    case updateMyInvestorProfile(body: UpdateInvestorProfileBody)
     case registerDevice(token: String, platform: String, environment: String?)
     /// Detach this device's APNs token on sign-out. Without it the token stays bound to the
     /// account that registered it (`device_tokens.token` is UNIQUE and only a NEW registration
@@ -331,6 +333,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me/subscription"
         case .getMySettings, .updateMySettings:
             return "/api/v1/users/me/settings"
+        case .getMyInvestorProfile, .updateMyInvestorProfile:
+            return "/api/v1/users/me/investor-profile"
         case .registerDevice, .unregisterDevice:
             return "/api/v1/users/me/devices"
 
@@ -603,7 +607,7 @@ enum APIEndpoint: Sendable {
         case .bulkUpdateHoldings,
              .renamePortfolio, .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios,
              .activatePortfolio,
-             .updateMySettings:
+             .updateMySettings, .updateMyInvestorProfile:
             return .PUT
 
         case .registerDevice, .markNotificationsRead, .createPriceAlert:
@@ -762,6 +766,9 @@ enum APIEndpoint: Sendable {
 
         case .updateMySettings(let preferences):
             return UpdateUserSettingsRequestBody(preferences: preferences)
+
+        case .updateMyInvestorProfile(let body):
+            return body
 
         case .registerDevice(let token, let platform, let environment):
             return DeviceRegisterRequestBody(token: token, platform: platform, environment: environment)
@@ -1054,6 +1061,17 @@ enum APIEndpoint: Sendable {
         case .getMySubscription, .getMySettings, .updateMySettings,
              .registerDevice, .unregisterDevice, .verifyPurchase:
             return .signInRequired
+
+        // The investor profile is captured during FIRST-RUN onboarding, before an account
+        // exists, so it MUST be guest-allowed — `get_profile_identity` resolves a signed-out
+        // caller to a per-install identity and `user_investor_profile.user_id` has no FK
+        // (migration 131) so that identity is a valid owner. Marking this `.signInRequired`
+        // would make APIClient refuse the call before it left the device, and the onboarding
+        // answers would be silently dropped for every user who has not signed up yet — i.e.
+        // all of them, at the exact moment we ask. Saving is free on every tier; only
+        // APPLYING the profile is gated, and that gate lives on the server.
+        case .getMyInvestorProfile, .updateMyInvestorProfile:
+            return .guestAllowed
 
         // Push never reaches a guest: `device_tokens` is FK-bound to public.users and
         // auth-only, so a guest inbox is empty by construction and a guest price alert is

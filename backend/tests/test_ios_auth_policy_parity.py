@@ -36,6 +36,7 @@ _GUEST_DEPS = {
     "get_learn_identity",
     "get_research_identity",
     "get_watchlist_identity",
+    "get_profile_identity",
     "get_identity_only_user",
     "get_optional_user_id",
 }
@@ -218,6 +219,12 @@ def test_strict_endpoints_are_signInRequired(case_name):
         # ever gets URLs back: the route answers 200 with `audio_locked` + `tier_required`,
         # and a client that refused to CALL it could not render the upgrade offer at all.
         "getBooksAudio",
+        # Investor profile (migration 131). Captured during FIRST-RUN onboarding, before
+        # an account exists, so `.signInRequired` would make APIClient refuse the call
+        # before it left the device and drop the answers of every user who has not signed
+        # up — i.e. all of them, at the exact moment we ask. Saving is free on every tier;
+        # only APPLYING the profile is gated, and that gate is server-side.
+        "getMyInvestorProfile", "updateMyInvestorProfile",
     ],
 )
 def test_guest_capable_endpoints_are_not_gated(case_name):
@@ -226,6 +233,52 @@ def test_guest_capable_endpoints_are_not_gated(case_name):
         f"{case_name} is guest-capable on the backend (per-install identity); marking it "
         f"signInRequired locks signed-out users out of a feature that works today"
     )
+
+
+@pytest.mark.parametrize("case_name", ["getHoldersData", "enrichStockNews"])
+def _routes_by_dep(deps: set[str]) -> set[tuple[str, str, str]]:
+    """(module, method, path) for every route whose signature uses one of `deps`.
+
+    The MODULE is part of the key deliberately: decorator paths are router-relative, and
+    several routers declare `@router.get("")` for their collection endpoint. Keying on
+    (method, path) alone collapses watchlist's `GET ""` onto every other `GET ""`, which
+    made an earlier version of the overlap check below report a phantom conflict.
+    """
+    found: set[tuple[str, str, str]] = set()
+    for py in sorted(_ENDPOINTS_DIR.glob("*.py")):
+        for chunk in re.split(r"(?=@router\.)", py.read_text()):
+            m = re.match(r'@router\.(get|post|put|patch|delete)\(\s*[\'"]([^\'"]*)[\'"]', chunk)
+            if not m:
+                continue
+            signature = chunk[: chunk.find("):") + 2] if "):" in chunk else chunk[:2000]
+            if set(re.findall(r"Depends\((\w+)\)", signature)) & deps:
+                found.add((py.stem, m.group(1).upper(), m.group(2)))
+    return found
+
+
+def _backend_guest_routes() -> set[tuple[str, str, str]]:
+    """Every route taking a GUEST-capable identity dependency."""
+    return _routes_by_dep(_GUEST_DEPS)
+
+
+def test_guest_deps_set_is_not_dead():
+    """`_GUEST_DEPS` was declared and never read, so the guest half of this file was
+    documentation rather than a guard: a per-install dependency could be renamed, or a
+    guest route could quietly gain a strict dep, and nothing here would notice. The two
+    assertions below are what make the set load-bearing."""
+    guest = _backend_guest_routes()
+    assert len(guest) >= 15, (
+        f"expected the known guest-capable routes, found {len(guest)} — if a dependency "
+        f"was renamed, _GUEST_DEPS needs updating or this whole check goes vacuous"
+    )
+
+
+def test_no_route_takes_both_a_guest_and_a_strict_dependency():
+    """A route holding both is ambiguous: iOS must pick ONE policy for it, and whichever
+    it picks is wrong half the time — either a guest is locked out or a tokenless tap
+    spends a round trip to be refused."""
+    overlap = _backend_guest_routes() & _routes_by_dep(_STRICT_DEPS)
+    assert not overlap, f"routes with conflicting auth dependencies: {sorted(overlap)}"
 
 
 @pytest.mark.parametrize("case_name", ["getHoldersData", "enrichStockNews"])

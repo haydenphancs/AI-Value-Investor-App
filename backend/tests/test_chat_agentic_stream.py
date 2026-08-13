@@ -225,10 +225,12 @@ async def test_stream_synthesis_degrades_to_specialist_answer_when_merge_fails()
 
     class _G:
         async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
-                                 system_instruction=None, max_rounds=4, model_name=None):
+                                 system_instruction=None, max_rounds=4, model_name=None,
+                                 usage_tag=None, max_output_tokens=None):
             yield ("answer", "valuation view: looks cheap")
 
-        async def stream_text(self, prompt, system_instruction=None, model_name=None):
+        async def stream_text(self, prompt, system_instruction=None, model_name=None,
+                              usage_tag=None, max_output_tokens=None):
             raise RuntimeError("quota circuit open (resource_exhausted)")
             yield  # pragma: no cover — makes this an async generator
 
@@ -396,10 +398,12 @@ async def test_stream_synthesis_clean_but_empty_merge_uses_specialist_answer():
 
     class _G:
         async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
-                                 system_instruction=None, max_rounds=4, model_name=None):
+                                 system_instruction=None, max_rounds=4, model_name=None,
+                                 usage_tag=None, max_output_tokens=None):
             yield ("answer", "fundamentals view: solid balance sheet")
 
-        async def stream_text(self, prompt, system_instruction=None, model_name=None):
+        async def stream_text(self, prompt, system_instruction=None, model_name=None,
+                              usage_tag=None, max_output_tokens=None):
             # Clean completion, but ONLY a thought — never an answer token.
             yield ("thought", "weighing the two lenses…")
 
@@ -426,7 +430,8 @@ async def test_stream_synthesis_all_specialists_fail_falls_back_to_general():
             self.calls = 0
 
         async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
-                                 system_instruction=None, max_rounds=4, model_name=None):
+                                 system_instruction=None, max_rounds=4, model_name=None,
+                                 usage_tag=None, max_output_tokens=None):
             self.calls += 1
             n = self.calls
             if n <= 2:                       # the two specialist runs → only a thought → empty answer

@@ -134,6 +134,7 @@ async def test_rerank_failure_uses_vector_order():
 
 @pytest.mark.asyncio
 async def test_retrieve_context_uses_retrieval_query_and_reranks(monkeypatch):
+    monkeypatch.setattr("app.config.settings.CHAT_RAG_ENABLED", True)
     g = _FakeGemini(rewrite="AAPL risk factors", rerank_indices=[2, 0])
     s = _svc(g)
     candidates = _chunks(20)
@@ -156,6 +157,7 @@ async def test_retrieve_context_uses_retrieval_query_and_reranks(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_retrieve_context_no_stock_uses_all_chunks(monkeypatch):
+    monkeypatch.setattr("app.config.settings.CHAT_RAG_ENABLED", True)
     g = _FakeGemini(rerank_indices=[0])
     s = _svc(g)
     called = {}
@@ -172,10 +174,88 @@ async def test_retrieve_context_no_stock_uses_all_chunks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_retrieve_context_never_raises_on_embed_failure():
+async def test_retrieve_context_never_raises_on_embed_failure(monkeypatch):
+    # RAG must be ENABLED here or this test is vacuous: the disabled gate returns
+    # ([], []) without ever reaching the embed call, so it would pass while proving
+    # nothing about failure handling.
+    monkeypatch.setattr("app.config.settings.CHAT_RAG_ENABLED", True)
     s = _svc(_FakeGemini(raises=True))
     chunks, citations = await s._retrieve_context("q", stock_id="AAPL", history=[])
     assert chunks == [] and citations == []
+
+
+# ── CHAT_RAG_ENABLED master switch ──────────────────────────────────────────
+#
+# The corpus is empty and nothing in the repo ingests it, so this path spent an
+# embedding call + a Supabase RPC (+ a flash-lite rewrite on ~40% of turns) every
+# turn to retrieve nothing — two round trips on the time-to-first-token path.
+
+
+@pytest.mark.asyncio
+async def test_retrieve_context_disabled_returns_empty(monkeypatch):
+    monkeypatch.setattr("app.config.settings.CHAT_RAG_ENABLED", False)
+    chunks, citations = await _svc(_FakeGemini())._retrieve_context(
+        "q", stock_id="AAPL", history=[],
+    )
+    assert chunks == [] and citations == []
+
+
+@pytest.mark.asyncio
+async def test_retrieve_context_disabled_spends_nothing(monkeypatch):
+    """The point of the gate is the money, not the return value.
+
+    Stubs RECORD rather than raise, deliberately: `_retrieve_context` wraps its
+    body in `except Exception` and degrades to ([], []), so an exploding stub is
+    swallowed and the test passes with the gate DELETED. Mutation-tested — this
+    version fails when the gate is removed, the raising version did not.
+    """
+    monkeypatch.setattr("app.config.settings.CHAT_RAG_ENABLED", False)
+    monkeypatch.setattr("app.config.settings.CHAT_QUERY_REWRITE_ENABLED", True)
+    calls: list[str] = []
+
+    class _RecordingGemini:
+        async def generate_embedding(self, *a, **k):
+            calls.append("embedding")
+            return [0.0] * 8
+
+        async def generate_text(self, *a, **k):
+            calls.append("generate_text")
+            return {"text": "x"}
+
+        async def generate_json(self, *a, **k):
+            calls.append("generate_json")
+            return {"text": "[]"}
+
+    s = _svc(_RecordingGemini())
+
+    def _search(*a, **k):
+        calls.append("vector_search")
+        return []
+
+    s._search_filing_chunks = _search
+    s._search_all_chunks = _search
+
+    # Both branches: with a ticker (filing chunks) and without (all chunks).
+    assert await s._retrieve_context("q", stock_id="AAPL", history=[]) == ([], [])
+    assert await s._retrieve_context("q", stock_id=None, history=[]) == ([], [])
+    assert calls == [], f"CHAT_RAG_ENABLED=False still spent: {calls}"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_context_gate_precedes_the_rewrite(monkeypatch):
+    """The gate sits ABOVE the query-rewrite branch — a gate placed after it would
+    still pay for a flash-lite call on every context-dependent follow-up."""
+    monkeypatch.setattr("app.config.settings.CHAT_RAG_ENABLED", False)
+    monkeypatch.setattr("app.config.settings.CHAT_QUERY_REWRITE_ENABLED", True)
+    g = _FakeGemini(rewrite="resolved query")
+    s = _svc(g)
+    await s._retrieve_context(
+        "why is it down?", stock_id="AAPL",
+        history=[{"role": "user", "content": "tell me about AAPL"}],
+    )
+    # _FakeGemini only sets `embed_text` inside generate_embedding, so its ABSENCE
+    # is the proof that neither the rewrite nor the embed was reached.
+    assert getattr(g, "embed_text", None) is None, "no embedding should have been requested"
 
 
 # ── _condense_history (Phase 5 rolling-summary memory) ──────────────────────

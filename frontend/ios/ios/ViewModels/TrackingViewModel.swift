@@ -654,15 +654,32 @@ class TrackingViewModel: ObservableObject {
         return grouped
     }
 
-    /// Re-fetch the activity feed after the SERVER confirmed a follow change.
+    /// Re-fetch the roster AND the activity feed after the SERVER confirmed a follow change.
     ///
     /// Coalesced: following three whales in a row posts three notifications, and each
     /// would otherwise cost a round trip whose result the next one immediately discards.
     /// Cancelling the pending task collapses a burst into one fetch of the final state.
+    ///
+    /// ⚠️ The roster reload is not optional. `is_locked` and `is_following_inactive` are
+    /// WHOLE-SET verdicts — the server computes them from the complete follow set
+    /// (`at_cap = len(followed) >= limit`, and the `> limit` truncation), so no per-row client
+    /// update can maintain them. `reconcileFollowState` only rebuilds the rows whose
+    /// `isFollowing` actually changed and returns every other row byte-identical, which left
+    /// both flags stale in both directions:
+    ///   • Pro at 10 follows stamps `is_locked` on the whole unfollowed roster; unfollow two and
+    ///     those rows still refuse at 8/10, showing an upgrade sheet for a slot the server would
+    ///     have accepted.
+    ///   • Drop back under the limit and a previously-truncated follow keeps
+    ///     `isFollowingInactive`, rendering dimmed with a lock and the word "Upgrade" directly
+    ///     above the very trades the feed has resumed serving.
+    /// `toggle_follow` clears `_whale_list_cache` server-side, so this re-fetch returns freshly
+    /// computed flags rather than the pre-change ones.
     func reloadForFollowChange() {
         activityReloadTask?.cancel()
         activityReloadTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.loadWhaleList()
             guard !Task.isCancelled else { return }
             await self?.loadWhaleActivityFeed()
         }

@@ -572,11 +572,21 @@ private struct BookDetailListenRow: View {
         isPreparingAudio = true
         Task {
             defer { isPreparingAudio = false }
-            // Resolves the signed URL (fetching if the memo is cold), so a paying user who
-            // taps before the prefetch lands waits one request rather than hitting
-            // `AudioManager.isMissingNarration`'s hard refuse.
-            guard let episode = await book.playableAudioEpisode() else { return }
-            audioManager.play(episode, startAt: resumeStartSeconds)
+            do {
+                // Resolves the signed URL (fetching if the memo is cold), so a paying user who
+                // taps before the prefetch lands waits one request rather than hitting
+                // `AudioManager.isMissingNarration`'s hard refuse.
+                let episode = try await book.playableAudioEpisode()
+                audioManager.play(episode, startAt: resumeStartSeconds)
+            } catch LibraryBook.PlayableAudioFailure.notNarrated {
+                // Nothing to play and nothing broken — the Listen row shouldn't have been
+                // tappable. Silent by design.
+            } catch {
+                // A user-initiated action that failed: say so. A bare `return` here left the
+                // spinner reverting to a play glyph with no toast, no log, no retry — the
+                // silent-revert pattern auth.md §6 exists to ban.
+                AppActions.shared.reportMutationFailure(error, action: "play book narration")
+            }
         }
     }
 }

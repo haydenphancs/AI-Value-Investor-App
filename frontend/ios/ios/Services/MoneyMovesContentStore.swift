@@ -125,7 +125,7 @@ final class MoneyMovesContentStore {
             remoteCards = []
             remoteFeatured = nil
             for dto in ordered {
-                let art = dto.toArticle()
+                let art = dto.toArticle(trustAudioFlag: true)   // backend: a locked article keeps the flag on purpose
                 remoteByTitle[dto.title] = art
                 if !dto.slug.isEmpty { remoteBySlug[dto.slug] = art }
                 remoteCards.append(dto.toCard())

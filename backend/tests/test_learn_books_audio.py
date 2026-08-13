@@ -103,6 +103,27 @@ async def test_a_signing_failure_omits_books_but_does_not_lock(monkeypatch):
     assert out.books == []
     assert out.audio_locked is False
     assert out.tier_required is None
+    # ...and it must SAY so, or the client cannot tell this from "no book is narrated" and
+    # overwrites its ten cached URLs with an empty dict.
+    assert out.temporarily_unavailable is True
+
+
+@pytest.mark.asyncio
+async def test_a_total_signing_failure_is_not_a_plain_unlocked_empty_envelope(monkeypatch):
+    """The exact shape that used to wipe the client's memo."""
+    monkeypatch.setattr(urls, "_sign_batch_sync", lambda bucket, paths: {})
+    out = await svc.get_books_audio(unlocked=True, tier_required=None)
+    plain_empty = BooksAudioResponse(books=[], audio_locked=False, tier_required=None)
+    assert out.model_dump_json() != plain_empty.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_catalog_is_also_flagged_temporarily_unavailable(monkeypatch, fake_sign):
+    """A deploy that dropped backend/data/book_audio/ is an outage, not an empty library."""
+    monkeypatch.setattr(svc, "BOOK_AUDIO_CATALOG", {})
+    out = await svc.get_books_audio(unlocked=True, tier_required=None)
+    assert out.books == [] and out.audio_locked is False
+    assert out.temporarily_unavailable is True
 
 
 @pytest.mark.asyncio
@@ -133,12 +154,27 @@ async def test_an_empty_catalog_degrades_instead_of_raising(monkeypatch, fake_si
 def test_the_wire_keys_match_the_swift_coding_keys():
     """iOS decodes these exact snake_case keys in `BookAudioURLStore.swift`."""
     body = BooksAudioResponse(books=[], audio_locked=True, tier_required="pro").model_dump()
-    assert set(body) == {"books", "audio_locked", "tier_required"}
+    assert set(body) == {"books", "audio_locked", "tier_required", "temporarily_unavailable"}
 
     fields = BooksAudioResponse.model_fields
     # Defaulted so an already-shipped client decodes a response without them.
     assert fields["audio_locked"].default is False
     assert fields["tier_required"].default is None
+    assert fields["temporarily_unavailable"].default is False
+
+
+def test_the_three_states_are_distinguishable_on_the_wire():
+    """locked / available / temporarily-unavailable must not collapse into one shape.
+
+    They did: a signing outage and "entitled, nothing narrated" were both
+    `{"books": [], "audio_locked": false}`, and the client's memo — ten working signed URLs —
+    was overwritten by the empty list, killing every Play button until the next fetch.
+    """
+    locked = BooksAudioResponse(books=[], audio_locked=True, tier_required="pro")
+    outage = BooksAudioResponse(books=[], audio_locked=False, temporarily_unavailable=True)
+    assert (locked.audio_locked, locked.temporarily_unavailable) == (True, False)
+    assert (outage.audio_locked, outage.temporarily_unavailable) == (False, True)
+    assert locked.model_dump_json() != outage.model_dump_json()
 
 
 # ── the drift guard ──────────────────────────────────────────────────────────

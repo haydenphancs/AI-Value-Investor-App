@@ -67,11 +67,28 @@ closure. You cannot express "retry insert #17".
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import Any, Callable, Optional, TypeVar
 
 T = TypeVar("T")
+
+
+def _reject_coroutine_function(op: Callable[[], Any], entrypoint: str) -> None:
+    """Fail loudly if `op` is async.
+
+    Both helpers take a **sync** callable (the Supabase SDK is synchronous). Handing
+    either one an `async def` produces an un-awaited coroutine that is returned as if
+    it were the result — no exception, no retry, no query. The `_async` suffix makes
+    that mistake actively inviting, so it is rejected rather than trusted.
+    """
+    if inspect.iscoroutinefunction(op) or inspect.isasyncgenfunction(op):
+        raise TypeError(
+            f"{entrypoint} takes a SYNC callable (the Supabase SDK is synchronous); "
+            f"got the async {getattr(op, '__name__', op)!r}. An async op would be "
+            f"returned un-awaited as the 'result' and the query would never run."
+        )
 
 _module_logger = logging.getLogger(__name__)
 
@@ -262,6 +279,7 @@ def retry_idempotent_sync(
     so the caller keeps ownership of the level decision (transient → WARNING,
     genuine bug → ERROR + stack).
     """
+    _reject_coroutine_function(op, "retry_idempotent_sync")
     log = logger or _module_logger
     last_attempt = max(1, attempts) - 1
     for attempt in range(max(1, attempts)):
@@ -298,6 +316,7 @@ async def retry_idempotent_async(
     Same idempotency precondition, same WARNING-on-retry / re-raise-untouched
     contract as the sync form.
     """
+    _reject_coroutine_function(op, "retry_idempotent_async")
     log = logger or _module_logger
     last_attempt = max(1, attempts) - 1
     for attempt in range(max(1, attempts)):

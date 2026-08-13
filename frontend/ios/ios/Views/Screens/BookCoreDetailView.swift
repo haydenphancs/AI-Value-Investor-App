@@ -184,9 +184,10 @@ struct BookCoreDetailView: View {
         guard LearnAudioEntitlement.shared.isUnlocked else { return }
         guard audioManager.currentEpisode?.id != currentAudioEpisode.id else { return }
         Task {
-            // Prepare-only: if the signed URL isn't available we simply don't pre-buffer. The
-            // play sites resolve on demand, so nothing is lost but a warm start.
-            guard let episode = await book.playableAudioEpisode() else { return }
+            // Prepare-only, so this one stays SILENT on failure by design: the user didn't ask
+            // for anything, and the play sites resolve on demand. Nothing is lost but a warm
+            // start. `try?` is deliberate here and banned at the two tap sites above.
+            guard let episode = try? await book.playableAudioEpisode() else { return }
             guard audioManager.currentEpisode?.id != episode.id else { return }
             audioManager.load(episode)
         }
@@ -855,13 +856,21 @@ private struct CoreDetailHeaderSection: View {
         isPreparingAudio = true
         Task {
             defer { isPreparingAudio = false }
-            guard let episode = await book.playableAudioEpisode() else { return }
-            // Play the whole-book narration, seeking to this core's start offset
-            audioManager.play(episode, startAt: coreStart)
-            // Force show the global audio player
-            audioManager.resetScrollHiding()
-            // Notify parent that playback started
-            onPlayStarted?()
+            do {
+                let episode = try await book.playableAudioEpisode()
+                // Play the whole-book narration, seeking to this core's start offset
+                audioManager.play(episode, startAt: coreStart)
+                // Force show the global audio player
+                audioManager.resetScrollHiding()
+                // Notify parent that playback started
+                onPlayStarted?()
+            } catch LibraryBook.PlayableAudioFailure.notNarrated {
+                // No narration for this book — nothing to report.
+            } catch {
+                // Same reasoning as BookDetailView.handlePlayTapped: a user-initiated tap that
+                // fails must not revert in silence.
+                AppActions.shared.reportMutationFailure(error, action: "play book narration")
+            }
         }
     }
 }

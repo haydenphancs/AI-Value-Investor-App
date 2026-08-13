@@ -218,3 +218,41 @@ def test_an_empty_insert_result_also_adopts_rather_than_indexerrors():
 
     pf._seed_default_portfolio(sb, "u1")  # must not raise
     assert sb.count("portfolio_items", "insert") == 0
+
+
+# ── end-to-end: the route must not 500 ───────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_list_portfolios_does_not_500_on_a_seed_race(monkeypatch):
+    """The user-visible symptom: a read-only endpoint returning 500.
+
+    `list_portfolios` re-fetches after seeding, so adopting the winner also means
+    the caller still gets the group back rather than an empty list.
+    """
+    sb = _SB(
+        rows={
+            ("watchlist_items", "select"): _WATCHLIST,
+            ("portfolios", "select"): [{"id": "winner"}],
+        },
+        insert_errors={"portfolios": _Violation()},
+    )
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    winner = pf.PortfolioResponse(
+        id="winner", name="Holdings", sort_order=0, items=[],
+        created_at=now, updated_at=now, is_active=True,
+    )
+    fetches = {"n": 0}
+
+    def _fetch(_sb, _uid):
+        fetches["n"] += 1
+        return [] if fetches["n"] == 1 else [winner]   # empty, then the winner's row
+
+    monkeypatch.setattr(pf, "_fetch_user_portfolios", _fetch)
+
+    result = await pf.list_portfolios(user={"id": "u1"}, supabase=sb)
+
+    assert [p.id for p in result.portfolios] == ["winner"]
+    assert fetches["n"] == 2, "the route must re-fetch after seeding"

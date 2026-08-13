@@ -36,6 +36,15 @@ class BooksAudioResponse(BaseModel):
     """
 
     books: List[BookAudioURLResponse] = []
-    # Both defaulted so an already-shipped client decodes this unchanged.
+    # All defaulted so an already-shipped client decodes this unchanged.
     audio_locked: bool = False
     tier_required: Optional[str] = None
+
+    # THE THIRD STATE. Without it, "Storage refused to sign anything just now" is
+    # wire-identical to "this account is entitled and no book has narration" — both are
+    # `{"books": [], "audio_locked": false}`. The client must not treat the first as the
+    # second: it caches URLs, and an unlocked-empty response would otherwise DELETE ten
+    # perfectly good ones and leave every Play button dead until the next fetch.
+    #
+    # True means: keep whatever you already have, show no lock, try again later.
+    temporarily_unavailable: bool = False

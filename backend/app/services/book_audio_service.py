@@ -88,7 +88,17 @@ async def get_books_audio(*, unlocked: bool, tier_required: str | None) -> Books
         return BooksAudioResponse(books=[], audio_locked=True, tier_required=tier_required)
 
     if not BOOK_AUDIO_CATALOG:
-        return BooksAudioResponse(books=[], audio_locked=False, tier_required=None)
+        # The deploy shipped without backend/data/book_audio/ (or every manifest was
+        # malformed). The library genuinely has narration, so this is an outage on our side,
+        # not an empty catalog — same third state as a total signing failure below, and for
+        # the same reason: the client must keep its cached URLs rather than wipe them.
+        logger.error(
+            "book_audio_service: catalog is EMPTY — book narration is unavailable to every "
+            "caller; check that backend/data/book_audio/*.manifest.json shipped with the deploy"
+        )
+        return BooksAudioResponse(
+            books=[], audio_locked=False, tier_required=None, temporarily_unavailable=True
+        )
 
     pairs = [(_BUCKET, object_path) for object_path in BOOK_AUDIO_CATALOG.values()]
     signed = await sign_many(pairs)
@@ -103,6 +113,20 @@ async def get_books_audio(*, unlocked: bool, tier_required: str | None) -> Books
             )
             continue
         books.append(BookAudioURLResponse(curriculum_order=order, audio_url=url))
+
+    if not books:
+        # Every book failed to sign while the catalog is non-empty — that is an outage, not
+        # an empty library, and the two must not look identical on the wire (see
+        # `BooksAudioResponse.temporarily_unavailable`). Logged at ERROR because a silent
+        # unlocked-empty response is exactly the shape that would wipe the client's memo.
+        logger.error(
+            "book_audio_service: signed 0 of %d book objects — returning "
+            "temporarily_unavailable so the client keeps its cached URLs",
+            len(BOOK_AUDIO_CATALOG),
+        )
+        return BooksAudioResponse(
+            books=[], audio_locked=False, tier_required=None, temporarily_unavailable=True
+        )
 
     return BooksAudioResponse(books=books, audio_locked=False, tier_required=None)
 

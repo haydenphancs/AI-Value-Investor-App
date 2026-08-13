@@ -282,6 +282,72 @@ async def test_malformed_story_content_never_raises(fake_sign, story):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [
+    {"u": 1},           # unhashable — `dict.get(bad)` raises TypeError
+    ["x"],              # unhashable
+    123, 4.5, True, None, "",
+    {"nested": {"deep": [1, 2]}},
+])
+async def test_a_bad_audio_url_ALONGSIDE_a_good_one_never_raises(fake_sign, bad):
+    """The case every other parametrize above misses, and the one that actually crashed.
+
+    Each story elsewhere in this file yields an EMPTY mapping, so `sign_journey`'s
+    `if not mapping: return response` short-circuit fires and `_sign_story_content` is never
+    reached. Pair a bad card with a GOOD one and the mapping is non-empty, the short-circuit
+    is skipped, and the rewriter evaluates `mapping.get(card["audioUrl"])` — which raises
+    `TypeError: unhashable type` for a dict or list, 500ing GET /learn/journey for PRO callers
+    while Free callers (whose redactor uses `pop`) got a clean 200.
+    """
+    story = {"cards": [{"audioUrl": _JOURNEY_AUDIO}, {"audioUrl": bad}]}
+    out = await sign_journey(_journey(story_content=story))
+    cards = out.lessons[0].story_content["cards"]
+    assert "/object/sign/" in cards[0]["audioUrl"], "the good card must still be signed"
+    assert cards[1]["audioUrl"] == bad, "the bad card must be left exactly as found"
+    # And the shared input is still untouched.
+    assert story["cards"][0]["audioUrl"] == _JOURNEY_AUDIO
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [{"u": 1}, ["x"], 123, None])
+async def test_a_bad_money_moves_audio_url_alongside_a_good_one_never_raises(fake_sign, bad):
+    """Latent twin of the above — `money_moves_content_service` currently guarantees a str or
+    absent, but the two rewriters must not drift."""
+    good = {"slug": "a", "title": "A", "hasAudioVersion": True, "audioUrl": _MM_AUDIO, "sections": []}
+    ugly = {"slug": "b", "title": "B", "hasAudioVersion": True, "audioUrl": bad, "sections": []}
+    out = await sign_money_moves(_money_moves(articles=[good, ugly]))
+    assert "/object/sign/" in out.articles[0]["audioUrl"]
+    assert out.articles[1]["audioUrl"] == bad
+
+
+@pytest.mark.asyncio
+async def test_a_failing_chunk_keeps_the_signatures_already_minted(monkeypatch):
+    """Journey is 207 clips = 3 chunks of `_MAX_BATCH`. A 500 on the last one used to discard
+    the ~200 signatures the first two had minted, so the memo could never warm incrementally
+    and every request re-signed all 207 from scratch."""
+    urls.reset_cache_for_tests()
+    calls = {"n": 0}
+
+    def _flaky(bucket, paths):
+        # Stand in for the real `create_signed_urls` loop: succeed on chunks 1-2, raise on 3.
+        out = {}
+        for start in range(0, len(paths), urls._MAX_BATCH):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                continue          # the real code now `continue`s past a failed chunk
+            for p in paths[start:start + urls._MAX_BATCH]:
+                out[p] = f"https://x/storage/v1/object/sign/{bucket}/{p}?token=t"
+        return out
+
+    monkeypatch.setattr(urls, "_sign_batch_sync", _flaky)
+    pairs = [("journey-media", f"audio/c{i}.m4a") for i in range(207)]
+    signed = await urls.sign_many(pairs)
+
+    assert len(signed) == 200, f"expected the 2 good chunks to survive, got {len(signed)}"
+    # And they are banked, so the next request only asks for the 7 that are still missing.
+    assert len(urls._cache) == 200
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("articles", [
     # `MoneyMovesResponse.articles` is `List[Dict[str, Any]]`, so pydantic rejects a non-dict
     # article at construction — the `isinstance` guards in the gate cover a shape that cannot

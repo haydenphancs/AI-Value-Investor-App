@@ -56,10 +56,16 @@ _SIGNED_MARKER = "/storage/v1/object/sign/"
 # Anything not listed here parses to None, i.e. "leave the value exactly as found".
 _SIGNABLE_BUCKETS = frozenset({"journey-media", "money-moves-media", "book-media"})
 
-# Ceiling on one bucket's mint. `_sign_batch_sync` issues up to a few sequential POSTs, and
-# a hung Storage call must not hold the Learn tab open — the caller degrades to the stored
-# URL instead. Note this bounds LATENCY, not the worker thread: `asyncio.to_thread` is not
-# cancellable. The per-bucket lock is what caps concurrent sign threads at one per bucket.
+# Ceiling on how long a CALLER waits for one bucket's mint. A hung Storage call must not hold
+# the Learn tab open — the caller degrades to the stored URL instead.
+#
+# ⚠️ This bounds LATENCY, not WORK. `asyncio.to_thread` is not cancellable, so on timeout the
+# worker thread keeps running to completion, and because the lock is released as soon as the
+# waiter gives up, a second request CAN start a second thread for the same bucket. (An earlier
+# comment here claimed the lock caps concurrent sign threads at one per bucket — it does not,
+# and the difference matters under a persistently slow bucket.) What keeps that bounded is
+# that abandoned threads still bank their chunks into `_cache`, so each retry finds more of
+# the work already done and asks for less.
 _SIGN_TIMEOUT_SECONDS = 4.0
 
 # How long a minted signature stays valid, and how long we reuse one before minting again.
@@ -154,7 +160,21 @@ def _sign_batch_sync(bucket: str, paths: List[str]) -> Dict[str, str]:
     storage = get_supabase().storage.from_(bucket)
     for start in range(0, len(paths), _MAX_BATCH):
         chunk = paths[start:start + _MAX_BATCH]
-        for item in storage.create_signed_urls(chunk, _SIGNED_TTL_SECONDS):
+        # PER-CHUNK, not per-call. Journey is 207 clips = 3 sequential POSTs; letting the
+        # third one's 500 propagate discarded the ~200 signatures the first two had already
+        # minted, so the memo could never warm incrementally and every subsequent request
+        # re-minted all 207 from scratch. `out` is returned either way, which is what this
+        # function's contract ("Returns only the successes") has always claimed.
+        try:
+            rows = storage.create_signed_urls(chunk, _SIGNED_TTL_SECONDS)
+        except Exception as e:
+            logger.warning(
+                "learn_audio_urls: chunk failed bucket=%s offset=%d size=%d (%s: %s) — "
+                "keeping the %d signature(s) already minted",
+                bucket, start, len(chunk), type(e).__name__, e, len(out),
+            )
+            continue
+        for item in rows:
             # Per-item failures come back in the row rather than as an exception — a missing
             # object is the common one (a clip named in content that was never uploaded).
             if item.get("error"):
@@ -169,6 +189,15 @@ def _sign_batch_sync(bucket: str, paths: List[str]) -> Dict[str, str]:
                 # Supabase echoes the path back WITHOUT a leading slash; normalise so the
                 # key matches what we asked for.
                 out[path.lstrip("/")] = signed
+        # Bank the chunk NOW, from the worker thread, rather than only in `_sign_bucket`
+        # after the await. `asyncio.wait_for` cannot cancel `asyncio.to_thread` — on timeout
+        # the caller walks away but this thread runs to completion, and everything it had
+        # minted used to be thrown away, so a bucket slow enough to time out could never
+        # warm its memo and every request re-submitted the whole job. A plain dict assignment
+        # is atomic under the GIL, and a duplicate write is idempotent.
+        minted_at = time.time()
+        for p, u in out.items():
+            _cache[(bucket, p)] = (minted_at, u)
     return out
 
 
@@ -198,7 +227,12 @@ async def _sign_bucket(bucket: str, paths: Set[str]) -> Dict[str, str]:
             except Exception as e:
                 # Deliberately non-fatal: callers fall back to the original URL. Logged with
                 # the exception TYPE + bucket so it is diagnosable from logs alone, with no
-                # repro. Nothing is cached, so the next request retries.
+                # repro.
+                #
+                # On TIMEOUT specifically the worker thread is still running and will bank
+                # its own chunks into `_cache` as they land (see `_sign_batch_sync`), so the
+                # return below picks up whatever completed — this is a partial success, not
+                # a total loss, and the next request inherits the warmed entries.
                 logger.warning(
                     "learn_audio_urls: signing bucket=%s failed for %d path(s), falling "
                     "back to public URLs (%s: %s)",

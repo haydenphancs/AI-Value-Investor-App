@@ -236,7 +236,16 @@ def _sign_story_content(
     for card in cards:
         if not isinstance(card, dict):
             continue
-        signed = mapping.get(card.get("audioUrl"))
+        # The `isinstance` mirrors the COLLECTOR's guard in `_journey_audio_urls`, and the
+        # asymmetry is what made this a crash rather than a no-op: the collector skips a
+        # non-str `audioUrl`, so a bad card cannot empty `mapping` and cannot trigger the
+        # `if not mapping: return response` short-circuit — meaning a payload with one good
+        # URL and one dict/list URL reaches here with a live mapping, and `dict.get` on an
+        # unhashable key raises TypeError. That 500'd /learn/journey for PRO callers while
+        # Free callers got 200 (the redactor uses `pop`, which never touches the key type) —
+        # the exact inverse of what this module promises.
+        raw = card.get("audioUrl")
+        signed = mapping.get(raw) if isinstance(raw, str) else None
         if signed:
             card["audioUrl"] = signed
     return out
@@ -252,7 +261,12 @@ async def sign_money_moves(response: MoneyMovesResponse) -> MoneyMovesResponse:
         if not isinstance(article, dict):
             articles.append(article)
             continue
-        signed = mapping.get(article.get("audioUrl"))
+        # Same unhashable-key guard as `_sign_story_content`. Latent rather than live here —
+        # `money_moves_content_service` overwrites `content["audioUrl"]` from the `audio_url`
+        # TEXT column or pops it, so the value is always a str or absent — but the two paths
+        # must not drift, and a future seeding variant would make this live.
+        raw = article.get("audioUrl")
+        signed = mapping.get(raw) if isinstance(raw, str) else None
         if not signed:
             articles.append(article)
             continue

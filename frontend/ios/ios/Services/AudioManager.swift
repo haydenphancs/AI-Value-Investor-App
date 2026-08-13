@@ -1078,7 +1078,13 @@ final class AudioManager: ObservableObject {
     private func refreshedURL(for episode: AudioEpisode) async -> String? {
         if let order = episode.bookCurriculumOrder {
             BookAudioURLStore.shared.invalidate(curriculumOrder: order)
-            return await BookAudioURLStore.shared.url(for: order)
+            let refreshed = await BookAudioURLStore.shared.url(for: order)
+            // Same equality check as the Money Moves arm below, and it matters more here: the
+            // server reuses a signature for 6h, so a refresh inside that window returns the
+            // BYTE-IDENTICAL string. Replaying it would fail again for the same reason, having
+            // spent the one-shot budget — and worse, it would satisfy the caller's `guard let`
+            // and restart playback of an episode that cannot play.
+            return (refreshed != episode.audioUrl) ? refreshed : nil
         }
         guard episode.category == .moneyMoves else { return nil }
         await MoneyMovesContentStore.shared.forceRefresh()
@@ -1111,23 +1117,49 @@ final class AudioManager: ObservableObject {
         if let episode = currentEpisode, !didRetryAfterURLRefresh, isSignedLearnNarration(episode) {
             didRetryAfterURLRefresh = true
             let resumeAt = currentTime
-            print("[AudioManager] learn narration failed — refreshing signed URL and retrying once (episode: \(episode.id), at: \(resumeAt))")
+            // Whether the user had actually STARTED this episode, or it was merely prepared by
+            // `load(_:)`. `BookCoreDetailView.ensureBookEpisodeLoaded()` pre-buffers on every
+            // `.onAppear` and chapter change, and `preparePlayer` attaches the status observer
+            // either way — so a failure on a merely-prepared item lands here too. Retrying such
+            // an item with `play(...)` would activate the audio session and start the whole book
+            // OUT LOUD from 0:00 for someone who opened a core purely to read (and then
+            // `autoCompleteListenedCores` would tick cores off as it ran).
+            let wasStarted = hasStartedPlayback
+            print("[AudioManager] learn narration failed — refreshing signed URL and retrying once (episode: \(episode.id), at: \(resumeAt), started: \(wasStarted))")
             teardownPlayer()
             stopPlaybackTimer()
             Task { @MainActor in
                 guard let fresh = await self.refreshedURL(for: episode) else {
-                    // Couldn't re-mint. Fall through to the real failure path; the flag stays set
-                    // so this cannot loop.
-                    self.handlePlaybackFailure(error)
+                    // Couldn't re-mint (commonly: the same signature came back, or we're
+                    // offline). `handlePlaybackFailure` would return at its `guard player != nil`
+                    // — teardownPlayer() above nil'd it — so call the surfacing half DIRECTLY.
+                    // Routing back through the entry point left `playbackState` at `.playing`
+                    // with no player: the mini player kept claiming playback, the Lock Screen
+                    // kept extrapolating, and the audio session was never released.
+                    self.surfacePlaybackFailure(error)
                     return
                 }
                 var retried = episode
                 retried.audioUrl = fresh
-                self.play(retried, startAt: resumeAt)
+                if wasStarted {
+                    self.play(retried, startAt: resumeAt)
+                } else {
+                    self.load(retried)   // stay prepared-but-silent, as it was
+                }
             }
             return
         }
 
+        surfacePlaybackFailure(error)
+    }
+
+    /// The second half of `handlePlaybackFailure`: tear down and report.
+    ///
+    /// Split out precisely because it must be callable when `player` is ALREADY nil. The
+    /// refresh-retry above tears the player down before its async work, so its failure path
+    /// cannot re-enter `handlePlaybackFailure` — that function's first line is
+    /// `guard player != nil else { return }`, which would swallow the report entirely.
+    private func surfacePlaybackFailure(_ error: Error?) {
         let appError = error.map(AppError.from) ?? .unknown(message: "This audio couldn't be played.")
         // Identify WHICH episode/URL died — a 404 on one Storage object is otherwise indistinguishable
         // from a general network outage in the logs.

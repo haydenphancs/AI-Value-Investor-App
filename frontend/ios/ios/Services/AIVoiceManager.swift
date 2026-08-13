@@ -41,6 +41,14 @@ class AIVoiceManager: NSObject, ObservableObject {
     // isPlaying=true and no audio — we fall back to on-device speech instead.
     private var statusObserver: NSKeyValueObservation?
     private var failObserver: NSObjectProtocol?
+    /// One-shot budget for the signed-URL refresh in `handleClipLoadFailed`.
+    ///
+    /// Cleared on `.readyToPlay` (something played, so a later expiry earns a fresh attempt).
+    /// The retry itself cannot loop even though it re-enters `playClip`: the replacement URL
+    /// always differs from the failed one, and `JourneyContentStore.refreshedClipURL` refuses
+    /// to return a string equal to the one passed in — so a second failure finds no newer URL
+    /// and degrades to on-device speech.
+    private var didRetryClipRefresh = false
 
     // What was last started. The play button after a finished clip calls `resume()`, but
     // `handleClipFinished` has already nil'd the player — so resume had nothing to resume and yet
@@ -405,19 +413,54 @@ class AIVoiceManager: NSObject, ObservableObject {
 
     /// React to clip readiness: a `.failed` item means the remote/bundled clip can't play.
     private func handleClipStatus(_ item: AVPlayerItem) {
-        guard player?.currentItem === item, item.status == .failed else { return }
+        guard player?.currentItem === item else { return }
+        if item.status == .readyToPlay {
+            // Something actually played, so a LATER expiry has earned its own one-shot refresh.
+            didRetryClipRefresh = false
+            return
+        }
+        guard item.status == .failed else { return }
         handleClipLoadFailed()
     }
 
     /// Clip failed to load — never leave the card stuck (isPlaying=true, no audio, no completion).
-    /// Fall back to on-device speech so it still narrates, highlights, and fires onComplete.
+    ///
+    /// Falls back to on-device speech, but only AFTER one attempt to re-resolve the clip. Journey
+    /// card URLs are signed and finite-lived, and `JourneyContentStore` latches its fetch for the
+    /// whole session, so a long-foregrounded app holds URLs past their life. Without the retry a
+    /// single expired token silently downgrades a PAYING learner to the robotic system voice for
+    /// the rest of the process — the same failure `AudioManager` was given recovery for, which
+    /// this engine never got.
     private func handleClipLoadFailed() {
         guard player != nil else { return }   // already handled / torn down
-        print("[AIVoiceManager] clip failed to load; falling back to on-device speech")
         let text = currentText
         let completion = onComplete
+        let readAlong = readAlongWords
+
+        // Only a REMOTE clip can be re-signed, and only once per clip — `didRetryClipRefresh`
+        // is cleared in `playClip`, so a genuinely dead object degrades to speech instead of
+        // looping, while a later expiry on a different clip still gets its own attempt.
+        guard case .clip(let name, _, _) = lastRequest,
+              name.hasPrefix("http"),
+              !didRetryClipRefresh else {
+            print("[AIVoiceManager] clip failed to load; falling back to on-device speech")
+            teardownPlayer()
+            speak(text, onComplete: completion)
+            return
+        }
+        didRetryClipRefresh = true
+        print("[AIVoiceManager] clip failed to load; refreshing signed URL and retrying once")
         teardownPlayer()
-        speak(text, onComplete: completion)
+        Task { @MainActor in
+            await JourneyContentStore.shared.forceRefresh()
+            guard let fresh = JourneyContentStore.shared.refreshedClipURL(matching: name) else {
+                // Nothing newer to play — degrade to speech, as before.
+                print("[AIVoiceManager] no re-signed clip URL available; falling back to speech")
+                self.speak(text, onComplete: completion)
+                return
+            }
+            self.playClip(named: fresh, text: text, readAlong: readAlong, onComplete: completion)
+        }
     }
 
     /// Periodic tick: map the playhead to the active word. Prefers forced-aligned per-word timings

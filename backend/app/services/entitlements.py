@@ -111,6 +111,27 @@ FREE_TIER_WHALE_NAME = "Bill Gates"
 #             their drill-down), and the AI Sentiment Summary — the position-level detail.
 WHALE_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 
+# ── Wiser (Learn): read free, listen with Pro ────────────────────────────────────────
+#
+# TEXT is free on every tier — all 27 Journey lessons, 13 Money Moves articles and 10
+# books stay fully readable, and so does progress tracking. What is paid is the produced
+# NARRATION (230 clips, 7h33m) and the read-along highlighting it drives.
+#
+# The line is drawn here for three reasons that all point the same way:
+#   • Cost. Serving Learn is ~2 cached Supabase selects an hour for the entire user base;
+#     the ONLY recurring cost is Storage egress, and narration is 100% of it. The gate
+#     lands exactly on the spend.
+#   • Category. Every comparable investing app gives education away (Investopedia,
+#     Robinhood Learn, Stash); Morningstar and Seeking Alpha charge for ANALYSIS, which
+#     this app already meters in credits. Meanwhile the book library is structurally a
+#     Blinkist product, and Blinkist's free tier is text with no audio.
+#   • 5.1.1(v). Keeping every word readable keeps the "not associated specifically to the
+#     user" posture the auth rules rely on (auth.md §1a).
+#
+# Same floor as the other two gates, and deliberately the same frozenset so they cannot
+# drift into "Pro unlocks signals but only Max unlocks narration".
+LEARN_AUDIO_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
+
 
 def normalize_tier(tier: Optional[str]) -> str:
     """Pure: map any incoming tier value onto a known key, defaulting to the least privileged."""
@@ -185,6 +206,24 @@ def required_tier_for_whales(tier: Optional[str]) -> Optional[str]:
     walking one rung would upsell Max to a Pro user who is not locked out of anything.
     """
     return None if whale_detail_unlocked(tier) else TIER_PRO
+
+
+def learn_audio_unlocked(tier: Optional[str]) -> bool:
+    """Pure: may this tier hear the produced Learn narration?
+
+    False for Free, for guests (whose identity dict hardcodes ``"free"``), and for anything
+    unrecognised — the unknown case must fall CLOSED onto the paid surface. Note this gates
+    AUDIO only; the text of every lesson, article and book core is free at any tier.
+    """
+    return normalize_tier(tier) in LEARN_AUDIO_UNLOCKED_TIERS
+
+
+def required_tier_for_learn_audio(tier: Optional[str]) -> Optional[str]:
+    """Pure: the plan that unlocks narration, or None if already unlocked.
+
+    A floor (always Pro), not a ladder walk — Pro already unlocks all of it.
+    """
+    return None if learn_audio_unlocked(tier) else TIER_PRO
 
 
 def is_free_tier_whale(name: Optional[str]) -> bool:

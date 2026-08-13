@@ -18,7 +18,7 @@ import SwiftUI
 struct InlineDisclaimerNotice: View {
     /// Short line shown inline. Keep it to one line where possible.
     ///
-    /// Pass `""` for a LINK-ONLY notice (icon + link, no prose). That is for a host
+    /// Pass `""` for a LINK-ONLY notice — just the underlined link, no prose. That is for a host
     /// that already prints the disclaimer wording itself — the report's bottom
     /// Disclaimer section — where repeating the sentence would say the same thing
     /// twice and only the tap-through to the full text is still missing.
@@ -40,9 +40,10 @@ struct InlineDisclaimerNotice: View {
         Button {
             showDisclaimers = true
         } label: {
+            // No leading info glyph: the underlined `linkLabel` is already the tap affordance, and
+            // the icon only added visual weight to a line that wants to stay quiet. Removed here
+            // rather than per-call-site so all 14 notices stay identical.
             HStack(spacing: AppSpacing.xxs) {
-                Image(systemName: "info.circle")
-                    .font(AppTypography.iconTiny)
                 if !text.isEmpty {
                     Text(text)
                         .font(AppTypography.caption)

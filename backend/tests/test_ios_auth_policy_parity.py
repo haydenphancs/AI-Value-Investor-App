@@ -208,6 +208,12 @@ def test_strict_endpoints_are_signInRequired(case_name):
         # which would silently reopen the bypass the gate exists to close.
         "getWhaleList", "getWhaleProfile",
         "getWhaleTradeGroups", "getWhaleTradeGroupDetail", "getSignalDetail",
+        # Learn content. Both were `.public` with no backend dependency until narration
+        # became Pro/Max; they now take `get_learn_identity` purely to read `tier`. The
+        # TEXT is still free on every tier, so they must stay guest-capable — marking
+        # either signInRequired would put a login wall in front of the education content
+        # 5.1.1(v) exists to protect.
+        "getJourney", "getMoneyMoves",
     ],
 )
 def test_guest_capable_endpoints_are_not_gated(case_name):

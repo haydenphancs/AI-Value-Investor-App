@@ -139,6 +139,11 @@ struct BookLibraryView: View {
                 .environmentObject(audioManager)
         }
         .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)
+        // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
+        // an upgrade, so this presenter is what turns that into the plan sheet. Needed on
+        // each screen because these are fullScreenCovers — a modifier on the presenter
+        // does not reach them.
+        .learnAudioPaywall()
     }
 
     private func loadBooks() {

@@ -480,6 +480,10 @@ final class AudioManager: ObservableObject {
 
     /// Load a new episode without starting playback (starts paused)
     func load(_ episode: AudioEpisode) {
+        // Even PREPARING is gated: `preparePlayer` starts buffering, which spends Storage
+        // egress for a listener who is not entitled to hear it.
+        guard !LearnAudioEntitlement.shared.refuseIfLocked(episode) else { return }
+        guard !isMissingNarration(episode) else { return }
         // Add current episode to history if exists
         if let current = currentEpisode {
             addToHistory(current)
@@ -502,6 +506,15 @@ final class AudioManager: ObservableObject {
 
     /// Play a new episode
     func play(_ episode: AudioEpisode) {
+        // BEFORE anything else. A locked episode must never reach the body below: with no
+        // `audioUrl` it takes the simulated-playback branch, which mounts the mini player,
+        // advances a fake progress bar and fires `playbackDidComplete` — silently marking
+        // the article or core COMPLETE for someone who heard nothing.
+        guard !LearnAudioEntitlement.shared.refuseIfLocked(episode) else { return }
+        guard !isMissingNarration(episode) else {
+            print("🔇 AudioManager: refusing \(episode.category.rawValue) episode with no narration URL — not simulating playback (it would auto-complete in silence)")
+            return
+        }
         // Kind only — episode titles are high-cardinality authored content.
         Analytics.shared.track(.audioPlayed, ["kind": .string(episode.category.rawValue)])
         // Add current episode to history if exists
@@ -542,6 +555,8 @@ final class AudioManager: ObservableObject {
     /// Play an episode starting at a time offset. Used for one-file book narration that jumps to a
     /// core's start. Seeks BEFORE playing so the listener doesn't hear a moment of audio from 0:00.
     func play(_ episode: AudioEpisode, startAt: TimeInterval) {
+        guard !LearnAudioEntitlement.shared.refuseIfLocked(episode) else { return }
+        guard !isMissingNarration(episode) else { return }
         // (Journey narration is silenced in `activateAudioSession()`, which every path that
         // takes the shared session goes through — see the note there.)
         if let current = currentEpisode {
@@ -580,6 +595,10 @@ final class AudioManager: ObservableObject {
     /// Resume playback
     func resume() {
         guard let episode = currentEpisode else { return }
+        // Covers the Lock Screen and Control Center remote commands, which reach the engine
+        // without passing any in-app button.
+        guard !LearnAudioEntitlement.shared.refuseIfLocked(episode) else { return }
+        guard !isMissingNarration(episode) else { return }
         // Play tapped after the episode finished (e.g. from the Lock Screen) → restart from the top.
         if duration > 0, currentTime >= duration - 0.5 { currentTime = 0 }
         playbackState = .playing
@@ -621,6 +640,31 @@ final class AudioManager: ObservableObject {
     /// Journey lesson mid-book left both voices audible at once. Only pauses
     /// when something is actually playing, so this is safe to call
     /// unconditionally on every Journey playback entry point.
+    /// `true` when this episode claims to be narrated but carries no URL — refuse rather
+    /// than simulate.
+    ///
+    /// The simulated-playback branch below exists for episodes that legitimately have no
+    /// audio (Daily Brief), and it fires `playbackDidComplete` on a timer. For the NARRATED
+    /// library that behaviour is a trap: a Money Moves article or book core with a missing
+    /// URL would mount a mini player, run a fake progress bar and silently mark itself
+    /// COMPLETE for someone who heard nothing. That happens for real whenever content
+    /// cached while locked outlives an upgrade, so it is not a theoretical case.
+    private func isMissingNarration(_ episode: AudioEpisode) -> Bool {
+        guard episode.category == .moneyMoves || episode.category == .books else { return false }
+        guard let url = episode.audioUrl, !url.isEmpty else { return true }
+        return false
+    }
+
+    /// Tear down Learn narration that this account is no longer entitled to hear.
+    ///
+    /// Called from `LearnAudioEntitlement.update` on a downgrade or sign-out. Deliberately a
+    /// no-op for non-Learn audio: the gate is on the produced library, not on the player.
+    func stopForLostEntitlement() {
+        guard let episode = currentEpisode,
+              LearnAudioEntitlement.shared.isLocked(episode) else { return }
+        stop()
+    }
+
     func pauseForExternalAudio() {
         // `.loading` is ALSO the buffering/stall state, not just "pre-play" — a freshly
         // started remote clip sits in `.loading` for as long as the network takes, with the

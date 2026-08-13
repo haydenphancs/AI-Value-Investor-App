@@ -150,11 +150,22 @@ struct MoneyMovesContentFile: Decodable {
 /// `content` blob (same shape as the bundle's articles).
 struct MoneyMovesAPIResponse: Decodable {
     let articles: [MoneyMoveArticleDTO]
+    /// Narration is Pro/Max and this caller doesn't have it: the server stripped every
+    /// `audioUrl` and read-along span. Optional so an older backend reads absent → unlocked,
+    /// i.e. exactly today's behaviour rather than a phantom lock.
+    let audioLocked: Bool?
+    let tierRequired: String?
 
-    private enum CodingKeys: String, CodingKey { case articles }
+    private enum CodingKeys: String, CodingKey {
+        case articles
+        case audioLocked = "audio_locked"
+        case tierRequired = "tier_required"
+    }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         articles = c.lenientArray(MoneyMoveArticleDTO.self, forKey: .articles)
+        audioLocked = (try? c.decodeIfPresent(Bool.self, forKey: .audioLocked)) ?? nil
+        tierRequired = (try? c.decodeIfPresent(String.self, forKey: .tierRequired)) ?? nil
     }
 }
 
@@ -202,7 +213,13 @@ struct MoneyMoveArticleDTO: Decodable {
             viewCount: viewCount,
             commentCount: commentCount ?? mappedComments.count,
             isBookmarked: false,
-            hasAudioVersion: audioUrl != nil,   // honest gate: only show Listen when narration exists
+            // Trust the server's flag when it sends one; fall back to the URL only for the
+            // bundled/offline blob, which carries no URLs at all. Deriving this purely from
+            // `audioUrl != nil` would make a LOCKED article (URL stripped, narration very
+            // much real) indistinguishable from one that was never narrated — and the Listen
+            // control hides entirely on false, so the upgrade offer would vanish from exactly
+            // the articles that would sell it.
+            hasAudioVersion: hasAudioVersion ?? (audioUrl != nil),
             heroGradientColors: heroGradientColors,
             tagLabel: tagLabel,
             isFeatured: isFeatured ?? false,

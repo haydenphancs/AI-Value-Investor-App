@@ -34,6 +34,12 @@ from app.schemas.learn_progress import CompleteLearnItemRequest, LearnProgressRe
 from app.schemas.money_moves import MoneyMovesResponse
 from app.services.journey_content_service import get_journey_content_service
 from app.services.money_moves_content_service import get_money_moves_content_service
+from app.services.entitlements import (
+    TIER_PRO,
+    learn_audio_unlocked,
+    required_tier_for_learn_audio,
+)
+from app.services.learn_audio_gate import redact_journey, redact_money_moves
 
 # Stable discriminators for the unified completion log.
 LEARN_CONTENT_TYPES = {"book_core", "journey_lesson", "money_move"}
@@ -44,28 +50,51 @@ router = APIRouter()
 
 
 @router.get("/journey", response_model=JourneyResponse)
-async def get_journey():
+async def get_journey(user: dict = Depends(get_learn_identity)):
     """
     All Investor Journey lessons, ordered by level then sort_order.
 
     Each lesson includes its `story_content` (cards with audio/image/video URLs).
     Degrades gracefully to stale cache or an empty list on a backend hiccup.
+
+    Every word of every lesson is free on every tier. The NARRATION is Pro/Max, so a
+    locked caller gets the same lessons with each card's `audioUrl` + `readAlongWords`
+    stripped. The identity dependency exists only to read `tier` — a signed-out caller
+    still resolves to a per-install guest and still gets the full text.
     """
     service = get_journey_content_service()
-    return await service.get_journey()
+    response = await service.get_journey()
+    # Redacted HERE, per request, never inside the service: `get_journey()` returns the
+    # object held in a process-wide 1-hour cache, shared by every caller regardless of
+    # plan. `redact_journey` deep-copies for that reason.
+    tier = user.get("tier")
+    if not learn_audio_unlocked(tier):
+        return redact_journey(response, required_tier_for_learn_audio(tier) or TIER_PRO)
+    return response
 
 
 @router.get("/money-moves", response_model=MoneyMovesResponse)
-async def get_money_moves():
+async def get_money_moves(user: dict = Depends(get_learn_identity)):
     """
     All Money Moves articles, ordered by sort_order.
 
     Each item is the full iOS-shaped article `content` (with the narration audioUrl
     overlaid when the voice exists). Degrades gracefully to stale cache or an empty
     list on a backend hiccup.
+
+    Every article is fully readable on every tier. The NARRATION is Pro/Max, so a locked
+    caller gets the same articles with `audioUrl`, `audioDurationSeconds` and the
+    read-along spans stripped. `hasAudioVersion` is deliberately left alone — see
+    MoneyMovesResponse.
     """
     service = get_money_moves_content_service()
-    return await service.get_money_moves()
+    response = await service.get_money_moves()
+    # Same copy-on-read rule as /journey above: the service's return value is the shared
+    # cache entry.
+    tier = user.get("tier")
+    if not learn_audio_unlocked(tier):
+        return redact_money_moves(response, required_tier_for_learn_audio(tier) or TIER_PRO)
+    return response
 
 
 @router.get("/progress/{content_type}", response_model=LearnProgressResponse)

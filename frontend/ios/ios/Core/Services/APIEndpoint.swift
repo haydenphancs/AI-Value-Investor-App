@@ -937,10 +937,6 @@ enum APIEndpoint: Sendable {
         case .getThemeDetail:
             return .public
 
-        // Learn CONTENT is public; Learn PROGRESS is per-identity (see below).
-        case .getJourney, .getMoneyMoves:
-            return .public
-
         case .getPersonas, .getTrendingAnalyses:
             return .public
 
@@ -979,6 +975,13 @@ enum APIEndpoint: Sendable {
 
         case .getLearnProgress, .completeLearnItem, .uncompleteLearnItem,
              .getBookBookmarks, .addBookBookmark, .removeBookBookmark:
+            return .guestAllowed
+
+        // Learn CONTENT moved off `.public` when narration became Pro/Max. It is still
+        // free to read on every tier — the identity is read ONLY for `tier`, to decide
+        // whether the response carries audio URLs. A signed-out caller resolves to a
+        // per-install guest and still gets every word of every lesson and article.
+        case .getJourney, .getMoneyMoves:
             return .guestAllowed
 
         case .getUpdatesTabs, .getHomeFeed, .getHomeDashboard:

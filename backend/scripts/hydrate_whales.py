@@ -39,6 +39,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.config import settings  # noqa: E402
 from app.database import get_supabase  # noqa: E402
+from app.utils.supabase_errors import (  # noqa: E402
+    is_transient_supabase_error,
+    retry_idempotent_sync,
+)
 from app.integrations.fmp import FMPClient  # noqa: E402
 from app.integrations.gemini import GeminiClient  # noqa: E402
 from app.services.whale_service import (  # noqa: E402
@@ -176,26 +180,48 @@ class WhaleHydrator:
                     whale_id, 0.0, [], whale=whale
                 )
                 if result.is_ok:
+                    # Computed ONCE and reused for both the write and the log, so the
+                    # two can never disagree.
+                    label = return_label_for(
+                        result.source, whale.get("associated_ticker")
+                    )
                     try:
-                        self.sb.table("whales").update({
-                            "ytd_return": result.value,
-                            "return_source": result.source,
-                            "return_window_years": result.window_years,
-                            "return_status": result.status,
-                            "return_label": return_label_for(
-                                result.source, whale.get("associated_ticker")
-                            ),
-                        }).eq("id", whale_id).execute()
+                        # RETRY-SAFE: PK-keyed UPDATE, fixed payload.
+                        retry_idempotent_sync(
+                            lambda: self.sb.table("whales").update({
+                                "ytd_return": result.value,
+                                "return_source": result.source,
+                                "return_window_years": result.window_years,
+                                "return_status": result.status,
+                                "return_label": label,
+                            }).eq("id", whale_id).execute(),
+                            what=f"whales ticker-only return whale_id={whale_id}",
+                            logger=logger,
+                        )
+                    except Exception as e:
+                        _transient = is_transient_supabase_error(e)
+                        (logger.warning if _transient else logger.error)(
+                            "  Ticker-only update failed for %s: %s: %s",
+                            name, type(e).__name__, e, exc_info=not _transient,
+                        )
+                    else:
+                        # try/except/ELSE on purpose. These two lines used to live
+                        # INSIDE the try, right after a log line that referenced two
+                        # names bound NOWHERE in this scope (`ytd_return`,
+                        # `return_label` — the code around them was refactored to the
+                        # `result` AnnualReturn and this call site was missed). The
+                        # NameError fired AFTER the UPDATE had already committed, was
+                        # swallowed by the handler above and reported as "Ticker-only
+                        # update failed" — a lie — so `processed` never incremented
+                        # and EVERY ticker-only whale was miscounted as skipped.
+                        # Keeping the counter in `else` means it can never again be
+                        # gated on a log line succeeding.
                         logger.info(
                             "  %s — ticker-only return updated: %s%% (%s)",
-                            name, ytd_return, return_label,
+                            name, result.value, label,
                         )
                         self.stats["processed"] += 1
                         return
-                    except Exception as e:
-                        logger.error(
-                            "  Ticker-only update failed for %s: %s", name, e
-                        )
             self.stats["skipped"] += 1
             return
 
@@ -1291,15 +1317,29 @@ class WhaleHydrator:
         # reject the whole row (PGRST204) and silently kill the snapshot cache.
         snapshot_ok = False
         try:
-            sb.table("whale_filing_snapshots").upsert(
-                snapshot_db_row(snapshot), on_conflict="whale_id,filing_period"
-            ).execute()
+            # RETRY-SAFE: a true UPSERT on the whale_id,filing_period unique key, with
+            # a fixed payload (snapshot_db_row is a pure key-filter — no now(), no
+            # counters), so replaying it converges to the identical row. Supabase's
+            # Cloudflare edge intermittently answers 520 with an HTML body, which
+            # postgrest raises as APIError('JSON could not be generated'); that blip
+            # used to lose the snapshot for a whole day.
+            retry_idempotent_sync(
+                lambda: sb.table("whale_filing_snapshots").upsert(
+                    snapshot_db_row(snapshot), on_conflict="whale_id,filing_period"
+                ).execute(),
+                what=f"whale_filing_snapshots upsert whale_id={whale_id}",
+                logger=logger,
+            )
             snapshot_ok = True
         except Exception as e:
-            logger.exception(
+            # Transient after retries → WARNING (the next run repairs it); a genuine
+            # failure keeps ERROR + stack.
+            _transient = is_transient_supabase_error(e)
+            (logger.warning if _transient else logger.error)(
                 "  Failed to upsert snapshot whale_id=%s period=%s: %s: %s",
                 whale_id, snapshot.get("filing_period"),
                 type(e).__name__, e,
+                exc_info=not _transient,
             )
 
         # 2. Update whales record. Only advertise the cache as warm
@@ -1337,11 +1377,21 @@ class WhaleHydrator:
                 )
             if risk_profile:
                 whale_update["risk_profile"] = risk_profile
-            sb.table("whales").update(whale_update).eq(
-                "id", whale_id
-            ).execute()
+            # RETRY-SAFE: PK-keyed UPDATE with a fixed payload — absorbing, so a
+            # replay after a lost ack lands on the same row values.
+            retry_idempotent_sync(
+                lambda: sb.table("whales").update(whale_update).eq(
+                    "id", whale_id
+                ).execute(),
+                what=f"whales update whale_id={whale_id}",
+                logger=logger,
+            )
         except Exception as e:
-            logger.error("  Failed to update whale record: %s", e)
+            _transient = is_transient_supabase_error(e)
+            (logger.warning if _transient else logger.error)(
+                "  Failed to update whale record: %s: %s",
+                type(e).__name__, e, exc_info=not _transient,
+            )
 
         # Track whether the denormalized writes (steps 3–5) all succeeded. The
         # dedup skip in _hydrate_one keys on raw_hash; if a denorm write fails
@@ -1351,7 +1401,16 @@ class WhaleHydrator:
         denorm_ok = True
 
         # 3. Replace holdings
-        try:
+        #
+        # RETRY-SAFE ONLY AS A WHOLE BLOCK — hence the closure. The block OPENS with
+        # a DELETE of every row for this whale, so replaying it wipes whatever a
+        # partially-committed prior attempt left behind and rebuilds from scratch.
+        # ⚠️ An individual insert must NEVER be retried on its own:
+        # whale_holdings_whale_id_ticker_key means a committed-but-unacked row makes
+        # the replay raise 23505, aborting the block and leaving holdings truncated.
+        # That is exactly why retry_idempotent_sync takes a callable — you cannot
+        # express "retry insert #17" through it.
+        def _sync_holdings():
             sb.table("whale_holdings").delete().eq(
                 "whale_id", whale_id
             ).execute()
@@ -1364,12 +1423,28 @@ class WhaleHydrator:
                     "allocation": h.get("allocation", 0),
                     "change_percent": h.get("change_percent", 0),
                 }).execute()
+
+        try:
+            retry_idempotent_sync(
+                _sync_holdings,
+                what=f"whale_holdings sync whale_id={whale_id}",
+                logger=logger,
+            )
         except Exception as e:
             denorm_ok = False
-            logger.error("  Failed to sync holdings: %s", e)
+            _transient = is_transient_supabase_error(e)
+            (logger.warning if _transient else logger.error)(
+                "  Failed to sync holdings: %s: %s",
+                type(e).__name__, e, exc_info=not _transient,
+            )
 
         # 4. Replace sector allocations
-        try:
+        #
+        # Same delete-first shape, same whole-block-only retry rule. This table has
+        # NO unique key, which makes the granularity even more load-bearing: a
+        # per-statement retry here would silently DUPLICATE allocation rows rather
+        # than fail loudly.
+        def _sync_sectors():
             sb.table("whale_sector_allocations").delete().eq(
                 "whale_id", whale_id
             ).execute()
@@ -1379,11 +1454,39 @@ class WhaleHydrator:
                     "sector": s["name"],
                     "allocation": s["allocation"],
                 }).execute()
+
+        try:
+            retry_idempotent_sync(
+                _sync_sectors,
+                what=f"whale_sector_allocations sync whale_id={whale_id}",
+                logger=logger,
+            )
         except Exception as e:
             denorm_ok = False
-            logger.error("  Failed to sync sectors: %s", e)
+            _transient = is_transient_supabase_error(e)
+            (logger.warning if _transient else logger.error)(
+                "  Failed to sync sectors: %s: %s",
+                type(e).__name__, e, exc_info=not _transient,
+            )
 
         # 5. Insert trade groups + trades (one per filing; skip existing dates)
+        #
+        # ⚠️ DO NOT RETRY THIS BLOCK. Two independent hazards, either of which turns a
+        # transient blip into permanent damage:
+        #   (a) `uq_whale_trade_groups_whale_date` UNIQUE(whale_id, date) — if the
+        #       group INSERT commits but the ack is lost, a replay hits the
+        #       select-exists guard below, `continue`s, and the trades are NEVER
+        #       written. Worse, every FUTURE run takes the same skip, so the loss is
+        #       permanent. The raw_hash reset in 5b cannot repair it: the guard
+        #       defeats it.
+        #   (b) `whale_trades` has NO unique key, so replaying a mid-loop trade insert
+        #       silently DUPLICATES the trade.
+        # Log-level demotion only. See app/utils/supabase_errors.py for the rule.
+        #
+        # KNOWN GAP (deliberately out of scope, tracked): hazard (a) can already
+        # strand trades today without any retry involved. The real fix is to make the
+        # group insert an upsert(on_conflict="whale_id,date") and derive the skip from
+        # a whale_trades COUNT rather than from group existence.
         groups = snapshot.get("trade_groups")
         if not groups:
             single = snapshot.get("trade_group")
@@ -1439,7 +1542,11 @@ class WhaleHydrator:
                     }).execute()
             except Exception as e:
                 denorm_ok = False
-                logger.error("  Failed to sync trade group: %s", e)
+                _transient = is_transient_supabase_error(e)
+                (logger.warning if _transient else logger.error)(
+                    "  Failed to sync trade group: %s: %s",
+                    type(e).__name__, e, exc_info=not _transient,
+                )
 
         # 5b. If any denormalized write failed, clear the snapshot's raw_hash so
         # the next scheduled run re-attempts the sync instead of matching the
@@ -1447,18 +1554,35 @@ class WhaleHydrator:
         # so the profile still serves; only the dedup key is reset.
         if snapshot_ok and not denorm_ok:
             try:
-                sb.table("whale_filing_snapshots").update(
-                    {"raw_hash": None}
-                ).eq("whale_id", whale_id).eq(
-                    "filing_period", snapshot["filing_period"]
-                ).execute()
+                # RETRY-SAFE: key-scoped UPDATE to a constant. Worth retrying because
+                # this write IS the self-heal signal — losing it to the same blip that
+                # broke the denorm write leaves the partial state hash-skipped
+                # indefinitely.
+                retry_idempotent_sync(
+                    lambda: sb.table("whale_filing_snapshots").update(
+                        {"raw_hash": None}
+                    ).eq("whale_id", whale_id).eq(
+                        "filing_period", snapshot["filing_period"]
+                    ).execute(),
+                    what=f"raw_hash reset whale_id={whale_id}",
+                    logger=logger,
+                )
                 logger.warning(
                     "  Reset raw_hash for whale_id=%s period=%s — a denormalized "
                     "write failed; next run will repair.",
                     whale_id, snapshot.get("filing_period"),
                 )
             except Exception as e:
-                logger.error("  Failed to reset raw_hash: %s", e)
+                # Genuinely worth an ERROR even when transient: the repair signal is
+                # lost, so the partial denorm state will be hash-skipped until the
+                # snapshot content itself changes.
+                logger.error(
+                    "  Failed to reset raw_hash for whale_id=%s period=%s — partial "
+                    "denormalized state will be SKIPPED by the hash dedup next run: "
+                    "%s: %s",
+                    whale_id, snapshot.get("filing_period"),
+                    type(e).__name__, e, exc_info=True,
+                )
 
         # 6. Generate alert if significant activity detected
         self._maybe_generate_alert(whale_id, snapshot)

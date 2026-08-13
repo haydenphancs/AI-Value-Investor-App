@@ -947,6 +947,13 @@ class TrackingViewModel: ObservableObject {
         selectedWhaleCategory = category
     }
 
+    /// Tapped a followed whale the current plan doesn't surface. Same plan sheet as a locked
+    /// Follow pill: the follow row exists, but the feed truncates to the covered subset, so
+    /// upgrading — not buying credits — is what makes it visible again.
+    func viewInactiveWhale(_ whale: TrendingWhale) {
+        showWhalePaywall = true
+    }
+
     func toggleFollowWhale(_ whale: TrendingWhale) {
         // PLAN gate before anything else. The server would refuse this follow with
         // WHALE_FOLLOW_LOCKED anyway, but letting the request go out would spend a round

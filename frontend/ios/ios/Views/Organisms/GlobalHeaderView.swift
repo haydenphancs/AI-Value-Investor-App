@@ -52,17 +52,39 @@ struct GlobalHeaderView: View {
 }
 
 // MARK: - Profile Avatar View
+
+/// How the avatar is cut. The two are not interchangeable — see `ProfileAvatarView`.
+enum ProfileAvatarShape {
+    /// Shares `CaydexLogoMark.iconCornerRatio`. For a header, where the avatar sits across
+    /// from the logo mark.
+    case squircle
+    /// A plain circle. For a standalone hero with no logo opposite it.
+    case circle
+}
+
 /// Loads the user's external avatar URL. Falls back to a default silhouette icon.
 ///
-/// Cut to a ROUNDED SQUARE, not a circle: in both headers this sits directly across
-/// from `CaydexLogoMark`, and a circle opposite the icon-shaped logo read as two
-/// unrelated marks. It shares the logo's `iconCornerRatio` so the pair keeps one
-/// silhouette at every size.
+/// The default is a ROUNDED SQUARE, not a circle, and only because of WHERE it usually sits:
+/// in both headers the avatar is directly across from `CaydexLogoMark`, and a circle opposite
+/// the icon-shaped logo read as two unrelated marks. It shares the logo's `iconCornerRatio` so
+/// the pair keeps one silhouette at every size.
+///
+/// That argument does NOT extend to the Account screen's 80pt hero, which has no logo opposite
+/// it — squaring it there was collateral from a header change. Pass `.circle` for a standalone
+/// avatar.
 struct ProfileAvatarView: View {
     let avatarUrl: String?
     var size: CGFloat = 36
+    var shape: ProfileAvatarShape = .squircle
 
-    private var cornerRadius: CGFloat { size * CaydexLogoMark.iconCornerRatio }
+    /// `.circle` is `RoundedRectangle` at half the side — same shape, one code path, so the
+    /// image clip and the fallback glyph can never disagree about which one is in use.
+    private var cornerRadius: CGFloat {
+        switch shape {
+        case .squircle: return size * CaydexLogoMark.iconCornerRatio
+        case .circle:   return size / 2
+        }
+    }
 
     var body: some View {
         if let urlString = avatarUrl, let url = URL(string: urlString) {
@@ -89,10 +111,11 @@ struct ProfileAvatarView: View {
         }
     }
 
-    /// Squared to match — `person.crop.circle.fill` would put a circle back on screen
-    /// for every signed-out or image-less user, which is most of them.
+    /// Follows `shape`. It has to: most users have no avatar image, so the fallback IS the
+    /// avatar for them — a squared glyph under a `.circle` request would make the parameter
+    /// look like it did nothing.
     private var fallbackAvatar: some View {
-        Image(systemName: "person.crop.square.fill")
+        Image(systemName: shape == .circle ? "person.crop.circle.fill" : "person.crop.square.fill")
             .font(.system(size: size))
             .foregroundColor(AppColors.primaryBlue)
     }

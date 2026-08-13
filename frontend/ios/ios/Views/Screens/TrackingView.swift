@@ -385,7 +385,8 @@ struct WhalesTabContent: View {
                 if !viewModel.trackedWhales.isEmpty {
                     FollowedWhalesRow(
                         whales: viewModel.trackedWhales,
-                        onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) }
+                        onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) },
+                        onInactiveTapped: { whale in viewModel.viewInactiveWhale(whale) }
                     )
                     .padding(.top, AppSpacing.sm)
                 }
@@ -440,33 +441,66 @@ struct WhalesTabContent: View {
 struct FollowedWhalesRow: View {
     let whales: [TrendingWhale]
     var onWhaleTapped: ((TrendingWhale) -> Void)?
+    /// Tapped a follow the current plan doesn't surface. The caller presents the paywall.
+    var onInactiveTapped: ((TrendingWhale) -> Void)?
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: AppSpacing.lg) {
                 ForEach(whales) { whale in
                     Button {
-                        onWhaleTapped?(whale)
+                        // A follow the plan doesn't cover leads to the offer, not the
+                        // profile — tapping through to a whale whose trades the feed will
+                        // not serve is the confusing half of this inconsistency.
+                        if whale.isFollowingInactive {
+                            onInactiveTapped?(whale)
+                        } else {
+                            onWhaleTapped?(whale)
+                        }
                     } label: {
                         VStack(spacing: AppSpacing.sm) {
-                            // Avatar
-                            WhaleAvatarView(
-                                name: whale.name,
-                                avatarURL: whale.avatarName.isEmpty ? nil : whale.avatarName,
-                                size: 64,
-                                category: whale.category
+                            // Avatar. Follows are truncated on read, never deleted, so a
+                            // Free account still HAS these rows — showing them at full
+                            // strength while the feed below serves only the covered whale
+                            // read as a bug. Dimmed + locked says "your plan, not a glitch".
+                            ZStack(alignment: .bottomTrailing) {
+                                WhaleAvatarView(
+                                    name: whale.name,
+                                    avatarURL: whale.avatarName.isEmpty ? nil : whale.avatarName,
+                                    size: 64,
+                                    category: whale.category
+                                )
+                                .opacity(whale.isFollowingInactive ? 0.45 : 1)
+
+                                if whale.isFollowingInactive {
+                                    Image(systemName: "lock.fill")
+                                        .font(AppTypography.iconXS).fontWeight(.bold)
+                                        // Text-role token — must clear 4.5:1 in both
+                                        // appearances. A *Graphic one fails the launch audit.
+                                        .foregroundColor(AppColors.primaryBlue)
+                                        .padding(5)
+                                        .background(Circle().fill(AppColors.cardBackground))
+                                        .overlay(Circle().stroke(AppColors.cardEdge, lineWidth: 1))
+                                }
+                            }
+                            .accessibilityLabel(
+                                whale.isFollowingInactive
+                                ? "\(whale.name), locked — upgrade to track"
+                                : whale.name
                             )
 
                             // Name
                             Text(whale.name.components(separatedBy: " ").last ?? whale.name)
                                 .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textPrimary)
+                                .foregroundColor(whale.isFollowingInactive
+                                                 ? AppColors.textMuted : AppColors.textPrimary)
                                 .lineLimit(1)
 
-                            // Trade count
-                            Text(whale.formattedTradeCount)
+                            // Trade count — or why this one is dark.
+                            Text(whale.isFollowingInactive ? "Upgrade" : whale.formattedTradeCount)
                                 .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textMuted)
+                                .foregroundColor(whale.isFollowingInactive
+                                                 ? AppColors.primaryBlue : AppColors.textMuted)
                         }
                         .frame(width: 72)
                     }

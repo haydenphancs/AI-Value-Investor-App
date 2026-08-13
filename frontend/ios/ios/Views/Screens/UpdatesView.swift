@@ -62,12 +62,13 @@ struct UpdatesView: View {
                         onFilterTapped: handleFilterTapped
                     )
 
-                    // NOTE: the "Filter news…" keyword bar used to sit here, between
-                    // the Live News header and the timeline. It was removed by
-                    // request — the source/sentiment sheet behind the header's filter
-                    // control is now the only way to narrow the feed. The ViewModel's
-                    // `newsSearchText` keyword path is left intact (and inert, since
-                    // nothing sets it) so restoring the bar is a one-block change.
+                    // NOTE: the "Filter news…" keyword bar used to sit here, between the
+                    // Live News header and the timeline. It was removed by request — the
+                    // source/sentiment sheet behind the header's filter control is now the
+                    // only way to narrow the feed, and the ViewModel's `newsSearchText`
+                    // keyword path has been removed with it. It had no writer left, so
+                    // `hasActiveFeedFilter` and `applyFiltersAndGroup` were carrying a
+                    // permanently-false branch. Restoring the bar means restoring that path.
 
                     // Scrollable Content with sticky section headers.
                     //

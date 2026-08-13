@@ -46,6 +46,19 @@ class TrendingWhaleResponse(BaseModel):
     # own demo. Defaulted so an already-shipped client decodes this unchanged.
     is_locked: bool = False
 
+    # True when the caller DOES follow this whale but their plan doesn't surface it.
+    #
+    # Follows are truncated on read, never deleted ("truncate, never destroy"), so a Free
+    # account that was Pro — or that followed before this gate existed — still holds rows
+    # for whales the activity feed will not serve. Without this flag the followed-whale
+    # avatar row showed all of them while the feed below it showed one, which reads as a
+    # bug rather than as a plan limit.
+    #
+    # Deliberately NOT folded into `is_locked`: that one force-unlocks a followed whale so
+    # the user can always unfollow, and it also gates the profile. These are different
+    # questions. Defaulted for the same already-shipped-client reason.
+    is_following_inactive: bool = False
+
 
 # ── Whale profile sub-models ────────────────────────────────────────
 

@@ -454,6 +454,14 @@ final class AppState {
         // because Journey narrates from `.onAppear` with no button to guard. One assignment
         // point in, one push out.
         LearnAudioEntitlement.shared.update(tier: user.tier)
+        // Book narration URLs are signed and fetched, not compiled in, so warm them here —
+        // this is the first moment we know the plan. A locked account clears instead, so a
+        // downgrade cannot leave a still-valid signed URL usable on the device.
+        if user.tier == .pro || user.tier == .premium {
+            BookAudioURLStore.shared.prefetch()
+        } else {
+            BookAudioURLStore.shared.reset()
+        }
     }
 
     /// Post-authentication side effects: claim guest data, refresh credits, pull synced settings.
@@ -721,6 +729,9 @@ final class AppState {
         // tier must not carry into the next account, and any Learn audio still playing is
         // now unentitled. `.free` is the safe direction — it locks, never unlocks.
         LearnAudioEntitlement.shared.update(tier: .free)
+        // Same argument, one layer down: a signed book URL minted for the ended session is
+        // still valid for hours, and this store is keyed by nothing but curriculum order.
+        BookAudioURLStore.shared.reset()
 
         // Everything below used to sit OUTSIDE this funnel, called only from `signOut()`. That
         // covered exactly one of the three ways a session ends — the other two (a dead access

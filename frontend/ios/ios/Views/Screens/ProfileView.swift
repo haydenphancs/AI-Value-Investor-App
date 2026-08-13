@@ -153,9 +153,12 @@ struct ProfileView: View {
     private var userIdentitySection: some View {
         VStack(spacing: AppSpacing.lg) {
             VStack(spacing: AppSpacing.md) {
+                // `.circle`, unlike the two headers: the squircle exists to rhyme with
+                // `CaydexLogoMark` across a nav bar, and there is no logo opposite this hero.
                 ProfileAvatarView(
                     avatarUrl: viewModel.avatarUrl,
-                    size: 80
+                    size: 80,
+                    shape: .circle
                 )
 
                 if viewModel.isAuthenticated {

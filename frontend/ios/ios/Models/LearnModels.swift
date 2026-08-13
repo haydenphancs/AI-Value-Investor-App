@@ -448,9 +448,15 @@ struct LibraryBook: Identifiable {
         bookAudioInfo?.coreStartSeconds[coreNumber]
     }
 
-    /// Convert to AudioEpisode for playback. The whole book is ONE file; `audioUrl` is set once
-    /// narration is generated (else nil => simulated/no audio). Duration prefers the real measured
-    /// narration length over the word-count estimate.
+    /// The book's episode IDENTITY — no URL. Use this for comparisons, lock affordances and
+    /// labels; use `playableAudioEpisode()` to actually start playback.
+    ///
+    /// `audioUrl` is deliberately nil here. It used to come from `BookAudioInfo`, which baked
+    /// the PUBLIC Storage URL of every book into the binary and made the Pro/Max narration
+    /// gate cosmetic. The playable URL is now a short-lived signed URL resolved at play time
+    /// by `BookAudioURLStore`.
+    ///
+    /// Safe to compare against a playable episode: `AudioEpisode ==` is `id`-only.
     var audioEpisode: AudioEpisode {
         AudioEpisode(
             id: "book-\(id.uuidString)",
@@ -462,9 +468,26 @@ struct LibraryBook: Identifiable {
             category: .books,
             authorName: author,
             sourceId: id.uuidString,
-            audioUrl: bookAudioInfo?.audioUrl,
+            audioUrl: nil,
+            // Still keyed off `bookAudioInfo` (durations/offsets), NOT off the URL — this is
+            // what lets the player map the playhead onto a core, and it must keep working
+            // for a locked user who never gets a URL at all.
             bookCurriculumOrder: bookAudioInfo == nil ? nil : curriculumOrder
         )
+    }
+
+    /// The episode with a playable signed URL attached, fetching one if needed.
+    ///
+    /// `nil` means "do not play": no narration exists for this book, or this account isn't
+    /// entitled, or the URL couldn't be obtained. Callers must check `refuseIfLocked` FIRST
+    /// so a free user gets the paywall without waiting on a network round trip.
+    @MainActor
+    func playableAudioEpisode() async -> AudioEpisode? {
+        guard bookAudioInfo != nil else { return nil }
+        guard let url = await BookAudioURLStore.shared.url(for: curriculumOrder) else { return nil }
+        var episode = audioEpisode
+        episode.audioUrl = url
+        return episode
     }
 }
 

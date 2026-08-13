@@ -547,6 +547,199 @@ async def test_a_non_colliding_portfolio_still_moves_wholesale():
     assert res["claimed"]["portfolios_merged"] == 1
 
 
+# ── The CONCURRENT-seed race (Race B) ────────────────────────────────────────
+#
+# The collision tests above cover the DETERMINISTIC case: the account already owns
+# "Holdings" when the claim starts, so the name is in `owned_pf` and the row takes the
+# merge path. They cannot see the race that actually kept the Sentry issue alive:
+# `_claim_portfolios` reads the account's names, and only THEN issues the UPDATE.
+# `_seed_default_portfolio` can insert "Holdings" inside that window — iOS fires
+# GET /portfolios from `TrackingViewModel.init` while `AppState.onAuthenticated`
+# fires the claim — so `movable` is stale by the time it is used and the UPDATE
+# raises 23505 under POST /users/me/claim-guest-data.
+#
+# The fake below injects exactly that interleaving.
+
+
+class _SeedRacingSB(_ConstrainedSB):
+    """Seeds a colliding account row DURING the UPDATE — i.e. inside the real window.
+
+    The seed has to land after the owned-names read and before the write, otherwise
+    the read simply sees it and takes the merge path with no race at all. Injecting
+    at execute-time reproduces the true interleaving: `movable` was computed from a
+    now-stale view, so the UPDATE raises 23505 on portfolios_user_id_name_key.
+    """
+
+    def __init__(self, store, *, seed_before=1):
+        super().__init__(store)
+        self.remaining = seed_before
+        self.update_attempts = 0
+
+    def table(self, name):
+        q = super().table(name)
+        if name != "portfolios":
+            return q
+        outer = self
+
+        class _Racing(type(q)):  # noqa: N801 — local shim
+            def execute(self):
+                if self._op == "update":
+                    outer.update_attempts += 1
+                    if outer.remaining > 0:
+                        # The concurrent GET /portfolios → _seed_default_portfolio
+                        # commits right here, between our read and our write.
+                        outer.remaining -= 1
+                        outer.store.setdefault("portfolios", []).append(
+                            {"id": f"seed{outer.remaining}",
+                             "user_id": _USER["id"], "name": "Holdings"}
+                        )
+                return super().execute()
+
+        q.__class__ = _Racing
+        return q
+
+
+class _AlwaysCollidesSB(_ConstrainedSB):
+    """Every portfolio UPDATE raises 23505, and a re-read cannot resolve it.
+
+    Faithful to a real shape: `idx_portfolios_one_active_per_user` (migration 126) is
+    a partial unique index on `user_id WHERE is_active`, so it is a *different*
+    constraint from the one the name re-read reasons about. If such a collision were
+    retried without a bound, the claim would spin.
+    """
+
+    def __init__(self, store):
+        super().__init__(store)
+        self.update_attempts = 0
+
+    def table(self, name):
+        q = super().table(name)
+        if name != "portfolios":
+            return q
+        outer = self
+
+        class _Colliding(type(q)):  # noqa: N801
+            def execute(self):
+                if self._op == "update":
+                    outer.update_attempts += 1
+                    raise _ConstraintViolation("idx_portfolios_one_active_per_user")
+                return super().execute()
+
+        q.__class__ = _Colliding
+        return q
+
+
+@pytest.mark.asyncio
+async def test_claim_portfolios_survives_a_concurrent_seed():
+    """THE race regression. Fails against a single-shot read-then-update.
+
+    The final clause is the point: a collision here must not eat the three steps
+    queued behind portfolios, which is the failure the whole endpoint was rewritten
+    for once already.
+    """
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [],
+        # Account owns NOTHING yet — so the first read says "Holdings" is movable,
+        # and the seed lands before the UPDATE.
+        "portfolios": [{"id": "g1", "user_id": bucket, "name": "Holdings"}],
+        "portfolio_items": [{"id": "gi1", "portfolio_id": "g1", "ticker": "NVDA"}],
+        "user_learn_progress": [
+            {"id": 1, "user_id": bucket, "content_type": "money_move", "item_key": "m1"},
+        ],
+        "research_reports": [{"id": "r1", "user_id": bucket}],
+        "chat_sessions": [{"id": "c1", "user_id": bucket}],
+    }
+
+    res = await _claim(_SeedRacingSB(store, seed_before=1), "install-A")
+
+    assert "error" not in res, f"the race was not handled: {res.get('error')}"
+    assert res["claimed"]["learn_progress"] == 1, "the race ate the Learn step"
+    assert res["claimed"]["research_reports"] == 1, "the race ate the reports step"
+    assert res["claimed"]["chat_sessions"] == 1, "the race ate the chat step"
+    # The guest row took the MERGE path on the retry, once the re-read saw the seed.
+    assert res["claimed"]["portfolios_merged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_racing_fake_really_reproduces_the_23505():
+    """NON-VACUITY for the race tests: without the retry, this shape DOES raise.
+
+    Guards against the fake quietly becoming a no-op (the exact way the pre-existing
+    `test_portfolios_move_too` was vacuous).
+    """
+    bucket = guest_user_id_for("install-A")
+    store = {"portfolios": [{"id": "g1", "user_id": bucket, "name": "Holdings"}]}
+    sb = _SeedRacingSB(store, seed_before=1)
+
+    with pytest.raises(_ConstraintViolation):
+        sb.table("portfolios").update(
+            {"user_id": _USER["id"], "is_active": False}
+        ).in_("id", ["g1"]).execute()
+
+
+@pytest.mark.asyncio
+async def test_claim_portfolios_gives_up_bounded_on_an_unresolvable_collision():
+    """A collision a re-read CANNOT resolve must terminate, and stay isolated.
+
+    The exact attempt count is asserted so the retry can never quietly become
+    unbounded.
+    """
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [],
+        "portfolios": [{"id": "g1", "user_id": bucket, "name": "Holdings"}],
+        "portfolio_items": [],
+        "user_learn_progress": [],
+        "research_reports": [{"id": "r1", "user_id": bucket}],
+        "chat_sessions": [{"id": "c1", "user_id": bucket}],
+    }
+    sb = _AlwaysCollidesSB(store)
+
+    res = await _claim(sb, "install-A")
+
+    assert sb.update_attempts == users_ep._CLAIM_PORTFOLIO_ATTEMPTS
+    assert res.get("error") == "PartialClaim"
+    assert res.get("failed") == ["portfolios"]
+    # Still isolated: the steps behind portfolios ran.
+    assert res["claimed"]["research_reports"] == 1
+    assert res["claimed"]["chat_sessions"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_non_unique_error_on_the_move_is_not_retried():
+    """Negative control — only a 23505 means "someone else won the race"."""
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [],
+        "portfolios": [{"id": "g1", "user_id": bucket, "name": "Holdings"}],
+        "portfolio_items": [], "user_learn_progress": [],
+        "research_reports": [], "chat_sessions": [],
+    }
+    attempts = {"n": 0}
+
+    class _BoomSB(_ConstrainedSB):
+        def table(self, name):
+            q = super().table(name)
+            if name != "portfolios":
+                return q
+
+            class _Boom(type(q)):  # noqa: N801
+                def execute(self):
+                    if self._op == "update":
+                        attempts["n"] += 1
+                        raise RuntimeError("relation is being vacuumed")
+                    return super().execute()
+
+            q.__class__ = _Boom
+            return q
+
+    res = await _claim(_BoomSB(store), "install-A")
+
+    assert attempts["n"] == 1, "a non-unique error must not be retried"
+    assert res.get("failed") == ["portfolios"]
+
+
 @pytest.mark.asyncio
 async def test_one_broken_table_does_not_abort_the_others():
     """Step isolation, independent of the portfolio case."""

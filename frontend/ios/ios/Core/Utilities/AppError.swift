@@ -38,6 +38,19 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// explicitly not a reason to sign anybody out.
     case authUnavailable(message: String)
 
+    /// The account exists and the password was right — the email address was never confirmed
+    /// (403 EMAIL_NOT_CONFIRMED).
+    ///
+    /// Its own case because none of the existing ones fit. `.forbidden` discards the message
+    /// and says "You don't have permission", which misdescribes it; `.validationFailed` titles
+    /// it "Invalid Input" and points at a form field that isn't wrong; and the generic
+    /// `.apiError` it used to fall into offers a retry button, when re-submitting the same
+    /// credentials will fail identically until the user opens the email.
+    ///
+    /// NOT an auth error (`isAuthError` stays false): there is no session to refresh or clear,
+    /// and treating it as one would sign out a user who never got signed in.
+    case emailNotConfirmed(message: String)
+
     // Business errors
     case insufficientCredits(required: Int, available: Int)
     /// The caller's PLAN doesn't allow this action (WHALE_FOLLOW_LOCKED, HTTP 403).
@@ -106,6 +119,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .signInRequired(let f): return "sign_in_required_\(f ?? "generic")"
         case .sessionEnded: return "session_ended"
         case .authUnavailable: return "auth_unavailable"
+        case .emailNotConfirmed: return "email_not_confirmed"
         case .insufficientCredits: return "insufficient_credits"
         case .planUpgradeRequired: return "plan_upgrade_required"
         case .notFound(let r): return "not_found_\(r)"
@@ -139,6 +153,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Signed Out"
         case .authUnavailable:
             return "Couldn't Verify Account"
+        case .emailNotConfirmed:
+            return "Confirm Your Email"
         case .insufficientCredits:
             return "Insufficient Credits"
         case .planUpgradeRequired:
@@ -185,6 +201,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .authUnavailable(let message):
             return message.isEmpty
                 ? "We couldn't verify your account just now. Please try again in a moment."
+                : message
+        case .emailNotConfirmed(let message):
+            return message.isEmpty
+                ? "Please confirm your email address, then sign in again. Check your inbox for the link."
                 : message
         case .insufficientCredits(let required, let available):
             // required <= 0 → the amount/balance wasn't plumbed (the backend
@@ -234,6 +254,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .signInRequired, .sessionEnded:
             return .signIn
         case .authUnavailable:
+            return .retry
+        // `.retry` — the user acts OUTSIDE the app (opens the email), then comes back and
+        // tries again. Not `.fixInput`: nothing on the form is wrong.
+        case .emailNotConfirmed:
             return .retry
         case .insufficientCredits, .planUpgradeRequired:
             return .upgrade
@@ -301,6 +325,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // ordinary permission wall at launch could destroy a perfectly valid session. 403 now
         // means only "authenticated but not allowed" (AUTH_FORBIDDEN, EMAIL_NOT_CONFIRMED),
         // which re-authenticating cannot fix, so it must not touch the session.
+        //
+        // `.emailNotConfirmed` (the typed case EMAIL_NOT_CONFIRMED now maps to) falls to the
+        // `default` below for that same reason, and one more: there is no session yet to
+        // destroy — the user never got signed in.
         //
         // `.signInRequired` is excluded for the mirror-image reason: no credential was sent, so
         // there is nothing wrong with any credential we hold. It is the SELF-HEAL signal — if a
@@ -523,6 +551,57 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "AUTH_UNAVAILABLE" {
                 return .authUnavailable(message: message)
             }
+            // 403 EMAIL_NOT_CONFIRMED. `validateResponse`'s 403 comment has always CLAIMED this
+            // routes to `.forbidden`, but no branch existed, so it fell through to `.apiError`:
+            // title "Error", action `.retry`. `.forbidden` would be wrong too — it discards the
+            // backend's message and says "You don't have permission", which is not the problem.
+            // It has its own case because the required action ("go confirm your email") matches
+            // none of the existing ones.
+            if code == "EMAIL_NOT_CONFIRMED" {
+                return .emailNotConfirmed(message: message)
+            }
+
+            // ── Codes that used to fall through to the generic branch below ──────────────
+            //
+            // `.apiError` is not silent — it surfaces the backend `user_message` verbatim and
+            // its analyticsKey is `api_<CODE>`. What it gets wrong is the TITLE ("Error") and
+            // the ACTION: it is unconditionally `.retry`, which is wrong for roughly half of
+            // these. Each branch below exists to fix the action.
+
+            // 404s. Retrying cannot conjure the resource; `.notFound` renders `.goBack`.
+            if code == "TICKER_NOT_FOUND" {
+                return .notFound(resource: "ticker")
+            }
+            if code == "REPORT_NOT_FOUND" {
+                return .notFound(resource: "report")
+            }
+            // 422s. The caller sent something the backend won't accept — `.fixInput`, not a
+            // retry of the identical request.
+            if code == "INVALID_INPUT" || code == "INVALID_PERSONA" {
+                return .validationFailed(message: message)
+            }
+            // Upstream quota. `.waitAndRetry` instead of an immediate retry that will just
+            // burn another rejected call. `retryAfter` cannot come from the payload — APIClient
+            // drops `details` when it builds `.businessError` — so 60s is the standing default,
+            // matching the 429 branch of `validateResponse`.
+            if code == "FMP_RATE_LIMITED" || code == "GEMINI_QUOTA_EXCEEDED" {
+                return .rateLimited(retryAfter: 60)
+            }
+            // Upstream down. Honestly a server-side failure, and `.serverError` already says
+            // "we're experiencing technical difficulties" with a retry — which IS right here.
+            if code == "FMP_UNAVAILABLE" || code == "GEMINI_UNAVAILABLE" {
+                return .serverError(statusCode: 503)
+            }
+            // Deliberately `.apiError`, listed rather than left to fall through: for these
+            // three the backend's own `user_message` is the best copy available AND `.retry`
+            // is genuinely the right action (the report pipeline is worth another attempt,
+            // and REPORT_NOT_READY resolves by asking again). Naming them makes that a
+            // decision a reader can check, not an accident of ordering.
+            if code == "DATA_INCOMPLETE"
+                || code == "REPORT_GENERATION_FAILED"
+                || code == "REPORT_NOT_READY" {
+                return .apiError(code: code, message: message)
+            }
             return .apiError(code: code, message: message)
         case .decodingError:
             return .unknown(message: "Failed to process server response")
@@ -652,6 +731,7 @@ extension AppError {
         case .signInRequired:      return "sign_in_required"
         case .sessionEnded:        return "session_ended"
         case .authUnavailable:     return "auth_unavailable"
+        case .emailNotConfirmed:   return "email_not_confirmed"
         case .insufficientCredits: return "insufficient_credits"
         case .planUpgradeRequired: return "plan_upgrade_required"
         case .notFound:            return "not_found"

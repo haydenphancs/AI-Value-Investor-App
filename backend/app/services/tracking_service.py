@@ -23,6 +23,7 @@ from app.services.chart_helper import (
 )
 from app.services.asset_class import symbol_trades_extended_hours
 from app.database import get_supabase
+from app.utils.supabase_errors import retry_idempotent_async
 from app.schemas.tracking import (
     TrackedAssetResponse,
     AlertResponse,
@@ -194,26 +195,46 @@ class TrackingService:
 
         # 1. Fetch user's watchlist from Supabase
         sb = get_supabase()
-        try:
-            result = (
+
+        def _read_watchlist():
+            return (
                 sb.table("watchlist_items")
                 .select("*")
                 .eq("user_id", user_id)
                 .order("added_at", desc=True)
                 .execute()
             )
+
+        try:
+            # Idempotent (a pure read), so a Supabase gateway blip is RETRIED rather
+            # than 503'd at the user. Supabase sits behind Cloudflare; a 520/525 edge
+            # page made postgrest raise APIError('JSON could not be generated') and
+            # this route was the only site where that reached a real person.
+            # Via to_thread so the sync postgrest call stops blocking the event loop
+            # on a hot request path (CLAUDE.md: never call Supabase synchronously
+            # inside an async def).
+            result = await retry_idempotent_async(
+                _read_watchlist,
+                what=f"watchlist read user={user_id}",
+                logger=logger,
+            )
             watchlist = result.data or []
         except Exception as exc:
-            # RAISE — never degrade a failed READ into an empty feed. The two are
-            # indistinguishable on the wire, and the iOS Assets tab purges every
+            # NO LOGGING HERE — deliberately. This used to logger.exception AND the
+            # endpoint re-logged with exc_info=True, so ONE datastore blip opened TWO
+            # Sentry issues (`APIError` and `WatchlistUnavailableError`) that always
+            # moved in lockstep. api/v1/endpoints/tracking.py is now the single
+            # reporter: it is the layer that can tell a transient blip (WARNING) from
+            # a genuine bug (ERROR + stack). `raise ... from exc` keeps the postgrest
+            # APIError as __cause__, so the endpoint's exc_info still prints the
+            # original traceback and the shared classifier can still read its .code.
+            #
+            # Still RAISES — never degrade a failed READ into an empty feed. The two
+            # are indistinguishable on the wire, and the iOS Assets tab purges every
             # portfolio ticker missing from this feed, so a laundered read failure
             # permanently deletes the user's portfolios (tickers AND hand-entered
             # shares/market_value). The endpoint maps this to 503
             # WATCHLIST_UNAVAILABLE so the client can tell the two apart.
-            logger.exception(
-                "[Tracking] watchlist read failed for user %s: %s: %s",
-                user_id, type(exc).__name__, exc,
-            )
             raise WatchlistUnavailableError(
                 f"watchlist read failed for user {user_id}: {type(exc).__name__}: {exc}"
             ) from exc

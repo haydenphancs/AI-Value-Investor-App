@@ -214,6 +214,10 @@ def test_strict_endpoints_are_signInRequired(case_name):
         # either signInRequired would put a login wall in front of the education content
         # 5.1.1(v) exists to protect.
         "getJourney", "getMoneyMoves",
+        # Book narration URLs. Guest-capable deliberately, even though only a paying account
+        # ever gets URLs back: the route answers 200 with `audio_locked` + `tier_required`,
+        # and a client that refused to CALL it could not render the upgrade offer at all.
+        "getBooksAudio",
     ],
 )
 def test_guest_capable_endpoints_are_not_gated(case_name):

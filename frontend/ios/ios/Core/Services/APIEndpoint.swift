@@ -261,6 +261,9 @@ enum APIEndpoint: Sendable {
     // MARK: - Learn / Money Moves
     case getMoneyMoves
 
+    // MARK: - Learn / Book narration URLs (signed, expiring; Pro/Max only)
+    case getBooksAudio
+
     // MARK: - Learn progress (unified completion log; contentType = book_core|journey_lesson|money_move)
     case getLearnProgress(contentType: String)
     case completeLearnItem(contentType: String, key: String)
@@ -548,6 +551,10 @@ enum APIEndpoint: Sendable {
         // Learn / Money Moves
         case .getMoneyMoves:
             return "/api/v1/learn/money-moves"
+
+        // Learn / Book narration URLs
+        case .getBooksAudio:
+            return "/api/v1/learn/books/audio"
 
         // Learn / Book Library progress
         case .getLearnProgress(let contentType):
@@ -982,6 +989,13 @@ enum APIEndpoint: Sendable {
         // whether the response carries audio URLs. A signed-out caller resolves to a
         // per-install guest and still gets every word of every lesson and article.
         case .getJourney, .getMoneyMoves:
+            return .guestAllowed
+
+        // Same identity rule, and deliberately NOT `.signInRequired` even though it only
+        // ever returns anything to a paying account: a guest must be able to CALL it and
+        // read back `audio_locked` + `tier_required` to render the upgrade offer. Refusing
+        // the request client-side would leave the Book Library unable to say why.
+        case .getBooksAudio:
             return .guestAllowed
 
         case .getUpdatesTabs, .getHomeFeed, .getHomeDashboard:

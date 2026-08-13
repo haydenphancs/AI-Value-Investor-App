@@ -586,6 +586,20 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
             _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE],
         )
 
+    # ── Gemini per-call timeout (app.integrations.gemini.GeminiTimeoutError) ──
+    # Matched by NAME, and placed BEFORE both the google/genai module test below and
+    # the generic keyword heuristics at the bottom. The class is OURS, so cls_module
+    # is "app.integrations.gemini" — it contains neither "google" nor "genai" and so
+    # misses the block below. It would then fall all the way to `"timeout" in cls`
+    # and answer FMP_UNAVAILABLE, i.e. tell the user "Our market data provider is
+    # temporarily unavailable" when it was the AI engine that stalled. Same shape and
+    # same reason as the watchlistunavailable / degradedreporterror guards above.
+    if "geminitimeout" in cls:
+        return (
+            ErrorCode.GEMINI_UNAVAILABLE,
+            _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE],
+        )
+
     # ── Gemini / Google generative AI errors ──────────────────────────
     if (
         "google" in cls_module

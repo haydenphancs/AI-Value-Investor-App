@@ -62,13 +62,42 @@ class GeminiQuotaError(Exception):
     """
 
 
+class GeminiTimeoutError(TimeoutError):
+    """One Gemini SDK call exceeded settings.GEMINI_REQUEST_TIMEOUT_SECONDS.
+
+    Subclasses **TimeoutError deliberately**. `_call_with_timeout` used to let the
+    bare `asyncio.TimeoutError` escape, and three outer handlers catch that type
+    today (`home_dashboard_service`, `chat_context_resolver`, `live_price`). Keeping
+    the inheritance guarantees this change CANNOT alter what any of them catch — it
+    only adds a name and a message.
+
+    Why a named type at all: `str(TimeoutError()) == ""`, so the bare form defeated
+    every string-matching classifier in this module (it logged ERROR and opened the
+    Sentry issue `TimeoutError` / "No error message"), and it defeated
+    `classify_exception`, whose `type(exc).__module__` test saw `builtins` and fell
+    through to **FMP_UNAVAILABLE** — telling the user their market-data provider was
+    down when it was the AI engine.
+
+    ⚠️ MESSAGE CONSTRAINT — the text must never contain "429", "quota", "rate limit",
+    "resource_exhausted", "unavailable", "503", "try again later" or "high demand".
+    `_is_quota_error` / `_is_overload_error` substring-match `str(exc)`, so any of
+    those words routes a timeout into the wrong retry branch — and a quota word would
+    additionally trip the process-wide `_quota_circuit`, fail-fasting every OTHER
+    Gemini call in the process off the back of one slow read. Pinned by
+    `tests/test_gemini_timeout.py::test_timeout_message_cannot_be_misrouted`.
+    """
+
+
 def is_transient_gemini_error(exc: Exception) -> bool:
-    """Quota/rate-limit OR server-overload — an upstream capacity condition the
-    caller should treat as retry-later + sentinel fallback and log at WARNING,
-    never an ERROR-level Sentry page. The single classifier every caller should
-    use (so the two failure modes stay in sync)."""
+    """Quota/rate-limit, server-overload, OR per-call timeout — an upstream capacity
+    condition the caller should treat as retry-later + sentinel fallback and log at
+    WARNING, never an ERROR-level Sentry page. The single classifier every caller
+    should use (so the three failure modes stay in sync).
+
+    The timeout arm is `isinstance`-based on purpose: a 90s stall carries no message
+    for a substring rule to match, which is exactly why it used to page."""
     return (
-        isinstance(exc, GeminiQuotaError)
+        isinstance(exc, (GeminiQuotaError, GeminiTimeoutError))
         or _is_quota_error(exc)
         or _is_overload_error(exc)
     )
@@ -129,8 +158,48 @@ class _QuotaCircuitBreaker:
 _quota_circuit = _QuotaCircuitBreaker()
 
 
+class _TimeoutStreak:
+    """One ERROR per timeout OUTAGE, not one per call.
+
+    Demoting per-call timeouts to WARNING is what closes the `TimeoutError` Sentry
+    issue, but on its own it would make a sustained Gemini stall invisible — every
+    caller has a sentinel fallback, so nothing else would shout. This escalates on
+    the STREAK instead: once GEMINI_TIMEOUT_ALERT_STREAK consecutive calls have timed
+    out with no success in between, emit exactly one ERROR. Any success resets it, so
+    the ERROR means "sustained upstream problem", not "one slow prompt".
+
+    Same closed→open idiom as `_QuotaCircuitBreaker.record_quota_error` above: the
+    `_alerted` latch is what keeps ~15 parallel narrative jobs from each filing a
+    duplicate.
+
+    Single-event-loop process → no lock needed.
+    """
+
+    def __init__(self) -> None:
+        self._consecutive = 0
+        self._alerted = False
+
+    def record(self) -> None:
+        self._consecutive += 1
+        if self._consecutive >= settings.GEMINI_TIMEOUT_ALERT_STREAK and not self._alerted:
+            self._alerted = True
+            logger.error(
+                "Gemini per-call timeouts sustained: %d consecutive calls hit the "
+                "%ss ceiling — likely an upstream outage, not a slow prompt",
+                self._consecutive,
+                settings.GEMINI_REQUEST_TIMEOUT_SECONDS,
+            )
+
+    def record_success(self) -> None:
+        self._consecutive = 0
+        self._alerted = False
+
+
+_timeout_streak = _TimeoutStreak()
+
+
 # ── Per-call timeout guard ─────────────────────────────────────────
-async def _call_with_timeout(coro):
+async def _call_with_timeout(coro, *, what: str = "Gemini call"):
     """Await a Gemini coroutine with a hard timeout.
 
     The unified SDK is async-native (`client.aio.*` returns coroutines), so this
@@ -138,15 +207,41 @@ async def _call_with_timeout(coro):
     hung network read would otherwise park the whole report-generation task
     forever (seen as a report card stuck at "synthesizing..." at 55%).
 
-    On timeout, raises asyncio.TimeoutError — `@async_retry` skips it (not a
-    quota error), and the caller's existing exception handler returns its
-    sentinel fallback instead of hanging.
+    On timeout, raises **GeminiTimeoutError** (a `TimeoutError` subclass, so any
+    existing `except asyncio.TimeoutError` handler is unaffected). `@async_retry`
+    gives it its OWN budget — `GEMINI_TIMEOUT_MAX_RETRIES`, default 0, i.e. no
+    retry — and logs the give-up at WARNING, because the caller's sentinel fallback
+    covers the user. A sustained run of timeouts still escalates to exactly one
+    ERROR via `_timeout_streak`, so demoting the individual call does not make an
+    outage invisible.
+
+    (This previously raised a BARE asyncio.TimeoutError, whose empty `str()` slipped
+    past every string-based classifier here → an ERROR log per attempt → the Sentry
+    issue `TimeoutError` with "No error message".)
+
+    `what` names the calling method so the log and the Sentry title say which one
+    stalled; it is keyword-only with a default so existing call sites are unaffected.
 
     Timeout sourced from settings.GEMINI_REQUEST_TIMEOUT_SECONDS.
     """
-    return await asyncio.wait_for(
-        coro, timeout=settings.GEMINI_REQUEST_TIMEOUT_SECONDS
-    )
+    try:
+        result = await asyncio.wait_for(
+            coro, timeout=settings.GEMINI_REQUEST_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError as exc:
+        # NB: an EXTERNAL cancellation (e.g. the 600s RESEARCH_PIPELINE_TIMEOUT_SECONDS
+        # ceiling in research_service) surfaces as CancelledError, not TimeoutError,
+        # so it is not misreported as a per-call stall.
+        _timeout_streak.record()
+        raise GeminiTimeoutError(
+            f"{what} exceeded its {settings.GEMINI_REQUEST_TIMEOUT_SECONDS}s "
+            f"per-request ceiling"
+        ) from exc
+    # Reset lives HERE rather than in async_retry so undecorated callers
+    # (create_narrative_cache, delete_cache, the tool-chat drive loop) clear the
+    # streak too.
+    _timeout_streak.record_success()
+    return result
 
 
 def async_retry(max_attempts: int = 3, delay: float = 1.0):
@@ -168,6 +263,7 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
             attempt = 0            # generic failures
             quota_attempt = 0      # quota/429 failures
             overload_attempt = 0   # server-overload / 5xx failures
+            timeout_attempt = 0    # per-call timeouts (own budget, default 0)
             while True:
                 # Fail fast while the breaker is open — don't add load to an
                 # already-exhausted quota; the caller's sentinel fallback fires.
@@ -181,6 +277,42 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
                     _quota_circuit.record_success()
                     return result
                 except Exception as e:
+                    # PER-CALL TIMEOUT — checked FIRST and by isinstance ONLY.
+                    # A string match would be one wording change away from landing in
+                    # the quota branch, which would trip the shared circuit breaker
+                    # and fail-fast every other Gemini call in the process.
+                    #
+                    # Budget defaults to 0 (no retry), which is what the docstrings
+                    # always claimed and what the latency arithmetic wants: the
+                    # generic branch used to retry these, so one hung call cost
+                    # 90s + backoff + 90s ≈ 182s against a 600s pipeline ceiling with
+                    # ~15 parallel narratives. A read that stalled a full 90s is a
+                    # stuck connection, not a blip. Kept as its own SETTING rather
+                    # than deleted so it is one env var away if that judgement changes.
+                    if isinstance(e, GeminiTimeoutError):
+                        timeout_attempt += 1
+                        if timeout_attempt > settings.GEMINI_TIMEOUT_MAX_RETRIES:
+                            # WARNING, not ERROR: the caller's sentinel fallback
+                            # covers the user, and _timeout_streak escalates a
+                            # SUSTAINED run to a single ERROR.
+                            logger.warning(
+                                "Gemini call timed out — giving up after %d "
+                                "attempt(s); the caller's sentinel fallback "
+                                "applies: %s",
+                                timeout_attempt, e,
+                            )
+                            raise
+                        backoff = (
+                            settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS * timeout_attempt
+                        )
+                        logger.warning(
+                            "Gemini timeout (attempt %d/%d) — backing off %.1fs: %s",
+                            timeout_attempt,
+                            settings.GEMINI_TIMEOUT_MAX_RETRIES,
+                            backoff, e,
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
                     if _is_quota_error(e):
                         _quota_circuit.record_quota_error()
                         quota_attempt += 1
@@ -404,7 +536,8 @@ class GeminiClient:
                     model=model_name or self.model_name,
                     contents=prompt,
                     config=self._config(system_instruction=system_instruction),
-                )
+                ),
+                what="generate_text",
             )
             result = {
                 "text": _response_text(response),
@@ -514,7 +647,8 @@ class GeminiClient:
                         contents=[f"FINANCIAL EVIDENCE:\n{evidence}"],
                         ttl=f"{int(ttl) * 60}s",
                     ),
-                )
+                ),
+                what="create_narrative_cache",
             )
             logger.info("Gemini context cache created (ttl=%dm)", ttl)
             return {"cache": cache}
@@ -541,7 +675,8 @@ class GeminiClient:
                 model=self.model_name,
                 contents=prompt,
                 config=self._config(cached_content=cache.name),
-            )
+            ),
+            what="generate_text_cached",
         )
         return {
             "text": _response_text(response),
@@ -560,7 +695,8 @@ class GeminiClient:
             if cache is None:
                 return
             await _call_with_timeout(
-                self._client.aio.caches.delete(name=cache.name)
+                self._client.aio.caches.delete(name=cache.name),
+                what="delete_cache",
             )
         except Exception as e:
             logger.debug("Context cache delete failed (expires via TTL): %s", e)
@@ -594,7 +730,8 @@ class GeminiClient:
                         response_mime_type="application/json",
                         response_schema=response_schema,
                     ),
-                )
+                ),
+                what="generate_json",
             )
             result = {
                 "text": _response_text(response),
@@ -638,7 +775,8 @@ class GeminiClient:
                         task_type=task_type,
                         output_dimensionality=settings.EMBEDDING_DIMENSION,
                     ),
-                )
+                ),
+                what="generate_embedding",
             )
             embedding = list(result.embeddings[0].values)
             self._embedding_cache.set(key, embedding)
@@ -678,7 +816,8 @@ class GeminiClient:
                         max_output_tokens=max_output_tokens,
                         tools=[types.Tool(google_search=types.GoogleSearch())],
                     ),
-                )
+                ),
+                what="generate_grounded_research",
             )
         except Exception as exc:
             if not is_transient_gemini_error(exc):
@@ -766,7 +905,8 @@ class GeminiClient:
             response = await _call_with_timeout(
                 self._client.aio.models.generate_content(
                     model=model, contents=prompt, config=config,
-                )
+                ),
+                what="generate_with_tools",
             )
 
             tool_results: List[Dict[str, Any]] = []
@@ -810,7 +950,8 @@ class GeminiClient:
                             types.Content(role="user", parts=response_parts),
                         ],
                         config=config,
-                    )
+                    ),
+                    what="generate_with_tools tool follow-up",
                 )
                 return {
                     "text": _response_text(follow_up),
@@ -830,7 +971,14 @@ class GeminiClient:
             }
 
         except Exception as e:
-            logger.error(f"Gemini tool-calling generation failed: {e}", exc_info=True)
+            # Was an UNCONDITIONAL ERROR — the only one of the five handlers in this
+            # file that never consulted the classifier, so a plain 429 / "high
+            # demand" / per-call timeout paged Sentry as if it were a code bug.
+            # Mirrors generate_text / generate_json / generate_embedding /
+            # generate_grounded_research now. The try still spans the tool handlers,
+            # so a genuine bug inside an FMP tool keeps its ERROR + stack.
+            if not is_transient_gemini_error(e):
+                logger.error(f"Gemini tool-calling generation failed: {e}", exc_info=True)
             raise
 
     def create_tool_chat(

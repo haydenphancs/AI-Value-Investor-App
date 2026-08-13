@@ -31,7 +31,9 @@ from app.dependencies import get_learn_identity
 from app.schemas.bookmarks import BookmarkListResponse, BookmarkRequest
 from app.schemas.journey import JourneyResponse
 from app.schemas.learn_progress import CompleteLearnItemRequest, LearnProgressResponse
+from app.schemas.learn_books_audio import BooksAudioResponse
 from app.schemas.money_moves import MoneyMovesResponse
+from app.services.book_audio_service import get_books_audio
 from app.services.journey_content_service import get_journey_content_service
 from app.services.money_moves_content_service import get_money_moves_content_service
 from app.services.entitlements import (
@@ -39,7 +41,12 @@ from app.services.entitlements import (
     learn_audio_unlocked,
     required_tier_for_learn_audio,
 )
-from app.services.learn_audio_gate import redact_journey, redact_money_moves
+from app.services.learn_audio_gate import (
+    redact_journey,
+    redact_money_moves,
+    sign_journey,
+    sign_money_moves,
+)
 
 # Stable discriminators for the unified completion log.
 LEARN_CONTENT_TYPES = {"book_core", "journey_lesson", "money_move"}
@@ -64,13 +71,14 @@ async def get_journey(user: dict = Depends(get_learn_identity)):
     """
     service = get_journey_content_service()
     response = await service.get_journey()
-    # Redacted HERE, per request, never inside the service: `get_journey()` returns the
-    # object held in a process-wide 1-hour cache, shared by every caller regardless of
-    # plan. `redact_journey` deep-copies for that reason.
+    # Gated HERE, per request, never inside the service: `get_journey()` returns the object
+    # held in a process-wide 1-hour cache, shared by every caller regardless of plan. BOTH
+    # branches deep-copy for that reason — the entitled one rewrites URLs, which would
+    # otherwise pin one caller's signed URLs into the shared payload for an hour.
     tier = user.get("tier")
     if not learn_audio_unlocked(tier):
         return redact_journey(response, required_tier_for_learn_audio(tier) or TIER_PRO)
-    return response
+    return await sign_journey(response)
 
 
 @router.get("/money-moves", response_model=MoneyMovesResponse)
@@ -89,12 +97,33 @@ async def get_money_moves(user: dict = Depends(get_learn_identity)):
     """
     service = get_money_moves_content_service()
     response = await service.get_money_moves()
-    # Same copy-on-read rule as /journey above: the service's return value is the shared
-    # cache entry.
+    # Same copy-on-read rule as /journey above, on BOTH branches: the service's return value
+    # is the shared cache entry.
     tier = user.get("tier")
     if not learn_audio_unlocked(tier):
         return redact_money_moves(response, required_tier_for_learn_audio(tier) or TIER_PRO)
-    return response
+    return await sign_money_moves(response)
+
+
+@router.get("/books/audio", response_model=BooksAudioResponse)
+async def get_books_audio_urls(user: dict = Depends(get_learn_identity)):
+    """
+    Signed narration URLs for the book library, one per book.
+
+    Every book's TEXT ships in the app and stays free; this route serves only the produced
+    narration, which is Pro/Max. It exists because book audio used to be ten PUBLIC Storage
+    URLs compiled into the binary — readable by anyone with the app, on any plan.
+
+    A locked caller gets 200 with an empty list and `audio_locked: true`, matching
+    /journey and /money-moves rather than raising a 403 on a screen whose job is to show
+    the upgrade offer.
+    """
+    tier = user.get("tier")
+    unlocked = learn_audio_unlocked(tier)
+    return await get_books_audio(
+        unlocked=unlocked,
+        tier_required=None if unlocked else (required_tier_for_learn_audio(tier) or TIER_PRO),
+    )
 
 
 @router.get("/progress/{content_type}", response_model=LearnProgressResponse)

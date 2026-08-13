@@ -47,6 +47,10 @@ from typing import Any, Dict, Optional
 from app.api.error_response import ErrorCode, make_error_body
 from app.config import settings
 from app.database import get_supabase
+from app.utils.supabase_errors import (
+    is_transient_supabase_error,
+    retry_idempotent_async,
+)
 from app.services.credit_service import CreditService
 
 logger = logging.getLogger(__name__)
@@ -261,11 +265,22 @@ async def sweep_once(
         )
 
     try:
-        result = await asyncio.to_thread(_find)
+        # Idempotent (a pure read), so a Supabase gateway blip is retried instead of
+        # silently costing this sweep pass. That matters here more than most places:
+        # this sweep is the ONLY mechanism that refunds credits for reports killed
+        # mid-flight, so skipping a pass leaves paid-for orphans un-refunded.
+        # retry_idempotent_async supplies the to_thread hop `_find` needs.
+        result = await retry_idempotent_async(
+            _find, what="research reconciliation lookup", logger=logger
+        )
     except Exception as e:
-        logger.error(
+        # Transient after retries → WARNING: the next sweep tick picks the orphans
+        # up, nothing is lost. A genuine failure keeps ERROR + stack.
+        _log = logger.warning if is_transient_supabase_error(e) else logger.error
+        _log(
             "research reconciliation sweep: lookup failed: %s: %s",
             type(e).__name__, e,
+            exc_info=not is_transient_supabase_error(e),
         )
         return {"stuck": 0, "refunded": 0}
 

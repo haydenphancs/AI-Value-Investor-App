@@ -2,20 +2,26 @@
 Bake per-book narration audio info into the iOS app as generated Swift.
 
 Reads every manifest in backend/data/book_audio/<order>_<slug>.manifest.json (produced by
-generate_book_audio.py; the public URL is filled in by seed_book_audio.py) and emits
-frontend/ios/ios/Models/BookAudioContent.swift:
+generate_book_audio.py) and emits frontend/ios/ios/Models/BookAudioContent.swift:
 
-    BookAudioInfo.byOrder[curriculumOrder] = { audioUrl, totalSeconds, coreStartSeconds[coreNumber] }
+    BookAudioInfo.byOrder[curriculumOrder] = { totalSeconds, coreStartSeconds[coreNumber] }
 
-The app uses this to (a) stream ONE file per book and (b) seek to a core's start. The audio URL is
-deterministic — {SUPABASE_URL}/storage/v1/object/public/book-media/audio/<file> — so this can run
-BEFORE seeding; the file just won't resolve until seed_book_audio.py uploads it.
+The app uses this to show a per-core timestamp and to seek(to:) a core's start.
+
+⚠️ NO URL IS EMITTED ANY MORE. This file used to bake the PUBLIC Storage URL of every book
+into the binary, which meant anyone reading one network request could stream all 276 MB of
+narration on any plan. Book audio is Pro/Max, so the URL is now a short-lived SIGNED url
+fetched at play time from GET /api/v1/learn/books/audio (app/services/book_audio_service.py,
+which reads the same manifests this script does).
+
+The durations and offsets deliberately STAY compiled in: they drive free UI that advertises
+the narration (the per-core "2:37" labels, the full-screen player's current-core readout,
+auto-advance), and a locked caller must still see all of it.
 
 Usage (from backend/):
     ./venv/bin/python scripts/gen_book_audio_swift.py
 """
 import json
-import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]                 # backend/
@@ -25,24 +31,7 @@ OUT = REPO / "frontend/ios/ios/Models/BookAudioContent.swift"
 BUCKET = "book-media"
 
 
-def supabase_url() -> str:
-    url = os.environ.get("SUPABASE_URL")
-    env = ROOT / ".env"
-    if not url and env.exists():
-        for line in env.read_text().splitlines():
-            if line.startswith("SUPABASE_URL="):
-                url = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
-    assert url, "SUPABASE_URL not found in env or backend/.env"
-    return url.rstrip("/")
-
-
-def public_url(base: str, fname: str) -> str:
-    return f"{base}/storage/v1/object/public/{BUCKET}/audio/{fname}"
-
-
 def main():
-    base = supabase_url()
     manifests = sorted(AUDIO_DIR.glob("*.manifest.json"))
     if not manifests:
         raise SystemExit(f"No manifests in {AUDIO_DIR} (run generate_book_audio.py first).")
@@ -51,9 +40,6 @@ def main():
     for mpath in manifests:
         m = json.loads(mpath.read_text())
         order = m["curriculum_order"]
-        # Supabase get_public_url appends a bare trailing "?" — strip it so the baked URL is clean
-        # (both forms resolve, but the clean one is tidier and matches the deterministic fallback).
-        url = (m.get("audio_url") or public_url(base, m["audio_file"])).rstrip("?")
         total = int(round(m["total_seconds"]))
         starts = ", ".join(
             f"{c['number']}: {int(round(c['start_seconds']))}"
@@ -61,7 +47,6 @@ def main():
         )
         entry = (
             f"        {order}: BookAudioInfo(\n"
-            f'            audioUrl: "{url}",\n'
             f"            totalSeconds: {total},\n"
             f"            coreStartSeconds: [{starts}]\n"
             f"        ),"
@@ -82,12 +67,19 @@ def main():
 //  Generated from backend/data/book_audio/*.manifest.json by
 //  backend/scripts/gen_book_audio_swift.py. Do not hand-edit — regenerate from the manifests.
 //
+//  ⚠️ NO AUDIO URL HERE. It used to carry the PUBLIC Storage URL of every book, so one
+//  network request handed anyone all 276 MB of narration on any plan. Narration is Pro/Max:
+//  the URL is now a short-lived SIGNED url fetched at play time by `BookAudioURLStore`
+//  from GET /api/v1/learn/books/audio.
+//
+//  Durations and offsets stay here on purpose — they drive FREE UI that advertises the
+//  narration (per-core timestamps, the player's current-core readout, auto-advance), and a
+//  locked user must still see all of it.
+//
 
 import Foundation
 
 struct BookAudioInfo {{
-    /// Public Supabase Storage URL of the single book narration file (streamed by AVPlayer).
-    let audioUrl: String
     /// Real measured length of the whole book narration, in seconds.
     let totalSeconds: Int
     /// Core number -> start offset (seconds) within the single book audio file.

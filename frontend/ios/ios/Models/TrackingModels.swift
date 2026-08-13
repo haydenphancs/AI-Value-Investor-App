@@ -915,8 +915,13 @@ struct TrendingWhale: Identifiable {
     /// either way — only the Follow button becomes a paywall. Never true for a whale the
     /// user already follows, so unfollowing is always available.
     let isLocked: Bool
+    /// The user follows this whale, but their plan doesn't surface it — the activity feed
+    /// serves only the covered subset. Follows are truncated on read, never deleted, so a
+    /// downgraded account keeps rows it can't see. Distinct from `isLocked`, which is about
+    /// whether a NEW follow is allowed.
+    let isFollowingInactive: Bool
 
-    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0, firmName: String? = nil, isLocked: Bool = false) {
+    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0, firmName: String? = nil, isLocked: Bool = false, isFollowingInactive: Bool = false) {
         self.id = id
         self.name = name
         self.category = category
@@ -928,6 +933,7 @@ struct TrendingWhale: Identifiable {
         self.recentTradeCount = recentTradeCount
         self.firmName = firmName
         self.isLocked = isLocked
+        self.isFollowingInactive = isFollowingInactive
     }
 
     /// Returns a copy with `isFollowing` flipped, threading EVERY other field
@@ -948,7 +954,12 @@ struct TrendingWhale: Identifiable {
             firmName: firmName,
             // Following it clears the lock by definition — the server never locks a whale
             // you already track, so unfollowing stays available.
-            isLocked: following ? false : isLocked
+            isLocked: following ? false : isLocked,
+            // UNfollowing always clears it (you no longer follow it at all). Following is
+            // the optimistic case: whether the new follow lands inside the plan's allowance
+            // is the server's call, so keep the current value until the next list refresh
+            // rather than guessing here.
+            isFollowingInactive: following ? isFollowingInactive : false
         )
     }
 

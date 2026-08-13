@@ -33,16 +33,6 @@ final class UpdatesViewModel: ObservableObject {
     @Published var filterOptions: NewsFilterOptions = .default {
         didSet { applyFiltersAndGroup() }
     }
-    /// Free-text keyword filter over the ALREADY-LOADED feed (client-side only —
-    /// the backend feed has no text-search param). Composes with the source /
-    /// sentiment `filterOptions`. Distinct from the top "Search or ask Cay AI" bar,
-    /// which is global entity/AI search; this only narrows the visible timeline.
-    @Published var newsSearchText: String = "" {
-        didSet {
-            guard oldValue != newsSearchText else { return }
-            applyFiltersAndGroup()
-        }
-    }
     @Published var isLoading: Bool = false
     @Published var isRefreshing: Bool = false
     @Published var error: String?
@@ -745,32 +735,14 @@ final class UpdatesViewModel: ObservableObject {
 
     // MARK: - Filtering + grouping
 
-    /// True when EITHER the source/sentiment sheet OR the keyword field is narrowing
-    /// the feed. Drives the empty state's copy ("No stories match your filters" vs
-    /// "No recent stories") so a keyword miss reads correctly.
+    /// True when the source/sentiment sheet is narrowing the feed. Drives the empty state's
+    /// copy ("No stories match your filters" vs "No recent stories").
     var hasActiveFeedFilter: Bool {
         filterOptions.hasActiveFilters
-            || !newsSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// Case-insensitive keyword match across the fields a reader would scan:
-    /// headline, summary, publisher, AI bullets, and related tickers.
-    private func article(_ article: NewsArticle, matchesKeyword kw: String) -> Bool {
-        if article.headline.lowercased().contains(kw) { return true }
-        if let s = article.summary, s.lowercased().contains(kw) { return true }
-        if article.source.displayName.lowercased().contains(kw) { return true }
-        if article.summaryBullets.contains(where: { $0.lowercased().contains(kw) }) { return true }
-        if article.relatedTickers.contains(where: { $0.lowercased().contains(kw) }) { return true }
-        return false
     }
 
     private func applyFiltersAndGroup() {
-        let kw = newsSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        newsArticles = allNewsArticles.filter { article in
-            guard filterOptions.matches(article) else { return false }
-            guard !kw.isEmpty else { return true }
-            return self.article(article, matchesKeyword: kw)
-        }
+        newsArticles = allNewsArticles.filter { filterOptions.matches($0) }
         // Sources for the filter sheet come from the UNFILTERED feed on purpose —
         // narrowing them by the active keyword would hide togglable publishers.
         availableSources = Array(

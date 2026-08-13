@@ -171,3 +171,95 @@ def test_get_benchmarks_degrades_to_empty_and_warns_on_transient(monkeypatch, ca
     assert out == {"pe_ratio": {}}  # degrades to an empty per-metric dict, never raises
     hits = [r for r in caplog.records if "Industry benchmark lookup failed" in r.getMessage()]
     assert hits and all(r.levelno == logging.WARNING for r in hits)  # WARNING, not ERROR
+
+
+# ── Cloudflare 520, via delegation to the shared classifier ──────────────────
+# `_is_transient` used to be implemented in this module and could NOT see a
+# Cloudflare 520: Supabase's edge returns an HTML error page, postgrest raises
+# APIError('JSON could not be generated') with an INT .code, and its traceback
+# frames are `postgrest`, not `httpcore`. That produced the 7-event "Industry
+# benchmark lookup failed for … Error 520" Sentry issue. The rule now lives in
+# app/utils/supabase_errors.py; these tests pin the delegation.
+
+def _gateway_error(status: int = 520):
+    """Build the error the REAL way, so the test can't drift from the client.
+
+    Never assert on str(e): postgrest 1.1.1 defines __repr__ but not __str__, so
+    str() renders the raw dict locally and "Error 520:\\nMessage: …" in production.
+    """
+    from postgrest.exceptions import APIError, generate_default_error_message
+
+    class _R:
+        status_code = status
+        content = b"<!DOCTYPE html><title>520: Web server is returning an unknown error</title>"
+
+    return APIError(generate_default_error_message(_R()))
+
+
+def _postgrest_error(code: str):
+    from postgrest.exceptions import APIError
+
+    return APIError({"message": "boom", "code": code, "hint": None, "details": None})
+
+
+def test_cloudflare_520_is_transient_via_delegation():
+    # Fails against the pre-delegation implementation — non-vacuous by construction.
+    assert _is_transient(_gateway_error(520)) is True
+
+
+def test_is_transient_delegates_to_the_shared_classifier():
+    from app.utils.supabase_errors import is_transient_supabase_error
+
+    for case in (
+        _gateway_error(520),                    # transient
+        httpx.RemoteProtocolError("Server disconnected"),  # transient
+        _postgrest_error("23505"),              # NOT — constraint violation
+        _postgrest_error("PGRST116"),           # NOT — no rows
+        _gateway_error(404),                    # NOT — deterministic
+        ValueError("nope"),                     # NOT
+    ):
+        assert _is_transient(case) is is_transient_supabase_error(case)
+
+
+def test_fetch_rows_retries_a_520_then_succeeds(monkeypatch):
+    monkeypatch.setattr(sbl.time, "sleep", lambda *_a, **_k: None)
+    lk = SectorBenchmarkLookup.__new__(SectorBenchmarkLookup)
+    good_rows = [{"metric_name": "pe_ratio", "period_label": "Q4'25",
+                  "median_value": 22.5, "sample_size": 40}]
+    lk.supabase = _FakeSupabase([_gateway_error(520), good_rows])
+
+    rows = lk._fetch_rows(lk._RICH_COLS, "Technology", ["pe_ratio"], "quarterly")
+    assert rows == good_rows
+    assert lk.supabase.execute_calls == 2
+
+
+def test_fetch_rows_does_not_retry_a_23505(monkeypatch):
+    """A constraint violation is deterministic — retrying it is a correctness hazard.
+
+    Guards the boundary between "gateway blip" and "PostgREST said no": both arrive
+    as the same APIError type, and only `.code` tells them apart.
+    """
+    monkeypatch.setattr(sbl.time, "sleep", lambda *_a, **_k: None)
+    lk = SectorBenchmarkLookup.__new__(SectorBenchmarkLookup)
+    lk.supabase = _FakeSupabase([_postgrest_error("23505")])
+
+    from postgrest.exceptions import APIError
+    with pytest.raises(APIError):
+        lk._fetch_rows(lk._RICH_COLS, "Technology", ["pe_ratio"], "quarterly")
+    assert lk.supabase.execute_calls == 1  # one attempt, not _MAX_FETCH_ATTEMPTS
+
+
+def test_get_benchmarks_warns_not_errors_on_a_520(monkeypatch, caplog):
+    import logging
+    monkeypatch.setattr(sbl.time, "sleep", lambda *_a, **_k: None)
+    lk = SectorBenchmarkLookup.__new__(SectorBenchmarkLookup)
+    lk.supabase = _FakeSupabase([_gateway_error(520)])
+
+    with caplog.at_level(logging.WARNING, logger=sbl.logger.name):
+        out = lk.get_benchmarks(
+            industry="Software - Infrastructure", sector="Technology",
+            metrics=["pe_ratio"], period_type="quarterly",
+        )
+    assert out == {"pe_ratio": {}}
+    hits = [r for r in caplog.records if "Industry benchmark lookup failed" in r.getMessage()]
+    assert hits and all(r.levelno == logging.WARNING for r in hits)

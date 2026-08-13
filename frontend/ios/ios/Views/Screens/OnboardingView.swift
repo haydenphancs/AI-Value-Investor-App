@@ -33,7 +33,10 @@ struct OnboardingView: View {
     @StateObject private var viewModel = OnboardingViewModel()
     @State private var page = 0
 
-    private let lastPage = 2
+    // Tickers first (proven, and the one input everything downstream compounds from),
+    // then the two preference steps. Adding steps to a first-run screen costs completion
+    // rate, so this is capped at two and both are pure taps with no typing.
+    private let lastPage = 4
 
     var body: some View {
         ZStack {
@@ -45,7 +48,9 @@ struct OnboardingView: View {
                 TabView(selection: $page) {
                     welcomePage.tag(0)
                     tickerPage.tag(1)
-                    readyPage.tag(2)
+                    experiencePage.tag(2)
+                    topicsPage.tag(3)
+                    readyPage.tag(4)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
 
@@ -116,6 +121,8 @@ struct OnboardingView: View {
         // Honest about state instead of a dead-feeling "Next": nothing is required,
         // and the copy says so rather than implying the user is stuck.
         case 1: return viewModel.selected.isEmpty ? "I'll pick later" : "Continue"
+        case 2: return viewModel.experienceLevel == nil ? "Skip this" : "Continue"
+        case 3: return viewModel.topics.isEmpty ? "Skip this" : "Continue"
         default: return "Start exploring"
         }
     }
@@ -188,6 +195,89 @@ struct OnboardingView: View {
         }
     }
 
+    /// Step 3 — how Cay AI should EXPLAIN things.
+    ///
+    /// ⚠️ This asks about reading preference, never about money. No risk tolerance, net
+    /// worth, income, time horizon or goals — collecting those would make the app's
+    /// output personalized investment advice rather than education. See
+    /// InvestorProfileModels.swift for the full reasoning before adding a question here.
+    private var experiencePage: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text("How should Cay AI explain things?")
+                .font(AppTypography.title)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.sm)
+
+            Text("This only changes how answers are written for you — never what the numbers say.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .padding(.horizontal, AppSpacing.lg)
+
+            ScrollView(showsIndicators: false) {
+                // VStack required — a ScrollView's ViewBuilder does not stack siblings
+                // (the same trap documented on tickerPage).
+                VStack(alignment: .leading, spacing: AppSpacing.lg) {
+                    VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                        Text("Where are you at?")
+                            .font(AppTypography.bodySmallEmphasis)
+                            .foregroundColor(AppColors.textSecondary)
+                        FlowOptionChips(
+                            options: InvestorExperienceLevel.allCases,
+                            title: { $0.title },
+                            isSelected: { viewModel.experienceLevel == $0 },
+                            // Tapping the selected chip clears it — nothing is required,
+                            // so an answer must be un-answerable.
+                            onTap: { viewModel.experienceLevel = (viewModel.experienceLevel == $0) ? nil : $0 }
+                        )
+                    }
+
+                    VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                        Text("Language")
+                            .font(AppTypography.bodySmallEmphasis)
+                            .foregroundColor(AppColors.textSecondary)
+                        FlowOptionChips(
+                            options: InvestorExplanationStyle.allCases,
+                            title: { $0.title },
+                            isSelected: { viewModel.explanationStyle == $0 },
+                            onTap: { viewModel.explanationStyle = (viewModel.explanationStyle == $0) ? nil : $0 }
+                        )
+                    }
+                }
+                .padding(.horizontal, AppSpacing.lg)
+            }
+        }
+    }
+
+    /// Step 4 — subjects the reader likes. Drives WHAT gets covered first, never a claim
+    /// that anything in these areas is suitable for them.
+    private var topicsPage: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text("What do you like reading about?")
+                .font(AppTypography.title)
+                .foregroundColor(AppColors.textPrimary)
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.sm)
+
+            Text("Cay AI will lead with these. It's about what we cover first, not what you should own.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .padding(.horizontal, AppSpacing.lg)
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    FlowOptionChips(
+                        options: InvestorTopic.allCases,
+                        title: { $0.title },
+                        isSelected: { viewModel.isTopicSelected($0) },
+                        onTap: { viewModel.toggleTopic($0) }
+                    )
+                }
+                .padding(.horizontal, AppSpacing.lg)
+            }
+        }
+    }
+
     private var readyPage: some View {
         VStack(spacing: AppSpacing.lg) {
             Spacer()
@@ -219,6 +309,12 @@ struct OnboardingView: View {
     // MARK: - Exit
 
     private func finish(skipped: Bool) {
+        // Save whatever they answered, on BOTH exits. "Skip" on the last page must not
+        // throw away preferences chosen two pages earlier — the button ends the flow, it
+        // does not undo it. Self-guarding: writes nothing when nothing was answered, so a
+        // straight skip still leaves no row.
+        viewModel.savePreferences()
+
         if skipped {
             viewModel.trackSkipped()
         } else {
@@ -265,6 +361,43 @@ private struct FlowChips: View {
                         Text(item.name)
                             .font(AppTypography.caption)
                             .foregroundColor(on ? AppColors.textOnAccent.opacity(0.8) : AppColors.textMuted)
+                    }
+                    .foregroundColor(on ? AppColors.textOnAccent : AppColors.textPrimary)
+                    .padding(.horizontal, AppSpacing.md)
+                    .padding(.vertical, AppSpacing.sm)
+                    .background(
+                        Capsule().fill(on ? AppColors.primaryFill : AppColors.cardBackgroundLight)
+                    )
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+        }
+    }
+}
+
+/// Label-only chips for the preference steps. A sibling of `FlowChips` rather than a
+/// generic rewrite of it: that one renders a symbol AND a company name in one capsule,
+/// which is a different chip, and merging the two behind a generic would leave a
+/// harder-to-read view for no reuse. Both share the same `FlowLayout` atom and the same
+/// fill/ink pairing (`primaryFill` + `textOnAccent` — never one without the other).
+private struct FlowOptionChips<Option: Hashable>: View {
+    let options: [Option]
+    let title: (Option) -> String
+    let isSelected: (Option) -> Bool
+    let onTap: (Option) -> Void
+
+    var body: some View {
+        FlowLayout(spacing: AppSpacing.sm) {
+            ForEach(options, id: \.self) { option in
+                let on = isSelected(option)
+                Button { onTap(option) } label: {
+                    HStack(spacing: 6) {
+                        if on {
+                            Image(systemName: "checkmark")
+                                .font(AppTypography.iconXS)
+                        }
+                        Text(title(option))
+                            .font(AppTypography.bodySmallEmphasis)
                     }
                     .foregroundColor(on ? AppColors.textOnAccent : AppColors.textPrimary)
                     .padding(.horizontal, AppSpacing.md)

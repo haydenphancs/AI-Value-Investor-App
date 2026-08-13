@@ -209,6 +209,7 @@ async def test_a_failure_PART_WAY_THROUGH_still_returns_rather_than_raises():
     assert res["claimed"] == {
         "watchlist_items": 0, "portfolios": 0, "portfolios_merged": 0,
         "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
+        "investor_profile": 0,
     }
 
 
@@ -235,6 +236,7 @@ async def test_response_shape_matches_the_ios_decoder(guest_id):
     assert set(res["claimed"]) == {
         "watchlist_items", "portfolios", "portfolios_merged",
         "learn_progress", "research_reports", "chat_sessions",
+        "investor_profile",
     }
     assert all(isinstance(v, int) for v in res["claimed"].values())
 
@@ -400,6 +402,7 @@ async def test_no_guest_learn_rows_is_a_clean_zero():
     assert res["claimed"] == {
         "watchlist_items": 1, "portfolios": 0, "portfolios_merged": 0,
         "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
+        "investor_profile": 0,
     }
 
 
@@ -758,3 +761,140 @@ async def test_one_broken_table_does_not_abort_the_others():
     assert res["claimed"]["chat_sessions"] == 1
     assert res.get("error") == "PartialClaim"
     assert res.get("failed") == ["user_learn_progress"]
+
+
+# ── Investor profile (migration 131) ─────────────────────────────────────────
+#
+# The profile is captured during FIRST-RUN onboarding, before an account exists, so
+# without this step answering the questions and THEN signing up throws the answers
+# away — the exact "signing in costs you data" failure this endpoint exists to prevent.
+#
+# `user_id` is the PRIMARY KEY here, so unlike the watchlist there is at most one row
+# per side and the two cannot be merged: re-pointing onto an id that already has a row
+# would raise a unique violation.
+
+@pytest.mark.asyncio
+async def test_investor_profile_moves_to_the_account():
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [], "portfolios": [],
+        "user_investor_profile": [
+            {"user_id": bucket, "experience_level": "new", "topics": ["dividends"]},
+        ],
+    }
+    sb = _SB(store)
+
+    res = await _claim(sb, "install-A")
+
+    assert res["claimed"]["investor_profile"] == 1
+    rows = store["user_investor_profile"]
+    assert len(rows) == 1 and rows[0]["user_id"] == _USER["id"]
+    # The answers themselves must survive the move, not just the row.
+    assert rows[0]["experience_level"] == "new" and rows[0]["topics"] == ["dividends"]
+
+
+@pytest.mark.asyncio
+async def test_the_accounts_own_profile_wins_and_the_guest_row_is_dropped():
+    """The account's profile is the more deliberate artifact — edited in Settings after
+    signup — so a first-run guess must not overwrite it. The guest row is DELETED rather
+    than stranded on a bucket nothing reads (same disposal as the watchlist duplicates)."""
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [], "portfolios": [],
+        "user_investor_profile": [
+            {"user_id": bucket, "experience_level": "new"},
+            {"user_id": _USER["id"], "experience_level": "experienced"},
+        ],
+    }
+    sb = _SB(store)
+
+    res = await _claim(sb, "install-A")
+
+    assert res["claimed"]["investor_profile"] == 0
+    rows = store["user_investor_profile"]
+    assert len(rows) == 1
+    assert rows[0]["user_id"] == _USER["id"]
+    assert rows[0]["experience_level"] == "experienced", "the account's answer was overwritten"
+
+
+@pytest.mark.asyncio
+async def test_no_guest_profile_is_a_clean_zero():
+    """A guest who skipped every preference question has no row at all."""
+    store = {"watchlist_items": [], "portfolios": [], "user_investor_profile": []}
+    res = await _claim(_SB(store), "install-A")
+    assert res["claimed"]["investor_profile"] == 0
+    assert "failed" not in res, "an absent profile is not a failure"
+
+
+@pytest.mark.asyncio
+async def test_claiming_the_profile_twice_is_idempotent():
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [], "portfolios": [],
+        "user_investor_profile": [{"user_id": bucket, "experience_level": "new"}],
+    }
+    sb = _SB(store)
+
+    first = await _claim(sb, "install-A")
+    second = await _claim(sb, "install-A")
+
+    assert first["claimed"]["investor_profile"] == 1
+    assert second["claimed"]["investor_profile"] == 0, "second pass must find nothing"
+    assert len(store["user_investor_profile"]) == 1
+
+
+def test_the_success_log_reports_every_counter():
+    """Every key in `claimed` must appear in the success log's args.
+
+    This regression has now happened twice: the comment above the log line records that
+    "a claim that moved only reports used to log nothing at all", and the investor-profile
+    counter was then added to `claimed` without being added to the log — so a claim that
+    moved ONLY a profile logged all-zeros and never mentioned it. Derived from the source
+    rather than a hand-copied list, so the next counter cannot be forgotten either.
+
+    Parses the FILE rather than `inspect.getsource`: that goes through linecache and the
+    function's recorded first line, which desynchronises the moment the file is edited
+    under a running interpreter — during mutation-testing it reported a bogus failure on
+    the scan assertion instead of the real one.
+    """
+    import ast
+    from pathlib import Path
+
+    path = Path(users_ep.__file__)
+    tree = ast.parse(path.read_text())
+    func = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+         and n.name == "claim_guest_data"),
+        None,
+    )
+    assert func is not None, "claim_guest_data not found — the scan would pass vacuously"
+
+    # The keys `claimed` is seeded with (the largest literal listing them).
+    seeded: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Dict) and node.keys:
+            keys = {k.value for k in node.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            if "watchlist_items" in keys and len(keys) > len(seeded):
+                seeded = keys
+    assert "investor_profile" in seeded, "scan failed to find the claimed dict"
+
+    # Every `claimed["x"]` referenced in a logger.* call.
+    logged: set[str] = set()
+    for node in ast.walk(func):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"info", "warning", "error"}):
+            for arg in node.args:
+                for sub in ast.walk(arg):
+                    if (isinstance(sub, ast.Subscript)
+                            and isinstance(sub.value, ast.Name) and sub.value.id == "claimed"
+                            and isinstance(sub.slice, ast.Constant)):
+                        logged.add(sub.slice.value)
+    assert logged, "found no claimed[...] references in any log call"
+
+    missing = seeded - logged
+    assert not missing, (
+        f"counter(s) tracked in `claimed` but absent from the success log: {sorted(missing)} — "
+        f"a claim that moved only those would log all-zeros"
+    )

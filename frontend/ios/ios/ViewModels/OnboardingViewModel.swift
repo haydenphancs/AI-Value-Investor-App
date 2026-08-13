@@ -82,8 +82,85 @@ final class OnboardingViewModel: ObservableObject {
         Task { await self.add(upper) }
     }
 
+    // MARK: - Learning preferences
+    //
+    // Captured on EVERY tier, applied only on Pro/Max (the server decides and says so in
+    // the response). Free users get their answers acknowledged rather than a control that
+    // silently does nothing.
+    //
+    // ⚠️ Content preferences ONLY — no finances, risk tolerance, time horizon, tax
+    // situation or goals. That omission is what keeps the app's output impersonal; see
+    // InvestorProfileModels.swift. Do not add a risk-tolerance step to this screen.
+
+    @Published var experienceLevel: InvestorExperienceLevel?
+    @Published var explanationStyle: InvestorExplanationStyle?
+    @Published private(set) var topics: [InvestorTopic] = []
+
+    /// Nothing here is required — every preference step is skippable, and a half-filled
+    /// profile is more useful than none.
+    var hasAnyPreference: Bool {
+        experienceLevel != nil || explanationStyle != nil || !topics.isEmpty
+    }
+
+    func isTopicSelected(_ topic: InvestorTopic) -> Bool { topics.contains(topic) }
+
+    /// Toggle a topic chip. Local only — the whole profile is saved once, at the end,
+    /// rather than one PUT per tap (unlike the tickers, which are individually
+    /// meaningful server-side).
+    func toggleTopic(_ topic: InvestorTopic) {
+        if let idx = topics.firstIndex(of: topic) {
+            topics.remove(at: idx)
+        } else {
+            topics.append(topic)
+        }
+    }
+
+    /// Persist the profile. Best-effort and fire-and-forget, per this file's rule: a
+    /// failed write must never hold up first run. Skipped entirely when the user
+    /// answered nothing, so a straight "Skip" doesn't write an all-defaults row that
+    /// would then read back as `has_profile: true`.
+    func savePreferences() {
+        guard hasAnyPreference else { return }
+        let body = UpdateInvestorProfileBody(
+            experienceLevel: experienceLevel,
+            explanationStyle: explanationStyle,
+            topics: topics.isEmpty ? nil : topics
+        )
+        Task { await self.putProfile(body) }
+    }
+
+    private func putProfile(_ body: UpdateInvestorProfileBody) async {
+        do {
+            try await apiClient.request(endpoint: .updateMyInvestorProfile(body: body))
+        } catch {
+            // Same posture as the watchlist writes above: non-fatal, not rolled back,
+            // but release-visible. A systematically failing profile write would leave
+            // the personalization feature with no data and no signal that it is empty.
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("onboarding_investor_profile"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
+            #if DEBUG
+            print("⚠️ [Onboarding] investor profile save failed: \(error)")
+            #endif
+        }
+    }
+
     func trackCompleted() {
-        Analytics.shared.track(.onboardingCompleted, ["count": .int(selected.count)])
+        Analytics.shared.track(.onboardingCompleted, [
+            "count": .int(selected.count),
+            "prefs": .int(answeredPreferenceCount),
+        ])
+    }
+
+    /// Answered preference questions, for the funnel event. Computed into a `let` at the
+    /// call site rather than inline in the props literal — a ternary inside that literal
+    /// is read as a second key by the analytics prop-key scan (see notification_kinds).
+    private var answeredPreferenceCount: Int {
+        var n = topics.count
+        if experienceLevel != nil { n += 1 }
+        if explanationStyle != nil { n += 1 }
+        return n
     }
 
     func trackSkipped() {

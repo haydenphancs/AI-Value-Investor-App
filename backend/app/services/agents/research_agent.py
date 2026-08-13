@@ -261,7 +261,8 @@ class ResearchAgent:
 
                 if round_num == 0:
                     response = await _call_with_timeout(
-                        chat.send_message(research_prompt)
+                        chat.send_message(research_prompt),
+                        what=f"Stage-A agentic round 1 ({self.persona.key})",
                     )
 
                 # Walk parts: handle function calls; collect tool responses
@@ -309,7 +310,8 @@ class ResearchAgent:
 
                 if has_function_call and response_parts:
                     response = await _call_with_timeout(
-                        chat.send_message(response_parts)
+                        chat.send_message(response_parts),
+                        what=f"Stage-A tool follow-up ({self.persona.key})",
                     )
                     continue
 

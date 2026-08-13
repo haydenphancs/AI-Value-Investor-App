@@ -105,11 +105,27 @@ final class BookAudioURLStore: ObservableObject {
             for book in response.books where !book.audioURL.isEmpty {
                 next[book.curriculumOrder] = book.audioURL
             }
-            urls = next
             audioLocked = response.audioLocked
-            // Latch the timestamp ONLY on a response that actually carried URLs. A locked or
-            // empty response must stay re-fetchable, or upgrading mid-session would leave the
-            // library silent for an hour with no way to recover but a relaunch.
+
+            if response.audioLocked {
+                // Genuinely not entitled — drop the memo. A signature minted for the previous
+                // plan stays valid for hours, and keeping it would let a downgraded account go
+                // on streaming.
+                urls = [:]
+            } else if !next.isEmpty {
+                urls = next
+            } else {
+                // Unlocked but empty. `temporarily_unavailable` says the server couldn't sign,
+                // and even without it an empty unlocked response is nonsense for a library that
+                // always has ten narrated books — so treat it as an outage either way and KEEP
+                // what we have. Overwriting here deleted ten working URLs on one hiccup and
+                // killed every Play button until the next fetch.
+                print("[BookAudioURLStore] unlocked but no URLs returned (temporarily_unavailable: \(response.temporarilyUnavailable)) — keeping \(urls.count) cached")
+            }
+
+            // Latch the timestamp ONLY on a response that actually carried URLs. A locked,
+            // empty or degraded response must stay re-fetchable, or upgrading mid-session would
+            // leave the library silent for an hour with no way to recover but a relaunch.
             lastLoadedAt = next.isEmpty ? nil : Date()
         } catch {
             // Non-fatal and deliberately quiet in the UI — the play site turns a nil URL into
@@ -129,20 +145,38 @@ struct BooksAudioResponse: Decodable {
     let books: [BookAudioURLDTO]
     let audioLocked: Bool
     let tierRequired: String?
+    /// The server has narration but could not sign it right now. Distinct from `audioLocked`
+    /// (a plan decision) and from an empty list (which would otherwise be indistinguishable).
+    let temporarilyUnavailable: Bool
 
     enum CodingKeys: String, CodingKey {
         case books
         case audioLocked = "audio_locked"
         case tierRequired = "tier_required"
+        case temporarilyUnavailable = "temporarily_unavailable"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // Every field defaulted: this response is pure enhancement, and a decode failure here
         // would silence narration for a paying user over a field they don't need.
-        books = (try? c.decode([BookAudioURLDTO].self, forKey: .books)) ?? []
+        //
+        // `books` decodes ELEMENT-WISE so one malformed row cannot empty the whole array —
+        // decoding `[BookAudioURLDTO]` wholesale would throw on the first bad element and the
+        // `?? []` would then discard all ten.
+        let rows = (try? c.decode([FailableBook].self, forKey: .books)) ?? []
+        books = rows.compactMap(\.value)
         audioLocked = (try? c.decode(Bool.self, forKey: .audioLocked)) ?? false
         tierRequired = try? c.decodeIfPresent(String.self, forKey: .tierRequired)
+        temporarilyUnavailable = (try? c.decode(Bool.self, forKey: .temporarilyUnavailable)) ?? false
+    }
+
+    /// Per-element tolerance: a row that fails to decode becomes nil instead of throwing.
+    private struct FailableBook: Decodable {
+        let value: BookAudioURLDTO?
+        init(from decoder: Decoder) throws {
+            value = try? BookAudioURLDTO(from: decoder)
+        }
     }
 }
 

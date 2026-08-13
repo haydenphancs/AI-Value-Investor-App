@@ -476,15 +476,31 @@ struct LibraryBook: Identifiable {
         )
     }
 
+    /// Why a book couldn't be turned into a playable episode.
+    ///
+    /// The distinction is the point: "this book was never narrated" is a fact the UI should
+    /// state calmly, while "we couldn't get the URL" is a failure of a user-initiated action
+    /// and must be reported (auth.md §6 bans a silent revert). Before this existed both
+    /// collapsed into `nil` and the play sites did a bare `return` — the spinner reverted and
+    /// the user was told nothing.
+    enum PlayableAudioFailure: Error {
+        /// No narration has been produced for this book at all.
+        case notNarrated
+        /// Narration exists but the signed URL could not be obtained (offline, signing outage,
+        /// or the server omitted this book from /learn/books/audio).
+        case urlUnavailable
+    }
+
     /// The episode with a playable signed URL attached, fetching one if needed.
     ///
-    /// `nil` means "do not play": no narration exists for this book, or this account isn't
-    /// entitled, or the URL couldn't be obtained. Callers must check `refuseIfLocked` FIRST
-    /// so a free user gets the paywall without waiting on a network round trip.
+    /// Callers must check `refuseIfLocked` FIRST, so a locked account gets the paywall without
+    /// waiting on a network round trip — this method does not distinguish entitlement.
     @MainActor
-    func playableAudioEpisode() async -> AudioEpisode? {
-        guard bookAudioInfo != nil else { return nil }
-        guard let url = await BookAudioURLStore.shared.url(for: curriculumOrder) else { return nil }
+    func playableAudioEpisode() async throws -> AudioEpisode {
+        guard bookAudioInfo != nil else { throw PlayableAudioFailure.notNarrated }
+        guard let url = await BookAudioURLStore.shared.url(for: curriculumOrder) else {
+            throw PlayableAudioFailure.urlUnavailable
+        }
         var episode = audioEpisode
         episode.audioUrl = url
         return episode

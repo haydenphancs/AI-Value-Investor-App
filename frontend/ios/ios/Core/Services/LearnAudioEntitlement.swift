@@ -55,7 +55,22 @@ final class LearnAudioEntitlement: ObservableObject {
         let unlocked = (tier == .pro || tier == .premium)
         guard unlocked != isUnlocked else { return }
         isUnlocked = unlocked
-        if !unlocked {
+        if unlocked {
+            // ⚠️ THE UPGRADE MUST INVALIDATE THE CONTENT STORES, or it buys nothing this run.
+            //
+            // Both Learn stores latch a once-per-session prefetch (`didPrefetch`) that never
+            // ages out. A caller who was locked at launch holds a payload the backend REDACTED:
+            // text intact, `audioUrl` and the read-along spans gone. Flipping this flag changes
+            // the labels — `hasAudioVersion` is deliberately left true so the offer stays
+            // visible — but the URLs are still missing, so:
+            //   • Money Moves "Listen Now" hits `AudioManager.isMissingNarration` and dies in a
+            //     `print`: no audio, no error, no paywall. Just a dead button.
+            //   • Journey cards fall through to `AVSpeechSynthesizer`, silently substituting the
+            //     system voice for the narration the user just paid for.
+            // Neither recovers without a relaunch. Re-fetch so the signed URLs actually arrive.
+            Task { await MoneyMovesContentStore.shared.forceRefresh() }
+            Task { await JourneyContentStore.shared.forceRefresh() }
+        } else {
             // A downgrade mid-session must not leave narration playing.
             AudioManager.shared.stopForLostEntitlement()
             AIVoiceManager.shared.stop()

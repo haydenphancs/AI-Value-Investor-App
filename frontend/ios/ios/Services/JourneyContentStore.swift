@@ -294,6 +294,42 @@ final class JourneyContentStore {
         prefetchTask = nil
     }
 
+    /// Re-fetch even though this session already has content.
+    ///
+    /// Two reasons, both of which make the once-per-session latch wrong now:
+    ///   • **Entitlement.** A locked caller is served lessons with every card's `audioUrl` and
+    ///     `readAlongWords` stripped, and that payload latches. Upgrading mid-session would
+    ///     otherwise leave every card silently narrating through on-device TTS — the free
+    ///     robotic voice — for the rest of the run, with no way back but a relaunch.
+    ///   • **Expiry.** Card URLs are signed and finite-lived, and `didPrefetch` never ages out.
+    ///
+    /// Called from `LearnAudioEntitlement.update(tier:)` on the locked→unlocked transition and
+    /// from `AIVoiceManager`'s one-shot recovery after a clip fails to load.
+    func forceRefresh() async {
+        didPrefetch = false
+        await prefetch()
+    }
+
+    /// Find the current URL for the same Storage object as `stale`, ignoring the query string.
+    ///
+    /// A re-signed URL differs from its predecessor ONLY in `?token=…`; the path is stable. So
+    /// after `forceRefresh()` this is how a caller holding a dead URL finds its replacement
+    /// without knowing which lesson or card it came from. Returns nil when nothing matches
+    /// (the clip was removed, the caller is locked and URLs were stripped, or `stale` isn't a
+    /// remote URL at all) and — deliberately — when the path resolves to the SAME string, so a
+    /// caller can't burn a retry replaying a URL that just failed.
+    func refreshedClipURL(matching stale: String) -> String? {
+        guard let stalePath = URL(string: stale)?.path, !stalePath.isEmpty else { return nil }
+        for cards in remoteByTitle.values {
+            for card in cards {
+                guard let clip = card.audioClip, clip != stale,
+                      let path = URL(string: clip)?.path, path == stalePath else { continue }
+                return clip
+            }
+        }
+        return nil
+    }
+
     /// Server-authored lesson catalog, ordered. Empty until a successful fetch, which is the
     /// signal for the journey builder to fall back to the bundled `InvestorJourneyData`.
     private(set) var remoteCatalog: [JourneyCatalogEntry] = []

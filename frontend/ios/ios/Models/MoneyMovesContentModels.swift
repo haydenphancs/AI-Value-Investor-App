@@ -197,7 +197,17 @@ struct MoneyMoveArticleDTO: Decodable {
     let relatedArticles: [RelatedArticleDTO]?
 
     /// Map the transport DTO into the UI model the views/AudioManager consume.
-    func toArticle() -> MoneyMoveArticle {
+    ///
+    /// `trustAudioFlag` says whether this DTO came from the BACKEND (true) or from the bundled
+    /// offline JSON (false). It exists because the two disagree about what `hasAudioVersion`
+    /// means. On the wire the backend deliberately keeps it TRUE for a locked article — the
+    /// narration is real, the URL is merely withheld — so the Listen control stays visible as
+    /// an upgrade offer. But all 13 articles in `Resources/MoneyMoves/money_moves.json` also
+    /// ship `hasAudioVersion: true` with `audioUrl: null`, and for an ENTITLED user offline
+    /// that renders a saturated "Listen Now" (not the paywall) whose tap dies in
+    /// `AudioManager.isMissingNarration`. Bundled articles therefore derive the flag from the
+    /// URL, which is the honest signal there.
+    func toArticle(trustAudioFlag: Bool = false) -> MoneyMoveArticle {
         let published = Calendar.current.date(
             byAdding: .day, value: -(publishedDaysAgo ?? 3), to: Date()
         ) ?? Date()
@@ -219,7 +229,7 @@ struct MoneyMoveArticleDTO: Decodable {
             // much real) indistinguishable from one that was never narrated — and the Listen
             // control hides entirely on false, so the upgrade offer would vanish from exactly
             // the articles that would sell it.
-            hasAudioVersion: hasAudioVersion ?? (audioUrl != nil),
+            hasAudioVersion: trustAudioFlag ? (hasAudioVersion ?? (audioUrl != nil)) : (audioUrl != nil),
             heroGradientColors: heroGradientColors,
             tagLabel: tagLabel,
             isFeatured: isFeatured ?? false,

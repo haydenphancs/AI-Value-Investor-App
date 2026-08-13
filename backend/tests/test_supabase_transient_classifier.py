@@ -407,6 +407,41 @@ async def test_async_does_not_block_the_loop_while_backing_off():
     assert ticks >= 3
 
 
+# ── the async-callable footgun ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_async_rejects_a_coroutine_function_loudly():
+    """`asyncio.to_thread(async_fn)` returns an UN-AWAITED coroutine as the result.
+
+    No exception, no retry, no query — the caller just gets a coroutine object where
+    it expected rows. The `_async` suffix makes this mistake actively inviting, so it
+    must fail loudly rather than silently.
+    """
+    async def accidentally_async():
+        return "value"
+
+    with pytest.raises(TypeError, match="SYNC callable"):
+        await retry_idempotent_async(accidentally_async, what="oops")
+
+
+def test_sync_rejects_a_coroutine_function_loudly():
+    async def accidentally_async():
+        return "value"
+
+    with pytest.raises(TypeError, match="SYNC callable"):
+        retry_idempotent_sync(accidentally_async, what="oops")
+
+
+def test_an_ordinary_callable_object_is_still_accepted():
+    """Negative control: the guard must only reject genuinely async callables.
+
+    Every real call site passes either a closure or a bound method, and `_Op` below
+    is a plain `__call__` object — none may be caught by the check.
+    """
+    assert retry_idempotent_sync(_Op(["ok"]), what="t") == "ok"
+    assert retry_idempotent_sync(lambda: "ok", what="t") == "ok"
+
+
 # ── API-surface guard ────────────────────────────────────────────────────────
 
 def test_no_non_idempotent_retry_entrypoint_exists():

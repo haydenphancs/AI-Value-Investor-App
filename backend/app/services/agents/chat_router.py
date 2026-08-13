@@ -10,6 +10,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
+from app.config import settings
 from app.services.agents.chat_specialists import SPECIALIST_KEYS, get_specialist
 
 logger = logging.getLogger(__name__)
@@ -22,9 +23,18 @@ _ROUTER_SYSTEM = (
 )
 _VALID = set(SPECIALIST_KEYS)
 
+# Lenses that answer a CONCEPT rather than interrogate a specific security. These are
+# the only classifications eligible for the cheap model, and only when the turn also
+# carries no ticker and no on-screen data (see `select_model`).
+_CONCEPTUAL_SPECIALISTS = frozenset({"education", "general"})
+
 
 def _fallback() -> Dict[str, Any]:
-    return {"specialists": ["general"], "mode": "single", "labels": ["General"]}
+    # `degraded` marks "we did not actually classify this" — distinct from a genuine
+    # `general` classification. Without it the two are indistinguishable downstream,
+    # and a Gemini outage (every turn falling back to `general`) would silently
+    # downgrade the WHOLE product to the cheap model. See `select_model`.
+    return {"specialists": ["general"], "mode": "single", "labels": ["General"], "degraded": True}
 
 
 async def route_question(gemini: Any, user_message: str) -> Dict[str, Any]:
@@ -71,7 +81,52 @@ async def route_question(gemini: Any, user_message: str) -> Dict[str, Any]:
             "specialists": keys,
             "mode": mode,
             "labels": [get_specialist(k).label for k in keys],
+            "degraded": False,
         }
     except Exception as e:
         logger.warning("Chat router failed (%s: %s) — defaulting to general", type(e).__name__, e)
         return _fallback()
+
+
+def select_model(
+    route: Dict[str, Any],
+    *,
+    has_ticker: bool,
+    has_client_context: bool,
+) -> str:
+    """Choose the generation model for this turn. PURE — no I/O, no extra LLM call.
+
+    `route_question` already classified the turn on the critical path, so reading its
+    output costs nothing; this is the cheapest cost lever available.
+
+    Downgrades to ``settings.CHAT_CHEAP_MODEL`` only when ALL of these hold:
+      * routing is enabled,
+      * the classification actually succeeded (never a degraded fallback),
+      * exactly one lens was chosen (``single`` — a synthesized cross-domain answer
+        is the hard case, so it keeps the flagship model),
+      * that lens is conceptual (education / general),
+      * the turn carries neither a ticker nor an on-screen data snapshot.
+
+    The last condition is load-bearing and easy to miss: an ``education``
+    classification on a STOCK screen ("what does this P/E mean?") still has to reason
+    over a live grounding block and call tools, which is exactly the work the cheap
+    model is worse at. Ticker-less conceptual questions are the safe set.
+
+    Every unknown falls back to the EXPENSIVE model on purpose: the downside of a
+    wrong cheap answer (a user reads it) outweighs the downside of a wrong expensive
+    one (it costs a fraction of a cent). Fail closed here means fail to *better*.
+    """
+    if not settings.CHAT_MODEL_ROUTING_ENABLED:
+        return settings.GEMINI_MODEL
+    # Absent `degraded` is treated as degraded: any caller constructing a route dict
+    # by hand has not proven a classification happened.
+    if route.get("degraded", True):
+        return settings.GEMINI_MODEL
+    if has_ticker or has_client_context:
+        return settings.GEMINI_MODEL
+    if route.get("mode") != "single":
+        return settings.GEMINI_MODEL
+    specialists = route.get("specialists") or []
+    if len(specialists) != 1 or specialists[0] not in _CONCEPTUAL_SPECIALISTS:
+        return settings.GEMINI_MODEL
+    return settings.CHAT_CHEAP_MODEL

@@ -446,9 +446,115 @@ def _response_text(response: Any) -> str:
     return "\n".join(chunks)
 
 
-def _response_tokens(response: Any) -> Optional[int]:
+# ── Token accounting ──────────────────────────────────────────────
+# Only `total_token_count` used to be read, which made prompt-prefix caching
+# invisible: Gemini 2.5 discounts a repeated request PREFIX by 75% once it
+# clears the model's floor, and `cached_content_token_count` is the ONLY signal
+# that it happened. Without it, "is our system instruction being cached?" is
+# unanswerable and every prompt-cost decision is guesswork.
+_USAGE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("total", "total_token_count"),
+    ("prompt", "prompt_token_count"),
+    ("cached", "cached_content_token_count"),
+    ("output", "candidates_token_count"),
+)
+_EMPTY_USAGE: Dict[str, Optional[int]] = {key: None for key, _ in _USAGE_FIELDS}
+
+
+def _coerce_token_count(value: Any) -> Optional[int]:
+    """Coerce one usage field to an int, or None. NEVER raises.
+
+    The SDK types these as `int | None`, but this is telemetry sitting on the
+    response path of every user-facing call — a proto default, a float, or a
+    non-finite sentinel must degrade to None rather than take down the answer.
+    `bool` is rejected explicitly (it is an `int` subclass, so `True` would
+    otherwise be reported as 1 token), and OverflowError is caught because
+    `int(float("inf"))` raises it and it is NOT a ValueError.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _response_usage(response: Any) -> Dict[str, Optional[int]]:
+    """Extract `{total, prompt, cached, output}` token counts. NEVER raises."""
     um = getattr(response, "usage_metadata", None)
-    return getattr(um, "total_token_count", None) if um else None
+    if um is None:
+        return dict(_EMPTY_USAGE)
+    return {key: _coerce_token_count(getattr(um, attr, None)) for key, attr in _USAGE_FIELDS}
+
+
+def _response_tokens(response: Any) -> Optional[int]:
+    """Total tokens for a response. Thin wrapper — six call sites depend on it."""
+    return _response_usage(response)["total"]
+
+
+def _log_gemini_usage(
+    usage: Dict[str, Optional[int]],
+    *,
+    call_site: str,
+    model: str,
+    tag: Optional[str] = None,
+) -> None:
+    """Emit ONE greppable line per Gemini call. Best-effort, never raises.
+
+    `cached_pct` is the number this exists for: the share of input tokens that
+    were served from the prefix cache at a 75% discount. A persistent 0 means
+    the stable prefix is not being reused (too short, or something volatile —
+    a price, a timestamp, a session id — is polluting the front of the request).
+    """
+    try:
+        prompt = usage.get("prompt") or 0
+        cached = usage.get("cached") or 0
+        cached_pct = round(100.0 * cached / prompt, 1) if prompt > 0 else 0.0
+        logger.info(
+            "GEMINI_USAGE call_site=%s model=%s tag=%s prompt_tok=%s cached_tok=%s "
+            "cached_pct=%s output_tok=%s total_tok=%s",
+            call_site, model, tag or "-",
+            usage.get("prompt"), usage.get("cached"), cached_pct,
+            usage.get("output"), usage.get("total"),
+        )
+    except Exception as e:  # pragma: no cover — telemetry must never break a call
+        logger.warning("GEMINI_USAGE log failed (%s: %s)", type(e).__name__, e)
+
+
+class _StreamUsage:
+    """Accumulate token usage across a stream, and across agentic ROUNDS.
+
+    Within one streamed response the SDK reports CUMULATIVE counts, so the last
+    non-empty reading of a round wins (not a sum, which would multiply-count).
+    Across rounds those per-round totals ARE additive, hence the explicit
+    `commit_round()` boundary — a 4-round agentic turn that summed every chunk
+    would over-report by roughly the chunk count.
+    """
+
+    __slots__ = ("_committed", "_round")
+
+    def __init__(self) -> None:
+        self._committed: Dict[str, int] = {key: 0 for key, _ in _USAGE_FIELDS}
+        self._round: Dict[str, Optional[int]] = dict(_EMPTY_USAGE)
+
+    def observe(self, chunk: Any) -> None:
+        """Record a chunk's usage if it carries any. Never raises."""
+        usage = _response_usage(chunk)
+        if any(value is not None for value in usage.values()):
+            self._round = usage
+
+    def commit_round(self) -> None:
+        """Fold the current round's last reading into the running total."""
+        for key, _ in _USAGE_FIELDS:
+            value = self._round.get(key)
+            if value:
+                self._committed[key] += value
+        self._round = dict(_EMPTY_USAGE)
+
+    def totals(self) -> Dict[str, Optional[int]]:
+        """Commit any open round and return the accumulated counts."""
+        self.commit_round()
+        return dict(self._committed)
 
 
 def _response_finish(response: Any) -> Optional[str]:
@@ -566,6 +672,8 @@ class GeminiClient:
         prompt: str,
         system_instruction: Optional[str] = None,
         model_name: Optional[str] = None,
+        usage_tag: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
     ):
         """Yield ``(kind, text)`` chunks as Gemini generates.
 
@@ -581,15 +689,19 @@ class GeminiClient:
             )
         config = self._config(
             system_instruction=system_instruction,
+            max_output_tokens=max_output_tokens,
             thinking_config=types.ThinkingConfig(include_thoughts=True),
         )
+        resolved_model = model_name or self.model_name
+        usage = _StreamUsage()
         try:
             stream = await self._client.aio.models.generate_content_stream(
-                model=model_name or self.model_name,
+                model=resolved_model,
                 contents=prompt,
                 config=config,
             )
             async for chunk in stream:
+                usage.observe(chunk)
                 for part in _iter_parts(chunk):
                     # part.text raises on non-text parts (finish-only) — treat as empty.
                     try:
@@ -604,6 +716,14 @@ class GeminiClient:
             if _is_quota_error(e):
                 _quota_circuit.record_quota_error()
             raise
+        finally:
+            # `finally`, not the happy path: a client disconnect closes this async
+            # generator (GeneratorExit) and an error raises past it, and BOTH still
+            # spent tokens. Logging only on success would hide exactly the turns
+            # that cost money without delivering an answer.
+            _log_gemini_usage(
+                usage.totals(), call_site="stream_text", model=resolved_model, tag=usage_tag,
+            )
 
     # ── Context caching (Stage-B narratives) ──────────────────────────
     # The N parallel narrative calls per report share one large evidence blob +
@@ -1011,6 +1131,8 @@ class GeminiClient:
         system_instruction: Optional[str] = None,
         max_rounds: int = 4,
         model_name: Optional[str] = None,
+        usage_tag: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
     ):
         """Stream a MULTI-ROUND agentic answer: the model can call function-calling tools
         mid-stream (manual FC), while reasoning + answer stream throughout.
@@ -1029,18 +1151,22 @@ class GeminiClient:
         config = self._config(
             system_instruction=system_instruction,
             tools=tools,
+            max_output_tokens=max_output_tokens,
             thinking_config=types.ThinkingConfig(include_thoughts=True),
         )
         # Manual function calling — we run handlers ourselves (AFC-while-streaming is buggy upstream).
         config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
-        chat = self._client.aio.chats.create(model=model_name or self.model_name, config=config)
+        resolved_model = model_name or self.model_name
+        chat = self._client.aio.chats.create(model=resolved_model, config=config)
 
         message: Any = prompt
+        usage = _StreamUsage()
         try:
             for _round in range(max_rounds):
                 fcalls: List[Any] = []
                 stream = await chat.send_message_stream(message)
                 async for chunk in stream:
+                    usage.observe(chunk)
                     for part in _iter_parts(chunk):
                         fc = getattr(part, "function_call", None)
                         if fc and fc.name:
@@ -1052,6 +1178,9 @@ class GeminiClient:
                             text = ""
                         if text:
                             yield ("thought" if getattr(part, "thought", False) else "answer"), text
+                # Round boundary: per-chunk counts are cumulative WITHIN a round but
+                # additive ACROSS rounds, so fold before the next send_message_stream.
+                usage.commit_round()
                 if not fcalls:
                     _quota_circuit.record_success()
                     return
@@ -1080,6 +1209,7 @@ class GeminiClient:
             # so the user always gets a reply.
             final_stream = await chat.send_message_stream(message)
             async for chunk in final_stream:
+                usage.observe(chunk)
                 for part in _iter_parts(chunk):
                     if getattr(part, "function_call", None):
                         continue
@@ -1094,6 +1224,12 @@ class GeminiClient:
             if _is_quota_error(e):
                 _quota_circuit.record_quota_error()
             raise
+        finally:
+            # See stream_text: the early `return` above, a client disconnect, and an
+            # exception all land here, and all three spent tokens.
+            _log_gemini_usage(
+                usage.totals(), call_site="stream_agentic", model=resolved_model, tag=usage_tag,
+            )
 
 
 # Global client instance

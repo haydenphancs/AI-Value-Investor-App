@@ -174,7 +174,7 @@ class ChatService:
         # serial LLM round-trip off time-to-first-token.
         (chunks, citations), conversation_block = await asyncio.gather(
             self._retrieve_context(user_message, stock_id, history),
-            self._condense_history(history),
+            self._condense_history(history, session_id=session_id),
         )
 
         # Step 3: Build prompt (includes RAG context + history)
@@ -333,7 +333,7 @@ class ChatService:
         # RAG context + conversation memory — independent, run concurrently (same as generate_response).
         (chunks, citations), conversation_block = await asyncio.gather(
             self._retrieve_context(user_message, stock_id, history),
-            self._condense_history(history),
+            self._condense_history(history, session_id=session_id),
         )
 
         asset_type = self._detect_asset_type(stock_id) if stock_id else "NORMAL"
@@ -395,6 +395,7 @@ class ChatService:
                 async for kind, payload in self.gemini.stream_agentic(
                     prep["prompt"], tools=tools, tool_handlers=tool_handlers,
                     system_instruction=sys, max_rounds=2,
+                    max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
                 ):
                     if kind == "answer":
                         texts.append(payload)
@@ -419,6 +420,7 @@ class ChatService:
             async for ev in self.gemini.stream_agentic(
                 prep["prompt"], tools=tools, tool_handlers=tool_handlers,
                 system_instruction=prep["system_instruction"],
+                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
             ):
                 yield ev
             return
@@ -439,6 +441,7 @@ class ChatService:
         try:
             async for kind, text in self.gemini.stream_text(
                 synth_prompt, system_instruction=prep["system_instruction"],
+                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
             ):
                 if kind == "answer" and text:
                     merge_yielded = True
@@ -872,8 +875,11 @@ class ChatService:
 
     def _get_recent_messages(self, session_id: str, limit: int = 10) -> List[Dict]:
         try:
+            # created_at is the watermark `_condense_history` compares against
+            # chat_sessions.memory_summary_upto to decide whether the cached rolling
+            # summary still covers the older slice.
             result = self.supabase.table("chat_messages").select(
-                "role, content"
+                "role, content, created_at"
             ).eq("session_id", session_id).order(
                 "created_at", desc=True
             ).limit(limit).execute()
@@ -963,6 +969,12 @@ class ChatService:
         (LLM-rerank) → top-K, plus the citations built from the surviving chunks. Never raises → ([], [])."""
         chunks: List[Dict] = []
         citations: List[Dict] = []
+        # Master switch, checked BEFORE the rewrite: with an un-ingested corpus this
+        # whole path is an embedding call + an RPC (+ a flash-lite rewrite on ~40% of
+        # turns) that provably returns nothing. Empty result is the same ([], []) the
+        # except-branch already degrades to, so every caller is unaffected.
+        if not settings.CHAT_RAG_ENABLED:
+            return chunks, citations
         try:
             query = user_message
             if settings.CHAT_QUERY_REWRITE_ENABLED:
@@ -1337,27 +1349,115 @@ class ChatService:
             for m in msgs
         )
 
-    async def _condense_history(self, history: List[Dict]) -> str:
+    @staticmethod
+    def _parse_ts(value: Any) -> Optional[datetime]:
+        """Parse a Supabase timestamp to an aware UTC datetime. NEVER raises → None.
+
+        Postgres renders `now()` with or without fractional seconds and with either
+        `+00:00` or `Z`, so string comparison is not safe. A naive value is assumed
+        UTC — mixing naive and aware in a comparison is a TypeError, and this runs on
+        the answer path.
+        """
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            try:
+                parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return None
+        else:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    def _load_cached_summary(self, session_id: Optional[str]) -> Tuple[str, Optional[datetime]]:
+        """Read the stored rolling summary + its watermark. NEVER raises → ("", None).
+
+        Guarded so the service is safe to deploy BEFORE migration 130: a missing
+        column raises here, degrades to "no cached summary", and the caller simply
+        regenerates exactly as it does today.
+        """
+        if not session_id or self.supabase is None:
+            return "", None
+        try:
+            res = self.supabase.table("chat_sessions").select(
+                "memory_summary, memory_summary_upto"
+            ).eq("id", session_id).limit(1).execute()
+            row = (res.data or [None])[0] or {}
+            return (row.get("memory_summary") or "").strip(), self._parse_ts(row.get("memory_summary_upto"))
+        except Exception as e:
+            logger.warning(
+                "Cached chat summary read failed for session=%s (%s: %s) — regenerating",
+                session_id, type(e).__name__, e,
+            )
+            return "", None
+
+    def _store_cached_summary(
+        self, session_id: Optional[str], summary: str, upto: Optional[datetime],
+    ) -> None:
+        """Persist the rolling summary. Best-effort — a failure only costs a
+        regeneration next turn, so it must never surface to the user."""
+        if not session_id or self.supabase is None or not summary or upto is None:
+            return
+        try:
+            self.supabase.table("chat_sessions").update({
+                "memory_summary": summary,
+                "memory_summary_upto": upto.isoformat(),
+            }).eq("id", session_id).execute()
+        except Exception as e:
+            logger.warning(
+                "Cached chat summary write failed for session=%s (%s: %s) — will regenerate",
+                session_id, type(e).__name__, e,
+            )
+
+    async def _condense_history(
+        self, history: List[Dict], session_id: Optional[str] = None,
+    ) -> str:
         """Build the conversation block for the prompt. Short chats → recent turns verbatim. Long
         chats → a rolling SUMMARY of the older turns + the last few verbatim, so early context
-        (tickers, goals, numbers) isn't dropped by simple truncation. Never raises → recent-only."""
+        (tickers, goals, numbers) isn't dropped by simple truncation. Never raises → recent-only.
+
+        The summary is CACHED on the session and reused until at least
+        `CHAT_SUMMARY_REFRESH_AFTER_MESSAGES` older-slice messages are newer than the
+        stored watermark. Regenerating it every turn re-derived nearly identical
+        bullets and put a serial LLM hop in front of the first token. Only the summary
+        of OLDER turns can lag; the recent window is always verbatim.
+        """
         if not history:
             return ""
         recent = history[-self._RECENT_TURNS:]
         older = history[:-self._RECENT_TURNS]
         if not older:
             return f"CONVERSATION HISTORY:\n{self._fmt_turns(recent)}"
+
+        newest_older = max(
+            (ts for ts in (self._parse_ts(m.get("created_at")) for m in older) if ts is not None),
+            default=None,
+        )
+        cached_summary, cached_upto = self._load_cached_summary(session_id)
         summary = ""
-        try:
-            prompt = (
-                "Summarize the earlier part of this conversation in 3-5 short bullet points — keep "
-                "the user's goals and any specifics (tickers, numbers, preferences) so it can ground "
-                "later answers. No preamble.\n\n" + self._fmt_turns(older, cap=400)
+        if cached_summary and cached_upto is not None:
+            # A message with an unparseable timestamp counts as uncovered: we cannot
+            # prove the cached summary includes it, so err toward regenerating.
+            uncovered = sum(
+                1 for m in older
+                if (ts := self._parse_ts(m.get("created_at"))) is None or ts > cached_upto
             )
-            res = await self.gemini.generate_text(prompt, model_name="gemini-2.5-flash-lite")
-            summary = (res.get("text") or "").strip()
-        except Exception as e:
-            logger.warning("History condense failed (%s: %s) — recent turns only", type(e).__name__, e)
+            if uncovered < settings.CHAT_SUMMARY_REFRESH_AFTER_MESSAGES:
+                summary = cached_summary
+
+        if not summary:
+            try:
+                prompt = (
+                    "Summarize the earlier part of this conversation in 3-5 short bullet points — keep "
+                    "the user's goals and any specifics (tickers, numbers, preferences) so it can ground "
+                    "later answers. No preamble.\n\n" + self._fmt_turns(older, cap=400)
+                )
+                res = await self.gemini.generate_text(prompt, model_name="gemini-2.5-flash-lite")
+                summary = (res.get("text") or "").strip()
+                if summary:
+                    self._store_cached_summary(session_id, summary, newest_older)
+            except Exception as e:
+                logger.warning("History condense failed (%s: %s) — recent turns only", type(e).__name__, e)
         if summary:
             return (
                 f"EARLIER CONVERSATION (summary):\n{summary}\n\n"

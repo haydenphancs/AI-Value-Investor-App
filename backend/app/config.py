@@ -372,6 +372,48 @@ class Settings(BaseSettings):
     CHAT_RERANK_ENABLED: bool = True
     RAG_RERANK_CANDIDATES: int = 20  # wider vector search before reranking down to RAG_TOP_K_RESULTS
 
+    # Master switch for chat RAG. OFF because the corpus is EMPTY and nothing in this
+    # repo ingests it: `book_chunks` / `article_chunks` / `company_filing_chunks` are
+    # written by no code here (migration 086's header says as much), and
+    # `generate_embedding` has exactly one caller — the query side. Left on, every
+    # single chat turn paid for an embedding call plus a Supabase RPC to retrieve
+    # nothing, and ~40% of turns also paid for a flash-lite query rewrite first — two
+    # network round trips on the time-to-first-token path for a guaranteed empty result.
+    # Deliberately a flag and NOT an emptiness probe: a per-turn COUNT is another round
+    # trip, and it would fail OPEN on a transient DB error (silently resuming the waste).
+    # Flip this to True on the day an ingestion pipeline lands.
+    CHAT_RAG_ENABLED: bool = False
+
+    # Per-turn model routing. `chat_router.route_question()` already classifies every
+    # turn on the critical path and the result was used only to pick a prompt lens —
+    # the classification is already paid for, so choosing a model from it costs nothing.
+    # A conceptual question with no ticker and no on-screen data ("what is a P/E
+    # ratio?") does not need the flagship model; measured, that turn is ~900 prompt
+    # tokens and the cheap model answers it for roughly a quarter of the price.
+    # Ships OFF: this is the one cost lever that can change what a user reads, so it
+    # wants an offline eval plus real answers reviewed before it is switched on
+    # (scripts/eval_model_routing.py). See `select_model` for the fail-closed rules.
+    CHAT_MODEL_ROUTING_ENABLED: bool = False
+    CHAT_CHEAP_MODEL: str = "gemini-2.5-flash-lite"
+
+    # Output ceiling for CHAT only (report generation keeps GEMINI_MAX_TOKENS=8192).
+    # Output is the majority of a chat turn's cost, and the chat system prompt already
+    # demands "SHORT, direct… AT MOST 2-3 brief supporting bullet points" — measured,
+    # real answers land around 150 tokens. An 8192 ceiling on a 150-token brief only
+    # ever binds when something has gone wrong (a loop, a runaway list), so this is a
+    # blast-radius cap, not a style control: it should never fire on a healthy turn.
+    CHAT_MAX_OUTPUT_TOKENS: int = 1200
+
+    # Reuse the stored rolling summary instead of regenerating it every turn.
+    # `_condense_history` fires a flash-lite call on EVERY turn once a chat passes
+    # `_RECENT_TURNS`, re-summarising almost the same older messages each time. The
+    # summary is persisted on the session and refreshed only after this many new
+    # messages have entered the older slice — so the cost becomes one call per N turns
+    # instead of one per turn, and a serial LLM hop leaves the time-to-first-token path.
+    # The trade is bounded staleness in the SUMMARY only; the recent turns are always
+    # verbatim, so nothing the user just said can be stale.
+    CHAT_SUMMARY_REFRESH_AFTER_MESSAGES: int = 4
+
     # ── Chat security / abuse & cost controls (denial-of-wallet, OWASP LLM10) ──
     # Input hygiene: a normalized+stripped user message over CHAT_MESSAGE_MAX_CHARS
     # is rejected with a friendly CHAT_MESSAGE_TOO_LONG (the Pydantic HARD_MAX is a

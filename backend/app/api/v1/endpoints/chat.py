@@ -231,6 +231,18 @@ def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str], req=None
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
+# Exactly the columns `_row_to_session` reads. The list endpoint used to `select("*")`,
+# which drags every session's `context_snapshot` (up to CHAT_CONTEXT_MAX_CHARS = 8000)
+# and `memory_summary` across the wire for a whole page — neither is serialized to iOS.
+# Kept in sync with `_row_to_session` by tests/test_chat_session_list_columns.py.
+# The single-session fetches deliberately keep `select("*")`: the turn path DOES read
+# context_snapshot and memory_summary from that row.
+_SESSION_LIST_COLUMNS = (
+    "id, title, session_type, stock_id, context_type, reference_id, "
+    "preview_message, message_count, is_saved, created_at, last_message_at"
+)
+
+
 def _row_to_session(row: dict) -> ChatSessionResponse:
     """Map a Supabase chat_sessions row to the response schema."""
     return ChatSessionResponse(
@@ -362,7 +374,7 @@ async def list_chat_sessions(
     """List all chat sessions for the current user, newest first."""
     result = (
         supabase.table("chat_sessions")
-        .select("*")
+        .select(_SESSION_LIST_COLUMNS)
         .eq("user_id", user["id"])
         .order("last_message_at", desc=True, nullsfirst=False)
         .range(offset, offset + limit - 1)
@@ -750,7 +762,7 @@ async def stream_chat_message(
         try:
             # Multi-agent (Phase 3): a cheap router picks the specialist lens(es). Run it in PARALLEL
             # with prep so the router's ~400ms hides behind the RAG/widget work. Never raises → general.
-            from app.services.agents.chat_router import route_question
+            from app.services.agents.chat_router import route_question, select_model
             from app.services.agents.chat_specialists import apply_specialist
             prep_coro = chat_service.prepare_stream_generation(
                 session_id=session_id,
@@ -808,9 +820,22 @@ async def stream_chat_message(
                 answer_stream = chat_service.stream_synthesis(prep, user_message, route, tools, handlers)
             else:
                 system_instruction = apply_specialist(prep["system_instruction"], route["specialists"][0])
+                # Free cost lever: the classification above is already paid for. A
+                # ticker-less conceptual question does not need the flagship model.
+                # Anything unproven falls back to it — see select_model.
+                answer_model = select_model(
+                    route,
+                    has_ticker=bool(stock_id),
+                    has_client_context=bool(effective_context),
+                )
                 answer_stream = chat_service.gemini.stream_agentic(
                     prep["prompt"], tools=tools, tool_handlers=handlers,
                     system_instruction=system_instruction,
+                    model_name=answer_model,
+                    max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+                    # Correlates the GEMINI_USAGE line to a turn: without the route you
+                    # cannot tell which lens (and so which model) served this answer.
+                    usage_tag=f"{session_id}:{route['specialists'][0]}",
                 )
 
             async for kind, payload in answer_stream:

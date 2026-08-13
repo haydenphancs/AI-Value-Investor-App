@@ -402,9 +402,9 @@ class WhaleFollowLockedException(Exception):
 def _apply_follow_locks(
     whales: List[TrendingWhaleResponse], tier: Optional[str]
 ) -> List[TrendingWhaleResponse]:
-    """Return the roster with ``is_locked`` set per this tier's follow allowance.
+    """Return the roster with ``is_locked`` and ``is_following_inactive`` set for this tier.
 
-    Rules, in order:
+    ``is_locked`` — may this caller START following this whale? Rules, in order:
       • already following  → NEVER locked. A user must always be able to unfollow, and a
         locked button on a whale they already track reads as data loss.
       • Free               → locked unless it is the designated free whale.
@@ -412,26 +412,48 @@ def _apply_follow_locks(
         follow is offered and the 11th is not).
       • Max                → never locked.
 
+    ``is_following_inactive`` — is this a follow the plan doesn't surface? It MUST mirror
+    `get_whale_activity_feed`'s truncation exactly, including its `> limit` boundary: that
+    is the whole point of the flag. A Free account holding exactly ONE follow keeps it even
+    if it isn't Bill Gates (`1 > 1` is false, so the feed doesn't truncate), and the avatar
+    row has to agree or the inconsistency simply moves.
+
     Non-mutating for the same reason `redact_whale_profile` is: the argument is the object
     in `_whale_list_cache`, and although that cache is per-user, an in-place write would
     still pin one plan's locks onto that user's next 5 minutes of requests.
     """
     limit = whale_follow_limit(tier)
     if limit is None:
-        return whales                      # Max — unlimited, nothing to lock
+        return whales                      # Max — unlimited, nothing to lock or truncate
 
     is_free = normalize_tier(tier) == TIER_FREE
-    at_cap = sum(1 for w in whales if w.is_following) >= limit
+    followed = [w for w in whales if w.is_following]
+    at_cap = len(followed) >= limit
+
+    # The subset the activity feed will actually serve. Same shape as whale_service
+    # .get_whale_activity_feed: only truncate when the count EXCEEDS the limit; Free keeps
+    # the designated free whale, Pro keeps a deterministic id-sorted prefix so the feed
+    # doesn't reshuffle between requests.
+    if len(followed) > limit:
+        if is_free:
+            active_ids = {w.id for w in followed if is_free_tier_whale(w.name)}
+        else:
+            active_ids = set(sorted(str(w.id) for w in followed)[:limit])
+    else:
+        active_ids = {w.id for w in followed}
 
     out: List[TrendingWhaleResponse] = []
     for w in whales:
+        updates = {}
         if w.is_following:
-            locked = False
+            if w.id not in active_ids:
+                updates["is_following_inactive"] = True
         elif is_free:
-            locked = not is_free_tier_whale(w.name)
-        else:
-            locked = at_cap
-        out.append(w.model_copy(update={"is_locked": True}) if locked else w)
+            if not is_free_tier_whale(w.name):
+                updates["is_locked"] = True
+        elif at_cap:
+            updates["is_locked"] = True
+        out.append(w.model_copy(update=updates) if updates else w)
     return out
 
 

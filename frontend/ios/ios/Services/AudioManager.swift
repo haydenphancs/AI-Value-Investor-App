@@ -148,6 +148,15 @@ final class AudioManager: ObservableObject {
     // surfaces .error instead of sitting in a false "playing" state with silence forever.
     private var statusObserver: NSKeyValueObservation?
     private var failedToEndObserver: NSObjectProtocol?
+    /// One-shot budget for the signed-URL refresh retry in `handlePlaybackFailure`.
+    ///
+    /// ⚠️ Reset in exactly TWO places, and NEVER in `preparePlayer`: the retry itself calls
+    /// `play(_:startAt:)`, which calls `preparePlayer`, so clearing it there would let a
+    /// genuinely dead URL retry forever.
+    ///   • on `.readyToPlay` — something actually played, so a later expiry earns a fresh try
+    ///   • when a DIFFERENT episode starts — a new book gets its own budget. The retry keeps
+    ///     the same `episode.id`, so this check deliberately does not fire for it.
+    private var didRetryAfterURLRefresh = false
     // A mid-stream STALL (Airplane Mode, dead Wi-Fi) never fails the item — AVPlayer just stops
     // advancing while the requested rate stands. Observed so the UI/Lock Screen don't keep claiming
     // playback against a frozen playhead.
@@ -491,6 +500,9 @@ final class AudioManager: ObservableObject {
 
         teardownPlayer()
         stopPlaybackTimer()
+        // A DIFFERENT episode gets a fresh signed-URL retry budget. The refresh retry in
+        // `handlePlaybackFailure` replays the SAME episode.id, so it deliberately misses this.
+        if episode.id != currentEpisode?.id { didRetryAfterURLRefresh = false }
         currentEpisode = episode
         duration = episode.duration
         currentTime = 0
@@ -524,6 +536,9 @@ final class AudioManager: ObservableObject {
 
         teardownPlayer()
         stopPlaybackTimer()
+        // A DIFFERENT episode gets a fresh signed-URL retry budget. The refresh retry in
+        // `handlePlaybackFailure` replays the SAME episode.id, so it deliberately misses this.
+        if episode.id != currentEpisode?.id { didRetryAfterURLRefresh = false }
         currentEpisode = episode
         duration = episode.duration
         currentTime = 0
@@ -565,6 +580,9 @@ final class AudioManager: ObservableObject {
 
         teardownPlayer()
         stopPlaybackTimer()
+        // A DIFFERENT episode gets a fresh signed-URL retry budget. The refresh retry in
+        // `handlePlaybackFailure` replays the SAME episode.id, so it deliberately misses this.
+        if episode.id != currentEpisode?.id { didRetryAfterURLRefresh = false }
         currentEpisode = episode
         duration = episode.duration
         currentTime = max(0, startAt)
@@ -1031,6 +1049,8 @@ final class AudioManager: ObservableObject {
         case .failed:
             handlePlaybackFailure(item.error)
         case .readyToPlay:
+            // The URL works, so a LATER expiry has earned its own one-shot refresh+retry.
+            didRetryAfterURLRefresh = false
             // Don't promote out of a STALL: .loading now doubles as the buffering state, and a late
             // readyToPlay would otherwise claim playback while the playhead is still frozen.
             if playbackState == .loading, player?.timeControlStatus != .waitingToPlayAtSpecifiedRate {
@@ -1041,12 +1061,73 @@ final class AudioManager: ObservableObject {
         }
     }
 
+    /// Whether this episode's URL is a minted, expiring signature that can be re-fetched.
+    ///
+    /// Books and Money Moves only. Daily Brief / podcast URLs are not gated Learn narration and
+    /// are not signed, so a failure there is a real failure and must surface immediately rather
+    /// than burn a pointless refresh.
+    private func isSignedLearnNarration(_ episode: AudioEpisode) -> Bool {
+        episode.bookCurriculumOrder != nil || episode.category == .moneyMoves
+    }
+
+    /// Re-mint this episode's URL, or nil if it could not be obtained.
+    ///
+    /// The two products refresh through different doors: book URLs come from a dedicated
+    /// endpoint keyed by curriculum order, Money Moves URLs ride inside the article payload —
+    /// so the whole content fetch is what has to be redone there.
+    private func refreshedURL(for episode: AudioEpisode) async -> String? {
+        if let order = episode.bookCurriculumOrder {
+            BookAudioURLStore.shared.invalidate(curriculumOrder: order)
+            return await BookAudioURLStore.shared.url(for: order)
+        }
+        guard episode.category == .moneyMoves else { return nil }
+        await MoneyMovesContentStore.shared.forceRefresh()
+        // By TITLE, not `sourceId`: the episode's `sourceId` is the article's locally-minted
+        // `id.uuidString`, which is regenerated on every decode and so cannot survive a
+        // refresh. `episode.title` is `article.title` verbatim, and the store is keyed on it.
+        let refreshed = MoneyMovesContentStore.shared.article(forTitle: episode.title)?.audioUrl
+        // Only worth a retry if it actually CHANGED — replaying the identical dead URL would
+        // just fail again and spend the one-shot budget for nothing.
+        return (refreshed != episode.audioUrl) ? refreshed : nil
+    }
+
     /// A load/playback failure on the current item: stop the false "playing", tear the player down,
     /// surface a typed `.error` state (isPlaying becomes false, so the mini-player / Lock Screen stop
     /// claiming playback), and log loudly for diagnosability.
     private func handlePlaybackFailure(_ error: Error?) {
         // Already torn down (e.g. status + failed-to-end both fired) — nothing to do.
         guard player != nil else { return }
+
+        // Learn narration streams from an EXPIRING signed URL. A signature is minted for 24h and
+        // reused server-side for at most 6h, so it cannot die mid-episode — but the CLIENT
+        // memoises: `BookAudioURLStore` caches URLs and `MoneyMovesContentStore.didPrefetch`
+        // latches once per session with no expiry, so a long-foregrounded app can hold a dead
+        // URL with no way back but a relaunch. Refresh and retry ONCE from the same playhead
+        // before declaring the audio broken.
+        //
+        // Retry unconditionally rather than trying to tell an expired token from an offline blip:
+        // that distinction isn't reliably available here, and one extra request during an outage
+        // is cheap.
+        if let episode = currentEpisode, !didRetryAfterURLRefresh, isSignedLearnNarration(episode) {
+            didRetryAfterURLRefresh = true
+            let resumeAt = currentTime
+            print("[AudioManager] learn narration failed — refreshing signed URL and retrying once (episode: \(episode.id), at: \(resumeAt))")
+            teardownPlayer()
+            stopPlaybackTimer()
+            Task { @MainActor in
+                guard let fresh = await self.refreshedURL(for: episode) else {
+                    // Couldn't re-mint. Fall through to the real failure path; the flag stays set
+                    // so this cannot loop.
+                    self.handlePlaybackFailure(error)
+                    return
+                }
+                var retried = episode
+                retried.audioUrl = fresh
+                self.play(retried, startAt: resumeAt)
+            }
+            return
+        }
+
         let appError = error.map(AppError.from) ?? .unknown(message: "This audio couldn't be played.")
         // Identify WHICH episode/URL died — a 404 on one Storage object is otherwise indistinguishable
         // from a general network outage in the logs.

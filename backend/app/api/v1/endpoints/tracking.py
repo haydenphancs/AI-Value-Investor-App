@@ -41,6 +41,7 @@ from app.schemas.tracking import (
 )
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import TrackingService
+from app.utils.supabase_errors import is_transient_supabase_error
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +66,27 @@ async def get_tracking_assets(
     try:
         return await service.get_tracking_feed(user["id"])
     except Exception as e:
-        logger.error(
-            "Tracking feed failed for user %s: %s: %s",
-            user["id"], type(e).__name__, e, exc_info=True,
-        )
+        # SINGLE Sentry reporter for this route. `tracking_service` deliberately does
+        # not log (see its comment): it used to logger.exception the raw postgrest
+        # APIError and then this handler re-logged the WatchlistUnavailableError with
+        # exc_info, so one Supabase blip opened TWO Sentry issues that always moved
+        # together.
+        #
+        # A transient datastore blip is WARNING — it is handled (already retried in
+        # the service) and surfaced to the client as a retryable 503, not an incident.
+        # Anything else is a genuine bug: ERROR with a stack.
+        # is_transient_supabase_error unwraps __cause__, so it reads the .code off the
+        # postgrest APIError underneath the WatchlistUnavailableError wrapper.
+        if is_transient_supabase_error(e):
+            logger.warning(
+                "Tracking feed unavailable for user %s (transient datastore blip): %s: %s",
+                user["id"], type(e).__name__, e,
+            )
+        else:
+            logger.error(
+                "Tracking feed failed for user %s: %s: %s",
+                user["id"], type(e).__name__, e, exc_info=True,
+            )
         return error_response_from_exception(e, step="tracking_feed")
 
 

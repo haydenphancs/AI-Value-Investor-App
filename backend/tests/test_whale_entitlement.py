@@ -223,6 +223,67 @@ def test_an_empty_roster_does_not_raise():
     assert _apply_follow_locks([], "free") == []
 
 
+# ── is_following_inactive: the row must agree with the feed ──────────────────
+#
+# The reported symptom: on Free, the followed-whale avatar row showed every follow while the
+# activity feed below it served only Bill Gates. Follows are truncated on READ and never
+# deleted, so a downgraded account legitimately holds rows the feed won't serve. These pin
+# that the flag mirrors `get_whale_activity_feed`'s truncation EXACTLY — including its
+# `> limit` boundary, which is the part that is easy to get subtly wrong.
+
+def test_free_marks_every_followed_whale_except_the_free_one():
+    roster = _roster(followed=3)          # Gates + Buffett + Dalio
+    out = _apply_follow_locks(roster, "free")
+    inactive = {w.name for w in out if w.is_following_inactive}
+    assert inactive == {"Warren Buffett", "Ray Dalio"}
+    # And the free whale stays fully live.
+    assert not next(w for w in out if w.name == "Bill Gates").is_following_inactive
+
+
+def test_a_single_follow_on_free_is_never_marked_even_if_it_is_not_the_free_whale():
+    """`len(followed) > limit` is FALSE at exactly one follow, so the feed does not truncate
+    and serves that whale. The row has to agree, or the inconsistency just moves."""
+    roster = _roster(include_free=False)
+    roster[0] = roster[0].model_copy(update={"is_following": True})   # Warren Buffett only
+    out = _apply_follow_locks(roster, "free")
+    assert not any(w.is_following_inactive for w in out)
+
+
+def test_pro_under_its_limit_marks_nothing():
+    out = _apply_follow_locks(_roster(followed=3), "pro")
+    assert not any(w.is_following_inactive for w in out)
+
+
+def test_pro_over_its_limit_keeps_a_deterministic_id_sorted_prefix(monkeypatch):
+    """Matches the feed's `sorted(...)[:limit]`, so the two never disagree and neither
+    reshuffles between requests."""
+    monkeypatch.setitem(ent.WHALE_FOLLOW_LIMITS, ent.TIER_PRO, 2)
+    out = _apply_follow_locks(_roster(followed=4), "pro")
+    active = sorted(w.id for w in out if w.is_following and not w.is_following_inactive)
+    assert active == ["w0", "w1"]
+    assert sorted(w.id for w in out if w.is_following_inactive) == ["w2", "w3"]
+
+
+def test_max_marks_nothing_however_many_are_followed():
+    out = _apply_follow_locks(_roster(followed=5), "premium")
+    assert not any(w.is_following_inactive for w in out)
+
+
+def test_marking_does_not_mutate_the_cached_roster():
+    """Same `_whale_list_cache` hazard as the lock flag."""
+    roster = _roster(followed=3)
+    _apply_follow_locks(roster, "free")
+    assert all(not w.is_following_inactive for w in roster)
+
+
+def test_locked_and_following_inactive_are_never_both_set():
+    """They answer different questions — "may I start following?" vs "is my follow served?"
+    — and a row that claims both would render as two contradictory affordances."""
+    for tier in ("free", "pro", "premium"):
+        for w in _apply_follow_locks(_roster(followed=3), tier):
+            assert not (w.is_locked and w.is_following_inactive), (tier, w.name)
+
+
 def test_free_with_no_free_whale_in_the_roster_locks_everything():
     """A category filter that excludes the free whale (e.g. ?category=politicians) must not
     accidentally unlock the first row."""

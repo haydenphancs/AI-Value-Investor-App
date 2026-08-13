@@ -8,6 +8,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.supabase_errors import (
+    is_transient_supabase_error,
+    retry_idempotent_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,45 +62,21 @@ _RETRY_BACKOFF_SECONDS = 0.25
 
 
 def _is_transient(exc: BaseException) -> bool:
-    """True for a transient connection blip worth retrying + logging quietly."""
-    try:
-        import httpx
-        if isinstance(exc, (
-            httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError,
-            httpx.WriteError, httpx.PoolTimeout, httpx.ConnectTimeout, httpx.ReadTimeout,
-        )):
-            return True
-        # A stale HTTP/2 pooled connection that Supabase closed (GOAWAY / idle
-        # timeout) surfaces on REUSE as LocalProtocolError('... in state
-        # ConnectionState.CLOSED') from the h2 state machine — a connection-reuse
-        # race, not a malformed-request bug. Retrying opens a fresh connection and
-        # succeeds. (A GENUINE local protocol bug would not carry the "closed" state,
-        # so it still surfaces as ERROR.)
-        if isinstance(exc, httpx.LocalProtocolError) and "closed" in str(exc).lower():
-            return True
-    except Exception:
-        pass
-    msg = str(exc).lower()
-    # String fallbacks so the classification holds even if the error arrives as a raw
-    # httpcore/h2 type (not wrapped as an httpx exception).
-    if "server disconnected" in msg or "connectionstate.closed" in msg:
-        return True
-    # Same stale-HTTP/2 pooled-connection reuse race, but surfacing as a BARE,
-    # low-level error from deep inside the h2 transport stack — most often a
-    # KeyError(<stream_id>) when httpcore/h2 looks up an already torn-down stream id
-    # (odd ints like 307 / 431). It carries no httpx type and no telltale message, so
-    # the checks above miss it and it lands as an ERROR-level Sentry issue. Classify by
-    # ORIGIN instead: an exception raised from within the httpcore/h2 internals is a
-    # connection-layer blip (a retry opens a fresh connection), NOT our bug. A genuine
-    # KeyError in our own code (e.g. row["metric_name"] schema drift) is raised from
-    # THIS module — its traceback carries no transport frame — so it stays ERROR.
-    tb = getattr(exc, "__traceback__", None)
-    while tb is not None:
-        top_pkg = tb.tb_frame.f_globals.get("__name__", "").split(".", 1)[0]
-        if top_pkg in ("httpcore", "h2", "hpack", "hyperframe"):
-            return True
-        tb = tb.tb_next
-    return False
+    """True for a transient connection blip worth retrying + logging quietly.
+
+    Back-compat alias — the rule itself now lives in `app/utils/supabase_errors.py`
+    so all five Supabase call sites share ONE classification. It moved because the
+    version that lived here could not recognise a Cloudflare 520: Supabase's edge
+    answers with an HTML error page, postgrest raises
+    `APIError('JSON could not be generated')` with an INT `.code`, and none of the
+    httpx/message/traceback predicates below match it (its frames are `postgrest`,
+    not `httpcore`). That is what produced the 7-event "Industry benchmark lookup
+    failed … Error 520" Sentry issue.
+
+    Kept as a module-level name on purpose: the three degrade-to-empty handlers in
+    this file and `tests/test_sector_benchmark_transient.py` both reach for it here.
+    """
+    return is_transient_supabase_error(exc)
 
 
 # ── Phase 3: mature-period picker (sample-size floor + hold-last-mature) ──
@@ -219,43 +199,39 @@ class SectorBenchmarkLookup:
         recorded parent (a modal-sector straddler) still gets its industry row
         rather than silently dropping to the sector fallback.
         """
-        for attempt in range(_MAX_FETCH_ATTEMPTS):
-            try:
-                rows: List[Dict[str, Any]] = []
-                start = 0
-                while True:
-                    query = (
-                        self.supabase.table("sector_benchmarks")
-                        .select(columns)
-                        .eq("period_type", period_type)
-                        .in_("metric_name", metrics)
-                    )
-                    if industry:
-                        query = query.eq("industry", industry)
-                    else:
-                        # SECTOR-aggregate rows only — exclude industry=<name> rows so
-                        # the sector lookup never mixes in industry rows.
-                        query = query.eq("sector", sector).eq("industry", "")
-                    resp = query.range(start, start + self._PAGE - 1).execute()
-                    batch = resp.data or []
-                    rows.extend(batch)
-                    if len(batch) < self._PAGE:
-                        break
-                    start += self._PAGE
-                return rows
-            except Exception as e:
-                # Transient Supabase/httpx disconnect (e.g. RemoteProtocolError:
-                # Server disconnected) — retry from the start (idempotent read).
-                if attempt < _MAX_FETCH_ATTEMPTS - 1 and _is_transient(e):
-                    logger.warning(
-                        "sector_benchmarks fetch transient error (attempt %d/%d): "
-                        "%s: %s — retrying",
-                        attempt + 1, _MAX_FETCH_ATTEMPTS, type(e).__name__, e,
-                    )
-                    time.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
-                    continue
-                raise
-        return []  # unreachable: the loop always returns or raises
+        def _page_all() -> List[Dict[str, Any]]:
+            rows: List[Dict[str, Any]] = []
+            start = 0
+            while True:
+                query = (
+                    self.supabase.table("sector_benchmarks")
+                    .select(columns)
+                    .eq("period_type", period_type)
+                    .in_("metric_name", metrics)
+                )
+                if industry:
+                    query = query.eq("industry", industry)
+                else:
+                    # SECTOR-aggregate rows only — exclude industry=<name> rows so
+                    # the sector lookup never mixes in industry rows.
+                    query = query.eq("sector", sector).eq("industry", "")
+                resp = query.range(start, start + self._PAGE - 1).execute()
+                batch = resp.data or []
+                rows.extend(batch)
+                if len(batch) < self._PAGE:
+                    break
+                start += self._PAGE
+            return rows
+
+        # Idempotent: a pure paginated READ, and the retry restarts from start=0 so
+        # a mid-pagination blip cannot yield a half-built list.
+        return retry_idempotent_sync(
+            _page_all,
+            what=f"sector_benchmarks fetch sector={sector!r} industry={industry!r}",
+            attempts=_MAX_FETCH_ATTEMPTS,
+            backoff_seconds=_RETRY_BACKOFF_SECONDS,
+            logger=logger,
+        )
 
     def _query(
         self,

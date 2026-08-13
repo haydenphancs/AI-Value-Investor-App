@@ -177,9 +177,18 @@ struct BookCoreDetailView: View {
 
     // Load the book narration only if it isn't already the active episode — so navigating between
     // cores (or arriving while it's already playing) doesn't tear down and restart playback.
+    //
+    // Entitlement-gated before anything else: `load()` starts BUFFERING, so a locked account
+    // must not reach it, and must not spend a request resolving a URL it can't use either.
     private func ensureBookEpisodeLoaded() {
-        if audioManager.currentEpisode?.id != currentAudioEpisode.id {
-            audioManager.load(currentAudioEpisode)
+        guard LearnAudioEntitlement.shared.isUnlocked else { return }
+        guard audioManager.currentEpisode?.id != currentAudioEpisode.id else { return }
+        Task {
+            // Prepare-only: if the signed URL isn't available we simply don't pre-buffer. The
+            // play sites resolve on demand, so nothing is lost but a warm start.
+            guard let episode = await book.playableAudioEpisode() else { return }
+            guard audioManager.currentEpisode?.id != episode.id else { return }
+            audioManager.load(episode)
         }
     }
 
@@ -766,6 +775,9 @@ private struct CoreDetailHeaderSection: View {
     let book: LibraryBook
     var onPlayStarted: (() -> Void)?
 
+    /// True while the signed narration URL is being fetched.
+    @State private var isPreparingAudio = false
+
     // One narration file for the whole book; this core is the segment starting at coreStart.
     private var bookEpisode: AudioEpisode { book.audioEpisode }
 
@@ -805,7 +817,8 @@ private struct CoreDetailHeaderSection: View {
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: entitlement.isLocked(bookEpisode)
                               ? "lock.circle.fill"
-                              : (isThisCoreAudioPlaying ? "pause.circle.fill" : "play.circle.fill"))
+                              : (isPreparingAudio ? "circle.dotted"
+                                 : (isThisCoreAudioPlaying ? "pause.circle.fill" : "play.circle.fill")))
                             .font(AppTypography.iconXL).fontWeight(.medium)
                             // Text-role token — must clear 4.5:1 in both appearances.
                             .foregroundColor(AppColors.primaryBlue)
@@ -832,9 +845,19 @@ private struct CoreDetailHeaderSection: View {
         if isThisCoreAudioPlaying {
             // Pause if this core is currently playing
             audioManager.togglePlayPause()
-        } else {
+            return
+        }
+        // Entitlement FIRST — see the same guard in `BookDetailListenRow.handlePlayTapped`.
+        // Resolving a URL for a locked account returns nil, which would make the tap silently
+        // do nothing instead of raising the paywall.
+        guard !entitlement.refuseIfLocked(bookEpisode) else { return }
+        guard !isPreparingAudio else { return }
+        isPreparingAudio = true
+        Task {
+            defer { isPreparingAudio = false }
+            guard let episode = await book.playableAudioEpisode() else { return }
             // Play the whole-book narration, seeking to this core's start offset
-            audioManager.play(bookEpisode, startAt: coreStart)
+            audioManager.play(episode, startAt: coreStart)
             // Force show the global audio player
             audioManager.resetScrollHiding()
             // Notify parent that playback started

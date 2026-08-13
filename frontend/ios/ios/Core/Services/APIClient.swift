@@ -635,8 +635,11 @@ actor APIClient {
 
         case 403:
             // 403 no longer means "no credential" — that is a 401 now. What remains is genuine
-            // authorization failure (AUTH_FORBIDDEN, EMAIL_NOT_CONFIRMED), which `mapAPIError`
-            // routes to `.forbidden` rather than letting it look like a session problem.
+            // authorization failure, which `mapAPIError` gives a typed case rather than letting
+            // it look like a session problem: AUTH_FORBIDDEN → `.forbidden`, and
+            // EMAIL_NOT_CONFIRMED → `.emailNotConfirmed`. (This comment used to claim BOTH went
+            // to `.forbidden`; EMAIL_NOT_CONFIRMED had no branch at all and fell through to the
+            // generic `.apiError`, so it rendered as "Error" with a retry button.)
             if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: data) {
                 throw APIError.businessError(
                     code: errorResponse.errorCode,

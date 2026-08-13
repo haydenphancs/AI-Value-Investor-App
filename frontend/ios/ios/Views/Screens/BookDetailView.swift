@@ -426,6 +426,10 @@ private struct BookDetailListenRow: View {
     @ObservedObject private var progress = BookProgressStore.shared
     let book: LibraryBook
 
+    /// True while the signed narration URL is being fetched. Drives a spinner on the play
+    /// button and swallows repeat taps.
+    @State private var isPreparingAudio = false
+
     // Check if this is the current book being played (any core)
     private var isCurrentBookPlaying: Bool {
         guard let currentEpisode = audioManager.currentEpisode else { return false }
@@ -489,11 +493,19 @@ private struct BookDetailListenRow: View {
                         // Book narration is Pro/Max. AudioManager refuses a locked episode
                         // and raises the paywall, so the row stays tappable and reads as an
                         // offer rather than a dead play button.
-                        Image(systemName: entitlement.isLocked(bookAudioEpisode)
-                              ? "lock.fill" : (isResumeCorePlaying ? "pause.fill" : "play.fill"))
-                            .font(AppTypography.iconMedium).fontWeight(.bold)
-                            .foregroundColor(AppColors.background)
-                            .offset(x: isResumeCorePlaying ? 0 : 2)
+                        if isPreparingAudio {
+                            // The signed URL is being fetched. Without this the button reads
+                            // as dead for a whole round trip on a cold launch.
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(AppColors.background)
+                        } else {
+                            Image(systemName: entitlement.isLocked(bookAudioEpisode)
+                                  ? "lock.fill" : (isResumeCorePlaying ? "pause.fill" : "play.fill"))
+                                .font(AppTypography.iconMedium).fontWeight(.bold)
+                                .foregroundColor(AppColors.background)
+                                .offset(x: isResumeCorePlaying ? 0 : 2)
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
@@ -550,9 +562,21 @@ private struct BookDetailListenRow: View {
     private func handlePlayTapped() {
         if isResumeCorePlaying {
             audioManager.togglePlayPause()
-        } else {
-            // Play the whole-book narration, seeking to the resume core's start (Core 1 = 0:00).
-            audioManager.play(bookAudioEpisode, startAt: resumeStartSeconds)
+            return
+        }
+        // Entitlement FIRST, before any URL work. `BookAudioURLStore` returns nil for a locked
+        // account, so resolving first would make the tap do nothing at all instead of raising
+        // the paywall — the offer has to fire here.
+        guard !entitlement.refuseIfLocked(bookAudioEpisode) else { return }
+        guard !isPreparingAudio else { return }
+        isPreparingAudio = true
+        Task {
+            defer { isPreparingAudio = false }
+            // Resolves the signed URL (fetching if the memo is cold), so a paying user who
+            // taps before the prefetch lands waits one request rather than hitting
+            // `AudioManager.isMissingNarration`'s hard refuse.
+            guard let episode = await book.playableAudioEpisode() else { return }
+            audioManager.play(episode, startAt: resumeStartSeconds)
         }
     }
 }

@@ -136,10 +136,27 @@ class Settings(BaseSettings):
     # default is unbounded — without this guard a hung network read
     # parks the whole report-generation task forever (seen as a card
     # stuck at "Deep research complete, synthesizing..." 55%). On
-    # timeout, generate_text / generate_json raise asyncio.TimeoutError,
-    # the @async_retry decorator skips it (not a quota error), and the
+    # timeout, _call_with_timeout raises GeminiTimeoutError (a TimeoutError
+    # SUBCLASS, so existing `except asyncio.TimeoutError` handlers are
+    # unaffected), @async_retry gives it the OWN budget below, and the
     # caller's existing sentinel fallback returns instead of hanging.
     GEMINI_REQUEST_TIMEOUT_SECONDS: int = 90
+    # Retries for a per-call Gemini TIMEOUT. Default 0 = do not retry.
+    #
+    # It previously fell through to @async_retry's GENERIC branch and WAS retried,
+    # contradicting the docstrings: one hung call cost 90s + backoff + 90s ≈ 182s
+    # against the 600s RESEARCH_PIPELINE_TIMEOUT_SECONDS ceiling, with ~15 parallel
+    # Stage-B narratives per report. A read that stalled for a full 90s is a stuck
+    # connection, not a blip, so the expected payoff of a retry is low and the
+    # latency cost is high. Kept as a setting (not deleted) so the judgement is one
+    # env var away — note pydantic-settings reads it at startup, so changing it on
+    # Railway needs a RESTART, not just a redeploy.
+    GEMINI_TIMEOUT_MAX_RETRIES: int = 0
+    # Consecutive per-call timeouts (no success in between) before the integration
+    # escalates from WARNING to a single ERROR. Individual timeouts are WARNING so
+    # they stop paging Sentry; this is what keeps a SUSTAINED outage visible without
+    # emitting one issue per call.
+    GEMINI_TIMEOUT_ALERT_STREAK: int = 5
 
     # Bounded concurrency for research-report generation. A single user may
     # have at most MAX_CONCURRENT_REPORTS_PER_USER reports in flight

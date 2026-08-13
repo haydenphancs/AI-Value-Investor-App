@@ -47,10 +47,20 @@ from app.services.notification_inbox_service import (
     NotificationInboxUnavailable,
     get_notification_inbox_service,
 )
+from app.utils.supabase_errors import is_unique_violation
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: Bounded re-read attempts for the guest→account portfolio move. The window
+#: between reading the account's portfolio NAMES and the UPDATE that re-points the
+#: guest's rows is real: `_seed_default_portfolio` can insert "Holdings" inside it
+#: (iOS fires GET /portfolios from TrackingViewModel.init while
+#: AppState.onAuthenticated fires the claim), producing 23505 on
+#: portfolios_user_id_name_key — the `/users/me/claim-guest-data` Sentry issue.
+#: Small and bounded: each attempt re-reads, so it converges rather than looping.
+_CLAIM_PORTFOLIO_ATTEMPTS = 3
 
 
 def _now_iso() -> str:
@@ -411,26 +421,55 @@ async def claim_guest_data(
             (str(r["id"]) for r in guest_pf if r.get("is_active")), None
         )
         if guest_pf:
-            owned_pf = {
-                r["name"]: r["id"] for r in (
-                    supabase.table("portfolios").select("id,name")
-                    .eq("user_id", user_id).execute().data or []
-                )
-            }
-            movable = [r["id"] for r in guest_pf if r.get("name") not in owned_pf]
-            if movable:
-                # ⚠️ `is_active` must be cleared IN THE SAME UPDATE that re-points the row.
-                # `idx_portfolios_one_active_per_user` (migration 126) is a partial UNIQUE
-                # index on `user_id WHERE is_active`, and a guest who used the Assets tab
-                # always has an active group — so moving it onto an account that also has
-                # one raises 23505. That is the exact failure mode this whole block was
-                # rewritten to fix once already: one shared `try` means the exception
-                # skips every later claim step, silently losing Learn progress, research
-                # reports and chat sessions.
-                supabase.table("portfolios").update(
-                    {"user_id": user_id, "is_active": False}
-                ).in_("id", movable).execute()
-                claimed["portfolios"] = len(movable)
+            owned_pf: dict = {}
+            for attempt in range(_CLAIM_PORTFOLIO_ATTEMPTS):
+                # RE-READ on every attempt — this is what makes the retry converge.
+                # `_seed_default_portfolio` (portfolios.py) can insert "Holdings" for
+                # THIS account between this read and the UPDATE below: iOS fires
+                # GET /portfolios from TrackingViewModel.init while
+                # AppState.onAuthenticated fires this claim. A blind replay of the
+                # same `movable` list would just collide again; re-reading drops the
+                # newly-conflicting name into the merge path instead.
+                owned_pf = {
+                    r["name"]: r["id"] for r in (
+                        supabase.table("portfolios").select("id,name")
+                        .eq("user_id", user_id).execute().data or []
+                    )
+                }
+                movable = [r["id"] for r in guest_pf if r.get("name") not in owned_pf]
+                if not movable:
+                    break
+                try:
+                    # ⚠️ `is_active` must be cleared IN THE SAME UPDATE that re-points the row.
+                    # `idx_portfolios_one_active_per_user` (migration 126) is a partial UNIQUE
+                    # index on `user_id WHERE is_active`, and a guest who used the Assets tab
+                    # always has an active group — so moving it onto an account that also has
+                    # one raises 23505. That is the exact failure mode this whole block was
+                    # rewritten to fix once already: one shared `try` means the exception
+                    # skips every later claim step, silently losing Learn progress, research
+                    # reports and chat sessions.
+                    #
+                    # A PostgREST UPDATE is ONE SQL statement, so it is all-or-nothing —
+                    # there is no partial move to reconcile before retrying.
+                    supabase.table("portfolios").update(
+                        {"user_id": user_id, "is_active": False}
+                    ).in_("id", movable).execute()
+                    claimed["portfolios"] = len(movable)
+                    break
+                except Exception as e:
+                    if (
+                        not is_unique_violation(e)
+                        or attempt == _CLAIM_PORTFOLIO_ATTEMPTS - 1
+                    ):
+                        # Not a race, or out of attempts → let the per-step handler
+                        # record it; the four OTHER claim steps still run.
+                        raise
+                    logger.warning(
+                        "Guest-data claim: portfolio move hit a unique violation for "
+                        "user=%s (concurrent seed) — re-reading owned names and "
+                        "retrying (%d/%d)",
+                        user_id, attempt + 1, _CLAIM_PORTFOLIO_ATTEMPTS,
+                    )
 
             for row in guest_pf:
                 target_id = owned_pf.get(row.get("name"))

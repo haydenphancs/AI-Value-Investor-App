@@ -40,6 +40,7 @@ from app.dependencies import get_watchlist_identity
 from app.schemas.tracking import PortfolioInsightsResponse
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import invalidate_feed_cache
+from app.utils.supabase_errors import is_unique_violation
 
 logger = logging.getLogger(__name__)
 
@@ -208,19 +209,68 @@ def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
     # Seeded ACTIVE: this is the user's only group, so it is by definition the one Home,
     # Updates and Tracking should follow. Leaving it inactive would leave every surface
     # falling back until the user happened to open Tracking and pick one.
-    portfolio_row = (
-        supabase.table("portfolios")
-        .insert(
-            {
-                "user_id": user_id,
-                "name": "Holdings",
-                "sort_order": 0,
-                "is_active": True,
-            }
+    try:
+        inserted = (
+            supabase.table("portfolios")
+            .insert(
+                {
+                    "user_id": user_id,
+                    "name": "Holdings",
+                    "sort_order": 0,
+                    "is_active": True,
+                }
+            )
+            .execute()
+            .data
         )
-        .execute()
-        .data[0]
-    )
+    except Exception as e:
+        # Only a UNIQUE violation is survivable here. Anything else re-raises —
+        # this must not become a generic error-swallower.
+        if not is_unique_violation(e):
+            raise
+        inserted = None
+
+    if not inserted:
+        # RACE: someone else created "Holdings" for this user between the
+        # zero-row `_fetch_user_portfolios` above and this insert. Two real
+        # producers, both observed in production:
+        #   * a concurrent GET /portfolios — ContentView mounts every tab at
+        #     launch, so TrackingViewModel.init and the Home fetch both hit this
+        #     route (the same window `_backfill_lone_empty_portfolio` documents);
+        #   * POST /users/me/claim-guest-data moving the guest's "Holdings" over.
+        # Adopting the winner beats 500-ing GET /api/v1/portfolios, which is what
+        # the bare `.data[0]` used to do.
+        existing = (
+            supabase.table("portfolios")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("name", "Holdings")
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not existing:
+            # The 23505 was on some OTHER constraint — do NOT swallow it.
+            raise RuntimeError(
+                f"portfolios: 'Holdings' insert hit a unique violation for "
+                f"user={user_id} but no such row exists — the constraint was not "
+                f"portfolios_user_id_name_key"
+            )
+        logger.info(
+            "portfolios: concurrent seed for user=%s — adopting the existing "
+            "'Holdings' group; items are left to the winner",
+            user_id,
+        )
+        # Deliberately NOT falling through to the item insert: those rows would
+        # collide on portfolio_items_portfolio_id_ticker_key against whatever the
+        # winner wrote. If the winner seeded an EMPTY group (it read the watchlist
+        # before onboarding wrote to it), `_backfill_lone_empty_portfolio` repairs
+        # it on the next GET /portfolios — that heal already exists, so there is
+        # no second repair path to maintain here.
+        return
+
+    portfolio_row = inserted[0]
 
     if seed_rows:
         item_rows = [

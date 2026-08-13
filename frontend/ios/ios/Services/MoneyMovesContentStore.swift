@@ -102,6 +102,17 @@ final class MoneyMovesContentStore {
         prefetchTask = nil
     }
 
+    /// Re-fetch even though this session already has content.
+    ///
+    /// Exists because the narration `audioUrl`s are now SIGNED and expiring. `didPrefetch`
+    /// latches once per session and never ages out, so an app foregrounded past a signature's
+    /// life would hold dead URLs with no way back but a relaunch. `AudioManager` calls this
+    /// once on a Money Moves playback failure before surfacing the error.
+    func forceRefresh() async {
+        didPrefetch = false
+        await prefetch()
+    }
+
     private func loadRemote() async {
         do {
             let response = try await APIClient.shared.request(

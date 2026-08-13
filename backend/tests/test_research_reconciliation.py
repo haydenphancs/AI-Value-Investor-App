@@ -363,3 +363,117 @@ async def test_worker_except_then_sweep_refunds_exactly_once():
 
     assert result == {"stuck": 0, "refunded": 0}  # nothing left to claim
     assert FakeCreditService.calls == [("u1", 5)]  # exactly one refund total
+
+
+# ── Transient Supabase failure on the sweep's lookup ─────────────────────────
+#
+# Supabase sits behind Cloudflare; a 520/525 edge page makes postgrest raise
+# APIError('JSON could not be generated'). This sweep is the ONLY mechanism that
+# refunds credits for reports killed mid-flight, so losing a pass to a blip leaves
+# paid-for orphans un-refunded — and it logged at ERROR, opening a Sentry issue for
+# an upstream hiccup ("research reconciliation sweep: lookup failed: APIError:
+# Error 520:").
+
+
+def _gateway_error(status: int = 520):
+    from postgrest.exceptions import APIError, generate_default_error_message
+
+    class _R:
+        status_code = status
+        content = b"<!DOCTYPE html><title>520: Web server is returning an unknown error</title>"
+
+    return APIError(generate_default_error_message(_R()))
+
+
+class _FlakyLookupSupabase(FakeSupabase):
+    """Raises a scripted error on the first N `research_reports` SELECTs."""
+
+    def __init__(self, rows, script):
+        super().__init__(rows)
+        self.script = list(script)
+        self.select_calls = 0
+
+    def table(self, name):
+        q = super().table(name)
+        outer = self
+
+        class _Flaky(type(q)):  # noqa: N801
+            def execute(self):
+                if self._op == "select":
+                    outer.select_calls += 1
+                    if outer.script:
+                        exc = outer.script.pop(0)
+                        if exc is not None:
+                            raise exc
+                return super().execute()
+
+        q.__class__ = _Flaky
+        return q
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    from app.utils import supabase_errors as se
+
+    async def _instant(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(se.asyncio, "sleep", _instant)
+
+
+@pytest.mark.asyncio
+async def test_sweep_retries_a_transient_lookup_then_proceeds():
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    old = (now - timedelta(seconds=recon.RECON_STUCK_THRESHOLD_SECONDS + 60)).isoformat()
+    # STARTED-and-hung, so it is genuinely claimable (a row with no
+    # processing_started_at is still legitimately queued behind the semaphore).
+    rows = [_row(id="r1", created_at=old, processing_started_at=old)]
+    sb = _FlakyLookupSupabase(rows, [_gateway_error(520), None])
+
+    result = await recon.sweep_once(now=now, supabase=sb)
+
+    assert sb.select_calls >= 2, "the 520 was not retried"
+    assert result == {"stuck": 1, "refunded": 1}, "the orphan was not recovered"
+    assert FakeCreditService.calls == [("u1", 5)]
+
+
+@pytest.mark.asyncio
+async def test_sweep_warns_rather_than_errors_on_a_persistent_transient(caplog):
+    import logging
+
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    sb = _FlakyLookupSupabase([_row()], [_gateway_error(520)] * 10)
+
+    with caplog.at_level(logging.DEBUG, logger=recon.logger.name):
+        result = await recon.sweep_once(now=now, supabase=sb)
+
+    assert result == {"stuck": 0, "refunded": 0}  # degrades, never raises
+    hits = [r for r in caplog.records if "lookup failed" in r.getMessage()]
+    assert hits and all(r.levelno == logging.WARNING for r in hits)
+
+
+@pytest.mark.asyncio
+async def test_sweep_still_errors_with_a_stack_for_a_real_bug(caplog):
+    """Negative control: the demotion must stay scoped to transients."""
+    import logging
+
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    sb = _FlakyLookupSupabase([_row()], [KeyError("status")])
+
+    with caplog.at_level(logging.DEBUG, logger=recon.logger.name):
+        result = await recon.sweep_once(now=now, supabase=sb)
+
+    assert result == {"stuck": 0, "refunded": 0}
+    hits = [r for r in caplog.records if "lookup failed" in r.getMessage()]
+    assert hits and hits[0].levelno == logging.ERROR
+    assert hits[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_not_retry_a_non_transient_lookup_failure():
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    sb = _FlakyLookupSupabase([_row()], [KeyError("status"), None])
+
+    await recon.sweep_once(now=now, supabase=sb)
+
+    assert sb.select_calls == 1

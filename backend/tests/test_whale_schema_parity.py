@@ -37,6 +37,10 @@ def test_trending_whale_response_keys_match_ios_dto():
         # Pro/Max follow gate — defaulted here, Optional in the Swift DTO, so a new
         # backend and an old app (and vice-versa) both keep decoding.
         "is_locked",
+        # "you follow this, your plan doesn't surface it" — the followed-avatar row reads
+        # this so it stops disagreeing with the truncated activity feed. Same
+        # defaulted-here / Optional-there contract as `is_locked`.
+        "is_following_inactive",
     }
 
 

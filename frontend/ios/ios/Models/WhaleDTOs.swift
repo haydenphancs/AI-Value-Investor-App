@@ -28,6 +28,10 @@ struct TrendingWhaleDTO: Codable, Identifiable {
     /// locks. Optional so an older backend reads as absent → `?? false` → unlocked, i.e.
     /// exactly today's behaviour rather than a phantom lock.
     let isLocked: Bool?
+    /// The caller follows this whale but their plan doesn't surface it (the activity feed
+    /// truncates to the covered subset). Optional for the same reason as `isLocked`: an
+    /// older backend reads as absent → `?? false` → today's behaviour, no phantom badge.
+    let isFollowingInactive: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id, name, category, title, description
@@ -37,6 +41,7 @@ struct TrendingWhaleDTO: Codable, Identifiable {
         case recentTradeCount = "recent_trade_count"
         case firmName = "firm_name"
         case isLocked = "is_locked"
+        case isFollowingInactive = "is_following_inactive"
     }
 
     func toTrendingWhale() -> TrendingWhale {
@@ -51,7 +56,8 @@ struct TrendingWhaleDTO: Codable, Identifiable {
             description: description,
             recentTradeCount: recentTradeCount,
             firmName: firmName,
-            isLocked: isLocked ?? false
+            isLocked: isLocked ?? false,
+            isFollowingInactive: isFollowingInactive ?? false
         )
     }
 }

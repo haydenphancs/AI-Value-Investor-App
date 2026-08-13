@@ -31,3 +31,13 @@ class JourneyResponse(BaseModel):
     """All Investor Journey lessons, ordered by level then sort_order."""
 
     lessons: List[JourneyLessonResponse]
+
+    # ── Narration gate (services/entitlements.learn_audio_unlocked) ──────────
+    # TEXT is free on every tier; the produced narration is Pro/Max. When locked,
+    # each card's `audioUrl` and `readAlongWords` are stripped server-side, so the
+    # client renders the full lesson as unhighlighted prose and shows a lock on the
+    # play control instead of a silent, broken one.
+    #
+    # Defaulted so an already-shipped build decodes this response unchanged.
+    audio_locked: bool = False
+    tier_required: Optional[str] = None      # "pro" when locked

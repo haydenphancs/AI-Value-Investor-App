@@ -426,6 +426,11 @@ struct BookCoreDetailView: View {
             // Follow the audio: if it leaves the core we're viewing, open the next one.
             autoAdvanceReading(from: oldTime, to: newTime)
         }
+        // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
+        // an upgrade, so this presenter is what turns that into the plan sheet. Needed on
+        // each screen because these are fullScreenCovers — a modifier on the presenter
+        // does not reach them.
+        .learnAudioPaywall()
     }
 
     // MARK: - Whole-book finale
@@ -755,6 +760,7 @@ private struct CoreDetailScrollOffsetKey: PreferenceKey {
 
 // MARK: - Header Section
 private struct CoreDetailHeaderSection: View {
+    @ObservedObject private var entitlement = LearnAudioEntitlement.shared
     @EnvironmentObject private var audioManager: AudioManager
     let content: CoreChapterContent
     let book: LibraryBook
@@ -797,8 +803,11 @@ private struct CoreDetailHeaderSection: View {
                 // Direct Play button
                 Button(action: handleDirectPlay) {
                     HStack(spacing: AppSpacing.xs) {
-                        Image(systemName: isThisCoreAudioPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        Image(systemName: entitlement.isLocked(bookEpisode)
+                              ? "lock.circle.fill"
+                              : (isThisCoreAudioPlaying ? "pause.circle.fill" : "play.circle.fill"))
                             .font(AppTypography.iconXL).fontWeight(.medium)
+                            // Text-role token — must clear 4.5:1 in both appearances.
                             .foregroundColor(AppColors.primaryBlue)
                     }
                 }

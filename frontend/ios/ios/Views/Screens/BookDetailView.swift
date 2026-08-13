@@ -212,6 +212,11 @@ struct BookDetailView: View {
                 Haptics.success()
             }
         }
+        // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
+        // an upgrade, so this presenter is what turns that into the plan sheet. Needed on
+        // each screen because these are fullScreenCovers — a modifier on the presenter
+        // does not reach them.
+        .learnAudioPaywall()
     }
 }
 
@@ -416,6 +421,7 @@ private struct BookDetailBadge: View {
 
 // MARK: - Listen Row
 private struct BookDetailListenRow: View {
+    @ObservedObject private var entitlement = LearnAudioEntitlement.shared
     @EnvironmentObject private var audioManager: AudioManager
     @ObservedObject private var progress = BookProgressStore.shared
     let book: LibraryBook
@@ -480,7 +486,11 @@ private struct BookDetailListenRow: View {
                             .fill(AppColors.textPrimary)
                             .frame(width: 48, height: 48)
 
-                        Image(systemName: isResumeCorePlaying ? "pause.fill" : "play.fill")
+                        // Book narration is Pro/Max. AudioManager refuses a locked episode
+                        // and raises the paywall, so the row stays tappable and reads as an
+                        // offer rather than a dead play button.
+                        Image(systemName: entitlement.isLocked(bookAudioEpisode)
+                              ? "lock.fill" : (isResumeCorePlaying ? "pause.fill" : "play.fill"))
                             .font(AppTypography.iconMedium).fontWeight(.bold)
                             .foregroundColor(AppColors.background)
                             .offset(x: isResumeCorePlaying ? 0 : 2)

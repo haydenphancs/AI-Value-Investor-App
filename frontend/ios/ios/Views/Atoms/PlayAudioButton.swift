@@ -10,6 +10,7 @@ import SwiftUI
 
 struct PlayAudioButton: View {
     @EnvironmentObject private var audioManager: AudioManager
+    @ObservedObject private var entitlement = LearnAudioEntitlement.shared
     let episode: AudioEpisode
     var style: Style = .primary
     var size: Size = .medium
@@ -53,9 +54,12 @@ struct PlayAudioButton: View {
     var body: some View {
         Button(action: handleTap) {
             HStack(spacing: AppSpacing.sm) {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                // Narration is Pro/Max. The engine refuses a locked episode and raises the
+                // paywall (see LearnAudioEntitlement), so the control stays tappable — it just
+                // has to LOOK like an offer rather than a broken play button.
+                Image(systemName: isLocked ? "lock.fill" : (isPlaying ? "pause.fill" : "play.fill"))
                     .font(.system(size: size.iconSize, weight: .semibold))
-                    .offset(x: isPlaying ? 0 : 1)
+                    .offset(x: (isPlaying || isLocked) ? 0 : 1)
 
                 if style != .minimal {
                     Text(buttonLabel)
@@ -71,8 +75,13 @@ struct PlayAudioButton: View {
         .buttonStyle(PlainButtonStyle())
     }
 
+    /// Whether this episode's narration is behind the caller's plan.
+    private var isLocked: Bool { entitlement.isLocked(episode) }
+
     private var buttonLabel: String {
-        if isPlaying {
+        if isLocked {
+            return "Listen"          // the offer, not an error — the tap opens the plan sheet
+        } else if isPlaying {
             return "Pause"
         } else if isCurrentEpisode && audioManager.playbackState == .paused {
             return "Resume"
@@ -121,6 +130,7 @@ struct PlayAudioButton: View {
 // MARK: - Large Play Button (for hero cards)
 struct LargePlayButton: View {
     @EnvironmentObject private var audioManager: AudioManager
+    @ObservedObject private var entitlement = LearnAudioEntitlement.shared
     let episode: AudioEpisode
     var showLabel: Bool = true
 
@@ -140,7 +150,8 @@ struct LargePlayButton: View {
                         .fill(AppColors.mediaSurface)
                         .frame(width: 48, height: 48)
 
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: entitlement.isLocked(episode)
+                          ? "lock.fill" : (isPlaying ? "pause.fill" : "play.fill"))
                         .font(AppTypography.iconMedium).fontWeight(.bold)
                         // NOT `AppColors.background`: that is #F4F5F8 in light, so this
                         // play triangle measured 1.09:1 on its own white circle and was
@@ -153,7 +164,8 @@ struct LargePlayButton: View {
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                         // Sits on the article hero gradient, not on the page — so this is
                         // on-accent ink, constant in both appearances.
-                        Text(isPlaying ? "Now Playing" : "Listen Now")
+                        Text(entitlement.isLocked(episode)
+                             ? "Listen with Pro" : (isPlaying ? "Now Playing" : "Listen Now"))
                             .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textOnAccent)
 

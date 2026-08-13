@@ -10,7 +10,7 @@ keys). We pass `content` through as-is — overlaying the row's audio_url column
 narration voice exists — so the iOS Codable models decode it directly.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -23,3 +23,18 @@ class MoneyMovesResponse(BaseModel):
     """
 
     articles: List[Dict[str, Any]]
+
+    # ── Narration gate (services/entitlements.learn_audio_unlocked) ──────────
+    # TEXT is free on every tier; narration is Pro/Max. When locked, each article's
+    # `audioUrl` / `audioDurationSeconds` and every block's read-along spans are
+    # stripped server-side.
+    #
+    # This is SEPARATE from each article's `hasAudioVersion`, and the distinction is
+    # load-bearing: that flag means "narration exists" and the client hides the Listen
+    # control entirely when it is false. Locked is a third state — narration exists,
+    # you can't play it yet — so it needs its own signal, or the upgrade offer is
+    # invisible on exactly the articles that would sell it.
+    #
+    # Defaulted so an already-shipped build decodes this response unchanged.
+    audio_locked: bool = False
+    tier_required: Optional[str] = None      # "pro" when locked

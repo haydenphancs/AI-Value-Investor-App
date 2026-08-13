@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct LessonTopicCardView: View {
     let storyContent: LessonStoryContent
@@ -17,6 +18,7 @@ struct LessonTopicCardView: View {
     var onLessonCompleted: (() -> Void)?
 
     @StateObject private var voiceManager = AIVoiceManager.shared
+    @ObservedObject private var entitlement = LearnAudioEntitlement.shared
     @State private var currentIndex: Int = 0
     @State private var cardProgress: CGFloat = 0
     @State private var dragOffset: CGFloat = 0
@@ -109,6 +111,11 @@ struct LessonTopicCardView: View {
                 cardProgress = newProgress
             }
         }
+        // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
+        // an upgrade, so this presenter is what turns that into the plan sheet. Needed on
+        // each screen because these are fullScreenCovers — a modifier on the presenter
+        // does not reach them.
+        .learnAudioPaywall()
     }
 
     // MARK: - Computed Properties
@@ -222,7 +229,9 @@ struct LessonTopicCardView: View {
                         .fill(AppColors.textPrimary.opacity(0.1))
                         .frame(width: 44, height: 44)
 
-                    Image(systemName: voiceManager.isPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: entitlement.isUnlocked
+                          ? (voiceManager.isPlaying ? "pause.fill" : "play.fill")
+                          : "lock.fill")
                         .font(AppTypography.iconDefault).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
@@ -254,6 +263,18 @@ struct LessonTopicCardView: View {
 
         guard !isCompletionCard else {
             // No voice for the completion card; show its progress segment full.
+            cardProgress = 1.0
+            return
+        }
+
+        // Narration is Pro/Max — and this method runs from `.onAppear` and on EVERY card
+        // change, so without this a locked learner would be narrated at with no tap at all.
+        // Placed AFTER `markLessonCompletedOnce()` above on purpose: completion is driven by
+        // reaching the last card, not by audio, and must keep working on every tier.
+        guard entitlement.isUnlocked else {
+            // Full segment so the Stories progress bar doesn't sit frozen at zero — with no
+            // audio there is no playback clock to drive it, and a stuck bar reads as broken
+            // rather than as unnarrated.
             cardProgress = 1.0
             return
         }
@@ -357,6 +378,15 @@ struct LessonTopicCardView: View {
     }
 
     private func togglePlayPause() {
+        // A TAP asks for the paywall; the `.onAppear` auto-play path in
+        // `startReadingCurrentCard` deliberately does NOT — a plan sheet presenting itself
+        // the instant a locked learner opens any lesson, before they touched anything,
+        // would be an ambush rather than an offer. `resume()` would also be a no-op here,
+        // because the engine refused the clip that never started.
+        guard entitlement.isUnlocked else {
+            LearnAudioEntitlement.shared.upgradeRequested.send()
+            return
+        }
         if voiceManager.isPlaying {
             voiceManager.pause()
             stopAutoAdvanceTimer()

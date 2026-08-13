@@ -449,6 +449,11 @@ final class AppState {
     func applyProfile(_ profile: UserProfile) {
         user.profile = profile
         user.tier = UserTier(rawValue: profile.tier) ?? .free
+        // Push the tier to the audio engines. They are services, not views, so they cannot
+        // read `@Environment(AppState.self)` — and the gate has to live at the engines
+        // because Journey narrates from `.onAppear` with no button to guard. One assignment
+        // point in, one push out.
+        LearnAudioEntitlement.shared.update(tier: user.tier)
     }
 
     /// Post-authentication side effects: claim guest data, refresh credits, pull synced settings.
@@ -712,6 +717,10 @@ final class AppState {
         // phone, saw A's followed investors — and any list the server hadn't yet reconciled
         // stayed wrong. Same bug class, same fix, one funnel.
         WhaleService.shared.reset()
+        // Narration entitlement is device-global state in the same sense: the ended session's
+        // tier must not carry into the next account, and any Learn audio still playing is
+        // now unentitled. `.free` is the safe direction — it locks, never unlocks.
+        LearnAudioEntitlement.shared.update(tier: .free)
 
         // Everything below used to sit OUTSIDE this funnel, called only from `signOut()`. That
         // covered exactly one of the three ways a session ends — the other two (a dead access

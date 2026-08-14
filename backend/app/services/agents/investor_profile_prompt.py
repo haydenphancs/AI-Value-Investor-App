@@ -30,7 +30,7 @@ the block's own trailer, because the model reads the trailer closest to the data
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.services.user_investor_profile_service import DEFAULTS
 
@@ -159,6 +159,54 @@ def render_profile_block(profile: Optional[Dict[str, Any]]) -> str:
     if not lines:
         return ""
     return _HEADER + "\n".join(lines) + "\n" + _TRAILER
+
+
+_THEME_LABEL: Dict[str, str] = {
+    "valuation": "valuation",
+    "technicals": "charts and technicals",
+    "fundamentals": "company fundamentals",
+    "macro": "the economy",
+    "sentiment": "market sentiment",
+    "education": "how investing concepts work",
+}
+
+
+def render_memory_block(facts: Optional[Dict[str, Any]]) -> str:
+    """Cross-session memory → a short block. PURE. "" when there is nothing.
+
+    Both inputs come from closed vocabularies (validated ticker symbols; chat specialist
+    keys), so like the preference block this is server-authored text and needs no fence.
+    A ticker is the one value that is not enumerable in advance, which is why it is
+    regex-validated at three points — write, read, and here.
+
+    Framed as WHAT THE READER ASKED ABOUT, never as what they own. The app does not know
+    anyone's holdings, and "you've been looking at NVDA" must not drift into "your NVDA
+    position" — that would be inventing a fact about their money.
+    """
+    if not isinstance(facts, dict):
+        return ""
+    lines: List[str] = []
+
+    tickers = [t for t in (facts.get("ticker_discussed") or []) if isinstance(t, str)]
+    if tickers:
+        lines.append(
+            f"- Recently asked about: {', '.join(tickers[:6])}. Mentioning one of these "
+            f"when it is genuinely relevant is fine; do not assume they own any of them."
+        )
+
+    themes = [
+        _THEME_LABEL[t] for t in (facts.get("question_theme") or [])
+        if isinstance(t, str) and t in _THEME_LABEL
+    ]
+    if themes:
+        lines.append(f"- Usually asks about: {', '.join(themes[:3])}.")
+
+    if not lines:
+        return ""
+    return (
+        "\nWHAT THEY HAVE BEEN ASKING ABOUT (across earlier conversations — topics only, "
+        "not holdings):\n" + "\n".join(lines) + "\n"
+    )
 
 
 def may_apply_profile(profile: Optional[Dict[str, Any]], tier: Optional[str]) -> bool:

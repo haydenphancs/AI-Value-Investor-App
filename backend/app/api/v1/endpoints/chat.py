@@ -285,6 +285,57 @@ def _session_type_for(context_type: Optional[str], stock_id: Optional[str]) -> s
     return "STOCK" if stock_id else "NORMAL"
 
 
+def _record_memory_facts(user: dict, stock_id: Optional[str], route: Optional[dict]) -> None:
+    """Record what this turn was about. Best-effort, AFTER delivery. NEVER raises.
+
+    Costs no LLM: both values were already computed for this turn — the router picked the
+    specialist to shape the prompt, and the session carries the ticker. They were simply
+    being discarded. Nothing here reads the user's text, which is what keeps the stored
+    values inside a closed vocabulary and therefore safe to render unfenced later.
+
+    Gated identically to the reading side, including CONSENT: memory is observed rather
+    than stated, so it must not accumulate for a reader who declined personalization.
+    """
+    try:
+        from app.config import settings
+        from app.services.agents.investor_profile_prompt import may_apply_profile
+        from app.services.entitlements import signals_unlocked
+        from app.services.user_investor_profile_service import (
+            get_user_investor_profile_service,
+        )
+        from app.services.user_memory_facts_service import (
+            FACT_THEME,
+            FACT_TICKER,
+            get_user_memory_facts_service,
+        )
+
+        if not settings.CHAT_MEMORY_FACTS_ENABLED:
+            return
+        if user.get("is_guest") or not signals_unlocked(user.get("tier")):
+            return
+
+        pairs = []
+        if stock_id:
+            pairs.append((FACT_TICKER, stock_id))
+        specialists = (route or {}).get("specialists") or []
+        if specialists:
+            pairs.append((FACT_THEME, specialists[0]))
+        if not pairs:
+            return
+
+        # Consent is checked against the stored profile, not inferred — same gate the
+        # reading side uses, so the two can never disagree about who opted in.
+        profile = get_user_investor_profile_service().get_profile(user["id"])
+        if not may_apply_profile(profile, user.get("tier")):
+            return
+        get_user_memory_facts_service().record(user["id"], pairs)
+    except Exception as e:  # noqa: BLE001 — the turn is already delivered
+        logger.warning(
+            "Memory fact recording failed for user=%s (%s: %s)",
+            user.get("id"), type(e).__name__, e,
+        )
+
+
 def _reader_lens_for(user: dict) -> Optional[str]:
     """The reader's rendered preference block for this turn, or None. NEVER raises.
 
@@ -307,7 +358,22 @@ def _reader_lens_for(user: dict) -> Optional[str]:
         if not settings.CHAT_PERSONALIZATION_ENABLED or not signals_unlocked(user.get("tier")):
             return None
         profile = get_user_investor_profile_service().get_profile(user["id"])
-        return resolve_reader_lens(profile, user.get("tier"))
+        lens = resolve_reader_lens(profile, user.get("tier"))
+        if lens is None:
+            # The four-arm gate refused (no consent, empty profile, …). Memory rides the
+            # SAME consent: it is observed rather than stated, so it must not apply to a
+            # reader who declined personalization.
+            return None
+
+        if settings.CHAT_MEMORY_FACTS_ENABLED:
+            from app.services.agents.investor_profile_prompt import render_memory_block
+            from app.services.user_memory_facts_service import (
+                get_user_memory_facts_service,
+            )
+
+            facts = get_user_memory_facts_service().top_facts(user["id"])
+            lens += render_memory_block(facts)
+        return lens
     except Exception as e:  # noqa: BLE001 — never let a preference break an answer
         logger.warning(
             "Reader lens unavailable for user=%s (%s: %s) — answering unpersonalized",
@@ -622,6 +688,9 @@ async def send_chat_message(
         # finally must NOT refund (a disconnect during the best-effort session/token steps
         # below is not a failed turn).
         delivered = True
+        # Off the hot path by construction: the answer is already persisted, so a failure
+        # here cannot affect the turn. (No router on this path — only the ticker is known.)
+        _record_memory_facts(user, session.data.get("stock_id"), None)
         # Zero Gemini cost (deep-dive cache HIT) → refund the charge: the user still got the
         # answer, but we don't bill a turn that incurred no AI cost. `== 0` (not falsy) so a
         # real generation reporting None/unknown usage is never wrongly refunded.
@@ -1034,6 +1103,8 @@ async def stream_chat_message(
             # Durably persisted → delivered. The finally backstop must not refund past this
             # point (a disconnect during the best-effort steps below is not a failed turn).
             delivered = True
+            # After persistence, so a memory write can never cost the reader an answer.
+            _record_memory_facts(user, stock_id, route)
             # Zero Gemini cost (deep-dive cache HIT via the fallback) → refund the charge.
             # `== 0` (not falsy) so a normal stream (tokens_used=None) is never refunded.
             if tokens_used == 0:

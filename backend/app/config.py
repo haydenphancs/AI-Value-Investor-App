@@ -446,6 +446,16 @@ class Settings(BaseSettings):
     # have it", this answers "does the feature exist yet".
     CHAT_PERSONALIZATION_ENABLED: bool = False
 
+    # Cross-session memory (rung 2): what the reader has been asking about, carried
+    # between conversations. Costs no LLM — both facts are already computed each turn
+    # (the router's specialist, the session's ticker) and were simply being discarded.
+    #
+    # Separate from CHAT_PERSONALIZATION_ENABLED so the two can be judged apart: the
+    # preference block is something the reader TOLD us, this is something we OBSERVED,
+    # and a reader may reasonably feel differently about the second. It is gated behind
+    # the same tier + consent checks regardless, so this flag can only ever narrow.
+    CHAT_MEMORY_FACTS_ENABLED: bool = False
+
     # ── Chat security / abuse & cost controls (denial-of-wallet, OWASP LLM10) ──
     # Input hygiene: a normalized+stripped user message over CHAT_MESSAGE_MAX_CHARS
     # is rejected with a friendly CHAT_MESSAGE_TOO_LONG (the Pydantic HARD_MAX is a

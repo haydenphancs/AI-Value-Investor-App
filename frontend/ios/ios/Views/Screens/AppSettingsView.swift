@@ -146,6 +146,33 @@ struct AppSettingsView: View {
                 selection: $defaultPersona
             )
 
+            // The editor the consent row's copy has always pointed at. Until now these
+            // questions were asked once during first-run onboarding and were then
+            // unreachable for the life of the install — so "add some interests in
+            // Settings" was an instruction nobody could follow, and a reader who skipped
+            // onboarding had no way to make the feature they consented to do anything.
+            NavigationLink {
+                InvestorPreferencesView()
+            } label: {
+                HStack {
+                    settingsLabel(
+                        title: "Learning Preferences",
+                        subtitle: "How Cay AI explains things to you"
+                    )
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.iconXS)
+                        .foregroundColor(AppColors.textMuted)
+                }
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.vertical, AppSpacing.md)
+                .background(AppColors.cardBackground)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+            // Re-read on return so the consent row's status reflects an edit made above.
+            .onDisappear { Task { await personalizationConsent.load() } }
+
             // Explicit, revocable opt-in. NOT a local @AppStorage toggle: the consent
             // record lives on the server (`user_investor_profile.consented_at`) because
             // that is what the backend actually checks before personalizing, and a

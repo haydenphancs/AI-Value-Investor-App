@@ -426,8 +426,12 @@ class Settings(BaseSettings):
     # `_condense_history` fires a flash-lite call on EVERY turn once a chat passes
     # `_RECENT_TURNS`, re-summarising almost the same older messages each time. The
     # summary is persisted on the session and refreshed only after this many new
-    # messages have entered the older slice — so the cost becomes one call per N turns
-    # instead of one per turn, and a serial LLM hop leaves the time-to-first-token path.
+    # MESSAGES have entered the older slice. One chat TURN writes two messages (the user's
+    # and the assistant's), so this value is a message count and the cadence it buys is
+    # N/2 turns — 4 here means one summariser call every 2 turns, not every 4. The comment
+    # here and in migration 130 both said "one call per N turns", overstating the saving 2x.
+    # Left at 4 deliberately: halving the LLM calls is still the win, and a longer watermark
+    # trades bounded staleness in the summary for a smaller one.
     # The trade is bounded staleness in the SUMMARY only; the recent turns are always
     # verbatim, so nothing the user just said can be stale.
     CHAT_SUMMARY_REFRESH_AFTER_MESSAGES: int = 4

@@ -93,7 +93,14 @@ def sanitize_facts(pairs: Iterable[Tuple[str, Any]]) -> List[Tuple[str, str]]:
     # `pairs` is caller-supplied and this function promises never to raise: a non-iterable
     # (an int, None) would otherwise blow up on the `for`, on a path whose whole contract
     # is that it degrades quietly.
-    if not isinstance(pairs, (list, tuple, set, frozenset)):
+    # Honour the `Iterable` in the signature. The old guard whitelisted four concrete
+    # types, so a generator, `dict.items()`, `zip` or `map` — every one of them a valid
+    # `Iterable[Tuple[str, Any]]` — fell straight through to an empty result with NO log,
+    # indistinguishable from "nothing to record". A trap for the next caller rather than a
+    # live bug, since the one production call site builds a list.
+    try:
+        pairs = list(pairs)
+    except TypeError:
         return out
     for pair in pairs:
         if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -172,14 +179,33 @@ class UserMemoryFactsService:
         try:
             rows = (
                 self.supabase.table(TABLE)
-                .select("id")
+                .select("id, updated_at")
                 .eq("user_id", user_id)
                 .order("updated_at", desc=True)
                 .execute()
             ).data or []
-            stale = [r["id"] for r in rows[MAX_FACTS_PER_USER:] if r.get("id")]
+            doomed = rows[MAX_FACTS_PER_USER:]
+            stale = [r["id"] for r in doomed if r.get("id")]
             if stale:
-                self.supabase.table(TABLE).delete().in_("id", stale).execute()
+                # SELF-GUARDING DELETE, for two independent reasons.
+                #
+                # `updated_at` bound: the id list comes from a snapshot taken before this
+                # statement runs. A concurrent turn can `record()` one of those exact rows
+                # in the gap, bumping it to NEWEST — and it would still be deleted, so the
+                # fact the reader is actively asking about is the one evicted. Re-checking
+                # the timestamp makes a row that was touched in the interim survive.
+                #
+                # `user_id` filter: `stale` is derived from a user-filtered select today,
+                # so an unfiltered `in_("id", ...)` is safe only by construction. One edit
+                # upstream and this becomes a cross-user delete; the filter costs nothing.
+                cutoff = doomed[0].get("updated_at")
+                q = (
+                    self.supabase.table(TABLE).delete()
+                    .eq("user_id", user_id).in_("id", stale)
+                )
+                if cutoff:
+                    q = q.lte("updated_at", cutoff)
+                q.execute()
         except Exception as e:
             logger.warning(
                 "memory fact eviction failed for user=%s (%s: %s)",

@@ -17,7 +17,7 @@ class _FakeGemini:
         self._raises = raises
         self.embed_task_type = None
 
-    async def generate_text(self, prompt, model_name=None, system_instruction=None):
+    async def generate_text(self, prompt, model_name=None, system_instruction=None, **_kwargs):
         if self._raises:
             raise RuntimeError("router backend down")
         return {"text": self._rewrite}

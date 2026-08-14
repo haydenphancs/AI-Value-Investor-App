@@ -245,6 +245,31 @@ def is_transient_supabase_error(exc: BaseException) -> bool:
     return _walk_chain(exc, _classify_one)
 
 
+#: PostgREST's "column not found in the schema cache" and Postgres's undefined_column.
+#: Both mean the same thing to a caller: the column named in the payload does not exist
+#: on this database yet.
+UNKNOWN_COLUMN_CODES = frozenset({"PGRST204", "42703"})
+
+
+def _is_unknown_column_one(exc: BaseException) -> bool:
+    code = getattr(exc, "code", None)
+    # A `str` code definitionally means PostgREST/Postgres answered structurally — an
+    # `int` code is an edge/origin status (see the module docstring), which is transient
+    # and must NOT be read as "this column is missing".
+    return isinstance(code, str) and code.strip() in UNKNOWN_COLUMN_CODES
+
+
+def is_unknown_column_error(exc: BaseException) -> bool:
+    """True when a write named a column the database does not have.
+
+    Exists so a service can degrade a write across a code-before-migration window rather
+    than failing it outright: the columns that DO exist are still written, and the new one
+    is retried on the next write once the migration lands. Deliberately narrow — it must
+    never swallow a transient edge failure, which is why it keys on a `str` code.
+    """
+    return _walk_chain(exc, _is_unknown_column_one)
+
+
 def _is_unique_violation_one(exc: BaseException) -> bool:
     code = getattr(exc, "code", None)
     return isinstance(code, str) and code.strip() == UNIQUE_VIOLATION_SQLSTATE

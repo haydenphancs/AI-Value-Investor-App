@@ -132,7 +132,7 @@ MEM_FLAG = "app.config.settings.CHAT_MEMORY_FACTS_ENABLED"
 
 def _install_facts(monkeypatch, facts=None, recorded=None):
     class _Svc:
-        def top_facts(self, user_id, limit=8):
+        def top_facts(self, user_id, **_kwargs):
             return dict(facts or {})
 
         def record(self, user_id, pairs):

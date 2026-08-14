@@ -810,3 +810,13 @@ class IdentityOnlyRateLimitChecker(IdentityRateLimitChecker):
 
 
 AnalyticsRateLimit = Depends(IdentityOnlyRateLimitChecker("analytics", 30, 60))
+
+#: The investor-profile routes. Guest-allowed and row-writing, which is the combination
+#: `create_chat_session` already got a limiter for: `user_id` is a uuid5 of the
+#: client-chosen `X-Guest-Id`, so rotating that header mints a fresh identity and an
+#: unthrottled caller could insert unbounded rows that nothing purges (the per-install
+#: bucket is unreachable from account deletion, and `claim-guest-data` can never reclaim a
+#: bucket it does not know about). Identity-ONLY, matching analytics: this must not be able
+#: to 503 a first-run onboarding save because a `public.users` read blipped.
+#: 20/min is far above the UI's ceiling — onboarding writes once, the editor once per Save.
+ProfileRateLimit = Depends(IdentityOnlyRateLimitChecker("investor_profile", 20, 60))

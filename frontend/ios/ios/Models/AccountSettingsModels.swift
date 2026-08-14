@@ -131,6 +131,13 @@ struct ClaimGuestDataResult: Codable, Sendable {
         /// `portfolios` because the row is deleted rather than moved, so folding it into that
         /// counter would make the log read as if a portfolio had been carried across intact.
         let portfoliosMerged: Int?
+        /// Learning preferences (`user_investor_profile`, migration 131). The backend has
+        /// always returned this key in BOTH the normal and early-return dicts and this DTO
+        /// never declared it — so a guest whose only carried-over work was their onboarding
+        /// answers made `didClaimAnything` answer false. Verbatim the same omission the
+        /// `chatSessions` comment above describes, repeated for the newest claim step.
+        /// Optional for the same independent-deploy reason as the others.
+        let investorProfile: Int?
 
         enum CodingKeys: String, CodingKey {
             case watchlistItems = "watchlist_items"
@@ -139,6 +146,7 @@ struct ClaimGuestDataResult: Codable, Sendable {
             case researchReports = "research_reports"
             case chatSessions = "chat_sessions"
             case portfoliosMerged = "portfolios_merged"
+            case investorProfile = "investor_profile"
         }
     }
 
@@ -154,5 +162,6 @@ struct ClaimGuestDataResult: Codable, Sendable {
             || (claimed.learnProgress ?? 0) > 0
             || (claimed.researchReports ?? 0) > 0
             || (claimed.chatSessions ?? 0) > 0
+            || (claimed.investorProfile ?? 0) > 0
     }
 }

@@ -18,6 +18,7 @@ import pytest
 from app.services.agents.chat_specialists import SPECIALIST_KEYS
 from app.services.agents.investor_profile_prompt import render_memory_block
 from app.services.user_memory_facts_service import (
+    _MEANINGFUL_THEMES,
     FACT_THEME,
     FACT_TICKER,
     MAX_FACTS_PER_USER,
@@ -161,6 +162,7 @@ class _Table:
         self._payload = None
         self._filters = {}
         self._in = None
+        self._lte = None
 
     def select(self, *_a, **_k):
         self._op = "select"; return self
@@ -180,8 +182,11 @@ class _Table:
     def in_(self, col, vals):
         self._in = (col, list(vals)); return self
 
-    def order(self, *_a, **_k):
-        return self
+    def lte(self, col, val):
+        self._lte = (col, val); return self
+
+    def order(self, key=None, **_k):
+        self._order = key; return self
 
     def limit(self, n):
         self._limit = n; return self
@@ -200,11 +205,28 @@ class _Table:
             if self._in:
                 _, ids = self._in
                 before = len(self.store)
-                self.store[:] = [r for r in self.store if r["id"] not in ids]
+
+                def _doomed(r):
+                    if r["id"] not in ids:
+                        return False
+                    # Model the WHERE clause faithfully. A fake that ignored `eq`/`lte`
+                    # would keep passing after the production guard was deleted, which is
+                    # the whole failure mode these filters exist to prevent.
+                    if any(r.get(k) != v for k, v in self._filters.items()):
+                        return False
+                    if self._lte:
+                        col, bound = self._lte
+                        if r.get(col) is not None and bound is not None and r[col] > bound:
+                            return False
+                    return True
+
+                self.store[:] = [r for r in self.store if not _doomed(r)]
                 self.log.append(("delete", before - len(self.store)))
             return type("R", (), {"data": []})()
         rows = [r for r in self.store
                 if all(r.get(k) == v for k, v in self._filters.items())]
+        if getattr(self, "_order", None) == "updated_at":
+            rows = sorted(rows, key=lambda r: r.get("updated_at") or "", reverse=True)
         return type("R", (), {"data": rows})()
 
 
@@ -396,3 +418,49 @@ def test_no_valid_value_can_exceed_the_sql_length_cap():
     assert lo <= 1, "validators reject empty, so the lower bound must be reachable at 1"
     assert longest_theme <= hi
     assert 10 <= hi, "a ticker may be up to 10 chars"
+
+
+# ── The two theme vocabularies must not drift ────────────────────────────────
+#
+# `_MEANINGFUL_THEMES` is DERIVED (`SPECIALIST_KEYS - {"general"}`) and decides what gets
+# WRITTEN. `investor_profile_prompt._THEME_LABEL` is HAND-WRITTEN and decides what gets
+# RENDERED. Nothing kept them in step, and migration 132's `fact_value` CHECK is
+# length-only despite its comment claiming the value is "one of SPECIALIST_KEYS" — so the
+# database will not catch a drift either.
+#
+# Adding a chat specialist is a supported operation (`chat_specialists.py` is a registry
+# built for it). The moment one is added: the validator accepts the new key, the CHECK
+# accepts it, `top_facts` returns it and it consumes the `RENDER_LIMITS[question_theme]`
+# slice — and then the renderer silently drops it. A reader whose three most recent themes
+# are all the new specialist loses the "Usually asks about" line ENTIRELY. That is the same
+# crowding-out regression already fixed once for tickers-vs-themes, reachable by a new door.
+
+
+def test_every_writable_theme_has_a_renderable_label():
+    from app.services.agents.investor_profile_prompt import _THEME_LABEL
+
+    unrenderable = sorted(_MEANINGFUL_THEMES - set(_THEME_LABEL))
+    assert not unrenderable, (
+        f"{unrenderable} can be STORED as a question_theme but has no label in "
+        f"investor_profile_prompt._THEME_LABEL, so it would occupy a render slot and then "
+        f"be dropped — silently shortening or emptying the 'Usually asks about' line. "
+        f"Add a label there when adding a chat specialist."
+    )
+
+
+def test_every_renderable_label_is_actually_writable():
+    """The reverse: a label for a theme that can never be stored is dead weight, and
+    usually means the specialist was renamed on one side only."""
+    from app.services.agents.investor_profile_prompt import _THEME_LABEL
+
+    unwritable = sorted(set(_THEME_LABEL) - _MEANINGFUL_THEMES)
+    assert not unwritable, f"{unwritable} have render labels but can never be stored"
+
+
+def test_general_is_excluded_from_both_sides():
+    """`general` is the router's ordinary fallback AND its degraded result, so storing it
+    would fill the cap with the least informative value there is."""
+    from app.services.agents.investor_profile_prompt import _THEME_LABEL
+
+    assert "general" not in _MEANINGFUL_THEMES
+    assert "general" not in _THEME_LABEL

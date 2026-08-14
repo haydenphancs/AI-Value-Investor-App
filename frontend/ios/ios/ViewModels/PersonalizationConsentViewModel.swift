@@ -33,6 +33,11 @@ final class PersonalizationConsentViewModel: ObservableObject {
     @Published private(set) var requiredTier: String?
     /// True when the reader has actually answered some preference questions.
     @Published private(set) var hasPreferences = false
+    /// True when those answers would actually change an answer. Distinct from
+    /// `hasPreferences`: a reader can answer every question and land on the house
+    /// defaults, which renders nothing — they have stated something, but there is
+    /// nothing to apply, and the copy must say so rather than accusing them of silence.
+    @Published private(set) var wouldPersonalize = false
 
     @Published private(set) var isLoading = false
     @Published private(set) var isSaving = false
@@ -120,6 +125,7 @@ final class PersonalizationConsentViewModel: ObservableObject {
         isApplied = dto.applied
         requiredTier = dto.requiredTier
         hasPreferences = !dto.isEmpty
+        wouldPersonalize = dto.wouldPersonalize
         hasLoadFailed = false
     }
 
@@ -140,7 +146,17 @@ final class PersonalizationConsentViewModel: ObservableObject {
         // this is the screen the user acts on, so it must not guess either.
         if hasLoadFailed { return "Couldn't check — tap to retry" }
         if !isOn { return "Off — answers are the same for everyone" }
-        if !hasPreferences { return "On — add some interests in Settings to give it something to use" }
+        // "Stated nothing" and "stated things that change nothing" are DIFFERENT, and the
+        // old copy answered both with the first. A reader who chose "Still learning" +
+        // "A bit of both" — the middle option on both onboarding questions — matches the
+        // house defaults, so nothing renders into the prompt. Telling them to go and add
+        // preferences was simply false: they had answered. See migration 134.
+        if !hasPreferences {
+            return "On — add your preferences in Learning Preferences above"
+        }
+        if !wouldPersonalize {
+            return "On — your answers match our defaults, so replies look the same. Add a subject to see a difference"
+        }
         if !isApplied {
             if let plan = requiredTier {
                 return "On — available on \(plan.capitalized)"

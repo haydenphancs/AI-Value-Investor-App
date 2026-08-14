@@ -260,6 +260,11 @@ class ChatService:
                 tools=tools,
                 tool_handlers=handlers,
                 system_instruction=system_instruction,
+                # The non-streaming /chat/send path inherited GEMINI_MAX_TOKENS (8192) —
+                # 6.8x the chat ceiling — because Phase 1d only threaded the cap through
+                # the two STREAM methods, and the guard scanned only those, so it stayed
+                # green with the hole open. Reports keep 8192; chat does not.
+                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
             )
 
             # If the tool was invoked, extract the widget payload
@@ -277,6 +282,7 @@ class ChatService:
             response = await self.gemini.generate_text(
                 prompt=prompt,
                 system_instruction=system_instruction,
+                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
             )
 
         ai_text = response["text"]
@@ -923,7 +929,14 @@ class ChatService:
                 "keyword-rich, and do NOT answer it.\n\n"
                 f"CONVERSATION:\n{convo}\n\nLATEST QUESTION: {user_message}\n\nStandalone search query:"
             )
-            res = await self.gemini.generate_text(prompt, model_name="gemini-2.5-flash-lite")
+            res = await self.gemini.generate_text(
+                prompt, model_name="gemini-2.5-flash-lite",
+                # Blast-radius cap, same as the answer path. These are internal
+                # helpers whose output should be a rewritten query or a few
+                # bullets — the ceiling only ever binds when something has gone
+                # wrong, and an uncapped runaway here is spend with no reader.
+                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+            )
             rewritten = (res.get("text") or "").strip().strip('"').strip()
             return rewritten if 0 < len(rewritten) <= 400 else user_message
         except Exception as e:
@@ -1496,17 +1509,44 @@ class ChatService:
 
         if not summary:
             try:
+                # CUMULATIVE. Regeneration used to summarize `older` alone, but `older`
+                # is drawn from the newest 20 messages — so anything that fell out of that
+                # window was dropped from the summary permanently, and the next refresh
+                # overwrote the stored one with a version that no longer knew it. A reader
+                # who said "I'm 24, first brokerage account, $3k to start" at message 2 had
+                # that silently erased by turn 15, which is the exact opposite of this
+                # method's stated purpose ("so early context isn't dropped by truncation").
+                carried = (
+                    f"Existing summary of even earlier turns:\n{cached_summary}\n\n"
+                    if cached_summary else ""
+                )
                 prompt = (
                     "Summarize the earlier part of this conversation in 3-5 short bullet points — keep "
                     "the user's goals and any specifics (tickers, numbers, preferences) so it can ground "
-                    "later answers. No preamble.\n\n" + self._fmt_turns(older, cap=400)
+                    "later answers. Merge anything still relevant from the existing summary below; do "
+                    "not drop a goal or number just because it is older. No preamble.\n\n"
+                    + carried + self._fmt_turns(older, cap=400)
                 )
-                res = await self.gemini.generate_text(prompt, model_name="gemini-2.5-flash-lite")
+                res = await self.gemini.generate_text(
+                prompt, model_name="gemini-2.5-flash-lite",
+                # Blast-radius cap, same as the answer path. These are internal
+                # helpers whose output should be a rewritten query or a few
+                # bullets — the ceiling only ever binds when something has gone
+                # wrong, and an uncapped runaway here is spend with no reader.
+                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+            )
                 summary = (res.get("text") or "").strip()
                 if summary:
                     self._store_cached_summary(session_id, summary, newest_older)
             except Exception as e:
                 logger.warning("History condense failed (%s: %s) — recent turns only", type(e).__name__, e)
+                # A STALE summary beats no summary. `cached_summary` is already loaded and
+                # is at most a few messages behind; discarding it dropped the reader's
+                # goals, tickers and numbers from the prompt entirely — on precisely the
+                # turns where the model is already degraded, which is when grounding
+                # matters most. This is also strictly worse than the pre-migration-130
+                # behaviour it was meant to preserve.
+                summary = summary or cached_summary or ""
         if summary:
             return (
                 f"EARLIER CONVERSATION (summary):\n{summary}\n\n"

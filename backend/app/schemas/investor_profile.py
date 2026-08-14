@@ -67,7 +67,17 @@ class InvestorProfileResponse(BaseModel):
     follow_signals: List[str] = Field(default_factory=list)
 
     has_profile: bool = False
+    #: The reader has stated NOTHING. Not the same as "nothing would change" — see
+    #: `would_personalize`. Conflating the two told a reader who picked both middle
+    #: options that they had answered nothing (migration 134).
     is_empty: bool = True
+    #: Which fields the reader explicitly submitted. Lets the Settings editor show a
+    #: chosen default differently from an untouched one.
+    answered_fields: List[str] = Field(default_factory=list)
+    #: Their answers WOULD change an answer, if the feature were on for them. False for
+    #: a reader whose every choice equals the house default — nothing to apply, but they
+    #: did answer, so the UI must not tell them to go and state something.
+    would_personalize: bool = False
     profile_version: int = 1
     consented_at: Optional[str] = None
 

@@ -14,6 +14,7 @@ from typing import Optional
 from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.database import get_auth_client, get_supabase
 from app.dependencies import (
+    ProfileRateLimit,
     get_current_user,
     get_current_user_or_guest,  # TEMP: guest fallback
     get_profile_identity,
@@ -30,6 +31,7 @@ from app.services.user_investor_profile_service import (
     get_user_investor_profile_service,
     is_empty_profile,
     merge_profiles,
+    would_personalize,
 )
 from app.schemas.user import UserResponse, UserCreditsResponse, UpdateProfileRequest
 from app.schemas.subscription import SubscriptionResponse
@@ -284,6 +286,12 @@ def _profile_response(profile: dict, user: dict) -> InvestorProfileResponse:
         follow_signals=profile["follow_signals"],
         has_profile=profile.get("has_profile", False),
         is_empty=empty,
+        answered_fields=profile.get("answered_fields") or [],
+        # Three distinct questions, three distinct fields. `is_empty` = stated nothing;
+        # `would_personalize` = their answers would change output; `applied` = it is
+        # changing output right now. One boolean used to answer the first two, and for a
+        # reader who chose both middle options they disagree — see migration 134.
+        would_personalize=would_personalize(profile),
         profile_version=profile.get("profile_version", 1),
         consented_at=profile.get("consented_at"),
         applied=may_apply_profile(profile, user.get("tier")),
@@ -294,6 +302,7 @@ def _profile_response(profile: dict, user: dict) -> InvestorProfileResponse:
 @router.get("/me/investor-profile", response_model=InvestorProfileResponse)
 async def get_my_investor_profile(
     user: dict = Depends(get_profile_identity),
+    _rate: None = ProfileRateLimit,
 ):
     """The reader's learning preferences, plus whether they are being APPLIED.
 
@@ -315,6 +324,7 @@ async def get_my_investor_profile(
 async def update_my_investor_profile(
     request: UpdateInvestorProfileRequest,
     user: dict = Depends(get_profile_identity),
+    _rate: None = ProfileRateLimit,
 ):
     """Save the reader's learning preferences.
 
@@ -333,6 +343,22 @@ async def update_my_investor_profile(
     # "field omitted" as "revoke", so every ordinary preference edit would silently
     # withdraw consent.
     consent = payload.pop("accepted_personalization_terms", None)
+
+    # A body that says nothing writes nothing. `upsert_profile({})` used to INSERT a row
+    # carrying only `user_id` + `updated_at`, which takes every column default — a phantom
+    # that reports `has_profile: true, is_empty: true` and, until the claim step learned to
+    # merge, was enough to make guest-data claiming delete the reader's real answers.
+    # iOS guards this client-side (`OnboardingViewModel.savePreferences` has
+    # `guard hasAnyPreference`), with a comment explaining precisely this hazard; the server
+    # had no equivalent, so any retry or other client could still create one.
+    #
+    # A consent-only write is NOT empty and deliberately still creates the row: the consent
+    # timestamp is the thing being recorded, and a reader may grant before stating anything.
+    if not payload and consent is None:
+        return _profile_response(
+            get_user_investor_profile_service().get_profile(user["id"]), user
+        )
+
     try:
         profile = get_user_investor_profile_service().upsert_profile(
             user["id"], payload, consent=consent,

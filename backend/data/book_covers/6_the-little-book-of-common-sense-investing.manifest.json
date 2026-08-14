@@ -1,0 +1,47 @@
+{
+  "title": "The Little Book of Common Sense Investing",
+  "author": "John C. Bogle",
+  "tagline": "COSTS ARE THE ONLY CERTAINTY",
+  "palette": "cool",
+  "title_cap_hero_px": 41,
+  "title_cap_thumb_px": 21,
+  "masters": {
+    "hero": {
+      "file": "6_the-little-book-of-common-sense-investing.hero.jpg",
+      "width": 480,
+      "height": 660,
+      "bytes": 54780,
+      "sha256": "28a8d0eef9a3bb2372c2885055d5dc6ed75392b78d95747048e476ab6072549a"
+    },
+    "thumb": {
+      "file": "6_the-little-book-of-common-sense-investing.thumb.jpg",
+      "width": 240,
+      "height": 330,
+      "bytes": 20134,
+      "sha256": "691c13962904b0a8973145a397eb6fce9f021cb642ca92aded4b2e777f146068"
+    }
+  },
+  "legibility": {
+    "title_contrast": 16.77,
+    "tagline_contrast": 5.92,
+    "sharpness": 9.1
+  },
+  "curriculum_order": 6,
+  "slug": "the-little-book-of-common-sense-investing",
+  "art_file": "6_the-little-book-of-common-sense-investing.art.jpg",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "3:4",
+  "art_size": "2K",
+  "art_prompt": "Cinematic macro-photography of an antique brass ship's compass with its glass dome and floating card, sitting on dark slate. The whole instrument is in frame and obviously a compass, its needle steady. Dramatic moody lighting, deep shadows, high contrast, premium documentary style, photorealistic, 8k resolution.\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 do not crop so tightly that it becomes an abstract texture or an unidentifiable piece of metal. The object must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nLIGHT: One hard key light from the upper left grazing across the surfaces, picking out every machined edge and tooling mark. Deep, genuinely black shadows across much of the frame \u2014 a low-key image. Specular highlights are small, hard and controlled. No flat even lighting, no softbox wash, no fill light.\n\nLENS: shot macro on a fast prime with shallow depth of field \u2014 the object itself is critically sharp front to back on its key plane, while the background falls away completely. Fine natural grain, subtle lens vignette. No HDR, no over-sharpening, no plastic CGI look.\n\nPALETTE: cold gunmetal, brushed steel, blue-grey and near-black, with one restrained steel-blue highlight. Almost no warmth. Rich but restrained \u2014 a graded film frame, not a colourful photograph.\n\nCOMPOSITION: vertical portrait 3:4 frame. The sharp, recognisable object sits in the UPPER 55% of the frame. THE BOTTOM 40% OF THE FRAME FALLS AWAY INTO NEAR-BLACK SHADOW AND DEFOCUS \u2014 plain, dark, empty and quiet, with no detail, no bright highlight and no object crossing into it.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, engraving, embossed lettering, serial numbers, dial numerals, brand names, logos, signage or watermarks ANYWHERE in the image. No human faces, no hands, no people. No books, book covers or bookshelves.",
+  "art_prompt_sha1": "6cd09bfa3857",
+  "art_native_width": 1792,
+  "art_native_height": 2400,
+  "uploaded": {
+    "thumb": "691c13962904b0a8973145a397eb6fce9f021cb642ca92aded4b2e777f146068",
+    "hero": "28a8d0eef9a3bb2372c2885055d5dc6ed75392b78d95747048e476ab6072549a"
+  },
+  "cover_urls": {
+    "thumb": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/6_the-little-book-of-common-sense-investing.thumb.jpg",
+    "hero": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/6_the-little-book-of-common-sense-investing.hero.jpg"
+  }
+}

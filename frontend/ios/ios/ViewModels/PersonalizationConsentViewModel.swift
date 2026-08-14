@@ -110,14 +110,23 @@ final class PersonalizationConsentViewModel: ObservableObject {
         hasPreferences = !dto.isEmpty
     }
 
-    /// Copy for the row's subtitle — honest about which of the three conditions is the
+    /// Copy for the row's subtitle — honest about which of the four conditions is the
     /// one currently stopping it.
+    ///
+    /// The last two branches used to be one, reading `requiredTier ?? "Pro"`. That was
+    /// wrong for the case this build actually ships in: the server's `applied` now also
+    /// reflects the `CHAT_PERSONALIZATION_ENABLED` feature flag, so a consented Pro
+    /// subscriber can be `!isApplied` with NO tier problem at all — and the old copy told
+    /// them "available on Pro", i.e. upgrade to the plan they are already on. `requiredTier`
+    /// is nil exactly when the tier is not the blocker, so it separates the two cleanly.
     var statusText: String {
         if !isOn { return "Off — answers are the same for everyone" }
         if !hasPreferences { return "On — add some interests in Settings to give it something to use" }
         if !isApplied {
-            let plan = (requiredTier ?? "Pro").capitalized
-            return "On — available on \(plan)"
+            if let plan = requiredTier {
+                return "On — available on \(plan.capitalized)"
+            }
+            return "On — not switched on yet, we'll start using it soon"
         }
         return "On — Cay AI tailors how it explains things"
     }

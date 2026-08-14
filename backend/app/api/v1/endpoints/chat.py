@@ -336,6 +336,53 @@ def _record_memory_facts(user: dict, stock_id: Optional[str], route: Optional[di
         )
 
 
+def _may_have_reader_lens(user: dict) -> bool:
+    """Pure, no I/O: could this caller possibly get a lens at all?
+
+    The first two arms of `may_apply_profile` — the feature flag and the tier — need
+    nothing from the database. The other two (consent, a non-empty row) do. Splitting
+    them out lets the async call sites answer the common case without touching a thread:
+    with the feature off, or for a free/guest caller, the answer is None and no work of
+    any kind should happen on the answer path.
+
+    Never raises: a caller identity that is not a dict, or is missing `tier`, resolves to
+    False rather than taking down the turn.
+    """
+    from app.config import settings
+    from app.services.entitlements import signals_unlocked
+
+    try:
+        if not settings.CHAT_PERSONALIZATION_ENABLED:
+            return False
+        return bool(signals_unlocked(user.get("tier")))
+    except Exception:  # noqa: BLE001 — a malformed identity is not a reason to fail a turn
+        return False
+
+
+async def _reader_lens_for_async(user: dict) -> Optional[str]:
+    """`_reader_lens_for` without blocking the event loop.
+
+    WHY THIS WRAPPER EXISTS. `_reader_lens_for` is synchronous and performs a Supabase
+    round trip (two, once `CHAT_MEMORY_FACTS_ENABLED` is on: the profile, then the memory
+    facts). Both call sites are `async def` on the answer path, so calling it directly
+    stalls the whole event loop — every other in-flight request included — for the
+    duration. That was invisible while the feature flag was off, because the function
+    returns before the read; flipping the flag would have turned it on for every Pro/Max
+    turn, and with no log drain in production it would not have shown up anywhere.
+
+    The gate is checked HERE rather than inside the thread on purpose: `asyncio.to_thread`
+    is not free, and wrapping the whole function would make free-tier turns pay a
+    threadpool hop to be told "None" — a regression for the majority of traffic in service
+    of a feature they cannot use.
+
+    The sync function remains the single implementation, so its never-raises contract and
+    its tests continue to cover this path.
+    """
+    if not _may_have_reader_lens(user):
+        return None
+    return await asyncio.to_thread(_reader_lens_for, user)
+
+
 def _reader_lens_for(user: dict) -> Optional[str]:
     """The reader's rendered preference block for this turn, or None. NEVER raises.
 
@@ -614,8 +661,9 @@ async def send_chat_message(
         # prompt labels it as a point-in-time copy, not live data.
         context_is_replayed = not request.context and bool(effective_context)
 
-        # Skips the DB round trip when it cannot apply (see _reader_lens_for).
-        reader_lens = _reader_lens_for(user)
+        # Skips the DB round trip when it cannot apply, and never blocks the loop
+        # when it does (see _reader_lens_for_async).
+        reader_lens = await _reader_lens_for_async(user)
 
         ai_result = await chat_service.generate_response(
             session_id=session_id,
@@ -868,7 +916,7 @@ async def stream_chat_message(
             # with prep so the router's ~400ms hides behind the RAG/widget work. Never raises → general.
             from app.services.agents.chat_router import route_question, select_model
             from app.services.agents.chat_specialists import apply_specialist
-            reader_lens = _reader_lens_for(user)
+            reader_lens = await _reader_lens_for_async(user)
             prep_coro = chat_service.prepare_stream_generation(
                 session_id=session_id,
                 user_message=user_message,

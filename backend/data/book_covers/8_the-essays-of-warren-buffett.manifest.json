@@ -1,0 +1,47 @@
+{
+  "title": "The Essays of Warren Buffett",
+  "author": "Warren Buffett & Lawrence Cunningham",
+  "tagline": "TIME DOES THE LIFTING",
+  "palette": "warm",
+  "title_cap_hero_px": 41,
+  "title_cap_thumb_px": 21,
+  "masters": {
+    "hero": {
+      "file": "8_the-essays-of-warren-buffett.hero.jpg",
+      "width": 480,
+      "height": 660,
+      "bytes": 59431,
+      "sha256": "ba5287cd72b1a9b38214a1e4fc7c5fb9b06b7ba0e806693a16c6bafef8ea3b6a"
+    },
+    "thumb": {
+      "file": "8_the-essays-of-warren-buffett.thumb.jpg",
+      "width": 240,
+      "height": 330,
+      "bytes": 22623,
+      "sha256": "e9edb3001bf985f584c7fe2912437a26a516127c56864a698d24ebb63d5eefd2"
+    }
+  },
+  "legibility": {
+    "title_contrast": 15.97,
+    "tagline_contrast": 6.48,
+    "sharpness": 9.1
+  },
+  "curriculum_order": 8,
+  "slug": "the-essays-of-warren-buffett",
+  "art_file": "8_the-essays-of-warren-buffett.art.jpg",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "3:4",
+  "art_size": "2K",
+  "art_prompt": "Cinematic macro-photography of a classic black and gold fountain pen, cap off and its polished gold nib clearly exposed, lying at a slight angle across a dark leather desk. THE WHOLE PEN IS SHARP AND IN FOCUS from nib to barrel end and is the unmistakable subject of the photograph, occupying a good part of the frame. A short stack of gold coins sits well behind it, small and softly defocused. Do not blur the pen. Dramatic moody lighting, deep shadows, high contrast, premium documentary style, photorealistic, 8k resolution.\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 do not crop so tightly that it becomes an abstract texture or an unidentifiable piece of metal. The object must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nLIGHT: One warm tungsten key light low and to the right, raking across the surfaces so the metal glows along its edges and everything else falls into darkness. Deep, genuinely black shadows across much of the frame \u2014 a low-key image. Specular highlights are small, hard and controlled. No flat even lighting, no softbox wash, no fill light.\n\nLENS: shot macro on a fast prime with shallow depth of field \u2014 the object itself is critically sharp front to back on its key plane, while the background falls away completely. Fine natural grain, subtle lens vignette. No HDR, no over-sharpening, no plastic CGI look.\n\nPALETTE: deep brass and old gold, warm amber, rich brown-black. Burnished and warm, never yellow or garish. Rich but restrained \u2014 a graded film frame, not a colourful photograph.\n\nCOMPOSITION: vertical portrait 3:4 frame. The sharp, recognisable object sits in the UPPER 55% of the frame. THE BOTTOM 40% OF THE FRAME FALLS AWAY INTO NEAR-BLACK SHADOW AND DEFOCUS \u2014 plain, dark, empty and quiet, with no detail, no bright highlight and no object crossing into it.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, engraving, embossed lettering, serial numbers, dial numerals, brand names, logos, signage or watermarks ANYWHERE in the image. No human faces, no hands, no people. No books, book covers or bookshelves.",
+  "art_prompt_sha1": "408bd9d26765",
+  "art_native_width": 1792,
+  "art_native_height": 2400,
+  "uploaded": {
+    "thumb": "e9edb3001bf985f584c7fe2912437a26a516127c56864a698d24ebb63d5eefd2",
+    "hero": "ba5287cd72b1a9b38214a1e4fc7c5fb9b06b7ba0e806693a16c6bafef8ea3b6a"
+  },
+  "cover_urls": {
+    "thumb": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/8_the-essays-of-warren-buffett.thumb.jpg",
+    "hero": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/8_the-essays-of-warren-buffett.hero.jpg"
+  }
+}

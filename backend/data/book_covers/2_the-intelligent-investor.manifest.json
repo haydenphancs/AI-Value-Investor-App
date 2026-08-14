@@ -1,0 +1,47 @@
+{
+  "title": "The Intelligent Investor",
+  "author": "Benjamin Graham",
+  "tagline": "PRICE IS NOT VALUE",
+  "palette": "cool",
+  "title_cap_hero_px": 41,
+  "title_cap_thumb_px": 21,
+  "masters": {
+    "hero": {
+      "file": "2_the-intelligent-investor.hero.jpg",
+      "width": 480,
+      "height": 660,
+      "bytes": 55652,
+      "sha256": "176aa347e5b5fcbfae3837c0f70d19e778d1766f6942dc661859974d99b8d166"
+    },
+    "thumb": {
+      "file": "2_the-intelligent-investor.thumb.jpg",
+      "width": 240,
+      "height": 330,
+      "bytes": 19732,
+      "sha256": "a3613dc73e5d2437026684dfdf642fbd486f1bcfcc476c7e52565892c5a5efe0"
+    }
+  },
+  "legibility": {
+    "title_contrast": 17.1,
+    "tagline_contrast": 12.53,
+    "sharpness": 21.0
+  },
+  "curriculum_order": 2,
+  "slug": "the-intelligent-investor",
+  "art_file": "2_the-intelligent-investor.art.jpg",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "3:4",
+  "art_size": "2K",
+  "art_prompt": "Cinematic macro-photography of a heavy circular steel bank vault door, seen three-quarters open from the front so the whole round door reads clearly \u2014 the spoked handwheel at its centre, the ring of thick cylindrical locking bolts thrown out around its edge, and the polished steel face. It must be instantly recognisable as a bank vault door, not a close abstract detail of metal. Dramatic moody lighting, deep shadows, high contrast, premium documentary style, photorealistic, 8k resolution.\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 do not crop so tightly that it becomes an abstract texture or an unidentifiable piece of metal. The object must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nLIGHT: One hard key light from the upper left grazing across the surfaces, picking out every machined edge and tooling mark. Deep, genuinely black shadows across much of the frame \u2014 a low-key image. Specular highlights are small, hard and controlled. No flat even lighting, no softbox wash, no fill light.\n\nLENS: shot macro on a fast prime with shallow depth of field \u2014 the object itself is critically sharp front to back on its key plane, while the background falls away completely. Fine natural grain, subtle lens vignette. No HDR, no over-sharpening, no plastic CGI look.\n\nPALETTE: cold gunmetal, brushed steel, blue-grey and near-black, with one restrained steel-blue highlight. Almost no warmth. Rich but restrained \u2014 a graded film frame, not a colourful photograph.\n\nCOMPOSITION: vertical portrait 3:4 frame. The sharp, recognisable object sits in the UPPER 55% of the frame. THE BOTTOM 40% OF THE FRAME FALLS AWAY INTO NEAR-BLACK SHADOW AND DEFOCUS \u2014 plain, dark, empty and quiet, with no detail, no bright highlight and no object crossing into it.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, engraving, embossed lettering, serial numbers, dial numerals, brand names, logos, signage or watermarks ANYWHERE in the image. No human faces, no hands, no people. No books, book covers or bookshelves.",
+  "art_prompt_sha1": "005d37d081f2",
+  "art_native_width": 1792,
+  "art_native_height": 2400,
+  "uploaded": {
+    "thumb": "a3613dc73e5d2437026684dfdf642fbd486f1bcfcc476c7e52565892c5a5efe0",
+    "hero": "176aa347e5b5fcbfae3837c0f70d19e778d1766f6942dc661859974d99b8d166"
+  },
+  "cover_urls": {
+    "thumb": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/2_the-intelligent-investor.thumb.jpg",
+    "hero": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/2_the-intelligent-investor.hero.jpg"
+  }
+}

@@ -56,6 +56,13 @@ struct iosApp: App {
         // Configure appearance
         configureAppearance()
 
+        // Give AsyncImage a real cache. BookLibraryView is a LazyVStack, so its cards
+        // recycle and AsyncImage re-requests on every identity change — without this the
+        // ten covers flash gradient->image on each scroll pass. The default shared cache
+        // is far too small for image payloads. This is app-wide on purpose: it also helps
+        // news thumbnails, whale avatars, company logos and the header.
+        configureImageCache()
+
         #if DEBUG
         // Runs here, before any window exists, so the nav-bar flatten check reports
         // what `configureAppearance()` actually captured rather than what a later
@@ -237,6 +244,18 @@ struct iosApp: App {
     }
 
     // MARK: - Appearance Configuration
+
+    /// Raise `URLCache.shared` so `AsyncImage` actually caches.
+    ///
+    /// Every remote image in the app goes through the shared cache, whose default is
+    /// sized for API JSON, not for artwork. The visible symptom was the book library:
+    /// a `LazyVStack` recycles its cards, `AsyncImage` re-requests on identity change,
+    /// and each scroll pass re-flashed gradient -> image.
+    private func configureImageCache() {
+        let memory = 32 * 1024 * 1024      // 32 MB
+        let disk = 128 * 1024 * 1024       // 128 MB
+        URLCache.shared = URLCache(memoryCapacity: memory, diskCapacity: disk)
+    }
 
     private func configureAppearance() {
         // Navigation bar appearance.

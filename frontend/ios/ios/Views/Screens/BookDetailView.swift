@@ -322,48 +322,15 @@ private struct BookDetailCoverImage: View {
                 .frame(width: 160, height: 220)
                 .shadow(color: Color(hex: book.coverGradientStart).opacity(0.4), radius: 20, y: 10)
 
-            // Book cover
-            ZStack {
-                RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(hex: book.coverGradientStart),
-                                Color(hex: book.coverGradientEnd)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-
-                // Book spine effect
-                HStack(spacing: 0) {
-                    Rectangle()
-                        .fill(Color.black.opacity(0.15))
-                        .frame(width: 4)
-                    Spacer()
-                }
-
-                // Book title on cover
-                VStack(spacing: AppSpacing.sm) {
-                    Text(book.title.uppercased())
-                        .font(AppTypography.bodySmall).fontWeight(.bold)
-                        .foregroundColor(AppColors.textOnAccent)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(4)
-                        .padding(.horizontal, AppSpacing.lg)
-
-                    Rectangle()
-                        .fill(Color.white.opacity(0.3))
-                        .frame(width: 40, height: 1)
-
-                    Text(book.author.uppercased())
-                        .font(AppTypography.captionTiny).fontWeight(.medium)
-                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
-                        .tracking(1)
-                }
-            }
-            .frame(width: 160, height: 220)
+            // The 160x220 hero uses its own larger master, whose type was set optically
+            // at that size rather than scaled up from the thumbnail.
+            BookCoverImage(
+                title: book.title,
+                width: 160,
+                height: 220,
+                showsSpine: true,
+                fallbackGradient: (book.coverGradientStart, book.coverGradientEnd)
+            )
         }
     }
 }

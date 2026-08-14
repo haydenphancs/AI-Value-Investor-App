@@ -14,7 +14,7 @@ struct TermsOfUseView: View {
     var body: some View {
         LegalDocumentView(
             title: "Terms of Use",
-            lastUpdated: "August 8, 2026",
+            lastUpdated: "August 13, 2026",
             intro: "These Terms of Use (\u{201C}Terms\u{201D}) govern your access to and use of the Caydex mobile application and related services (the \u{201C}App\u{201D}), operated by Caydex (\u{201C}we,\u{201D} \u{201C}us,\u{201D} or \u{201C}our\u{201D}). By downloading, accessing, or using the App, you agree to be bound by these Terms. If you do not agree, do not use the App.",
             sections: Self.sections
         )
@@ -34,6 +34,7 @@ struct TermsOfUseView: View {
                 "The App is an educational and informational research tool. Nothing in the App constitutes financial, investment, legal, tax, or other professional advice, a recommendation, or an offer or solicitation to buy or sell any security or financial instrument.",
                 "Caydex is not a registered investment adviser, broker-dealer, or financial planner. You are solely responsible for your own investment decisions and their outcomes. Past performance does not guarantee future results, and all investing involves risk, including the possible loss of principal. Consult a qualified professional before making investment decisions.",
                 "Everything the App produces is general and impersonal. Ratings, scores, fair-value estimates, and research reports are produced from public data by the same methodology for every user, and are not adapted to your portfolio, holdings, financial situation, risk tolerance, or objectives. Where a feature uses figures you enter yourself — for example Portfolio Insights — it returns neutral descriptive diagnostics about the data you provided, and does not recommend that you buy, sell, or hold anything.",
+                "Learning preferences. You may optionally tell us how you prefer to learn — your self-described experience level, how technical you want explanations to be, how long answers should be, and which subjects you find interesting. If you turn on personalized explanations, we use those preferences only to decide which information to show you first and how to word an explanation. They never change our analysis, ratings, scores, or estimates, which are produced by the same methodology for every user, and they never make any output a recommendation that a security is suitable for you. We do not ask for, and these preferences do not tell us, your finances, risk tolerance, time horizon, tax situation, or investment objectives — and the App does not adapt its analysis to those things. You can turn personalized explanations off at any time in the App, which stops them being used.",
                 "Caydex is independent. We hold no positions in the securities covered by the App, we receive no compensation from any issuer, and no company can pay to be featured, rated, scored, or covered. We do not sell advertising or paid placement to issuers, and no third party directs or reviews our ratings before publication.",
                 "We do not provide brokerage, custody, or execution services. We never hold your money or securities, we cannot place trades, and no fiduciary or advisory relationship is created between you and Caydex by your use of the App."
             ]

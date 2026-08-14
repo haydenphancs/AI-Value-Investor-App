@@ -219,7 +219,6 @@ struct EducationBook: Identifiable {
     let title: String
     let author: String
     let description: String
-    let coverImageName: String
     let pageCount: Int
     let publishedYear: Int
     let rating: Double
@@ -707,7 +706,6 @@ extension EducationBook {
             title: "The Intelligent Investor",
             author: "Benjamin Graham",
             description: "The Bible of Value Investing. Warren Buffett's #1 recommended book.",
-            coverImageName: "book_intelligent_investor",
             pageCount: 623,
             publishedYear: 1949,
             rating: 4.8,
@@ -717,7 +715,6 @@ extension EducationBook {
             title: "One Up On Wall Street",
             author: "Peter Lynch",
             description: "How to use what you already know to make money in the market.",
-            coverImageName: "book_one_up_wall_street",
             pageCount: 304,
             publishedYear: 1989,
             rating: 4.5,
@@ -727,7 +724,6 @@ extension EducationBook {
             title: "Common Stocks and Uncommon Profits",
             author: "Philip Fisher",
             description: "The growth investing masterpiece that influenced Warren Buffett.",
-            coverImageName: "book_common_stocks",
             pageCount: 271,
             publishedYear: 1958,
             rating: 4.7,

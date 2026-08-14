@@ -12,6 +12,10 @@ struct MoneyMoveArticleContent: View {
     let article: MoneyMoveArticle
     /// Narration playhead (seconds) when this article's audio is active, else nil (no highlight).
     var activeTime: Double? = nil
+    /// Follow a Related Articles card. Optional so previews stay one-liners — but the real
+    /// screen MUST pass it: the cards render as tap targets, and until 2026-08-14 nothing was
+    /// passed here, so every one of them was a dead tap with no visible failure.
+    var onRelatedTapped: ((RelatedArticle) -> Void)? = nil
     @ObservedObject private var progress = MoneyMovesProgressStore.shared
 
     var body: some View {
@@ -47,7 +51,10 @@ struct MoneyMoveArticleContent: View {
 
             // Related articles
             if !article.relatedArticles.isEmpty {
-                MoneyMoveRelatedArticlesSection(articles: article.relatedArticles)
+                MoneyMoveRelatedArticlesSection(
+                    articles: article.relatedArticles,
+                    onArticleTapped: onRelatedTapped
+                )
             }
 
             // Bottom padding

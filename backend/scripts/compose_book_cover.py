@@ -30,7 +30,7 @@ from book_cover_typography import (  # noqa: E402
     assert_spelling, balanced_wrap, cap_of, contrast, crop_aspect, draw_tracked,
     fit_text, font_for_cap, grey_equiv, halo_under, hexc, lift, load_faces,
     luminance, rel_l, scrim_to, sharpness, text_w, uniform_cap)
-from generate_book_cover_art import BOOKS, WARM, read_manifest, write_manifest  # noqa: E402
+from generate_book_cover_art import BOOKS, PALETTES, read_manifest, write_manifest  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data/book_covers"
@@ -41,8 +41,16 @@ THUMB = (240, 330)         # 80x110pt @3x
 
 INK = (240, 240, 236)      # bone — never pure white, matches the grade's ceiling
 AUTHOR_ALPHA = 178
-ACCENT_WARM = "#E0B36A"
-ACCENT_COOL = "#8FB4DC"
+# Tagline ink, one per palette. Each is the frame's own hue lifted toward bone at draw
+# time (see lift()), so it stays in family with the photograph instead of sitting on it.
+ACCENTS = {
+    "gold": "#E0B36A",
+    "gray": "#8FB4DC",
+    "green": "#86C9A0",
+    "red": "#E0928A",
+}
+assert set(ACCENTS) == set(PALETTES), (
+    f"every palette needs a tagline accent: {set(PALETTES) ^ set(ACCENTS)}")
 TITLE_TRACK = 0.005    # must match between uniform_cap() and draw time
 
 # The mastered-badge disc in LibraryBookCard is a 24pt circle at .offset(x:6,y:-6)
@@ -77,7 +85,7 @@ def compose(order, size, title_cap):
     is_thumb = W < 300
     slug, palette, _subject = BOOKS[order]
     title, author, tagline = META[order]
-    key = hexc(ACCENT_WARM if palette is WARM else ACCENT_COOL)
+    key = hexc(ACCENTS[palette])
 
     art = DATA / f"{order}_{slug}.art.jpg"
     if not art.exists():
@@ -208,7 +216,7 @@ def main():
         man.setdefault("slug", slug)
         man.setdefault("art_file", f"{order}_{slug}.art.jpg")
         man.update(title=title, author=author, tagline=tagline,
-                   palette="warm" if BOOKS[order][1] is WARM else "cool",
+                   palette=BOOKS[order][1],
                    title_cap_hero_px=caps["hero"], title_cap_thumb_px=caps["thumb"],
                    masters=rec,
                    legibility=dict(title_contrast=round(rows[-1][3], 2),
@@ -218,15 +226,15 @@ def main():
 
     med = sorted(r[5] for r in rows)[len(rows) // 2]
     worst_tag = min(r[4] for r in rows)
-    print(f"{'#':>2} {'book':44s} {'pal':>4s} {'KB':>4s} {'title':>8s} {'tagline':>9s} {'sharp':>7s}")
+    print(f"{'#':>2} {'book':44s} {'pal':>5s} {'KB':>4s} {'title':>8s} {'tagline':>9s} {'sharp':>7s}")
     for o, slug, kb, cr, tcr, sharp in rows:
-        pal = "warm" if BOOKS[o][1] is WARM else "cool"
+        pal = BOOKS[o][1]
         flags = ""
         if tcr < 4.5:
             flags += "  ** TAGLINE LOW **"
         if sharp < med * 0.62:
             flags += "  ** soft (hint) **"
-        print(f"{o:2d} {slug:44s} {pal:>4s} {kb:4d} {cr:7.2f}:1 {tcr:8.2f}:1 {sharp:7.1f}{flags}")
+        print(f"{o:2d} {slug:44s} {pal:>5s} {kb:4d} {cr:7.2f}:1 {tcr:8.2f}:1 {sharp:7.1f}{flags}")
     print(f"\nworst tagline contrast {worst_tag:.2f}:1 (AA body text needs 4.5) · "
           f"median sharpness {med:.1f}")
     print("Note: the sharpness score is biased low on warm, low-contrast frames — "

@@ -2,7 +2,7 @@
   "title": "A Random Walk Down Wall Street",
   "author": "Burton Malkiel",
   "tagline": "NOBODY OUTRUNS THE ODDS",
-  "palette": "cool",
+  "palette": "green",
   "title_cap_hero_px": 41,
   "title_cap_thumb_px": 21,
   "masters": {
@@ -10,21 +10,21 @@
       "file": "7_a-random-walk-down-wall-street.hero.jpg",
       "width": 480,
       "height": 660,
-      "bytes": 70041,
-      "sha256": "5148129a699af29fa1352ca1f616eefbcb588d08c403b3f64d0665b4d7259f4d"
+      "bytes": 74703,
+      "sha256": "bfed9a652bbe55902197c00afc161254df5631500e864d781cc9e1dfd58f6080"
     },
     "thumb": {
       "file": "7_a-random-walk-down-wall-street.thumb.jpg",
       "width": 240,
       "height": 330,
-      "bytes": 22955,
-      "sha256": "d2a8885bb28832317624c3fb86047a0615886452743c4d7170d0c58a4ad3d0ce"
+      "bytes": 23473,
+      "sha256": "1f77be1bbd71aad9f650c26d1314174cb8988382b4b61d179e3a4ce0e2e03896"
     }
   },
   "legibility": {
-    "title_contrast": 15.65,
-    "tagline_contrast": 10.81,
-    "sharpness": 27.5
+    "title_contrast": 17.52,
+    "tagline_contrast": 13.68,
+    "sharpness": 28.6
   },
   "curriculum_order": 7,
   "slug": "a-random-walk-down-wall-street",
@@ -32,13 +32,13 @@
   "art_model": "gemini-3-pro-image",
   "art_aspect": "3:4",
   "art_size": "2K",
-  "art_prompt": "Cinematic macro-photography of a wide shallow woven basket sitting on dark slate, brimming right to the rim with many identical silver coins heaped together \u2014 hundreds of them, the whole market held in one basket rather than a single pick. The basket and the individual coins are both clearly readable, and a few loose coins rest on the slate beside it. Dramatic moody lighting, deep shadows, high contrast, premium documentary style, photorealistic, 8k resolution.\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 do not crop so tightly that it becomes an abstract texture or an unidentifiable piece of metal. The object must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nLIGHT: One hard key light from the upper left grazing across the surfaces, picking out every machined edge and tooling mark. Deep, genuinely black shadows across much of the frame \u2014 a low-key image. Specular highlights are small, hard and controlled. No flat even lighting, no softbox wash, no fill light.\n\nLENS: shot macro on a fast prime with shallow depth of field \u2014 the object itself is critically sharp front to back on its key plane, while the background falls away completely. Fine natural grain, subtle lens vignette. No HDR, no over-sharpening, no plastic CGI look.\n\nPALETTE: cold gunmetal, brushed steel, blue-grey and near-black, with one restrained steel-blue highlight. Almost no warmth. Rich but restrained \u2014 a graded film frame, not a colourful photograph.\n\nCOMPOSITION: vertical portrait 3:4 frame. The sharp, recognisable object sits in the UPPER 55% of the frame. THE BOTTOM 40% OF THE FRAME FALLS AWAY INTO NEAR-BLACK SHADOW AND DEFOCUS \u2014 plain, dark, empty and quiet, with no detail, no bright highlight and no object crossing into it.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, engraving, embossed lettering, serial numbers, dial numerals, brand names, logos, signage or watermarks ANYWHERE in the image. No human faces, no hands, no people. No books, book covers or bookshelves.",
-  "art_prompt_sha1": "98f19708d480",
+  "art_prompt": "Cinematic macro-photography of a wide shallow woven basket sitting on dark slate, brimming right to the rim with many identical aged copper coins carrying a green verdigris patina \u2014 hundreds of them, the whole market held in one basket rather than a single pick. The basket and the individual coins are both clearly readable, and a few loose coins rest on the slate beside it. Dramatic moody lighting, deep shadows, high contrast, premium documentary style, photorealistic, 8k resolution.\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 do not crop so tightly that it becomes an abstract texture or an unidentifiable piece of metal. The object must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nLIGHT: One cool key light from the upper left raking across the surfaces, with a faint green bounce lifting the shadow side. Deep, genuinely black shadows across much of the frame \u2014 a low-key image. Specular highlights are small, hard and controlled. No flat even lighting, no softbox wash, no fill light.\n\nLENS: shot macro on a fast prime with shallow depth of field \u2014 the object itself is critically sharp front to back on its key plane, while the background falls away completely. Fine natural grain, subtle lens vignette. No HDR, no over-sharpening, no plastic CGI look.\n\nPALETTE: deep emerald and moss, the soft blue-green of verdigris patina on aged copper, over a rich green-black. Muted and organic, never lime, neon or minty. Rich but restrained \u2014 a graded film frame, not a colourful photograph.\n\nCOMPOSITION: vertical portrait 3:4 frame. The sharp, recognisable object sits in the UPPER 55% of the frame. THE BOTTOM 40% OF THE FRAME FALLS AWAY INTO NEAR-BLACK SHADOW AND DEFOCUS \u2014 plain, dark, empty and quiet, with no detail, no bright highlight and no object crossing into it.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, engraving, embossed lettering, serial numbers, dial numerals, brand names, logos, signage or watermarks ANYWHERE in the image. No human faces, no hands, no people. No books, book covers or bookshelves.",
+  "art_prompt_sha1": "861f1f03059f",
   "art_native_width": 1792,
   "art_native_height": 2400,
   "uploaded": {
-    "thumb": "d2a8885bb28832317624c3fb86047a0615886452743c4d7170d0c58a4ad3d0ce",
-    "hero": "5148129a699af29fa1352ca1f616eefbcb588d08c403b3f64d0665b4d7259f4d"
+    "thumb": "1f77be1bbd71aad9f650c26d1314174cb8988382b4b61d179e3a4ce0e2e03896",
+    "hero": "bfed9a652bbe55902197c00afc161254df5631500e864d781cc9e1dfd58f6080"
   },
   "cover_urls": {
     "thumb": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/7_a-random-walk-down-wall-street.thumb.jpg",

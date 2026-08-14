@@ -5,6 +5,17 @@ force-push and a fresh clone everywhere the repo exists.
 
 Written 2026-08-07. Every number below was measured on this repo, not estimated.
 
+> **Reviewed and corrected 2026-08-14** — six defects, two of which lose data:
+> **1b** (`--force` `git reset --hard`s your uncommitted work), **2** (skipping it deletes
+> ~620 MB of audio off disk), **3** (two paths missing, so the *After* check failed even on a
+> perfect run), **5** (residual target unreachable), **After** (47 remote branches, not "8+";
+> `--all` does not rewrite them), and the Storage recovery note (buckets went private in
+> migration 128). Re-measured the same day: history holds 1516.8 MB of blob content.
+>
+> Also re-confirmed the reason to run it: the repo **is public** (`"private": false`) and both
+> copyrighted PDFs are still anonymously downloadable today by direct commit SHA. They are
+> deleted at tip, so a `/main/` URL 404s — which is exactly why deletion was not enough.
+
 ---
 
 ## Why
@@ -83,10 +94,34 @@ cd /Users/haiphan/BIGDATA/myApp && cp -a AI-Value-Investor-App AI-Value-Investor
 ```
 
 Keep it until you have confirmed a fresh clone works and the app still builds. Also confirm
-`git log --oneline origin/main..HEAD` is empty (it was, at `9ff3740`) so nothing local is
-unpushed.
+`git log --oneline origin/main..HEAD` is empty (still empty as of 2026-08-14) so nothing local
+is unpushed.
+
+### 1b. 🔴 COMMIT OR STASH YOUR WORKING TREE FIRST — step 3 destroys it
+
+**This is the single most dangerous thing in this runbook and the original version did not
+mention it.**
+
+`git filter-repo --force` does **not** merely skip a confirmation. `--force` bypasses
+`sanity_check` entirely (`git-filter-repo:3327`), which is where the
+`abort("you have unstaged changes")` guard lives (`:3488`) — and the run then ends with an
+unconditional `git reset --hard` in a non-bare repo. **Every uncommitted change is gone**,
+recoverable only from the step-1 backup, which nothing else in this document tells you to
+go looking for.
+
+```bash
+git status --porcelain    # MUST be empty before step 3
+```
+
+As of 2026-08-14 this repo has uncommitted work in it — including this file and
+`LAUNCH_CHECKLIST.md`. Commit or stash, then re-check.
 
 ### 2. Move the media out of the working tree first
+
+⚠️ **This step is load-bearing, not tidiness.** Because step 3 ends in `git reset --hard`,
+skipping the `git rm --cached` + `.gitignore` commit means the reset **deletes ~490 tracked
+audio files (~620 MB) off your disk**, not just out of history. The seeding scripts then have
+nothing to read. Do step 2, and commit it, before step 3.
 
 The rewrite removes these paths from every commit. Take them out of git's control *and* keep
 them on disk, so the seeding scripts still work:
@@ -123,13 +158,30 @@ cd /Users/haiphan/BIGDATA/myApp/AI-Value-Investor-App
 git filter-repo --force \
   --path backend/data/book_audio --path backend/data/journey_audio \
   --path backend/data/money_moves_audio \
+  --path backend/data/money_moves_audio_clone \
   --path backend/data/journey_audio_gemini_bak \
   --path backend/data/money_moves_audio_gemini_bak \
   --path separate_project \
   --path documents/Books \
   --path backend/scripts/caydex_report_poc.pdf \
+  --path app_logic.txt \
   --invert-paths
 ```
+
+**Two paths were missing from this list until 2026-08-14**, and both defeat the success
+criterion in the *After* section:
+
+- `backend/data/money_moves_audio_clone/how-amazon-built-its-moat.m4a` — **5.6 MB**, the single
+  largest survivor. Note the directory is `money_moves_audio_clone`, a *sibling* of
+  `money_moves_audio`; a `--path` on the latter does **not** match it.
+- `app_logic.txt` — 2.1 MB at the repo root.
+
+**Deliberately NOT purged:** `backend/data/book_covers/` (43 objects, **14.4 MB**). It is live,
+actively-edited content that is tracked at HEAD, and `--invert-paths` removes a path from HEAD
+too — purging it would delete the cover art. It is the bulk of what remains, and that is the
+right trade. (Only three narrow `book_covers` patterns are gitignored today — `.tmp_*`,
+`*.art.v*.jpg`, `*.candidates.jpg` — so the composed `.art.jpg` and `.manifest.json` files are
+tracked on purpose.)
 
 ⚠️ `--path documents/Books` removes the 109 `core N.txt` files **as well as** the two PDFs,
 because the PDFs sit inside per-book folders. Those `.txt` files are your Learn source content
@@ -162,16 +214,33 @@ git push --force --tags
 
 ```bash
 git reflog expire --expire=now --all && git gc --prune=now --aggressive
-du -sh .git      # expect well under 100 MB, from 1.0 GB
+du -sh .git      # expect roughly 60-120 MB, from 1.0 GB
 ```
+
+⚠️ **Do not expect "well under 100 MB"** — that was the original target and it is not
+achievable while `book_covers` stays tracked. Measured 2026-08-14: history holds **1516.8 MB**
+of blob content; the purge as written leaves **192.2 MB**, and with the two paths added above
+**184.5 MB** — of which 14.4 MB is the book cover art you are deliberately keeping. That is
+uncompressed blob content, so packed `.git` lands well below it, but a run that finishes at
+~100 MB is a SUCCESS, not a reason to re-run the rewrite.
 
 ---
 
 ## After
 
-- **Every other clone is now invalid.** Delete and re-clone; do not merge. There are 8+ remote
-  `claude/*` branches — `--all` rewrites them too, and any PR open against them will show a
-  rewritten base.
+- **Every other clone is now invalid.** Delete and re-clone; do not merge.
+- 🔴 **`--all` does NOT do what this said about the remote branches.** There are **47** remote
+  `origin/claude/*` branches (counted 2026-08-14, not "8+"). `git filter-repo` rewrites *local*
+  refs; those 47 exist only on the remote, so `git push --force --all` pushes your local set and
+  leaves every unrewritten remote branch in place — each one still carrying the full old
+  history, which keeps the PDF blobs fetchable and the repo large. Worse, filter-repo maps any
+  branch it *does* see, so a stale local tracking branch can be *recreated* on the remote.
+  **Delete the remote `claude/*` branches on GitHub first**, then push `main` explicitly:
+
+  ```bash
+  git branch -r | grep 'origin/claude/' | wc -l      # expect 0 before you push
+  git push --force origin main
+  ```
 - **GitHub keeps unreachable objects for a while.** The old blobs stay fetchable by SHA until
   GitHub GCs. For the PDFs specifically, open a support request to purge cached views if that
   matters to you.
@@ -191,7 +260,17 @@ git rev-list --objects --all | git cat-file --batch-check='%(objecttype) %(objec
 
 The last one should print nothing — no blob over 5 MB anywhere in history.
 
+⚠️ **As originally written this check FAILED even on a perfect run**, because
+`money_moves_audio_clone/how-amazon-built-its-moat.m4a` (5.6 MB) was not in the `--path` list.
+It is now. With the corrected list the check passes; the largest survivor is a 1.63 MB cover
+image. If it prints anything, add that path and re-run rather than assuming the rewrite failed.
+
 - **The Learn pipeline is unaffected** as long as you keep the audio on disk. 17 scripts read
   those directories (`generate_*_audio.py`, `align_*_audio.py`, `seed_*.py`, …). They are build
-  inputs, never runtime assets — iOS reads the public Storage URLs. If you ever lose the local
-  copies, download them back from the three buckets.
+  inputs, never runtime assets.
+- ⚠️ **The "download them back from the buckets" fallback is no longer a one-liner.** Migration
+  128 made `journey-media`, `money-moves-media` and `book-media` **private** (`public = false`)
+  — verified by probing the public object URL, which now answers
+  `{"statusCode":"404","error":"Bucket not found"}`. Recovery needs the service-role key and a
+  signed-URL download, not a plain `curl`. **The step-1 backup is your real safety net**, and
+  the safety check above must be re-run with the service role, not against public URLs.

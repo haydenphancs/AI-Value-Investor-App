@@ -145,8 +145,33 @@ async def lifespan(app: FastAPI):
     # it is the refund safety net for charged-but-undelivered reports.
     background_tasks: list[asyncio.Task] = []
 
+    def _on_background_task_done(task: asyncio.Task) -> None:
+        """Make a background loop's death LOUD.
+
+        Every loop below is `while True` with an internal try/except, so the only way one
+        exits is a raise OUTSIDE that guard — exactly the failure that killed price alerts:
+        `run_price_alert_loop` read an undeclared setting before its `while True`, so it
+        died with AttributeError ~30s after every boot. Nothing logged, nothing retried,
+        and the feature was simply absent in production while the app kept serving.
+
+        Without a done-callback the exception is retrieved by nobody and asyncio's
+        "Task exception was never retrieved" warning only fires at GC, if at all.
+        """
+        if task.cancelled():  # shutdown path — expected, already logged below
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Background task %r DIED and will not restart (%s: %s)",
+                task.get_name(), type(exc).__name__, exc, exc_info=exc,
+            )
+        else:
+            # A `while True` loop returning normally is also a bug, just a quiet one.
+            logger.warning("Background task %r exited without an error", task.get_name())
+
     def _spawn(coro, name: str) -> asyncio.Task:
         task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(_on_background_task_done)
         background_tasks.append(task)
         return task
 

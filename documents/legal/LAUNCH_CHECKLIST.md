@@ -5,6 +5,26 @@ Everything only you can do. Code-side work is tracked separately in the plan fil
 
 Ordered by **when to start**, not by importance.
 
+> ## 🔎 Whole-file audit 2026-08-14 — read this before anything else
+>
+> Every section was re-checked against the repo and live HTTP (95 findings, 93 survived
+> adversarial verification). **The file was missing four launch blockers entirely** and three
+> of the five START HERE items were wrong about scope or state. Corrections are inline and
+> dated; the summary:
+>
+> | | |
+> |---|---|
+> | **NEW blockers, were in no section** | Paid Applications Agreement/banking/W-9 (§6b) · four **consumable** credit packs — §6b listed only the 2 subscriptions (§6b) · `PRICE_ALERT_*` undeclared, price alerts dead in prod (**FIXED in code**) · `CFBundleDisplayName` missing, Home Screen read "ios" (**FIXED in code**) |
+> | **Unticked but DONE** | §5c domain→Railway · "11 defects still open" (all fixed) · Time Sensitive entitlement |
+> | **Asserted but WRONG** | §3 doc date · §3 "all four text/html" · §5 "043 reverts persona names" · §5 guest allowance · §7 "Nine data types" · §9 push rationale + `.p8` path · §7 "ASC record not created" |
+> | **Stale command** | the `curl -sI` block below returns **405** on all four paths (HEAD is not routed; GET returns 200) |
+>
+> Still true and worth trusting: §5's migration tables, §1's residual-review-risk analysis,
+> §3's hosted↔in-app legal parity, §5b (d)(e)(f), §8.
+>
+> **§5 re-verified against the LIVE DATABASE 2026-08-14** (migrations 103–134, all applied,
+> nothing pending).
+>
 > **Verified against the live system 2026-08-05.** §5 previously listed six migrations as
 > pending that were all already applied — checked this time against
 > `backend/database/schema_snapshot.sql` (a dump of the live Supabase schema) rather than
@@ -22,19 +42,29 @@ existing Individual Apple account, so the whole list is workable in days rather 
 
 ---
 
-## 👉 START HERE — next actions, as of 2026-08-06
+## 👉 START HERE — next actions, re-ordered 2026-08-14
 
-This file is long and most of it is already done. If you only do one thing, do #1.
+Ordered by **third-party lead time first**, because those are the only items you cannot
+compress by working harder. Everything here is yours — the code-side work is tracked separately
+and most of it landed 2026-08-14.
 
 | # | Do this | Why now | Where |
 |---|---|---|---|
-| **1** | **Set up Resend (or Postmark/SES) and point Supabase SMTP at it** | 🔴 Email/password signup is STILL a dead end — Confirm email is ON and Supabase's built-in mailer does not deliver. Everything else in the old item #1 is now DONE (2026-08-06): domain live on Railway, legal pages served, both ASC URLs ready, AASA fetching, mail receiving via Cloudflare Email Routing. | §5c |
-| **2** | Publish the Google OAuth consent screen (*Testing* → *In production*) | Google sign-in currently works **only for allow-listed accounts**, and refresh tokens expire after 7 days. Looks exactly like an app bug, and only after release. | §5e |
-| **3** | Purge the two copyrighted PDFs from git history | Public repo. Independent of everything else — can be done any time. | §4 |
-| **4** | Create the App Store Connect record + IAP products, set the Server Notifications URL | Needed before you can charge. The notifications URL is what stops a cancelled subscriber keeping their tier. | §6b, §7 |
-| **5** | Ask FMP and CoinGecko about commercial redistribution | Free to ask, slow to answer — start the clock early. | §6 |
+| **1** | **App Store Connect → Business: accept the Paid Applications Agreement, add banking + W-9** | 🔴 **Was in NO section of this file.** It gates *every* §6b item: until it is active ASC returns **no products at all** to `Product.products(for:)`, and the paywall shows "Credit packs aren't available on this device right now" — identical to a wrong product id, and the most commonly misdiagnosed IAP failure. Bank verification takes days. | §6b |
+| **2** | **Set up Resend (or Postmark/SES) and point Supabase SMTP at it** | 🔴 Email/password signup is still a dead end — Confirm email is ON and Supabase's built-in mailer does not deliver. ⚠️ **MERGE** the provider's `include:` into the existing SPF record; do not replace it, or you break the §2 inbound mail. | §5c |
+| **3** | **Flip the repo private** (30 seconds) | Both copyrighted PDFs are anonymously downloadable **today** by commit SHA — re-verified 2026-08-14. This kills the exposure instantly while the full 1.0 GB history purge waits on its runbook fixes. | §4 |
+| **4** | Publish the Google OAuth consent screen (*Testing* → *In production*) | Google sign-in works **only for allow-listed accounts** and refresh tokens die after 7 days. Looks exactly like an app bug, and only after release. | §5e |
+| **5** | Create **six** IAP products + subscription-group localization | Not two. Four **consumable** credit packs ship and this file never mentioned them. Blocked on #1. | §6b |
+| **6** | Ask FMP and CoinGecko about commercial redistribution | Free to ask, slow to answer — start the clock early. | §6 |
+| **7** | Flag your own account as `is_admin` | 🔴 Buried in §5 and absent from this table until now. `is_admin` matches **zero** rows, so every admin route 403s for every account including yours. One SQL `UPDATE`. | §5 |
 
-**Already done, stop re-reading these:** migrations 103–115 — ALL of them (§5), Supabase Apple + Google
+**What changed in this table on 2026-08-14:** the old #1 (SMTP) is now #2 behind a longer-lead
+item; the old #3 ("purge the two copyrighted PDFs — can be done any time") sold a 10-minute job
+that is actually a full history rewrite requiring every clone deleted, so it is now split into
+the 30-second mitigation above and the real purge in §4; the old #4 conflated the ASC record
+(which **probably already exists** — see §7) with the IAP products (which do not).
+
+**Already done, stop re-reading these:** migrations 103–134 — ALL of them (§5, re-verified live 2026-08-14), Supabase Apple + Google
 providers and redirect URL (§5b d/e/f), the Apple capabilities — Sign in with Apple,
 Associated Domains, Push Notifications (§5b, §9), the native Google SDK and its iOS OAuth
 client (§5e), iPhone-only device support (§8), and **as of 2026-08-06** the whole domain
@@ -42,18 +72,34 @@ sitting: `caydexinvest.com` live on Railway via Cloudflare, `/privacy` `/terms` 
 serving 200 text/html, the AASA returning `application/json` with **zero** redirects, and
 `support@` / `copyright@` / `privacy@` receiving via Cloudflare Email Routing (§2, §3).
 
-**Verified live 2026-08-06**, not assumed:
+**Verified live 2026-08-14**, not assumed:
 ```bash
-for p in privacy terms support .well-known/apple-app-site-association; do curl -sI "https://caydexinvest.com/$p" | head -1; done
+for p in privacy terms support .well-known/apple-app-site-association; do printf "%-46s " "$p"; curl -s -o /dev/null -w "%{http_code} %{content_type} redirects=%{num_redirects}\n" "https://caydexinvest.com/$p"; done
 ```
+
+⚠️ **The old form of this command used `curl -sI` (HEAD) and now returns `405` on all four
+paths** — the routes are registered `@app.get` only (`main.py`), and FastAPI's `APIRoute` does
+not auto-add HEAD. The pages are healthy; GET returns `200 text/html` ×3 plus
+`200 application/json` for the AASA, zero redirects. Anyone re-running the old command before
+submission would read four 405s as an outage and un-tick §3 on a phantom. Apple fetches the
+AASA with GET, so nothing is actually broken.
 
 **Meanwhile:** use **Google sign-in** to test the app. It bypasses email confirmation entirely
 (Google addresses arrive pre-verified), so #1 does not block anything except email/password
 signup.
 
-Code-side defects found in the 2026-08-05 audit — all five P0s fixed, 11 lower-priority ones
-still open — are tracked separately in
-`~/.claude/plans/everything-is-pushed-and-twinkly-jellyfish.md`.
+~~Code-side defects found in the 2026-08-05 audit — 11 lower-priority ones still open.~~
+✅ **All of them are now fixed** (spot-verified in source 2026-08-14: the auth-transition view
+rebuild, the empty-report cache poisoning, degraded-FMP persistence in two services, the
+ApeWisdom cache deadlock, the chat stock card's +0.00%, the literal "HTTP 400", the
+whitespace-padded bearer, APNs detach on sign-out, PDF deletion past 100 objects, the cache
+template's cancellation hang, and the sentiment TTL clobber — plus the P2 unbounded caches).
+Nothing is outstanding in `~/.claude/plans/everything-is-pushed-and-twinkly-jellyfish.md`.
+
+**The 2026-08-14 audit replaced them with a new list**, fixed the same day: price alerts dead in
+production, `CFBundleDisplayName`, the tenth privacy data type, the false App Review note, the
+missing `match` notification category, an undisclaimered Buy/Sell verdict served by the API, 36
+fabricated view counts, and seven TTS prompts naming real investors.
 
 ---
 
@@ -137,7 +183,9 @@ Three addresses are now promised in the legal documents and must actually receiv
 
 ## 3. Host the legal documents
 
-Both files are final and dated **July 29, 2026**.
+Both files are dated **August 13, 2026** (`terms.html:33`, `privacy.html:48`, commit `d0ca155`).
+*(This line said "final and dated July 29, 2026" until 2026-08-14 — the date was two revisions
+stale, and "final" is not a useful word for a document that has moved twice since.)*
 
 - [x] Host `documents/legal/privacy.html` at `https://caydexinvest.com/privacy`
 - [x] Host `documents/legal/terms.html` at `https://caydexinvest.com/terms`
@@ -145,9 +193,10 @@ Both files are final and dated **July 29, 2026**.
       requires a Support URL and yours is currently `mailto:`-only. A page with a contact
       form or just the support email plus a short FAQ is enough
 - [x] Verify all three load over HTTPS with no mixed content
-      *(all four verified live 2026-08-07: 200 `text/html`, zero redirects. The START HERE
-      block above has claimed this since 2026-08-06 — §3 was simply never back-ticked, which
-      is exactly the "unticked boxes that are secretly done" failure the preamble warns about.)*
+      *(re-verified live 2026-08-14 with GET: the three pages return 200 `text/html`, and the
+      AASA returns 200 **`application/json`** — not `text/html`, as this line claimed until
+      2026-08-14. Content type is the one thing Apple is strict about for the AASA, so getting
+      it wrong here would have masked a real failure. Zero redirects on all four.)*
 
 The in-app native versions (`PrivacyPolicyView`, `TermsOfUseView`) mirror the hosted text.
 If you edit one, edit both — I've kept them in parity.
@@ -180,15 +229,42 @@ is a *size* problem. The two PDFs remain a genuine copyright item and ride the s
 clips are in Supabase Storage, so the repo copies are redundant and recoverable. Re-check
 before running (command in the runbook).
 
+- [ ] 🔴 **First, the 30-second mitigation: flip the repo private.** Re-verified 2026-08-14 —
+      the repo is public (`"private": false`) and **both** PDFs return `HTTP/2 200` to an
+      anonymous SHA-pinned `raw.githubusercontent` fetch. They are deleted at tip, so `/main/`
+      404s; direct-SHA access is exactly the mechanism this section anticipated. Going private
+      ends the exposure immediately and buys time to do the rewrite properly.
+- [ ] **Commit or stash your working tree** — `git filter-repo --force` ends in an
+      unconditional `git reset --hard` and will destroy uncommitted work (runbook §1b)
+- [ ] Delete the **47** remote `origin/claude/*` branches on GitHub — `--all` does *not*
+      rewrite them, and each keeps the full old history alive (runbook *After*)
 - [ ] Run the runbook (back up first — it rewrites every commit)
 - [ ] Force-push, then delete and re-clone every other copy of the repo
 - [ ] Email GitHub Support to purge cached views — old blobs stay reachable by direct
       commit SHA until garbage collection
-- [ ] Confirm `du -sh .git` is well under 100 MB, and both gates still pass
+- [ ] Confirm `du -sh .git` lands in the **60–120 MB** range (not "well under 100 MB" — that
+      target is unreachable while the 14.4 MB of book cover art stays tracked, which it should),
+      and both gates still pass
+
+⚠️ **The runbook had six defects, two of them data-destroying — corrected 2026-08-14.** Do not
+work from a cached memory of it; re-read it.
 
 ---
 
-## 5. Migrations — ✅ 103–115 ALL APPLIED, NONE PENDING (re-verified 2026-08-07)
+## 5. Migrations — ✅ 103–134 ALL APPLIED, NONE PENDING (re-verified 2026-08-14)
+
+> **Re-verified 2026-08-14 by querying the LIVE database directly** (not the snapshot, not
+> this file's memory), after 134 was applied. Every migration from 103 to 134 is applied and
+> **nothing is pending.** The table below covers 103–115; 116–134 are itemised after it.
+>
+> ⚠️ **121 and 122 do not exist** — no files, and `git log --diff-filter=D` shows none were
+> ever deleted. They are skipped numbers, not a hole in the apply chain. Same for 033. Do not
+> go looking for them.
+>
+> Method note, because it nearly caught me: I first probed 126 and 127 by GUESSING their column
+> names from the filenames and got `false` for both. Both are in fact applied — 127 adds
+> `return_status` / `return_window_years`, nothing called "provenance". Verify against the
+> migration's actual DDL, never against what its name suggests.
 
 **This section used to list six migrations as pending, with alarming consequences attached.
 They were all already applied.** Corrected after checking every one against
@@ -213,6 +289,33 @@ which is exactly what 108/110/111 do and cannot happen by accident.
 that deploying their code without the migration makes *every guest INSERT fail the FK check*,
 and the backend is already deployed. Worth knowing they are fine rather than assuming.
 
+### 116–134 — applied, verified live 2026-08-14
+
+Checked by querying for each migration's real objects, not by name-matching.
+
+| Migration | Evidence in the live database | State |
+|---|---|---|
+| 116 drop `user_book_progress` | `to_regclass` returns NULL — table gone | ✅ applied |
+| 117 purchased-credit pool | `user_credits.purchased_total` present | ✅ applied |
+| 118 two-pool spend/refund | `spend_credits` / `refund_credits` functions present | ✅ applied |
+| 119 `notification_events` | table present | ✅ applied |
+| 120 `notification_job_state` | table present | ✅ applied |
+| 123 credit_purchases txn index | index on `transaction_id` present | ✅ applied |
+| 124 refund pairs each debit once | `credit_transactions.reverses*` column present | ✅ applied |
+| 125 `price_alerts` | table present | ✅ applied |
+| 126 portfolios active group | `set_active_portfolio()` + `idx_portfolios_one_active_per_user` present | ✅ applied |
+| 127 whale return provenance | `whales.return_source` / `return_status` / `return_window_years` present | ✅ applied |
+| 128 learn media buckets private | `journey-media`, `money-moves-media`, `book-media` all `public=false` | ✅ applied |
+| 129 portfolio unique constraints | constraint present | ✅ applied |
+| 130 chat rolling summary | `chat_sessions.memory_summary` present | ✅ applied |
+| 131 `user_investor_profile` | table present | ✅ applied |
+| 132 `user_memory_facts` | table present | ✅ applied |
+| 133 book covers bucket | `book-covers` bucket present | ✅ applied |
+| 134 `answered_fields` | column + CHECK present; probed live and it accepts `'{}'` and valid values, rejects out-of-vocabulary and NULL elements | ✅ applied |
+
+`backend/database/schema_snapshot.sql` was regenerated on 2026-08-14 **after** 134 landed, so it
+now answers for every one of these.
+
 ### Migrations: all applied — but one ACTION remains
 
 > **Re-verified 2026-08-07 against a fresh `schema_snapshot.sql`.** The previous dump was from
@@ -222,8 +325,12 @@ and the backend is already deployed. Worth knowing they are fine rather than ass
 
 - [x] **103_persona_style_names.sql** — applied. *(verified live 2026-08-07: all five active
       personas carry style names, no real investor names.)* Real names would be an App Store
-      5.2.1 risk. **Do not replay 043 or 074** — both revert the names via
-      `ON CONFLICT DO UPDATE`, so this can regress without anyone touching 103.
+      5.2.1 risk. **Do not replay 074** — it reverts the names via `ON CONFLICT DO UPDATE`
+      (`074:17-32`), so this can regress without anyone touching 103.
+      ⚠️ *Corrected 2026-08-14: this said "do not replay 043 **or** 074". Only 074 rewrites
+      `name`. `043:16-23` is a plain `UPDATE` that never touches it, and it carries the
+      icon/colour alignment the iOS fallback depends on — so avoiding 043 on this advice would
+      have been the actual mistake.*
       To re-check (this is a data `UPDATE`, invisible to a schema-only dump):
       ```sql
       select key, name from public.agent_personas order by key;
@@ -286,11 +393,17 @@ and the backend is already deployed. Worth knowing they are fine rather than ass
       away from becoming exactly that. Evidence: the fresh dump keeps `credits_select_own` and
       `credits_service_all` on that table and no longer contains `credits_update_own`.
 
-**Tune the guest allowance after launch.** `GUEST_REPORT_MONTHLY_LIMIT = 1` in
-`backend/app/config.py` is a deliberate starting point: it delivers the "wow" report
-without an account while making sign-up a strict upgrade (2/month + chat + saved
-reports + watchlist). It was previously unlimited, which made signing in a *downgrade*.
-Raise it if signups look too gated; set it to 0 to require sign-in for any report.
+~~**Tune the guest allowance after launch.**~~ ⚠️ **DEAD — deleted 2026-08-14.** This paragraph
+described `GUEST_REPORT_MONTHLY_LIMIT = 1` as "delivering the wow report without an account".
+It does nothing. AI generation went **account-only**: both doors (`POST /research/generate` and
+`GET /stocks/{ticker}/report`) take `get_current_user`, `guest_report_budget_service` is
+transitively dead, and `tests/test_auth_dependency_matrix.py` pins the absence. **Guests get
+zero reports, not one.**
+
+This matters beyond a stale knob: it was the origin of the false line in the App Review notes
+("no login is required — the app is fully usable as a guest, so no demo account is needed"),
+which would have sent a reviewer into a signed-out build unable to reach the app's headline
+feature. That note is rewritten; **provide demo credentials in App Review Information**.
 
 ---
 
@@ -327,7 +440,21 @@ If you didn't request this, you can ignore this email.
 
 **Authentication → Sign In / Providers → Email → "Confirm email"**
 
-- [ ] Enable it
+- [x] Enable it — *believed DONE 2026-08-06; **confirm in the dashboard**, I cannot read it.*
+
+> ⚠️ **This file contradicted itself here for a week (resolved 2026-08-14).** The box was
+> unticked and §5's migration-113 bullet called the setting "off … still unticked", while
+> START HERE and §5c both stated it was switched **ON** on 2026-08-06 — §5c citing an actual
+> registration of a real address that reached the "Confirm your email" screen. The two dated,
+> observation-backed statements win, so it is ticked above.
+>
+> The live blocker is **not** this setting, it is §5c (SMTP): confirmation email is ON and
+> nothing delivers it. Go there.
+>
+> Also stale below: the paragraphs arguing "until migration 113 is applied…" and "§2 is also
+> unticked". **113 is applied** (verified live 2026-08-07) and **§2 is fully ticked** — the
+> admin-by-email-claim escalation this section warns about is closed twice over. Left in place
+> because the reasoning is still worth reading, but do not act on it as a live risk.
 
 This is what makes the chosen policy (option A) real. With it OFF, `/register` still returns a
 usable session and the backend says so honestly via `confirmation_required: false` — but
@@ -382,22 +509,25 @@ confirmation-gated signup, means users simply cannot get in.
 
 Resend, Postmark, and Amazon SES all have usable free tiers.
 
-**⚠️ Do this together with §3 (point `caydexinvest.com` at Railway) — they share a
-prerequisite.** SMTP setup wants SPF/DKIM DNS records on `caydexinvest.com`, and that domain
-is still a Namecheap parking page. So one DNS session unblocks four separate things:
+- [x] Point `caydexinvest.com` at Railway (also §3) — **DONE.** ⚠️ *This box was unticked and
+      the paragraph below it said the domain "is still a Namecheap parking page" until
+      2026-08-14. Both were stale. Verified live that day: `https://caydexinvest.com/privacy`
+      returns `HTTP/2 200` with `server: railway-hikari` and `x-railway-edge`, and `dig NS`
+      returns Cloudflare, not Namecheap. §3 had been back-ticked; §5c never was — the exact
+      "unticked boxes that are secretly done" failure the preamble warns about.*
+- [ ] Add the SMTP provider's **sending DKIM**, and **MERGE** its `include:` into the existing
+      SPF record
 
-| Needs the domain live | Checklist item |
-|---|---|
-| SPF/DKIM for SMTP → confirmation emails deliver | §5c (this section) |
-| `https://caydexinvest.com/privacy` + `/terms` + `/support` | §3 |
-| App Store Connect Privacy Policy URL + Support URL | §7 |
-| Apple fetching `/.well-known/apple-app-site-association` (no redirects tolerated) → passkeys | §5b, passkey groundwork |
+⚠️ **Do NOT replace the SPF record.** `dig TXT caydexinvest.com` already returns
+`v=spf1 include:_spf.mx.cloudflare.net ~all`, paired with Cloudflare Email Routing MX records —
+that is what makes `support@` / `copyright@` / `privacy@` receive mail (§2). Overwriting it with
+the provider's suggested record silently breaks every address this file promises in the legal
+documents. Add the provider's `include:` **into** the existing string, and add its DKIM
+selector as a new record (`resend._domainkey` / `send.` currently return nothing).
 
-Doing them separately means touching Namecheap DNS three or four times and waiting for
-propagation each time. Doing them together is one sitting.
-
-- [ ] Point `caydexinvest.com` at Railway (also §3)
-- [ ] Add the SMTP provider's SPF/DKIM records at the same time
+The old "one DNS session unblocks four things" table is gone: two of those four (§3 and the
+AASA) are done, and the §7 row is not a DNS task at all — it is blocked on the App Store Connect
+record. DNS work remaining is DKIM plus the SPF merge, and nothing else.
 
 ### (d) Enable Sign in with Apple
 
@@ -544,15 +674,44 @@ Get it in writing.
 
 ## 6b. In-app purchase setup (Phase 8) 🔴 REQUIRED before you can charge
 
-The code is done and tested against a local StoreKit configuration. These six items make it
-work against real Apple infrastructure.
+The code is done and tested against a local StoreKit configuration. These items make it work
+against real Apple infrastructure.
 
-### App Store Connect
+> **Rewritten 2026-08-14.** This section said "these six items" and listed **two** products.
+> **Six ship.** The four consumable credit packs (migration 117, `Caydex.storekit`,
+> `StoreKitService.ProductID`, `BuyCreditsView`) appeared nowhere in this file — a
+> `grep -i "consumable\|credit pack"` over all 787 lines returned zero hits. It also had no
+> entry for the Paid Applications Agreement, which gates everything below it.
+> `backend/tests/test_iap_product_and_privacy_parity.py` now pins the four in-repo surfaces
+> against each other; App Store Connect is the one surface no test can reach, so it is on you.
+
+### App Store Connect — Business (do this FIRST, it has the longest lead time)
+
+- [ ] 🔴 **Accept the Paid Applications Agreement**, add **banking** details and complete the
+      **W-9 / tax forms** (Business → Agreements, Tax, and Banking).
+      Until this is active ASC returns **no IAP products at all** — `Product.products(for:)`
+      comes back empty and the paywall shows *"Credit packs aren't available on this device
+      right now."* That is the same symptom as a wrong product id, which is why this is the
+      most commonly misdiagnosed IAP failure. Bank verification is not instant; start it early.
+
+### App Store Connect — products (all SIX, blocked on the agreement above)
 
 - [ ] Create two **auto-renewable subscriptions** in a subscription group. The product IDs
       must match exactly, or a real purchase verifies and then fails to map to a plan:
       - `com.phan.caydex.pro.monthly` — $14.99/month
       - `com.phan.caydex.max.monthly` — $39.99/month
+- [ ] Create four **consumable** in-app purchases. Prices and credit grants come from
+      `credit_packs` (migration 117) — ASC and the table must agree or the user is charged one
+      price and shown another:
+      - `com.phan.caydex.credits.starter` — 90 credits
+      - `com.phan.caydex.credits.plus` — 250 credits
+      - `com.phan.caydex.credits.power` — 550 credits
+      - `com.phan.caydex.credits.mega` — 1200 credits
+      ⚠️ The `com.phan.caydex.credits.` **prefix is load-bearing**: the backend routes a
+      verified transaction to the credit path by prefix (`IAP_CREDIT_PACK_PREFIX`). A pack id
+      outside it is diagnosed as an unmapped *subscription* and refused.
+- [ ] Give the **subscription group** a localized display name — it currently has
+      `localizations: []`, and subscriptions cannot be submitted for review without one
 - [ ] Fill in the localised display name, description, and a review screenshot for each
       (Apple rejects subscriptions with incomplete metadata)
 - [ ] Note the app's numeric **Apple ID** (App Information) → set `IAP_APP_APPLE_ID`
@@ -561,12 +720,41 @@ work against real Apple infrastructure.
 ### Apple root certificates
 
 - [ ] Download Apple's public root CAs from https://www.apple.com/certificateauthority/
-      (you want **AppleRootCA-G3.cer**) and place them in `backend/certs/apple/`
+      (you want **AppleRootCA-G3**) and place them in `backend/certs/apple/`
 - [ ] Deploy them with the app on Railway
 
 Verification **fails closed** without these: with `IAP_ENVIRONMENT=Sandbox` or `Production`
 and no certificates, the endpoint returns 503 rather than accepting anything. That is
 deliberate — no trust anchor must never silently mean "trust everything" on a payment path.
+`backend/certs/` does not exist today (checked 2026-08-14), so this is genuinely open.
+
+**Three traps this section did not mention until 2026-08-14, each of which looks like success:**
+
+- ⚠️ **`.gitignore:145` is `*.cer`.** Railway builds from git, so saving Apple's file as
+  `AppleRootCA-G3.cer` and running a normal `git add .` silently omits it — you tick this box
+  and production still 503s. Save it as **`.der` or `.crt`** (both accepted by the loader,
+  neither ignored), or `git add -f`.
+- ⚠️ **Do not convert it to PEM.** The loader is `load_certificate(FILETYPE_ASN1, …)`, which is
+  DER-only. A PEM root **builds a verifier fine** — the startup log says "verifier ready" — and
+  then throws `INVALID_CERTIFICATE` on the first real purchase, returning **400 "If you were
+  charged, contact support"** to every legitimate buyer. A deploy that accuses your paying
+  customers of forgery is worse than one that fails closed.
+- ⚠️ **`IAP_APP_APPLE_ID` is a SECOND, independent 503.** It defaults to `None` and the library
+  raises *"appAppleId is required when the environment is Production"*. Certificates load
+  first, so this only surfaces **after** you fix the certs — and the box above blames the certs
+  alone, sending you back to re-check something you already did.
+
+**Readiness probe — run this instead of discovering the answer via a paying customer.**
+It mutates nothing (the payload fails signature verification by design):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  https://<your-railway-host>/api/v1/billing/app-store-notifications \
+  -H 'Content-Type: application/json' -d '{"signedPayload":"x"}'
+```
+
+**400** = the verifier was built; certificates and app id are both fine. **503** = certificates
+missing *or* `IAP_APP_APPLE_ID` unset. Anything else is worth reading the logs for.
 
 ### Server notifications
 
@@ -654,14 +842,30 @@ Once sandbox is live, on a real device with a sandbox tester signed in:
 
 No longer blocked — your existing Individual account can create this record (see §1).
 
-- [ ] Create the app record → note the numeric app ID (nothing in the app needs it today,
-      but IAP setup does)
+- [ ] ⚠️ **The app record probably ALREADY EXISTS — check before creating one.** The Xcode
+      archive at `~/Library/Developer/Xcode/Archives/2026-06-06/` records
+      `uploadEvent { state = success, adamId = 6759525689, uploadDestination = App Store }`,
+      and an App Store upload requires an existing record. Two consequences if so:
+      - That upload's sibling failed with **error 90717 — "Invalid large app icon… can't be
+        transparent or contain an alpha channel."** Verify the icon before re-uploading, or
+        you will burn another round trip on it.
+      - `CURRENT_PROJECT_VERSION = 1` / `MARKETING_VERSION = 1.0` is the build already accepted
+        on 2026-06-06, so you **must bump the build number** or the upload is rejected outright.
+
+      Note the numeric app ID either way — IAP setup needs it (`IAP_APP_APPLE_ID`).
 - [ ] **Availability: United States only.** This defers EU AI Act Article 50, GDPR, and the
       Article 27 EU-representative requirement entirely, at zero engineering cost
 - [ ] Privacy Policy URL → `https://caydexinvest.com/privacy`
 - [ ] Support URL → `https://caydexinvest.com/support`
 - [ ] **App Privacy questionnaire** → read straight from
-      `documents/legal/app-privacy-answers.md`. **Nine** data types, tracking = No.
+      `documents/legal/app-privacy-answers.md`. **TEN** data types, tracking = No.
+      ⚠️ **Was "Nine" until 2026-08-14.** The tenth is **Purchases → Purchase History** (Linked
+      = Yes, Tracking = No, purpose = App Functionality): StoreKit shipped, and every verified
+      transaction is stored in `credit_purchases` with a NOT NULL `user_id`. Both machine-
+      readable surfaces (`PrivacyInfo.xcprivacy` and the answer sheet) still said "no StoreKit
+      purchase flow exists yet" a week after it shipped; both are now corrected and pinned by
+      `tests/test_iap_product_and_privacy_parity.py`. Declare Purchase History, **never**
+      Payment Info — Apple handles payment and the app never sees card details.
       ⚠️ The ninth is **User Content → Photos or Videos** (Linked = Yes, purpose = App
       Functionality), added 2026-08-07 with the Help Us Improve screen: the user can attach a
       screenshot to a bug report, which is emailed to `support@`. It is optional and
@@ -713,20 +917,55 @@ a meaningful saving in item 9.
 ## 9. Later phases (not yet)
 
 - **APNs** — ✅ key created (`7YPQRK276L`) and the five `APNS_*` variables are set on
-  Railway. The code path is built: the insight sweeper alerts watchers of a ticker that
-  moved materially, deduped per user per ticker per trading day.
+  Railway.
+
+  ⚠️ **Rewritten 2026-08-14 — this described push as ONE notification.** Nine kinds across six
+  categories now ship (`notification_kinds.py`, seven default-on), driven by four background
+  loops. The insight sweeper is one of them. Additions this section never had:
+  - **`PUSH_DRY_RUN` must be ABSENT on Railway.** It is the global kill switch: when set, the
+    dispatcher writes the ledger row and never calls APNs — so the in-app inbox and badge keep
+    working perfectly and you cannot tell from inside the app that nothing was ever sent.
+  - A mangled `APNS_AUTH_KEY` PEM sets `PushService.enabled = False` and degrades at
+    **`logger.debug`**, deliberately. No endpoint or startup log exposes whether signing is
+    actually configured — so "the variables are set" is an assumption, not an observation.
+  - **Time Sensitive Notifications** entitlement shipped 2026-08-08 (in both `.entitlements`
+    files; the App ID capability is confirmed enabled). This section never recorded it. The
+    silent regression risk is losing the key from one of the two files — which already happened
+    once to `applesignin`.
+  - `AppDelegate.Category.all` was missing `match`, so profile-match pushes arrived with no
+    action buttons. **Fixed 2026-08-14** and pinned by
+    `tests/test_ios_notification_category_parity.py`.
+
   Still outstanding:
   - [x] **Push Notifications capability** on `com.phan.caydex` in the developer portal.
         Without it the app can't register and no device token is ever issued
-  - [ ] A **real iPhone** for the first end-to-end delivery — push does not work in the
-        Simulator, so everything to date is unit-tested against a stub
-  - [ ] Flip `APNS_ENV` from `sandbox` to `production` at launch. A device token is only
-        valid in the environment that issued it, and Debug/Release builds already
-        declare different `aps-environment` values
-  - [ ] Keep a copy of the `.p8` in your password manager — Apple allows exactly one
-        download, and the file currently exists only at `BIGDATA/myApp/`
-- **IAP products** (Phase 8): Pro $14.99, Max $39.99, plus a sandbox tester account
-- **Screenshots** (Phase 10): I can capture these from the simulator when the UI is final
+  - [ ] A **real iPhone** for the first end-to-end APNs delivery.
+        ⚠️ *"Push does not work in the Simulator" is only half true and cost testing time.*
+        The entire **client** half — categories, action buttons, interruption level, badge,
+        cold-launch routing — is testable with **no phone** via `xcrun simctl push` and the
+        nine fixtures in `frontend/ios/scripts/push-fixtures/`. What needs a device is the
+        APNs round trip itself (token issuance and delivery).
+        ⚠️ **Sign in first.** `PushNotificationManager` stashes and returns early unless
+        authenticated, while onboarding spends the one-shot iOS permission prompt while the
+        user is still a guest. Sign in, confirm a `device_tokens` row exists with
+        `environment='production'`, *then* trigger.
+  - [ ] Flip `APNS_ENV` from `sandbox` to `production` at launch.
+        ⚠️ *Correct instruction, wrong reason — fixed 2026-08-14.* `push_service` routes
+        **per token** using each row's stored environment; `APNS_ENV` is only the fallback for
+        NULL rows, and the client has always supplied one. Still flip it. And note a
+        mis-routed token gets a **400**, while the pruning logic deliberately removes tokens
+        only on **410** — so a wrongly-routed token stays dead in the table forever.
+  - [ ] Keep a copy of the `.p8` in your password manager — Apple allows exactly one download.
+        Actual path: `/Users/haiphan/BIGDATA/myApp/data and keys/AuthKey_7YPQRK276L.p8`
+        *(this said `BIGDATA/myApp/` until 2026-08-14 — one directory short).*
+        ✅ Good news: `git rev-list --objects --all | grep '\.p8'` is **empty**, so the key was
+        never committed and does not ride the §4 purge.
+- ~~**IAP products** (Phase 8)~~ — ⚠️ **not a "later phase".** Phase 8 is done and the StoreKit
+  code ships; §6b is the live instruction and lists **six** products, not two. This line
+  contradicted §6b and §7 and is retained only so the contradiction is not re-introduced.
+- **Screenshots** (Phase 10): I can capture these from the simulator when the UI is final.
+  iPhone only (§8) — 6.9" and 6.5". ⚠️ Check the app icon for an **alpha channel** first;
+  the 2026-06-06 upload failed on exactly that (error 90717).
 
 ---
 
@@ -741,3 +980,13 @@ Three items I can prepare materials for but shouldn't be the final word on:
    sufficiently transformative, even written in your own words
 3. **Whether an LLC is worth forming** — a liability question, not an Apple one (§1).
    Worth a CPA/attorney conversation on your own timeline, independent of launch
+4. **Real investor names in the Learn library** *(added 2026-08-14 — this list predates both
+   surfaces)*. Migration 103 removed real names from the personas for Guideline 5.2.1, but the
+   same shape survives elsewhere: the generated **book cover art typesets real names**
+   ("WARREN BUFFETT", "BENJAMIN GRAHAM") and the covers live in a **public** bucket with their
+   URLs baked into the app, and three **Journey lesson titles** are named after living
+   investors ("The Buffett Way", "The Lynch Way", "The Cathie Wood Way"), with view code
+   branching on the literal strings. These are titles of real books and descriptions of real
+   methodologies, which is a much stronger position than the personas had — but "LESSON 1: THE
+   BUFFETT WAY" is exactly the card that ends up in an App Store screenshot, which §7's
+   metadata rule forbids. Worth a lawyer's read, and worth deciding before screenshots.

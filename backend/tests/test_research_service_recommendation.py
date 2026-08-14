@@ -24,16 +24,38 @@ def _svc() -> ResearchService:
     return ResearchService.__new__(ResearchService)
 
 
-@pytest.mark.parametrize("key", ["_scoring_inputs", "key_vitals"])
-def test_derive_recommendation_handles_none_valuation_slot(key):
-    svc = _svc()
-    # The exact production crash case: score layer present, valuation slot None.
-    data = {"quality_score": 62, key: {"valuation": None}}
-    assert svc._derive_recommendation(data) in {"Buy", "Sell", "Hold", "Watch"}
-    # Score layer entirely absent -> falls back to score-only logic.
-    assert svc._derive_recommendation({"quality_score": 30}) == "Sell"
-    # Score layer is None.
-    assert svc._derive_recommendation({"quality_score": 70, key: None}) == "Hold"
+def test_no_buy_sell_verdict_is_derived_or_served_anymore():
+    """`_derive_recommendation` emitted a literal "Buy"/"Sell"/"Hold"/"Watch" call on a
+    named security, persisted it and served it, and NO View ever rendered it — all of the
+    App Review 5.1.1(ix)/3.1.5 "advice, not information" risk for none of the benefit.
+    Removed 2026-08-14.
+
+    Pinned in three places because reintroducing any ONE of them re-opens the risk:
+    the derivation, the write, and — most easily missed — the response field, which would
+    otherwise keep serving the verdicts already stored on pre-removal report rows.
+    """
+    from pathlib import Path
+
+    from app.schemas.research import ResearchReportDetail
+
+    assert not hasattr(ResearchService, "_derive_recommendation"), (
+        "_derive_recommendation is back. If a Buy/Sell verdict is wanted again it needs a "
+        "disclaimer surface first — see the Technical Meter, which has one."
+    )
+    assert "action_recommendation" not in ResearchReportDetail.model_fields, (
+        "ResearchReportDetail serves action_recommendation again. Reports generated before "
+        "2026-08-14 still hold a stored verdict, so this field re-publishes them."
+    )
+    service_src = Path(
+        __file__
+    ).resolve().parents[1] / "app/services/research_service.py"
+    body = "\n".join(
+        line for line in service_src.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("#")
+    )
+    assert '"action_recommendation":' not in body, (
+        "research_service writes action_recommendation again"
+    )
 
 
 @pytest.mark.parametrize("key", ["_scoring_inputs", "key_vitals"])

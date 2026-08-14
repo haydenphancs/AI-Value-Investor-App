@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Coni7jynSzlLiRCaj6phGSCmooysqFfwzqpbSmZEMZRaWD8qaQbPYItoqXmwQsp
+\restrict FKXNpKAkjkyY9UwNlFV0ClyuriysHSXXY8M839MKOiujn0iy0HmoNhK98Ks9U8H
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -7093,7 +7093,9 @@ CREATE TABLE public.user_investor_profile (
     consented_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    answered_fields text[] DEFAULT '{}'::text[] NOT NULL,
     CONSTRAINT user_investor_profile_answer_depth_check CHECK ((answer_depth = ANY (ARRAY['brief'::text, 'standard'::text, 'deep'::text]))),
+    CONSTRAINT user_investor_profile_answered_fields_check CHECK ((answered_fields <@ ARRAY['experience_level'::text, 'explanation_style'::text, 'answer_depth'::text, 'topics'::text, 'learning_goals'::text, 'follow_signals'::text])),
     CONSTRAINT user_investor_profile_experience_level_check CHECK ((experience_level = ANY (ARRAY['new'::text, 'learning'::text, 'experienced'::text]))),
     CONSTRAINT user_investor_profile_explanation_style_check CHECK ((explanation_style = ANY (ARRAY['plain_language'::text, 'balanced'::text, 'technical'::text]))),
     CONSTRAINT user_investor_profile_follow_signals_check CHECK ((follow_signals <@ ARRAY['whales'::text, 'congress'::text, 'insiders'::text, 'earnings'::text])),
@@ -7107,6 +7109,13 @@ CREATE TABLE public.user_investor_profile (
 --
 
 COMMENT ON TABLE public.user_investor_profile IS 'How a reader prefers to LEARN (experience level, explanation style, answer depth, topics of interest). Content preferences only — deliberately no finances, risk tolerance, time horizon, tax situation or goals, so output stays impersonal. Closed enums only: the rendered block is injected UNFENCED into the chat system instruction, which is safe only while no user-authored text can reach it. Guest-writable, so user_id has NO FK and may be a synthetic per-install uuid5.';
+
+
+--
+-- Name: COLUMN user_investor_profile.answered_fields; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_investor_profile.answered_fields IS 'Which preference fields the reader has explicitly submitted. Distinguishes "chose the default value" from "never answered" — the two are identical in the value columns, which made a reader who picked both middle options read back as having stated nothing. Drives is_empty on the wire and the pre-selected chips in the Settings editor.';
 
 
 --
@@ -13828,5 +13837,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Coni7jynSzlLiRCaj6phGSCmooysqFfwzqpbSmZEMZRaWD8qaQbPYItoqXmwQsp
+\unrestrict FKXNpKAkjkyY9UwNlFV0ClyuriysHSXXY8M839MKOiujn0iy0HmoNhK98Ks9U8H
 

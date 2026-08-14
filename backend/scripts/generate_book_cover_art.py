@@ -65,63 +65,89 @@ COMPOSITION: vertical portrait 3:4 frame. The sharp, recognisable object sits in
 
 ABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, engraving, embossed lettering, serial numbers, dial numerals, brand names, logos, signage or watermarks ANYWHERE in the image. No human faces, no hands, no people. No books, book covers or bookshelves."""
 
-# Two palettes in a balanced 5/5 split across the set: W C C W W C C W W C. NOT strict
-# alternation — the invariant that matters is that the palette never runs flat for three
-# books together, which is where a scroll starts to look monotonous. Colour is doing real
-# work here: it is what separates ten dark covers from each other at speed.
+# FOUR palettes. Colour is doing real work: it is the only thing that separates ten
+# dark, low-key covers from each other at a glance in a scroll.
+#
+# Distribution across the shelf is  gold gray red gold green gray green gold red red
+# — a 3/2/2/3 split with no palette running more than two books deep. NOT strict
+# rotation, which is not achievable with four colours over ten books without forcing
+# a colour onto a subject it does not suit. The subject leads; the palette follows it.
 # Pinned by tests/test_book_covers_parity.py::test_palette_is_balanced_and_never_runs_three_deep.
-WARM = ("One warm tungsten key light low and to the right, raking across the surfaces so "
+PALETTES = {
+    "gold": (
+        "One warm tungsten key light low and to the right, raking across the surfaces so "
         "the metal glows along its edges and everything else falls into darkness.",
         "deep brass and old gold, warm amber, rich brown-black. Burnished and warm, "
-        "never yellow or garish.")
-COOL = ("One hard key light from the upper left grazing across the surfaces, picking out "
+        "never yellow or garish.",
+    ),
+    "gray": (
+        "One hard key light from the upper left grazing across the surfaces, picking out "
         "every machined edge and tooling mark.",
         "cold gunmetal, brushed steel, blue-grey and near-black, with one restrained "
-        "steel-blue highlight. Almost no warmth.")
+        "steel-blue highlight. Almost no warmth.",
+    ),
+    "green": (
+        "One cool key light from the upper left raking across the surfaces, with a faint "
+        "green bounce lifting the shadow side.",
+        "deep emerald and moss, the soft blue-green of verdigris patina on aged copper, "
+        "over a rich green-black. Muted and organic, never lime, neon or minty.",
+    ),
+    "red": (
+        "One low warm key from the right, plus a deep red ambient wash bleeding into the "
+        "shadows behind the subject.",
+        "oxblood, deep crimson and burnished copper-red over a warm red-black. Rich, dark "
+        "and restrained — never bright, never scarlet, never a pure saturated red.",
+    ),
+}
 
 # order: (slug, palette, subject)
 BOOKS = {
-    1: ("rich-dad-poor-dad", WARM,
+    1: ("rich-dad-poor-dad", "gold",
         "two neat stacks of gold coins standing on a dark polished wood desk, one stack clearly "
         "taller than the other, with a single brass house key lying flat in front of them, its bow "
         "and bit plainly visible. BOTH COIN STACKS ARE COMPLETE AND FULLY INSIDE THE FRAME with "
         "clear space above them — nothing is cropped by the top edge. Shot slightly above coin "
         "level so the milled edges and the round faces of the coins both read, and the key is sharp"),
-    2: ("the-intelligent-investor", COOL,
+    2: ("the-intelligent-investor", "gray",
         "a heavy circular steel bank vault door, seen three-quarters open from the front so the "
         "whole round door reads clearly — the spoked handwheel at its centre, the ring of thick "
         "cylindrical locking bolts thrown out around its edge, and the polished steel face. It must "
         "be instantly recognisable as a bank vault door, not a close abstract detail of metal"),
-    3: ("the-psychology-of-money", COOL,
+    # Kept GRAY. The red re-roll was rejected on review, so this reverts to the exact
+    # prompt that produced the approved plate — palette AND subject wording — so the
+    # prompt checkpoint still matches the committed art and a later run does not
+    # silently re-roll a cover that was already signed off.
+    3: ("the-psychology-of-money", "gray",
         "a single gold coin standing balanced upright on its edge on a dark polished stone surface, "
         "casting a long dramatic shadow away from the light. The coin is clearly a coin, sharp and "
         "complete, alone in the frame"),
-    4: ("one-up-on-wall-street", WARM,
+    4: ("one-up-on-wall-street", "gold",
         "an antique brass magnifying glass with a turned wooden handle resting on a dark desk, its "
         "round lens clearly visible and catching the light, with a softly defocused rising line "
         "chart glowing far behind it. The magnifying glass is complete and unmistakable"),
-    5: ("common-stocks-and-uncommon-profits", WARM,
-        "a small green seedling with two fresh leaves growing up out of a heap of gold coins in "
-        "dark rich soil. Both the seedling and the individual coins are clearly readable"),
-    6: ("the-little-book-of-common-sense-investing", COOL,
+    5: ("common-stocks-and-uncommon-profits", "green",
+        "a small green seedling with two fresh leaves growing up out of a heap of aged copper coins "
+        "with green verdigris patina, set in dark rich soil. Both the seedling and the individual "
+        "coins are clearly readable"),
+    6: ("the-little-book-of-common-sense-investing", "gray",
         "an antique brass ship's compass with its glass dome and floating card, sitting on dark "
         "slate. The whole instrument is in frame and obviously a compass, its needle steady"),
-    7: ("a-random-walk-down-wall-street", COOL,
+    7: ("a-random-walk-down-wall-street", "green",
         "a wide shallow woven basket sitting on dark slate, brimming right to the rim with many "
-        "identical silver coins heaped together — hundreds of them, the whole market held in one "
-        "basket rather than a single pick. The basket and the individual coins are both clearly "
-        "readable, and a few loose coins rest on the slate beside it"),
-    8: ("the-essays-of-warren-buffett", WARM,
+        "identical aged copper coins carrying a green verdigris patina — hundreds of them, the whole "
+        "market held in one basket rather than a single pick. The basket and the individual coins are "
+        "both clearly readable, and a few loose coins rest on the slate beside it"),
+    8: ("the-essays-of-warren-buffett", "gold",
         "a classic black and gold fountain pen, cap off and its polished gold nib clearly exposed, "
         "lying at a slight angle across a dark leather desk. THE WHOLE PEN IS SHARP AND IN FOCUS "
         "from nib to barrel end and is the unmistakable subject of the photograph, occupying a good "
         "part of the frame. A short stack of gold coins sits well behind it, small and softly "
         "defocused. Do not blur the pen"),
-    9: ("the-little-book-that-still-beats-the-market", WARM,
-        "the round brass keys of a vintage mechanical adding machine, seen at an angle so the "
-        "banks of keys and the machine's body clearly read as an old calculating machine, warm "
-        "brass and black enamel, worn with use"),
-    10: ("the-most-important-thing", COOL,
+    9: ("the-little-book-that-still-beats-the-market", "red",
+        "the round keys of a vintage mechanical adding machine, seen at an angle so the banks of "
+        "keys and the machine's body clearly read as an old calculating machine. Deep oxblood-red "
+        "enamel bodywork with dark copper-red key rims, worn with use"),
+    10: ("the-most-important-thing", "red",
          "the polished brass pendulum bob and rod of an antique longcase clock, hanging in the dark "
          "interior of the clock case, the disc of the bob catching the light. It is clearly a clock "
          "pendulum, whole and recognisable"),
@@ -129,7 +155,8 @@ BOOKS = {
 
 
 def prompt_for(order: int) -> str:
-    _slug, (light, palette), subject = BOOKS[order]
+    _slug, palette_name, subject = BOOKS[order]
+    light, palette = PALETTES[palette_name]
     return BASE.format(subject=subject, light=light, palette=palette)
 
 
@@ -194,10 +221,21 @@ def generate(order: int, force: bool = False) -> Path:
                      if getattr(p, "inline_data", None) and p.inline_data.data), None)
         if blob is None:
             txt = " ".join((p.text or "") for p in parts if getattr(p, "text", None))
+            reason = str(cand.finish_reason)
+            # NO_IMAGE with no safety block and no explanation is a transient generation
+            # failure, not a refusal — it succeeds on a re-ask. Only exceptions used to be
+            # retried, so a single one of these failed the whole book. A genuine refusal
+            # names a safety reason or returns explanatory text; those still fail fast,
+            # because retrying a refusal just burns quota.
+            transient = ("NO_IMAGE" in reason and not cand.safety_ratings and not txt.strip())
+            if transient and attempt < MAX_ATTEMPTS:
+                wait = min(6 * attempt, 30)
+                print(f"  {order:2d} {slug:44s} ! empty result ({reason}) — retry {wait}s")
+                time.sleep(wait)
+                continue
             raise RuntimeError(
                 f"book {order} ({slug}): model returned no image. "
-                f"finish_reason={cand.finish_reason} safety={cand.safety_ratings} "
-                f"text={txt[:300]!r}")
+                f"finish_reason={reason} safety={cand.safety_ratings} text={txt[:300]!r}")
 
         img = Image.open(io.BytesIO(blob))
         img.load()

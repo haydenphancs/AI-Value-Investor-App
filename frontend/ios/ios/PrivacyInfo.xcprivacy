@@ -13,14 +13,17 @@
   Required-reason APIs: UserDefaults only (23 files use @AppStorage). Verified ABSENT:
   file-timestamp APIs, system boot time, disk space, and active-keyboard APIs.
 
-  Tracking: false. There is no IDFA, no AppTrackingTransparency, and no advertising or
-  analytics SDK in the binary — Package.resolved has exactly one pin (sentry-cocoa,
-  which ships its own manifest).
+  Tracking: false. There is no IDFA, no AppTrackingTransparency and no advertising SDK —
+  grep for ATTrackingManager / advertisingIdentifier / NSUserTrackingUsageDescription
+  returns nothing but this comment. Package.resolved has NINE pins: sentry-cocoa plus the
+  GoogleSignIn dependency tree (googlesignin-ios, appauth-ios, gtmappauth,
+  gtm-session-fetcher, googleutilities, app-check, promises, interop-ios-for-google-sdks).
+  All nine ship their own manifests, and none is an advertising or attribution SDK, so the
+  conclusion is unchanged — but do not restate the old "exactly one pin (sentry-cocoa)"
+  rationale, which was already stale when the Google SDK landed.
 
   NOT declared, deliberately:
     * Performance Data — Sentry runs with tracesSampleRate = 0.0, so none is sent.
-    * Purchase History — no StoreKit purchase flow exists yet. ADD IT when IAP ships
-      (plan Phase 8), or the manifest becomes inaccurate.
     * Precise/Coarse Location, Health, Contacts, Audio Data — all verified absent
       from the codebase.
 
@@ -165,6 +168,25 @@
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeProductInteraction</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+
+		<!-- IAP purchase history. StoreKit 2 ships (StoreKitService, observer started at
+		     launch), and every verified transaction is written to `credit_purchases` with a
+		     NOT NULL user_id alongside transaction_id / product_id / price_cents — so it is
+		     LINKED, not anonymous. Subscriptions additionally set users.tier. No card or
+		     billing details ever reach us; Apple handles payment and we see only Apple's
+		     signed transaction. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePurchaseHistory</string>
 			<key>NSPrivacyCollectedDataTypeLinked</key>
 			<true/>
 			<key>NSPrivacyCollectedDataTypeTracking</key>

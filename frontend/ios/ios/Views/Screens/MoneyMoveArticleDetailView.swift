@@ -28,20 +28,41 @@ struct MoneyMoveArticleDetailView: View {
 
     let article: MoneyMoveArticle
 
+    /// Set when the reader follows a Related Articles card. Tapping SWAPS the article in
+    /// place rather than presenting another cover: this screen is itself a `fullScreenCover`,
+    /// so pushing a second one would nest presentations without bound, each keeping its own
+    /// scroll and audio state. `nil` means "showing the article we were opened with".
+    @State private var current: MoneyMoveArticle?
+
+    /// The article actually on screen. Everything below reads this, never `article`.
+    private var shown: MoneyMoveArticle { current ?? article }
+
     /// Convert article to AudioEpisode for playback
     private var audioEpisode: AudioEpisode {
         AudioEpisode(
-            id: "article-\(article.id)",
-            title: article.title,
-            subtitle: article.subtitle,
-            artworkGradientColors: article.heroGradientColors,
-            artworkIcon: article.category.iconName,
-            duration: TimeInterval(article.audioDurationSeconds ?? article.readTimeMinutes * 60),
+            id: "article-\(shown.id)",
+            title: shown.title,
+            subtitle: shown.subtitle,
+            artworkGradientColors: shown.heroGradientColors,
+            artworkIcon: shown.category.iconName,
+            duration: TimeInterval(shown.audioDurationSeconds ?? shown.readTimeMinutes * 60),
             category: .moneyMoves,
-            authorName: article.author.name,
-            sourceId: article.id.uuidString,
-            audioUrl: article.audioUrl
+            authorName: shown.author.name,
+            sourceId: shown.id.uuidString,
+            audioUrl: shown.audioUrl
         )
+    }
+
+    /// Follow a Related Articles card. Resolves by title because `relatedArticles` entries
+    /// carry no slug. A title with no article is ignored rather than clearing the screen —
+    /// the content is server-driven, so a card can outlive the article it points at.
+    private func openRelated(_ related: RelatedArticle) {
+        guard let next = MoneyMovesContentStore.shared.article(forTitle: related.title),
+              next.id != shown.id else { return }
+        // Audio deliberately keeps playing: it is a global episode with its own mini player,
+        // and `readAlongActiveTime` already returns nil once the episode no longer matches,
+        // so the new article simply renders without read-along highlighting.
+        current = next
     }
 
     /// The narration playhead (seconds) when THIS article's audio is the active episode, else nil
@@ -80,14 +101,18 @@ struct MoneyMoveArticleDetailView: View {
                     VStack(spacing: 0) {
                         // Hero header
                         MoneyMoveArticleHeroHeader(
-                            article: article,
+                            article: shown,
                             audioEpisode: audioEpisode,
                             onBackTapped: handleBackTapped,
                             onShareTapped: handleShareTapped
                         )
 
                         // Content
-                        MoneyMoveArticleContent(article: article, activeTime: readAlongActiveTime)
+                        MoneyMoveArticleContent(
+                            article: shown,
+                            activeTime: readAlongActiveTime,
+                            onRelatedTapped: openRelated
+                        )
                         .padding(.top, AppSpacing.lg)
 
                         // Bottom padding (extra space for mini player). Completion is now an
@@ -96,6 +121,10 @@ struct MoneyMoveArticleDetailView: View {
                         Color.clear
                             .frame(height: audioManager.hasActiveEpisode ? 120 : 40)
                     }
+                    // Changing identity on swap gives the new article a FRESH scroll view, so it
+                    // opens at the top instead of inheriting the previous article's offset
+                    // mid-paragraph. Also rebinds read-along and the completion toggle.
+                    .id(shown.id)
                 }
                 // Drive the sticky header + reading-progress bar straight from the scroll
                 // view's live geometry (iOS 18+). More reliable than a GeometryReader +
@@ -149,7 +178,7 @@ struct MoneyMoveArticleDetailView: View {
                         chatViewModel.startNewConversation(
                             firstMessage: text,
                             contextType: .moneyMovesArticle,
-                            referenceId: article.slug
+                            referenceId: shown.slug
                         )
                         // Release the focus-driven compact reason deterministically (the covered
                         // TextField's focus-off event is unreliable). AIChatScreen's own forceCompact
@@ -177,7 +206,7 @@ struct MoneyMoveArticleDetailView: View {
                 .receive(on: DispatchQueue.main)
                 .sink { completed in
                     if completed.id == audioEpisode.id {
-                        MoneyMovesProgressStore.shared.markCompleted(slug: article.slug)
+                        MoneyMovesProgressStore.shared.markCompleted(slug: shown.slug)
                     }
                 }
         }
@@ -186,7 +215,7 @@ struct MoneyMoveArticleDetailView: View {
             audioCompletionCancellable = nil
         }
         .sheet(isPresented: $showShareSheet) {
-            ShareSheet(items: [article.title, article.subtitle])
+            ShareSheet(items: [shown.title, shown.subtitle])
         }
         // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
         // an upgrade, so this presenter is what turns that into the plan sheet. Needed on
@@ -218,7 +247,7 @@ struct MoneyMoveArticleDetailView: View {
             .buttonStyle(PlainButtonStyle())
 
             // Title
-            Text(article.title)
+            Text(shown.title)
                 .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .lineLimit(1)
@@ -282,7 +311,7 @@ struct MoneyMoveArticleDetailView: View {
     }
 
     private func handleAuthorTapped() {
-        print("Navigate to author profile: \(article.author.name)")
+        print("Navigate to author profile: \(shown.author.name)")
     }
 }
 

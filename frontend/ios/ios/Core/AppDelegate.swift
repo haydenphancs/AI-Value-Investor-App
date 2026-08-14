@@ -23,8 +23,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         static let smartMoney = "smart_money"
         static let priceAlert = "price_alert"
         static let app = "app"
+        // `CATEGORY_MATCH` / thread_id "match" — the profile-match kind. It was MISSING from
+        // `all` until 2026-08-14, which is precisely the silent failure the doc comment above
+        // describes: the backend shipped `aps.category = "match"`, iOS found no registered
+        // category, and every profile-match push arrived with no View / Mark as Read buttons.
+        // Nothing logs this. Adding a kind to `notification_kinds.py` means adding it here.
+        static let match = "match"
 
-        static let all = [watchlist, earnings, smartMoney, priceAlert, app]
+        static let all = [watchlist, earnings, smartMoney, priceAlert, app, match]
     }
 
     private enum Action {

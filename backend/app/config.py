@@ -414,6 +414,20 @@ class Settings(BaseSettings):
     # verbatim, so nothing the user just said can be stale.
     CHAT_SUMMARY_REFRESH_AFTER_MESSAGES: int = 4
 
+    # Apply the reader's learning preferences to chat answers (Pro/Max only).
+    #
+    # ⚠️ SHIPS OFF, AND THE GATE IS LEGAL, NOT TECHNICAL. Turning this on changes the app
+    # from producing output that is identical for everyone to output composed for one
+    # reader. The design keeps that on the safe side of the line — it personalizes
+    # PEDAGOGY (what to cover first, at what reading level), never a view about a
+    # security, and the profile deliberately excludes the five suitability inputs — but
+    # the live Terms §2 still promise output is "general and impersonal", and that
+    # paragraph needs its carve-out before this is enabled. See the plan's §1.
+    #
+    # Independent of the tier gate on purpose: `signals_unlocked` answers "may this user
+    # have it", this answers "does the feature exist yet".
+    CHAT_PERSONALIZATION_ENABLED: bool = False
+
     # ── Chat security / abuse & cost controls (denial-of-wallet, OWASP LLM10) ──
     # Input hygiene: a normalized+stripped user message over CHAT_MESSAGE_MAX_CHARS
     # is rejected with a friendly CHAT_MESSAGE_TOO_LONG (the Pydantic HARD_MAX is a

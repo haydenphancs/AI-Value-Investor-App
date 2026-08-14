@@ -59,6 +59,11 @@ enum AnalyticsEventName: String {
     /// and push relevant at all.
     case onboardingCompleted = "onboarding_completed"
     case onboardingSkipped = "onboarding_skipped"
+    /// Personalized explanations opted in / out. Deliberately property-less: the point
+    /// is the RATE and the consent audit trail, and the answers themselves are the
+    /// reader's own reading interests, which have no business in the analytics stream.
+    case personalizationConsentGranted = "personalization_consent_granted"
+    case personalizationConsentWithdrawn = "personalization_consent_withdrawn"
     /// A user-initiated write that failed and was reverted. Carries `action` (what they were
     /// doing) and `code` (`AppError.analyticsCode`). Exists because this whole class of failure
     /// used to be a `print` — so in production there was no way to know how often a tap on

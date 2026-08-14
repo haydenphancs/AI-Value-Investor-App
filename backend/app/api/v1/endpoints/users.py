@@ -320,12 +320,14 @@ async def update_my_investor_profile(
     control that silently does nothing.
     """
     payload = request.model_dump(exclude_none=True)
-    consented_at = None
-    if payload.pop("accepted_personalization_terms", False):
-        consented_at = datetime.now(timezone.utc).isoformat()
+    # Tri-state, and `exclude_none` is what preserves it: absent → don't touch stored
+    # consent, True → grant, False → revoke. A plain `.pop(key, False)` would read
+    # "field omitted" as "revoke", so every ordinary preference edit would silently
+    # withdraw consent.
+    consent = payload.pop("accepted_personalization_terms", None)
     try:
         profile = get_user_investor_profile_service().upsert_profile(
-            user["id"], payload, consented_at=consented_at,
+            user["id"], payload, consent=consent,
         )
     except ProfileUnreadable as e:
         return make_error_response(ErrorCode.SETTINGS_UNAVAILABLE, message=str(e))

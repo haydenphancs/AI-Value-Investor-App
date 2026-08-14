@@ -41,10 +41,19 @@ and **Purposes**. Answer *Used for tracking = No* for every row.
 | Financial Info → **Other Financial Info** | Yes | App Functionality | Self-entered share counts / position values for the diversification score (`portfolio_holdings.shares`, `market_value`) |
 | User Content → **Other User Content** | Yes | App Functionality | Chat messages, report ratings and written feedback |
 | User Content → **Photos or Videos** | Yes | App Functionality | Optional screenshot the user attaches to a Help Us Improve bug report, emailed to support@. Out-of-process `PhotosPicker`, one image at a time, visible in the composer before it sends |
-| Usage Data → **Product Interaction** | Yes | App Functionality | Watchlist contents, lesson/book completion, bookmarks, followed entities |
+| Usage Data → **Product Interaction** | Yes | App Functionality | Watchlist contents, lesson/book completion, bookmarks, followed entities, and the optional learning preferences (experience level, explanation style, answer length, topics of interest) in `user_investor_profile` |
 | Diagnostics → **Crash Data** | **No** | App Functionality | Sentry. `sendDefaultPii = false` and `SentrySDK.setUser` is never called, so crash reports carry no identity |
 
-Note on the non-obvious one:
+Notes on the non-obvious ones:
+
+- **Learning preferences do NOT add a data type.** They are self-described *content*
+  preferences — reading level, explanation style, answer length, subjects of interest — which
+  is the same class as the watchlist and lesson progress already covered by Product
+  Interaction. They are deliberately **not** Financial Info: the profile collects no finances,
+  risk tolerance, time horizon, tax situation or investment objectives, and a test
+  (`test_no_suitability_field_ever_creeps_in`) fails the build if anyone adds one. So the
+  existing selection stands; only this evidence line changes.
+
 
 - **Photos or Videos** — selected as of the Help Us Improve screen. It is optional and
   user-initiated: nothing is read unless the user picks an image, and they see it in the

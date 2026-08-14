@@ -55,6 +55,11 @@ ALLOWED_EVENTS: frozenset[str] = frozenset({
     # Updates, the personalized Home strip, and (later) push relevant at all.
     "onboarding_completed",
     "onboarding_skipped",
+    # Personalized-explanations opt-in / withdrawal. Property-less on purpose: the value
+    # is the RATE and the consent audit trail. The preferences themselves are the reader's
+    # own reading interests and are deliberately kept out of the analytics stream.
+    "personalization_consent_granted",
+    "personalization_consent_withdrawn",
     # Failure telemetry. Both replace `print`/`#if DEBUG` sites that were invisible in release
     # builds, which is how a whole class of silently-reverted user actions (whale follow, the
     # star toggles, portfolio edits) survived unnoticed. `mutation_failed` is user-initiated,

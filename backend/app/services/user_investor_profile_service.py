@@ -116,6 +116,29 @@ def sanitize_profile(raw: Any) -> Dict[str, Any]:
     return out
 
 
+def sanitize_updates(raw: Any) -> Dict[str, Any]:
+    """Sanitize only the fields ACTUALLY PRESENT in `raw`. NEVER raises.
+
+    Distinct from `sanitize_profile`, and the distinction is load-bearing:
+    `sanitize_profile` fills every absent field with its default, which is right for a
+    READ (a missing column should render as the default) and catastrophic for a WRITE.
+    The upsert writes whatever columns the payload carries, so passing a defaults-filled
+    dict silently CLEARS every field the caller did not mention — a Settings screen
+    editing one preference would wipe the other five.
+
+    Caught by an end-to-end round-trip, not by a unit test: with the table absent the
+    endpoint answered 503, so nothing ever observed the stored row.
+    """
+    out: Dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return out
+    clean = sanitize_profile(raw)
+    for field in list(SCALAR_FIELDS) + list(ARRAY_FIELDS):
+        if field in raw:
+            out[field] = clean[field]
+    return out
+
+
 def is_empty_profile(profile: Dict[str, Any]) -> bool:
     """True when the user expressed no preference at all.
 
@@ -161,7 +184,7 @@ class UserInvestorProfileService:
         return profile
 
     def upsert_profile(
-        self, user_id: str, raw: Dict[str, Any], *, consented_at: Optional[str] = None,
+        self, user_id: str, raw: Dict[str, Any], *, consent: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Write the profile and return the sanitized result.
 
@@ -169,7 +192,11 @@ class UserInvestorProfileService:
         best-effort, but the endpoint still needs to know it did not land so it can
         say so rather than echoing back a profile that was never stored.
         """
-        payload = sanitize_profile(raw)
+        # PARTIAL: only the fields the caller actually sent. PostgREST's upsert writes
+        # exactly the columns in the payload (INSERT … ON CONFLICT DO UPDATE SET those),
+        # so omitting a field leaves the stored value alone on update and takes the
+        # column DEFAULT on insert — which is what the API documents.
+        payload = sanitize_updates(raw)
         payload["user_id"] = user_id
         # Matches every other service in the repo (iap_service, price_alert_service,
         # updates_insight_sweeper). PostgREST posts this as JSON, so Postgres casts the
@@ -178,8 +205,15 @@ class UserInvestorProfileService:
         # Set explicitly rather than relying on the column DEFAULT, which fires only on
         # INSERT and would freeze `updated_at` at creation time for every later upsert.
         payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-        if consented_at is not None:
-            payload["consented_at"] = consented_at
+        # THREE states, not two. `None` = the caller said nothing about consent, so the
+        # stored value is left alone (an ordinary preference edit must not silently
+        # re-consent anyone). `True` = granted now. `False` = REVOKED, which has to write
+        # an explicit NULL — consent the user cannot withdraw is not consent, and a
+        # `truthy?` check would make the toggle one-way.
+        if consent is True:
+            payload["consented_at"] = datetime.now(timezone.utc).isoformat()
+        elif consent is False:
+            payload["consented_at"] = None
         try:
             self.supabase.table(TABLE).upsert(
                 payload, on_conflict="user_id",

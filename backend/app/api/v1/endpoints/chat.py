@@ -285,6 +285,37 @@ def _session_type_for(context_type: Optional[str], stock_id: Optional[str]) -> s
     return "STOCK" if stock_id else "NORMAL"
 
 
+def _reader_lens_for(user: dict) -> Optional[str]:
+    """The reader's rendered preference block for this turn, or None. NEVER raises.
+
+    Best-effort by design: personalization is a presentation nicety, so a profile-store
+    hiccup must degrade to the normal, impersonal answer rather than fail the turn. The
+    tier / consent / feature-flag decision lives in `resolve_reader_lens` so it is a pure
+    function both endpoints share and tests can exercise without a request.
+    """
+    try:
+        from app.services.agents.investor_profile_prompt import resolve_reader_lens
+        from app.services.user_investor_profile_service import (
+            get_user_investor_profile_service,
+        )
+
+        from app.config import settings
+        from app.services.entitlements import signals_unlocked
+
+        # Skip the read entirely when it cannot matter — the common case (feature off,
+        # or a free/guest caller) must not pay a Supabase round trip on the answer path.
+        if not settings.CHAT_PERSONALIZATION_ENABLED or not signals_unlocked(user.get("tier")):
+            return None
+        profile = get_user_investor_profile_service().get_profile(user["id"])
+        return resolve_reader_lens(profile, user.get("tier"))
+    except Exception as e:  # noqa: BLE001 — never let a preference break an answer
+        logger.warning(
+            "Reader lens unavailable for user=%s (%s: %s) — answering unpersonalized",
+            user.get("id"), type(e).__name__, e,
+        )
+        return None
+
+
 def _effective_context(req_context: Optional[str], session_row: dict) -> Optional[str]:
     """The on-screen grounding snapshot to feed the LLM this turn.
 
@@ -517,6 +548,9 @@ async def send_chat_message(
         # prompt labels it as a point-in-time copy, not live data.
         context_is_replayed = not request.context and bool(effective_context)
 
+        # Skips the DB round trip when it cannot apply (see _reader_lens_for).
+        reader_lens = _reader_lens_for(user)
+
         ai_result = await chat_service.generate_response(
             session_id=session_id,
             user_message=msg,
@@ -526,6 +560,7 @@ async def send_chat_message(
             context_type=ctx_type,
             reference_id=ref_id,
             context_is_replayed=context_is_replayed,
+            reader_lens=reader_lens,
         )
 
         # Output enforcement (OWASP LLM02/LLM07): redact high-confidence provider /
@@ -764,6 +799,7 @@ async def stream_chat_message(
             # with prep so the router's ~400ms hides behind the RAG/widget work. Never raises → general.
             from app.services.agents.chat_router import route_question, select_model
             from app.services.agents.chat_specialists import apply_specialist
+            reader_lens = _reader_lens_for(user)
             prep_coro = chat_service.prepare_stream_generation(
                 session_id=session_id,
                 user_message=user_message,
@@ -773,6 +809,7 @@ async def stream_chat_message(
                 context_type=ctx_type,
                 reference_id=ref_id,
                 context_is_replayed=context_is_replayed,
+                reader_lens=reader_lens,
             )
             if settings.CHAT_MULTI_AGENT_ENABLED:
                 prep, route = await asyncio.gather(
@@ -883,6 +920,9 @@ async def stream_chat_message(
                     context_type=ctx_type,
                     reference_id=ref_id,
                     context_is_replayed=context_is_replayed,
+                    # Same lens the aborted stream used — a fallback that answered
+                    # differently would be visible to the user as a personality change.
+                    reader_lens=reader_lens,
                 )
                 content = ai_result.get("content")
                 citations = ai_result.get("citations")

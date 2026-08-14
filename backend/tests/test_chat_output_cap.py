@@ -26,7 +26,12 @@ CHAT_STREAM_CALLERS = (
     BACKEND / "app" / "services" / "chat_service.py",
     BACKEND / "app" / "api" / "v1" / "endpoints" / "chat.py",
 )
-STREAM_METHODS = {"stream_text", "stream_agentic"}
+# Every generation method a CHAT turn can reach — not just the streaming pair. The
+# original set was `{"stream_text", "stream_agentic"}` while the docstring above claimed
+# to check "every chat entry point", so the non-streaming /chat/send path
+# (`generate_with_tools`, falling back to `generate_text`) sat outside the scan and
+# inherited GEMINI_MAX_TOKENS. The file was green with the hole open.
+STREAM_METHODS = {"stream_text", "stream_agentic", "generate_with_tools", "generate_text"}
 
 
 # ── the cap is actually a cap ───────────────────────────────────────────────

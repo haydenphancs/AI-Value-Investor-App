@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict TD2ioylK96dqrmxSZ9VLohwUiXcm5mtUeJc7N2fpGSZfHq0rd4EGIqvxBzVfKfg
+\restrict Coni7jynSzlLiRCaj6phGSCmooysqFfwzqpbSmZEMZRaWD8qaQbPYItoqXmwQsp
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1412,6 +1412,61 @@ $$;
 
 
 --
+-- Name: ensure_active_portfolio(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ensure_active_portfolio(p_user_id uuid) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_id UUID;
+BEGIN
+    -- Same per-user advisory lock as set_active_portfolio, and it has to be the SAME key or
+    -- the two functions do not exclude each other. A `NOT EXISTS (an active row)` re-check
+    -- is NOT sufficient on its own: it reads committed state, so an in-flight uncommitted
+    -- activation is invisible to it, this UPDATE proceeds, and the index insert then blocks
+    -- and raises 23505 when the other transaction commits.
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+    SELECT id INTO v_id
+      FROM public.portfolios
+     WHERE user_id = p_user_id AND is_active
+     LIMIT 1;
+
+    IF FOUND THEN
+        RETURN v_id;   -- already healthy; the common path is one indexed read
+    END IF;
+
+    -- Promote the user's first group, ordered the way the app lists them.
+    --
+    -- One statement with the pick as a sub-select, NOT `SELECT ... LIMIT 1 FOR UPDATE` into
+    -- a variable: LIMIT is applied BEFORE the lock, so if the chosen row is deleted
+    -- concurrently, EPQ drops it and the SELECT returns nothing rather than falling through
+    -- to the next candidate — reporting "this user owns no groups" for a user who owns
+    -- several. The documented caller is literally "after deleting the active group", so
+    -- delete-versus-heal is the expected pair, not an exotic one.
+    UPDATE public.portfolios
+       SET is_active = TRUE, updated_at = NOW()
+     WHERE id = (
+             SELECT id
+               FROM public.portfolios
+              WHERE user_id = p_user_id
+              ORDER BY sort_order, created_at, id
+              LIMIT 1
+           )
+    RETURNING id INTO v_id;
+
+    -- NULL here means the user genuinely owns no groups. `GET /portfolios` seeds one
+    -- (`_seed_default_portfolio`, which inserts is_active = TRUE); every other caller
+    -- treats NULL as "nothing to heal" and the surfaces fall back honestly.
+    RETURN v_id;
+END;
+$$;
+
+
+--
 -- Name: ensure_credit_period(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2252,6 +2307,66 @@ $$;
 --
 
 COMMENT ON FUNCTION public.search_filing_chunks(query_embedding public.vector, match_threshold double precision, match_count integer, filter_ticker text, filter_filing_type text) IS 'Semantic search across SEC filing chunks. Optionally filter by ticker and filing type.';
+
+
+--
+-- Name: set_active_portfolio(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.set_active_portfolio(p_user_id uuid, p_portfolio_id uuid) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_owned BOOLEAN;
+BEGIN
+    -- Serialise on the USER, not on the target row. A row lock on `id = p_portfolio_id` is
+    -- what an earlier draft used, and it does not serialise anything: two concurrent
+    -- switches for the same user lock DIFFERENT rows, so both proceed. Worked interleaving,
+    -- with the user's active row currently C:
+    --
+    --   T1 locks A, clears C, sets A = TRUE  (uncommitted)
+    --   T2 locks B (no conflict), its clear blocks on T1's lock of C
+    --   T1 commits; T2 re-checks C, now FALSE, so T2's clear matches NOTHING —
+    --     A's new TRUE version postdates T2's clear snapshot
+    --   T2 sets B = TRUE  →  duplicate key on idx_portfolios_one_active_per_user
+    --
+    -- And when the user has ZERO active rows — a state this schema explicitly expects and
+    -- heals — neither clear touches anything, so there is no incidental lock contention to
+    -- narrow the window at all and the collision window is the whole transaction.
+    --
+    -- An advisory lock keyed on the user is the only thing that covers both. It is
+    -- transaction-scoped, so it releases on COMMIT/ROLLBACK with no unlock path to forget.
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+    SELECT TRUE INTO v_owned
+      FROM public.portfolios
+     WHERE user_id = p_user_id AND id = p_portfolio_id;
+
+    IF NOT FOUND THEN
+        RETURN FALSE;   -- not this user's portfolio (or gone) — caller answers 404
+    END IF;
+
+    -- TWO statements, deliberately. The obvious one-statement form
+    --     UPDATE portfolios SET is_active = (id = p_portfolio_id) WHERE user_id = p_user_id
+    -- transiently holds two TRUE rows for the same user while the executor walks them, and a
+    -- plain unique INDEX is checked per row and cannot be deferred. That form therefore fails
+    -- with a duplicate-key error whenever the new row happens to be visited before the old one
+    -- is cleared — i.e. intermittently, depending on physical row order. Clear, then set.
+    UPDATE public.portfolios
+       SET is_active = FALSE, updated_at = NOW()
+     WHERE user_id = p_user_id AND is_active AND id <> p_portfolio_id;
+
+    -- `AND NOT is_active` keeps re-activating the current group a genuine no-op instead of a
+    -- spurious updated_at bump.
+    UPDATE public.portfolios
+       SET is_active = TRUE, updated_at = NOW()
+     WHERE user_id = p_user_id AND id = p_portfolio_id AND NOT is_active;
+
+    RETURN TRUE;
+END;
+$$;
 
 
 --
@@ -3397,13 +3512,13 @@ $$;
 --
 
 CREATE FUNCTION storage.filename(name text) RETURNS text
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql IMMUTABLE
     AS $$
 DECLARE
-_parts text[];
+    _parts text[];
 BEGIN
-	select string_to_array(name, '/') into _parts;
-	return _parts[array_length(_parts,1)];
+    SELECT string_to_array(name, '/') INTO _parts;
+    RETURN _parts[array_length(_parts, 1)];
 END
 $$;
 
@@ -5161,7 +5276,9 @@ CREATE TABLE public.chat_sessions (
     last_message_at timestamp with time zone DEFAULT now() NOT NULL,
     context_type text,
     reference_id text,
-    context_snapshot text
+    context_snapshot text,
+    memory_summary text,
+    memory_summary_upto timestamp with time zone
 );
 
 
@@ -5205,6 +5322,20 @@ COMMENT ON COLUMN public.chat_sessions.reference_id IS 'Identifier the ChatConte
 --
 
 COMMENT ON COLUMN public.chat_sessions.context_snapshot IS 'Last on-screen grounding snapshot iOS sent (SendChatMessageRequest.context), persisted so a history reopen (where iOS sends no context) can replay the exact data the user saw. Written best-effort by the chat endpoints; NULL for legacy/general chats and any turn that never carried a client snapshot.';
+
+
+--
+-- Name: COLUMN chat_sessions.memory_summary; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_sessions.memory_summary IS 'Rolling flash-lite summary of the conversation turns older than the verbatim recent window, cached so it is not regenerated every turn. Written best-effort by ChatService._condense_history; NULL until a chat grows past _RECENT_TURNS.';
+
+
+--
+-- Name: COLUMN chat_sessions.memory_summary_upto; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_sessions.memory_summary_upto IS 'created_at of the newest chat_message included in memory_summary. The service regenerates the summary once CHAT_SUMMARY_REFRESH_AFTER_MESSAGES older-slice messages are newer than this watermark. NULL means no usable cached summary.';
 
 
 --
@@ -6262,7 +6393,8 @@ CREATE TABLE public.portfolios (
     name text NOT NULL,
     sort_order integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    is_active boolean DEFAULT false NOT NULL
 );
 
 
@@ -6271,6 +6403,13 @@ CREATE TABLE public.portfolios (
 --
 
 COMMENT ON COLUMN public.portfolios.user_id IS 'A real public.users id, OR a per-INSTALL synthetic uuid from guest_user_id_for() for signed-out users. NO foreign key by design (migration 108), same as watchlist_items. Account deletion clears this table explicitly.';
+
+
+--
+-- Name: COLUMN portfolios.is_active; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.portfolios.is_active IS 'At most one row per user is TRUE: the group currently driving Home, Updates and Tracking. Enforced by idx_portfolios_one_active_per_user. The backend only ever writes it through set_active_portfolio() / ensure_active_portfolio(); note that is a convention, NOT a privilege boundary — migration 037 granted table-level UPDATE on portfolios to authenticated, so a signed-in caller can still clear their own flag directly via PostgREST. The index makes that unable to produce two active groups, and GET /portfolios re-heals zero. See migration 126.';
 
 
 --
@@ -6939,6 +7078,38 @@ COMMENT ON COLUMN public.user_credits.spendable IS 'Auto-computed: (total - used
 
 
 --
+-- Name: user_investor_profile; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_investor_profile (
+    user_id uuid NOT NULL,
+    experience_level text DEFAULT 'learning'::text NOT NULL,
+    explanation_style text DEFAULT 'balanced'::text NOT NULL,
+    answer_depth text DEFAULT 'brief'::text NOT NULL,
+    topics text[] DEFAULT '{}'::text[] NOT NULL,
+    learning_goals text[] DEFAULT '{}'::text[] NOT NULL,
+    follow_signals text[] DEFAULT '{}'::text[] NOT NULL,
+    profile_version smallint DEFAULT 1 NOT NULL,
+    consented_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_investor_profile_answer_depth_check CHECK ((answer_depth = ANY (ARRAY['brief'::text, 'standard'::text, 'deep'::text]))),
+    CONSTRAINT user_investor_profile_experience_level_check CHECK ((experience_level = ANY (ARRAY['new'::text, 'learning'::text, 'experienced'::text]))),
+    CONSTRAINT user_investor_profile_explanation_style_check CHECK ((explanation_style = ANY (ARRAY['plain_language'::text, 'balanced'::text, 'technical'::text]))),
+    CONSTRAINT user_investor_profile_follow_signals_check CHECK ((follow_signals <@ ARRAY['whales'::text, 'congress'::text, 'insiders'::text, 'earnings'::text])),
+    CONSTRAINT user_investor_profile_learning_goals_check CHECK ((learning_goals <@ ARRAY['read_financials'::text, 'value_a_business'::text, 'understand_charts'::text, 'understand_macro'::text, 'follow_smart_money'::text])),
+    CONSTRAINT user_investor_profile_topics_check CHECK ((topics <@ ARRAY['value'::text, 'growth'::text, 'dividends'::text, 'technology'::text, 'energy'::text, 'healthcare'::text, 'crypto'::text, 'etf_index'::text, 'macro'::text, 'small_cap'::text]))
+);
+
+
+--
+-- Name: TABLE user_investor_profile; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.user_investor_profile IS 'How a reader prefers to LEARN (experience level, explanation style, answer depth, topics of interest). Content preferences only — deliberately no finances, risk tolerance, time horizon, tax situation or goals, so output stays impersonal. Closed enums only: the rendered block is injected UNFENCED into the chat system instruction, which is safe only while no user-authored text can reach it. Guest-writable, so user_id has NO FK and may be a synthetic per-install uuid5.';
+
+
+--
 -- Name: user_learn_progress; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6981,6 +7152,50 @@ CREATE TABLE public.user_lesson_progress (
     status public.lesson_status DEFAULT 'notStarted'::public.lesson_status NOT NULL,
     completed_at timestamp with time zone
 );
+
+
+--
+-- Name: user_memory_facts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_memory_facts (
+    id bigint NOT NULL,
+    user_id uuid NOT NULL,
+    fact_key text NOT NULL,
+    fact_value text NOT NULL,
+    hit_count integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_memory_facts_fact_key_check CHECK ((fact_key = ANY (ARRAY['ticker_discussed'::text, 'question_theme'::text]))),
+    CONSTRAINT user_memory_facts_fact_value_check CHECK (((char_length(fact_value) >= 1) AND (char_length(fact_value) <= 32))),
+    CONSTRAINT user_memory_facts_hit_count_check CHECK ((hit_count > 0))
+);
+
+
+--
+-- Name: TABLE user_memory_facts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.user_memory_facts IS 'What a reader has been asking about, across sessions — tickers discussed and question themes. Closed vocabulary only (validated ticker symbols; chat specialist keys), because the rendered block is injected UNFENCED into the chat system instruction and must contain no user-authored text. Derived deterministically from the router and the session, so recording costs no LLM call.';
+
+
+--
+-- Name: user_memory_facts_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.user_memory_facts_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: user_memory_facts_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.user_memory_facts_id_seq OWNED BY public.user_memory_facts.id;
 
 
 --
@@ -7360,6 +7575,8 @@ CREATE TABLE public.whales (
     return_source text DEFAULT ''::text,
     return_label text DEFAULT ''::text,
     firm_name text,
+    return_window_years integer,
+    return_status text DEFAULT ''::text NOT NULL,
     CONSTRAINT whales_followers_count_nonneg CHECK ((followers_count >= 0)),
     CONSTRAINT whales_portfolio_value_nonneg CHECK (((portfolio_value IS NULL) OR (portfolio_value >= (0)::numeric)))
 );
@@ -7412,6 +7629,20 @@ COMMENT ON COLUMN public.whales.last_hydrated_at IS 'Timestamp of last successfu
 --
 
 COMMENT ON COLUMN public.whales.firm_name IS 'Firm a person-fronted whale runs (e.g. "Bridgewater Associates" for Ray Dalio). NULL for institutions/politicians.';
+
+
+--
+-- Name: COLUMN whales.return_window_years; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.whales.return_window_years IS 'Calendar years compounded into ytd_return. NULL means the figure is not a multi-year CAGR — the client then omits the "· N-yr" suffix rather than implying a window it does not know. See migration 127.';
+
+
+--
+-- Name: COLUMN whales.return_status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.whales.return_status IS 'ok | insufficient_history | unavailable. Drives whether the Whale Profile draws a percent or an em-dash. Empty string = a row written before migration 127; the serve path treats that as "trust the legacy value" so nothing blanks during rollout. insufficient_history and unavailable are deliberately distinct: only the former is a judgement about the whale, and only the former may clear a stored ytd_return — an upstream fetch failure must never blank good data. See migration 127.';
 
 
 --
@@ -7747,6 +7978,13 @@ ALTER TABLE ONLY public.updates_insight_state ALTER COLUMN id SET DEFAULT nextva
 --
 
 ALTER TABLE ONLY public.user_learn_progress ALTER COLUMN id SET DEFAULT nextval('public.user_learn_progress_id_seq'::regclass);
+
+
+--
+-- Name: user_memory_facts id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_memory_facts ALTER COLUMN id SET DEFAULT nextval('public.user_memory_facts_id_seq'::regclass);
 
 
 --
@@ -8934,6 +9172,14 @@ ALTER TABLE ONLY public.user_credits
 
 
 --
+-- Name: user_investor_profile user_investor_profile_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_investor_profile
+    ADD CONSTRAINT user_investor_profile_pkey PRIMARY KEY (user_id);
+
+
+--
 -- Name: user_learn_progress user_learn_progress_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8963,6 +9209,22 @@ ALTER TABLE ONLY public.user_lesson_progress
 
 ALTER TABLE ONLY public.user_lesson_progress
     ADD CONSTRAINT user_lesson_progress_user_id_lesson_id_key UNIQUE (user_id, lesson_id);
+
+
+--
+-- Name: user_memory_facts user_memory_facts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_memory_facts
+    ADD CONSTRAINT user_memory_facts_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_memory_facts user_memory_facts_user_id_fact_key_fact_value_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_memory_facts
+    ADD CONSTRAINT user_memory_facts_user_id_fact_key_fact_value_key UNIQUE (user_id, fact_key, fact_value);
 
 
 --
@@ -10266,6 +10528,13 @@ CREATE INDEX idx_portfolio_items_portfolio ON public.portfolio_items USING btree
 
 
 --
+-- Name: idx_portfolios_one_active_per_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_portfolios_one_active_per_user ON public.portfolios USING btree (user_id) WHERE is_active;
+
+
+--
 -- Name: idx_portfolios_user_sort; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10571,6 +10840,13 @@ CREATE INDEX idx_user_credits_user ON public.user_credits USING btree (user_id);
 --
 
 CREATE INDEX idx_user_learn_progress_lookup ON public.user_learn_progress USING btree (user_id, content_type);
+
+
+--
+-- Name: idx_user_memory_facts_recent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_memory_facts_recent ON public.user_memory_facts USING btree (user_id, updated_at DESC);
 
 
 --
@@ -11184,6 +11460,14 @@ ALTER TABLE ONLY public.user_lesson_progress
 
 ALTER TABLE ONLY public.user_lesson_progress
     ADD CONSTRAINT user_lesson_progress_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_memory_facts user_memory_facts_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_memory_facts
+    ADD CONSTRAINT user_memory_facts_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -12997,6 +13281,19 @@ ALTER TABLE public.user_bookmarks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_credits ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: user_investor_profile; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_investor_profile ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_investor_profile user_investor_profile_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_investor_profile_service_all ON public.user_investor_profile TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: user_learn_progress; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -13042,6 +13339,19 @@ CREATE POLICY user_learn_progress_update_own ON public.user_learn_progress FOR U
 --
 
 ALTER TABLE public.user_lesson_progress ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_memory_facts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_memory_facts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_memory_facts user_memory_facts_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_memory_facts_service_all ON public.user_memory_facts TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: user_settings; Type: ROW SECURITY; Schema: public; Owner: -
@@ -13352,10 +13662,17 @@ CREATE POLICY whales_service_all ON public.whales USING ((auth.role() = 'service
 ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: objects book_media_public_read; Type: POLICY; Schema: storage; Owner: -
+-- Name: objects book_covers_public_read; Type: POLICY; Schema: storage; Owner: -
 --
 
-CREATE POLICY book_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'book-media'::text));
+CREATE POLICY book_covers_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'book-covers'::text));
+
+
+--
+-- Name: objects book_covers_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY book_covers_service_write ON storage.objects TO service_role USING ((bucket_id = 'book-covers'::text)) WITH CHECK ((bucket_id = 'book-covers'::text));
 
 
 --
@@ -13398,13 +13715,6 @@ CREATE POLICY home_theme_media_service_write ON storage.objects TO service_role 
 
 
 --
--- Name: objects journey_media_public_read; Type: POLICY; Schema: storage; Owner: -
---
-
-CREATE POLICY journey_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'journey-media'::text));
-
-
---
 -- Name: objects journey_media_service_write; Type: POLICY; Schema: storage; Owner: -
 --
 
@@ -13416,13 +13726,6 @@ CREATE POLICY journey_media_service_write ON storage.objects TO service_role USI
 --
 
 ALTER TABLE storage.migrations ENABLE ROW LEVEL SECURITY;
-
---
--- Name: objects money_moves_media_public_read; Type: POLICY; Schema: storage; Owner: -
---
-
-CREATE POLICY money_moves_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'money-moves-media'::text));
-
 
 --
 -- Name: objects money_moves_media_service_write; Type: POLICY; Schema: storage; Owner: -
@@ -13525,5 +13828,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict TD2ioylK96dqrmxSZ9VLohwUiXcm5mtUeJc7N2fpGSZfHq0rd4EGIqvxBzVfKfg
+\unrestrict Coni7jynSzlLiRCaj6phGSCmooysqFfwzqpbSmZEMZRaWD8qaQbPYItoqXmwQsp
 

@@ -1049,7 +1049,11 @@ _MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
 # column that `get_current_user` re-reads (via `select("*")`) on EVERY authenticated request.
 # The Pydantic bound is the real guard; this is the cheap outer one that rejects the body before
 # it is parsed at all.
-_BODY_CAPPED_PATH_SUFFIXES = ("/me/settings", "/users/me")
+# `/me/investor-profile` joined these because it is the one guest-writable, unauthenticated
+# JSON write in the app: the body is materialised and json.loads'd BEFORE Pydantic's
+# per-field `max_length` can fire, so without a cap a caller could post 50 MB and burn
+# ~150 MB of RSS per in-flight request with no credential at all.
+_BODY_CAPPED_PATH_SUFFIXES = ("/me/settings", "/users/me", "/me/investor-profile")
 
 
 @app.middleware("http")

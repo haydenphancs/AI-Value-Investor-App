@@ -187,10 +187,16 @@ def render_memory_block(facts: Optional[Dict[str, Any]]) -> str:
         return ""
     lines: List[str] = []
 
+    # Slice limits come from the service that produced the facts, not from literals here.
+    # Two hardcoded caps meant editing `RENDER_LIMITS` was a silent no-op in one direction
+    # and a silent double-cap in the other.
+    from app.services.user_memory_facts_service import FACT_THEME, FACT_TICKER, RENDER_LIMITS
+
     tickers = [t for t in (facts.get("ticker_discussed") or []) if isinstance(t, str)]
     if tickers:
+        shown = ", ".join(tickers[: RENDER_LIMITS[FACT_TICKER]])
         lines.append(
-            f"- Recently asked about: {', '.join(tickers[:6])}. Mentioning one of these "
+            f"- Recently asked about: {shown}. Mentioning one of these "
             f"when it is genuinely relevant is fine; do not assume they own any of them."
         )
 
@@ -199,7 +205,7 @@ def render_memory_block(facts: Optional[Dict[str, Any]]) -> str:
         if isinstance(t, str) and t in _THEME_LABEL
     ]
     if themes:
-        lines.append(f"- Usually asks about: {', '.join(themes[:3])}.")
+        lines.append(f"- Usually asks about: {', '.join(themes[: RENDER_LIMITS[FACT_THEME]])}.")
 
     if not lines:
         return ""

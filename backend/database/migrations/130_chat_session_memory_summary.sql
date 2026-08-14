@@ -13,7 +13,9 @@
 -- included in the summary; the service counts how many messages in the current
 -- older slice are newer than that watermark and only regenerates once that count
 -- reaches CHAT_SUMMARY_REFRESH_AFTER_MESSAGES (4). Cost becomes one call per ~4
--- turns instead of one per turn.
+-- turns instead of one per turn. ⚠️ CORRECTION: the setting counts MESSAGES, and one
+-- turn writes two (the user's and the assistant's), so the real cadence is one call
+-- per N/2 turns — at the default of 4, every 2 turns rather than every 4.
 --
 -- A timestamp watermark rather than a message COUNT on purpose: the history window
 -- is capped (_get_recent_messages limit=20), so a count saturates at the cap and

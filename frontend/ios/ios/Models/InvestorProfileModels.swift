@@ -164,6 +164,15 @@ struct InvestorProfileDTO: Codable, Sendable {
     /// The plan that would unlock it — named by the server so the paywall cannot drift
     /// from what was enforced.
     let requiredTier: String?
+    /// Which fields the reader explicitly submitted. Lets the editor show a value the
+    /// reader CHOSE differently from an untouched default — they are identical in the
+    /// value columns, which is the whole reason this field exists (migration 134).
+    let answeredFields: [String]
+    /// Whether these answers would actually change an answer. Distinct from `isEmpty`
+    /// ("stated nothing") and from `applied` ("changing answers right now"): a reader can
+    /// have answered every question and still land on the house defaults, in which case
+    /// there is nothing to apply but they must NOT be told they said nothing.
+    let wouldPersonalize: Bool
 
     enum CodingKeys: String, CodingKey {
         case experienceLevel = "experience_level"
@@ -178,6 +187,8 @@ struct InvestorProfileDTO: Codable, Sendable {
         case consentedAt = "consented_at"
         case applied
         case requiredTier = "required_tier"
+        case answeredFields = "answered_fields"
+        case wouldPersonalize = "would_personalize"
     }
 
     init(from decoder: Decoder) throws {
@@ -201,6 +212,11 @@ struct InvestorProfileDTO: Codable, Sendable {
         consentedAt = try? c.decodeIfPresent(String.self, forKey: .consentedAt)
         applied = (try? c.decode(Bool.self, forKey: .applied)) ?? false
         requiredTier = try? c.decodeIfPresent(String.self, forKey: .requiredTier)
+        // Both tolerant like every field above. They are also ABSENT on a backend that
+        // predates them, and the defaults are the safe reading: nothing known to be
+        // answered, and nothing claimed to be personalizing.
+        answeredFields = (try? c.decode([String].self, forKey: .answeredFields)) ?? []
+        wouldPersonalize = (try? c.decode(Bool.self, forKey: .wouldPersonalize)) ?? false
     }
 }
 

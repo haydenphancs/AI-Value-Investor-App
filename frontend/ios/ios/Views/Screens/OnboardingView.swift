@@ -375,43 +375,6 @@ private struct FlowChips: View {
     }
 }
 
-/// Label-only chips for the preference steps. A sibling of `FlowChips` rather than a
-/// generic rewrite of it: that one renders a symbol AND a company name in one capsule,
-/// which is a different chip, and merging the two behind a generic would leave a
-/// harder-to-read view for no reuse. Both share the same `FlowLayout` atom and the same
-/// fill/ink pairing (`primaryFill` + `textOnAccent` — never one without the other).
-private struct FlowOptionChips<Option: Hashable>: View {
-    let options: [Option]
-    let title: (Option) -> String
-    let isSelected: (Option) -> Bool
-    let onTap: (Option) -> Void
-
-    var body: some View {
-        FlowLayout(spacing: AppSpacing.sm) {
-            ForEach(options, id: \.self) { option in
-                let on = isSelected(option)
-                Button { onTap(option) } label: {
-                    HStack(spacing: 6) {
-                        if on {
-                            Image(systemName: "checkmark")
-                                .font(AppTypography.iconXS)
-                        }
-                        Text(title(option))
-                            .font(AppTypography.bodySmallEmphasis)
-                    }
-                    .foregroundColor(on ? AppColors.textOnAccent : AppColors.textPrimary)
-                    .padding(.horizontal, AppSpacing.md)
-                    .padding(.vertical, AppSpacing.sm)
-                    .background(
-                        Capsule().fill(on ? AppColors.primaryFill : AppColors.cardBackgroundLight)
-                    )
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-        }
-    }
-}
-
 #Preview {
     OnboardingView()
 }

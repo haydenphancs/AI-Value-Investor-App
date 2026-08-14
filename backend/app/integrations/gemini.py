@@ -624,13 +624,24 @@ class GeminiClient:
         self,
         prompt: str,
         system_instruction: Optional[str] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Generate text using Gemini.  Results are cached by (prompt, system_instruction)
-        for GEMINI_CACHE_TTL seconds to avoid duplicate API calls.
+        Generate text using Gemini.  Results are cached by (prompt, system_instruction,
+        model, output cap) for GEMINI_CACHE_TTL seconds to avoid duplicate API calls.
+
+        `max_output_tokens` defaults to the global `GEMINI_MAX_TOKENS`. Chat passes
+        `CHAT_MAX_OUTPUT_TOKENS`; report generation deliberately does not.
+
+        ⚠️ The cap is part of the CACHE KEY. Without it a capped chat call and an uncapped
+        one for the same prompt collide, and whichever ran first serves the other — so a
+        report could be handed a 1,200-token-truncated answer, or a chat turn could return
+        a full-length one straight past its own ceiling.
         """
-        key = _cache_key(prompt, system_instruction or "", model_name or "")
+        key = _cache_key(
+            prompt, system_instruction or "", model_name or "", str(max_output_tokens or "")
+        )
         cached = self._response_cache.get(key)
         if cached is not None:
             logger.debug("Gemini generate_text cache HIT")
@@ -641,7 +652,10 @@ class GeminiClient:
                 self._client.aio.models.generate_content(
                     model=model_name or self.model_name,
                     contents=prompt,
-                    config=self._config(system_instruction=system_instruction),
+                    config=self._config(
+                        system_instruction=system_instruction,
+                        max_output_tokens=max_output_tokens,
+                    ),
                 ),
                 what="generate_text",
             )
@@ -1003,6 +1017,7 @@ class GeminiClient:
         tool_handlers: Dict[str, Callable],
         system_instruction: Optional[str] = None,
         model_name: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Generate a response using Gemini Function Calling (single-round).
@@ -1020,7 +1035,10 @@ class GeminiClient:
             model_name: Optional model override.
         """
         model = model_name or self.model_name
-        config = self._config(system_instruction=system_instruction, tools=tools)
+        config = self._config(
+            system_instruction=system_instruction, tools=tools,
+            max_output_tokens=max_output_tokens,
+        )
         try:
             response = await _call_with_timeout(
                 self._client.aio.models.generate_content(

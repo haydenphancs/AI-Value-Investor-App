@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.database import get_supabase
+from app.utils.supabase_errors import is_unknown_column_error
 
 logger = logging.getLogger(__name__)
 
@@ -139,26 +140,73 @@ def sanitize_updates(raw: Any) -> Dict[str, Any]:
     return out
 
 
+#: Every field a reader can answer. The `answered_fields` vocabulary, and the CHECK in
+#: migration 134, are both this list.
+ANSWERABLE_FIELDS: tuple[str, ...] = tuple(SCALAR_FIELDS) + tuple(ARRAY_FIELDS)
+
+
+def answered_fields_in(raw: Any) -> List[str]:
+    """Which answerable fields this payload actually SUBMITTED. PURE, never raises.
+
+    Presence, not value. A reader who picks "Still learning" has answered
+    `experience_level` even though that equals the column default — and the whole reason
+    this exists is that those two cases are indistinguishable in the value columns, so
+    the most likely pair of onboarding answers read back as "stated nothing". See
+    migration 134.
+    """
+    if not isinstance(raw, dict):
+        return []
+    return [f for f in ANSWERABLE_FIELDS if f in raw]
+
+
+def would_personalize(profile: Any) -> bool:
+    """True when these answers would actually change an answer.
+
+    The RENDER question, kept separate from `is_empty_profile`'s "did they state
+    anything" question. They are not the same: an at-default scalar renders nothing (see
+    `investor_profile_prompt._scalar`), so a reader can have answered every question and
+    still produce an empty block. Conflating the two told such a reader they had stated
+    nothing — see migration 134.
+
+    Imported lazily: `investor_profile_prompt` imports `DEFAULTS` from this module, so a
+    module-level import here would be circular.
+    """
+    from app.services.agents.investor_profile_prompt import render_profile_block
+
+    return bool(render_profile_block(profile))
+
+
 def is_empty_profile(profile: Any) -> bool:
-    """True when the user expressed no preference at all.
+    """True when the user has stated nothing.
 
-    Scalars have defaults, so 'empty' means every ARRAY is empty AND every scalar is
-    still its default. Used to decide whether there is anything worth applying — an
-    all-default profile should not claim to personalize anything.
+    'Nothing' means: no field was ever submitted (`answered_fields`) AND every array is
+    empty. It deliberately does NOT ask whether the stored values differ from the column
+    defaults — that is `would_personalize`, and answering it here is what made a reader
+    who chose "Still learning" + "A bit of both" read back as having said nothing at all.
 
-    Defaults are applied for MISSING keys rather than compared against `None`. Without
-    that, `is_empty_profile({})` returned False — a dict containing nothing at all was
-    reported as "not empty", because `None != "learning"`. Unreachable through
-    `_profile_response` today (it only ever sees a `sanitize_profile` output, which seeds
-    every key), but a caller handing over a raw row would have flipped `is_empty` to False
-    and made the UI claim the reader had stated preferences they never stated.
+    `answered_fields` is absent on rows written before migration 134, so the array check
+    is retained as the fallback signal: an older row with topics is still non-empty.
 
     Non-dict input answers True rather than raising, matching `sanitize_profile`'s and
     `sanitize_updates`' "never raises" contract — the three sit together and were
-    inconsistent about it (`is_empty_profile(None)` raised `AttributeError`).
+    inconsistent about it (`is_empty_profile(None)` raised `AttributeError`, and
+    `is_empty_profile({})` answered False because `None != "learning"`).
     """
     if not isinstance(profile, dict):
         return True
+    answered = profile.get("answered_fields")
+    if isinstance(answered, (list, tuple)) and any(
+        f in ANSWERABLE_FIELDS for f in answered if isinstance(f, str)
+    ):
+        return False
+
+    # FALLBACK — and it is not just for old rows. `answered_fields` is absent until
+    # migration 134 is applied, and the code must be safe to deploy in either order, so
+    # without this a live row holding `experience_level='experienced'` would read as
+    # "stated nothing" for the window between deploy and migrate. This is exactly what the
+    # function used to do, so pre-134 behaviour is preserved rather than regressed: infer
+    # an answer from content. It can only under-report (a chosen DEFAULT is invisible),
+    # which is the bug `answered_fields` exists to fix — not one it introduces.
     if any(profile.get(f) for f in ARRAY_FIELDS):
         return False
     return all(profile.get(f, DEFAULTS[f]) == DEFAULTS[f] for f in SCALAR_FIELDS)
@@ -202,6 +250,20 @@ def merge_profiles(account: Any, guest: Any) -> Dict[str, Any]:
     if guest_consent and (not acct_consent or str(guest_consent) < str(acct_consent)):
         changed["consented_at"] = guest_consent
 
+    # UNION, and it is not optional. Without it the claim reproduced the exact bug
+    # migration 134 exists to fix, one boundary later: a guest who tapped "Still learning"
+    # + "A bit of both" stores those as answered with both values equal to the defaults,
+    # so every value-based rule above finds nothing to merge, the guest row is deleted,
+    # and the account reads `is_empty: true` again — told they had stated nothing, having
+    # answered both questions before signing up.
+    merged_answered = {
+        f for f in (list(account.get("answered_fields") or [])
+                    + list(guest.get("answered_fields") or []))
+        if isinstance(f, str) and f in ANSWERABLE_FIELDS
+    }
+    if merged_answered != set(account.get("answered_fields") or []):
+        changed["answered_fields"] = sorted(merged_answered)
+
     return changed
 
 
@@ -210,6 +272,9 @@ class UserInvestorProfileService:
 
     def __init__(self, supabase=None):
         self.supabase = supabase or get_supabase()
+
+    def _upsert(self, payload: Dict[str, Any]) -> None:
+        self.supabase.table(TABLE).upsert(payload, on_conflict="user_id").execute()
 
     def get_profile(self, user_id: str) -> Dict[str, Any]:
         """Return the stored profile, or all-defaults when there is none.
@@ -235,6 +300,16 @@ class UserInvestorProfileService:
         profile["profile_version"] = (row or {}).get("profile_version", 1)
         profile["consented_at"] = (row or {}).get("consented_at")
         profile["has_profile"] = bool(row)
+        # Filtered to the known vocabulary rather than passed through: this feeds
+        # `is_empty_profile`, and a stale value from a future vocabulary change must not
+        # make a profile look answered. Absent on rows written before migration 134, and
+        # absent entirely until it is applied — `[]` degrades to the array-only check,
+        # which is the pre-134 behaviour, so the code is safe to deploy in either order.
+        stored_answered = (row or {}).get("answered_fields")
+        profile["answered_fields"] = [
+            f for f in (stored_answered or [])
+            if isinstance(f, str) and f in ANSWERABLE_FIELDS
+        ]
         return profile
 
     def upsert_profile(
@@ -252,6 +327,22 @@ class UserInvestorProfileService:
         # column DEFAULT on insert — which is what the API documents.
         payload = sanitize_updates(raw)
         payload["user_id"] = user_id
+
+        # UNION, never replace. A later partial write must not un-answer an earlier one:
+        # editing only `topics` in the Settings editor would otherwise erase the fact that
+        # `experience_level` was answered during onboarding, and the reader would be told
+        # again that they have stated nothing. Read-then-write rather than an RPC, matching
+        # this file's raw-SDK style; two truly simultaneous PUTs can lose one side's
+        # bookkeeping, which costs a re-ask at worst and never loses a stored VALUE.
+        submitted = answered_fields_in(raw)
+        if submitted:
+            try:
+                existing = self.get_profile(user_id).get("answered_fields") or []
+            except ProfileUnreadable:
+                # A read blip must not block the write. The union degrades to just this
+                # payload's fields — a later edit re-adds the rest.
+                existing = []
+            payload["answered_fields"] = sorted(set(existing) | set(submitted))
         # Matches every other service in the repo (iap_service, price_alert_service,
         # updates_insight_sweeper). PostgREST posts this as JSON, so Postgres casts the
         # STRING to timestamptz — the literal "now()" happens to parse too (verified on
@@ -269,16 +360,60 @@ class UserInvestorProfileService:
         elif consent is False:
             payload["consented_at"] = None
         try:
-            self.supabase.table(TABLE).upsert(
-                payload, on_conflict="user_id",
-            ).execute()
+            self._upsert(payload)
         except Exception as e:
+            # ⚠️ DEPLOY-ORDER TOLERANCE, not politeness. PostgREST rejects a payload naming
+            # a column absent from its schema cache (PGRST204), and `answered_fields` does
+            # not exist until migration 134 is applied. Without this, a deploy that landed
+            # BEFORE the migration would fail the ENTIRE profile write — losing the
+            # reader's actual answers over a bookkeeping column. Migrations here are
+            # applied by hand, so "code first" is a real ordering, not a hypothetical.
+            #
+            # Retried WITHOUT the new column: the answers are what matter, and
+            # `is_empty_profile` still infers correctly from content in the meantime.
+            if "answered_fields" in payload and is_unknown_column_error(e):
+                logger.warning(
+                    "Investor profile write for user=%s rejected `answered_fields` (%s) — "
+                    "migration 134 is not applied yet; retrying without it. Apply 134 to "
+                    "restore chosen-default tracking.",
+                    user_id, type(e).__name__,
+                )
+                payload.pop("answered_fields", None)
+                try:
+                    self._upsert(payload)
+                except Exception as retry_error:
+                    logger.warning(
+                        "Investor profile write failed for user=%s (%s: %s)",
+                        user_id, type(retry_error).__name__, retry_error,
+                    )
+                    raise ProfileUnreadable(str(retry_error)) from retry_error
+            else:
+                logger.warning(
+                    "Investor profile write failed for user=%s (%s: %s)",
+                    user_id, type(e).__name__, e,
+                )
+                raise ProfileUnreadable(str(e)) from e
+
+        # The write is COMMITTED. A failure in the read-back below is a read problem, and
+        # surfacing it as `ProfileUnreadable` made the endpoint answer 503 — telling the
+        # user their consent grant or preference edit failed when the row was durably
+        # stored. They then retry, or worse, treat the 503 as "the server has no profile".
+        # Reconstruct the response locally instead; it is the same data the read would have
+        # returned, minus any concurrent change by another device.
+        try:
+            return self.get_profile(user_id)
+        except ProfileUnreadable as e:
             logger.warning(
-                "Investor profile write failed for user=%s (%s: %s)",
+                "Investor profile read-back failed for user=%s after a SUCCESSFUL write "
+                "(%s: %s) — returning the written values rather than reporting a failure",
                 user_id, type(e).__name__, e,
             )
-            raise ProfileUnreadable(str(e)) from e
-        return self.get_profile(user_id)
+            echoed = sanitize_profile(payload)
+            echoed["profile_version"] = 1
+            echoed["consented_at"] = payload.get("consented_at")
+            echoed["has_profile"] = True
+            echoed["answered_fields"] = payload.get("answered_fields") or submitted
+            return echoed
 
 
 _service: Optional[UserInvestorProfileService] = None

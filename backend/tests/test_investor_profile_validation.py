@@ -296,8 +296,12 @@ def test_upsert_payload_carries_only_known_columns():
     svc = UserInvestorProfileService(supabase=_SB())
     svc.upsert_profile("u1", {"topics": ["value"], "risk_tolerance": "aggressive"})
 
+    # The editable columns are DERIVED; only the metadata ones are named here, and they
+    # are the short list that changes with a migration rather than with the vocabulary.
+    # `answered_fields` joined them in migration 134 — it records WHICH fields the reader
+    # submitted, so a chosen default is distinguishable from an unanswered question.
     allowed = set(SCALAR_FIELDS) | set(ARRAY_FIELDS) | {
-        "user_id", "updated_at", "consented_at",
+        "user_id", "updated_at", "consented_at", "answered_fields",
     }
     extra = set(captured["payload"]) - allowed
     assert not extra, f"payload carries columns the table does not have: {sorted(extra)}"
@@ -432,3 +436,228 @@ def test_revoking_consent_immediately_stops_personalization():
         assert may_apply_profile(revoked, "premium") is False
     finally:
         cfg.settings.CHAT_PERSONALIZATION_ENABLED = original
+
+
+# ── "stated nothing" vs "would change nothing" are DIFFERENT questions ────────
+#
+# One boolean answered both, and for the two most likely onboarding answers they
+# disagree. `render_profile_block` deliberately skips an at-default scalar (emitting it
+# would restate the global STYLE block and tell the model nothing), so a reader who
+# tapped "Still learning" + "A bit of both" — the middle option on BOTH questions —
+# rendered "" and was reported as having stated nothing. Settings then told them to
+# "add some interests", `applied` was false even for a consented Pro subscriber, and the
+# feature was permanently inert. Migration 134's `answered_fields` separates the two.
+
+from app.services.user_investor_profile_service import (  # noqa: E402
+    ANSWERABLE_FIELDS,
+    answered_fields_in,
+    would_personalize,
+)
+
+
+def _sql_134() -> str:
+    """Migration 134's text, read from disk — never a hand-copied vocabulary."""
+    from pathlib import Path
+
+    return (
+        Path(__file__).resolve().parents[1]
+        / "database" / "migrations" / "134_investor_profile_answered_fields.sql"
+    ).read_text(encoding="utf-8")
+
+
+def sql_check_block() -> str:
+    """Just the `answered_fields <@ ARRAY[...]` contents from migration 134.
+
+    Brace-bounded on purpose: the backfill UPDATE lower down names every field as a
+    string literal, so any assertion made against the whole file text is satisfied by
+    the backfill regardless of what the CHECK says.
+    """
+    sql = _sql_134()
+    marker = "answered_fields <@ ARRAY["
+    assert marker in sql, "migration 134 no longer declares the answered_fields CHECK"
+    return sql.split(marker, 1)[1].split("]::TEXT[]", 1)[0]
+
+
+def test_the_check_block_extractor_is_not_reading_the_whole_file():
+    """Guard against the guard. If this ever returns the file, the parity test above is
+    satisfied by the backfill and stops guarding anything."""
+    block = sql_check_block()
+    assert "UPDATE" not in block.upper(), "the extractor is picking up the backfill"
+    assert len(block) < 400, f"CHECK block is {len(block)} chars — extractor drifted"
+
+
+def _answered(raw, fields):
+    p = sanitize_profile(raw)
+    p["answered_fields"] = list(fields)
+    return p
+
+
+def test_choosing_the_middle_option_is_not_an_empty_profile():
+    """THE regression, stated directly."""
+    p = _answered(
+        {"experience_level": "learning", "explanation_style": "balanced"},
+        ["experience_level", "explanation_style"],
+    )
+    assert is_empty_profile(p) is False, "a reader who answered both questions read as silent"
+
+
+def test_choosing_the_middle_option_still_personalizes_nothing():
+    """And the OTHER half must stay true — there is genuinely nothing to render, so the
+    UI must not promise that answers will change."""
+    p = _answered(
+        {"experience_level": "learning", "explanation_style": "balanced"},
+        ["experience_level", "explanation_style"],
+    )
+    assert would_personalize(p) is False
+
+
+def test_a_real_choice_is_both_non_empty_and_personalizing():
+    p = _answered({"topics": ["energy"]}, ["topics"])
+    assert is_empty_profile(p) is False and would_personalize(p) is True
+
+
+def test_a_reader_who_answered_nothing_is_still_empty():
+    assert is_empty_profile(sanitize_profile({})) is True
+    assert would_personalize(sanitize_profile({})) is False
+
+
+def test_answered_fields_records_presence_not_value():
+    """A field set to its default value is still an ANSWER."""
+    assert answered_fields_in({"experience_level": "learning"}) == ["experience_level"]
+    assert answered_fields_in({}) == []
+    assert answered_fields_in(None) == []
+    assert answered_fields_in({"risk_tolerance": "high"}) == [], "unknown key must not count"
+
+
+def test_answered_fields_vocabulary_matches_the_migration():
+    """The CHECK in 134 and `ANSWERABLE_FIELDS` must not drift — a Python-only value
+    fails the constraint with a 23514 that the write path logs and swallows, which is
+    silent feature loss with a green suite."""
+    import re
+
+    # BOTH directions must read the CHECK BLOCK, never the whole file. Searching the file
+    # for `'follow_signals'` passes on the backfill UPDATE, which names every field too —
+    # so deleting a value from the CHECK left this green (mutation-proven). Same vacuity
+    # shape as the source-scan guards that shipped broken before: never search forward for
+    # the token you are asserting.
+    block = sql_check_block()
+    in_check = set(re.findall(r"'([a-z_]+)'", block))
+    assert in_check == set(ANSWERABLE_FIELDS), (
+        f"migration 134's CHECK and ANSWERABLE_FIELDS disagree: "
+        f"only in SQL {sorted(in_check - set(ANSWERABLE_FIELDS))}, "
+        f"only in Python {sorted(set(ANSWERABLE_FIELDS) - in_check)}"
+    )
+
+
+def test_pre_migration_rows_still_read_correctly():
+    """`answered_fields` is absent until 134 is applied, and the code must be safe to
+    deploy in either order. Content-inference is retained as the fallback, so a live row
+    with real answers cannot read as 'stated nothing' during that window."""
+    legacy = sanitize_profile({"experience_level": "experienced"})
+    legacy.pop("answered_fields", None)
+    assert is_empty_profile(legacy) is False
+    assert is_empty_profile(sanitize_profile({"topics": ["energy"]})) is False
+
+
+# ── The two failures a migration review caught in this change ────────────────
+
+
+def test_a_code_first_deploy_degrades_instead_of_losing_the_answers():
+    """`answered_fields` does not exist until 134 is applied, and migrations here are
+    applied BY HAND — so "code deployed first" is a real ordering. PostgREST rejects a
+    payload naming an unknown column (PGRST204), which would have failed the WHOLE write
+    and lost the reader's actual answers over a bookkeeping column."""
+    from app.services.user_investor_profile_service import UserInvestorProfileService
+
+    attempts = []
+
+    class _PGRST204(Exception):
+        code = "PGRST204"
+
+    class _Table:
+        def upsert(self, payload, on_conflict=None):
+            attempts.append(dict(payload))
+            if "answered_fields" in payload:
+                raise _PGRST204("column not found in schema cache")
+            return self
+
+        def select(self, *a, **k): return self
+        def eq(self, *a, **k): return self
+        def limit(self, *a, **k): return self
+        def execute(self): return type("R", (), {"data": []})()
+
+    class _SB:
+        def table(self, _n): return _Table()
+
+    svc = UserInvestorProfileService(supabase=_SB())
+    svc.upsert_profile("u1", {"topics": ["value"]})
+
+    assert len(attempts) == 2, "the write was not retried without the unknown column"
+    assert "answered_fields" in attempts[0]
+    assert "answered_fields" not in attempts[1]
+    assert attempts[1]["topics"] == ["value"], "the reader's actual answers must still land"
+
+
+def test_a_genuine_write_failure_is_still_raised():
+    """The degradation must be NARROW. A transient edge failure carries an INT code and
+    must not be mistaken for a missing column, or a real outage would look like a
+    successful save."""
+    from app.services.user_investor_profile_service import (
+        ProfileUnreadable, UserInvestorProfileService,
+    )
+
+    class _Edge520(Exception):
+        code = 520
+
+    class _Table:
+        def upsert(self, *a, **k): raise _Edge520("cloudflare")
+        def select(self, *a, **k): return self
+        def eq(self, *a, **k): return self
+        def limit(self, *a, **k): return self
+        def execute(self): return type("R", (), {"data": []})()
+
+    class _SB:
+        def table(self, _n): return _Table()
+
+    with pytest.raises(ProfileUnreadable):
+        UserInvestorProfileService(supabase=_SB()).upsert_profile("u1", {"topics": ["value"]})
+
+
+def test_merging_a_guest_profile_carries_answered_fields_across():
+    """Without this the claim reproduced the very bug 134 fixes, one boundary later: a
+    guest who chose both middle options has answers whose VALUES equal the defaults, so
+    every value-based merge rule finds nothing, the guest row is deleted, and the account
+    reads `is_empty: true` again."""
+    from app.services.user_investor_profile_service import merge_profiles
+
+    def _row(**over):
+        row = {
+            "experience_level": "learning", "explanation_style": "balanced",
+            "answer_depth": "brief", "topics": [], "learning_goals": [],
+            "follow_signals": [], "consented_at": None, "answered_fields": [],
+        }
+        row.update(over)
+        return row
+
+    account = _row()
+    guest = _row(answered_fields=["experience_level", "explanation_style"])
+    merged = merge_profiles(account, guest)
+    assert merged.get("answered_fields") == ["experience_level", "explanation_style"], (
+        "the guest's answered-ness was dropped, so their answers read as silence again"
+    )
+
+
+def test_merging_keeps_both_sides_answered_fields():
+    from app.services.user_investor_profile_service import merge_profiles
+
+    account = {"answered_fields": ["topics"], "topics": ["value"]}
+    guest = {"answered_fields": ["experience_level"], "topics": []}
+    assert merge_profiles(account, guest)["answered_fields"] == ["experience_level", "topics"]
+
+
+def test_merging_drops_out_of_vocabulary_answered_fields():
+    from app.services.user_investor_profile_service import merge_profiles
+
+    account = {"answered_fields": [], "topics": []}
+    guest = {"answered_fields": ["risk_tolerance", "topics"], "topics": ["value"]}
+    assert merge_profiles(account, guest)["answered_fields"] == ["topics"]

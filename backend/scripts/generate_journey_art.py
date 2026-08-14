@@ -260,47 +260,143 @@ LESSONS = {
         "line, the middle flag noticeably taller than the others"),
 
     # ---- STRATEGIES ---------------------------------------------------------
+    # NOT a balance scale — risk_reward rejected one and balance_sheet already uses a beam;
+    # a third would make the set look like it only owns one idea. Value vs price reads just
+    # as well as two objects of obviously different worth standing side by side.
     "buffett_way": ("strategies", "amber",
-        "a balance scale with a single large cut gemstone on one pan and a small stack of coins on "
-        "the other, the gemstone side heavier, and a simple hourglass standing quietly beside it"),
+        "one large multi-faceted cut gemstone standing on a simple flat plinth, and beside it a "
+        "short stack of round coins that is plainly much smaller and shorter than the gemstone, "
+        "so the gem is clearly worth far more than the little pile being paid for it. Two objects "
+        "only, both solidly filled, standing on the same ground line, complete and well inside "
+        "the frame"),
+    # NOT a shopping cart or basket — etfs_101 already owns the basket. Everyday objects you
+    # personally recognise carry "invest in what you know" without reusing that container.
     "lynch_way": ("strategies", "amber",
-        "a simple shopping cart holding a few everyday geometric grocery shapes, with a clean "
-        "rising line chart drawn as the cart's own handle"),
+        "three ordinary everyday objects standing side by side in a row on one shelf — a takeaway "
+        "coffee cup with a lid, a running shoe seen from the side, and a smartphone standing "
+        "upright — with one clean upward arrow rising behind them. Solid flat fills, all three "
+        "objects complete and well inside the frame"),
+    # A rising ribbon that shattered into particles was a MOOD, not a statement — no object in
+    # it, so nothing for a learner to recognise, and it was the one image in the set that got
+    # "I don't understand this". Every other Strategies hero is a thing you know on sight
+    # (gemstone, whale, metronome, shears); the rocket keeps that. Chosen over a telescope and
+    # a linear-vs-exponential pair — see VARIANTS.
     "cathie_wood_way": ("strategies", "amber",
-        "a steep exponential curve sweeping up from the lower left, its leading tip breaking into "
-        "a small cluster of geometric particles, with a simple rocket-like arrow riding the curve"),
+        "one simple rocket climbing steeply from lower left toward upper right, tilted along its "
+        "direction of travel, with a solid tapering exhaust trail curving behind it and three or "
+        "four small geometric particles scattered just ahead of its nose. The whole rocket "
+        "including its fins and the entire trail are complete and well inside the frame with "
+        "clear white margin on every side"),
     "whale_watching": ("strategies", "amber",
-        "the large simple silhouette of a whale gliding beneath a horizontal line, with a "
-        "small boat outline above and a trail of round bubbles rising between them"),
-    "portfolio_gardening": ("strategies", "amber",
-        "three small potted plants of clearly different heights in a neat row, one being pruned by "
-        "a pair of simple shears, one thriving, one just sprouting"),
+        "one large simple solid silhouette of a whale seen from the side gliding below a straight "
+        "horizontal surface line, with a small simple boat outline floating on that line above it "
+        "and a trail of round bubbles rising between the two. The whole whale including its tail "
+        "and the whole boat are complete and well inside the frame"),
+    # Green, not the level amber. Same content-driven override as crypto→ember and
+    # warnings→crimson: a lesson about tending living things reads wrong in gold.
+    # Measured the tightest composition of all 27 on its first render — 76px bottom margin and
+    # a lopsided 160/96 left-right split, because the shears drifted out past the third pot.
+    # Nothing was technically clipped and the edge guard passed it, which is the point: a
+    # composition can read as "cut off" well before anything actually touches an edge. Hence
+    # the explicit middle-two-thirds framing and the shears held INSIDE the group.
+    "portfolio_gardening": ("strategies", "green",
+        "three small potted plants standing in a neat evenly spaced row at clearly different "
+        "stages — the first just a sprout with two leaves, the second full and healthy, the third "
+        "taller — with a pair of simple open shears held above the third plant, angled in toward "
+        "it and kept INSIDE the group rather than out to one side. The three pots and the shears "
+        "together occupy only the middle two thirds of the frame width and the middle two thirds "
+        "of its height, so there is clearly empty white space on the left, on the right, above "
+        "and below. Solid flat fills, all three pots resting on one common ground line whose ends "
+        "stop well short of both side edges"),
+    # NOT a staircase of blocks — that reads as a bar chart next to the income_statement
+    # waterfall, and red_flags already owns steps-with-flags. A metronome is a single object
+    # that means steady repetition and appears nowhere else in the 27.
     "power_of_discipline": ("strategies", "amber",
-        "a row of identical small blocks stacked one per column into a steadily rising staircase, "
-        "each column exactly one block taller than the last, absolutely even and regular"),
+        "one simple upright metronome shaped as a tall narrow trapezoid, with a straight pendulum "
+        "arm rising from its base and a small sliding weight partway up the arm, the arm tilted "
+        "slightly to one side, and two or three short even arcs behind the arm showing it "
+        "swinging steadily. One object only, solidly filled, complete and well inside the frame"),
+    # No flag — red_flags owns that shape. Note the endpoints: a "path running left to right"
+    # gets drawn spanning the whole frame and off both edges, exactly like the funnel's
+    # incoming "band" did. Giving the route an explicit START DOT and an ARROWHEAD forces it
+    # to begin and end somewhere inside the picture. The first attempt also ran the route
+    # straight THROUGH the middle pit, so not-touching is now stated per pit.
     "common_mistakes": ("strategies", "crimson",
-        "a clean winding path with three small pits along it, a simple flag marking a safe route "
-        "that steps neatly around every pit"),
+        "three open pits of the same size sunk into a single straight horizontal ground line, "
+        "evenly spaced, with clear white space to the left of the first pit and to the right of "
+        "the last. Above them one dashed route line that BEGINS at a small solid round dot to the "
+        "left of the first pit and ENDS in a clear arrowhead to the right of the last pit, arcing "
+        "up and over each pit in turn and never touching, entering or crossing any pit. The "
+        "starting dot, the arrowhead, and both ends of the ground line are all well inside the "
+        "frame with clear white margin — the ground line must not reach either side edge"),
 
     # ---- MASTERY ------------------------------------------------------------
+    # The six Mastery subjects are the only ones designed rather than drafted: four of these
+    # lessons are abstract mental models with no natural object, which is precisely the case
+    # that produced the set's one "I don't understand this image". Each names a concrete
+    # thing, and each carries the specific negative constraint that its own failure mode
+    # needs (blank dominoes so they can't drift into dice; "absolutely not a clock" on the
+    # helm; "snapped, not cut" on the bar).
     "fomo_cycle": ("mastery", "crimson",
-        "a closed circular loop arrow, a sharp spike rising steeply on its upper arc and falling "
-        "just as steeply on the lower arc, with a few small chasing arrows following behind"),
+        "a single flat mousetrap seen from slightly above: a solid rounded rectangular base plate "
+        "with all four corners visible, and a heavy U-shaped snap bar cocked and propped clearly "
+        "upright at the back of the plate so it reads as loaded and under tension rather than "
+        "lying flat. Sitting alone in the exact centre of the plate is one round disc of cheese "
+        "with three simple round holes cut through it, filled in the lighter accent colour so it "
+        "plainly reads as the lure. Two components only, both bold and chunky, one closed "
+        "self-contained object, centred and left-right balanced, complete and well inside the "
+        "frame"),
     "second_order_thinking": ("mastery", "violet",
-        "a row of upright dominoes where the first has toppled, and partway along the row the "
-        "chain branches into two diverging rows heading in different directions"),
+        "three identical upright rectangular domino tiles standing on one short horizontal ground "
+        "bar whose two rounded ends stop well inside the picture, evenly spaced and seen straight "
+        "on, completely blank apart from a single thin dividing groove across the middle of each "
+        "— no pips, no dots, no markings of any kind. The left tile has already toppled and lies "
+        "flat on the bar, the middle tile is caught leaning at a clear angle about to strike the "
+        "next, and the right-hand tile still stands perfectly upright and untouched, filled in "
+        "the lighter accent colour so it reads as the step nobody has asked about yet. Everything "
+        "complete, left-right balanced and well inside the frame"),
     "risk_vs_uncertainty": ("mastery", "violet",
-        "two objects side by side — a single die showing clean pip dots on the left, and on the "
-        "right a plain smooth cube of drifting fog with no markings at all"),
+        "two solid dice of exactly the same size, the same rounded-corner cube silhouette and the "
+        "same slight three-quarter angle, sitting side by side and level on one short straight "
+        "base line whose ends stop well inside the picture. The left die is fully pipped, its "
+        "three visible faces carrying neat plain solid round dot pips only. The right die is "
+        "unmistakably the SAME die with its pips taken away — identical proportions, corners and "
+        "angle — but every visible face is left completely bare, an uninterrupted flat fill with "
+        "nothing on it at all, and filled in the lighter accent colour. Both are whole closed "
+        "cubes with every edge visible, nothing cropped, no cast shadows and no other objects, "
+        "complete and well inside the frame"),
     "art_of_selling": ("mastery", "violet",
-        "an open hand shape rendered as a simple geometric outline releasing a single balloon-like "
-        "sphere that rises, with a small clean rising line ending in a neat flat plateau below"),
+        "one flat rectangular segmented bar lying horizontally across the middle of the picture, "
+        "divided by clean straight chamfered grooves into six equal raised squares like a bar of "
+        "chocolate. The bar has been cleanly snapped in two: the left portion of four squares "
+        "stays intact and whole, and the right portion of two squares sits slightly apart with a "
+        "small clear gap between them and a matching short zigzag break edge on both facing "
+        "sides, so it unmistakably reads as broken off rather than cut or sliced. The two "
+        "separated squares are filled in the lighter accent colour, and both pieces rest on the "
+        "same level line. Only this one bar and its two snapped-off squares — no wrapper, no "
+        "crumbs, no knife. Complete, centred, left-right balanced and well inside the frame"),
     "inversion": ("mastery", "violet",
-        "a large arrow that loops back on itself to point in the opposite direction, drawn over a "
-        "faint mirrored version of the same shape, one solid and one outlined"),
+        "a single square maze with thick solid walls, deliberately coarse and simple with only a "
+        "few wide corridors, its outer wall closed on all four sides except one clear gap in the "
+        "middle of the right-hand wall, and a small solid filled square goal at the very centre. "
+        "One bold solid route line in the lighter accent colour BEGINS at a large solid round dot "
+        "sitting inside the centre goal square, works outward through the corridors turning three "
+        "or four times, and ENDS in a clear arrowhead aimed at the gap but stopping just short of "
+        "it, still entirely inside the maze square. Every wrong corridor is left completely "
+        "empty. The route is one confident solid stroke of even weight — not dashed, not dotted, "
+        "not thin. The maze is one closed self-contained square, complete and well inside the "
+        "frame"),
     "ai_and_beyond": ("mastery", "violet",
-        "a clean geometric network of connected nodes forming a soft brain-like silhouette, with a "
-        "small rising line chart threading through its lower edge"),
+        "a single ship's steering helm standing upright and centred, drawn as one thick solid "
+        "ring with six broad straight spokes meeting at a solid square microchip hub in the exact "
+        "centre, and six short rounded handle knobs spaced evenly around the OUTSIDE of the rim "
+        "so the silhouette is plainly a wheel you grip and turn. Four short straight circuit "
+        "traces run outward from the chip hub along four of the spokes, each ending in a small "
+        "filled round node well before it reaches the rim, and the chip hub is filled in the "
+        "lighter accent colour. This is a steering wheel and absolutely NOT a clock, dial or "
+        "gauge: no tick marks, no notches or markings anywhere around the rim, no needle, no "
+        "pointer, no clock hands. One closed self-contained shape, complete and entirely inside "
+        "the frame"),
 }
 
 # The two subjects the style bake-off runs on: one abstract growth idea (hardest to
@@ -312,6 +408,27 @@ STYLE_TEST_SUBJECTS = ("compound_interest", "balance_sheet")
 # LESSONS above and copy its master to _variants/<slug>.chosen.art.jpg — the next run
 # adopts it instead of re-rolling, so the approved picture is the one that ships.
 VARIANTS = {
+    # A rising ribbon that shatters into particles is a MOOD, not a statement — there is
+    # nothing in it to recognise, so there is nothing to understand. All three below name a
+    # concrete thing: a machine that climbs, two futures compared, or an instrument for
+    # seeing further than everyone else.
+    # The rocket WON and now lives in LESSONS above; not repeated here. These two are the
+    # record of what was weighed against it: "two futures" taught the idea best but read as a
+    # chart, and the telescope was the most distinctive object in the 27 but said foresight
+    # rather than growth.
+    "cathie_wood_way": [
+        "two lines that begin together at one small solid dot on the left: the lower line stays "
+        "flat and level all the way to the right and ends in a plain blunt cap, while the upper "
+        "line bends steadily and then sharply upward and ends in a clear arrowhead high on the "
+        "right, so the widening gap between the ordinary path and the accelerating one is the "
+        "whole picture. Both lines are solid filled ribbons, and the starting dot, the blunt cap "
+        "and the arrowhead are all well inside the frame",
+
+        "one simple telescope on a tripod stand, angled up and to the right, with a small tight "
+        "cluster of four-pointed star shapes in the distance along its line of sight. The whole "
+        "telescope, all three legs of the tripod and the entire star cluster are complete and "
+        "well inside the frame with clear white margin on every side",
+    ],
     # The bar/funnel/arrows/bar construction was legible as shapes but unreadable as an
     # IDEA — it never said what was being taken away or what survived. All three below tell
     # the same story left to right or top to bottom: a big amount, visible subtractions, and

@@ -25,29 +25,30 @@ import pytest
 
 from app.schemas.widget import (
     WidgetBasketResponse,
+    WidgetCauseResponse,
+    WidgetMoveContextResponse,
     WidgetMoverPayload,
     WidgetMoverResponse,
-    WidgetReasonKind,
-    WidgetReasonResponse,
 )
-from app.services.widget_movers_service import (
-    detect_basket,
-    rank_movers,
-    resolve_reason,
-)
+from app.services.daily_move_attribution import CauseKind
+from app.services.widget_movers_service import detect_basket, rank_movers
 from app.utils.market_hours import ET
 
 _ISO_NO_FRACTION = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 # Every key the Swift decoder reads, at the level it reads it.
 _PAYLOAD_KEYS = {
-    "mode", "as_of", "market_session", "is_stale",
-    "headline_mover", "basket", "market_story", "universe_label",
+    "mode", "as_of", "market_session", "headline_mover", "basket", "runners_up",
 }
 _MOVER_KEYS = {
-    "ticker", "company_name", "change_percent", "price", "tier", "z", "reason",
+    "ticker", "company_name", "change_percent", "price", "tier", "z",
+    "cause", "context",
 }
-_REASON_KEYS = {"kind", "text", "catalyst_tag", "sources"}
+_CAUSE_KEYS = {"kind", "tag", "detail"}
+_CONTEXT_KEYS = {
+    "change_percent", "z", "gap_percent", "intraday_percent", "gap_dominant",
+    "industry_name", "industry_change_percent", "market_change_percent",
+}
 _BASKET_KEYS = {
     "direction", "moved_count", "total_count", "factor_kind", "factor_label",
     "average_change_percent", "tickers", "text",

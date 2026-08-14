@@ -1,0 +1,37 @@
+{
+  "slug": "ai_and_beyond",
+  "level": "mastery",
+  "style": "flat_vector",
+  "palette": "violet",
+  "subject": "a single ship's steering helm standing upright and centred, drawn as one thick solid ring with six broad straight spokes meeting at a solid square microchip hub in the exact centre, and six short rounded handle knobs spaced evenly around the OUTSIDE of the rim so the silhouette is plainly a wheel you grip and turn. Four short straight circuit traces run outward from the chip hub along four of the spokes, each ending in a small filled round node well before it reaches the rim, and the chip hub is filled in the lighter accent colour. This is a steering wheel and absolutely NOT a clock, dial or gauge: no tick marks, no notches or markings anywhere around the rim, no needle, no pointer, no clock hands. One closed self-contained shape, complete and entirely inside the frame",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: a single ship's steering helm standing upright and centred, drawn as one thick solid ring with six broad straight spokes meeting at a solid square microchip hub in the exact centre, and six short rounded handle knobs spaced evenly around the OUTSIDE of the rim so the silhouette is plainly a wheel you grip and turn. Four short straight circuit traces run outward from the chip hub along four of the spokes, each ending in a small filled round node well before it reaches the rim, and the chip hub is filled in the lighter accent colour. This is a steering wheel and absolutely NOT a clock, dial or gauge: no tick marks, no notches or markings anywhere around the rim, no needle, no pointer, no clock hands. One closed self-contained shape, complete and entirely inside the frame\n\nPALETTE: a deep violet and indigo with a soft lilac, slate-grey neutrals and clean white, plus one small cyan accent. Reflective and advanced. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+  "art_prompt_sha1": "3afd036c4745",
+  "art_file": "ai_and_beyond.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "ai_and_beyond.hero.jpg",
+      "width": 1536,
+      "height": 864,
+      "sha256": "19ed8471c601d1ee44aef1354d8466f26b49e18808e7e722158918a1b121749a",
+      "bytes": 89670,
+      "cropped": true,
+      "snapped_fraction": 0.7816
+    }
+  },
+  "background": {
+    "min_channel": 255,
+    "max_cast": 0,
+    "corner_rgb": [
+      255,
+      255,
+      255
+    ],
+    "is_white": true,
+    "art_at_edge": false
+  }
+}

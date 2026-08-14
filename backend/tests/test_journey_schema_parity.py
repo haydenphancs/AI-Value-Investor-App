@@ -185,3 +185,120 @@ def test_non_object_card_in_array_still_serves_verbatim():
     lesson["story_content"]["cards"].append("not-an-object")  # type: ignore[arg-type]
     resp = JourneyResponse(lessons=[lesson])  # does NOT raise
     assert resp.lessons[0].story_content["cards"][-1] == "not-an-object"
+
+
+# ---------------------------------------------------------------------------
+# Lesson hero artwork: cards[0].imageUrl only
+#
+# The contract itself does not change — `imageUrl` was always in
+# _CANONICAL_REMOTE_CARD_KEYS, which is the point: populating it breaks nothing.
+# What is pinned here is the PLACEMENT (the title card carries the hero, nothing
+# else does) and the rollout property the whole plan depends on — a lesson with no
+# artwork yet must produce imageUrl=None and must not raise.
+# ---------------------------------------------------------------------------
+
+class _StubStorage:
+    """Minimal stand-in for the Supabase storage client. No network."""
+
+    def __init__(self, bucket):
+        self._bucket = bucket
+
+    def get_public_url(self, path):
+        return f"https://stub.supabase.co/storage/v1/object/public/{self._bucket}/{path}?"
+
+    def upload(self, *_a, **_k):
+        raise AssertionError("upload must not run in a unit test")
+
+    def list(self, *_a, **_k):
+        return []
+
+
+class _StubSupabase:
+    def __init__(self):
+        self.storage = self
+
+    def from_(self, bucket):
+        return _StubStorage(bucket)
+
+
+def _seed_module():
+    import sys
+    sys.path.insert(0, str(_REPO / "backend/scripts"))
+    import seed_journey
+    return seed_journey
+
+
+def _one_lesson():
+    data = json.loads(_BUNDLE_JSON.read_text())
+    return data["lessons"][0]
+
+
+def test_only_the_title_card_carries_an_image_url(tmp_path, monkeypatch):
+    """The hero belongs to the first screen. Every other card — including the
+    completion card, whose artwork was deliberately dropped — stays None."""
+    seed = _seed_module()
+    lesson = _one_lesson()
+    slug = lesson["slug"]
+
+    art_dir = tmp_path / "journey_art"
+    art_dir.mkdir()
+    hero = art_dir / f"{slug}.hero.jpg"
+    hero.write_bytes(b"\xff\xd8\xff\xdb-not-a-real-jpeg")
+    (art_dir / f"{slug}.manifest.json").write_text(json.dumps({
+        "slug": slug,
+        "masters": {"hero": {"file": hero.name, "sha256": "deadbeef", "bytes": 123}},
+        "uploaded": {"hero": "deadbeef"},
+    }))
+    monkeypatch.setattr(seed, "ART_DIR", art_dir)
+    monkeypatch.setattr(seed, "_EXISTING_IMAGES", {hero.name})
+    monkeypatch.setattr(seed, "DRY", True)
+    monkeypatch.setitem(seed._LEVEL_TOTALS, lesson["level"], 7)
+
+    story = seed.build_story_content(_StubSupabase(), lesson, slug)
+    cards = story["cards"]
+
+    assert cards[0]["type"] == "title"
+    assert cards[0]["imageUrl"], "title card should carry the hero URL"
+    assert "journey-images/lessons/" in cards[0]["imageUrl"]
+    assert not cards[0]["imageUrl"].endswith("?"), (
+        "trailing ? is a distinct URLCache key on device")
+    for card in cards[1:]:
+        assert card["imageUrl"] is None, (
+            f"{card['type']} card must not carry artwork, got {card['imageUrl']!r}")
+
+
+def test_image_url_is_none_when_the_lesson_has_no_art(tmp_path, monkeypatch):
+    """The whole rollout rests on this: 27 lessons are seeded before all 27 images
+    exist, and a lesson with no artwork must serve imageUrl=None without raising."""
+    seed = _seed_module()
+    lesson = _one_lesson()
+    monkeypatch.setattr(seed, "ART_DIR", tmp_path / "empty")
+    monkeypatch.setattr(seed, "DRY", True)
+    monkeypatch.setitem(seed._LEVEL_TOTALS, lesson["level"], 7)
+
+    story = seed.build_story_content(_StubSupabase(), lesson, lesson["slug"])
+    assert all(c["imageUrl"] is None for c in story["cards"])
+
+
+def test_seeder_never_emits_a_relative_or_empty_image_url(tmp_path, monkeypatch):
+    """iOS dispatches on hasPrefix("http"); anything else falls through to a bundle
+    asset lookup and renders the placeholder. Empty string is worse — it still
+    reserves the slot."""
+    seed = _seed_module()
+    lesson = _one_lesson()
+    art_dir = tmp_path / "journey_art"
+    art_dir.mkdir()
+    (art_dir / f"{lesson['slug']}.manifest.json").write_text(json.dumps({
+        "slug": lesson["slug"],
+        "masters": {"hero": {"file": "x.hero.jpg", "sha256": "abc", "bytes": 1}},
+    }))
+    monkeypatch.setattr(seed, "ART_DIR", art_dir)
+    monkeypatch.setattr(seed, "_EXISTING_IMAGES", {"x.hero.jpg"})
+    monkeypatch.setattr(seed, "DRY", True)
+    monkeypatch.setitem(seed._LEVEL_TOTALS, lesson["level"], 7)
+
+    story = seed.build_story_content(_StubSupabase(), lesson, lesson["slug"])
+    for card in story["cards"]:
+        url = card["imageUrl"]
+        assert url is None or url.startswith("https://"), f"bad imageUrl: {url!r}"
+        assert url != "", "an empty imageUrl still reserves the slot on iOS"

@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "d99db71d751bc5fa3d8b29634a24141347b580aeb68450d49096ae3e30a55515"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/power_of_discipline.hero.jpg"
 }

@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "5d00ad237704bd57bb513c122a8d1a653e41d8f2d2098a4164787d8b2498e37c"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/stock_vs_business.hero.jpg"
 }

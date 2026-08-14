@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "b46e230fdd52f8a800c860aa00f6b8967f7c5fe0197ebae749a3513d18c26ed0"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/buffett_way.hero.jpg"
 }

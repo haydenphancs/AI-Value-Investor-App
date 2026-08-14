@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "0c921a8911b26e4e1eaadcb6b08723c6fb4a52fbca159ec04a05910a700b2947"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/risk_vs_uncertainty.hero.jpg"
 }

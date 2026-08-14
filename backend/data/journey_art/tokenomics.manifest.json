@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "5afd7dc63a401151ab022e36b314d0fe4738279f81c35b649a554095e4296bd6"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/tokenomics.hero.jpg"
 }

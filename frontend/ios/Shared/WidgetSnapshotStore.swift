@@ -57,21 +57,44 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     public let mode: String
     public let asOf: Date
     public let marketSession: String
-    public let isStale: Bool
     public let headlineMover: WidgetMover?
     public let basket: WidgetBasket?
-    public let marketStory: String?
-    public let universeLabel: String?
+    /// Next few movers, for the large family. Empty on smaller sizes' data too —
+    /// the backend always sends them; only Large renders them.
+    public let runnersUp: [WidgetMover]
 
     enum CodingKeys: String, CodingKey {
         case mode
         case asOf = "as_of"
         case marketSession = "market_session"
-        case isStale = "is_stale"
         case headlineMover = "headline_mover"
         case basket
-        case marketStory = "market_story"
-        case universeLabel = "universe_label"
+        case runnersUp = "runners_up"
+    }
+
+    /// Tolerant of an older backend that has not shipped `runners_up` yet: a missing
+    /// key must degrade to an empty list, not fail the whole decode and leave the
+    /// widget on its placeholder.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try c.decode(String.self, forKey: .mode)
+        asOf = try c.decode(Date.self, forKey: .asOf)
+        marketSession = try c.decode(String.self, forKey: .marketSession)
+        headlineMover = try c.decodeIfPresent(WidgetMover.self, forKey: .headlineMover)
+        basket = try c.decodeIfPresent(WidgetBasket.self, forKey: .basket)
+        runnersUp = try c.decodeIfPresent([WidgetMover].self, forKey: .runnersUp) ?? []
+    }
+
+    public init(
+        mode: String, asOf: Date, marketSession: String,
+        headlineMover: WidgetMover?, basket: WidgetBasket?, runnersUp: [WidgetMover] = []
+    ) {
+        self.mode = mode
+        self.asOf = asOf
+        self.marketSession = marketSession
+        self.headlineMover = headlineMover
+        self.basket = basket
+        self.runnersUp = runnersUp
     }
 }
 
@@ -82,13 +105,16 @@ public struct WidgetMover: Codable, Equatable, Sendable {
     public let price: Double?
     public let tier: String?
     public let z: Double?
-    public let reason: WidgetReason
+    /// Why it moved TODAY. Always present; `.none` is a real answer, not a failure.
+    public let cause: WidgetCause
+    /// The arithmetic beside it — always true, never a guess.
+    public let context: WidgetMoveContext
 
     enum CodingKeys: String, CodingKey {
         case ticker
         case companyName = "company_name"
         case changePercent = "change_percent"
-        case price, tier, z, reason
+        case price, tier, z, cause, context
     }
 
     /// `nil` ⇒ the number is HIDDEN, never rendered as 0.0%. A fabricated flat reading
@@ -100,38 +126,69 @@ public struct WidgetMover: Codable, Equatable, Sendable {
 
     /// `-0.0 > 0` is false, so a signed zero cannot paint a gainer.
     public var isPositive: Bool { (changePercent ?? 0) > 0 }
+
+    /// "1.1× normal" — the single most useful thing to put beside a percentage,
+    /// because it says whether this move is remarkable *for this stock*.
+    public var volatilityLabel: String? {
+        guard let z else { return nil }
+        return String(format: "%.1f× normal", z)
+    }
 }
 
-/// Provenance of the reason line. The app renders a "Why it moved" treatment ONLY for
-/// `.catalyst`; the other two are deliberately styled as what they are.
-public enum WidgetReasonKind: String, Codable, Sendable {
-    /// Web-grounded and source-cited. May be framed as *why*.
-    case catalyst
-    /// A news headline. Says what is going on; establishes no causal link.
-    case context
-    /// Arithmetic only. Always available, never wrong.
+/// What kind of cause the backend was able to establish. Mirrors `CauseKind`.
+public enum WidgetCauseKind: String, Codable, Sendable {
+    case earnings
+    case analyst
+    case companyNews = "company_news"
+    case sector
+    case market
+    /// Nothing identifiable — the common, honest case.
     case none
 
-    /// Unknown values decode to `.context` rather than throwing: a backend that adds a
-    /// fourth kind must not break every already-installed widget.
+    /// An unknown value decodes to `.none` rather than throwing: a backend that adds a
+    /// seventh kind must not break every already-installed widget.
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = WidgetReasonKind(rawValue: raw) ?? .context
+        self = WidgetCauseKind(rawValue: raw) ?? .none
     }
+
+    /// Only an established cause earns the "Why it moved" framing.
+    public var isEstablished: Bool { self != .none }
 }
 
-public struct WidgetReason: Codable, Equatable, Sendable {
-    public let kind: WidgetReasonKind
-    public let text: String
-    public let catalystTag: String?
+public struct WidgetCause: Codable, Equatable, Sendable {
+    public let kind: WidgetCauseKind
+    public let tag: String?
+    public let detail: String
+}
+
+public struct WidgetMoveContext: Codable, Equatable, Sendable {
+    public let changePercent: Double
+    public let z: Double?
+    public let gapPercent: Double?
+    public let intradayPercent: Double?
+    public let gapDominant: Bool
+    public let industryName: String?
+    public let industryChangePercent: Double?
+    public let marketChangePercent: Double?
 
     enum CodingKeys: String, CodingKey {
-        case kind, text
-        case catalystTag = "catalyst_tag"
+        case changePercent = "change_percent"
+        case z
+        case gapPercent = "gap_percent"
+        case intradayPercent = "intraday_percent"
+        case gapDominant = "gap_dominant"
+        case industryName = "industry_name"
+        case industryChangePercent = "industry_change_percent"
+        case marketChangePercent = "market_change_percent"
     }
 
-    /// True only when the backend established a cause. Gates the "Why it moved" label.
-    public var isCausal: Bool { kind == .catalyst }
+    /// "Aerospace & Defense −1.2%" — the comparison that tells a reader whether this
+    /// was a company event or a group move.
+    public var industryLabel: String? {
+        guard let name = industryName, let c = industryChangePercent else { return nil }
+        return String(format: "%@ %+.1f%%", name, c)
+    }
 }
 
 public struct WidgetBasket: Codable, Equatable, Sendable {

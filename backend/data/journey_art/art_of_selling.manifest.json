@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "252dbf350fc2a649d0ffabefe4f97cef2dd77f0b31253b9e77ec405c0ea69643"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/art_of_selling.hero.jpg"
 }

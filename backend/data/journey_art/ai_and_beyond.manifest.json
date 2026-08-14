@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "19ed8471c601d1ee44aef1354d8466f26b49e18808e7e722158918a1b121749a"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/ai_and_beyond.hero.jpg"
 }

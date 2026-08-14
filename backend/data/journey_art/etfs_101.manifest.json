@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "7f346dce818eab8e75e5019d6ea69b190cfd70df057e1fef7b80e0a3e0f09af1"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/etfs_101.hero.jpg"
 }

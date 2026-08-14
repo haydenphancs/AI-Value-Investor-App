@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "80f678734da27086c4f08ded68c9c2acfd9a8887ac8576e38c7f94306655cf3c"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/red_flags.hero.jpg"
 }

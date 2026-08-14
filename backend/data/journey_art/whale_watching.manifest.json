@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "58aa0ed0c5a84d93a6e6abc7ea6f9d55e8cc2298f3298b571e65eac7c66325d3"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/whale_watching.hero.jpg"
 }

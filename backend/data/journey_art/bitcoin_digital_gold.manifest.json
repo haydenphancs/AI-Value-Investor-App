@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "26e940f303a99aae14788946d6a4a35f7088bf74bbdbb42d9517398c54946505"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/bitcoin_digital_gold.hero.jpg"
 }

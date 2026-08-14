@@ -34,5 +34,9 @@
     "is_white": true,
     "art_at_edge": false
   },
-  "adopted_from": "risk_reward.chosen.art.jpg"
+  "adopted_from": "risk_reward.chosen.art.jpg",
+  "uploaded": {
+    "hero": "99a3119551712b614ea0376d644358aeb7bcf8d502254b6f8d5c722b9ca060bd"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/risk_reward.hero.jpg"
 }

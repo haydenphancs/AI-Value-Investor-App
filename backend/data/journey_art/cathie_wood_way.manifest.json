@@ -34,5 +34,9 @@
     "is_white": true,
     "art_at_edge": false
   },
-  "adopted_from": "cathie_wood_way.chosen.art.jpg"
+  "adopted_from": "cathie_wood_way.chosen.art.jpg",
+  "uploaded": {
+    "hero": "485127c5ec0eecc38acdacfd9a3f5abe37d115604676140d80349d2bbfc93552"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/cathie_wood_way.hero.jpg"
 }

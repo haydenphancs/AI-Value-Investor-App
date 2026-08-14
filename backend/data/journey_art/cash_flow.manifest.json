@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "08992588e76d83f3ef21265ee74ef9f816a0d1d0d563a1276af1b31587b2f846"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/cash_flow.hero.jpg"
 }

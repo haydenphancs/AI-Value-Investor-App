@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "0102e0af6f530247185d0513e22e70d12b6e3ee0eb35e7f53314a182ec6ac4b6"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/common_mistakes.hero.jpg"
 }

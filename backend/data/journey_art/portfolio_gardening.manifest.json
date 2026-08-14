@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "a7078be37a5d0e30d46fb40fcabdbb885707bd0db1115b2c3b1ffe22e9a21b9f"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/portfolio_gardening.hero.jpg"
 }

@@ -37,7 +37,12 @@ from app.services.active_group_service import (
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
 from app.services.asset_class import trades_extended_hours
-from app.services.chart_helper import fetch_chart_data, sparkline_precision
+from app.services.chart_helper import (
+    FULL_SPAN,
+    fetch_chart_data,
+    intraday_span,
+    sparkline_precision,
+)
 # Pure tier table — no I/O and no service imports, so this is cycle-safe at module level
 # (unlike signals_service, which imports FROM here and must stay function-local below).
 from app.services.entitlements import (
@@ -82,7 +87,13 @@ _PULSE_SYMBOLS: List[Dict[str, str]] = [
 ]
 
 _SPARKLINE_POINTS = 30          # downsampled intraday closes per mini-chart
-_CACHE_TTL_SECONDS = 300        # 5 min — live market-data freshness ceiling
+# 1 min — live market-data freshness ceiling. Was 300s, which meant the Market
+# Pulse prices moved once every five minutes under a header that says "Markets
+# Open" with a blinking green dot: the strip read as frozen, which is exactly the
+# "it looks like the day is already done" complaint this change answers. The tile
+# is 6 symbols behind ONE class-level cache shared by every user, so the cost of
+# 5x-ing it is ~6 FMP calls/min globally — under 1% of the Premium 750/min budget.
+_CACHE_TTL_SECONDS = 60
 _CACHE_KEY = "dashboard"
 # A build that lost tiles is cached only briefly. `_build_pulse` swallows per-tile
 # failures and can NEVER raise, so "didn't raise" is not "succeeded" — without
@@ -101,7 +112,7 @@ _PULSE_BUILD_TIMEOUT_SECONDS = 6
 # deliberately never cached, so during a total FMP outage the same entry would
 # otherwise be re-served forever, ageing without bound while the header keeps
 # claiming the market is open. Past this ceiling the honest empty placeholder wins.
-_STALE_SERVE_CEILING_SECONDS = _CACHE_TTL_SECONDS * 2   # 10 min
+_STALE_SERVE_CEILING_SECONDS = _CACHE_TTL_SECONDS * 2   # 2 min
 
 
 # ── Daily Scanners config ─────────────────────────────────────────────
@@ -277,27 +288,42 @@ def _downsample(values: List[float], target: int) -> List[float]:
     return [values[i] for i in idxs]
 
 
-def _intraday_sparkline(bars: Any, points: int = _SPARKLINE_POINTS) -> List[float]:
-    """Pure transform: 1D intraday bars → downsampled closes for the mini-chart.
+def _intraday_sparkline(
+    bars: Any,
+    points: int = _SPARKLINE_POINTS,
+    *,
+    extended_hours: bool = False,
+) -> Tuple[List[float], float, float]:
+    """Pure transform: 1D intraday bars → (downsampled closes, span_from, span_to).
 
     Mirrors the holdings-card sparkline (tracking_service): keep only the MOST
     RECENT trading day (so warm-up bars from prior sessions don't fold several
     days into one tiny chart), take closes oldest-first, downsample to ``points``.
 
+    The span is where those bars sit inside the asset's own session. It is the
+    series' ONLY time axis — without it iOS spreads N points across the full tile
+    width, which made a 10:15 tile pixel-identical to a completed day. ``points``
+    cannot substitute: `_downsample` passes short series through untouched, so the
+    count encodes elapsed time only accidentally and only before noon.
+
+    ``extended_hours`` picks that session: 00:00–24:00 for the 24/7 assets
+    (crypto, commodity futures), 09:30–16:00 otherwise. It MUST match the flag the
+    bars were fetched with, or the span describes a window the series never had.
+
     Robust to the shapes FMP/chart_helper return:
-    - non-list / fewer than 2 bars → []
+    - non-list / fewer than 2 bars → ([], full span)
     - non-dict rows, missing/None/non-numeric/non-positive closes → skipped
-    - fewer than 2 usable closes after filtering → []
+    - fewer than 2 usable closes after filtering → ([], full span)
 
     Never fabricates a synthetic series — returns [] so the iOS SparklineView
     simply draws nothing rather than a fake trend.
     """
     if not isinstance(bars, list) or len(bars) < 2:
-        return []
+        return ([], *FULL_SPAN)
 
     dict_bars = [b for b in bars if isinstance(b, dict)]
     if not dict_bars:
-        return []
+        return ([], *FULL_SPAN)
 
     # chart_helper returns bars sorted oldest-first, so the last bar is newest.
     last_day = str(dict_bars[-1].get("date", ""))[:10]  # "YYYY-MM-DD"
@@ -308,21 +334,27 @@ def _intraday_sparkline(bars: Any, points: int = _SPARKLINE_POINTS) -> List[floa
     else:
         day_bars = dict_bars
 
+    # Bars and closes stay in LOCKSTEP so the span is derived from the rows that
+    # actually survived filtering — reading it off `day_bars` would let a dropped
+    # final bar push the line's end past the last price it really has.
+    usable: List[Dict[str, Any]] = []
     closes: List[float] = []
     for b in day_bars:
         cf = _finite_float(b.get("close"))
         if cf is not None and cf > 0:
+            usable.append(b)
             closes.append(cf)
 
     if len(closes) < 2:
-        return []
+        return ([], *FULL_SPAN)
+    span = intraday_span(usable, extended_hours=extended_hours)
     # Precision scales to the series' own magnitude. A flat round(c, 2) collapses
     # any sub-dollar asset into a handful of distinct levels, so the mini-chart
     # draws a dead-flat line next to a live non-zero % change. Mirrors
     # tracking_service._sparkline_precision (the holdings-card twin).
     sampled = _downsample(closes, points)
     digits = sparkline_precision(sampled)
-    return [round(c, digits) for c in sampled]
+    return ([round(c, digits) for c in sampled], *span)
 
 
 # ── Scanner pure helpers (unit-tested without network) ────────────────
@@ -1292,15 +1324,25 @@ class HomeDashboardService:
     ) -> None:
         """Fetch a 1D intraday sparkline for the rank-1 (head) row of each
         non-empty list, in parallel, and attach it. Only rank-1 carries a spark
-        (matching the iOS model); failures leave it ``[]``."""
+        (matching the iOS model); failures leave it ``[]``.
+
+        Every scanner universe is US equities, so the default regular-hours window
+        is the right one — these rows can never be a 24/7 asset.
+
+        Note the scanner card's own 20-minute cache now SHOWS: the span makes the
+        line stop where its data does, so a stale head row ends ~5% short of the
+        card's width instead of being stretched to the edge. That is the honest
+        rendering, not a regression."""
         heads = [rows[0] for rows in lists if rows]
         if not heads:
             return
         sparks = await asyncio.gather(
             *[self._fetch_sparkline(h.symbol) for h in heads]
         )
-        for head, spark in zip(heads, sparks):
+        for head, (spark, spark_from, spark_to) in zip(heads, sparks):
             head.spark = spark
+            head.spark_from = spark_from
+            head.spark_to = spark_to
 
     # ── Emerging Frontiers themes (server-driven, cache-aside + guard) ─
 
@@ -1630,12 +1672,13 @@ class HomeDashboardService:
         # to the US equity session — that is what their own detail charts do
         # (crypto_service / commodity_service both pass extended_hours=True).
         # _PULSE_SYMBOLS already carries the class per tile.
-        quote, spark = await asyncio.gather(
+        quote, spark_result = await asyncio.gather(
             self.fmp.get_stock_price_quote(symbol),
             self._fetch_sparkline(
                 symbol, extended_hours=trades_extended_hours(cfg.get("type", ""))
             ),
         )
+        spark, spark_from, spark_to = spark_result
 
         if not quote:
             logger.warning("No quote for pulse symbol %s — dropping tile", symbol)
@@ -1679,12 +1722,14 @@ class HomeDashboardService:
             change_percent=round(change_f, 2) + 0.0,
             previous_close=previous_close,
             spark=spark,
+            spark_from=spark_from,
+            spark_to=spark_to,
         )
 
     async def _fetch_sparkline(
         self, symbol: str, extended_hours: bool = False
-    ) -> List[float]:
-        """Latest-session 1D intraday closes (oldest-first) for the mini-chart.
+    ) -> Tuple[List[float], float, float]:
+        """Latest-session 1D intraday closes (oldest-first) + their session span.
 
         Uses the SAME series the detail chart and the holdings cards draw (5-min
         intraday via the shared chart_helper), in the SAME session window that
@@ -1698,19 +1743,23 @@ class HomeDashboardService:
         slice beside a live price, contradicting both its own % change and the
         detail chart one tap away.
 
-        Returns [] on failure — never a synthetic series.
+        Returns [] on failure — never a synthetic series. The span degrades to full
+        width, i.e. the behaviour the tile had before spans existed.
         """
         try:
             bars = await fetch_chart_data(
                 self.fmp, symbol, "1D", extended_hours=extended_hours
             )
-            return _intraday_sparkline(bars)
+            # Same flag on both halves: the span describes the window the bars were
+            # FETCHED in, so passing one and not the other would position a
+            # regular-hours series against a 24h axis (or vice versa).
+            return _intraday_sparkline(bars, extended_hours=extended_hours)
         except Exception as exc:
             logger.warning(
                 "Sparkline (1D intraday) for %s failed: %s: %s",
                 symbol, type(exc).__name__, exc,
             )
-            return []
+            return ([], *FULL_SPAN)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────

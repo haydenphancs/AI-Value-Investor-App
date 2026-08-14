@@ -193,7 +193,8 @@ struct ResearchContentView: View {
                     // First-run CTA: send them to the tab that can actually make one.
                     onGenerateFirst: { viewModel.selectedTab = .research },
                     requiresSignIn: viewModel.requiresSignInForReports,
-                    onSignIn: { appState.requestSignIn(for: "see your analyses") }
+                    onSignIn: { appState.requestSignIn(for: "see your analyses") },
+                    isReconnecting: viewModel.isReconnectingReports
                 )
                 .padding(.top, AppSpacing.sm)
 

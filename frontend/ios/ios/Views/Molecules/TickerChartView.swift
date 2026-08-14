@@ -82,11 +82,37 @@ struct TickerChartView: View {
         let end = max(start, min(pricePoints.count - 1, viewportState.visibleEnd))
         let sliced = Array(pricePoints[start...end])
 
-        // For 1D stock charts, only show the latest trading day
-        if selectedRange == .oneDay && assetContext != .crypto {
+        // For 1D charts, only show the latest trading day
+        if usesIntradayTimeMapping {
             return TradingDayHelper.filterToLatestDay(sliced)
         }
         return sliced
+    }
+
+    /// True when the 1D chart positions each point by its TIME OF DAY rather than
+    /// by its index — which is what leaves the untraded remainder of the session
+    /// empty on the right instead of stretching a morning across the full width.
+    ///
+    /// This used to exclude crypto (`assetContext != .crypto`), so a Bitcoin 1D
+    /// chart fell back to index mapping and stretched. Commodities were WORSE:
+    /// they were included but measured against the 09:30–16:00 equity window, so
+    /// every overnight bar clamped to 0 and piled up on the left edge. Both are
+    /// fixed by choosing the WINDOW per asset class instead of opting them out.
+    private var usesIntradayTimeMapping: Bool { selectedRange == .oneDay }
+
+    /// The session `visiblePoints` is measured against: 09:30–16:00 ET for
+    /// equities/ETFs/indices, the whole calendar day for crypto and commodity
+    /// futures. Mirrors the backend's `asset_class.trades_extended_hours`, which
+    /// picks the same window for the card sparkline — they must agree, or the
+    /// same ticker's row and chart stop at different places.
+    private var sessionWindow: TradingDayHelper.SessionWindow {
+        TradingDayHelper.window(for: assetContext)
+    }
+
+    /// Per-point time fractions for the 1D chart, or nil for index mapping.
+    private var intradayTimeFractions: [CGFloat]? {
+        guard usesIntradayTimeMapping else { return nil }
+        return TradingDayHelper.timeFractions(for: visiblePoints, window: sessionWindow)
     }
 
     /// Index in the FULL `pricePoints` where `visiblePoints` begins.
@@ -169,7 +195,8 @@ struct TickerChartView: View {
                     showExtendedHours: chartSettings.showExtendedHours && assetContext.supportsExtendedHours,
                     lookbackCloses: overlayLookbackCloses,
                     chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil,
-                    useIntradayTimeMapping: selectedRange == .oneDay && assetContext != .crypto,
+                    useIntradayTimeMapping: usesIntradayTimeMapping,
+                    sessionWindow: sessionWindow,
                     baselineClose: baselineClose
                 )
 
@@ -178,9 +205,7 @@ struct TickerChartView: View {
                     selectedRange: selectedRange,
                     crosshairState: crosshairState,
                     viewportState: viewportState,
-                    timeFractions: (selectedRange == .oneDay && assetContext != .crypto)
-                        ? TradingDayHelper.timeFractions(for: visiblePoints)
-                        : nil
+                    timeFractions: intradayTimeFractions
                 )
             }
             .frame(height: 140)
@@ -191,7 +216,8 @@ struct TickerChartView: View {
                 ChartXAxisLabels(
                     pricePoints: visiblePoints,
                     selectedRange: selectedRange,
-                    useIntradayTimeMapping: selectedRange == .oneDay && assetContext != .crypto
+                    useIntradayTimeMapping: usesIntradayTimeMapping,
+                    sessionWindow: sessionWindow
                 )
                     .padding(.horizontal, AppSpacing.lg)
             }
@@ -207,9 +233,7 @@ struct TickerChartView: View {
                     crosshairState: crosshairState,
                     // Share the main price chart's 1D intraday time-of-session mapping so
                     // volume bars + the sub-chart crosshair align with the price line.
-                    timeFractions: (selectedRange == .oneDay && assetContext != .crypto)
-                        ? TradingDayHelper.timeFractions(for: visiblePoints)
-                        : nil
+                    timeFractions: intradayTimeFractions
                 )
             }
 

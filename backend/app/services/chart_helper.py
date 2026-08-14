@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import FMPClient
+from app.utils.market_hours import US_MARKET_EARLY_CLOSES
 
 
 def _finite_or_none(v: Any) -> Optional[float]:
@@ -25,6 +26,124 @@ def _finite_or_none(v: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
     return f if math.isfinite(f) else None
+
+# A sparkline that covers the WHOLE plotting window — the value every degenerate
+# branch of `intraday_span` returns, because it reproduces the pre-existing
+# "stretch the series edge to edge" behaviour exactly. A bad span must never make
+# the chart worse than it was before spans existed.
+FULL_SPAN: Tuple[float, float] = (0.0, 1.0)
+
+# Session windows as ET minutes-from-midnight. Equities/ETFs/indices trade the
+# regular 09:30–16:00 bell; crypto and the continuously-quoted commodity futures
+# run the whole calendar day, and FMP stamps their bars 00:00–23:55 ET (verified
+# live: BTCUSD and GCUSD both start at 00:00 while ^GSPC starts at 09:30).
+_REGULAR_OPEN_MINUTE = 9 * 60 + 30    # 09:30
+_REGULAR_CLOSE_MINUTE = 16 * 60       # 16:00
+_EARLY_CLOSE_MINUTE = 13 * 60         # 13:00 — NYSE/NASDAQ half-days
+_ROUND_THE_CLOCK_WINDOW = (0, 24 * 60)
+
+
+def _bar_minute_of_day(date_str: Any) -> Optional[int]:
+    """Minutes-from-midnight for an FMP intraday stamp, or None if it isn't one.
+
+    FMP intraday dates are ``"YYYY-MM-DD HH:MM:SS"`` in ET with no offset. A
+    daily bar (``"YYYY-MM-DD"``, length 10) has no time-of-day and returns None,
+    which pushes the caller to the full-width fallback rather than inventing a
+    midnight position for it.
+    """
+    if not isinstance(date_str, str) or len(date_str) <= 10:
+        return None
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return dt.hour * 60 + dt.minute
+
+
+def _session_window(date_str: Any, *, extended_hours: bool) -> Optional[Tuple[int, int]]:
+    """(open, close) ET minutes for the session the given bar belongs to."""
+    if extended_hours:
+        return _ROUND_THE_CLOCK_WINDOW
+    # Half-days close at 13:00, so a 12:55 bar is the LAST one of that session and
+    # must read as a COMPLETE day, not as 60% of one. Same table `session_phase`
+    # uses — one source, or the chart and the "Markets Closed" header disagree
+    # about when the bell rang.
+    if not isinstance(date_str, str) or len(date_str) < 10:
+        return None
+    try:
+        day = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    close = (
+        _EARLY_CLOSE_MINUTE
+        if (day.year, day.month, day.day) in US_MARKET_EARLY_CLOSES
+        else _REGULAR_CLOSE_MINUTE
+    )
+    return (_REGULAR_OPEN_MINUTE, close)
+
+
+def intraday_span(
+    day_bars: List[Dict[str, Any]],
+    *,
+    extended_hours: bool,
+    interval_minutes: int = 5,
+) -> Tuple[float, float]:
+    """Where a single session's bars sit inside that session, as (from, to) in [0, 1].
+
+    A sparkline ships as a bare ``List[float]`` with no time axis, so the client
+    used to spread N points across the FULL tile width — which made a 10:15 chart
+    pixel-identical to a completed day and read as "the market already closed".
+    This pair is the missing axis: iOS draws the series between ``width * from``
+    and ``width * to`` and leaves the rest of the tile empty, matching what the
+    asset-detail 1D chart has always done via ``TradingDayHelper.timeFractions``.
+
+    ``day_bars`` must already be trimmed to ONE day (both callers do that with
+    their ``last_day`` filter) and sorted oldest-first, which is what
+    ``fetch_chart_data`` returns.
+
+    ``to`` uses the last bar's END (``+ interval_minutes``) because a bar covers
+    its interval — and because without it a session's only bar, stamped at the
+    open, would produce ``to == 0`` and a zero-width chart.
+
+    Every degenerate input returns ``FULL_SPAN``: an empty/1-element list, rows
+    that aren't dicts, a missing/daily/unparseable date, an unknown session, or
+    any ordering that yields ``to <= from``. Full width is the historical
+    behaviour, so a span this function cannot compute costs nothing.
+    """
+    if not isinstance(day_bars, list) or len(day_bars) < 2:
+        return FULL_SPAN
+
+    dates = [b.get("date") for b in day_bars if isinstance(b, dict)]
+    if len(dates) < 2:
+        return FULL_SPAN
+
+    first_minute = _bar_minute_of_day(dates[0])
+    last_minute = _bar_minute_of_day(dates[-1])
+    if first_minute is None or last_minute is None:
+        return FULL_SPAN
+
+    window = _session_window(dates[-1], extended_hours=extended_hours)
+    if window is None:
+        return FULL_SPAN
+    open_minute, close_minute = window
+    length = close_minute - open_minute
+    if length <= 0:
+        return FULL_SPAN
+
+    step = interval_minutes if interval_minutes > 0 else 0
+    start = (first_minute - open_minute) / length
+    end = (last_minute + step - open_minute) / length
+
+    start = min(max(start, 0.0), 1.0)
+    end = min(max(end, 0.0), 1.0)
+    if end <= start:
+        # Bars entirely outside their own session window (bad upstream data, or a
+        # symbol whose real venue this table doesn't model). Nothing honest to say
+        # about position — fall back rather than draw a zero-width line.
+        return FULL_SPAN
+
+    return (round(start, 4), round(end, 4))
+
 
 def sparkline_precision(values: List[float]) -> int:
     """Decimal places that preserve a mini-chart series' SHAPE at its magnitude.

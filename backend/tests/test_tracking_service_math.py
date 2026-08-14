@@ -100,6 +100,13 @@ def _bar(date: str, close: float) -> dict:
     return {"date": date, "close": close}
 
 
+def _closes(sparklines: dict, ticker: str) -> list:
+    """Just the series. `_get_all_sparklines` values are
+    ``(closes, span_from, span_to)``; the span's own math is covered in
+    test_intraday_span.py, and its wiring in the span tests below."""
+    return sparklines[ticker][0]
+
+
 @pytest.mark.asyncio
 async def test_sparkline_keeps_only_latest_trading_day(monkeypatch):
     tsvc._sparkline_cache.clear()
@@ -117,7 +124,7 @@ async def test_sparkline_keeps_only_latest_trading_day(monkeypatch):
     monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
-    assert out["ORCL"] == [20.0, 21.0, 22.0]   # only 2026-07-09 bars, rounded
+    assert _closes(out, "ORCL") == [20.0, 21.0, 22.0]   # only 2026-07-09 bars, rounded
 
 
 @pytest.mark.asyncio
@@ -130,7 +137,8 @@ async def test_sparkline_single_point_day_returns_empty(monkeypatch):
     monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
-    assert out["ORCL"] == []   # <2 closes → honest empty, never a 1-point chart
+    # <2 closes → honest empty at FULL span, never a 1-point chart.
+    assert out["ORCL"] == ([], 0.0, 1.0)
 
 
 @pytest.mark.asyncio
@@ -143,7 +151,7 @@ async def test_sparkline_empty_bars_returns_empty(monkeypatch):
     monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
-    assert out["ORCL"] == []
+    assert out["ORCL"] == ([], 0.0, 1.0)
 
 
 @pytest.mark.asyncio
@@ -491,14 +499,123 @@ async def test_sparkline_cache_key_separates_extended_from_regular(monkeypatch):
     ext = await svc._get_all_sparklines(["XYZUSD"], {"XYZUSD": "crypto"})
     reg = await svc._get_all_sparklines(["XYZUSD"], {"XYZUSD": "equity-forced"})
 
-    assert ext["XYZUSD"] == [5.0, 9.0]
+    assert _closes(ext, "XYZUSD") == [5.0, 9.0]
     # 'equity-forced' isn't a trusted class, so the symbol decides → still crypto.
-    assert reg["XYZUSD"] == [5.0, 9.0]
+    assert _closes(reg, "XYZUSD") == [5.0, 9.0]
     # Direct key check: the two variants occupy distinct slots.
-    tsvc._sparkline_cache_set("ZZZ", [1.0, 2.0], extended_hours=True)
-    tsvc._sparkline_cache_set("ZZZ", [3.0, 4.0], extended_hours=False)
-    assert tsvc._sparkline_cache_get("ZZZ", True) == [1.0, 2.0]
-    assert tsvc._sparkline_cache_get("ZZZ", False) == [3.0, 4.0]
+    tsvc._sparkline_cache_set("ZZZ", [1.0, 2.0], extended_hours=True, span=(0.0, 0.4))
+    tsvc._sparkline_cache_set("ZZZ", [3.0, 4.0], extended_hours=False, span=(0.0, 0.9))
+    # The SPAN is cached with the series it describes. Storing only the closes
+    # would let a fresh span be paired with a stale series, drawing the line out
+    # to a time its last bar never reached.
+    assert tsvc._sparkline_cache_get("ZZZ", True) == ([1.0, 2.0], 0.0, 0.4)
+    assert tsvc._sparkline_cache_get("ZZZ", False) == ([3.0, 4.0], 0.0, 0.9)
+
+
+# ══════════════════════ sparkline session span ════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_sparkline_span_marks_a_partial_session_as_partial(monkeypatch):
+    """A mid-morning series must NOT claim the whole card.
+
+    This is the reported bug: iOS spreads the closes between `width * span_from`
+    and `width * span_to`, so a full-width span on a 09:30–12:15 series draws a
+    34-bar morning exactly like a completed 78-bar day.
+    """
+    tsvc._sparkline_cache.clear()
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return [_bar("2026-08-13 09:30:00", 100.0), _bar("2026-08-13 12:15:00", 101.0)]
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    out = await TrackingService()._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
+
+    _series, lo, hi = out["ORCL"]
+    assert lo == 0.0
+    assert 0.40 < hi < 0.45, "a 09:30-12:15 equity session is ~2/5 of 09:30-16:00"
+
+
+@pytest.mark.asyncio
+async def test_sparkline_span_uses_the_asset_s_own_session_window(monkeypatch):
+    """Crypto is measured on 00:00-24:00, equities on 09:30-16:00.
+
+    The window must follow the SAME `extended_hours` flag the bars were fetched
+    with, or a 24/7 series gets positioned against the equity bell and reads as
+    finished by lunchtime.
+    """
+    tsvc._sparkline_cache.clear()
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return [_bar("2026-08-13 00:00:00", 100.0), _bar("2026-08-13 12:15:00", 101.0)]
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    svc = TrackingService()
+    crypto = await svc._get_all_sparklines(["BTCUSD"], {"BTCUSD": "crypto"})
+
+    _series, lo, hi = crypto["BTCUSD"]
+    assert (lo, hi) == (0.0, pytest.approx(740 / 1440, abs=1e-3))
+
+
+@pytest.mark.asyncio
+async def test_sparkline_span_ignores_bars_whose_close_was_dropped(monkeypatch):
+    """The span must describe the bars that SURVIVED filtering.
+
+    A non-finite close is removed from the series; reading the span off the
+    unfiltered day would still stretch the line out to that bar's time — drawing
+    to a moment whose price was thrown away.
+    """
+    tsvc._sparkline_cache.clear()
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        return [
+            _bar("2026-08-13 09:30:00", 100.0),
+            _bar("2026-08-13 12:15:00", 101.0),
+            _bar("2026-08-13 15:55:00", float("nan")),   # dropped from the series
+        ]
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    out = await TrackingService()._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
+
+    series, _lo, hi = out["ORCL"]
+    assert series == [100.0, 101.0]
+    assert hi < 1.0, "span stretched to a bar whose close was discarded"
+    assert 0.40 < hi < 0.45
+
+
+@pytest.mark.asyncio
+async def test_sparkline_span_survives_a_cache_round_trip(monkeypatch):
+    """Series and span are cached TOGETHER. A cache holding only the closes would
+    pair a fresh span with a stale series and draw past its real last bar."""
+    tsvc._sparkline_cache.clear()
+    calls = {"n": 0}
+
+    async def fake_fetch(fmp, ticker, rng, extended_hours=False):
+        calls["n"] += 1
+        return [_bar("2026-08-13 09:30:00", 100.0), _bar("2026-08-13 12:15:00", 101.0)]
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
+    svc = TrackingService()
+    cold = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
+    warm = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
+
+    assert calls["n"] == 1, "second call should have been served from cache"
+    assert cold["ORCL"] == warm["ORCL"]
+
+
+@pytest.mark.asyncio
+async def test_sparkline_failure_degrades_to_full_span_not_zero_width(monkeypatch):
+    """Full width is the pre-span behaviour. A degraded row must fall back to it
+    rather than to a collapsed line — the fallback must never make a card that
+    used to render fine render worse."""
+    tsvc._sparkline_cache.clear()
+
+    async def boom(fmp, ticker, rng, extended_hours=False):
+        raise RuntimeError("FMP down")
+
+    monkeypatch.setattr(tsvc, "fetch_chart_data", boom)
+    out = await TrackingService()._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
+    assert out["ORCL"] == ([], 0.0, 1.0)
 
 
 # ════════════════════ sub-dollar sparkline keeps its shape ════════════════
@@ -518,7 +635,7 @@ async def test_sub_dollar_sparkline_is_not_flattened_to_one_level(monkeypatch):
     svc = TrackingService()
     out = await svc._get_all_sparklines(["PENNY"], {"PENNY": "stock"})
 
-    series = out["PENNY"]
+    series = _closes(out, "PENNY")
     assert len(series) == len(closes)
     assert min(series) != max(series), "series flattened — chart would be a dead line"
     assert len(set(series)) >= 5      # real shape preserved, not 1-2 levels
@@ -538,7 +655,7 @@ async def test_large_price_sparkline_stays_at_two_decimals(monkeypatch):
     monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
     svc = TrackingService()
     out = await svc._get_all_sparklines(["ORCL"], {"ORCL": "stock"})
-    assert out["ORCL"] == [144.27, 145.0]
+    assert _closes(out, "ORCL") == [144.27, 145.0]
 
 
 # ═════════════ a fully-degraded feed must not be pinned in cache ══════════

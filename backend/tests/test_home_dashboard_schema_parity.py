@@ -50,7 +50,13 @@ import time as _time
 # ── 1. Schema parity ──────────────────────────────────────────────────
 
 # The exact snake_case keys the iOS `MarketPulseItemDTO.CodingKeys` expects.
-_ITEM_KEYS = {"symbol", "name", "type", "price", "change_percent", "previous_close", "spark"}
+_ITEM_KEYS = {
+    "symbol", "name", "type", "price", "change_percent", "previous_close", "spark",
+    # The sparkline's time axis — where `spark` sits inside this asset's own
+    # session, as fractions of the tile width. Without these iOS spread N points
+    # edge-to-edge and a 10:15 tile was pixel-identical to a closed day.
+    "spark_from", "spark_to",
+}
 # The exact snake_case keys the iOS `HomeDashboardResponseDTO.CodingKeys` expects.
 _RESPONSE_KEYS = {
     "market_status_text", "market_is_open", "pulse", "scanners", "signals",
@@ -157,12 +163,19 @@ def test_dashboard_response_validates_worst_case_inputs():
 # ── 2. Intraday sparkline transform ───────────────────────────────────
 
 
+def _series(bars, **kw):
+    """Just the closes. `_intraday_sparkline` returns (closes, span_from, span_to);
+    the span has its own dedicated tests in test_intraday_span.py."""
+    return _intraday_sparkline(bars, **kw)[0]
+
+
 def test_intraday_sparkline_empty_and_bad_shapes_return_empty():
-    assert _intraday_sparkline(None) == []
-    assert _intraday_sparkline([]) == []
-    assert _intraday_sparkline([{"date": "2026-01-01 10:00:00", "close": 5.0}]) == []  # 1 bar
-    assert _intraday_sparkline("garbage") == []
-    assert _intraday_sparkline(["not-a-dict", "also-not"]) == []
+    # Every degenerate shape yields an empty series AT FULL SPAN. Full span is the
+    # pre-span behaviour, so a series the transform cannot place still renders
+    # exactly as it always did rather than collapsing to zero width.
+    for bad in (None, [], [{"date": "2026-01-01 10:00:00", "close": 5.0}],
+                "garbage", ["not-a-dict", "also-not"]):
+        assert _intraday_sparkline(bad) == ([], 0.0, 1.0)
 
 
 def test_intraday_sparkline_keeps_only_most_recent_day():
@@ -174,7 +187,7 @@ def test_intraday_sparkline_keeps_only_most_recent_day():
         {"date": "2026-06-26 11:00:00", "close": 101.0},
         {"date": "2026-06-26 12:00:00", "close": 102.0},
     ]
-    assert _intraday_sparkline(bars) == [100.0, 101.0, 102.0]
+    assert _series(bars) == [100.0, 101.0, 102.0]
 
 
 def test_intraday_sparkline_skips_none_zero_negative_and_nonnumeric_closes():
@@ -186,7 +199,7 @@ def test_intraday_sparkline_skips_none_zero_negative_and_nonnumeric_closes():
         {"date": "2026-06-26 10:20:00", "close": "oops"},  # skipped (non-numeric)
         {"date": "2026-06-26 10:25:00", "close": 101.0},
     ]
-    assert _intraday_sparkline(bars) == [100.0, 101.0]
+    assert _series(bars) == [100.0, 101.0]
 
 
 def test_intraday_sparkline_downsamples_keeping_first_and_last():
@@ -195,7 +208,7 @@ def test_intraday_sparkline_downsamples_keeping_first_and_last():
         {"date": f"2026-06-26 {9 + i // 12:02d}:{(i % 12) * 5:02d}:00", "close": float(i + 1)}
         for i in range(78)
     ]
-    out = _intraday_sparkline(bars, points=30)
+    out = _series(bars, points=30)
     assert 2 <= len(out) <= 30
     assert out[0] == 1.0       # first survives
     assert out[-1] == 78.0     # last survives
@@ -207,7 +220,7 @@ def test_intraday_sparkline_requires_two_usable_closes():
         {"date": "2026-06-25 10:00:00", "close": 90.0},
         {"date": "2026-06-26 10:00:00", "close": 100.0},  # only one on the last day
     ]
-    assert _intraday_sparkline(bars) == []
+    assert _intraday_sparkline(bars) == ([], 0.0, 1.0)
 
 
 def test_downsample_returns_input_when_within_target():
@@ -450,6 +463,42 @@ async def test_off_hours_bars_survive_for_crypto_and_are_clipped_for_indices():
     # GCUSD / CLUSD are continuously-quoted futures — same treatment as crypto.
     assert tiles["GCUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
     assert tiles["CLUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
+
+
+@pytest.mark.asyncio
+async def test_pulse_span_window_follows_the_asset_class_too():
+    """The SPAN must use the same window the bars were fetched with.
+
+    `extended_hours` has to reach BOTH halves of `_fetch_sparkline`: the fetch
+    (which decides which bars survive) and `intraday_span` (which decides where
+    they sit). Passing it to only the fetch is silent — the series looks right and
+    the position is wrong, so a Bitcoin tile measured against the 09:30–16:00
+    bell reads as nearly finished at lunchtime while its own detail chart shows
+    half a day left.
+    """
+    svc, _fake = _fresh_service()
+    resp = await svc.get_dashboard()
+    tiles = {p.symbol: p for p in resp.pulse}
+
+    # The fake feed's last bar is 20:00 ET for the 24/7 tiles and 12:00 for the
+    # index (later bars are clipped by the regular-hours filter).
+    index = tiles["^GSPC"]
+    crypto = tiles["BTCUSD"]
+
+    # Index: 12:00 bar + 5min interval, on a 390-minute session.
+    assert index.spark_to == pytest.approx((12 * 60 + 5 - 570) / 390, abs=1e-3)
+    # Crypto: 20:00 bar + 5min, on the full 1440-minute day. A DIFFERENT fraction
+    # for the same feed — which is exactly what the window choice buys.
+    assert crypto.spark_to == pytest.approx((20 * 60 + 5) / 1440, abs=1e-3)
+    assert crypto.spark_to != index.spark_to
+
+
+@pytest.mark.asyncio
+async def test_every_pulse_tile_ships_an_ordered_span_in_range():
+    svc, _fake = _fresh_service()
+    resp = await svc.get_dashboard()
+    for tile in resp.pulse:
+        assert 0.0 <= tile.spark_from < tile.spark_to <= 1.0, tile.symbol
 
 
 # ── 6. Signed zero ────────────────────────────────────────────────────

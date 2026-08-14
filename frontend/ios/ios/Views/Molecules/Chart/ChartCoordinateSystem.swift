@@ -78,9 +78,10 @@ struct ChartCoordinateSystem {
         closes: [Double],
         pricePoints: [StockPricePoint],
         size: CGSize,
-        useOHLC: Bool = false
+        useOHLC: Bool = false,
+        window: TradingDayHelper.SessionWindow = .regular
     ) -> ChartCoordinateSystem {
-        let fracs = TradingDayHelper.timeFractions(for: pricePoints)
+        let fracs = TradingDayHelper.timeFractions(for: pricePoints, window: window)
 
         let minVal: Double
         let maxVal: Double
@@ -107,13 +108,46 @@ struct ChartCoordinateSystem {
 
 // MARK: - Trading Day Helper
 
-/// Maps intraday data points to their fractional position within the regular trading session.
+/// Maps intraday data points to their fractional position within a trading session.
 enum TradingDayHelper {
 
+    /// The span of one trading day, in ET minutes from midnight.
+    ///
+    /// Not every asset trades the equity bell. Crypto runs 24/7 and the FMP
+    /// commodity codes are continuously-quoted futures — FMP stamps both from
+    /// 00:00 ET (verified: BTCUSD and GCUSD bars start at 00:00, ^GSPC at 09:30).
+    /// Measuring those against 09:30–16:00 pushed every overnight bar through the
+    /// `max(0, …)` clamp and piled them all on the left edge, which is what the
+    /// commodity 1D chart did before this type existed.
+    struct SessionWindow: Equatable {
+        let openMinute: Int
+        let closeMinute: Int
+
+        var length: Int { closeMinute - openMinute }
+
+        /// US equities / ETFs / indices: 09:30 – 16:00 ET.
+        static let regular = SessionWindow(openMinute: 9 * 60 + 30, closeMinute: 16 * 60)
+        /// Crypto + commodity futures: the whole calendar day.
+        static let roundTheClock = SessionWindow(openMinute: 0, closeMinute: 24 * 60)
+    }
+
+    /// The session an asset class trades in. Mirrors the backend's
+    /// `asset_class.trades_extended_hours`, which picks the window the card
+    /// sparkline is measured against — the two must agree or the same ticker's
+    /// card and chart stop at different places.
+    static func window(for context: ChartAssetContext) -> SessionWindow {
+        switch context {
+        case .crypto, .commodity:
+            return .roundTheClock
+        case .stock, .etf, .index:
+            return .regular
+        }
+    }
+
     // Regular session: 9:30 AM - 4:00 PM ET  (570 - 960 minutes from midnight)
-    static let marketOpenMinute = 9 * 60 + 30   // 570
-    static let marketCloseMinute = 16 * 60        // 960
-    static let sessionLength = marketCloseMinute - marketOpenMinute  // 390 minutes
+    static let marketOpenMinute = SessionWindow.regular.openMinute   // 570
+    static let marketCloseMinute = SessionWindow.regular.closeMinute // 960
+    static let sessionLength = SessionWindow.regular.length          // 390 minutes
 
     /// Filter price points to only the latest trading day.
     /// Uses the date prefix (yyyy-MM-dd) of the last data point as the reference day.
@@ -124,12 +158,24 @@ enum TradingDayHelper {
     }
 
     /// Compute normalized [0..1] time fractions for each price point.
-    /// 0.0 = market open (9:30 AM ET), 1.0 = market close (4:00 PM ET).
-    /// Pre-market points clamp to 0, after-hours clamp to 1.
-    static func timeFractions(for pricePoints: [StockPricePoint]) -> [CGFloat] {
+    /// 0.0 = the session open, 1.0 = the session close, in `window`.
+    /// Points outside the window clamp to the nearest edge.
+    ///
+    /// `window` defaults to the equity session so existing callers are unchanged.
+    /// Pass `window(for:)` for anything that might be crypto or a commodity —
+    /// on the 09:30–16:00 window every one of their overnight bars clamps to 0
+    /// and stacks on the left edge.
+    static func timeFractions(
+        for pricePoints: [StockPricePoint],
+        window: SessionWindow = .regular
+    ) -> [CGFloat] {
         let etTimeZone = TimeZone(identifier: "America/New_York")!
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = etTimeZone
+
+        // A zero/negative-length window would divide by zero and yield NaN x
+        // positions, which silently blanks the whole Path.
+        guard window.length > 0 else { return pricePoints.map { _ in 0 } }
 
         return pricePoints.map { point in
             guard let date = ChartDateFormatters.parseDate(point.date) else {
@@ -139,15 +185,23 @@ enum TradingDayHelper {
             guard let hour = comps.hour, let minute = comps.minute else { return 0 }
             let minuteOfDay = hour * 60 + minute
 
-            let fraction = CGFloat(minuteOfDay - marketOpenMinute) / CGFloat(sessionLength)
+            let fraction = CGFloat(minuteOfDay - window.openMinute) / CGFloat(window.length)
             return max(0, min(1, fraction))
         }
     }
 
     /// Generate evenly-spaced time labels across the trading session in the user's local timezone.
     /// Returns `count` labels like ["7:30 AM", "9:05 AM", "10:40 AM", "12:15 PM"].
-    static func sessionTimeLabels(count: Int, referenceDate: Date? = nil) -> [String] {
-        guard count > 1 else { return [] }
+    ///
+    /// `window` must be the SAME one `timeFractions` used, or the axis labels
+    /// describe a different day than the line above them — a 24/7 asset would be
+    /// captioned 9:30 AM–4:00 PM while its bars span midnight to midnight.
+    static func sessionTimeLabels(
+        count: Int,
+        referenceDate: Date? = nil,
+        window: SessionWindow = .regular
+    ) -> [String] {
+        guard count > 1, window.length > 0 else { return [] }
 
         let etTimeZone = TimeZone(identifier: "America/New_York")!
         var etCalendar = Calendar(identifier: .gregorian)
@@ -156,8 +210,8 @@ enum TradingDayHelper {
         // Use today (or the reference date's day) as the base
         let baseDate = referenceDate ?? Date()
         var openComps = etCalendar.dateComponents([.year, .month, .day], from: baseDate)
-        openComps.hour = 9
-        openComps.minute = 30
+        openComps.hour = window.openMinute / 60
+        openComps.minute = window.openMinute % 60
         openComps.second = 0
 
         guard let openDate = etCalendar.date(from: openComps) else { return [] }
@@ -169,7 +223,7 @@ enum TradingDayHelper {
 
         var labels: [String] = []
         for i in 0..<count {
-            let minuteOffset = Double(i) * Double(sessionLength) / Double(count - 1)
+            let minuteOffset = Double(i) * Double(window.length) / Double(count - 1)
             guard let labelDate = Calendar.current.date(
                 byAdding: .minute,
                 value: Int(minuteOffset),

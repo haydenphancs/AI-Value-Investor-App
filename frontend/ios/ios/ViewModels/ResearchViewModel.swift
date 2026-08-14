@@ -69,7 +69,27 @@ class ResearchViewModel: ObservableObject {
     @Published var searchResults: [StockSearchResult] = []
     /// True when the Reports tab has nothing to show because the user is signed out —
     /// distinct from "you have no reports yet", which needs different copy.
+    ///
+    /// ⚠️ This is a SNAPSHOT taken during `loadReports()`, not a live read of auth. It was
+    /// previously written once from `init` — which runs at launch, while session restore is
+    /// still in flight — and nothing ever recomputed it, so a signed-in user was told to sign
+    /// in for the rest of the app run. Anything that changes auth MUST re-run `loadReports()`;
+    /// `ResearchViewWithBinding` does that on `.task(id: isActiveTab)` and on an
+    /// `auth.status` transition to `.authenticated`.
     @Published var requiresSignInForReports: Bool = false
+
+    /// A credential is stored but not yet armed. Renders as "Reconnecting…", never as the
+    /// sign-in prompt: this user is not signed out, and `AppState.requestSignIn` deliberately
+    /// refuses to prompt in this window anyway, so the button would do nothing.
+    @Published var isReconnectingReports: Bool = false
+
+    /// When `loadBackendData()` last completed. Drives `loadIfStale()` so re-entering the tab
+    /// does not refetch on every switch. Deliberately NOT set on the signed-out / reconnecting
+    /// early-returns — those must stay eligible for an immediate reload.
+    private var lastLoadedAt: Date?
+
+    /// How long a completed load stays fresh. Matches `HomeDashboardViewModel.stalenessWindow`.
+    private static let stalenessWindow: TimeInterval = 300
 
     @Published var isSearching: Bool = false
     @Published var showSearchResults: Bool = false
@@ -170,6 +190,39 @@ class ResearchViewModel: ObservableObject {
         async let trendingTask: () = loadTrending()
         async let personasTask: () = loadPersonas()
         _ = await (reportsTask, creditsTask, trendingTask, personasTask)
+
+        // Only a load that actually saw the account counts as fresh. Marking the signed-out or
+        // reconnecting pass as fresh would let the 5-minute window suppress the reload that
+        // heals it — i.e. the staleness guard would re-create the bug it is sitting next to.
+        if !requiresSignInForReports && !isReconnectingReports {
+            lastLoadedAt = Date()
+        }
+    }
+
+    /// Reload only if the last successful load has aged out.
+    ///
+    /// Mirrors `HomeDashboardViewModel.loadIfStale` so tab re-entry is cheap. A signed-out or
+    /// mid-restore state is never "fresh" (see `loadBackendData`), so arriving on the tab after
+    /// signing in always refetches.
+    func loadIfStale(maxAge: TimeInterval = ResearchViewModel.stalenessWindow) async {
+        if let last = lastLoadedAt, Date().timeIntervalSince(last) < maxAge { return }
+        await loadBackendData()
+    }
+
+    /// The signed-in identity changed — these reports belong to the previous one.
+    ///
+    /// Clearing first matters in the sign-OUT direction: nothing in
+    /// `AppState.discardDataForEndedSession()` reaches into this ViewModel, so without it the
+    /// previous account's analyses (ticker, score, fair value) stayed on screen for whoever
+    /// used the device next.
+    func reloadForIdentityChange() async {
+        reports = []
+        selectedReportIds = []
+        isSelectingReports = false
+        creditBalance = nil
+        lastLoadedAt = nil
+        error = nil
+        await loadBackendData()
     }
 
     /// Fetch active personas from GET /research/personas.
@@ -243,12 +296,20 @@ class ResearchViewModel: ObservableObject {
     func loadReports() async {
         // Reports belong to an account now, so a signed-out user has none to load — say that,
         // rather than firing a request that will be refused.
+        //
+        // THREE outcomes, not two. "Not armed right now" is not the same as "signed out": at
+        // launch this runs while session restore is still in flight, and a restore that keeps
+        // failing backs off forever. Collapsing that into the sign-in prompt is what told a
+        // signed-in user to sign in — with their own avatar loaded in the header above it.
         guard AppActions.shared.isSignedIn else {
             reports = []
-            requiresSignInForReports = true
+            let reconnecting = AppActions.shared.isRestoringSession
+            isReconnectingReports = reconnecting
+            requiresSignInForReports = !reconnecting
             return
         }
         requiresSignInForReports = false
+        isReconnectingReports = false
 
         print("📋 ResearchVM: Loading reports from backend...")
         do {

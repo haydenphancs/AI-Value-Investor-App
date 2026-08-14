@@ -164,7 +164,9 @@ struct ScannerCard: View {
                 showBaseline: scanner.kind == .movers,
                 showEndDot: true,
                 lineWidth: 2.2,
-                isPositive: heroSparkDirection
+                isPositive: heroSparkDirection,
+                spanFrom: head?.sparkFrom ?? 0,
+                spanTo: head?.sparkTo ?? 1
             )
             .frame(width: 104, height: 48)
         }

@@ -26,6 +26,10 @@ struct MainChartCanvas: View {
     var chartEventDates: ChartEventDates? = nil
     /// When true, use time-based X positioning (1D intraday)
     var useIntradayTimeMapping: Bool = false
+    /// The session that mapping is measured against. Defaults to the equity bell;
+    /// crypto and commodity futures need the whole calendar day, or every
+    /// overnight bar clamps to 0 and piles up on the left edge.
+    var sessionWindow: TradingDayHelper.SessionWindow = .regular
     /// Reference price for the dashed baseline (e.g. prior-day close on 1D).
     /// Folded into the y-range so it's always visible. Falls back to the current
     /// price when nil.
@@ -74,7 +78,8 @@ struct MainChartCanvas: View {
                             closes: closes,
                             pricePoints: pricePoints,
                             size: size,
-                            useOHLC: useOHLC
+                            useOHLC: useOHLC,
+                            window: sessionWindow
                         )
                     }
                     return useOHLC

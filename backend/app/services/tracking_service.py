@@ -17,7 +17,9 @@ import logging
 
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.services.chart_helper import (
+    FULL_SPAN,
     fetch_chart_data,
+    intraday_span,
     sparkline_precision,
     _finite_or_none,
 )
@@ -78,8 +80,16 @@ FEED_CACHE_TTL = 30  # 30 seconds per-user
 # The TTL is what keeps data fresh; this cap is what keeps the process alive.
 _FEED_CACHE_MAX_ENTRIES = 500
 
-_sparkline_cache: Dict[str, Tuple[float, List[float]]] = {}
-SPARKLINE_CACHE_TTL = 300  # 5 minutes per-ticker
+# Value is the whole drawable series: closes PLUS the (from, to) session span iOS
+# positions them with. Cached together because they describe the same bars — a
+# cache that held only the closes would let a fresh span be paired with a stale
+# series, drawing the line to a time its last bar never reached.
+_sparkline_cache: Dict[str, Tuple[float, Tuple[List[float], float, float]]] = {}
+# 2 minutes per-ticker. Bars arrive every 5 minutes, so this only ever costs the
+# user half a bar of lag — but at the old 300s the line's end could sit a full
+# bar behind the 30s-fresh quote beside it, which now READS as staleness because
+# the span makes "where the data stops" visible instead of stretching it away.
+SPARKLINE_CACHE_TTL = 120
 
 
 def _feed_cache_get(user_id: str) -> Optional[TrackingFeedResponse]:
@@ -143,7 +153,9 @@ def _sparkline_cache_key(ticker: str, extended_hours: bool) -> str:
     return f"{ticker}:{'ext' if extended_hours else 'reg'}"
 
 
-def _sparkline_cache_get(ticker: str, extended_hours: bool = False) -> Optional[List[float]]:
+def _sparkline_cache_get(
+    ticker: str, extended_hours: bool = False
+) -> Optional[Tuple[List[float], float, float]]:
     key = _sparkline_cache_key(ticker, extended_hours)
     entry = _sparkline_cache.get(key)
     if entry is None:
@@ -155,8 +167,15 @@ def _sparkline_cache_get(ticker: str, extended_hours: bool = False) -> Optional[
     return value
 
 
-def _sparkline_cache_set(ticker: str, value: List[float], extended_hours: bool = False) -> None:
-    _sparkline_cache[_sparkline_cache_key(ticker, extended_hours)] = (_time.monotonic(), value)
+def _sparkline_cache_set(
+    ticker: str,
+    value: List[float],
+    extended_hours: bool = False,
+    span: Tuple[float, float] = FULL_SPAN,
+) -> None:
+    _sparkline_cache[_sparkline_cache_key(ticker, extended_hours)] = (
+        _time.monotonic(), (value, span[0], span[1])
+    )
 
 
 # Re-exported under the module-private name the sparkline builder uses, so both
@@ -276,7 +295,7 @@ class TrackingService:
         quotes_map: Dict[str, Dict] = (
             results[0] if not isinstance(results[0], BaseException) else {}
         )
-        sparklines_map: Dict[str, List[float]] = (
+        sparklines_map: Dict[str, Tuple[List[float], float, float]] = (
             results[1] if not isinstance(results[1], BaseException) else {}
         )
         earnings_alerts: List[AlertResponse] = (
@@ -317,7 +336,12 @@ class TrackingService:
                 continue
             try:
                 quote = quotes_map.get(ticker, {})
-                sparkline = sparklines_map.get(ticker, [])
+                # A missing entry (the whole sparkline gather failed) degrades to
+                # no series at full span — the same thing the card drew before
+                # spans existed, rather than a zero-width line.
+                sparkline, spark_from, spark_to = sparklines_map.get(
+                    ticker, ([], *FULL_SPAN)
+                )
 
                 # EVERY numeric goes through `_finite_or_none`. A bare float() is
                 # the trap here: `float("nan")` is TRUTHY so a NaN survives the
@@ -372,6 +396,8 @@ class TrackingService:
                         change_percent=round(float(change_pct), 2) + 0.0,
                         previous_close=round(prev_close_f, 2) if prev_close_f else None,
                         sparkline_data=sparkline,
+                        spark_from=spark_from,
+                        spark_to=spark_to,
                         logo_url=item.get("logo_url"),
                         # Sector/country live on the watchlist row (seeded on
                         # holdings-add and lazy-enriched by PortfolioInsights).
@@ -428,8 +454,12 @@ class TrackingService:
 
     async def _get_all_sparklines(
         self, tickers: List[str], asset_types: Optional[Dict[str, str]] = None
-    ) -> Dict[str, List[float]]:
+    ) -> Dict[str, Tuple[List[float], float, float]]:
         """Fetch sparkline data for all tickers concurrently.
+
+        Each value is ``(closes, span_from, span_to)`` — the series plus where it
+        sits inside that asset's session, so the card can leave the un-traded rest
+        of the day blank instead of stretching the morning across the whole tile.
 
         ``asset_types`` maps ticker → the STORED ``asset_type`` column, used only
         as a hint: it defaults to ``'Stock'`` and ``POST /api/v1/watchlist`` (the
@@ -442,7 +472,7 @@ class TrackingService:
         """
         asset_types = asset_types or {}
 
-        async def _fetch_one(ticker: str) -> Tuple[str, List[float]]:
+        async def _fetch_one(ticker: str) -> Tuple[str, List[float], float, float]:
             # Resolve the session window FIRST — it is part of the cache identity
             # (the same ticker yields a different series under each window).
             extended_hours = symbol_trades_extended_hours(
@@ -451,7 +481,7 @@ class TrackingService:
 
             cached = _sparkline_cache_get(ticker, extended_hours)
             if cached is not None:
-                return (ticker, cached)
+                return (ticker, *cached)
 
             try:
                 # Use the SAME series the TickerDetailView 1D chart draws:
@@ -469,7 +499,7 @@ class TrackingService:
                     # Honest empty — never fabricate. iOS SparklineView draws
                     # nothing for an empty/1-point series.
                     _sparkline_cache_set(ticker, [], extended_hours)
-                    return (ticker, [])
+                    return (ticker, [], *FULL_SPAN)
 
                 # Keep only the most recent trading day — mirrors the iOS
                 # TradingDayHelper.filterToLatestDay step, so the multi-day
@@ -484,13 +514,26 @@ class TrackingService:
                 # REQUIRED `List[float]` that Starlette renders with
                 # allow_nan=False — keep the guard local so a future chart_helper
                 # branch can't silently reopen the hole.
-                closes = [
-                    c for c in (_finite_or_none(b.get("close")) for b in day_bars)
-                    if c is not None and c > 0
-                ]
+                #
+                # Bars and closes are kept in LOCKSTEP so the span below is
+                # computed from the rows that actually survived. Deriving it from
+                # `day_bars` instead would let a dropped final bar push the line's
+                # end past the last price it really has.
+                usable: List[Dict[str, Any]] = []
+                closes: List[float] = []
+                for b in day_bars:
+                    c = _finite_or_none(b.get("close"))
+                    if c is not None and c > 0:
+                        usable.append(b)
+                        closes.append(c)
                 if len(closes) < 2:
                     _sparkline_cache_set(ticker, [], extended_hours)
-                    return (ticker, [])
+                    return (ticker, [], *FULL_SPAN)
+
+                # Where these bars sit inside their own session, as (from, to)
+                # fractions. Without it iOS spreads the series across the FULL tile
+                # width, so a 10:15 chart is pixel-identical to a closed day.
+                span = intraday_span(usable, extended_hours=extended_hours)
 
                 # ~78 five-min bars per session → downsample so the card payload
                 # stays small and the tiny chart reads cleanly. Precision scales to
@@ -500,17 +543,17 @@ class TrackingService:
                 sampled = _downsample(closes, 30)
                 digits = _sparkline_precision(sampled)
                 sparkline = [round(c, digits) for c in sampled]
-                _sparkline_cache_set(ticker, sparkline, extended_hours)
-                return (ticker, sparkline)
+                _sparkline_cache_set(ticker, sparkline, extended_hours, span)
+                return (ticker, sparkline, *span)
             except Exception as exc:
                 logger.warning(
                     "Sparkline (1D intraday) for %s failed: %s: %s",
                     ticker, type(exc).__name__, exc,
                 )
-                return (ticker, [])
+                return (ticker, [], *FULL_SPAN)
 
         results = await asyncio.gather(*[_fetch_one(t) for t in tickers])
-        return dict(results)
+        return {t: (series, lo, hi) for t, series, lo, hi in results}
 
     # ── Earnings Alerts ─────────────────────────────────────────────
 

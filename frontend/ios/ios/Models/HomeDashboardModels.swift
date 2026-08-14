@@ -41,12 +41,18 @@ struct MarketPulseItem: Identifiable, Hashable {
     /// colours the sparkline green ABOVE / red BELOW it. `nil` → the sparkline
     /// anchors to its first point instead.
     let previousClose: Double?
+    /// Where `spark` sits inside this asset's session, as fractions of the tile
+    /// width. Defaults to the full width — the behaviour before the backend sent
+    /// a span — so mock fixtures and any degraded row render exactly as before.
+    var sparkFrom: Double = 0
+    var sparkTo: Double = 1
 
-    // Explicit init with a `previousClose` default so existing call sites (the
-    // mock fixtures) keep compiling while the live repository supplies it.
+    // Explicit init with defaults for the trailing fields so existing call sites
+    // (the mock fixtures) keep compiling while the live repository supplies them.
     init(name: String, symbol: String, type: MarketTickerType,
          priceText: String, changeText: String, isPositive: Bool,
-         spark: [Double], previousClose: Double? = nil) {
+         spark: [Double], previousClose: Double? = nil,
+         sparkFrom: Double = 0, sparkTo: Double = 1) {
         self.name = name
         self.symbol = symbol
         self.type = type
@@ -55,6 +61,8 @@ struct MarketPulseItem: Identifiable, Hashable {
         self.isPositive = isPositive
         self.spark = spark
         self.previousClose = previousClose
+        self.sparkFrom = sparkFrom
+        self.sparkTo = sparkTo
     }
 }
 
@@ -81,6 +89,9 @@ struct ScannerEntry: Identifiable, Hashable {
     let isPositive: Bool
     /// Only the head (rank 1) entry carries a sparkline; rows render none.
     var spark: [Double] = []
+    /// Session span of `spark`; full width when the server sent none.
+    var sparkFrom: Double = 0
+    var sparkTo: Double = 1
 }
 
 /// One card in the "Daily Scanners" swipeable carousel.
@@ -270,11 +281,24 @@ struct MarketPulseItemDTO: Decodable {
     let previousClose: Double?
     /// Latest-session intraday closes, oldest-first. May be empty.
     let spark: [Double]
+    /// Where `spark` sits inside this asset's own session, as fractions of the
+    /// tile width — the series' only time axis.
+    ///
+    /// ⚠️ **Optional on purpose.** A non-Optional `var x: Double = 1` whose name is
+    /// in `CodingKeys` still emits a plain `decode(...)` and throws `keyNotFound`
+    /// against a backend that predates the field — the exact trap that shipped
+    /// `PortfolioDTO.isActive`. Here that would blank the WHOLE Home dashboard
+    /// against production until Railway deploys. `HomeRepository` substitutes the
+    /// full-width default.
+    let sparkFrom: Double?
+    let sparkTo: Double?
 
     enum CodingKeys: String, CodingKey {
         case symbol, name, type, price, spark
         case changePercent = "change_percent"
         case previousClose = "previous_close"
+        case sparkFrom = "spark_from"
+        case sparkTo = "spark_to"
     }
 }
 
@@ -291,6 +315,10 @@ struct ScannerRowDTO: Decodable {
     let volumeMultiple: Double?         // Heavy Traffic (RVOL)
     let shortPercentOfFloat: Double?    // Skeptical Money
     let spark: [Double]                 // rank-1 only, else []
+    /// Session span of `spark` — Optional for the same reason as
+    /// `MarketPulseItemDTO.sparkFrom`; see that comment before making it required.
+    let sparkFrom: Double?
+    let sparkTo: Double?
 
     enum CodingKeys: String, CodingKey {
         case rank, symbol, name, price, spark
@@ -298,6 +326,8 @@ struct ScannerRowDTO: Decodable {
         case marketCap = "market_cap"
         case volumeMultiple = "volume_multiple"
         case shortPercentOfFloat = "short_percent_of_float"
+        case sparkFrom = "spark_from"
+        case sparkTo = "spark_to"
     }
 }
 

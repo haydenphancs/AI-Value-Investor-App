@@ -43,6 +43,15 @@ struct TrackedAsset: Identifiable {
     let price: Double
     let changePercent: Double
     let sparklineData: [Double]
+    /// Where `sparklineData` sits inside this asset's own trading session, as
+    /// fractions of the row's width. The series is a bare `[Double]` with no
+    /// timestamps, so without this pair `SparklineView` spread the points edge to
+    /// edge and a 10:15 row was pixel-identical to a completed day — while the
+    /// detail chart one tap away correctly showed the session half-empty.
+    ///
+    /// Defaults are full width: the behaviour before the backend sent a span.
+    var sparkFrom: Double = 0
+    var sparkTo: Double = 1
     let assetType: String  // "stock", "crypto", "etf", "index", "commodity"
     let marketCap: Double?
 
@@ -536,6 +545,10 @@ struct TrackedAssetDTO: Codable, Identifiable {
     // Optional so an older backend (no key) still decodes cleanly.
     let previousClose: Double?
     let sparklineData: [Double]
+    /// Session span of `sparklineData`. Optional so an older backend (no key)
+    /// still decodes — `toTrackedAsset()` substitutes the full-width default.
+    let sparkFrom: Double?
+    let sparkTo: Double?
     let logoUrl: String?
     let sector: String?
     let country: String?
@@ -551,6 +564,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case changePercent = "change_percent"
         case previousClose = "previous_close"
         case sparklineData = "sparkline_data"
+        case sparkFrom = "spark_from"
+        case sparkTo = "spark_to"
         case logoUrl = "logo_url"
         case sector, country, shares
         case marketCap = "market_cap"
@@ -592,6 +607,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
         changePercent = lenient(Double.self, .changePercent).finiteOrNil ?? 0
         previousClose = lenient(Double.self, .previousClose).finiteOrNil
         sparklineData = (lenient([Double].self, .sparklineData) ?? []).filter(\.isFinite)
+        sparkFrom = lenient(Double.self, .sparkFrom).finiteOrNil
+        sparkTo = lenient(Double.self, .sparkTo).finiteOrNil
         logoUrl = lenient(String.self, .logoUrl)
         sector = lenient(String.self, .sector)
         country = lenient(String.self, .country)
@@ -609,6 +626,10 @@ struct TrackedAssetDTO: Codable, Identifiable {
             price: price,
             changePercent: changePercent,
             sparklineData: sparklineData,
+            // A missing, non-finite or inverted pair falls back to the full
+            // width — the pre-span behaviour. Never narrow a row we cannot place.
+            sparkFrom: sparkFrom ?? 0,
+            sparkTo: sparkTo ?? 1,
             assetType: assetType ?? "stock",
             marketCap: marketCap,
             shares: shares,

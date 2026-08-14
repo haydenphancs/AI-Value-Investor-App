@@ -43,6 +43,17 @@ final class AppActions {
     /// honest answer.
     var isSignedIn: Bool { appState?.auth.isAuthenticated ?? false }
 
+    /// A credential IS stored but is not armed yet — the `.restoring` window.
+    ///
+    /// `isSignedIn == false` answers two very different questions with one word: "this is a
+    /// deliberate guest" and "this is your account, mid-reconnect". For ACTIONS that collapse
+    /// is correct and deliberate (see above). For COPY it is not: telling someone who is signed
+    /// in to sign in is the same defect `.claude/rules/auth.md` §5 documents, and the restore
+    /// backoff runs `2s → 8s → 30s → 120s → 300s` indefinitely, so the window is not brief.
+    ///
+    /// Use this to choose what to SAY, never to decide whether a write may proceed.
+    var isRestoringSession: Bool { appState?.hasUnusedStoredCredential ?? false }
+
     // MARK: - Actions
 
     /// Raise the shared "this needs an account" prompt.

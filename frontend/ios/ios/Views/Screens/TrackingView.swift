@@ -272,6 +272,13 @@ struct TrackingContentViewWithBinding: View {
                 )
             }
         }
+        // This tab is the most exposed of the four. Watchlist and portfolios are
+        // `.guestAllowed` and partitioned PER INSTALL, so a guest and an account hold
+        // genuinely DIFFERENT rows on the same device — and this screen had no reload
+        // trigger of any kind: it reads `isActiveTab` nowhere, and AppState's session-end
+        // teardown does not reach into ViewModels. Signing in or out left the previous
+        // identity's holdings on screen until the user happened to pull-to-refresh.
+        .reloadOnIdentityChange { await viewModel.reloadForIdentityChange() }
     }
 
     // MARK: - Action Handlers

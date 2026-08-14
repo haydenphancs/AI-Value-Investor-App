@@ -11,6 +11,10 @@ struct ChartXAxisLabels: View {
     let pricePoints: [StockPricePoint]
     let selectedRange: ChartTimeRange
     var useIntradayTimeMapping: Bool = false
+    /// The session the labels describe. Must match the one the price line above
+    /// is drawn against — a 24/7 asset captioned 9:30 AM – 4:00 PM would put the
+    /// wrong clock under the right chart.
+    var sessionWindow: TradingDayHelper.SessionWindow = .regular
 
     var body: some View {
         let labels = computeLabels()
@@ -33,7 +37,10 @@ struct ChartXAxisLabels: View {
             let refDate = pricePoints.first.flatMap { ChartDateFormatters.parseDate($0.date) }
             return TradingDayHelper.sessionTimeLabels(
                 count: selectedRange.xAxisLabelCount,
-                referenceDate: refDate
+                referenceDate: refDate,
+                // Same window the line above is drawn against, or the axis
+                // captions a 24/7 asset's day as 9:30 AM - 4:00 PM.
+                window: sessionWindow
             )
         }
 

@@ -691,6 +691,22 @@ class TrackingViewModel: ObservableObject {
         isRefreshing = false
     }
 
+    /// The signed-in identity changed — these tracked assets belong to the previous one.
+    ///
+    /// This tab is the most exposed of the four: watchlist and portfolios are `.guestAllowed`
+    /// and partitioned PER INSTALL, so a guest and an account legitimately hold DIFFERENT rows
+    /// under the same install. It also had no reload trigger at all — it reads `isActiveTab`
+    /// nowhere, so nothing refetched on tab activation either. Signing in or out left the
+    /// previous identity's holdings on screen until pull-to-refresh.
+    ///
+    /// Cleared before the fetch so the previous account's positions are never on screen while
+    /// the new load is in flight.
+    func reloadForIdentityChange() async {
+        trackedAssets = []
+        assetsErrorMessage = nil
+        await loadData()
+    }
+
     // MARK: - Live Price Refresh
 
     /// Periodically re-fetches asset prices while there is something that can move.

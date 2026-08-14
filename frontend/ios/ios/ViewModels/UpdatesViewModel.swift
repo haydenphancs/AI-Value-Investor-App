@@ -220,6 +220,25 @@ final class UpdatesViewModel: ObservableObject {
     /// spinner, which would be a lie here — the user is not on this screen. It re-reads
     /// tabs and re-selects, but keeps the per-scope article cache, since the ARTICLES for
     /// a scope are unaffected by which group it belongs to. Only membership changed.
+    /// The signed-in identity changed — the feed and its per-scope caches belong to the
+    /// previous one.
+    ///
+    /// Must reset `hasLoadedOnce`. It is the hardest latch of the four tab ViewModels: it is
+    /// set on the first successful load and never cleared, and this screen is opacity-mounted,
+    /// so `loadIfNeeded()` early-returns for the ENTIRE process. Without this reset, signing in
+    /// left guest-era news and insight scopes on screen until the app was killed.
+    func reloadForIdentityChange() async {
+        hasLoadedOnce = false
+        await loadTabs()
+        if let tab = selectedTab {
+            // `force: true` — the per-scope article cache was populated under the previous
+            // identity, and `reloadForActiveGroupChange`'s reasoning (articles are unaffected
+            // by group membership) does NOT hold here: watchlist scopes differ per account.
+            await loadFeed(for: tab, force: true)
+        }
+        hasLoadedOnce = true
+    }
+
     func reloadForActiveGroupChange() async {
         await loadTabs()
         // `loadTabs` re-points `selectedTab` at a scope the new group actually contains

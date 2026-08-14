@@ -61,6 +61,8 @@ def _profile(symbol, *, mc=1e9, avg=2e6, etf=False, fund=False, **extra):
 _ROW_KEYS = {
     "rank", "symbol", "name", "price", "change_percent", "market_cap",
     "volume_multiple", "short_percent_of_float", "spark",
+    # Session span of `spark` (rank-1 only) — see MarketPulseItemResponse.
+    "spark_from", "spark_to",
 }
 _GROUP_KEYS = {"kind", "gainers", "losers", "entries", "as_of_date"}
 _GROUPS_KEYS = {"movers", "volume", "shorts"}
@@ -598,17 +600,38 @@ def test_is_quality_company_rejects_nan_marketcap_and_avgvol():
 
 
 def test_intraday_sparkline_drops_infinite_close():
-    # One finite close left → < 2 → [] (never a list containing inf).
+    # One finite close left → < 2 → empty series at full span (never a list
+    # containing inf, which would serialize as an invalid JSON token).
     assert _intraday_sparkline([
         {"date": "2026-06-26 10:00:00", "close": float("inf")},
         {"date": "2026-06-26 11:00:00", "close": 200.0},
-    ]) == []
-    out = _intraday_sparkline([
+    ]) == ([], 0.0, 1.0)
+    out, _lo, _hi = _intraday_sparkline([
         {"date": "2026-06-26 10:00:00", "close": 100.0},
         {"date": "2026-06-26 10:05:00", "close": float("inf")},
         {"date": "2026-06-26 10:10:00", "close": 102.0},
     ])
     assert all(math.isfinite(c) for c in out)
+
+
+def test_intraday_sparkline_span_ignores_bars_whose_close_was_dropped():
+    """The span must describe the bars that SURVIVED, not the raw day.
+
+    A non-finite final close is filtered out of the series; if the span were read
+    off `day_bars` it would still stretch the line to that bar's time, drawing to
+    a moment whose price was discarded.
+    """
+    with_bad_tail = _intraday_sparkline([
+        {"date": "2026-06-26 09:30:00", "close": 100.0},
+        {"date": "2026-06-26 12:00:00", "close": 101.0},
+        {"date": "2026-06-26 15:55:00", "close": float("nan")},  # dropped
+    ])
+    clean = _intraday_sparkline([
+        {"date": "2026-06-26 09:30:00", "close": 100.0},
+        {"date": "2026-06-26 12:00:00", "close": 101.0},
+    ])
+    assert with_bad_tail[1:] == clean[1:]
+    assert with_bad_tail[2] < 1.0   # NOT stretched to the 15:55 bar's position
 
 
 def test_movers_from_universe_drops_nan_price():

@@ -36,6 +36,18 @@ class MarketPulseItemResponse(BaseModel):
     # dashed previous-close reference is meaningful (mirrors the holdings-card
     # 1D sparkline). May be empty if the session series was unavailable.
     spark: List[float]
+    # Where `spark` sits inside this asset's own session, as fractions of the
+    # tile's width — the series' ONLY time axis. iOS draws it between
+    # `width * spark_from` and `width * spark_to` and leaves the rest blank, so a
+    # 10:15 tile reads as a morning instead of as a finished day. The window is
+    # 09:30–16:00 ET for equities/indices and 00:00–24:00 for the 24/7 assets, so
+    # a Bitcoin tile and an S&P tile fill different fractions at the same instant.
+    #
+    # Defaults are full width = the exact pre-span behaviour, so an un-updated
+    # branch (e.g. the Your Watchlist tiles, which ship `spark=[]` on purpose)
+    # loses nothing.
+    spark_from: float = 0.0
+    spark_to: float = 1.0
 
 
 # ── Daily Scanners ─────────────────────────────────────────────────────
@@ -57,6 +69,8 @@ class ScannerRowResponse(BaseModel):
     volume_multiple: Optional[float] = None         # RVOL (volume/avg), Heavy Traffic only
     short_percent_of_float: Optional[float] = None  # Skeptical Money only
     spark: List[float] = []                         # latest-session intraday; rank-1 only, else []
+    spark_from: float = 0.0                         # session span of `spark` — see MarketPulseItemResponse
+    spark_to: float = 1.0
 
 
 class ScannerGroupResponse(BaseModel):

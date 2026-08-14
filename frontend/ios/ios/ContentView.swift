@@ -248,6 +248,10 @@ struct HomeViewWithBinding: View {
 // MARK: - ResearchView with Binding Support
 struct ResearchViewWithBinding: View {
     @Environment(AppState.self) private var appState
+    /// Injected at ContentView.swift's tab ZStack. It was already being provided for this tab
+    /// and simply never read here, which is why Home and Updates recovered from a raced load
+    /// and Research did not.
+    @Environment(\.isActiveTab) private var isActiveTab
     @StateObject private var viewModel: ResearchViewModel
     @Binding var selectedTab: HomeTab
     let prefilledTicker: String?
@@ -298,6 +302,22 @@ struct ResearchViewWithBinding: View {
         .onAppear {
             viewModel.selectedTab = initialSubTab
         }
+        // Heals a load that raced session restore. The ViewModel's only unconditional load is
+        // in `init`, and all five tabs mount eagerly in one ZStack — so it runs at launch, while
+        // auth is still `.restoring`, and `requiresSignInForReports` latched `true` with nothing
+        // to clear it. `loadIfStale` makes re-entry cheap; a signed-out/reconnecting pass is
+        // never marked fresh, so arriving here after signing in always refetches.
+        // Same `.task(id: isActiveTab)` idiom as HomeDashboardView and UpdatesView.
+        .task(id: isActiveTab) {
+            guard isActiveTab else { return }
+            await viewModel.loadIfStale()
+        }
+        // The direct case, and the one that has no other cure: signing in or out from THIS
+        // tab. `SignInRequiredSheet` dismisses itself on `.authenticated`, and
+        // `onAuthenticated()`'s fan-out hydrates credits, settings and the Learn stores but
+        // nothing research-related — so without this the tab behind the sheet keeps rendering
+        // "Sign in to see your analyses" to a user who just signed in.
+        .reloadOnIdentityChange { await viewModel.reloadForIdentityChange() }
         .fullScreenCover(item: $selectedReport) { report in
             NavigationStack {
                 TickerReportView(report: report)
@@ -444,7 +464,8 @@ struct ResearchViewWithBinding: View {
                     // Reports are account-scoped now, so "you have none" and "you're signed
                     // out" are different situations and get different copy + CTA.
                     requiresSignIn: viewModel.requiresSignInForReports,
-                    onSignIn: { appState.requestSignIn(for: "see your analyses") }
+                    onSignIn: { appState.requestSignIn(for: "see your analyses") },
+                    isReconnecting: viewModel.isReconnectingReports
                 )
                 .padding(.top, AppSpacing.sm)
 

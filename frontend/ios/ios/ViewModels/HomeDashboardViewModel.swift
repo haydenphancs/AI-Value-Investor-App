@@ -47,9 +47,15 @@ final class HomeDashboardViewModel: ObservableObject {
     /// the rest of the session.
     private var refreshTask: Task<Void, Never>?
 
-    /// Matches the backend's 5-minute pulse cache: anything fresher than this is
-    /// served from that cache anyway, so re-fetching sooner buys nothing.
-    static let stalenessWindow: TimeInterval = 300
+    /// Matches the backend's pulse cache (now 60s, was 300s): anything fresher
+    /// than this is served from that cache anyway, so re-fetching sooner buys
+    /// nothing — and anything OLDER than it is data the backend would happily
+    /// refresh, so holding it back just makes the strip look frozen.
+    ///
+    /// Keep this equal to `_CACHE_TTL_SECONDS` in `home_dashboard_service.py`.
+    /// At 300s against a 60s server cache, arriving on the tab could show prices
+    /// up to five minutes old under a live "Markets Open" header.
+    static let stalenessWindow: TimeInterval = 60
 
     /// Poll cadence. Deliberately shorter than `stalenessWindow` so the
     /// market-status header (recomputed fresh on every backend request, never
@@ -83,6 +89,23 @@ final class HomeDashboardViewModel: ObservableObject {
     /// `lastLoadedAt` nil, so a screen that is still blank always retries.
     func loadIfStale(maxAge: TimeInterval = HomeDashboardViewModel.stalenessWindow) async {
         if let last = lastLoadedAt, Date().timeIntervalSince(last) < maxAge { return }
+        await load()
+    }
+
+    /// The signed-in identity changed — drop this dashboard and fetch the new one.
+    ///
+    /// `loadIfStale()` cannot serve this. It is keyed on AGE, and the data is not old, it
+    /// belongs to somebody else: a load made as a guest stamps `lastLoadedAt` like any other,
+    /// so signing in left the guest's watchlist on screen for up to 5 minutes. In the sign-out
+    /// direction it is worse — the next person to open the app would see the previous
+    /// account's watchlist and holdings.
+    ///
+    /// Clearing before the fetch is deliberate: the reload can be slow or fail, and stale
+    /// account data must not sit on screen while it does.
+    func reloadForIdentityChange() async {
+        data = nil
+        lastLoadedAt = nil
+        errorMessage = nil
         await load()
     }
 

@@ -92,6 +92,11 @@ struct HomeDashboardView: View {
             await viewModel.loadIfStale()
             viewModel.startAutoRefresh()
         }
+        // `loadIfStale` is keyed on AGE, which cannot express "this data belongs to somebody
+        // else". A load made as a guest stamps `lastLoadedAt` like any other, so signing in
+        // left the guest's watchlist on screen for the full 5-minute window — and signing out
+        // left the previous account's watchlist for the next person to open the app.
+        .reloadOnIdentityChange { await viewModel.reloadForIdentityChange() }
         // Returning from the background is the other way a user arrives at hours
         // -old data. `scenePhase` is unused in this codebase; this is the
         // NotificationCenter idiom UpdatesView already uses.

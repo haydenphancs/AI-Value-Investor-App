@@ -33,6 +33,20 @@ class TrackedAssetResponse(BaseModel):
     # sparkline's dotted baseline anchors to this; nullable for degraded rows.
     previous_close: Optional[float] = None
     sparkline_data: List[float] = Field(default_factory=list)
+    # Where `sparkline_data` sits inside this asset's own trading session, as
+    # fractions of the card's width. iOS draws the series between `width *
+    # spark_from` and `width * spark_to` and leaves the rest blank.
+    #
+    # This is the series' only time axis. Without it the client spread N points
+    # edge-to-edge, so a 10:15 chart was pixel-identical to a completed session
+    # and read as "the market already closed" beside a live price — and it
+    # contradicted the asset-detail 1D chart, which has always left the untraded
+    # remainder of the day empty.
+    #
+    # Defaults are full width: that is exactly the pre-span behaviour, so a
+    # degraded row or an older client loses nothing.
+    spark_from: float = 0.0
+    spark_to: float = 1.0
     logo_url: Optional[str] = None
     sector: Optional[str] = None
     country: Optional[str] = None

@@ -100,7 +100,9 @@ final class HomeRepository: HomeRepositoryProtocol {
             changeText: tile.changeText,
             isPositive: tile.isPositive,
             spark: tile.spark,
-            previousClose: tile.previousClose
+            previousClose: tile.previousClose,
+            sparkFrom: tile.sparkFrom,
+            sparkTo: tile.sparkTo
         )
     }
 
@@ -122,7 +124,13 @@ final class HomeRepository: HomeRepositoryProtocol {
             // `previousClose` is the dashed reference line — so the card colours
             // green ABOVE / red BELOW it, exactly like the Holdings cards.
             spark: dto.spark,
-            previousClose: dto.previousClose
+            previousClose: dto.previousClose,
+            // Where that series sits in the session, so a half-traded day fills
+            // half the tile instead of stretching edge to edge. `?? 0 / ?? 1` is
+            // the full width — what the tile drew before the backend sent a span,
+            // and what an older/degraded response still gets.
+            sparkFrom: dto.sparkFrom ?? 0,
+            sparkTo: dto.sparkTo ?? 1
         )
     }
 
@@ -206,7 +214,9 @@ final class HomeRepository: HomeRepositoryProtocol {
             primaryText: formatSignedPercent(r.changePercent),
             secondaryText: formatDollar(r.price) + capSuffix(r.marketCap),
             isPositive: r.changePercent >= 0,
-            spark: r.spark
+            spark: r.spark,
+            sparkFrom: r.sparkFrom ?? 0,
+            sparkTo: r.sparkTo ?? 1
         )
     }
 
@@ -217,7 +227,9 @@ final class HomeRepository: HomeRepositoryProtocol {
             primaryText: String(format: "%.1f×", r.volumeMultiple ?? 0),
             secondaryText: formatSignedPercent(r.changePercent),
             isPositive: r.changePercent >= 0,
-            spark: r.spark
+            spark: r.spark,
+            sparkFrom: r.sparkFrom ?? 0,
+            sparkTo: r.sparkTo ?? 1
         )
     }
 
@@ -228,7 +240,9 @@ final class HomeRepository: HomeRepositoryProtocol {
             primaryText: String(format: "%.1f%%", r.shortPercentOfFloat ?? 0),
             secondaryText: formatDollar(r.price) + capSuffix(r.marketCap),
             isPositive: false,
-            spark: r.spark
+            spark: r.spark,
+            sparkFrom: r.sparkFrom ?? 0,
+            sparkTo: r.sparkTo ?? 1
         )
     }
 

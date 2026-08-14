@@ -33,6 +33,11 @@ struct ReportsListSection: View {
     var requiresSignIn: Bool = false
     /// Tapped from the signed-out state. When nil the CTA is hidden.
     var onSignIn: (() -> Void)?
+    /// A credential is stored but not armed yet — the session is being restored. Takes
+    /// precedence over `requiresSignIn`: this user is NOT signed out, so offering them a Sign In
+    /// button is both wrong and inert (`AppState.requestSignIn` deliberately declines to prompt
+    /// while a restore is pending, and shows "Reconnecting your account…" instead).
+    var isReconnecting: Bool = false
 
     @State private var showSortMenu = false
 
@@ -44,7 +49,11 @@ struct ReportsListSection: View {
                 searchReveal
             }
 
-            if sections.isEmpty && requiresSignIn {
+            if sections.isEmpty && isReconnecting {
+                // Checked BEFORE `requiresSignIn`: during a restore we cannot prove the session
+                // yet, but we hold a credential, so "sign in" would be a false statement.
+                reconnectingState
+            } else if sections.isEmpty && requiresSignIn {
                 signedOutState
             } else if sections.isEmpty && !searchText.isEmpty {
                 emptySearchState
@@ -298,6 +307,32 @@ struct ReportsListSection: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.top, AppSpacing.xxxl)
+    }
+
+    /// A stored credential that has not been validated yet. This user IS signed in as far as
+    /// they are concerned, so the one thing this must not do is ask them to sign in — that copy
+    /// shipped next to their own loaded avatar. It also offers no button on purpose: the session
+    /// heals itself (launch / foreground / network-restored / backoff), and `requestSignIn`
+    /// declines to prompt in this window, so any CTA here would be inert.
+    private var reconnectingState: some View {
+        VStack(spacing: AppSpacing.md) {
+            ProgressView()
+                .controlSize(.large)
+
+            Text("Reconnecting…")
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text("Getting your analyses. This usually takes a moment.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xl)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, AppSpacing.xxxl)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Reconnecting. Getting your analyses.")
     }
 
     /// Reports live on an account, so a signed-out user genuinely has none to show. Saying

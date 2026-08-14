@@ -29,7 +29,12 @@ from app.schemas.tracking import (
 
 ASSET_KEYS = {
     "ticker", "company_name", "price", "change_percent", "previous_close",
-    "sparkline_data", "logo_url", "sector", "country", "market_cap",
+    "sparkline_data",
+    # The sparkline's time axis — where the series sits inside this asset's own
+    # session, as fractions of the row's width. Without them iOS spread N points
+    # edge-to-edge, so a 10:15 row was pixel-identical to a completed day.
+    "spark_from", "spark_to",
+    "logo_url", "sector", "country", "market_cap",
     "shares", "market_value", "asset_type",
 }
 ALERT_KEYS = {
@@ -54,7 +59,10 @@ INSIDER_ITEM_KEYS = {
 
 # iOS non-optional `let` fields — these MUST be present AND non-null or the
 # Swift decoder throws keyNotFound / valueNotFound and blanks the whole list.
-ASSET_REQUIRED = {"ticker", "company_name", "price", "change_percent", "sparkline_data"}
+ASSET_REQUIRED = {
+    "ticker", "company_name", "price", "change_percent", "sparkline_data",
+    "spark_from", "spark_to",
+}
 ALERT_REQUIRED = {"type", "title", "description"}
 WHALE_ITEM_REQUIRED = {"ticker", "company_name", "whale_count", "amount"}
 ANALYST_ITEM_REQUIRED = {"ticker", "firm_name", "rating_action", "new_rating"}
@@ -131,6 +139,12 @@ def test_tracking_feed_schema_parity():
         assert isinstance(asset["price"], float)
         assert isinstance(asset["change_percent"], float)
         assert isinstance(asset["sparkline_data"], list)
+        # The span is a fraction pair iOS multiplies by the row width. A value
+        # outside [0, 1], or an inverted pair, would draw the line off the card
+        # or backwards.
+        assert isinstance(asset["spark_from"], float)
+        assert isinstance(asset["spark_to"], float)
+        assert 0.0 <= asset["spark_from"] < asset["spark_to"] <= 1.0
 
     # Alerts — every alert carries the full AlertResponse key set (the `type`
     # discriminator selects which optionals iOS reads).
@@ -210,6 +224,10 @@ def test_required_asset_fields_are_never_null_on_the_wire():
     assert math.isfinite(dumped["price"])
     assert math.isfinite(dumped["change_percent"])
     assert dumped["sparkline_data"] == []
+    # A degraded row falls back to FULL width — the exact pre-span behaviour.
+    # Defaulting to anything narrower would shrink every row the feed could not
+    # place, which is worse than the bug this pair fixes.
+    assert (dumped["spark_from"], dumped["spark_to"]) == (0.0, 1.0)
 
 
 def test_signed_zero_change_percent_would_break_the_ios_sign_logic():

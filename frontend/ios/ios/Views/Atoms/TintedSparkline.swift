@@ -28,6 +28,11 @@ struct TintedSparkline: View {
     /// only thing distinguishing them — hence this parameter rather than inferring from
     /// the series, whose slope is not the same claim as the caller's verdict.
     var isPositive: Bool? = nil
+    /// Where `points` sits inside its trading session, as fractions of the width.
+    /// Defaults to the full width, so a caller with no session information (a
+    /// non-intraday series, a preview) is unchanged. See `SparklineGeometry`.
+    var spanFrom: Double = 0
+    var spanTo: Double = 1
 
     @Environment(\.differentiateWithoutColor) private var differentiate
 
@@ -42,7 +47,9 @@ struct TintedSparkline: View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            let pts = SparklineGeometry.normalizedPoints(points, in: geo.size)
+            let pts = SparklineGeometry.normalizedPoints(
+                points, in: geo.size, spanFrom: spanFrom, spanTo: spanTo
+            )
 
             if pts.count > 1 {
                 ZStack {

@@ -49,7 +49,11 @@ struct MarketPulseCard: View {
                     SparklineView(
                         data: item.spark,
                         isPositive: item.isPositive,
-                        referencePrice: item.previousClose
+                        referencePrice: item.previousClose,
+                        // Bitcoin and the S&P fill different fractions at the same
+                        // instant — their sessions are 00:00-24:00 and 09:30-16:00.
+                        spanFrom: item.sparkFrom,
+                        spanTo: item.sparkTo
                     )
                     .frame(height: 22)
                 }

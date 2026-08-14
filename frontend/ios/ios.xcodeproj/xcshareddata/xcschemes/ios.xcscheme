@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "938B285D2F04A07A00A3CE08"
-               BuildableName = "ios.app"
+               BuildableName = "Caydex.app"
                BlueprintName = "ios"
                ReferencedContainer = "container:ios.xcodeproj">
             </BuildableReference>
@@ -46,7 +46,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "938B285D2F04A07A00A3CE08"
-            BuildableName = "ios.app"
+            BuildableName = "Caydex.app"
             BlueprintName = "ios"
             ReferencedContainer = "container:ios.xcodeproj">
          </BuildableReference>
@@ -73,7 +73,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "938B285D2F04A07A00A3CE08"
-            BuildableName = "ios.app"
+            BuildableName = "Caydex.app"
             BlueprintName = "ios"
             ReferencedContainer = "container:ios.xcodeproj">
          </BuildableReference>

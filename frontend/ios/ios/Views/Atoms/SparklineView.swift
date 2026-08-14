@@ -16,6 +16,19 @@ struct SparklineView: View {
     /// the previous trading day's close) the chart anchors to it instead of the
     /// first data point — matching Apple Stocks / Robinhood.
     var referencePrice: Double? = nil
+    /// Where `data` sits inside its trading session, as fractions of the width.
+    ///
+    /// Server-supplied (`spark_from` / `spark_to`). The series is a bare `[Double]`
+    /// with no timestamps, so without this pair the points spread edge to edge and
+    /// a 10:15 chart was pixel-identical to a completed day — the card read as
+    /// "the market already closed" beside a live, moving price, and it contradicted
+    /// the asset-detail 1D chart, which has always left the untraded remainder of
+    /// the session empty.
+    ///
+    /// Defaults are the full width, i.e. the behaviour before spans existed, so a
+    /// caller with no session information (previews, `MarketTicker`) is unchanged.
+    var spanFrom: Double = 0
+    var spanTo: Double = 1
 
     private let dotRadius: CGFloat = 3
     private let lineWidth: CGFloat = 1.5
@@ -39,10 +52,16 @@ struct SparklineView: View {
                 let minValue = min(data.min() ?? 0, referenceValue)
                 let maxValue = max(data.max() ?? 1, referenceValue)
                 let range = max(maxValue - minValue, .ulpOfOne)
-                let stepX = width / CGFloat(data.count - 1)
+                // The series occupies only the elapsed slice of its session; the
+                // rest of the card stays empty. `clampedSpan` is shared with
+                // `SparklineGeometry` so the two primitives can't disagree about
+                // what an unusable span means (both fall back to full width).
+                let span = SparklineGeometry.clampedSpan(from: spanFrom, to: spanTo)
+                let originX = width * span.from
+                let stepX = (width * (span.to - span.from)) / CGFloat(data.count - 1)
 
                 let points: [CGPoint] = data.enumerated().map { index, value in
-                    let x = CGFloat(index) * stepX
+                    let x = originX + CGFloat(index) * stepX
                     let y = height - (CGFloat((value - minValue) / range) * height)
                     return CGPoint(x: x, y: y)
                 }
@@ -93,6 +112,11 @@ struct SparklineView: View {
                     }
 
                     // --- Dotted reference line ---
+                    // Spans the FULL width on purpose, even when the series
+                    // covers only part of the session: this is a price LEVEL
+                    // (yesterday's close), not data. Trimming it to `span` would
+                    // make the untraded remainder of the day look like a gap in
+                    // the axis rather than a day that hasn't happened yet.
                     var refLine = Path()
                     refLine.move(to: CGPoint(x: 0, y: referenceY))
                     refLine.addLine(to: CGPoint(x: size.width, y: referenceY))
@@ -190,6 +214,16 @@ struct SparklineView: View {
         SparklineView(
             data: [100, 95, 92, 98, 96, 102, 105, 99, 103, 108],
             isPositive: true
+        )
+        .frame(width: 120, height: 40)
+
+        // Mid-morning: ~2/5 of the session traded, the rest of the card empty.
+        SparklineView(
+            data: [100, 98, 102, 105, 103, 108],
+            isPositive: true,
+            referencePrice: 100,
+            spanFrom: 0,
+            spanTo: 0.43
         )
         .frame(width: 120, height: 40)
     }

@@ -33,7 +33,12 @@ struct AssetRow: View {
                 SparklineView(
                     data: asset.sparklineData,
                     isPositive: asset.isPositive,
-                    referencePrice: asset.previousClose
+                    referencePrice: asset.previousClose,
+                    // Only the traded part of the session, so a mid-morning row
+                    // stops partway across instead of looking like a finished
+                    // day. Matches the 1D chart this row opens into.
+                    spanFrom: asset.sparkFrom,
+                    spanTo: asset.sparkTo
                 )
                 .frame(height: 32)
 

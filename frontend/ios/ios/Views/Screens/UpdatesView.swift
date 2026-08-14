@@ -128,6 +128,13 @@ struct UpdatesView: View {
                 guard isActiveTab else { return }
                 await viewModel.loadIfNeeded()
             }
+            // `loadIfNeeded()` early-returns on `hasLoadedOnce`, which latches on the first
+            // successful load and is never reset — and this screen is opacity-mounted, so the
+            // latch survives every tab switch for the whole process. That makes the activation
+            // trigger above useless after launch: without this, signing in or out left the
+            // previous identity's news scopes and insight feed on screen until the app was
+            // killed. `reloadForIdentityChange()` clears the latch, unlike every other path.
+            .reloadOnIdentityChange { await viewModel.reloadForIdentityChange() }
             // The active group changed on the Tracking tab. `loadIfNeeded()` cannot serve
             // this: it early-returns on `hasLoadedOnce`, which latches once and is never
             // reset, and this screen is opacity-mounted so the latch survives every tab

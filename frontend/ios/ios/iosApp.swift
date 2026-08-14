@@ -139,6 +139,14 @@ struct iosApp: App {
                     // below can repeat it without a second window.
                     AppLockManager.shared.syncLockWindow()
 
+                    // Seed the widget on COLD LAUNCH. `didBecomeActive` below covers
+                    // returning to the foreground, but it races the first frame on a cold
+                    // start — verified on the simulator: a launch-only run produced 20+
+                    // requests and ZERO widget fetches, so a freshly installed widget stayed
+                    // on its placeholder until the user backgrounded and returned. Both
+                    // triggers, throttled to one fetch per minute, so the overlap is free.
+                    WidgetRefreshService.shared.refresh()
+
                     #if DEBUG
                     AppearanceProbe.dump("task-post")
                     Task { await AppearanceProbe.runTransitionSelfTestIfRequested() }
@@ -235,6 +243,13 @@ struct iosApp: App {
                     // user returns with working connectivity. No-ops unless a stored credential
                     // is actually going unused.
                     Task { await appState.restoreSessionIfNeeded(trigger: "foreground") }
+                    // The Home Screen widget cannot fetch for itself — it is a separate
+                    // process with no access to APIClient's token (see
+                    // Shared/WidgetSnapshotStore.swift for why that is mandatory, not
+                    // incidental). So the app refreshes its snapshot whenever it comes
+                    // forward. Throttled to 60s and entirely best-effort; a failure
+                    // never surfaces to the user.
+                    WidgetRefreshService.shared.refresh()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
                     // Re-lock the app when it backgrounds (if App Lock is enabled).

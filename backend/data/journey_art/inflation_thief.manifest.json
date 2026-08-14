@@ -1,0 +1,37 @@
+{
+  "slug": "inflation_thief",
+  "level": "foundation",
+  "style": "flat_vector",
+  "palette": "crimson",
+  "subject": "a stack of round coins with its top third dissolving into small drifting particles that blow away to the right, the remaining stack visibly shorter than its faint outline",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: a stack of round coins with its top third dissolving into small drifting particles that blow away to the right, the remaining stack visibly shorter than its faint outline\n\nPALETTE: a deep crimson red and warm coral, with slate-grey neutrals and clean white. Cautionary but never alarming \u2014 rich and restrained, not a bright emergency red. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+  "art_prompt_sha1": "e34d02608e49",
+  "art_file": "inflation_thief.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "inflation_thief.hero.jpg",
+      "width": 1536,
+      "height": 864,
+      "sha256": "1cb7595dc8aeb4b99fc1a6b91b0d595e43c5f5b6c5e4468287c07b41e41a89fb",
+      "bytes": 50805,
+      "cropped": true,
+      "snapped_fraction": 0.8821
+    }
+  },
+  "background": {
+    "min_channel": 255,
+    "max_cast": 0,
+    "corner_rgb": [
+      255,
+      255,
+      255
+    ],
+    "is_white": true,
+    "art_at_edge": false
+  }
+}

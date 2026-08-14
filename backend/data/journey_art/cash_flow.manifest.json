@@ -1,0 +1,37 @@
+{
+  "slug": "cash_flow",
+  "level": "analysis",
+  "style": "flat_vector",
+  "palette": "teal",
+  "subject": "a straight horizontal cylindrical pipe running left to right across the upper part of the frame, with a flanged cap closing each end so both ends finish well inside the frame, and one simple T-shaped valve handle on a short straight stem mounted on top of the pipe left of centre \u2014 a plain T bar, not a spoked wheel. A circular opening on the UNDERSIDE of the pipe, right of centre, from which a thick smooth stream falls straight down, with two or three round coins riding the falling stream. Directly below it stands a simple open bucket: a plain flat trapezoid slightly narrower at the bottom than the top, with one straight rim line across the top. The LOWER TWO THIRDS of the bucket is FILLED with a solid block of teal liquid whose top edge is one straight horizontal line \u2014 a solid filled area of colour clearly darker than the bucket itself, definitely not a thin stripe, band or empty container. Completely flat with no extruded depth, no thick walls, no side panels or blocks beside it, no wavy or rippled surface, and no coins resting in the liquid. The pipe, the valve handle, the stream and the whole bucket are complete and fully visible, centred with generous empty white margin on all four sides and nothing touching an edge",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: a straight horizontal cylindrical pipe running left to right across the upper part of the frame, with a flanged cap closing each end so both ends finish well inside the frame, and one simple T-shaped valve handle on a short straight stem mounted on top of the pipe left of centre \u2014 a plain T bar, not a spoked wheel. A circular opening on the UNDERSIDE of the pipe, right of centre, from which a thick smooth stream falls straight down, with two or three round coins riding the falling stream. Directly below it stands a simple open bucket: a plain flat trapezoid slightly narrower at the bottom than the top, with one straight rim line across the top. The LOWER TWO THIRDS of the bucket is FILLED with a solid block of teal liquid whose top edge is one straight horizontal line \u2014 a solid filled area of colour clearly darker than the bucket itself, definitely not a thin stripe, band or empty container. Completely flat with no extruded depth, no thick walls, no side panels or blocks beside it, no wavy or rippled surface, and no coins resting in the liquid. The pipe, the valve handle, the stream and the whole bucket are complete and fully visible, centred with generous empty white margin on all four sides and nothing touching an edge\n\nPALETTE: a deep teal #0E7490 with a brighter cyan, cool slate-grey neutrals and clean white. Analytical and precise. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+  "art_prompt_sha1": "945d293896b6",
+  "art_file": "cash_flow.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "cash_flow.hero.jpg",
+      "width": 1536,
+      "height": 864,
+      "sha256": "08992588e76d83f3ef21265ee74ef9f816a0d1d0d563a1276af1b31587b2f846",
+      "bytes": 30130,
+      "cropped": true,
+      "snapped_fraction": 0.8735
+    }
+  },
+  "background": {
+    "min_channel": 255,
+    "max_cast": 0,
+    "corner_rgb": [
+      255,
+      255,
+      255
+    ],
+    "is_white": true,
+    "art_at_edge": false
+  }
+}

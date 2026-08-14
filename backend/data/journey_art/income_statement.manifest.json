@@ -1,0 +1,37 @@
+{
+  "slug": "income_statement",
+  "level": "analysis",
+  "style": "flat_vector",
+  "palette": "teal_green",
+  "subject": "exactly four solid vertical bars standing side by side on one common horizontal baseline, evenly spaced, read left to right. Their heights are deliberately UNEVEN and must not form a regular staircase: the first bar is full height; the second is only slightly shorter than the first, about four fifths of its height; the third drops sharply to about half the height of the first; and the fourth is much shorter again, roughly one fifth of the first. The first three bars are teal and cyan. The FOURTH AND LAST bar is GREEN and is the only green element anywhere in the picture. A thin stepped connector line runs from the top of each bar across to the top of the next, so the eye follows the amount falling away. Exactly four bars \u2014 no more, no fewer \u2014 all complete and well inside the frame with clear white margin on every side",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: exactly four solid vertical bars standing side by side on one common horizontal baseline, evenly spaced, read left to right. Their heights are deliberately UNEVEN and must not form a regular staircase: the first bar is full height; the second is only slightly shorter than the first, about four fifths of its height; the third drops sharply to about half the height of the first; and the fourth is much shorter again, roughly one fifth of the first. The first three bars are teal and cyan. The FOURTH AND LAST bar is GREEN and is the only green element anywhere in the picture. A thin stepped connector line runs from the top of each bar across to the top of the next, so the eye follows the amount falling away. Exactly four bars \u2014 no more, no fewer \u2014 all complete and well inside the frame with clear white margin on every side\n\nPALETTE: a deep teal #0E7490 and a brighter cyan for the main shapes, with ONE fresh green reserved exclusively for the single small element representing what is left over at the end, plus cool slate-grey neutrals and clean white. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+  "art_prompt_sha1": "dab52332f95b",
+  "art_file": "income_statement.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "income_statement.hero.jpg",
+      "width": 1536,
+      "height": 864,
+      "sha256": "08189935d3690254128fe2dcd81626603987441dae4a3cc5f5d0e91ccaecc2d6",
+      "bytes": 29130,
+      "cropped": true,
+      "snapped_fraction": 0.8312
+    }
+  },
+  "background": {
+    "min_channel": 255,
+    "max_cast": 0,
+    "corner_rgb": [
+      255,
+      255,
+      255
+    ],
+    "is_white": true,
+    "art_at_edge": false
+  }
+}

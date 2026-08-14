@@ -732,6 +732,11 @@ final class AppState {
         // Same argument, one layer down: a signed book URL minted for the ended session is
         // still valid for hours, and this store is keyed by nothing but curriculum order.
         BookAudioURLStore.shared.reset()
+        // The widget snapshot is the same bug class with the widest blast radius: it lives in
+        // a device-global App Group container, and unlike everything else here it is visible
+        // on the HOME SCREEN — the previous account's holdings and their biggest mover,
+        // readable without unlocking into the app at all.
+        WidgetRefreshService.shared.clearForEndedSession()
 
         // Everything below used to sit OUTSIDE this funnel, called only from `signOut()`. That
         // covered exactly one of the three ways a session ends — the other two (a dead access

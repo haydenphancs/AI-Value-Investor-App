@@ -1,0 +1,99 @@
+{
+  "slug": "risk_reward",
+  "style": "flat_vector",
+  "palette": "blue",
+  "candidates": [
+    {
+      "slug": "risk_reward",
+      "tag": "0_current",
+      "subject": "a simple balance scale, one pan holding a small stack of coins and the other holding a single upward arrow, the beam tilted just slightly so the trade-off reads clearly",
+      "file": "risk_reward_0_current.jpg",
+      "master": "risk_reward_0_current.art.jpg",
+      "prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: a simple balance scale, one pan holding a small stack of coins and the other holding a single upward arrow, the beam tilted just slightly so the trade-off reads clearly\n\nPALETTE: a confident royal blue #2563EB with a lighter sky blue, cool slate-grey neutrals and clean white. Calm and trustworthy. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+      "background": {
+        "min_channel": 255,
+        "max_cast": 0,
+        "corner_rgb": [
+          255,
+          255,
+          255
+        ],
+        "is_white": true
+      },
+      "native": [
+        2752,
+        1536
+      ],
+      "bytes": 39669
+    },
+    {
+      "slug": "risk_reward",
+      "tag": "1",
+      "subject": "one large round coin seen face on, split down the middle by a single clean vertical line into two solidly filled halves \u2014 the left half carrying a bold upward arrow and the right half a bold downward arrow \u2014 the two halves together forming one complete unbroken circle that clearly cannot exist without the other. Solid filled shapes, not thin outlines",
+      "file": "risk_reward_1.jpg",
+      "master": "risk_reward_1.art.jpg",
+      "prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: one large round coin seen face on, split down the middle by a single clean vertical line into two solidly filled halves \u2014 the left half carrying a bold upward arrow and the right half a bold downward arrow \u2014 the two halves together forming one complete unbroken circle that clearly cannot exist without the other. Solid filled shapes, not thin outlines\n\nPALETTE: a confident royal blue #2563EB with a lighter sky blue, cool slate-grey neutrals and clean white. Calm and trustworthy. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+      "background": {
+        "min_channel": 255,
+        "max_cast": 0,
+        "corner_rgb": [
+          255,
+          255,
+          255
+        ],
+        "is_white": true
+      },
+      "native": [
+        2752,
+        1536
+      ],
+      "bytes": 42318
+    },
+    {
+      "slug": "risk_reward",
+      "tag": "2",
+      "subject": "two interlocking chain links lying at a slight angle, solidly filled and clearly threaded through one another so neither can be removed without breaking the other, the upper link carrying a small upward arrow and the lower link a small downward arrow. Bold solid fills, heavy confident shapes, not thin outline linework",
+      "file": "risk_reward_2.jpg",
+      "master": "risk_reward_2.art.jpg",
+      "prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: two interlocking chain links lying at a slight angle, solidly filled and clearly threaded through one another so neither can be removed without breaking the other, the upper link carrying a small upward arrow and the lower link a small downward arrow. Bold solid fills, heavy confident shapes, not thin outline linework\n\nPALETTE: a confident royal blue #2563EB with a lighter sky blue, cool slate-grey neutrals and clean white. Calm and trustworthy. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+      "background": {
+        "min_channel": 255,
+        "max_cast": 0,
+        "corner_rgb": [
+          255,
+          255,
+          255
+        ],
+        "is_white": true
+      },
+      "native": [
+        2752,
+        1536
+      ],
+      "bytes": 47045
+    },
+    {
+      "slug": "risk_reward",
+      "tag": "3",
+      "subject": "a single continuous solid ribbon running left to right that rises into one tall peak and drops into one trough of exactly equal depth below the same centre line, the height above and the depth below plainly mirroring each other, with a small upward arrow at the top of the peak and a small downward arrow at the bottom of the trough. Solid filled ribbon, not a thin drawn line",
+      "file": "risk_reward_3.jpg",
+      "master": "risk_reward_3.art.jpg",
+      "prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: a single continuous solid ribbon running left to right that rises into one tall peak and drops into one trough of exactly equal depth below the same centre line, the height above and the depth below plainly mirroring each other, with a small upward arrow at the top of the peak and a small downward arrow at the bottom of the trough. Solid filled ribbon, not a thin drawn line\n\nPALETTE: a confident royal blue #2563EB with a lighter sky blue, cool slate-grey neutrals and clean white. Calm and trustworthy. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+      "background": {
+        "min_channel": 255,
+        "max_cast": 0,
+        "corner_rgb": [
+          255,
+          255,
+          255
+        ],
+        "is_white": true
+      },
+      "native": [
+        2752,
+        1536
+      ],
+      "bytes": 40793
+    }
+  ]
+}

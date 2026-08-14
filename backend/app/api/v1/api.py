@@ -26,6 +26,7 @@ from app.api.v1.endpoints import (
     live_price,
     learn,
     updates,
+    widget,
     analytics,
 )
 
@@ -47,6 +48,10 @@ api_router.include_router(watchlist.router, prefix="/watchlist", tags=["Watchlis
 # /updates/feed) off `ticker_news_cache`, which has a 6h expiry + cleanup.
 # See migration 104 for the row cleanup.
 api_router.include_router(updates.router, prefix="/updates", tags=["Updates"])
+# Home-screen widget. Reads the same sweeper-produced caches the Updates screen does;
+# no Gemini on this path either. Two routes rather than one `?mode=` route so each
+# carries exactly one auth policy — see the module header.
+api_router.include_router(widget.router, prefix="/widget", tags=["Widget"])
 api_router.include_router(research.router, prefix="/research", tags=["Research"])
 api_router.include_router(crypto.router, prefix="/crypto", tags=["Crypto"])
 api_router.include_router(commodities.router, prefix="/commodities", tags=["Commodities"])

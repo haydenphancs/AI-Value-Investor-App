@@ -44,5 +44,29 @@
 	<true/>
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- App Group. The ONLY channel between this app and the Movers widget extension.
+	     The app fetches (it owns the auth token) and writes a small JSON snapshot into
+	     the shared container; the widget reads it and performs no network call and no
+	     identity read of its own.
+
+	     ⚠️ That split is deliberate and must not be "simplified" into letting the widget
+	     call the API. `.claude/rules/auth.md` §8 makes APIClient the one token source
+	     precisely because a Keychain reader and the client deliberately DIVERGE during
+	     `.restoring` — a widget reading the Keychain would render real-account content
+	     while the app UI says guest, and could never refresh an expired token because
+	     refresh is main-actor and lives in the app.
+
+	     ⚠️ There is a second, worse trap: `GuestIdentity` stores the per-install id with
+	     NO `kSecAttrAccessGroup`. Adding one so an extension could read it would make the
+	     existing read miss, mint a fresh UUID, and silently abandon every current guest's
+	     watchlist, portfolios, chats and Learn progress. Do not go down that path.
+
+	     ⚠️ Must be identical in ios-Release.entitlements and in the widget's own
+	     entitlements, and registered on BOTH App IDs in the Developer portal.
+	     `test_ios_widget_parity.py` fails the build if the three copies drift. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.phan.caydex</string>
+	</array>
 </dict>
 </plist>

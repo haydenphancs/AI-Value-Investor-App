@@ -57,5 +57,18 @@
 	<true/>
 	<key>aps-environment</key>
 	<string>production</string>
+	<!-- App Group — see the long note in ios.entitlements for why the widget reads a
+	     snapshot instead of calling the API itself. Duplicated here because THIS FILE
+	     REPLACES the Debug one rather than extending it; a capability that exists only
+	     in Debug is absent from every shipped build. That has already happened once to
+	     `applesignin`, which is why this file carries the warning at the top.
+
+	     The identifier must be byte-identical here, in ios.entitlements, in the widget's
+	     entitlements, and in the Swift constant. `test_ios_widget_parity.py` pins all
+	     four. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.phan.caydex</string>
+	</array>
 </dict>
 </plist>

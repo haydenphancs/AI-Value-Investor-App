@@ -7,16 +7,49 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		9A1000000000000000000C /* CaydexWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 9A10000000000000000001 /* CaydexWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		93350E262FFF40D100351547 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 93350E252FFF40D100351547 /* Sentry */; };
 		93DE099D3025390F00C5E948 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 93DE099C3025390F00C5E948 /* GoogleSignIn */; };
 		93DE099F3025390F00C5E948 /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 93DE099E3025390F00C5E948 /* GoogleSignInSwift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		9A1000000000000000000D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 938B28562F04A07A00A3CE08 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9A10000000000000000002;
+			remoteInfo = CaydexWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		9A1000000000000000000B /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				9A1000000000000000000C /* CaydexWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		9A10000000000000000001 /* CaydexWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = CaydexWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		938B285E2F04A07A00A3CE08 /* ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ios.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		9A1000000000000000000F /* Exceptions for "CaydexWidgets" folder in "CaydexWidgets" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 9A10000000000000000002 /* CaydexWidgets */;
+		};
 		93C023772F53AACD0054687D /* Exceptions for "ios" folder in "ios" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -27,6 +60,19 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		9A10000000000000000003 /* CaydexWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9A1000000000000000000F /* Exceptions for "CaydexWidgets" folder in "CaydexWidgets" target */,
+			);
+			path = CaydexWidgets;
+			sourceTree = "<group>";
+		};
+		9A10000000000000000004 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
 		938B28602F04A07A00A3CE08 /* ios */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -38,6 +84,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		9A10000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		938B285B2F04A07A00A3CE08 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -62,6 +115,8 @@
 			isa = PBXGroup;
 			children = (
 				938B28602F04A07A00A3CE08 /* ios */,
+				9A10000000000000000003 /* CaydexWidgets */,
+				9A10000000000000000004 /* Shared */,
 				93350E242FFF40D100351547 /* Frameworks */,
 				938B285F2F04A07A00A3CE08 /* Products */,
 			);
@@ -71,6 +126,7 @@
 			isa = PBXGroup;
 			children = (
 				938B285E2F04A07A00A3CE08 /* ios.app */,
+				9A10000000000000000001 /* CaydexWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -78,6 +134,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		9A10000000000000000002 /* CaydexWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9A10000000000000000008 /* Build configuration list for PBXNativeTarget "CaydexWidgets" */;
+			buildPhases = (
+				9A10000000000000000005 /* Sources */,
+				9A10000000000000000006 /* Frameworks */,
+				9A10000000000000000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				9A10000000000000000003 /* CaydexWidgets */,
+				9A10000000000000000004 /* Shared */,
+			);
+			name = CaydexWidgets;
+			packageProductDependencies = (
+			);
+			productName = CaydexWidgets;
+			productReference = 9A10000000000000000001 /* CaydexWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		938B285D2F04A07A00A3CE08 /* ios */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 938B28692F04A07B00A3CE08 /* Build configuration list for PBXNativeTarget "ios" */;
@@ -85,13 +164,16 @@
 				938B285A2F04A07A00A3CE08 /* Sources */,
 				938B285B2F04A07A00A3CE08 /* Frameworks */,
 				938B285C2F04A07A00A3CE08 /* Resources */,
+				9A1000000000000000000B /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				9A1000000000000000000E /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				938B28602F04A07A00A3CE08 /* ios */,
+				9A10000000000000000004 /* Shared */,
 			);
 			name = ios;
 			packageProductDependencies = (
@@ -105,6 +187,14 @@
 		};
 /* End PBXNativeTarget section */
 
+/* Begin PBXTargetDependency section */
+		9A1000000000000000000E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9A10000000000000000002 /* CaydexWidgets */;
+			targetProxy = 9A1000000000000000000D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin PBXProject section */
 		938B28562F04A07A00A3CE08 /* Project object */ = {
 			isa = PBXProject;
@@ -114,6 +204,9 @@
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					938B285D2F04A07A00A3CE08 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					9A10000000000000000002 = {
 						CreatedOnToolsVersion = 26.2;
 					};
 				};
@@ -137,11 +230,19 @@
 			projectRoot = "";
 			targets = (
 				938B285D2F04A07A00A3CE08 /* ios */,
+				9A10000000000000000002 /* CaydexWidgets */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		9A10000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		938B285C2F04A07A00A3CE08 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -152,6 +253,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		9A10000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		938B285A2F04A07A00A3CE08 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -162,6 +270,76 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
+		9A10000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = CaydexWidgets/CaydexWidgets.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = WG697LVCS9;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = CaydexWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Caydex;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phan.caydex.CaydexWidgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		9A1000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = CaydexWidgets/CaydexWidgets.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = WG697LVCS9;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = CaydexWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Caydex;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phan.caydex.CaydexWidgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 		938B28672F04A07B00A3CE08 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -360,6 +538,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		9A10000000000000000008 /* Build configuration list for PBXNativeTarget "CaydexWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9A10000000000000000009 /* Debug */,
+				9A1000000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		938B28592F04A07A00A3CE08 /* Build configuration list for PBXProject "ios" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

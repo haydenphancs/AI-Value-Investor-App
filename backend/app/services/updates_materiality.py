@@ -312,6 +312,44 @@ def volatility_tier(change_percent: Any, sigma_daily: Any, is_index: bool = Fals
     return _tier_for_z(z)
 
 
+# The smallest σ_daily we will divide by, as a fraction (0.25%/day).
+#
+# Not a tuning knob — a correctness guard. σ comes from a 180-day baseline, and a
+# ticker that barely trades (or was halted for most of the window) can produce a
+# σ of 0.0001. Without a floor, `z = 0.02% / (0.0001·100)` = 2.0, so a two-basis-point
+# twitch on a frozen ticker outranks a genuine 6% selloff and headlines the widget.
+# 0.25%/day sits below any liquid instrument we rank — the calmest real thing in the
+# universe is ^GSPC at ~0.83%/day, and even a short-duration bond ETF runs ~0.3% — so
+# the floor only ever binds on data that is degenerate rather than merely calm.
+_MIN_SIGMA_DAILY = 0.0025
+
+
+def move_z(change_percent: Any, sigma_daily: Any) -> Optional[float]:
+    """Continuous volatility-relative magnitude: how many daily σ this move is.
+
+    ``volatility_tier`` computes this same z and then throws it away, keeping only
+    a 4-bucket label. Ranking needs the number: buckets are coarse (z ≥ 1/2/3), and
+    the obvious substitute — ``move_score`` — is **tier bucket + raw magnitude**, so
+    a Notable +9% (z≈1.1, score 19.0) outranks an Unusual +3% (z≈2.4, score 18.0).
+    That is raw-percentage ranking wearing a z-score hat, which is the opposite of
+    "rank by how unusual this is for THIS ticker".
+
+    Returns ``None`` — never 0.0 — when the move or σ is unusable, so a caller
+    cannot accidentally rank an unknown alongside a genuinely calm move. Callers
+    that must still order such rows should sort them last explicitly.
+
+    Sign is dropped: a −4% and a +4% on the same ticker are equally unusual. Callers
+    that need direction read it off ``change_percent``.
+    """
+    pct = finite(change_percent)
+    if pct is None:
+        return None
+    sig = finite(sigma_daily)
+    if sig is None or sig <= 0:
+        return None
+    return abs(pct) / (max(sig, _MIN_SIGMA_DAILY) * 100.0)
+
+
 def classify_move(
     change_percent: Any,
     sigma_daily: Any,

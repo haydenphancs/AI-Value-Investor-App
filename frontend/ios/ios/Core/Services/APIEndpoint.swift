@@ -230,6 +230,20 @@ enum APIEndpoint: Sendable {
     /// On-demand AI enrichment (bullets + sentiment) for specific articles.
     case enrichUpdatesNews(scope: String, articleIds: [String])
 
+    // MARK: - Home-screen widget
+    //
+    // Two cases rather than one `mode:` parameter BECAUSE OF `authPolicy`. That switch
+    // is exhaustive with one policy per case, and `test_ios_auth_policy_parity.py`
+    // pairs each case with its backend dependency — a single case whose auth changed
+    // with an argument could not be expressed in that model, and would have to be
+    // special-cased in the very test that exists to stop auth drift.
+    //
+    /// The most unusual move among the tickers Caydex tracks. Public market data.
+    case getWidgetMarketMover
+    /// The caller's own biggest mover, plus the combined reason when holdings moved
+    /// together. Needs an identity to know whose holdings — hence `.guestAllowed`.
+    case getWidgetPortfolioMover
+
     // MARK: - Chat
     case listChatSessions(limit: Int, offset: Int)
     case createChatSession(stockId: String?, contextType: String? = nil, referenceId: String? = nil)
@@ -499,6 +513,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/updates/tabs"
         case .getUpdatesFeed:
             return "/api/v1/updates/feed"
+        case .getWidgetMarketMover:
+            return "/api/v1/widget/market-mover"
+        case .getWidgetPortfolioMover:
+            return "/api/v1/widget/portfolio-mover"
         case .enrichUpdatesNews:
             return "/api/v1/updates/news/enrich"
 
@@ -947,6 +965,12 @@ enum APIEndpoint: Sendable {
         case .getUpdatesFeed, .enrichUpdatesNews:
             return .public
 
+        // The widget's market mode: a shared universe, nothing about the caller. Public
+        // means the default widget works with no identity at all, which matters because a
+        // widget extension is a separate process that cannot reach `APIClient`'s token.
+        case .getWidgetMarketMover:
+            return .public
+
         // Theme detail is public market data.
         case .getThemeDetail:
             return .public
@@ -1006,6 +1030,12 @@ enum APIEndpoint: Sendable {
             return .guestAllowed
 
         case .getUpdatesTabs, .getHomeFeed, .getHomeDashboard:
+            return .guestAllowed
+
+        // The widget's portfolio mode reads the caller's OWN holdings, so it resolves
+        // through `get_watchlist_identity` — the same per-install partition the watchlist
+        // routes write (migration 108). Backend dependency: `get_watchlist_identity`.
+        case .getWidgetPortfolioMover:
             return .guestAllowed
 
         // Whales resolve a signed-out caller through `get_watchlist_identity`, so they are

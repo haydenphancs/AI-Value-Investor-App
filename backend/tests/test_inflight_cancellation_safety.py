@@ -59,6 +59,7 @@ _INFLIGHT_MODULES = [
     "signal_of_confidence_service.py",
     "signals_service.py",
     "valuation_snapshot_service.py",
+    "widget_movers_service.py",
 ]
 
 

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Group — the ONLY thing this extension needs, and the only channel it has to
+	     the app. It performs no network call, no Keychain read, and holds no credential.
+
+	     Must be byte-identical to ios.entitlements, ios-Release.entitlements and
+	     `WidgetSharedConfig.appGroupIdentifier`, and registered on BOTH App IDs
+	     (com.phan.caydex and com.phan.caydex.CaydexWidgets) in the Developer portal.
+	     A mismatch is silent: UserDefaults(suiteName:) returns nil and the widget shows
+	     its placeholder forever, with nothing logged where anyone would look.
+	     `backend/tests/test_ios_widget_parity.py` fails the build if the copies drift. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.phan.caydex</string>
+	</array>
+</dict>
+</plist>

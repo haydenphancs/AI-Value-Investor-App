@@ -1,0 +1,103 @@
+{
+  "slug": "income_statement",
+  "style": "flat_vector",
+  "palette": "teal_green",
+  "candidates": [
+    {
+      "slug": "income_statement",
+      "tag": "0_current",
+      "subject": "one wide solid horizontal bar near the top of the frame, a funnel shape directly beneath it, two short stubby arrows peeling away to the left and to the right from the funnel's waist, and one small narrow solid bar below the funnel's spout \u2014 the top bar clearly several times wider than the bottom bar, so what comes out is plainly a fraction of what went in. Every element is a closed self-contained shape that starts and stops well inside the picture: no flowing band, ribbon or stream of any kind, and nothing entering the frame from outside it",
+      "file": "income_statement_0_current.jpg",
+      "master": "income_statement_0_current.art.jpg",
+      "prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: one wide solid horizontal bar near the top of the frame, a funnel shape directly beneath it, two short stubby arrows peeling away to the left and to the right from the funnel's waist, and one small narrow solid bar below the funnel's spout \u2014 the top bar clearly several times wider than the bottom bar, so what comes out is plainly a fraction of what went in. Every element is a closed self-contained shape that starts and stops well inside the picture: no flowing band, ribbon or stream of any kind, and nothing entering the frame from outside it\n\nPALETTE: a deep teal #0E7490 and a brighter cyan for the main shapes, with ONE fresh green reserved exclusively for the single small element representing what is left over at the end, plus cool slate-grey neutrals and clean white. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+      "background": {
+        "min_channel": 255,
+        "max_cast": 0,
+        "corner_rgb": [
+          255,
+          255,
+          255
+        ],
+        "is_white": true,
+        "art_at_edge": false
+      },
+      "native": [
+        2752,
+        1536
+      ],
+      "bytes": 39023
+    },
+    {
+      "slug": "income_statement",
+      "tag": "1_612965",
+      "subject": "a row of five solid vertical bars standing on one common baseline, read left to right: the first bar is very tall and teal, the next three are progressively shorter and each clearly sits lower than the one before as if a piece has been taken away, and the fifth and final bar is short and GREEN, the only green element in the picture. Small downward steps connect the top of each bar to the next so the eye follows the amount shrinking. All five bars complete, evenly spaced and well inside the frame",
+      "file": "income_statement_1_612965.jpg",
+      "master": "income_statement_1_612965.art.jpg",
+      "prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: a row of five solid vertical bars standing on one common baseline, read left to right: the first bar is very tall and teal, the next three are progressively shorter and each clearly sits lower than the one before as if a piece has been taken away, and the fifth and final bar is short and GREEN, the only green element in the picture. Small downward steps connect the top of each bar to the next so the eye follows the amount shrinking. All five bars complete, evenly spaced and well inside the frame\n\nPALETTE: a deep teal #0E7490 and a brighter cyan for the main shapes, with ONE fresh green reserved exclusively for the single small element representing what is left over at the end, plus cool slate-grey neutrals and clean white. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+      "background": {
+        "min_channel": 255,
+        "max_cast": 0,
+        "corner_rgb": [
+          255,
+          255,
+          255
+        ],
+        "is_white": true,
+        "art_at_edge": false
+      },
+      "native": [
+        2752,
+        1536
+      ],
+      "bytes": 27593
+    },
+    {
+      "slug": "income_statement",
+      "tag": "2_adb0e3",
+      "subject": "a large solid teal fruit-press or squeezer viewed from the side with a big round mass held inside it and a plate pressing down from above, and beneath its small spout a short wide glass holding a small amount of GREEN liquid \u2014 the glass obviously holding far less than the mass being pressed. Two or three small drops falling between the spout and the glass. The press, the spout and the whole glass are complete and well inside the frame",
+      "file": "income_statement_2_adb0e3.jpg",
+      "master": "income_statement_2_adb0e3.art.jpg",
+      "prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: a large solid teal fruit-press or squeezer viewed from the side with a big round mass held inside it and a plate pressing down from above, and beneath its small spout a short wide glass holding a small amount of GREEN liquid \u2014 the glass obviously holding far less than the mass being pressed. Two or three small drops falling between the spout and the glass. The press, the spout and the whole glass are complete and well inside the frame\n\nPALETTE: a deep teal #0E7490 and a brighter cyan for the main shapes, with ONE fresh green reserved exclusively for the single small element representing what is left over at the end, plus cool slate-grey neutrals and clean white. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+      "background": {
+        "min_channel": 255,
+        "max_cast": 0,
+        "corner_rgb": [
+          255,
+          255,
+          255
+        ],
+        "is_white": true,
+        "art_at_edge": false
+      },
+      "native": [
+        2752,
+        1536
+      ],
+      "bytes": 33046
+    },
+    {
+      "slug": "income_statement",
+      "tag": "3_d58976",
+      "subject": "a tall stack of identical solid teal blocks resting on a simple base, with three blocks clearly lifted out of the stack and floating away up and to the right, each with a short motion line behind it, leaving one single small GREEN block sitting alone on the base \u2014 the green block is the only green element and is plainly much smaller than the original stack. Everything complete and well inside the frame",
+      "file": "income_statement_3_d58976.jpg",
+      "master": "income_statement_3_d58976.art.jpg",
+      "prompt": "Clean 2D vector illustration in a flat corporate editorial style. Crisp geometric vector shapes with clean hard edges, solid flat colour fills, confident even linework, a few subtle dynamic motion lines to imply movement, generous negative space. A modern financial app illustration asset. Absolutely flat \u2014 no photographic texture, no 3D rendering, no bevels, no glossy highlights, no drop shadows.\n\nSUBJECT: a tall stack of identical solid teal blocks resting on a simple base, with three blocks clearly lifted out of the stack and floating away up and to the right, each with a short motion line behind it, leaving one single small GREEN block sitting alone on the base \u2014 the green block is the only green element and is plainly much smaller than the original stack. Everything complete and well inside the frame\n\nPALETTE: a deep teal #0E7490 and a brighter cyan for the main shapes, with ONE fresh green reserved exclusively for the single small element representing what is left over at the end, plus cool slate-grey neutrals and clean white. Use two or three colours at most, plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal 16:9 frame. ONE single centred subject occupying roughly the middle 70% of the frame, with clean empty margin on all four sides. Calm, balanced and uncluttered \u2014 a single clear idea rendered simply, not a busy scene. Everything is fully inside the frame; nothing is cropped by an edge.\n\nBACKGROUND \u2014 ABSOLUTE REQUIREMENT: the background is pure flat uniform white #FFFFFF, edge to edge and right into all four corners. No vignette, no gradient, no tinted or coloured backdrop, no background texture, no ground plane, no horizon line, no shadow reaching any edge, no border, no frame, no rounded card behind the subject.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, labels, axis ticks, currency symbols, percentage signs, logos, watermarks or signage ANYWHERE in the image. No human faces, no hands, no people.",
+      "background": {
+        "min_channel": 255,
+        "max_cast": 0,
+        "corner_rgb": [
+          255,
+          255,
+          255
+        ],
+        "is_white": true,
+        "art_at_edge": false
+      },
+      "native": [
+        2752,
+        1536
+      ],
+      "bytes": 36022
+    }
+  ]
+}

@@ -201,24 +201,37 @@ def test_titles_are_all_one_size():
 
 
 def test_palette_is_balanced_and_never_runs_three_deep():
-    """Colour is doing real work: it is what separates ten dark covers in a scroll.
+    """Colour is the only thing separating ten dark, low-key covers in a scroll.
 
-    The shelf is W C C W W C C W W C — a balanced 5/5 split with no run longer than
-    two, NOT strict alternation. Strict alternation was asserted first and is simply
-    not what the set is; the useful invariant is that the palette never goes flat for
-    three books running, which is where a scroll starts to look monotonous.
+    FOUR palettes now (gold / gray / green / red). Strict rotation is not achievable
+    over ten books without forcing a colour onto a subject it does not suit, so the
+    guarded invariants are the two that actually matter:
+      - roughly even use, no palette carrying more than one extra book
+      - never three consecutive books in one palette, which is where a scroll goes flat
     """
+    from collections import Counter
     mans = _manifests()
     orders = sorted(o for o in mans if mans[o].get("palette"))
     pals = [mans[o]["palette"] for o in orders]
-    assert pals.count("warm") == pals.count("cool"), (
-        f"palette split is not balanced: {pals.count('warm')} warm / "
-        f"{pals.count('cool')} cool")
+    counts = Counter(pals)
+    assert len(counts) >= 4, f"expected at least 4 palettes in use, got {dict(counts)}"
+    assert max(counts.values()) - min(counts.values()) <= 1, (
+        f"palette use is lopsided: {dict(counts)}")
+
     run = longest = 1
     for a, b in zip(pals, pals[1:]):
         run = run + 1 if a == b else 1
         longest = max(longest, run)
     assert longest <= 2, f"a run of {longest} consecutive books shares one palette: {pals}"
+
+
+def test_every_palette_has_a_tagline_accent():
+    """A palette with no accent would silently fall back and break the family."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from compose_book_cover import ACCENTS
+    from generate_book_cover_art import PALETTES
+    assert set(ACCENTS) == set(PALETTES), (
+        f"palette/accent mismatch: {set(PALETTES) ^ set(ACCENTS)}")
 
 
 # ----------------------------------------------------------------- iOS wiring

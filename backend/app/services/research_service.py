@@ -313,7 +313,15 @@ class ResearchService:
                 "valuation_analysis": self._extract_valuation(ticker_report_data),
                 "risk_assessment": self._extract_risk(ticker_report_data),
                 "key_takeaways": self._extract_takeaways(ticker_report_data),
-                "action_recommendation": self._derive_recommendation(ticker_report_data),
+                # `action_recommendation` is deliberately NO LONGER WRITTEN (2026-08-14).
+                # It emitted a literal "Buy"/"Sell"/"Hold"/"Watch" verdict on a named
+                # security, was persisted and served, and was rendered by no View — so it
+                # carried the full App Review 5.1.1(ix)/3.1.5 "this is advice, not
+                # information" risk with zero product benefit, and was one `Text(...)` away
+                # from shipping that verdict undisclaimered. The DB column still exists and
+                # simply goes NULL on new rows; drop it in a later migration if you want.
+                # If a Buy/Sell verdict is ever wanted again, it needs a disclaimer surface
+                # first — see the Technical Meter, which has one.
 
                 # Scoring
                 "overall_score": ticker_report_data.get("quality_score"),
@@ -668,30 +676,6 @@ class ResearchService:
         """Extract key takeaways from executive summary bullets."""
         bullets = data.get("executive_summary_bullets", [])
         return [b.get("text", "") for b in bullets[:5] if b.get("text")]
-
-    def _derive_recommendation(self, data: Dict[str, Any]) -> str:
-        """Derive Buy/Hold/Sell from quality score and valuation."""
-        score = data.get("quality_score", 50)
-        # None-safe: slots are Optional and can be None. Legacy "key_vitals"
-        # fallback covers reports cached before the key was renamed.
-        val_status = (
-            (
-                data.get("_scoring_inputs") or data.get("key_vitals") or {}
-            ).get("valuation") or {}
-        ).get("status", "fair_value")
-        if isinstance(score, str):
-            try:
-                score = float(score)
-            except ValueError:
-                score = 50
-        if score >= 75 and val_status in ("underpriced", "deep_undervalued"):
-            return "Buy"
-        elif score <= 35 or val_status == "overpriced":
-            return "Sell"
-        elif score >= 60:
-            return "Hold"
-        else:
-            return "Watch"
 
     def _derive_conviction(self, data: Dict[str, Any]) -> str:
         """Derive conviction level from quality score."""

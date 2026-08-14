@@ -151,7 +151,10 @@ def _minimal_row(**over):
         "risk_assessment": None,
         "full_report": None,
         "key_takeaways": None,
-        "action_recommendation": None,
+        # A DB row from before 2026-08-14 still carries `action_recommendation`; kept in
+        # this worst-case fixture on purpose, to prove the model IGNORES it rather than
+        # re-publishing a stored Buy/Sell verdict.
+        "action_recommendation": "Buy",
         "overall_score": None,
         "fair_value_estimate": None,
         "generation_time_seconds": None,

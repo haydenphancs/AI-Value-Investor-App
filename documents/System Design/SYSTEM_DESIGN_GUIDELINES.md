@@ -1828,6 +1828,24 @@ and plans stay one tap away from inside that screen.
 against the DECLARED field default (not a live `settings` instance, which reads the environment
 and would pass on any machine).
 
+**State as of 2026-08-14:** migrations 130/131/132/134 are applied; the three tables are empty
+because the app is pre-launch. All four flags (including `CHAT_RAG_ENABLED`) are `False`, so this
+whole subsystem is inert in production today — the code is live, the behaviour is not. Flipping a
+flag is a Railway environment variable plus a service **restart** (`settings` is an `lru_cache`d
+module singleton), not a redeploy.
+
+### 9c.0 Write-path guards
+
+The profile `PUT` is the app's only guest-writable, unauthenticated, row-creating JSON write, so
+it carries the controls that combination demands:
+
+| Guard | Why |
+|---|---|
+| `ProfileRateLimit` (20/min, identity-only) | `user_id` is a uuid5 of the client-chosen `X-Guest-Id`; rotating it mints a fresh identity, and orphan guest rows are unreachable from both account deletion and `claim-guest-data`. Identity-ONLY so a `public.users` blip cannot 503 a first-run onboarding save. |
+| `_BODY_CAPPED_PATH_SUFFIXES` | The body is materialised and `json.loads`'d **before** Pydantic's per-field `max_length` can fire. |
+| Empty-body short-circuit | `PUT {}` used to INSERT a phantom row reporting `has_profile: true, is_empty: true`, which was the enabling condition for guest-claim destroying real answers. A consent-only write is deliberately NOT empty. |
+| Unknown-column degradation | `answered_fields` did not exist before 134, and migrations here are applied by hand. PostgREST rejects a payload naming an unknown column, which would have failed the ENTIRE write — so the service drops that one key and retries rather than losing the reader's answers over bookkeeping. |
+
 ### 9c.1 The compliance line is the architecture
 
 The app personalizes **pedagogy** — what to cover first, at what reading level — and never

@@ -288,7 +288,8 @@ struct ResearchReportDetail: Identifiable, Sendable {
     let riskAssessment: RiskAssessment?
     let fullReport: String?
     let keyTakeaways: [String]?
-    let actionRecommendation: String?
+    // `actionRecommendation` removed 2026-08-14 with the backend field. It carried a
+    // literal Buy/Sell/Hold/Watch verdict on a named security that no View rendered.
 
     // Metadata
     let generationTimeSeconds: Int?
@@ -316,7 +317,6 @@ struct ResearchReportDetail: Identifiable, Sendable {
         case riskAssessment = "risk_assessment"
         case fullReport = "full_report"
         case keyTakeaways = "key_takeaways"
-        case actionRecommendation = "action_recommendation"
         case generationTimeSeconds = "generation_time_seconds"
         case tokensUsed = "tokens_used"
         case createdAt = "created_at"
@@ -350,7 +350,6 @@ extension ResearchReportDetail: Decodable {
         self.riskAssessment = try container.decodeIfPresent(RiskAssessment.self, forKey: .riskAssessment)
         self.fullReport = try container.decodeIfPresent(String.self, forKey: .fullReport)
         self.keyTakeaways = try container.decodeIfPresent([String].self, forKey: .keyTakeaways)
-        self.actionRecommendation = try container.decodeIfPresent(String.self, forKey: .actionRecommendation)
         
         self.generationTimeSeconds = try container.decodeIfPresent(Int.self, forKey: .generationTimeSeconds)
         self.tokensUsed = try container.decodeIfPresent(Int.self, forKey: .tokensUsed)

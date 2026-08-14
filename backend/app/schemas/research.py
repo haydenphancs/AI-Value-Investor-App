@@ -157,7 +157,13 @@ class ResearchReportDetail(BaseModel):
     risk_assessment: Optional[RiskAssessment] = None
     full_report: Optional[str] = None
     key_takeaways: Optional[List[str]] = None
-    action_recommendation: Optional[str] = None
+    # `action_recommendation` was REMOVED from this response on 2026-08-14. It carried a
+    # literal "Buy"/"Sell"/"Hold"/"Watch" verdict on a named security and no View ever
+    # rendered it. Dropping the field (rather than just ceasing to write it) matters
+    # because reports generated BEFORE that date still have the value in
+    # `research_reports.action_recommendation`, and a field left here would keep serving
+    # those stored verdicts for the life of every cached report.
+    # iOS decodes it with `decodeIfPresent`, so its absence is a no-op there.
 
     # Scoring (from home_feed migration)
     overall_score: Optional[float] = None  # 0-100

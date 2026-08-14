@@ -355,6 +355,26 @@ class Settings(BaseSettings):
     # row survives, so the information is not lost, only the buzz.
     NOTIFICATION_MAX_DEFER_HOURS: int = 12
 
+    # Price alerts (migration 125). These four MUST be declared here, not left to a
+    # Railway variable: `model_config` sets `extra="ignore"`, so an undeclared env var is
+    # silently dropped and every read raises AttributeError. They were missing until
+    # 2026-08-14, which killed `run_price_alert_loop` ~30s after every boot (the interval
+    # read sits outside its `while True`) and 503'd all four /alerts/price routes.
+    #
+    # Evaluation cadence, gated on `session_phase() != "closed"` (04:00-20:00 ET). One
+    # cycle is a single bulk quote call, so this is cheap; the loop floors it at 15s.
+    PRICE_ALERT_INTERVAL_SECONDS: int = 60
+    # Caps, surfaced to iOS on every list response (`PriceAlertListResponse`) so the UI
+    # can disable the bell at the cap rather than fail the POST. Keep in step with the
+    # schema defaults in `schemas/price_alerts.py` — iOS falls back to those before its
+    # first successful fetch.
+    PRICE_ALERT_MAX_PER_USER: int = 20
+    PRICE_ALERT_MAX_PER_TICKER_PER_USER: int = 3
+    # How far price must retreat past the threshold before a `repeat` rule re-arms,
+    # as a fraction. Without a band, a price oscillating either side of the limit
+    # notifies on every cycle. Matches `price_alert_engine.evaluate_alert`'s own default.
+    PRICE_ALERT_REARM_PCT: float = 0.005
+
     # Gemini quota (429) handling. Instead of skipping retries on a rate-limit
     # error, back off and retry a bounded number of times — paired with the
     # agent-run semaphore this recovers transient 429s rather than degrading a

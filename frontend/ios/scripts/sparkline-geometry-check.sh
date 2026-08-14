@@ -143,6 +143,37 @@ check(SparklineGeometry.normalizedPoints([1.0], in: size, spanTo: 0.4).isEmpty, 
 check(SparklineGeometry.normalizedPoints([1.0, Double.nan], in: size).isEmpty, "NaN value → nothing")
 check(SparklineGeometry.normalizedPoints(series, in: .zero).isEmpty, "zero size → nothing")
 
+print("SparklineGeometry.plotRect — room for the end dot")
+// The bug this guards: the y-scale sends the series MINIMUM to y = height, and
+// the dot is centred on the last point, so a session closing at its own low lost
+// half the dot to the canvas edge. Measured on-device before the fix: 9px of an
+// 18px dot on the S&P tile.
+let dotR: CGFloat = 3
+let rising = [10.0, 11.0, 12.0]          // closes at its HIGH
+let falling = [12.0, 11.0, 10.0]         // closes at its LOW
+
+let lowEnd = SparklineGeometry.normalizedPoints(falling, in: size, markInset: dotR).last!
+check(lowEnd.y <= size.height - dotR, "a series closing at its LOW keeps a full dot inside")
+let highEnd = SparklineGeometry.normalizedPoints(rising, in: size, markInset: dotR).last!
+check(highEnd.y >= dotR, "a series closing at its HIGH keeps a full dot inside")
+
+// The horizontal twin: after the close span.to == 1, putting the last point on
+// the right edge.
+let closed = SparklineGeometry.normalizedPoints(rising, in: size, spanTo: 1, markInset: dotR)
+check(closed.last!.x <= size.width - dotR, "a completed session keeps the dot off the right edge")
+check(near(closed.first!.x, 0), "the left edge stays flush (nothing is drawn before the first point)")
+
+// Zero inset must reproduce the old edge-to-edge mapping exactly.
+let noInset = SparklineGeometry.normalizedPoints(falling, in: size, markInset: 0)
+check(near(noInset.last!.y, size.height) && near(noInset.first!.y, 0),
+      "markInset 0 reproduces the un-inset mapping")
+
+// A tile shorter than 3 insets must not collapse.
+let tiny = SparklineGeometry.plotRect(in: CGSize(width: 8, height: 6), markInset: dotR)
+check(tiny.height > 0 && tiny.width > 0, "a tiny canvas still yields a positive plot rect")
+check(SparklineGeometry.plotRect(in: size, markInset: -5).height == size.height,
+      "a negative inset is ignored rather than expanding the plot")
+
 print("TradingDayHelper — session windows")
 check(TradingDayHelper.window(for: .stock) == .regular, "stock → 09:30-16:00")
 check(TradingDayHelper.window(for: .etf) == .regular, "etf → 09:30-16:00")

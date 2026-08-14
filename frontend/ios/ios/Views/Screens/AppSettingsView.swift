@@ -41,6 +41,7 @@ struct AppSettingsView: View {
     /// Third-party AI processing consent. 5.1.1(ii)/5.1.2 require an accessible way to
     /// withdraw consent, so it is surfaced here rather than only at the first-send gate.
     @ObservedObject private var aiConsent = AIConsentStore.shared
+    @StateObject private var personalizationConsent = PersonalizationConsentViewModel()
     @State private var showWithdrawAIConsentConfirmation = false
 
     var body: some View {
@@ -74,6 +75,9 @@ struct AppSettingsView: View {
         .toolbarBackground(AppColors.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .onAppear { calculateCacheSize() }
+        // The consent record is server-side, so it has to be fetched — the row must show
+        // what the backend will actually honour, not a local guess.
+        .task { await personalizationConsent.load() }
         // Sync general prefs to the backend when leaving (no-op for guests).
         .onDisappear { SettingsSyncManager.shared.push() }
         .onChange(of: playbackSpeedRaw) { _, newValue in
@@ -141,6 +145,24 @@ struct AppSettingsView: View {
                 options: AnalysisPersona.allCases.map { ($0.key, $0.compactName) },
                 selection: $defaultPersona
             )
+
+            // Explicit, revocable opt-in. NOT a local @AppStorage toggle: the consent
+            // record lives on the server (`user_investor_profile.consented_at`) because
+            // that is what the backend actually checks before personalizing, and a
+            // device-local flag would drift across devices and vanish on reinstall.
+            SettingsToggleRow(
+                title: "Personalized Explanations",
+                subtitle: personalizationConsent.statusText,
+                isOn: Binding(
+                    get: { personalizationConsent.isOn },
+                    // Not optimistic: the row reflects what the SERVER stored. A failed
+                    // grant that looked successful is the worst bug this switch could have.
+                    set: { newValue in
+                        Task { await personalizationConsent.setConsent(newValue) }
+                    }
+                )
+            )
+            .disabled(personalizationConsent.isSaving || personalizationConsent.isLoading)
         }
     }
 

@@ -5,6 +5,8 @@ Monitoring, not enforcement — the endpoint LOGS these, it doesn't block. The t
 AND pin the no-false-positive contract (tradeoff/conditional language + the company 'Google' must
 stay clean, so we never flag a good answer)."""
 
+import pytest
+
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
 
 
@@ -167,3 +169,55 @@ def test_enforce_secret_regex_preserves_hyphenated_finance_compounds():
     ):
         out, tags = enforce_answer(txt)
         assert out == txt and tags == [], (txt, out, tags)
+
+
+# ── Suitability claims (Phase 4, monitor-only) ───────────────────────────────
+
+@pytest.mark.parametrize("answer", [
+    "This one is right for you given what you follow.",
+    "That ETF is suitable for you.",
+    "It fits your profile nicely.",
+    "This matches your risk appetite.",
+    "A great fit for you.",
+    "Given your goals, this is the one.",
+    "It aligns with your goals.",
+    "Perfect for you.",
+    "For someone like you, this is the obvious pick.",
+])
+def test_suitability_claims_are_flagged(answer):
+    assert "suitability_claim" in scan_answer(answer)
+
+
+@pytest.mark.parametrize("answer", [
+    "Margins expanded 200bps year over year.",
+    "Some investors weigh dividend cover before yield.",
+    "The debt-to-equity ratio is 1.8x, above the sector median.",
+])
+def test_ordinary_analysis_is_not_flagged(answer):
+    assert "suitability_claim" not in scan_answer(answer)
+
+
+def test_the_compliant_refusal_also_trips_it_and_that_is_why_it_is_monitor_only():
+    """Documented, accepted false positive.
+
+    "whether it's right for you depends on circumstances I can't see" is the model
+    COMPLYING with ADVICE_BOUNDARY. It trips the same phrase the violation does, which is
+    precisely why this tag must never drive redaction: enforcing would corrupt the
+    compliant answers while barely touching the non-compliant ones.
+    """
+    compliant = (
+        "Whether it's right for you depends on your circumstances, which I can't see. "
+        "Caydex is not a registered investment adviser."
+    )
+    assert "suitability_claim" in scan_answer(compliant)
+    # …and enforcement leaves it completely untouched.
+    redacted, _ = enforce_answer(compliant)
+    assert redacted == compliant
+
+
+def test_suitability_is_not_an_enforcement_class():
+    """Pins the decision so nobody 'fixes' it later: enforce_answer must not redact any
+    suitability phrasing."""
+    for answer in ("This is right for you.", "It fits your profile."):
+        redacted, _ = enforce_answer(answer)
+        assert redacted == answer

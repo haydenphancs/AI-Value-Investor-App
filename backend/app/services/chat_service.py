@@ -150,6 +150,7 @@ class ChatService:
         context_type: Optional[str] = None,
         reference_id: Optional[str] = None,
         context_is_replayed: bool = False,
+        reader_lens: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate AI response with RAG context retrieval and optional
@@ -206,6 +207,7 @@ class ChatService:
             client_context=context,
             asset_type=asset_type,
             context_is_replayed=context_is_replayed,
+            reader_lens=reader_lens,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
 
@@ -310,6 +312,7 @@ class ChatService:
         context_type: Optional[str] = None,
         reference_id: Optional[str] = None,
         context_is_replayed: bool = False,
+        reader_lens: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build everything a STREAMED response needs, WITHOUT calling Gemini.
 
@@ -352,7 +355,7 @@ class ChatService:
             snapshot_summary=snapshot_summary,
             company_profile_summary=company_profile_summary,
             client_context=context, asset_type=asset_type,
-            context_is_replayed=context_is_replayed,
+            context_is_replayed=context_is_replayed, reader_lens=reader_lens,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
@@ -1261,6 +1264,7 @@ class ChatService:
         client_context: Optional[str] = None,
         asset_type: str = "STOCK",
         context_is_replayed: bool = False,
+        reader_lens: Optional[str] = None,
     ) -> str:
         base = (
             # Single source of truth for the identity guard (persona_config.IDENTITY_RULE),
@@ -1289,6 +1293,16 @@ class ChatService:
             # to sit here, and additionally covers suitability ("right for me?").
             + ADVICE_BOUNDARY
         )
+
+        # Reader preferences sit HERE — after the shared guards (identity rule, style,
+        # advice boundary) and BEFORE anything session- or turn-specific. Order matters
+        # twice over: the amended ADVICE_BOUNDARY above refers to "a USER PREFERENCES
+        # block ... above", and a block placed after the fenced client context would be
+        # read as part of that untrusted span. Already rendered by the caller (a
+        # server-authored string from closed enums), so it is trusted and unfenced —
+        # see agents/investor_profile_prompt for why fencing it would make it inert.
+        if reader_lens:
+            base += reader_lens
 
         # Add asset-specific persona
         if asset_type in self._ASSET_PERSONAS:

@@ -46,6 +46,28 @@ _IDENTITY_PATTERNS = (
 )
 
 
+# Suitability claims (monitor-only). Personalization lets the model address the reader
+# directly, and the failure mode that matters is no longer "buy this" but "this suits
+# YOU" — the one assertion that turns impersonal analysis into personalized investment
+# advice. `ADVICE_BOUNDARY` forbids it; this measures whether the model obeys.
+#
+# ⚠️ DELIBERATELY NOT ENFORCED (see the redaction section below, which is reserved for
+# high-confidence, near-zero-false-positive classes). "whether it's right for you depends
+# on circumstances I can't see" is the model COMPLYING correctly, and it trips these
+# patterns. Redacting it would corrupt the compliant answers while leaving the
+# non-compliant ones — which say "this IS right for you" — largely untouched. Watch the
+# rate; escalate only with real traffic to justify a narrower enforcement set.
+_SUITABILITY_PATTERNS = (
+    "right for you", "right for your", "suitable for you", "suitable for your",
+    "a good fit for you", "a great fit for you", "fits your profile", "fits your risk",
+    "fits your goals", "matches your profile", "matches your risk", "matches your goals",
+    "suits your", "appropriate for you", "appropriate for your",
+    "well-suited to you", "well suited to you", "ideal for you", "perfect for you",
+    "given your risk tolerance", "based on your risk", "aligns with your goals",
+    "given your goals", "given your profile", "for someone like you",
+)
+
+
 def _boundary_regex(patterns) -> "re.Pattern":
     """Match any phrase as a whole token, not a substring. `(?<!\\w)…(?!\\w)` stops the short/fragile
     tokens from firing on innocent supersets — the reported class was `as an ai` matching inside
@@ -56,6 +78,7 @@ def _boundary_regex(patterns) -> "re.Pattern":
 
 _ADVICE_RE = _boundary_regex(_ADVICE_PATTERNS)
 _IDENTITY_RE = _boundary_regex(_IDENTITY_PATTERNS)
+_SUITABILITY_RE = _boundary_regex(_SUITABILITY_PATTERNS)
 
 
 def scan_answer(answer: str) -> List[str]:
@@ -67,6 +90,8 @@ def scan_answer(answer: str) -> List[str]:
         issues.append("advice_directive")
     if _IDENTITY_RE.search(text):
         issues.append("identity_leak")
+    if _SUITABILITY_RE.search(text):
+        issues.append("suitability_claim")
     return issues
 
 

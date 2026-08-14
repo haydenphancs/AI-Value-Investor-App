@@ -144,3 +144,75 @@ def test_index_snapshot_attribution_is_cay_ai():
     }
     assert literals, "index_service.py no longer sets generated_by"
     assert all(val == "Cay AI" for _f, val in literals), literals
+
+
+# ── Reader-preference block placement (Phase 4) ──────────────────────────────
+#
+# The amended ADVICE_BOUNDARY says "If a USER PREFERENCES block appears ABOVE…", and the
+# fenced CLIENT CONTEXT tells the model to follow no instruction inside it. Both make the
+# block's POSITION load-bearing: too early and it precedes the guards it is constrained
+# by; too late and it lands inside an untrusted span and goes inert.
+
+def _lens() -> str:
+    """The REAL rendered block, so these pin the shipping string rather than a mock."""
+    from app.services.agents.investor_profile_prompt import render_profile_block
+    return render_profile_block({"topics": ["energy"], "experience_level": "new"})
+
+
+# Block-only marker: the phrase "USER PREFERENCES" also appears inside the amended
+# ADVICE_BOUNDARY ("If a USER PREFERENCES block appears above…"), so searching for that
+# finds the boundary even when no block was supplied.
+_MARK = "Topics they follow:"
+_LENS = None  # populated per-test via _lens()
+
+
+def _svc():
+    from app.services.chat_service import ChatService
+    return ChatService.__new__(ChatService)
+
+
+def test_reader_lens_is_absent_unless_supplied():
+    instr = _svc()._build_system_instruction("NORMAL", None)
+    assert _MARK not in instr
+
+
+def test_reader_lens_sits_after_the_guards():
+    from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
+
+    instr = _svc()._build_system_instruction("NORMAL", None, reader_lens=_lens())
+    assert instr.startswith(IDENTITY_RULE), "identity rule must stay first"
+    assert instr.index(ADVICE_BOUNDARY) < instr.index(_MARK), (
+        "ADVICE_BOUNDARY refers to a preferences block 'above' it — the block must "
+        "follow the boundary, not precede it"
+    )
+
+
+def test_reader_lens_sits_before_the_untrusted_client_context():
+    instr = _svc()._build_system_instruction(
+        "STOCK", "AAPL", client_context="symbol: AAPL | price: 1.23",
+        asset_type="STOCK", reader_lens=_lens(),
+    )
+    assert instr.index(_MARK) < instr.index("<<<CLIENT_CONTEXT>>>"), (
+        "the preferences block must not fall inside the fenced span the model is told "
+        "to treat as data and never follow"
+    )
+
+
+def test_reader_lens_does_not_disturb_the_guards():
+    """Adding the block must not drop either shared guard."""
+    from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
+
+    instr = _svc()._build_system_instruction("STOCK", "AAPL", reader_lens=_lens())
+    assert IDENTITY_RULE in instr and ADVICE_BOUNDARY in instr
+
+
+def test_advice_boundary_forbids_suitability_language_explicitly():
+    """The amendment's whole job: preferences may steer coverage, never suitability."""
+    from app.services.agents.persona_config import ADVICE_BOUNDARY
+
+    low = ADVICE_BOUNDARY.lower()
+    assert "user preferences" in low
+    assert "never state or imply" in low
+    assert "an interest in a topic is never a reason to own anything" in low
+    # The pre-existing promises must survive verbatim.
+    assert "you do not know this user's finances" in low

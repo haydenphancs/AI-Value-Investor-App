@@ -301,3 +301,134 @@ def test_upsert_payload_carries_only_known_columns():
     }
     extra = set(captured["payload"]) - allowed
     assert not extra, f"payload carries columns the table does not have: {sorted(extra)}"
+
+
+# ── sanitize_updates: partial writes must not clear unmentioned fields ───────
+#
+# Regression: `upsert_profile` originally wrote `sanitize_profile(raw)`, which fills every
+# ABSENT field with its default. Because the upsert writes whatever columns the payload
+# carries, a PUT of `{"answer_depth": "deep"}` silently cleared the user's topics. Proven
+# by an end-to-end round-trip against the real table; no unit test could see it, because
+# with the table missing the endpoint answered 503 before Postgres saw the row.
+
+def test_updates_include_only_the_fields_provided():
+    from app.services.user_investor_profile_service import sanitize_updates
+
+    out = sanitize_updates({"answer_depth": "deep"})
+    assert out == {"answer_depth": "deep"}, "an unmentioned field must not appear at all"
+
+
+def test_updates_of_an_empty_body_write_nothing():
+    from app.services.user_investor_profile_service import sanitize_updates
+
+    assert sanitize_updates({}) == {}
+
+
+@pytest.mark.parametrize("bad", [None, "x", 5, [], object()])
+def test_updates_never_raise_on_junk(bad):
+    from app.services.user_investor_profile_service import sanitize_updates
+
+    assert sanitize_updates(bad) == {}
+
+
+def test_updates_still_sanitize_the_values_they_pass_through():
+    from app.services.user_investor_profile_service import sanitize_updates
+
+    out = sanitize_updates({"experience_level": "wizard", "topics": ["value", "banana"]})
+    # Present-but-invalid scalar falls back to the default (it WAS mentioned, so it is
+    # written); the unknown array item is dropped.
+    assert out["experience_level"] == DEFAULTS["experience_level"]
+    assert out["topics"] == ["value"]
+
+
+def test_an_explicitly_empty_list_still_clears():
+    """Omitted ≠ empty. Sending [] is how a user deselects everything."""
+    from app.services.user_investor_profile_service import sanitize_updates
+
+    assert sanitize_updates({"topics": []}) == {"topics": []}
+
+
+def test_updates_never_carry_an_unknown_column():
+    from app.services.user_investor_profile_service import sanitize_updates
+
+    out = sanitize_updates({"risk_tolerance": "aggressive", "topics": ["value"]})
+    assert set(out) == {"topics"}
+
+
+# ── Consent is tri-state and revocable ───────────────────────────────────────
+#
+# Consent the user cannot withdraw is not consent. And "field omitted" must NOT mean
+# "revoke", or every ordinary preference edit would silently withdraw it.
+
+def _capture_upsert():
+    """A service whose Supabase layer records the written payload."""
+    from app.services.user_investor_profile_service import UserInvestorProfileService
+
+    seen = {}
+
+    class _Table:
+        def upsert(self, payload, on_conflict=None):
+            seen["payload"] = payload
+            return self
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def limit(self, *a, **k):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": []})()
+
+    class _SB:
+        def table(self, _name):
+            return _Table()
+
+    return UserInvestorProfileService(supabase=_SB()), seen
+
+
+def test_consent_absent_leaves_the_stored_value_alone():
+    svc, seen = _capture_upsert()
+    svc.upsert_profile("u1", {"topics": ["value"]})
+    assert "consented_at" not in seen["payload"], (
+        "an ordinary preference edit must not touch consent"
+    )
+
+
+def test_consent_true_stamps_a_timestamp():
+    from datetime import datetime
+
+    svc, seen = _capture_upsert()
+    svc.upsert_profile("u1", {}, consent=True)
+    stamped = seen["payload"]["consented_at"]
+    assert isinstance(stamped, str)
+    datetime.fromisoformat(stamped)
+
+
+def test_consent_false_writes_an_explicit_null():
+    """Revocation must clear the column, not merely skip writing it."""
+    svc, seen = _capture_upsert()
+    svc.upsert_profile("u1", {}, consent=False)
+    assert "consented_at" in seen["payload"]
+    assert seen["payload"]["consented_at"] is None
+
+
+def test_revoking_consent_immediately_stops_personalization():
+    """End of the chain: a revoked profile can never produce a lens."""
+    from app.services.agents.investor_profile_prompt import may_apply_profile
+
+    granted = {"experience_level": "new", "topics": ["value"],
+               "consented_at": "2026-08-13T00:00:00+00:00"}
+    revoked = {**granted, "consented_at": None}
+
+    import app.config as cfg
+    original = cfg.settings.CHAT_PERSONALIZATION_ENABLED
+    cfg.settings.CHAT_PERSONALIZATION_ENABLED = True
+    try:
+        assert may_apply_profile(granted, "premium") is True
+        assert may_apply_profile(revoked, "premium") is False
+    finally:
+        cfg.settings.CHAT_PERSONALIZATION_ENABLED = original

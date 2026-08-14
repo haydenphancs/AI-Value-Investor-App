@@ -1,0 +1,124 @@
+//
+//  PersonalizationConsentViewModel.swift
+//  ios
+//
+//  Owns the "Personalized explanations" opt-in.
+//
+//  WHY THE CONSENT LIVES ON THE SERVER, not in UserDefaults like AIConsentStore:
+//  this one gates a SERVER-side behaviour (whether the backend folds the reader's
+//  preferences into the chat system instruction). A device-local flag would let a second
+//  device silently personalize for a user who only consented on the first, and would be
+//  lost on reinstall. The backend refuses to apply any profile whose `consented_at` is
+//  null, so the stored timestamp IS the gate — not a mirror of it.
+//
+//  It is deliberately revocable. Consent that cannot be withdrawn is not consent; the
+//  PUT sends `accepted_personalization_terms: false` to clear the timestamp, which stops
+//  personalization on the very next turn.
+//
+
+import Combine
+import Foundation
+
+@MainActor
+final class PersonalizationConsentViewModel: ObservableObject {
+
+    /// Whether the reader has consented (mirrors the server's `consented_at`).
+    @Published private(set) var isOn = false
+    /// Whether Cay AI is ACTUALLY using it — consent AND an entitled tier AND a
+    /// non-empty profile. Shown so a Free user is told the truth rather than being
+    /// given a toggle that does nothing.
+    @Published private(set) var isApplied = false
+    /// The plan that would unlock it, straight from the server so the copy cannot drift
+    /// from what was enforced.
+    @Published private(set) var requiredTier: String?
+    /// True when the reader has actually answered some preference questions.
+    @Published private(set) var hasPreferences = false
+
+    @Published private(set) var isLoading = false
+    @Published private(set) var isSaving = false
+    @Published var errorMessage: String?
+    /// True when the last load failed, so consent state is UNKNOWN. Callers that gate a
+    /// flow on it (the paywall) must fall through rather than guess — offering the opt-in
+    /// to someone who already consented is annoying; dead-ending a purchase is worse.
+    @Published private(set) var hasLoadFailed = false
+
+    private let apiClient: APIClient
+
+    init(apiClient: APIClient = .shared) {
+        self.apiClient = apiClient
+    }
+
+    func load() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let dto = try await apiClient.request(
+                endpoint: .getMyInvestorProfile,
+                responseType: InvestorProfileDTO.self
+            )
+            apply(dto)
+            hasLoadFailed = false
+        } catch {
+            // Read-only failure: leave the toggle in its last known state rather than
+            // flipping it to a value the server never confirmed. Reported, not swallowed.
+            hasLoadFailed = true
+            errorMessage = AppError.from(error).message
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("personalization_consent_load"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
+        }
+    }
+
+    /// Grant or revoke. Not optimistic on purpose: this is a consent record, so the UI
+    /// must show what the SERVER stored, never what we hoped it stored. A failed grant
+    /// that looked successful would be the worst possible bug in this particular switch.
+    func setConsent(_ granted: Bool) async {
+        guard !isSaving else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            let dto = try await apiClient.request(
+                endpoint: .updateMyInvestorProfile(
+                    body: UpdateInvestorProfileBody(acceptedPersonalizationTerms: granted)
+                ),
+                responseType: InvestorProfileDTO.self
+            )
+            apply(dto)
+            // Two literal call sites, not a ternary or a `let`: the analytics guard
+            // greps for `Analytics.shared.track(.someCase`, so an event name reached
+            // through a variable is invisible to it and the metric silently reads
+            // "nobody does this" instead of "not instrumented".
+            if granted {
+                Analytics.shared.track(.personalizationConsentGranted)
+            } else {
+                Analytics.shared.track(.personalizationConsentWithdrawn)
+            }
+        } catch {
+            errorMessage = AppError.from(error).message
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("personalization_consent_save"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
+        }
+    }
+
+    private func apply(_ dto: InvestorProfileDTO) {
+        isOn = dto.consentedAt != nil
+        isApplied = dto.applied
+        requiredTier = dto.requiredTier
+        hasPreferences = !dto.isEmpty
+    }
+
+    /// Copy for the row's subtitle — honest about which of the three conditions is the
+    /// one currently stopping it.
+    var statusText: String {
+        if !isOn { return "Off — answers are the same for everyone" }
+        if !hasPreferences { return "On — add some interests in Settings to give it something to use" }
+        if !isApplied {
+            let plan = (requiredTier ?? "Pro").capitalized
+            return "On — available on \(plan)"
+        }
+        return "On — Cay AI tailors how it explains things"
+    }
+}

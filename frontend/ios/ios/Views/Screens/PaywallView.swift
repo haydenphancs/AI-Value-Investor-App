@@ -18,6 +18,11 @@ struct PaywallView: View {
     /// Observed so the CTA reflects `isPurchasing` — the ViewModel holds the service, and
     /// changes on a nested ObservableObject don't propagate through it automatically.
     @ObservedObject private var store = StoreKitService.shared
+    /// Personalization only APPLIES on Pro/Max, so the upgrade is the one moment the
+    /// consent ask is self-explanatory — the reader has just bought the thing it belongs
+    /// to. Loaded lazily; the sheet is offered only if they have not already consented.
+    @StateObject private var personalizationConsent = PersonalizationConsentViewModel()
+    @State private var showPersonalizationConsent = false
 
     /// Alerts keyed off optional state, so dismissing clears the value rather than leaving
     /// a stale flag that re-presents.
@@ -99,10 +104,26 @@ struct PaywallView: View {
             .toolbarBackground(AppColors.background, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .alert("You're all set", isPresented: purchaseSucceeded) {
-                Button("Done", role: .cancel) { dismiss() }
+                Button("Done", role: .cancel) {
+                    // Offer the opt-in instead of dismissing, but ONLY when they have not
+                    // already consented — a repeat purchase or a re-subscribe must not
+                    // re-ask. Falls through to dismiss if the consent state is unknown
+                    // (a failed load), because a purchase flow must never dead-end.
+                    if personalizationConsent.isOn || personalizationConsent.hasLoadFailed {
+                        dismiss()
+                    } else {
+                        showPersonalizationConsent = true
+                    }
+                }
             } message: {
                 Text("Your subscription is active and your credits have been added.")
             }
+            .sheet(isPresented: $showPersonalizationConsent, onDismiss: { dismiss() }) {
+                PersonalizationConsentSheet(viewModel: personalizationConsent)
+            }
+            // Fetched up front so the "Done" tap can decide instantly rather than
+            // stalling the purchase flow on a network call.
+            .task { await personalizationConsent.load() }
             .alert("Waiting for approval", isPresented: $viewModel.isPendingApproval) {
                 Button("OK", role: .cancel) {}
             } message: {

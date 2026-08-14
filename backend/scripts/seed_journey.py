@@ -38,6 +38,13 @@ JSON_PATH = _FRONTEND_JSON if _FRONTEND_JSON.exists() else BACKEND / "data/journ
 AUDIO_DIR = BACKEND / "data/journey_audio"
 
 BUCKET = "journey-media"
+# Lesson artwork lives in its OWN public bucket, never in journey-media. Narration is
+# Pro/Max and journey-media is destined to go private (migration 128); artwork is free
+# for everyone, so a signed URL would work for paying users and 404 for free ones —
+# the exact inverse of the intent. See migration 136 for the full reasoning.
+IMAGE_BUCKET = "journey-images"
+IMAGE_PREFIX = "lessons"
+ART_DIR = BACKEND / "data/journey_art"
 # Stable namespace so the same lesson key always maps to the same lessons.id.
 NS = uuid.UUID("a1b2c3d4-0000-4000-8000-000000000000")
 DRY = "--dry-run" in sys.argv
@@ -45,6 +52,7 @@ FORCE = "--force" in sys.argv   # overwrite existing bucket audio (needed to rep
 
 _LEVEL_TOTALS: dict[str, int] = {}
 _EXISTING_AUDIO: set[str] = set()   # objects already in journey-media/audio/ — skip re-upload
+_EXISTING_IMAGES: set[str] = set()  # objects already in journey-images/lessons/
 
 
 def lesson_key(cards: list[dict]) -> str:
@@ -81,20 +89,89 @@ def upload_audio(sb, clip: str) -> str | None:
     return sb.storage.from_(BUCKET).get_public_url(path)
 
 
-def build_story_content(sb, lesson: dict) -> dict:
+def upload_image(sb, slug: str) -> str | None:
+    """Upload a lesson's hero art to journey-images/lessons/ and return its public URL.
+
+    Mirrors upload_audio's never-wipe-a-good-URL behaviour, with one deliberate
+    difference: it skips on the content SHA256 recorded in the manifest, not on the
+    filename. Artwork gets iterated on — the same <slug>.hero.jpg is regenerated
+    repeatedly — so name-based skipping would silently upload nothing after a re-roll
+    and leave the old picture live. seed_book_covers.py deviates the same way and for
+    the same reason.
+
+    Every failure path returns None or a pre-existing URL and never raises: during
+    rollout most lessons legitimately have no art yet, and one lesson's Storage error
+    must not abort the other twenty-six.
+    """
+    man_path = ART_DIR / f"{slug}.manifest.json"
+    if not man_path.exists():
+        return None                                    # no art yet — the normal case
+
+    try:
+        man = json.loads(man_path.read_text())
+    except Exception as exc:                           # noqa: BLE001
+        print(f"    ! unreadable manifest {man_path.name}: {type(exc).__name__}: {exc}")
+        return None
+
+    rec = (man.get("masters") or {}).get("hero") or {}
+    name = rec.get("file")
+    if not name:
+        print(f"    ! {slug}: manifest has no masters.hero — run generate_journey_art.py")
+        return None
+
+    path = f"{IMAGE_PREFIX}/{name}"
+    # `or None` guards the empty string: iOS checks `!name.isEmpty` but an empty imageUrl
+    # would still reserve the slot and render the placeholder rather than nothing.
+    public = (sb.storage.from_(IMAGE_BUCKET).get_public_url(path).rstrip("?") or None)
+    local = ART_DIR / name
+    in_bucket = name in _EXISTING_IMAGES
+
+    if not local.exists():
+        # Seeding from a box without backend/data/journey_art/ must not wipe a live URL.
+        return public if in_bucket else None
+    if man.get("uploaded", {}).get("hero") == rec.get("sha256") and in_bucket and not FORCE:
+        return public                                  # byte-identical to what is live
+
+    if not DRY:
+        try:
+            sb.storage.from_(IMAGE_BUCKET).upload(
+                path,
+                local.read_bytes(),
+                # cache-control 300 while the art is still being iterated: the filename is
+                # stable across re-rolls, so a long TTL pins a superseded image on device.
+                {"content-type": "image/jpeg", "upsert": "true", "cache-control": "300"},
+            )
+        except Exception as exc:                       # noqa: BLE001
+            print(f"    ! image upload failed for {slug}: {type(exc).__name__}: {exc}")
+            return public if in_bucket else None
+        _EXISTING_IMAGES.add(name)
+        man.setdefault("uploaded", {})["hero"] = rec.get("sha256")
+        man["image_url"] = public
+        man_path.write_text(json.dumps(man, indent=2) + "\n")
+        print(f"    + uploaded {name}")
+    return public
+
+
+def build_story_content(sb, lesson: dict, key: str) -> dict:
     title = lesson["title"]
     level = lesson["level"]
     sort_order = lesson["sortOrder"]
+    # One lookup per lesson, not per card: the hero belongs to the title card only.
+    image_url = upload_image(sb, key)
     cards_out = []
     for card in lesson["cards"]:
         clip = card.get("audioClip")
         audio_url = upload_audio(sb, clip) if clip else None
+        # Hoisted out of the dict literal on purpose — test_journey_schema_parity slices
+        # that literal and regexes it for "word": pairs to pin the card contract, so an
+        # inline expression containing a colon would corrupt what it reads.
+        is_title = card["type"] == "title"
         cards_out.append({
             "type": card["type"],
             "headline": card.get("headline"),
             "text": card.get("text"),          # keeps **highlight** markup for iOS
             "audioUrl": audio_url,
-            "imageUrl": None,                  # filled in later when artwork exists
+            "imageUrl": image_url if is_title else None,
             "videoUrl": None,
             "cta": card.get("cta"),
             # Per-word read-along timings (from align_journey_audio.py); null until aligned.
@@ -125,6 +202,17 @@ def main():
     except Exception as exc:  # noqa: BLE001
         print(f"(could not list existing audio: {exc})\n")
 
+    # Same for artwork. Its own try/except: a missing journey-images bucket (migration
+    # 136 not applied yet) must print a note and let the audio-only seed proceed, not
+    # abort the whole run.
+    try:
+        listed = sb.storage.from_(IMAGE_BUCKET).list(IMAGE_PREFIX, {"limit": 200})
+        _EXISTING_IMAGES.update(item["name"] for item in listed)
+        print(f"{len(_EXISTING_IMAGES)} lesson image(s) already in Storage — "
+              f"will skip byte-identical ones.\n")
+    except Exception as exc:  # noqa: BLE001
+        print(f"(could not list {IMAGE_BUCKET} — has migration 136 been applied? {exc})\n")
+
     rows = []
     for lesson in lessons:
         # Prefer the AUTHORED slug. The row id is `uuid5(NS, key)`, and deriving that key from
@@ -139,7 +227,10 @@ def main():
         # exactly and this migrates with zero orphans.
         key = (lesson.get("slug") or "").strip() or lesson_key(lesson["cards"])
         print(f"[{lesson['level']}/{lesson['sortOrder']}] {lesson['title']} ({key})")
-        story = build_story_content(sb, lesson)
+        # `key` is the authored slug — the same value the row id is derived from, and the
+        # same one the artwork is filed under, so the Storage path and the database
+        # identity are guaranteed to agree.
+        story = build_story_content(sb, lesson, key)
         rows.append({
             "id": str(uuid.uuid5(NS, key)),
             "title": lesson["title"],

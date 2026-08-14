@@ -7,20 +7,22 @@ snake_case because `APIClient` deliberately does not use `.convertFromSnakeCase`
 
 WHY A SEPARATE SCHEMA RATHER THAN REUSING `AIInsightCardResponse`
 -----------------------------------------------------------------
-The card answers "what is the news on this scope". The widget answers a different
-question — "which of these tickers moved most, and why" — and the difference is
-load-bearing in one specific way: **provenance**.
+The card answers "what is the news on this scope, over the last 24-48 hours". The
+widget answers a strictly DAILY question — "which ticker moved most TODAY, and why" —
+and the window is the whole difference.
 
-The card carries a `headline` (a free, always-generated news roll-up) and an
-optional `price_move` (a web-grounded, cited causal explanation). Those are not
-interchangeable, and a widget is exactly the surface where conflating them does
-damage: 30 characters under a red −4.8%, a news summary *reads* as the cause even
-when nothing established one. Measured 2026-08-14: every one of the 12 live cards
-had a headline and **none** had a `price_move`, so a naive implementation would
-have shipped 100% roll-ups presented as reasons.
+An earlier build served the card's news `headline` as the reason. Measured against the
+live corpus, that shipped lines like *"Archer Aviation explores new markets and
+strategic growth"* under a red −5.02%: a generic PR headline that explains nothing,
+reading as a cause purely by adjacency. The grounded catalyst was no better — the only
+cached ACHR row described a **+42.7% fifteen-day rally**, a correct answer to a
+different question.
 
-So the reason is a tagged union on `kind`, and the tag is not cosmetic — iOS
-renders a "why it moved" treatment only for `catalyst`. See `WidgetReasonKind`.
+So the payload now carries two separate things instead of one ambiguous string:
+`cause` (established from dated, structured data — earnings today, an analyst action
+today, a classified headline, an industry move) and `context` (pure arithmetic — the σ
+multiple, the overnight gap split, the industry delta). `cause.kind == "none"` is a
+real, common, useful answer, not a failure.
 
 CONTRACT NOTES
 --------------
@@ -35,42 +37,10 @@ CONTRACT NOTES
   close. Labelling that is honest; hiding it makes the widget look broken.
 """
 
-from enum import Enum
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.schemas.updates import SourceRefResponse
-
-
-class WidgetReasonKind(str, Enum):
-    """Provenance of the reason text. Never collapse these.
-
-    * ``catalyst`` — the web-grounded, source-cited `price_move.reason`. The only
-      kind that may be presented as *why* the move happened.
-    * ``context`` — the insight card's news headline. Says what is going on around
-      the ticker; establishes no causal link. Rendered without the "why it moved"
-      framing.
-    * ``none`` — a deterministic sentence built from the numbers we already have
-      ("−4.8%, about 1.1× its normal daily range"). Always available, never wrong,
-      and the reason a quiet-news mover still renders something truthful.
-    """
-
-    CATALYST = "catalyst"
-    CONTEXT = "context"
-    NONE = "none"
-
-
-class WidgetReasonResponse(BaseModel):
-    """The line under the ticker, plus what it is allowed to claim."""
-
-    kind: WidgetReasonKind
-    text: str
-    # 2-4 word label ("Earnings Beat"). Only ever set when kind == catalyst.
-    catalyst_tag: Optional[str] = None
-    # Cited sources. Only ever non-empty when kind == catalyst — a `context`
-    # reason must not borrow the card's article list and thereby look sourced.
-    sources: List[SourceRefResponse] = Field(default_factory=list)
 
 
 class WidgetMoverResponse(BaseModel):
@@ -87,7 +57,10 @@ class WidgetMoverResponse(BaseModel):
     # Continuous |move| / σ_daily. None when σ is unknown — NOT 0.0, which would
     # read as "perfectly normal" for a ticker we simply cannot judge.
     z: Optional[float] = None
-    reason: WidgetReasonResponse
+    # Why it moved today. Always present; `cause.kind == "none"` is a real answer.
+    cause: "WidgetCauseResponse"
+    # The arithmetic beside it — σ multiple, gap split, industry delta.
+    context: "WidgetMoveContextResponse"
 
 
 class WidgetBasketResponse(BaseModel):
@@ -115,8 +88,52 @@ class WidgetBasketResponse(BaseModel):
     text: str
 
 
+class WidgetCauseResponse(BaseModel):
+    """Why the stock moved TODAY — established from structured data, not generated.
+
+    Produced by `daily_move_attribution`, which checks a small enumerable answer set
+    (earnings today · an analyst action today · classifiable company news · the
+    industry moved · the market moved) and returns `kind="none"` when none of them
+    holds. Every branch is dated by construction, so a multi-day rally narrative can
+    never appear here — the bug that motivated the rebuild.
+    """
+
+    # 'earnings' | 'analyst' | 'company_news' | 'sector' | 'market' | 'none'.
+    kind: str
+    # 2-4 word badge label ("Earnings Beat"). None when kind == 'none'.
+    tag: Optional[str] = None
+    # One punchy sentence. NEVER empty — the 'none' branch says what it checked and
+    # how the move compares with its industry, which is more useful than silence.
+    detail: str
+
+
+class WidgetMoveContextResponse(BaseModel):
+    """Arithmetic about the move. Always true, never a guess, always present."""
+
+    change_percent: float
+    # |move| / σ_daily. None when σ is unknown — NOT 0.0, which would read as
+    # "judged, perfectly normal" for a ticker we cannot judge.
+    z: Optional[float] = None
+    # The overnight half of the move. Both `open` and `previousClose` ride on the
+    # batch-quote row already fetched, so this costs nothing — and a gap means the
+    # stock moved before anyone could trade, which is itself an explanation.
+    gap_percent: Optional[float] = None
+    intraday_percent: Optional[float] = None
+    gap_dominant: bool = False
+    industry_name: Optional[str] = None
+    industry_change_percent: Optional[float] = None
+    market_change_percent: Optional[float] = None
+
+
 class WidgetMoverPayload(BaseModel):
-    """What one widget timeline entry renders."""
+    """What one widget timeline entry renders.
+
+    Deliberately NOT carrying: a market news headline (`__MARKET__`'s roll-up is not a
+    move and not today-scoped), a `universe_label` (was decoded by iOS and rendered
+    nowhere), or an `is_stale` flag (it meant "the market is closed", which is not the
+    same thing — a Saturday snapshot of Friday's close is correct, not stale).
+    `market_session` + `as_of` carry all of that honestly.
+    """
 
     # 'market' | 'portfolio'.
     mode: str
@@ -125,21 +142,15 @@ class WidgetMoverPayload(BaseModel):
     # 'premarket' | 'regular' | 'afterhours' | 'closed', from `market_hours.session_phase`.
     # Lets the widget say "at Friday's close" instead of implying live data.
     market_session: str
-    # True when the data predates the current session — the widget shows a muted
-    # timestamp rather than pretending to be live.
-    is_stale: bool = False
 
-    # None on a genuinely flat day, or when a portfolio is empty. iOS falls back
-    # to `market_story`; it must never render an empty card.
+    # None only when nothing was readable — an empty portfolio falls back to market
+    # mode at the endpoint, so this is absent far less often than it used to be.
     headline_mover: Optional[WidgetMoverResponse] = None
     # Portfolio mode only, and only when the correlated-move test passes.
     basket: Optional[WidgetBasketResponse] = None
-    # The market-level line ('Mixed Signals Cloud US Market Outlook'). Always
-    # populated for market mode so the fallback path can never be blank.
-    market_story: Optional[str] = None
+    # Next few movers, for the large family. The service already reads their cards;
+    # without this the 4x4 tile renders a void.
+    runners_up: List[WidgetMoverResponse] = Field(default_factory=list)
 
-    # Honest framing for what was ranked. Market mode ranks inside the universe
-    # Caydex actually tracks — those are the only tickers with a σ, a card and a
-    # possible catalyst — so the widget says so rather than implying it scanned
-    # the whole market.
-    universe_label: Optional[str] = None
+
+WidgetMoverResponse.model_rebuild()

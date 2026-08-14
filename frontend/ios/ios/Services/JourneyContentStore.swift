@@ -426,15 +426,20 @@ final class JourneyContentStore {
             for lesson in file.lessons {
                 let slug = Self.slug(lesson.title)
                 bundledByTitle[lesson.title] = lesson.cards.map { card in
-                    let isCorner = card.type == "title" || card.type == "completion"
-                    let image = (card.hasImage == true) ? "journey_\(slug)_\(card.type)" : nil
+                    // Offline fallback only, and only for the TITLE card — the completion
+                    // card no longer carries artwork. `hasImage` stays load-bearing here, so
+                    // shipping 27 imagesets later lights offline up with no further change.
+                    // Note these names use the TITLE-derived slug; the remote path uses the
+                    // authored one, and they disagree for 14 lessons.
+                    let image = (card.type == "title" && card.hasImage == true)
+                        ? "journey_\(slug)_title" : nil
                     return makeCard(
                         title: lesson.title,
                         type: card.type,
                         headline: card.headline,
                         text: card.text ?? "",
                         audio: card.audioClip,
-                        image: image ?? (isCorner ? "journey_\(slug)_\(card.type)" : nil),
+                        image: image,
                         cta: card.cta,
                         readAlong: card.readAlongWords
                     )
@@ -450,7 +455,14 @@ final class JourneyContentStore {
     private func makeCard(title lessonTitle: String, type: String, headline: String?,
                           text: String, audio: String?, image: String?, cta: String?,
                           readAlong: [ReadAlongWord]? = nil) -> LessonTopicCard {
-        let slug = Self.slug(lessonTitle)
+        // No `?? "journey_<slug>_<type>"` fallback on either corner card. Those asset names
+        // have NEVER resolved — there is not one journey_* imageset in Assets.xcassets — so
+        // the fallback only ever produced the "Image coming soon" placeholder. Passing nil
+        // instead makes LessonTitleCard/LessonCompletionCard skip the slot entirely, which
+        // is why removing this also removes the placeholder from every installed build.
+        // It additionally takes Self.slug(_:) out of the artwork path for good: that derived
+        // slug disagrees with the authored `slug` for 14 of the 27 lessons, and Storage URLs
+        // are keyed on the authored one.
         switch type {
         case "title":
             return .titleCard(
@@ -458,15 +470,16 @@ final class JourneyContentStore {
                 subtitle: Self.segments(from: text),
                 audioText: Self.spoken(from: text),
                 audioClip: audio,
-                imageName: image ?? "journey_\(slug)_title",
+                imageName: image,
                 readAlongWords: readAlong
             )
         case "completion":
+            // Deliberately no imageName: the closing card carries no artwork by product
+            // decision. Pinned by tests/test_journey_art_parity.py.
             return .completionCard(
                 title: headline ?? "You're ready.",
                 subtitle: Self.spoken(from: text),
-                ctaDestination: Self.cta(cta),
-                imageName: image ?? "journey_\(slug)_completion"
+                ctaDestination: Self.cta(cta)
             )
         default: // content
             return .contentCard(

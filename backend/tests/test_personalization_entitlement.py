@@ -119,3 +119,106 @@ def test_a_missing_user_dict_does_not_raise(monkeypatch):
     monkeypatch.setattr(FLAG, True)
     _install(monkeypatch, _profile())
     assert chat_ep._reader_lens_for({}) is None
+
+
+# ── Memory facts ride the SAME gate (Phase 7) ────────────────────────────────
+#
+# Memory is OBSERVED rather than stated, so it must not accumulate — or be applied — for
+# a reader who declined personalization. Both sides consult the same stored consent, so
+# the read and the write can never disagree about who opted in.
+
+MEM_FLAG = "app.config.settings.CHAT_MEMORY_FACTS_ENABLED"
+
+
+def _install_facts(monkeypatch, facts=None, recorded=None):
+    class _Svc:
+        def top_facts(self, user_id, limit=8):
+            return dict(facts or {})
+
+        def record(self, user_id, pairs):
+            if recorded is not None:
+                recorded.append((user_id, list(pairs)))
+            return len(list(pairs))
+
+    monkeypatch.setattr(
+        "app.services.user_memory_facts_service.get_user_memory_facts_service",
+        lambda: _Svc(),
+    )
+
+
+def test_memory_is_appended_to_the_lens_when_enabled(monkeypatch):
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _install(monkeypatch, _profile())
+    _install_facts(monkeypatch, {"ticker_discussed": ["NVDA"]})
+    lens = chat_ep._reader_lens_for({"id": "u1", "tier": "pro"})
+    assert lens and "NVDA" in lens and "ASKING ABOUT" in lens
+
+
+def test_memory_flag_off_leaves_the_preference_block_intact(monkeypatch):
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, False)
+    _install(monkeypatch, _profile())
+    _install_facts(monkeypatch, {"ticker_discussed": ["NVDA"]})
+    lens = chat_ep._reader_lens_for({"id": "u1", "tier": "pro"})
+    assert lens and "NVDA" not in lens, "memory leaked in with its flag off"
+    assert "dividends" in lens, "the preference block should be unaffected"
+
+
+def test_no_memory_without_consent(monkeypatch):
+    """The preference gate refuses first, so memory is never even read."""
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _install(monkeypatch, _profile(consented_at=None))
+    _install_facts(monkeypatch, {"ticker_discussed": ["NVDA"]})
+    assert chat_ep._reader_lens_for({"id": "u1", "tier": "pro"}) is None
+
+
+# ── recording ────────────────────────────────────────────────────────────────
+
+def test_recording_stores_the_ticker_and_the_routed_theme(monkeypatch):
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _install(monkeypatch, _profile())
+    recorded = []
+    _install_facts(monkeypatch, recorded=recorded)
+    chat_ep._record_memory_facts(
+        {"id": "u1", "tier": "premium"}, "NVDA", {"specialists": ["valuation"]},
+    )
+    assert recorded and recorded[0][0] == "u1"
+    assert ("ticker_discussed", "NVDA") in recorded[0][1]
+    assert ("question_theme", "valuation") in recorded[0][1]
+
+
+@pytest.mark.parametrize("user,stock,route", [
+    ({"id": "g1", "tier": "free", "is_guest": True}, "NVDA", {"specialists": ["valuation"]}),
+    ({"id": "u1", "tier": "free"}, "NVDA", {"specialists": ["valuation"]}),
+    ({"id": "u1", "tier": "pro"}, None, None),          # nothing observable this turn
+    ({"id": "u1", "tier": "pro"}, None, {"specialists": []}),
+])
+def test_recording_is_skipped_when_it_should_not_happen(monkeypatch, user, stock, route):
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _install(monkeypatch, _profile())
+    recorded = []
+    _install_facts(monkeypatch, recorded=recorded)
+    chat_ep._record_memory_facts(user, stock, route)
+    assert recorded == []
+
+
+def test_recording_skipped_without_consent(monkeypatch):
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _install(monkeypatch, _profile(consented_at=None))
+    recorded = []
+    _install_facts(monkeypatch, recorded=recorded)
+    chat_ep._record_memory_facts({"id": "u1", "tier": "pro"}, "NVDA", {"specialists": ["macro"]})
+    assert recorded == [], "recorded memory for a reader who never consented"
+
+
+def test_recording_never_raises(monkeypatch):
+    """It runs AFTER the answer is persisted — a failure here must be invisible."""
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _install(monkeypatch, raises=True)
+    chat_ep._record_memory_facts({"id": "u1", "tier": "pro"}, "NVDA", {"specialists": ["macro"]})

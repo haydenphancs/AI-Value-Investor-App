@@ -49,6 +49,16 @@ enum LessonCategory {
 }
 
 // MARK: - Lesson
+/// The book offered by the Journey's "want to go deeper?" card.
+///
+/// A named type rather than a tuple so the card's label and the chat seed read from one
+/// value — those were two separate hardcoded strings, behind a button that did nothing.
+struct JourneyDeepDiveBook {
+    let title: String
+    let author: String
+}
+
+
 struct Lesson: Identifiable {
     let id = UUID()
     let title: String

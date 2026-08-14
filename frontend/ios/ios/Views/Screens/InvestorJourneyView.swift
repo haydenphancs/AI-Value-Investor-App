@@ -13,6 +13,11 @@ struct InvestorJourneyView: View {
     var scrollToNextLesson: Bool = false
     @Namespace private var lessonNamespace
 
+    // Its OWN ChatViewModel, like every other .aiChatCover host: sharing the Wiser tab's
+    // resumable thread would clobber it. Caller-owned so "resume last conversation" works.
+    @StateObject private var chatViewModel = ChatViewModel()
+    @State private var showChat = false
+
     var body: some View {
         ZStack {
             // Background
@@ -57,8 +62,10 @@ struct InvestorJourneyView: View {
                             }
 
                             // Chat with book prompt (between Level 2 and 3)
-                            ChatWithBookPromptCard {
-                                viewModel.openChatWithBook()
+                            ChatWithBookPromptCard(
+                                bookTitle: viewModel.deepDiveBook.title
+                            ) {
+                                handleChatWithBook()
                             }
                             .padding(.horizontal, AppSpacing.lg)
 
@@ -125,6 +132,7 @@ struct InvestorJourneyView: View {
             }
         }
         .navigationBarHidden(true)
+        .aiChatCover(isPresented: $showChat, viewModel: chatViewModel)
         .fullScreenCover(isPresented: $viewModel.showLessonStory) {
             if let lesson = viewModel.selectedLesson {
                 LessonTopicCardView(
@@ -139,10 +147,46 @@ struct InvestorJourneyView: View {
                     },
                     onLessonCompleted: {
                         viewModel.markSelectedLessonCompleted()
+                    },
+                    onAskAI: {
+                        handleAskAboutLesson(lesson)
                     }
                 )
             }
         }
+    }
+
+    /// Seeds a chat about the Journey's deep-dive book.
+    ///
+    /// Replaces a `print()` that shipped as a dead button. Reads the title from the
+    /// ViewModel so the card's label and this seed cannot drift apart.
+    private func handleChatWithBook() {
+        let book = viewModel.deepDiveBook
+        chatViewModel.startNewConversation(
+            firstMessage: "Tell me about \"\(book.title)\" by \(book.author).",
+            context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas.",
+            contextType: .book
+        )
+        showChat = true
+    }
+
+    /// Seeds a chat grounded on the lesson just finished.
+    ///
+    /// ⚠️ The reference is the lesson TITLE, not `lesson.id`: that id is a client-side
+    /// `UUID()` regenerated on every launch and unknown to the backend, so sending it
+    /// would never resolve. `ChatContextResolver._resolve_journey_lesson` matches on the
+    /// backend id OR the title, and the title is the only value both sides share.
+    ///
+    /// This is the FIRST caller of `.journeyLesson`. The backend branch has been built,
+    /// tested and deployed all along with nothing on iOS ever sending it.
+    private func handleAskAboutLesson(_ lesson: Lesson) {
+        viewModel.dismissLessonStory()
+        chatViewModel.startNewConversation(
+            firstMessage: "Explain \"\(lesson.title)\" in simple terms.",
+            contextType: .journeyLesson,
+            referenceId: lesson.title
+        )
+        showChat = true
     }
 
     private func handleCTANavigation(_ destination: LessonCTADestination) {

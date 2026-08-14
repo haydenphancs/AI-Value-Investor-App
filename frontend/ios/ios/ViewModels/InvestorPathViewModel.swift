@@ -265,10 +265,16 @@ class InvestorJourneyViewModel: ObservableObject {
         }
     }
 
-    func openChatWithBook() {
-        print("Opening chat with The Intelligent Investor")
-        // Navigate to chat with book
-    }
+    /// The book the Journey's "want to go deeper?" card offers.
+    ///
+    /// This replaces a `print()` stub that shipped as a DEAD BUTTON: tapping the card
+    /// logged a line in debug and did nothing in release. Presentation lives in the view
+    /// (a ViewModel cannot present a cover), so this exposes only the data — and being
+    /// one value means the card's label and the chat's seed can no longer disagree.
+    let deepDiveBook = JourneyDeepDiveBook(
+        title: "The Intelligent Investor",
+        author: "Benjamin Graham"
+    )
 
     func updateMorningSessionTime(_ date: Date) {
         studySchedule.morningSessionTime = date

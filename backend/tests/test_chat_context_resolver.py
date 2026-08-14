@@ -705,3 +705,60 @@ async def test_ticker_report_history_arrays_dropped_narratives_survive(resolver,
 
 def test_singleton_is_stable():
     assert get_chat_context_resolver() is get_chat_context_resolver()
+
+
+# ── JOURNEY_LESSON, reached from iOS for the first time (Phase 5) ────────────
+#
+# This branch shipped fully built and was NEVER CALLED: no iOS site sent the context
+# type. Now that `InvestorJourneyView` does, these pin the two things that call site
+# actually depends on.
+
+
+def _journey_svc(monkeypatch, lessons):
+    class _Svc:
+        async def get_journey(self):
+            return _Obj(lessons=lessons)
+
+    import app.services.journey_content_service as jc
+    monkeypatch.setattr(jc, "get_journey_content_service", lambda: _Svc())
+
+
+@pytest.mark.asyncio
+async def test_journey_resolves_by_TITLE_not_only_id(resolver, monkeypatch):
+    """iOS sends the TITLE, and it has no choice: `Lesson.id` is a client-side `UUID()`
+    regenerated every launch and unknown to the backend. If this branch only matched on
+    id, every lesson chat would silently degrade to ungrounded."""
+    _journey_svc(monkeypatch, [
+        {"id": "srv-42", "title": "Margin of Safety", "description": "Buy below value."},
+    ])
+    block = await resolver.resolve("JOURNEY_LESSON", "Margin of Safety", None)
+    assert block and "Margin of Safety" in block
+
+
+@pytest.mark.asyncio
+async def test_journey_title_match_is_exact(resolver, monkeypatch):
+    """A near-miss must resolve to nothing rather than grounding on the wrong lesson —
+    an almost-right lesson is worse than none, because the answer looks authoritative."""
+    _journey_svc(monkeypatch, [{"id": "1", "title": "Margin of Safety", "description": "x"}])
+    assert await resolver.resolve("JOURNEY_LESSON", "Margin of Safety ", None) is not None
+    assert await resolver.resolve("JOURNEY_LESSON", "Margin", None) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ref", [None, "", "   ", "Nonexistent Lesson"])
+async def test_journey_unknown_reference_degrades_quietly(resolver, monkeypatch, ref):
+    _journey_svc(monkeypatch, [{"id": "1", "title": "Risk 101", "description": "x"}])
+    assert await resolver.resolve("JOURNEY_LESSON", ref, None) is None
+
+
+@pytest.mark.asyncio
+async def test_journey_service_failure_never_raises(resolver, monkeypatch):
+    """Grounding is best-effort; a content-service outage must cost the grounding, not
+    the answer."""
+    class _Svc:
+        async def get_journey(self):
+            raise RuntimeError("journey content service down")
+
+    import app.services.journey_content_service as jc
+    monkeypatch.setattr(jc, "get_journey_content_service", lambda: _Svc())
+    assert await resolver.resolve("JOURNEY_LESSON", "Risk 101", None) is None

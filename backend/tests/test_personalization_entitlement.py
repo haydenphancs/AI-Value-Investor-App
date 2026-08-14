@@ -384,3 +384,79 @@ async def test_async_lens_survives_a_store_failure(monkeypatch):
     monkeypatch.setattr(FLAG, True)
     _install(monkeypatch, raises=True)
     assert await chat_ep._reader_lens_for_async({"id": "u1", "tier": "pro"}) is None
+
+
+# ── The WRITE side must also stay off the event loop ─────────────────────────
+#
+# `_reader_lens_for_async` fixed the read. The write is worse and was missed: one
+# `_record_memory_facts` call is up to ~7 sequential blocking Supabase round trips (profile
+# read, then a select + upsert per fact, then the eviction select + delete). Run inline from
+# an `async def` that stalls the whole worker for every concurrent request.
+
+
+@pytest.mark.asyncio
+async def test_memory_write_costs_nothing_when_the_feature_is_off(monkeypatch):
+    monkeypatch.setattr(MEM_FLAG, False)
+    _no_thread(monkeypatch)
+    await chat_ep._record_memory_facts_async({"id": "u1", "tier": "pro"}, "NVDA", {"specialists": ["macro"]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user", [
+    {"id": "g1", "tier": "free", "is_guest": True},
+    {"id": "u1", "tier": "free"},
+    {"id": "u1", "tier": None},
+])
+async def test_memory_write_costs_nothing_for_an_ineligible_caller(monkeypatch, user):
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _no_thread(monkeypatch)
+    await chat_ep._record_memory_facts_async(user, "NVDA", {"specialists": ["macro"]})
+
+
+@pytest.mark.asyncio
+async def test_memory_write_really_uses_a_thread(monkeypatch):
+    """The point of the wrapper. Without this it could be 'simplified' back to a direct
+    call and every other assertion here would still pass."""
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _install(monkeypatch, _profile())
+    recorded = []
+    _install_facts(monkeypatch, recorded=recorded)
+    hopped = {"n": 0}
+    real = asyncio.to_thread
+
+    async def _counting(fn, *a, **kw):
+        hopped["n"] += 1
+        return await real(fn, *a, **kw)
+
+    monkeypatch.setattr(asyncio, "to_thread", _counting)
+    await chat_ep._record_memory_facts_async(
+        {"id": "u1", "tier": "pro"}, "NVDA", {"specialists": ["valuation"]}
+    )
+    assert hopped["n"] == 1, "the blocking memory write did not go through a thread"
+    assert recorded, "nothing was recorded — the wrapper swallowed the write"
+
+
+@pytest.mark.asyncio
+async def test_memory_write_never_raises(monkeypatch):
+    """It runs after the answer is delivered; a failure must stay invisible."""
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    _install(monkeypatch, raises=True)
+    await chat_ep._record_memory_facts_async({"id": "u1", "tier": "pro"}, "NVDA", {"specialists": ["macro"]})
+
+
+def test_a_general_only_turn_does_not_pay_a_profile_read(monkeypatch):
+    """`general` is the router's fallback AND its degraded result, and is deliberately not a
+    stored theme — so a ticker-less general turn builds a non-empty `pairs` that validates to
+    nothing. Checking `pairs` before validating meant paying a Supabase profile round trip,
+    on a very common path, to write nothing at all."""
+    monkeypatch.setattr(FLAG, True)
+    monkeypatch.setattr(MEM_FLAG, True)
+    calls = _install(monkeypatch, _profile())
+    recorded = []
+    _install_facts(monkeypatch, recorded=recorded)
+    chat_ep._record_memory_facts({"id": "u1", "tier": "pro"}, None, {"specialists": ["general"]})
+    assert calls["n"] == 0, "read the profile for a turn that can never record anything"
+    assert recorded == []

@@ -109,7 +109,18 @@ struct PaywallView: View {
                     // already consented — a repeat purchase or a re-subscribe must not
                     // re-ask. Falls through to dismiss if the consent state is unknown
                     // (a failed load), because a purchase flow must never dead-end.
-                    if personalizationConsent.isOn || personalizationConsent.hasLoadFailed {
+                    // "Unknown" covers THREE states, and only one was handled. A failed load
+                    // fell through correctly, but a load still IN FLIGHT (the common case on
+                    // a slow read — the purchase can easily finish first) was treated as
+                    // "has not consented", so a subscriber who consented months ago was asked
+                    // again on a re-subscribe. That is the exact thing the comment above
+                    // forbids. And with nothing stated there is nothing to consent ABOUT: the
+                    // sheet opens "You told us how you like to learn", which would be false.
+                    let stateIsUnknown = personalizationConsent.hasLoadFailed
+                        || personalizationConsent.isLoading
+                    if personalizationConsent.isOn
+                        || stateIsUnknown
+                        || !personalizationConsent.hasPreferences {
                         dismiss()
                     } else {
                         showPersonalizationConsent = true

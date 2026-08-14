@@ -898,3 +898,98 @@ def test_the_success_log_reports_every_counter():
         f"counter(s) tracked in `claimed` but absent from the success log: {sorted(missing)} — "
         f"a claim that moved only those would log all-zeros"
     )
+
+
+# ── The profile claim MERGES; it used to destroy ─────────────────────────────
+#
+# The tie-break was "does the account have a row", not "does the account row contain
+# anything". A phantom row is trivially created (an empty PUT, or a consent-only write on
+# a user with no row), and the costly case is the `.restoring` window: the client keeps
+# sending X-Guest-Id with the token disarmed, so a CONSENT GRANT lands on the guest bucket
+# and answers 200 — then the session heals and the claim deleted that grant. Result:
+# `investor_profile: 0`, no error, no log, and a toggle that silently reads Off again.
+#
+# Every sibling step here merges. These pin that this one does too.
+
+_CONSENT_EARLY = "2026-08-01T00:00:00+00:00"
+_CONSENT_LATE = "2026-08-13T00:00:00+00:00"
+
+
+def _defaults(user_id, **over):
+    row = {
+        "user_id": user_id,
+        "experience_level": "learning", "explanation_style": "balanced",
+        "answer_depth": "brief",
+        "topics": [], "learning_goals": [], "follow_signals": [],
+        "consented_at": None,
+    }
+    row.update(over)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_a_phantom_account_row_does_not_destroy_the_guests_answers():
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [], "portfolios": [],
+        "user_investor_profile": [
+            _defaults(bucket, experience_level="new", topics=["dividends"]),
+            _defaults(_USER["id"]),          # phantom: exists, states nothing
+        ],
+    }
+    res = await _claim(_SB(store), "install-A")
+
+    assert res["claimed"]["investor_profile"] == 1
+    rows = [r for r in store["user_investor_profile"] if r["user_id"] == _USER["id"]]
+    assert len(rows) == 1
+    assert rows[0]["topics"] == ["dividends"], "the guest's answers were thrown away"
+    assert rows[0]["experience_level"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_a_guest_consent_grant_survives_the_claim():
+    """THE regression. A grant written during `.restoring` lands on the guest bucket."""
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [], "portfolios": [],
+        "user_investor_profile": [
+            _defaults(bucket, topics=["energy"], consented_at=_CONSENT_LATE),
+            _defaults(_USER["id"], topics=["value"]),   # account stated topics, never consented
+        ],
+    }
+    await _claim(_SB(store), "install-A")
+
+    row = [r for r in store["user_investor_profile"] if r["user_id"] == _USER["id"]][0]
+    assert row["consented_at"] == _CONSENT_LATE, "the consent grant was destroyed by the claim"
+    assert row["topics"] == ["value"], "the account's own topics must still win"
+
+
+@pytest.mark.asyncio
+async def test_the_earlier_consent_timestamp_wins():
+    """That is when the reader actually accepted."""
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [], "portfolios": [],
+        "user_investor_profile": [
+            _defaults(bucket, consented_at=_CONSENT_EARLY, topics=["energy"]),
+            _defaults(_USER["id"], consented_at=_CONSENT_LATE, topics=["value"]),
+        ],
+    }
+    await _claim(_SB(store), "install-A")
+    row = [r for r in store["user_investor_profile"] if r["user_id"] == _USER["id"]][0]
+    assert row["consented_at"] == _CONSENT_EARLY
+
+
+@pytest.mark.asyncio
+async def test_the_guest_bucket_never_lingers_after_a_merge():
+    """A row left on the per-install bucket is unclaimable and unreachable forever."""
+    bucket = guest_user_id_for("install-A")
+    store = {
+        "watchlist_items": [], "portfolios": [],
+        "user_investor_profile": [
+            _defaults(bucket, topics=["energy"]),
+            _defaults(_USER["id"], topics=["value"]),
+        ],
+    }
+    await _claim(_SB(store), "install-A")
+    assert not [r for r in store["user_investor_profile"] if r["user_id"] == bucket]

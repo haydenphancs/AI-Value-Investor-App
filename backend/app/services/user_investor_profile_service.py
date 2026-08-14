@@ -139,16 +139,70 @@ def sanitize_updates(raw: Any) -> Dict[str, Any]:
     return out
 
 
-def is_empty_profile(profile: Dict[str, Any]) -> bool:
+def is_empty_profile(profile: Any) -> bool:
     """True when the user expressed no preference at all.
 
     Scalars have defaults, so 'empty' means every ARRAY is empty AND every scalar is
     still its default. Used to decide whether there is anything worth applying — an
     all-default profile should not claim to personalize anything.
+
+    Defaults are applied for MISSING keys rather than compared against `None`. Without
+    that, `is_empty_profile({})` returned False — a dict containing nothing at all was
+    reported as "not empty", because `None != "learning"`. Unreachable through
+    `_profile_response` today (it only ever sees a `sanitize_profile` output, which seeds
+    every key), but a caller handing over a raw row would have flipped `is_empty` to False
+    and made the UI claim the reader had stated preferences they never stated.
+
+    Non-dict input answers True rather than raising, matching `sanitize_profile`'s and
+    `sanitize_updates`' "never raises" contract — the three sit together and were
+    inconsistent about it (`is_empty_profile(None)` raised `AttributeError`).
     """
+    if not isinstance(profile, dict):
+        return True
     if any(profile.get(f) for f in ARRAY_FIELDS):
         return False
-    return all(profile.get(f) == DEFAULTS[f] for f in SCALAR_FIELDS)
+    return all(profile.get(f, DEFAULTS[f]) == DEFAULTS[f] for f in SCALAR_FIELDS)
+
+
+def merge_profiles(account: Any, guest: Any) -> Dict[str, Any]:
+    """Fold a guest profile into an account one. PURE — returns only the CHANGED columns.
+
+    Used by `POST /users/me/claim-guest-data`, which previously deleted the guest row
+    whenever the account had any row at all. That threw away real answers — and, in the
+    `.restoring` window, a real CONSENT grant, which is the compliance artifact the whole
+    feature hangs on.
+
+    The rules, and why:
+      * **arrays** — the account's list wins when it is non-empty; an empty account list
+        takes the guest's. Deliberately not a union: a user who curated their topics on the
+        account should not silently regain ones they removed, and the guest row is at most
+        first-run onboarding answers.
+      * **scalars** — the account wins unless it is still at the column default, in which
+        case the guest's explicit answer fills the gap.
+      * **`consented_at`** — the EARLIER of the two, because that is when the reader
+        actually accepted. A grant on either side is a grant; this is the one field where
+        losing the guest's value is a compliance regression rather than a data-loss nit.
+
+    Returns `{}` when the guest row adds nothing, so the caller can skip a pointless write.
+    """
+    if not isinstance(account, dict) or not isinstance(guest, dict):
+        return {}
+
+    changed: Dict[str, Any] = {}
+    for field in ARRAY_FIELDS:
+        if not account.get(field) and guest.get(field):
+            changed[field] = guest[field]
+    for field in SCALAR_FIELDS:
+        acct = account.get(field, DEFAULTS[field])
+        their = guest.get(field)
+        if acct == DEFAULTS[field] and their and their != DEFAULTS[field]:
+            changed[field] = their
+
+    acct_consent, guest_consent = account.get("consented_at"), guest.get("consented_at")
+    if guest_consent and (not acct_consent or str(guest_consent) < str(acct_consent)):
+        changed["consented_at"] = guest_consent
+
+    return changed
 
 
 class UserInvestorProfileService:

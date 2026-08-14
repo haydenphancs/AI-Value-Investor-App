@@ -33,23 +33,33 @@ _SWIFT = (
 
 
 def _response_from(raw: dict, *, tier: str = "free") -> InvestorProfileResponse:
-    """Mirror `users._profile_response` without importing the endpoint module."""
-    from app.services.entitlements import required_tier_for_signals, signals_unlocked
+    """Shape a stored row exactly as the endpoint does — by CALLING the endpoint's builder.
+
+    ⚠️ This used to be a hand-written mirror ("without importing the endpoint module"), and
+    it drifted the moment `_profile_response` changed: it kept computing the old two-arm
+    `applied = signals_unlocked(tier) and not is_empty_profile(profile)` after the real one
+    started delegating to `may_apply_profile`, which additionally requires `consented_at`
+    and the feature flag. Measured on the same input, the mirror said `True` where the API
+    said `False` — and the suite stayed green, because a copy of the logic can only ever
+    test itself. This file's entire purpose is parity, so a copy is the one thing it must
+    not contain. (`_SESSION_LIST_COLUMNS` learned the same lesson: derive, never duplicate.)
+
+    `sanitize_profile` is still applied here because `_profile_response` expects a row that
+    has already been through the service, which is what `get_profile` always hands it.
+    """
+    from app.api.v1.endpoints.users import _profile_response
 
     profile = sanitize_profile(raw)
-    empty = is_empty_profile(profile)
-    return InvestorProfileResponse(
-        experience_level=profile["experience_level"],
-        explanation_style=profile["explanation_style"],
-        answer_depth=profile["answer_depth"],
-        topics=profile["topics"],
-        learning_goals=profile["learning_goals"],
-        follow_signals=profile["follow_signals"],
-        has_profile=bool(raw),
-        is_empty=empty,
-        applied=signals_unlocked(tier) and not empty,
-        required_tier=required_tier_for_signals(tier),
-    )
+    # `sanitize_profile` owns only the closed-vocabulary fields; consent and row-existence
+    # ride alongside it on a real row, so mirror that here.
+    if raw.get("consented_at"):
+        profile["consented_at"] = raw["consented_at"]
+    profile["has_profile"] = bool(raw)
+    return _profile_response(profile, {"id": "u1", "tier": tier})
+
+
+# A profile that satisfies every arm of the gate EXCEPT the ones a given test is varying.
+_CONSENTED = "2026-08-13T00:00:00+00:00"
 
 
 # ── the response survives worst-case inputs ─────────────────────────────────
@@ -91,14 +101,61 @@ def test_every_vocabulary_value_round_trips():
     ("free", False), ("pro", True), ("premium", True),
     (None, False), ("wizard", False), ("", False),
 ])
-def test_applied_follows_the_tier_and_falls_closed(tier, expected):
-    r = _response_from({"topics": ["value"]}, tier=tier)
+def test_applied_follows_the_tier_and_falls_closed(tier, expected, monkeypatch):
+    """The TIER axis, with every other arm of the gate satisfied.
+
+    The flag and the consent timestamp are set here deliberately: without them every row
+    would be `False` for a reason unrelated to the tier, and this parametrisation would
+    pass while testing nothing. That is exactly how the old hand-copied mirror hid the
+    drift it was supposed to catch.
+    """
+    monkeypatch.setattr("app.config.settings.CHAT_PERSONALIZATION_ENABLED", True)
+    r = _response_from({"topics": ["value"], "consented_at": _CONSENTED}, tier=tier)
     assert r.applied is expected
 
 
-def test_an_empty_profile_is_never_applied_even_on_a_paid_tier():
+def test_applied_is_false_without_consent_on_every_tier(monkeypatch):
+    """The CONSENT arm — the one the old mirror omitted entirely."""
+    monkeypatch.setattr("app.config.settings.CHAT_PERSONALIZATION_ENABLED", True)
+    for tier in ("pro", "premium"):
+        assert _response_from({"topics": ["value"]}, tier=tier).applied is False
+
+
+def test_applied_is_false_while_the_feature_flag_is_off():
+    """The FLAG arm — the other omission, and the state the build ships in."""
+    r = _response_from({"topics": ["value"], "consented_at": _CONSENTED}, tier="pro")
+    assert r.applied is False
+
+
+def test_an_empty_profile_is_never_applied_even_on_a_paid_tier(monkeypatch):
     """Nothing to personalize with — claiming otherwise would be a lie in the UI."""
-    assert _response_from({}, tier="premium").applied is False
+    monkeypatch.setattr("app.config.settings.CHAT_PERSONALIZATION_ENABLED", True)
+    assert _response_from({"consented_at": _CONSENTED}, tier="premium").applied is False
+
+
+def test_the_wire_field_never_disagrees_with_the_runtime_gate(monkeypatch):
+    """Parity stated directly, across the whole grid, so a future re-implementation fails.
+
+    Enumerating outcomes cannot catch a FIFTH arm being added to `may_apply_profile` and
+    not to the endpoint; asserting equivalence can.
+    """
+    from app.services.agents.investor_profile_prompt import may_apply_profile
+
+    for flag in (True, False):
+        monkeypatch.setattr("app.config.settings.CHAT_PERSONALIZATION_ENABLED", flag)
+        for tier in ("pro", "premium", "free", None, "wizard", ""):
+            for raw in (
+                {"topics": ["value"], "consented_at": _CONSENTED},
+                {"topics": ["value"]},
+                {"consented_at": _CONSENTED},
+                {},
+            ):
+                profile = sanitize_profile(raw)
+                if raw.get("consented_at"):
+                    profile["consented_at"] = raw["consented_at"]
+                assert _response_from(raw, tier=tier).applied is may_apply_profile(
+                    profile, tier
+                ), f"wire disagrees with the gate: flag={flag} tier={tier!r} raw={raw}"
 
 
 def test_required_tier_names_the_plan_the_server_enforced():

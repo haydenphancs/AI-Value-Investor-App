@@ -92,15 +92,22 @@ struct InvestorJourneyView: View {
                             }
 
                             // Study Schedule section
-                            InvestorJourneyStudyScheduleSection(
-                                schedule: $viewModel.studySchedule,
-                                onMorningTimeTap: {
-                                    // Show time picker for morning session
-                                },
-                                onReviewTimeTap: {
-                                    // Show time picker for review time
-                                }
-                            )
+                            // ⚠️ The Study Schedule section is intentionally NOT rendered.
+                            // Every control in it was inert: both time rows were empty
+                            // closures with a "show time picker" comment, and the section
+                            // wrote straight through a `@Binding`, so
+                            // `InvestorPathViewModel.updateMorningSessionTime` /
+                            // `updateReviewTime` / `toggleDailyReminder` were never called
+                            // and `saveSchedule()` never ran — the toggle reset to its
+                            // default the moment the `@StateObject` was recreated.
+                            //
+                            // "Daily Reminder" is the part that made this worse than dead
+                            // UI: it promises a notification, and there is no such kind in
+                            // `notification_kinds.py` (9 kinds, none of them a study
+                            // reminder), so nothing could ever have been scheduled. Adding
+                            // one is a feature with a registry entry, a preference key, a
+                            // sender and a settings toggle — not a bug fix. The organism
+                            // and the ViewModel methods are left in place, ready for it.
 
                             // Inspirational quote
                             InvestorQuoteCard(quote: viewModel.quote)
@@ -141,9 +148,12 @@ struct InvestorJourneyView: View {
                         viewModel.dismissLessonStory()
                     },
                     onCTATapped: { destination in
+                        // Capture the lesson BEFORE dismissing — `dismissLessonStory()`
+                        // clears `selectedLesson`, so reading it afterwards always gave nil
+                        // and the CTA lost the only context that makes it specific.
+                        let lessonTitle = viewModel.selectedLesson?.title
                         viewModel.dismissLessonStory()
-                        // Handle CTA navigation based on destination
-                        handleCTANavigation(destination)
+                        handleCTANavigation(destination, lessonTitle: lessonTitle)
                     },
                     onLessonCompleted: {
                         viewModel.markSelectedLessonCompleted()
@@ -162,11 +172,13 @@ struct InvestorJourneyView: View {
     /// ViewModel so the card's label and this seed cannot drift apart.
     private func handleChatWithBook() {
         let book = viewModel.deepDiveBook
-        chatViewModel.startNewConversation(
+        // Present ONLY if the seed took. Both Journey entry points share one view model, so
+        // a seed refused by the in-flight guard would otherwise open the OTHER conversation.
+        guard chatViewModel.startNewConversation(
             firstMessage: "Tell me about \"\(book.title)\" by \(book.author).",
             context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas.",
             contextType: .book
-        )
+        ) else { return }
         showChat = true
     }
 
@@ -181,31 +193,53 @@ struct InvestorJourneyView: View {
     /// tested and deployed all along with nothing on iOS ever sending it.
     private func handleAskAboutLesson(_ lesson: Lesson) {
         viewModel.dismissLessonStory()
-        chatViewModel.startNewConversation(
+        // `context:` is a deliberate fallback, not redundancy. The backend resolves the
+        // grounding block from the LIVE journey catalog; if that is unseeded or degrades to
+        // `lessons: []`, `_resolve_journey_lesson` returns None and `resolve` falls back to
+        // `client_context`. Without this the model would receive nothing while the UI still
+        // showed a "Grounded on Lesson" chip — an answer that overclaims what it read.
+        guard chatViewModel.startNewConversation(
             firstMessage: "Explain \"\(lesson.title)\" in simple terms.",
+            context: "The user just finished the lesson \"\(lesson.title)\". \(lesson.description)",
             contextType: .journeyLesson,
             referenceId: lesson.title
-        )
+        ) else { return }
         showChat = true
     }
 
-    private func handleCTANavigation(_ destination: LessonCTADestination) {
+    /// Acts on the lesson-completion CTA.
+    ///
+    /// Every arm of this used to be a bare `print()`, so in release the lesson simply closed
+    /// and the advertised destination was never reached — the same dead-button class that was
+    /// already fixed once for the deep-dive book card and left in place here.
+    ///
+    /// All six route into Cay AI rather than to another tab, deliberately. There is no
+    /// cross-tab navigation affordance in the app (the tab selection is `@State` in
+    /// `ContentView`, not routable from a Learn sub-screen), and two of the destinations name
+    /// features that do not exist at all — there is no quiz engine and no video player. Chat
+    /// is a real, reachable destination that is already wired on this screen, and it can
+    /// genuinely do each of these things. Seeds are written so the answer continues the
+    /// lesson rather than restating it.
+    private func handleCTANavigation(_ destination: LessonCTADestination, lessonTitle: String?) {
+        let lesson = lessonTitle.map { " I just finished the lesson \"\($0)\"." } ?? ""
+        let seed: String
         switch destination {
         case .analyzeStock:
-            // Navigate to stock analysis - implement based on your navigation
-            print("Navigate to stock analysis")
+            seed = "Walk me through how to analyse a stock, step by step.\(lesson)"
         case .viewPortfolio:
-            // Navigate to portfolio
-            print("Navigate to portfolio")
-        case .readArticle(let articleId):
-            print("Navigate to article: \(articleId)")
-        case .watchVideo(let videoId):
-            print("Navigate to video: \(videoId)")
+            seed = "How should I think about reviewing a portfolio as a whole?\(lesson)"
         case .practiceQuiz:
-            print("Navigate to quiz")
+            seed = lessonTitle.map { "Quiz me on \"\($0)\" — ask me one question at a time." }
+                ?? "Quiz me on what I have been learning — one question at a time."
+        case .readArticle(let articleId):
+            seed = "Explain the key ideas in \"\(articleId)\".\(lesson)"
+        case .watchVideo(let videoId):
+            seed = "Explain \"\(videoId)\" to me.\(lesson)"
         case .custom(let action):
-            print("Custom action: \(action)")
+            seed = "\(action)\(lesson)"
         }
+        guard chatViewModel.startNewConversation(firstMessage: seed) else { return }
+        showChat = true
     }
 }
 

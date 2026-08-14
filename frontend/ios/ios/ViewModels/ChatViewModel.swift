@@ -188,27 +188,43 @@ class ChatViewModel: ObservableObject {
     // MARK: - Session Management
 
     /// Create a new chat session and optionally send the first message.
+    ///
+    /// Returns whether the caller should PRESENT the chat. Every caller used to set
+    /// `showChat = true` on the next line unconditionally, which is wrong for the one path
+    /// that leaves the conversation untouched: the in-flight guard below. Abandoning a
+    /// streaming answer (swipe down) does not clear `isAITyping` — `AIChatScreen` never
+    /// calls `resetConversation()`, by design, so it can resume — so a seed attempted while
+    /// that answer was still generating silently did nothing and then presented the PREVIOUS
+    /// conversation, complete with its grounding chip. On the Journey screen, where the book
+    /// card and the lesson action share one view model, tapping "Ask Cay AI about this
+    /// lesson" would open the book chat and discard the lesson entirely.
+    ///
+    /// `@discardableResult` so the eight callers that cannot hit that race are unchanged.
+    @discardableResult
     func startNewConversation(
         firstMessage: String,
         stockId: String? = nil,
         context: String? = nil,
         contextType: ChatContextType? = nil,
         referenceId: String? = nil
-    ) {
+    ) -> Bool {
         // One seed in flight at a time: block a second synchronous seed (rapid double-tap on the
         // Deep Research / AI Analyst / report-chat buttons, which have no text-field empty-guard)
         // from creating a duplicate backend session and overwriting `messages`. isAITyping is reset
         // by resetConversation()/loadConversation(), so a genuine new chat from a settled state passes.
-        guard !isAITyping else { return }
+        // FALSE: nothing was seeded, so presenting would show the previous conversation.
+        guard !isAITyping else { return false }
 
         // Third-party AI consent gate (App Review 5.1.2(i)). Placed AFTER the in-flight
         // guard but BEFORE any state mutation or network call, so a held send leaves the
         // conversation exactly as it was.
+        // TRUE: the send is held, but the chat must still present — that is where the
+        // consent prompt lives, and the pending send replays once it is granted.
         if holdForConsent(PendingChatSend(
             message: firstMessage, startsNewConversation: true,
             stockId: stockId, context: context,
             contextType: contextType, referenceId: referenceId
-        )) { return }
+        )) { return true }
 
         errorMessage = nil
         currentStockId = stockId
@@ -285,6 +301,10 @@ class ChatViewModel: ObservableObject {
                 errorMessage = "Failed to start conversation. Please try again."
             }
         }
+        // Seeded: `messages` now holds this conversation's first turn, so presenting shows
+        // what the caller asked for. (The network work above is detached — a later failure
+        // surfaces inside the chat, which is the right place for it.)
+        return true
     }
 
     /// Send a message in the current conversation.

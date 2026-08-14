@@ -16,6 +16,10 @@ struct LessonTopicCardView: View {
     var onCTATapped: ((LessonCTADestination) -> Void)?
     /// Fired once when the learner reaches the lesson's completion card.
     var onLessonCompleted: (() -> Void)?
+    /// Ask Cay AI about THIS lesson. Offered on the completion card only — mid-lesson
+    /// it would compete with the read-along, and at the end the learner has the whole
+    /// concept in mind, which is when a follow-up question is actually worth asking.
+    var onAskAI: (() -> Void)?
 
     @StateObject private var voiceManager = AIVoiceManager.shared
     @ObservedObject private var entitlement = LearnAudioEntitlement.shared
@@ -212,6 +216,27 @@ struct LessonTopicCardView: View {
                 }
             )
             .transition(.opacity.combined(with: .move(edge: .bottom)))
+            .overlay(alignment: .bottom) {
+                if onAskAI != nil {
+                    Button {
+                        voiceManager.stop()
+                        stopAutoAdvanceTimer()
+                        onAskAI?()
+                    } label: {
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: "sparkles")
+                            Text("Ask Cay AI about this")
+                        }
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textOnAccent)
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.vertical, AppSpacing.sm)
+                        .background(Capsule().fill(AppColors.primaryFill))
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .padding(.bottom, AppSpacing.xxl)
+                }
+            }
         }
     }
 

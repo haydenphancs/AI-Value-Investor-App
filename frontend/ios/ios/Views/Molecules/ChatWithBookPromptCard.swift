@@ -2,12 +2,18 @@
 //  ChatWithBookPromptCard.swift
 //  ios
 //
-//  Molecule: Prompt card for chatting with The Intelligent Investor
+//  Molecule: prompt card offering a chat about a book.
+//
+//  The title is INJECTED rather than hardcoded here: the label the user reads and the
+//  book the chat is actually seeded with have to come from one place, or they drift.
+//  They already had — this card said "The Intelligent Investor" while the handler
+//  behind it was a `print()` that opened nothing at all.
 //
 
 import SwiftUI
 
 struct ChatWithBookPromptCard: View {
+    let bookTitle: String
     var onTap: (() -> Void)?
 
     var body: some View {
@@ -41,7 +47,7 @@ struct ChatWithBookPromptCard: View {
                         .font(AppTypography.bodyEmphasis)
                         .foregroundColor(AppColors.textPrimary)
 
-                    Text("Chat with The Intelligent Investor")
+                    Text("Chat with \(bookTitle)")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }
@@ -61,7 +67,7 @@ struct ChatWithBookPromptCard: View {
 }
 
 #Preview {
-    ChatWithBookPromptCard()
+    ChatWithBookPromptCard(bookTitle: "The Intelligent Investor")
         .padding()
         .background(AppColors.background)
 }

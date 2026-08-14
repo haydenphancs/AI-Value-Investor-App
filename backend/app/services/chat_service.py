@@ -1236,6 +1236,12 @@ class ChatService:
     # Asset-specific persona extensions
     # Persona = a short analyst VOICE only. No mandatory ##-section scaffolds — chat answers stay
     # concise (see the brevity directive in _build_system_instruction); the user asks for detail.
+    # Session types produced by `_CONTEXT_TO_SESSION_TYPE` for the three LEARN contexts:
+    # BOOK ← BOOK, CONCEPT ← MONEY_MOVES_ARTICLE, JOURNEY ← JOURNEY_LESSON. Gated on this
+    # rather than on `context_type` because the session type is already a parameter here
+    # and survives a history reopen, where the per-message context type may be absent.
+    _LEARN_SESSION_TYPES = frozenset({"BOOK", "CONCEPT", "JOURNEY"})
+
     _ASSET_PERSONAS = {
         "INDEX": (
             "\nAnswer as a senior market strategist — broad conditions, valuations, sector rotation, "
@@ -1303,6 +1309,22 @@ class ChatService:
         # see agents/investor_profile_prompt for why fencing it would make it inert.
         if reader_lens:
             base += reader_lens
+            # Learn surfaces only (book / article / journey lesson), and only when a lens
+            # actually exists — "connect this to what they follow" is meaningless for a
+            # reader who stated no interests, and would invite the model to invent some.
+            #
+            # This is where personalization earns the most and risks the least: the
+            # subject is a CONCEPT, so tailoring the worked example is pedagogy, not a
+            # view about a security. The wording keeps it that way — "how the idea is
+            # generally used", never "so you should".
+            if session_type in self._LEARN_SESSION_TYPES:
+                base += (
+                    "\nSince this is a learning topic, you MAY close with ONE short "
+                    "sentence connecting the concept to something the reader follows — "
+                    "phrased as how the idea is generally applied there, never as a "
+                    "suggestion to buy, sell, or own anything, and never as a claim that "
+                    "it suits them. Skip it entirely if there is no honest connection.\n"
+                )
 
         # Add asset-specific persona
         if asset_type in self._ASSET_PERSONAS:

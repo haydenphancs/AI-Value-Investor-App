@@ -502,7 +502,33 @@ class WidgetMoversService:
         # The ticker→industry map is per-request (it depends on which tickers we are
         # attributing), but it is one batched select against a shared cache table.
         ctx.ticker_industry = await self._industries(tickers)
+
+        # `company_profile_cache` is populated lazily on ticker-detail views, so a
+        # newer or less-visited name can be missing — measured: ACHR and JOBY were,
+        # and without an industry the widget loses its most useful comparison. Fill
+        # the gap for the HEADLINE ticker only: one FMP call, spent on the one line
+        # the reader actually looks at. Runners-up degrade to no industry line.
+        head = tickers[0].upper() if tickers else None
+        if head and head not in ctx.ticker_industry:
+            name = await self._industry_for_one(head)
+            if name:
+                ctx.ticker_industry[head] = name
         return ctx
+
+    async def _industry_for_one(self, ticker: str) -> Optional[str]:
+        try:
+            rows = await get_fmp_client().get_company_profiles_batch([ticker])
+        except Exception as e:
+            logger.warning(
+                "widget: profile lookup failed for %s (%s: %s)",
+                ticker, type(e).__name__, e,
+            )
+            return None
+        for r in rows or []:
+            ind = str((r or {}).get("industry") or "").strip()
+            if ind:
+                return ind
+        return None
 
     async def _fetch_market_context(self) -> "_MarketContext":
         fmp = get_fmp_client()

@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "0a72bd79a4259ef9ee278d86737dd115a666435daa2aa87b87b8d49359a49e57"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/fomo_cycle.hero.jpg"
 }

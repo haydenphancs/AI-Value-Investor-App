@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "1cb7595dc8aeb4b99fc1a6b91b0d595e43c5f5b6c5e4468287c07b41e41a89fb"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/inflation_thief.hero.jpg"
 }

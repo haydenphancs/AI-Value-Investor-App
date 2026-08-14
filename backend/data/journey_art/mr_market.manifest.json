@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "4ffa0f08b48e5213710dd9bdc6a41f7ea8b1163b2a5625db5d7d9c3571865595"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/mr_market.hero.jpg"
 }

@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "e871485bc5c10e5fb9bcffa2bbc0ce286d3a74ff31d616d4a389046b9062ffb4"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/inversion.hero.jpg"
 }

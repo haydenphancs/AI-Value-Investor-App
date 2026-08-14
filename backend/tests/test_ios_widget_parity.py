@@ -190,6 +190,7 @@ def _swift_coding_keys(struct: str) -> set[str]:
         ("WidgetMoverSnapshot", "WidgetMoverPayload"),
         ("WidgetMover", "WidgetMoverResponse"),
         ("WidgetBasket", "WidgetBasketResponse"),
+        ("WidgetMoveContext", "WidgetMoveContextResponse"),
     ],
 )
 def test_swift_decodes_every_field_the_backend_sends(swift_struct, pydantic_model):
@@ -208,15 +209,23 @@ def test_swift_decodes_every_field_the_backend_sends(swift_struct, pydantic_mode
     )
 
 
-def test_the_reason_kinds_agree_in_both_directions():
-    """iOS switches on this to decide whether it may say "why it moved"."""
-    from app.schemas.widget import WidgetReasonKind
+def test_the_cause_kinds_agree_in_both_directions():
+    """iOS switches on this to decide whether it may show a "why" badge at all.
 
-    backend = {k.value for k in WidgetReasonKind}
+    A backend kind Swift has never heard of decodes to `.none` rather than throwing,
+    so a divergence does not crash — it silently downgrades a real cause to "nothing
+    identifiable", which is exactly the kind of quiet wrongness this file exists for.
+    """
+    from app.services.daily_move_attribution import CauseKind
+
+    backend = {k.value for k in CauseKind}
     src = _strip_swift_comments(_swift_source())
-    m = re.search(r"enum WidgetReasonKind[^{]*\{(.*?)\n\}", src, re.S)
-    assert m, "WidgetReasonKind not found in Swift"
-    swift = set(re.findall(r"case\s+(\w+)", m.group(1)))
+    m = re.search(r"enum WidgetCauseKind[^{]*\{(.*?)\n\}", src, re.S)
+    assert m, "WidgetCauseKind not found in Swift"
+    body = m.group(1)
+    swift = set()
+    for case, raw in re.findall(r'case\s+(\w+)(?:\s*=\s*"([^"]+)")?', body):
+        swift.add(raw or case)
     assert swift == backend, (
-        f"reason kinds diverged — Swift {sorted(swift)} vs backend {sorted(backend)}"
+        f"cause kinds diverged — Swift {sorted(swift)} vs backend {sorted(backend)}"
     )

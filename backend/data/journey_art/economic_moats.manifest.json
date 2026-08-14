@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "a5f9cf03e806d4abcec1b9e85f5ffd963f9aff003139506dcef93db31f046e53"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/economic_moats.hero.jpg"
 }

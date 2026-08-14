@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "732d5fb846144be33358dbfa4f2cfa5e152aee66e4b3ec4576a80000c81d595c"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/key_statistics.hero.jpg"
 }

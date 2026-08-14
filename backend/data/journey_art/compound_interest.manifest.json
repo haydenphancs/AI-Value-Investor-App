@@ -34,5 +34,9 @@
     "is_white": true,
     "art_at_edge": false
   },
-  "adopted_from": "flat_vector_compound_interest.art.jpg"
+  "adopted_from": "flat_vector_compound_interest.art.jpg",
+  "uploaded": {
+    "hero": "8a447cd5f5289a5927705ca716c0d69b86d7269fe866e470db8a3217428b1050"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/compound_interest.hero.jpg"
 }

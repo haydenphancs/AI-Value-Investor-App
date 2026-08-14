@@ -34,5 +34,9 @@
     "is_white": true,
     "art_at_edge": false
   },
-  "adopted_from": "flat_vector_balance_sheet.art.jpg"
+  "adopted_from": "flat_vector_balance_sheet.art.jpg",
+  "uploaded": {
+    "hero": "ac0b4aecea50346a7b25f3bc0faefffb2a6a8751907e889b6119759000d5e18e"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/balance_sheet.hero.jpg"
 }

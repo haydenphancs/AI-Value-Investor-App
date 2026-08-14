@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "08189935d3690254128fe2dcd81626603987441dae4a3cc5f5d0e91ccaecc2d6"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/income_statement.hero.jpg"
 }

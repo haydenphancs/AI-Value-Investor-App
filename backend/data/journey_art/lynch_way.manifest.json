@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "843eaa7e39a53f50a24ec27921aa1f029e4fd628137d35ce08c2e16ecb1c068c"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/lynch_way.hero.jpg"
 }

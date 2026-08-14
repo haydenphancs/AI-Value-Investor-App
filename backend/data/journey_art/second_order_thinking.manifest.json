@@ -33,5 +33,9 @@
     ],
     "is_white": true,
     "art_at_edge": false
-  }
+  },
+  "uploaded": {
+    "hero": "b29a72491f3c4fae0300b985a5a4baa750d75fa19a6e9dc99b55ef8ffd38d8d3"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/journey-images/lessons/second_order_thinking.hero.jpg"
 }

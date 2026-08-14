@@ -128,6 +128,23 @@ final class NotificationSettingsViewModel: ObservableObject {
             ]
         ),
         NotificationGroupSpec(
+            id: "match",
+            title: "Topics You Follow",
+            subtitle: "Based on the interests you picked",
+            icon: "sparkles",
+            masterKey: nil,
+            rows: [
+                NotificationToggleSpec(
+                    key: "notify_profile_topics",
+                    title: "Signals in Your Topics",
+                    // Informational, never directive (SYSTEM_DESIGN_GUIDELINES §11.7):
+                    // describes what happened in an area they follow, and makes no claim
+                    // that anything is worth owning.
+                    subtitle: "When institutions or Congress are active in an area you follow"
+                ),
+            ]
+        ),
+        NotificationGroupSpec(
             id: "app",
             title: "App Activity",
             subtitle: "Things you asked for",

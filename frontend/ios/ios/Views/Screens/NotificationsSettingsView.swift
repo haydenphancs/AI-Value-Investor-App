@@ -62,6 +62,13 @@ struct NotificationsSettingsView: View {
         // filing touches dozens of positions — the easiest signal in the app to over-send.
         "notify_smart_money_institutional": false,
 
+        // Topics you follow
+        // Ships OFF: every other kind is triggered by something the user explicitly
+        // tracks (a watchlist ticker, a threshold they typed, a report they paid for).
+        // This one is DERIVED from stated interests, so it has to be opted into — a
+        // notification nobody asked for is how the permission is lost permanently.
+        "notify_profile_topics": false,
+
         // App activity
         "notify_research_complete": true,
 

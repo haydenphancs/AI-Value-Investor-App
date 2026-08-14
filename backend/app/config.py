@@ -320,6 +320,24 @@ class Settings(BaseSettings):
     # pre-warmers off so a laptop does not burn the quota.
     RUN_NOTIFICATION_JOBS_LOCALLY: bool = False
 
+    # ET hour after which each daily sender may run. `_run_scheduled_notification_senders`
+    # wakes hourly and skips a sender until the local ET hour reaches its value; the real
+    # once-per-day guarantee comes from `claim_notification_job`.
+    #
+    # ⚠️ These three were REFERENCED by main.py but never DEFINED here, and `Settings` uses
+    # `extra="ignore"`, so `settings.EARNINGS_NOTIFY_HOUR_ET` raised AttributeError. The
+    # tuple that reads them is built BEFORE the `while True` and outside any try, so the
+    # whole task died ~90s after every startup — meaning the earnings and smart-money
+    # senders never ran at all, silently, with only a task-crash log to show for it.
+    #
+    # Values match what main.py's docstring already documented: earnings after the close,
+    # smart money in the evening once Form 4s have landed.
+    EARNINGS_NOTIFY_HOUR_ET: int = 16
+    SMART_MONEY_NOTIFY_HOUR_ET: int = 18
+    # An hour after smart money, deliberately: it derives from the same signals, so the
+    # specific alert should land first and the per-category caps keep this from stacking.
+    PROFILE_MATCH_NOTIFY_HOUR_ET: int = 19
+
     # How long a `notification_job_state.claim_at` may sit before another instance may
     # steal it. Sized well above the slowest sender (insider, ~200 FMP calls) so a slow
     # run is never stolen mid-flight, and low enough that a hard-killed instance frees

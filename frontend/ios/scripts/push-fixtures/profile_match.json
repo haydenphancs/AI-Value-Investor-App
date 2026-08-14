@@ -1,0 +1,18 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Technology activity",
+      "body": "GOOGL is seeing congressional filings in Technology, a topic you follow. Also active: TSM, AVGO."
+    },
+    "sound": "default",
+    "thread-id": "match",
+    "interruption-level": "passive",
+    "category": "profile_match",
+    "badge": 1
+  },
+  "kind": "profile_match",
+  "route": "ticker",
+  "ticker": "GOOGL",
+  "asset_type": "stock",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

@@ -34,6 +34,13 @@ struct TintedSparkline: View {
     var spanFrom: Double = 0
     var spanTo: Double = 1
 
+    /// Radius of the end dot. One constant so the plot inset that reserves room
+    /// for it can never drift from the circle actually drawn.
+    ///
+    /// Kept equal to `SparklineView.dotRadius` — the scanner card and the Market
+    /// Pulse tiles sit on the same screen, so a size difference reads as a bug.
+    private static let endDotRadius: CGFloat = 2.5
+
     @Environment(\.differentiateWithoutColor) private var differentiate
 
     /// Dash the negative line only. `isPositive == nil` keeps the solid style.
@@ -47,8 +54,14 @@ struct TintedSparkline: View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
+            // The end dot is a 6pt circle centred on the last point, so the plot
+            // has to give up its radius or a series closing at its own high/low
+            // renders a half dot flattened against the canvas edge. Without a dot
+            // only the stroke needs room.
             let pts = SparklineGeometry.normalizedPoints(
-                points, in: geo.size, spanFrom: spanFrom, spanTo: spanTo
+                points, in: geo.size,
+                spanFrom: spanFrom, spanTo: spanTo,
+                markInset: showEndDot ? Self.endDotRadius : lineWidth / 2
             )
 
             if pts.count > 1 {
@@ -100,7 +113,7 @@ struct TintedSparkline: View {
                                 Circle().fill(color)
                             }
                         }
-                        .frame(width: 6, height: 6)
+                        .frame(width: Self.endDotRadius * 2, height: Self.endDotRadius * 2)
                         .position(last)
                     }
                 }

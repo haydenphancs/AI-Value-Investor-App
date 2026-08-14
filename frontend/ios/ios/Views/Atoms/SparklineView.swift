@@ -30,7 +30,12 @@ struct SparklineView: View {
     var spanFrom: Double = 0
     var spanTo: Double = 1
 
-    private let dotRadius: CGFloat = 3
+    // 2.5pt radius = a 5pt dot (was 6pt). It only has to mark where the series
+    // ends; on a 22pt Market Pulse tile the larger one read as a bullet. Kept in
+    // step with `TintedSparkline.endDotRadius` — both appear on the Home screen,
+    // so a size difference reads as a bug. It also drives the plot inset below,
+    // so shrinking it hands the line back a little vertical amplitude.
+    private let dotRadius: CGFloat = 2.5
     private let lineWidth: CGFloat = 1.5
 
     /// The area split is ALREADY a positional cue — green sits above the dashed reference
@@ -52,21 +57,31 @@ struct SparklineView: View {
                 let minValue = min(data.min() ?? 0, referenceValue)
                 let maxValue = max(data.max() ?? 1, referenceValue)
                 let range = max(maxValue - minValue, .ulpOfOne)
+                // Reserve room for the end dot, which is centred ON the last
+                // point. The y-scale sends the series minimum to the very bottom
+                // and the maximum to the very top, so without this a session that
+                // closes at its own low or high renders a HALF dot flattened
+                // against the canvas edge — measured on-device at 9px instead of
+                // 18px on the S&P tile, which closed at its low, while the Dow
+                // (which did not) drew a full circle.
+                let plot = SparklineGeometry.plotRect(in: geometry.size, markInset: dotRadius)
                 // The series occupies only the elapsed slice of its session; the
                 // rest of the card stays empty. `clampedSpan` is shared with
                 // `SparklineGeometry` so the two primitives can't disagree about
                 // what an unusable span means (both fall back to full width).
                 let span = SparklineGeometry.clampedSpan(from: spanFrom, to: spanTo)
-                let originX = width * span.from
-                let stepX = (width * (span.to - span.from)) / CGFloat(data.count - 1)
+                let originX = plot.minX + plot.width * span.from
+                let stepX = (plot.width * (span.to - span.from)) / CGFloat(data.count - 1)
 
                 let points: [CGPoint] = data.enumerated().map { index, value in
                     let x = originX + CGFloat(index) * stepX
-                    let y = height - (CGFloat((value - minValue) / range) * height)
+                    let y = plot.maxY - (CGFloat((value - minValue) / range) * plot.height)
                     return CGPoint(x: x, y: y)
                 }
 
-                let referenceY = height - (CGFloat((referenceValue - minValue) / range) * height)
+                // Same mapping as the data, so the dashed line stays where the
+                // price level actually sits relative to the plotted series.
+                let referenceY = plot.maxY - (CGFloat((referenceValue - minValue) / range) * plot.height)
 
                 let lastPoint = points.last!
                 let endIsAbove = data.last! >= referenceValue

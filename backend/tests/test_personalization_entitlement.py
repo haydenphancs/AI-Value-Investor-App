@@ -222,3 +222,165 @@ def test_recording_never_raises(monkeypatch):
     monkeypatch.setattr(MEM_FLAG, True)
     _install(monkeypatch, raises=True)
     chat_ep._record_memory_facts({"id": "u1", "tier": "pro"}, "NVDA", {"specialists": ["macro"]})
+
+
+# ── The wire field that REPORTS the gate ──────────────────────────────────────
+#
+# Everything above pins the runtime gate. Nothing pinned the field that tells the USER
+# what the gate decided, and the two drifted: `_profile_response` computed
+# `applied = signals_unlocked(tier) and not is_empty_profile(profile)` — the tier and
+# non-empty arms only. With the feature flag off (the shipped default) a consented Pro
+# reader was told "On — Cay AI tailors how it explains things" while nothing was tailored.
+#
+# `applied` now delegates to `may_apply_profile`, so these assertions and the ones above
+# are the same predicate seen from two sides. Keep them in one file for that reason.
+
+from app.api.v1.endpoints.users import _profile_response  # noqa: E402
+
+
+def _applied(profile, tier):
+    return _profile_response(dict(profile), {"id": "u1", "tier": tier}).applied
+
+
+def test_applied_is_false_while_the_feature_flag_is_off(monkeypatch):
+    """THE regression. Every other arm passes; only the flag is off."""
+    monkeypatch.setattr(FLAG, False)
+    assert _applied(_profile(), "pro") is False, (
+        "reported applied=True with CHAT_PERSONALIZATION_ENABLED off — the UI would "
+        "claim answers are tailored while the feature does nothing"
+    )
+
+
+def test_applied_is_false_without_consent(monkeypatch):
+    monkeypatch.setattr(FLAG, True)
+    assert _applied(_profile(consented_at=None), "pro") is False
+
+
+@pytest.mark.parametrize("tier", ["free", None, "", "wizard"])
+def test_applied_is_false_for_an_unentitled_tier(monkeypatch, tier):
+    monkeypatch.setattr(FLAG, True)
+    assert _applied(_profile(), tier) is False
+
+
+def test_applied_is_false_for_an_all_default_profile(monkeypatch):
+    monkeypatch.setattr(FLAG, True)
+    empty = _profile(experience_level="learning", topics=[], learning_goals=[])
+    assert _applied(empty, "pro") is False
+
+
+@pytest.mark.parametrize("tier", ["pro", "premium"])
+def test_applied_is_true_only_when_all_four_arms_pass(monkeypatch, tier):
+    monkeypatch.setattr(FLAG, True)
+    assert _applied(_profile(), tier) is True
+
+
+def test_applied_agrees_with_the_runtime_gate_it_reports(monkeypatch):
+    """The invariant, stated directly: the wire field and the chat path never disagree.
+
+    A future edit that re-derives `applied` locally would pass every case above while
+    still being able to drift on a fifth arm added to `may_apply_profile`. This asserts
+    equivalence across the whole grid instead of enumerating outcomes.
+    """
+    from app.services.agents.investor_profile_prompt import may_apply_profile
+
+    for flag in (True, False):
+        monkeypatch.setattr(FLAG, flag)
+        for tier in ("pro", "premium", "free", None, "wizard"):
+            for prof in (
+                _profile(),
+                _profile(consented_at=None),
+                _profile(experience_level="learning", topics=[], learning_goals=[]),
+            ):
+                assert _applied(prof, tier) is may_apply_profile(dict(prof), tier), (
+                    f"wire field disagrees with the runtime gate: flag={flag} tier={tier!r}"
+                )
+
+
+# ── The async seam: same verdict, without stalling the event loop ─────────────
+#
+# `_reader_lens_for` is synchronous and does a Supabase round trip (two with memory on).
+# Both call sites are `async def` on the answer path, so calling it directly blocks the
+# loop for every concurrent request. `_reader_lens_for_async` moves the read to a thread —
+# but only AFTER a pure gate, so the common case (feature off, or a free/guest caller)
+# still costs nothing at all. That second half is the part worth pinning: a wrapper that
+# always hops is a regression for the majority of traffic.
+
+import asyncio  # noqa: E402
+
+
+def _no_thread(monkeypatch):
+    """Make any `asyncio.to_thread` call an error, and report whether one was attempted."""
+    hops = {"n": 0}
+
+    async def _boom(fn, *a, **kw):
+        hops["n"] += 1
+        raise AssertionError("asyncio.to_thread called on a turn that cannot personalize")
+
+    monkeypatch.setattr(asyncio, "to_thread", _boom)
+    return hops
+
+
+@pytest.mark.asyncio
+async def test_async_lens_costs_nothing_when_the_feature_is_off(monkeypatch):
+    monkeypatch.setattr(FLAG, False)
+    calls = _install(monkeypatch, _profile())
+    _no_thread(monkeypatch)
+    assert await chat_ep._reader_lens_for_async({"id": "u1", "tier": "pro"}) is None
+    assert calls["n"] == 0, "read the profile with the feature off"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tier", ["free", None, "", "wizard"])
+async def test_async_lens_costs_nothing_for_an_unentitled_caller(monkeypatch, tier):
+    monkeypatch.setattr(FLAG, True)
+    calls = _install(monkeypatch, _profile())
+    _no_thread(monkeypatch)
+    assert await chat_ep._reader_lens_for_async({"id": "u1", "tier": tier}) is None
+    assert calls["n"] == 0, "read the profile for a caller who can never apply it"
+
+
+@pytest.mark.asyncio
+async def test_async_lens_matches_the_sync_implementation(monkeypatch):
+    """Same verdict, so the sync function's own tests still cover this path."""
+    monkeypatch.setattr(FLAG, True)
+    _install(monkeypatch, _profile())
+    user = {"id": "u1", "tier": "pro"}
+    assert await chat_ep._reader_lens_for_async(user) == chat_ep._reader_lens_for(user)
+
+
+@pytest.mark.asyncio
+async def test_async_lens_really_uses_a_thread_when_it_reads(monkeypatch):
+    """The whole point: the blocking read happens OFF the event loop.
+
+    Without this, `_reader_lens_for_async` could be 'simplified' to a direct call and every
+    assertion above would still pass — the bug it exists to prevent is invisible to a
+    correctness test.
+    """
+    monkeypatch.setattr(FLAG, True)
+    _install(monkeypatch, _profile())
+    hopped = {"n": 0}
+    real = asyncio.to_thread
+
+    async def _counting(fn, *a, **kw):
+        hopped["n"] += 1
+        return await real(fn, *a, **kw)
+
+    monkeypatch.setattr(asyncio, "to_thread", _counting)
+    lens = await chat_ep._reader_lens_for_async({"id": "u1", "tier": "pro"})
+    assert lens and "dividends" in lens
+    assert hopped["n"] == 1, "the profile read did not go through a thread"
+
+
+@pytest.mark.asyncio
+async def test_async_lens_never_raises_on_a_malformed_identity(monkeypatch):
+    monkeypatch.setattr(FLAG, True)
+    _install(monkeypatch, _profile())
+    assert await chat_ep._reader_lens_for_async({}) is None
+
+
+@pytest.mark.asyncio
+async def test_async_lens_survives_a_store_failure(monkeypatch):
+    """A profile-store outage degrades to an impersonal answer, as on the sync path."""
+    monkeypatch.setattr(FLAG, True)
+    _install(monkeypatch, raises=True)
+    assert await chat_ep._reader_lens_for_async({"id": "u1", "tier": "pro"}) is None

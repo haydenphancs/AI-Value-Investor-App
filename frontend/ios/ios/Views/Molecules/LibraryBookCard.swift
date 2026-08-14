@@ -22,23 +22,10 @@ struct LibraryBookCard: View {
             HStack(alignment: .top, spacing: AppSpacing.lg) {
                 // Book cover with optional mastered badge
                 ZStack(alignment: .topTrailing) {
-                    // Book cover
-                    ZStack {
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(bookCoverGradient)
-                            .frame(width: 80, height: 110)
-
-                        // Book title overlay
-                        VStack {
-                            Text(book.title.uppercased())
-                                .font(AppTypography.captionTiny).fontWeight(.bold)
-                                .foregroundColor(AppColors.textOnAccent)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(3)
-                                .padding(.horizontal, AppSpacing.xs)
-                        }
-                        .frame(width: 80, height: 110)
-                    }
+                    BookCoverImage(
+                        title: book.title,
+                        fallbackGradient: (book.coverGradientStart, book.coverGradientEnd)
+                    )
 
                     // Mastered checkmark badge
                     //
@@ -161,16 +148,6 @@ struct LibraryBookCard: View {
         .cardSurface(cornerRadius: AppCornerRadius.extraLarge)
     }
 
-    private var bookCoverGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(hex: book.coverGradientStart),
-                Color(hex: book.coverGradientEnd)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
 }
 
 #Preview {

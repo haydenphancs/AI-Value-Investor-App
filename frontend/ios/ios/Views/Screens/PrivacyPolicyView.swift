@@ -15,7 +15,7 @@ struct PrivacyPolicyView: View {
     var body: some View {
         LegalDocumentView(
             title: "Privacy Policy",
-            lastUpdated: "August 8, 2026",
+            lastUpdated: "August 13, 2026",
             // The summary is deliberately FIRST and in the intro rather than as a numbered
             // section: "we don't sell your data" is the single thing users most want to know,
             // and burying it in §5 (where it lived) meant almost nobody ever read it. The
@@ -47,6 +47,7 @@ struct PrivacyPolicyView: View {
             paragraphs: [
                 "Account information: if you create an account, we collect your email address and any display name you provide.",
                 "Usage information: content you create or request in the App, such as watchlists, portfolios, generated research reports, saved items, chat messages, and preferences.",
+                "Learning preferences: if you answer the optional questions during setup or in Settings, we store how you described your experience level, how technical you want explanations to be, how long you want answers, which subjects interest you, and what you want to get better at. We use them only to choose what to show you first and how to word an explanation \u{2014} never to change our analysis, ratings, or estimates, which are the same for every user. We do not ask for your finances, risk tolerance, time horizon, tax situation, or investment objectives. Personalized explanations are off until you turn them on, and you can turn them off again at any time in Settings.",
                 "Holdings you enter: if you use Portfolio Insights, the share counts or position values you type in. These are self-reported by you \u{2014} we never connect to a brokerage and never see your actual account.",
                 "Support reports you send us: if you use Help Us Improve, what you type and \u{2014} only if you choose to attach one \u{2014} a screenshot you pick yourself. Nothing is read from your photo library unless you select an image, you can see the whole message in your mail app before it sends, and we use it solely to reproduce and fix the problem.",
                 "Device information: app version, device type, IP address, and general technical/log data used for reliability, security, and abuse prevention. A push notification token if you enable notifications.",

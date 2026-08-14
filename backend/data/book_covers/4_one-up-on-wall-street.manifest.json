@@ -1,0 +1,47 @@
+{
+  "title": "One Up On Wall Street",
+  "author": "Peter Lynch",
+  "tagline": "KNOW WHAT YOU OWN",
+  "palette": "warm",
+  "title_cap_hero_px": 41,
+  "title_cap_thumb_px": 21,
+  "masters": {
+    "hero": {
+      "file": "4_one-up-on-wall-street.hero.jpg",
+      "width": 480,
+      "height": 660,
+      "bytes": 55728,
+      "sha256": "442d5ba5af435e50e8f6442c19b50249b00c0e5a493e82a3373caf5418816c31"
+    },
+    "thumb": {
+      "file": "4_one-up-on-wall-street.thumb.jpg",
+      "width": 240,
+      "height": 330,
+      "bytes": 18125,
+      "sha256": "fce9267eecb7b687b3763efd10d6bc1413d454ad0ab726ecd75fb39989163985"
+    }
+  },
+  "legibility": {
+    "title_contrast": 16.72,
+    "tagline_contrast": 10.61,
+    "sharpness": 15.1
+  },
+  "curriculum_order": 4,
+  "slug": "one-up-on-wall-street",
+  "art_file": "4_one-up-on-wall-street.art.jpg",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "3:4",
+  "art_size": "2K",
+  "art_prompt": "Cinematic macro-photography of an antique brass magnifying glass with a turned wooden handle resting on a dark desk, its round lens clearly visible and catching the light, with a softly defocused rising line chart glowing far behind it. The magnifying glass is complete and unmistakable. Dramatic moody lighting, deep shadows, high contrast, premium documentary style, photorealistic, 8k resolution.\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 do not crop so tightly that it becomes an abstract texture or an unidentifiable piece of metal. The object must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nLIGHT: One warm tungsten key light low and to the right, raking across the surfaces so the metal glows along its edges and everything else falls into darkness. Deep, genuinely black shadows across much of the frame \u2014 a low-key image. Specular highlights are small, hard and controlled. No flat even lighting, no softbox wash, no fill light.\n\nLENS: shot macro on a fast prime with shallow depth of field \u2014 the object itself is critically sharp front to back on its key plane, while the background falls away completely. Fine natural grain, subtle lens vignette. No HDR, no over-sharpening, no plastic CGI look.\n\nPALETTE: deep brass and old gold, warm amber, rich brown-black. Burnished and warm, never yellow or garish. Rich but restrained \u2014 a graded film frame, not a colourful photograph.\n\nCOMPOSITION: vertical portrait 3:4 frame. The sharp, recognisable object sits in the UPPER 55% of the frame. THE BOTTOM 40% OF THE FRAME FALLS AWAY INTO NEAR-BLACK SHADOW AND DEFOCUS \u2014 plain, dark, empty and quiet, with no detail, no bright highlight and no object crossing into it.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, engraving, embossed lettering, serial numbers, dial numerals, brand names, logos, signage or watermarks ANYWHERE in the image. No human faces, no hands, no people. No books, book covers or bookshelves.",
+  "art_prompt_sha1": "a2b27fb86bcd",
+  "art_native_width": 1792,
+  "art_native_height": 2400,
+  "uploaded": {
+    "thumb": "fce9267eecb7b687b3763efd10d6bc1413d454ad0ab726ecd75fb39989163985",
+    "hero": "442d5ba5af435e50e8f6442c19b50249b00c0e5a493e82a3373caf5418816c31"
+  },
+  "cover_urls": {
+    "thumb": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/4_one-up-on-wall-street.thumb.jpg",
+    "hero": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/book-covers/covers/4_one-up-on-wall-street.hero.jpg"
+  }
+}

@@ -23,7 +23,8 @@ from app.schemas.investor_profile import (
     InvestorProfileResponse,
     UpdateInvestorProfileRequest,
 )
-from app.services.entitlements import required_tier_for_signals, signals_unlocked
+from app.services.agents.investor_profile_prompt import may_apply_profile
+from app.services.entitlements import required_tier_for_signals
 from app.services.user_investor_profile_service import (
     ProfileUnreadable,
     get_user_investor_profile_service,
@@ -257,16 +258,22 @@ async def update_my_settings(
 def _profile_response(profile: dict, user: dict) -> InvestorProfileResponse:
     """Shape the stored profile for the wire, including the tier verdict.
 
-    `applied` reuses `entitlements.signals_unlocked` rather than inventing a second
-    tier table — it already normalizes an unknown tier down to free, and guests
-    hardcode "free", so both fall closed. `required_tier` comes from the matching
-    helper so the paywall names exactly the plan the server enforced.
+    `applied` DELEGATES to `may_apply_profile` — the same pure gate the chat path calls —
+    rather than re-deriving the verdict here. It used to be `signals_unlocked(tier) and
+    not is_empty_profile(profile)`, which is two of that gate's four arms: it omitted
+    `consented_at` and `CHAT_PERSONALIZATION_ENABLED`. A consented, entitled reader was
+    therefore told "Cay AI tailors how it explains things" while the feature flag was off
+    and nothing was being tailored — the exact lie the paragraph below forbids, and the
+    default state this build ships in. Two arms cannot be kept in sync by hand across two
+    files; one call cannot drift at all.
+
+    `required_tier` comes from the matching entitlements helper so the paywall names
+    exactly the plan the server enforced.
 
     An all-default profile reports `applied=False` whatever the tier: there is nothing
     to personalize with, and claiming otherwise would be a lie in the UI.
     """
     empty = is_empty_profile(profile)
-    unlocked = signals_unlocked(user.get("tier"))
     return InvestorProfileResponse(
         experience_level=profile["experience_level"],
         explanation_style=profile["explanation_style"],
@@ -278,7 +285,7 @@ def _profile_response(profile: dict, user: dict) -> InvestorProfileResponse:
         is_empty=empty,
         profile_version=profile.get("profile_version", 1),
         consented_at=profile.get("consented_at"),
-        applied=unlocked and not empty,
+        applied=may_apply_profile(profile, user.get("tier")),
         required_tier=required_tier_for_signals(user.get("tier")),
     )
 

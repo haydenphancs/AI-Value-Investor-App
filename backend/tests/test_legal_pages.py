@@ -596,3 +596,101 @@ def test_the_published_effective_dates_agree_across_every_mirror():
             f"{doc}: served page says {html_dates[0]!r} but {screen} says {swift_dates[0]!r} — "
             f"the in-app mirror and the published page must state the same effective date"
         )
+
+
+# ── Substantive parity: the in-app mirror must carry what the published page says ──
+#
+# WHY THIS EXISTS, and why the date test above was not enough. The 2026-08-13
+# personalization change amended BOTH HTML copies with a "Learning preferences" carve-out
+# and did not touch either Swift mirror. `test_the_published_effective_dates_agree_across_
+# every_mirror` stayed green throughout, because it asserts the two dates AGREE — and they
+# did, at the stale value. Its own docstring describes exactly this failure from
+# 2026-08-07; agreement-of-dates cannot detect a mirror that was simply forgotten.
+#
+# This asserts agreement of CONTENT for the clauses that carry legal weight. It is
+# deliberately scoped to specific sentences rather than diffing whole documents: the Swift
+# mirror is prose-only by construction (no headings markup, no <em>), so a structural diff
+# would be permanently red and would get deleted.
+#
+# The in-app Terms is the document a reader sees before tapping the personalization consent
+# toggle in Settings, so a carve-out that exists only on the website is not one they agreed to.
+
+_CARVE_OUT_CLAUSES = {
+    "terms": (
+        "TermsOfUseView.swift",
+        [
+            "learning preferences",
+            "we use those preferences only to decide which information to show you first",
+            "never change our analysis, ratings, scores, or estimates",
+            "never make any output a recommendation that a security is suitable for you",
+            "your finances, risk tolerance, time horizon, tax situation, or investment objectives",
+            "turn personalized explanations off at any time",
+        ],
+    ),
+    "privacy": (
+        "PrivacyPolicyView.swift",
+        [
+            "learning preferences",
+            "never to change our analysis, ratings, or estimates",
+            "we do not ask for your finances, risk tolerance, time horizon, tax situation, or investment objectives",
+            "personalized explanations are off until you turn them on",
+        ],
+    ),
+}
+
+
+def _normalized_prose(raw: str, *, strip_tags: bool) -> str:
+    """Lowercased, tag-free, whitespace-collapsed text, so a phrase can span a line break.
+
+    Both sides need this for different reasons: the HTML hard-wraps mid-sentence and puts
+    `<em>`/`<strong>` inside clauses, and the Swift literals are one long line. Comparing
+    either verbatim would fail on formatting rather than on meaning.
+    """
+    import html as _html
+
+    text = raw
+    if strip_tags:
+        text = re.sub(r"<[^>]+>", " ", text)
+    text = _html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+@pytest.mark.parametrize("doc", sorted(_CARVE_OUT_CLAUSES))
+def test_the_published_page_states_the_personalization_carve_out(doc, client):
+    """The website half. Without this, the clauses below could pass by both being absent."""
+    body = _normalized_prose(client.get(f"/{doc}").text, strip_tags=True)
+    for clause in _CARVE_OUT_CLAUSES[doc][1]:
+        assert clause in body, f"/{doc} no longer states {clause!r}"
+
+
+@pytest.mark.parametrize("doc", sorted(_CARVE_OUT_CLAUSES))
+def test_the_in_app_mirror_states_the_personalization_carve_out(doc, client):
+    """THE regression: shipped for the website, forgotten for the app."""
+    screen, clauses = _CARVE_OUT_CLAUSES[doc]
+    prose = _normalized_prose(
+        _swift_user_facing_strings(_IOS_SCREENS_DIR / screen), strip_tags=False
+    )
+    for clause in clauses:
+        assert clause in prose, (
+            f"{screen} does not state {clause!r}, but the published /{doc} page does. "
+            f"The in-app document is what a reader sees before consenting — amending only "
+            f"the website leaves that consent uninformed."
+        )
+
+
+def test_the_carve_out_scan_is_not_vacuous():
+    """Guard against the guard.
+
+    Both assertions above are substring checks, and a substring check against an empty or
+    mis-parsed haystack passes for `""` and fails for everything else — so a broken scanner
+    would look like a broken document. Prove the Swift extractor still returns real prose,
+    and that a sentence which is NOT in the carve-out is absent, so the haystack is not
+    somehow matching everything.
+    """
+    for screen in ("TermsOfUseView.swift", "PrivacyPolicyView.swift"):
+        prose = _normalized_prose(
+            _swift_user_facing_strings(_IOS_SCREENS_DIR / screen), strip_tags=False
+        )
+        assert len(prose) > 2000, f"{screen} scan returned {len(prose)} chars — extractor drifted"
+        assert "caydex" in prose, f"{screen} scan produced text without the product name"
+        assert "we guarantee your investment returns" not in prose

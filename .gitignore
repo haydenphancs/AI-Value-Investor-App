@@ -243,6 +243,16 @@ backend/data/book_audio/.cache_*/
 backend/data/book_audio/.clone_cache_*/
 backend/data/book_audio/.tmp_*/
 backend/data/voice_clone/
+
+# --- Book cover generation local artifacts (regenerable; never commit) ---
+# The .art.jpg masters and the composited .hero/.thumb ARE committed: art generation is
+# nondeterministic and paid, so a deleted master can never be recovered, only replaced
+# with a different picture. Committing it is what makes re-typesetting runnable on a
+# fresh clone with no API key. Only scratch is ignored.
+backend/data/book_covers/.tmp_*
+backend/data/book_covers/*.art.v*.jpg
+backend/data/book_covers/*.candidates.jpg
+
 dump.rdb
 
 # Sentry CLI configuration file for Xcode

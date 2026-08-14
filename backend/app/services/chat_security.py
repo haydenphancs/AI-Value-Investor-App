@@ -94,6 +94,45 @@ def neutralize_fences(text: Optional[str]) -> str:
     return t
 
 
+# ── Symbol hygiene (the one untrusted value that reaches the SYSTEM prompt UNFENCED) ──
+
+# Every legitimate shape the app actually uses, and nothing else:
+#   ^GSPC ^DJI ^IXIC ^TNX ^VIX   indices (leading caret)
+#   BTCUSD BTCUSDT GCUSD CLUSD   crypto + commodity
+#   BTC ETH GOLD OIL NATGAS      bare crypto / friendly commodity aliases
+#   AAPL BRK.B BRK-B             equities, incl. dot/hyphen share classes
+# 16 chars is comfortably above the longest of those (7) without being a free-text field.
+_SYMBOL_RE = re.compile(r"^\^?[A-Za-z0-9][A-Za-z0-9.\-]{0,14}$")
+
+
+def sanitize_symbol(raw: Optional[str]) -> Optional[str]:
+    """A ticker safe to interpolate into the system instruction, or ``None``.
+
+    ⚠️ WHY THIS EXISTS. ``stock_id`` is the ONE untrusted, caller-supplied value that reaches
+    the system instruction **unfenced** — ``_build_system_instruction`` writes
+    ``"You are currently helping analyze {stock_id}."`` directly. Every other untrusted span
+    (user message, client context, RAG chunk, history) goes through ``neutralize_fences`` into a
+    spotlighted fence; this one had no guard at all, and ``CreateChatSessionRequest.stock_id`` was
+    a bare ``Optional[str]``.
+
+    That let a caller write arbitrary instructions into the system prompt, positioned directly
+    AFTER ``ADVICE_BOUNDARY`` and the identity rule — i.e. exactly where text can override them.
+    Verified reachable on the commonest session type: ``_ASSET_PERSONAS`` covers only
+    INDEX/CRYPTO/ETF/COMMODITY, so a ``STOCK`` session falls into that ``elif``.
+
+    Rejecting (rather than escaping) is right here: this is a closed-vocabulary identifier, not
+    prose. Anything that is not symbol-shaped is not a symbol, and dropping it degrades to a
+    perfectly good generic chat instead of smuggling text into the prompt.
+
+    Never raises; returns ``None`` for missing / malformed / over-long input.
+    """
+    t = normalize_text(raw)
+    if not t:
+        return None
+    t = t.strip().upper()
+    return t if _SYMBOL_RE.match(t) else None
+
+
 # ── Message validation (friendly length ceiling) ─────────────────────────────
 
 def validate_message(raw: Optional[str]) -> Tuple[str, Optional[ErrorCode]]:

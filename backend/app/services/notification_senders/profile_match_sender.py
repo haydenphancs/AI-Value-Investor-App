@@ -85,11 +85,33 @@ def _body(matches: Sequence[Match]) -> str:
 
 
 def _load_profiles() -> List[Dict[str, Any]]:
-    """Readers who opted in and stated something to match on. Never raises → []."""
+    """Readers who CONSENTED and stated something to match on. Never raises → [].
+
+    ⚠️ `consented_at` is not optional here. This function's docstring said "opted in" while
+    the query selected only `user_id, topics, follow_signals` — consent was never fetched, so
+    a profile captured during onboarding (which never grants consent: `OnboardingViewModel`
+    leaves `accepted_personalization_terms` nil) drove a personalized push saying "…a topic
+    you follow" to someone who had not accepted the personalization terms.
+
+    Every other consumer of this table already refuses such a row — `may_apply_profile`
+    returns False on a null `consented_at`, and `_profile_response` reports `applied=False`.
+    Migration 131 states the invariant flatly: "NULL until they do; the feature must not
+    apply a profile captured before the disclosure existed." Push is the surface where
+    getting it wrong is least recoverable, because the notification is already delivered.
+
+    Filtered in SQL rather than in Python so the row cap and the tier read below are spent
+    on candidates that can actually be notified.
+    """
     try:
         res = (
             get_supabase().table("user_investor_profile")
-            .select("user_id, topics, follow_signals")
+            .select("user_id, topics, follow_signals, consented_at")
+            .not_.is_("consented_at", "null")
+            # Deterministic order: an unordered LIMIT returns an arbitrary but STABLE
+            # subset (physical heap order), so once the table exceeds the cap the same
+            # readers were excluded on every daily run, forever, while the log below
+            # implied a transient miss.
+            .order("user_id")
             .limit(_MAX_PROFILES)
             .execute()
         )
@@ -105,8 +127,12 @@ def _load_profiles() -> List[Dict[str, Any]]:
             "profile match: hit the %d-profile scan ceiling — some readers were not "
             "considered this pass", _MAX_PROFILES,
         )
-    # Nothing stated → nothing to match. Filtered here so the tier read below stays small.
-    return [r for r in rows if (r.get("topics") or r.get("follow_signals"))]
+    # Belt and braces on the SQL filter: a row whose consent was revoked between the read
+    # and the send is still refused, and the check cannot be lost by a future query edit.
+    return [
+        r for r in rows
+        if r.get("consented_at") and (r.get("topics") or r.get("follow_signals"))
+    ]
 
 
 def _tiers_for(user_ids: Sequence[str]) -> Dict[str, str]:

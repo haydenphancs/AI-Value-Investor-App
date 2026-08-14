@@ -100,6 +100,18 @@ final class PersonalizationConsentViewModel: ObservableObject {
                 "op": .string("personalization_consent_save"),
                 "code": .string(AppError.from(error).analyticsCode),
             ])
+            // A user-initiated mutation that fails must SAY SO. `errorMessage` was set here
+            // and rendered nowhere, so a failed grant looked exactly like a UI glitch: the
+            // switch animated on, snapped back, and nothing was shown. auth.md §6 bans that
+            // pattern precisely because ~20 revert-and-say-nothing sites survived on it —
+            // and this one is a consent record, where "did that save?" is the whole question.
+            // Worse in reverse: a failed REVOKE leaves the user believing they withdrew
+            // consent while the server keeps personalizing.
+            AppActions.shared.reportMutationFailure(
+                error,
+                action: granted ? "turn on personalized explanations"
+                                : "turn off personalized explanations"
+            )
         }
     }
 
@@ -108,6 +120,7 @@ final class PersonalizationConsentViewModel: ObservableObject {
         isApplied = dto.applied
         requiredTier = dto.requiredTier
         hasPreferences = !dto.isEmpty
+        hasLoadFailed = false
     }
 
     /// Copy for the row's subtitle — honest about which of the four conditions is the
@@ -120,6 +133,12 @@ final class PersonalizationConsentViewModel: ObservableObject {
     /// them "available on Pro", i.e. upgrade to the plan they are already on. `requiredTier`
     /// is nil exactly when the tier is not the blocker, so it separates the two cleanly.
     var statusText: String {
+        // UNKNOWN is not OFF. On a failed load `isOn` keeps its initial `false`, so the row
+        // used to state "Off — answers are the same for everyone" with total confidence while
+        // the server's `consented_at` was set and Cay AI was personalizing on the very next
+        // turn. The type doc above says callers gating on `hasLoadFailed` must not guess;
+        // this is the screen the user acts on, so it must not guess either.
+        if hasLoadFailed { return "Couldn't check — tap to retry" }
         if !isOn { return "Off — answers are the same for everyone" }
         if !hasPreferences { return "On — add some interests in Settings to give it something to use" }
         if !isApplied {

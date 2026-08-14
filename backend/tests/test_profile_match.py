@@ -18,6 +18,7 @@ import pytest
 from app.services.agents.chat_guardrails import scan_answer
 from app.services.notification_senders.profile_match_sender import _body, _title
 from app.services.profile_match import (
+    SIGNAL_FAMILY_TO_FOLLOW,
     Match,
     match_profile,
     sectors_from_rows,
@@ -112,14 +113,14 @@ def test_the_shared_signals_payload_is_never_mutated():
     `redact_signals` carries a warning about."""
     signals = _signals()
     before = copy.deepcopy(signals)
-    match_profile({"follow_signals": ["congress", "whale"], "topics": ["technology"]},
+    match_profile({"follow_signals": ["congress", "whales"], "topics": ["technology"]},
                   signals, SECTORS)
     assert signals == before
 
 
 def test_limit_is_respected():
     out = match_profile(
-        {"follow_signals": ["congress", "whale", "earnings"], "topics": []},
+        {"follow_signals": ["congress", "whales", "earnings"], "topics": []},
         _signals(), SECTORS, limit=2,
     )
     assert len(out) == 2
@@ -140,7 +141,7 @@ def test_ordering_does_not_depend_on_incidental_row_order():
     the lead ticker — and the lead drives the notification's deep link and its whole
     first sentence. So this permutes the input instead.
     """
-    profile = {"follow_signals": ["congress", "whale", "earnings"], "topics": ["technology"]}
+    profile = {"follow_signals": ["congress", "whales", "earnings"], "topics": ["technology"]}
     baseline = [m.symbol for m in match_profile(profile, _signals(), SECTORS)]
 
     for family in ("congress", "whale", "earnings"):
@@ -171,7 +172,7 @@ def test_equal_ranked_rows_break_ties_by_symbol_not_by_family_order():
 
 def test_missing_or_empty_groups_are_skipped():
     signals = {"congress": None, "whale": {"entries": []}}
-    assert match_profile({"follow_signals": ["congress", "whale"], "topics": []},
+    assert match_profile({"follow_signals": ["congress", "whales"], "topics": []},
                          signals, SECTORS) == []
 
 
@@ -301,3 +302,138 @@ def test_limit_counts_distinct_tickers_not_rows():
         signals, SECTORS, limit=2,
     )
     assert [m.symbol for m in out] == ["AAPL", "PFE"]
+
+
+# ── Consent is a gate on the PUSH path too ───────────────────────────────────
+#
+# `_load_profiles`' docstring said "readers who opted in" while the query selected only
+# `user_id, topics, follow_signals` — consent was never fetched. A profile captured during
+# first-run onboarding (which never grants consent: OnboardingViewModel leaves
+# `accepted_personalization_terms` nil) therefore drove a personalized push saying
+# "…a topic you follow" to somebody who had not accepted the personalization terms.
+#
+# Every other consumer of this table already refuses such a row. Push is the surface where
+# getting it wrong is least recoverable: the notification has already been delivered.
+
+from app.services.notification_senders import profile_match_sender as pms
+
+
+class _FakeTable:
+    def __init__(self, rows, sink):
+        self._rows, self._sink = rows, sink
+
+    def select(self, cols):
+        self._sink["columns"] = cols
+        return self
+
+    def limit(self, n):
+        return self
+
+    def order(self, *a, **kw):
+        self._sink["ordered"] = True
+        return self
+
+    @property
+    def not_(self):
+        return self
+
+    def is_(self, col, val):
+        self._sink.setdefault("sql_filters", []).append((col, val))
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self._rows})()
+
+
+def _install_profile_rows(monkeypatch, rows):
+    sink: dict = {}
+    monkeypatch.setattr(
+        pms, "get_supabase", lambda: type("S", (), {"table": lambda _s, _n: _FakeTable(rows, sink)})()
+    )
+    return sink
+
+
+_CONSENT = "2026-08-13T00:00:00+00:00"
+
+
+def test_an_unconsented_profile_is_never_loaded(monkeypatch):
+    """THE regression: preferences stated, terms never accepted."""
+    _install_profile_rows(monkeypatch, [
+        {"user_id": "u1", "topics": ["technology"], "follow_signals": [], "consented_at": None},
+    ])
+    assert pms._load_profiles() == [], "loaded a reader who never accepted personalization"
+
+
+def test_a_consented_profile_is_loaded(monkeypatch):
+    _install_profile_rows(monkeypatch, [
+        {"user_id": "u1", "topics": ["technology"], "follow_signals": [], "consented_at": _CONSENT},
+    ])
+    assert [r["user_id"] for r in pms._load_profiles()] == ["u1"]
+
+
+def test_consent_is_filtered_in_sql_not_only_in_python(monkeypatch):
+    """The row cap and the tier read below must be spent on candidates that can be sent to."""
+    sink = _install_profile_rows(monkeypatch, [])
+    pms._load_profiles()
+    assert "consented_at" in sink.get("columns", ""), "consent column is not even selected"
+    assert ("consented_at", "null") in sink.get("sql_filters", []), "no SQL consent filter"
+
+
+def test_the_scan_is_ordered_so_the_cap_does_not_starve_the_same_readers(monkeypatch):
+    """An unordered LIMIT returns an arbitrary but STABLE subset, so once the table exceeds
+    the cap the same readers were excluded on every daily run, permanently — while the log
+    implied a transient miss."""
+    sink = _install_profile_rows(monkeypatch, [])
+    pms._load_profiles()
+    assert sink.get("ordered"), "the profile scan has no ORDER BY"
+
+
+def test_a_consented_but_silent_reader_is_still_excluded(monkeypatch):
+    """Consent alone is not something to match on."""
+    _install_profile_rows(monkeypatch, [
+        {"user_id": "u1", "topics": [], "follow_signals": [], "consented_at": _CONSENT},
+    ])
+    assert pms._load_profiles() == []
+
+
+def test_the_follow_vocabulary_matches_the_profile_column():
+    """`SIGNAL_FAMILY_TO_FOLLOW` maps a signal FAMILY to a `follow_signals` VALUE, and the
+    two vocabularies are different words for the same idea ("whale" → "whales").
+
+    Several tests in this file used to pass the family name as a follow preference, so the
+    whale family was never actually followed and those cases matched only via the topic arm
+    — green, but testing something other than what they claimed. A value that is not in the
+    column's vocabulary can never match, and nothing else would notice.
+    """
+    from app.services.user_investor_profile_service import ARRAY_FIELDS
+
+    vocab = set(ARRAY_FIELDS["follow_signals"])
+    unknown = {f: v for f, v in SIGNAL_FAMILY_TO_FOLLOW.items() if v not in vocab}
+    assert not unknown, (
+        f"{unknown} map to follow_signals values that do not exist in the column vocabulary "
+        f"{sorted(vocab)} — those families can never be followed."
+    )
+
+
+def test_no_test_in_this_file_uses_an_invalid_follow_signal():
+    """Anti-recurrence: the bug above was in the TESTS, so guard the tests."""
+    import ast
+    from pathlib import Path
+
+    from app.services.user_investor_profile_service import ARRAY_FIELDS
+
+    vocab = set(ARRAY_FIELDS["follow_signals"])
+    src = Path(__file__).read_text(encoding="utf-8")
+    bad = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Dict):
+            continue
+        for k, v in zip(node.keys, node.values):
+            if not (isinstance(k, ast.Constant) and k.value == "follow_signals"):
+                continue
+            if not isinstance(v, (ast.List, ast.Tuple)):
+                continue
+            for item in v.elts:
+                if isinstance(item, ast.Constant) and item.value not in vocab:
+                    bad.append((item.value, item.lineno))
+    assert not bad, f"invalid follow_signals values in this file: {bad} (vocab {sorted(vocab)})"

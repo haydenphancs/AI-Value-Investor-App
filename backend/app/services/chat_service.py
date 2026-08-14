@@ -25,7 +25,7 @@ from app.config import settings
 from app.schemas.chat import StockChartWidget, HistoricalDataPoint
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
 from app.services.asset_class import detect_asset_class
-from app.services.chat_security import cap_prompt, neutralize_fences
+from app.services.chat_security import cap_prompt, neutralize_fences, sanitize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -1330,10 +1330,23 @@ class ChatService:
         if asset_type in self._ASSET_PERSONAS:
             base += self._ASSET_PERSONAS[asset_type]
         elif stock_id:
-            base += (
-                f"\nYou are currently helping analyze {stock_id}. "
-                "Use the provided financial data and filings context."
-            )
+            # ⚠️ `stock_id` is caller-supplied and lands here UNFENCED, directly after
+            # ADVICE_BOUNDARY and the identity rule — the one position from which text can
+            # override them. Every other untrusted span is spotlight-fenced; this one was
+            # interpolated raw, so a crafted `stock_id` on POST /chat/sessions wrote arbitrary
+            # instructions into the SYSTEM prompt (verified: a STOCK session misses
+            # `_ASSET_PERSONAS`, so this branch is the common path, not an edge case).
+            #
+            # Sanitized HERE as well as at the endpoint on purpose: the endpoint guards new
+            # sessions, this guards the ones already stored. A symbol that is not symbol-shaped
+            # is dropped rather than escaped — it is a closed-vocabulary identifier, and a
+            # generic instruction is a strictly better outcome than smuggled text.
+            safe_symbol = sanitize_symbol(stock_id)
+            if safe_symbol:
+                base += (
+                    f"\nYou are currently helping analyze {safe_symbol}. "
+                    "Use the provided financial data and filings context."
+                )
 
         # Stock-specific enrichment
         if stock_id and asset_type == "STOCK":

@@ -29,6 +29,7 @@ from app.api.error_response import make_error_response, ErrorCode
 from app.services.chat_security import (
     validate_message,
     sanitize_context,
+    sanitize_symbol,
     scan_input,
     ensure_disclaimer,
     disclaimer_suffix,
@@ -285,6 +286,46 @@ def _session_type_for(context_type: Optional[str], stock_id: Optional[str]) -> s
     return "STOCK" if stock_id else "NORMAL"
 
 
+def _may_record_memory_facts(user: dict) -> bool:
+    """Pure, no I/O: could this turn possibly write a memory fact?
+
+    The mirror of `_may_have_reader_lens`, and it exists for the same reason: it lets the
+    async call sites skip the threadpool hop entirely in the common case (feature off, or a
+    guest / free caller) rather than paying one to discover there is nothing to do.
+
+    Never raises — a malformed identity is not a reason to fail a delivered turn.
+    """
+    from app.config import settings
+    from app.services.entitlements import signals_unlocked
+
+    try:
+        if not settings.CHAT_MEMORY_FACTS_ENABLED:
+            return False
+        if user.get("is_guest"):
+            return False
+        return bool(signals_unlocked(user.get("tier")))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _record_memory_facts_async(
+    user: dict, stock_id: Optional[str], route: Optional[dict]
+) -> None:
+    """`_record_memory_facts` without blocking the event loop. NEVER raises.
+
+    The write side is worse than the read side that `_reader_lens_for_async` already fixed:
+    a single call is up to ~7 sequential blocking Supabase round trips (profile read, then a
+    select + upsert per fact, then the eviction select + delete). Run inline from an
+    `async def`, that stalls the whole worker — every other in-flight request included — for
+    the duration, once `CHAT_MEMORY_FACTS_ENABLED` is turned on.
+
+    The gate is checked here rather than inside the thread so a free-tier turn pays nothing.
+    """
+    if not _may_record_memory_facts(user):
+        return
+    await asyncio.to_thread(_record_memory_facts, user, stock_id, route)
+
+
 def _record_memory_facts(user: dict, stock_id: Optional[str], route: Optional[dict]) -> None:
     """Record what this turn was about. Best-effort, AFTER delivery. NEVER raises.
 
@@ -307,6 +348,7 @@ def _record_memory_facts(user: dict, stock_id: Optional[str], route: Optional[di
             FACT_THEME,
             FACT_TICKER,
             get_user_memory_facts_service,
+            sanitize_facts,
         )
 
         if not settings.CHAT_MEMORY_FACTS_ENABLED:
@@ -320,7 +362,14 @@ def _record_memory_facts(user: dict, stock_id: Optional[str], route: Optional[di
         specialists = (route or {}).get("specialists") or []
         if specialists:
             pairs.append((FACT_THEME, specialists[0]))
-        if not pairs:
+
+        # Sanitize BEFORE the profile read, not after. `general` is both the router's
+        # ordinary fallback and its degraded result, and it is deliberately excluded from
+        # the stored theme vocabulary — so a ticker-less general turn builds a non-empty
+        # `pairs` that validates to nothing. Checking `pairs` alone therefore paid a
+        # Supabase profile round trip, on a very common path, to write nothing at all.
+        facts = sanitize_facts(pairs)
+        if not facts:
             return
 
         # Consent is checked against the stored profile, not inferred — same gate the
@@ -328,7 +377,7 @@ def _record_memory_facts(user: dict, stock_id: Optional[str], route: Optional[di
         profile = get_user_investor_profile_service().get_profile(user["id"])
         if not may_apply_profile(profile, user.get("tier")):
             return
-        get_user_memory_facts_service().record(user["id"], pairs)
+        get_user_memory_facts_service().record(user["id"], facts)
     except Exception as e:  # noqa: BLE001 — the turn is already delivered
         logger.warning(
             "Memory fact recording failed for user=%s (%s: %s)",
@@ -542,13 +591,20 @@ async def create_chat_session(
 ):
     """Create a new chat session."""
     now_iso = datetime.now(timezone.utc).isoformat()
+    # `stock_id` is the one caller-supplied value that reaches the SYSTEM instruction
+    # unfenced (chat_service._build_system_instruction). Normalize it to a real symbol
+    # at the door so nothing else in the app ever handles the raw string — the title
+    # below and every later turn read the stored value. `sanitize_symbol` drops anything
+    # that is not symbol-shaped, which downgrades a crafted payload to a generic chat
+    # rather than rejecting a legitimate request. See its docstring for the full story.
+    stock_id = sanitize_symbol(request.stock_id)
     session_data = {
         "user_id": user["id"],
-        "session_type": _session_type_for(request.context_type, request.stock_id),
-        "stock_id": request.stock_id,
+        "session_type": _session_type_for(request.context_type, stock_id),
+        "stock_id": stock_id,
         "context_type": request.context_type,
         "reference_id": request.reference_id,
-        "title": f"Chat about {request.stock_id}" if request.stock_id else "New Chat",
+        "title": f"Chat about {stock_id}" if stock_id else "New Chat",
         "last_message_at": now_iso,
     }
 
@@ -738,7 +794,7 @@ async def send_chat_message(
         delivered = True
         # Off the hot path by construction: the answer is already persisted, so a failure
         # here cannot affect the turn. (No router on this path — only the ticker is known.)
-        _record_memory_facts(user, session.data.get("stock_id"), None)
+        await _record_memory_facts_async(user, session.data.get("stock_id"), None)
         # Zero Gemini cost (deep-dive cache HIT) → refund the charge: the user still got the
         # answer, but we don't bill a turn that incurred no AI cost. `== 0` (not falsy) so a
         # real generation reporting None/unknown usage is never wrongly refunded.
@@ -910,6 +966,22 @@ async def stream_chat_message(
         reasoning_text = ""
         answer_parts: list = []
         reasoning_parts: list = []
+        # Bound BEFORE the try, because both are read from paths that run when the try
+        # raised early. `prepare_stream_generation` does Supabase + RAG + Gemini + FMP work,
+        # so a transient blip there left `route` unassigned — and the fallback handler below
+        # reads `reader_lens`, while the persist block reads `route`. Python evaluates call
+        # arguments before entering the callee, so `_record_memory_facts(user, stock_id, route)`
+        # raised UnboundLocalError at the CALL SITE (regardless of the memory feature flag),
+        # inside the persist `try`, AFTER `delivered = True` — turning a turn that was saved
+        # into "Your answer was generated but couldn't be saved" and skipping the `done` frame,
+        # the auto-title, the snapshot and the suggestions.
+        #
+        # `degraded: True` is the honest default: nothing was classified, so `select_model`
+        # must keep the flagship model rather than downgrade an unclassified turn.
+        reader_lens: Optional[str] = None
+        route: dict = {
+            "specialists": ["general"], "mode": "single", "labels": ["General"], "degraded": True,
+        }
 
         try:
             # Multi-agent (Phase 3): a cheap router picks the specialist lens(es). Run it in PARALLEL
@@ -1151,8 +1223,6 @@ async def stream_chat_message(
             # Durably persisted → delivered. The finally backstop must not refund past this
             # point (a disconnect during the best-effort steps below is not a failed turn).
             delivered = True
-            # After persistence, so a memory write can never cost the reader an answer.
-            _record_memory_facts(user, stock_id, route)
             # Zero Gemini cost (deep-dive cache HIT via the fallback) → refund the charge.
             # `== 0` (not falsy) so a normal stream (tokens_used=None) is never refunded.
             if tokens_used == 0:
@@ -1169,6 +1239,12 @@ async def stream_chat_message(
                 "user_message": "Your answer was generated but couldn't be saved. Please try again.",
             })
             return
+
+        # OUTSIDE the delivery-critical try on purpose. This is best-effort bookkeeping that
+        # runs after the answer is durably stored, so it must never be able to turn a saved
+        # turn into an error frame — which is exactly what happened while it lived inside the
+        # try above. Also off the event loop: see `_record_memory_facts_async`.
+        await _record_memory_facts_async(user, stock_id, route)
 
         # Best-effort post-delivery writes (turn already persisted + charged): session metadata +
         # first-question auto-title + the on-screen snapshot. A failure here must NEVER refund or
@@ -1257,14 +1333,25 @@ async def get_chat_history(
     supabase: Client = Depends(get_supabase),
 ):
     """Get chat session with full message history."""
-    session = (
-        supabase.table("chat_sessions")
-        .select("*")
-        .eq("id", session_id)
-        .eq("user_id", user["id"])
-        .single()
-        .execute()
-    )
+    # postgrest-py RAISES APIError when `.single()` matches zero rows (PGRST116/406), so an
+    # unwrapped call never reached the `if not session.data` check below — it escaped to the
+    # global handler as a bare 500 "internal server error", making that check dead code.
+    # A missing session, another user's session, or a guest session viewed after sign-in all
+    # took that path. It matters beyond tidiness: iOS uses GET /chat/sessions/{id} as the
+    # persistence oracle in `reconcileAfterStreamFailure`, and a 500 there is indistinguishable
+    # from "server broken", so it retries generation — re-charging a credit and duplicating a
+    # turn that was already saved. The two message routes already wrap the identical call.
+    try:
+        session = (
+            supabase.table("chat_sessions")
+            .select("*")
+            .eq("id", session_id)
+            .eq("user_id", user["id"])
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Chat session not found")
 
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
@@ -1292,14 +1379,25 @@ async def update_chat_session(
 ):
     """Update a chat session (title, is_saved)."""
     # Verify ownership
-    session = (
-        supabase.table("chat_sessions")
-        .select("id")
-        .eq("id", session_id)
-        .eq("user_id", user["id"])
-        .single()
-        .execute()
-    )
+    # postgrest-py RAISES APIError when `.single()` matches zero rows (PGRST116/406), so an
+    # unwrapped call never reached the `if not session.data` check below — it escaped to the
+    # global handler as a bare 500 "internal server error", making that check dead code.
+    # A missing session, another user's session, or a guest session viewed after sign-in all
+    # took that path. It matters beyond tidiness: iOS uses GET /chat/sessions/{id} as the
+    # persistence oracle in `reconcileAfterStreamFailure`, and a 500 there is indistinguishable
+    # from "server broken", so it retries generation — re-charging a credit and duplicating a
+    # turn that was already saved. The two message routes already wrap the identical call.
+    try:
+        session = (
+            supabase.table("chat_sessions")
+            .select("id")
+            .eq("id", session_id)
+            .eq("user_id", user["id"])
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Chat session not found")
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
@@ -1333,14 +1431,25 @@ async def delete_chat_session(
 ):
     """Delete a chat session and all its messages."""
     # Verify ownership
-    session = (
-        supabase.table("chat_sessions")
-        .select("id")
-        .eq("id", session_id)
-        .eq("user_id", user["id"])
-        .single()
-        .execute()
-    )
+    # postgrest-py RAISES APIError when `.single()` matches zero rows (PGRST116/406), so an
+    # unwrapped call never reached the `if not session.data` check below — it escaped to the
+    # global handler as a bare 500 "internal server error", making that check dead code.
+    # A missing session, another user's session, or a guest session viewed after sign-in all
+    # took that path. It matters beyond tidiness: iOS uses GET /chat/sessions/{id} as the
+    # persistence oracle in `reconcileAfterStreamFailure`, and a 500 there is indistinguishable
+    # from "server broken", so it retries generation — re-charging a credit and duplicating a
+    # turn that was already saved. The two message routes already wrap the identical call.
+    try:
+        session = (
+            supabase.table("chat_sessions")
+            .select("id")
+            .eq("id", session_id)
+            .eq("user_id", user["id"])
+            .single()
+            .execute()
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Chat session not found")
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 

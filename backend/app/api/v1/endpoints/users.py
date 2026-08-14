@@ -29,6 +29,7 @@ from app.services.user_investor_profile_service import (
     ProfileUnreadable,
     get_user_investor_profile_service,
     is_empty_profile,
+    merge_profiles,
 )
 from app.schemas.user import UserResponse, UserCreditsResponse, UpdateProfileRequest
 from app.schemas.subscription import SubscriptionResponse
@@ -699,22 +700,45 @@ async def claim_guest_data(
         # this endpoint exists to prevent.
         # No `.limit(1)`: user_id is the PRIMARY KEY, so at most one row can match —
         # and the sibling claim steps read the same way.
-        guest_row = (
-            supabase.table("user_investor_profile").select("user_id")
+        #
+        # ⚠️ THE TIE-BREAK IS ON CONTENT, NOT ON EXISTENCE. This used to drop the guest row
+        # whenever the account had *any* row, including an all-defaults phantom one — and a
+        # phantom is trivially created (an empty PUT, or a consent-only write on a user with
+        # no row). The costly case is the `.restoring` window: the client keeps sending
+        # `X-Guest-Id` with the token disarmed, so a consent grant lands on the GUEST bucket
+        # and answers 200; the session then heals and this step deleted that grant, leaving
+        # `investor_profile: 0`, no error, and a toggle that silently reads Off again.
+        #
+        # Every sibling step here merges. This one now does too: the account keeps anything
+        # it has actually stated, and the guest row fills the gaps rather than being thrown
+        # away. Consent is COALESCEd — a grant on either side is a grant, and the earlier
+        # timestamp is the honest one because that is when the reader actually accepted.
+        guest_rows = (
+            supabase.table("user_investor_profile").select("*")
             .eq("user_id", bucket).execute().data or []
         )
-        if not guest_row:
+        if not guest_rows:
             return
-        account_row = (
-            supabase.table("user_investor_profile").select("user_id")
+        guest_row = guest_rows[0]
+        account_rows = (
+            supabase.table("user_investor_profile").select("*")
             .eq("user_id", user_id).execute().data or []
         )
-        if account_row:
-            supabase.table("user_investor_profile").delete().eq("user_id", bucket).execute()
+        if not account_rows:
+            supabase.table("user_investor_profile").update({"user_id": user_id}) \
+                .eq("user_id", bucket).execute()
+            claimed["investor_profile"] = 1
             return
-        supabase.table("user_investor_profile").update({"user_id": user_id}) \
-            .eq("user_id", bucket).execute()
-        claimed["investor_profile"] = 1
+
+        account_row = account_rows[0]
+        merged = merge_profiles(account_row, guest_row)
+        if merged:
+            supabase.table("user_investor_profile").update(merged) \
+                .eq("user_id", user_id).execute()
+            claimed["investor_profile"] = 1
+        # The guest row has been folded in (or had nothing to add) — drop it either way so
+        # the per-install bucket does not linger unclaimable.
+        supabase.table("user_investor_profile").delete().eq("user_id", bucket).execute()
 
     def _claim() -> None:
         """Run every step, isolated.

@@ -162,7 +162,22 @@ struct AppSettingsView: View {
                     }
                 )
             )
-            .disabled(personalizationConsent.isSaving || personalizationConsent.isLoading)
+            // Also disabled when the state is UNKNOWN. A failed load leaves `isOn` at its
+            // initial `false`, so leaving the switch live let the user act on a baseline
+            // that may be the opposite of what the server holds — toggling "on" for consent
+            // that is already granted, or "off" believing it was on. `statusText` says
+            // "Couldn't check" in that state; the control must match the sentence.
+            .disabled(
+                personalizationConsent.isSaving
+                    || personalizationConsent.isLoading
+                    || personalizationConsent.hasLoadFailed
+            )
+            // Retry is the only action that makes sense while the state is unknown.
+            .onTapGesture {
+                guard personalizationConsent.hasLoadFailed,
+                      !personalizationConsent.isLoading else { return }
+                Task { await personalizationConsent.load() }
+            }
         }
     }
 

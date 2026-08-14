@@ -7,7 +7,7 @@
     "sound": "default",
     "thread-id": "match",
     "interruption-level": "passive",
-    "category": "profile_match",
+    "category": "match",
     "badge": 1
   },
   "kind": "profile_match",

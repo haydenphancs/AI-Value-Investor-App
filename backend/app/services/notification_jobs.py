@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 # its state row (and grants one extra run on the changeover day — harmless, but say so).
 JOB_EARNINGS = "earnings"
 JOB_SMART_MONEY = "smart_money"
+JOB_PROFILE_MATCH = "profile_match"
 
 
 class NotificationJobResult:

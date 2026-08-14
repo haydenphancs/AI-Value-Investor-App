@@ -59,6 +59,10 @@ CATEGORY_EARNINGS = "earnings"
 CATEGORY_SMART_MONEY = "smart_money"
 CATEGORY_PRICE_ALERT = "price_alert"
 CATEGORY_APP = "app"
+# Deliberately "match", NOT "for_you": "for you" is suitability-adjacent in exactly
+# the way chat_guardrails._SUITABILITY_PATTERNS exists to catch, and a notification
+# category name leaks into copy far too easily.
+CATEGORY_MATCH = "match"
 
 # Per-user, per-CATEGORY, per-day ceiling. `None` = uncapped.
 #
@@ -80,6 +84,10 @@ CATEGORY_DAILY_CAPS: Dict[str, Optional[int]] = {
     CATEGORY_SMART_MONEY: 3,
     CATEGORY_PRICE_ALERT: 10,   # user-created; they asked for each one by name
     CATEGORY_APP: None,         # user-initiated, never capped
+    # ONE per day. This is a DERIVED alert — no external event forces its timing, so
+    # it has the weakest claim on attention of any kind in the registry. Everything
+    # else here is triggered by something that actually happened at a moment.
+    CATEGORY_MATCH: 1,
 }
 
 
@@ -163,6 +171,7 @@ KIND_INSIDER_TRADE = "insider_trade"
 KIND_WHALE_13F = "whale_13f"
 KIND_CONGRESS_TRADE = "congress_trade"
 KIND_PRICE_ALERT = "price_alert"
+KIND_PROFILE_MATCH = "profile_match"
 
 
 NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
@@ -281,6 +290,30 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=False,
             route_kind="ticker",
             label="Price alerts",
+        ),
+        # Signals in a topic or feed the reader told us they follow.
+        #
+        # `default_on=False` is REQUIRED, not stylistic. Every other kind here is
+        # triggered by an event about something the user explicitly tracks (a watchlist
+        # ticker, a threshold they typed, a report they paid for). This one is derived
+        # from stated preferences, so it must be opted INTO — a notification the user
+        # never asked for, about a topic they merely said was interesting, is the fastest
+        # way to lose the notification permission permanently.
+        #
+        # PASSIVE and quiet-hours-respecting for the same reason: nothing here is
+        # time-critical. The congress feed lags filings by 30-45 days and 13F data is
+        # quarterly, so waking someone for it would misrepresent its freshness.
+        NotificationKind(
+            key=KIND_PROFILE_MATCH,
+            preference_key="notify_profile_topics",
+            master_preference_key=None,
+            default_on=False,
+            category=CATEGORY_MATCH,
+            interruption_level=LEVEL_PASSIVE,
+            thread_id="match",
+            respects_quiet_hours=True,
+            route_kind="ticker",
+            label="Topics you follow",
         ),
     )
 }

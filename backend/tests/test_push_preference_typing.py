@@ -76,6 +76,11 @@ _OFF_BY_DEFAULT = [
     "notify_market_volatility",
     "notify_smart_money_institutional",
     "notify_quiet_hours_enabled",
+    # Topic-match alerts. Off for a different reason than the two above: those are noisy,
+    # this one is DERIVED. Every other kind fires on an event about something the user
+    # explicitly tracks; this fires on an interest they merely said they had, so it has
+    # to be opted into rather than out of.
+    "notify_profile_topics",
 ]
 
 

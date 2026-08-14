@@ -423,6 +423,9 @@ async def _run_scheduled_notification_senders():
     from app.services.notification_senders.smart_money_sender import (
         run_smart_money_notifications,
     )
+    from app.services.notification_senders.profile_match_sender import (
+        run_profile_match_notifications,
+    )
     # `datetime` is not a module-level import in this file (every other loop imports it
     # locally), so it must be imported here or the first wake raises NameError — an
     # error a plain `from app.main import app` import check would never surface.
@@ -436,6 +439,11 @@ async def _run_scheduled_notification_senders():
     senders = (
         ("earnings", settings.EARNINGS_NOTIFY_HOUR_ET, run_earnings_notifications),
         ("smart_money", settings.SMART_MONEY_NOTIFY_HOUR_ET, run_smart_money_notifications),
+        # LAST, and deliberately an hour later: it reads the same signals the smart-money
+        # pass does, and a reader who follows a ticker AND its topic should get the
+        # specific alert first — the per-category caps then keep the derived one from
+        # piling on top.
+        ("profile_match", settings.PROFILE_MATCH_NOTIFY_HOUR_ET, run_profile_match_notifications),
     )
 
     while True:

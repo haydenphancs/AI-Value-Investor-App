@@ -1801,11 +1801,31 @@ extra keys, so the splat would silently serve the granted-only balance with no e
 
 ### 9b.7 Pricing
 
-Packs are priced strictly **above** the subscription per-credit rate so a top-up never undercuts a
-plan: Starter $1.99/90 · Plus $4.99/250 · Power $9.99/550 · Mega $19.99/1,200 (1.77× → 1.33× Pro's
-$0.0125/credit). Mega deliberately mirrors Pro's monthly allowance so the upsell is self-evident.
+Two invariants, both **enforced** by `tests/test_iap_product_and_privacy_parity.py` rather than
+asserted here — they are derived from the `credit_packs` and `plan_credits` seeds, so a reprice on
+either side re-arms the guard:
+
+1. **No pack undercuts a plan.** Every pack sits strictly above the subscription per-credit rate.
+   Pro binds at $14.99/1,200 = $0.0124917/credit (Max at $0.0099975 is looser).
+2. **The ladder is strictly monotonic** — a dearer pack must be *better* per credit, never worse.
+
+Current ladder (migration **138**, superseding 117's): Starter $2.99/130 · Plus $5.99/280 ·
+Power $11.99/600 · Mega $24.99/1,300 — **1.84× → 1.54×** Pro's rate.
+
+Invariant 2 is why Mega is 1,300 and no longer mirrors Pro's 1,200 allowance. At $24.99, 1,200
+credits is $0.020825/credit — 4% *worse* than Power — so the ladder would invert at the top and the
+biggest pack would become the worst value. The replacement framing argues *toward* the subscription,
+which is the direction invariant 1 exists to push: **Mega is 1,300 credits once for $24.99; Pro is
+1,200 credits every month for $14.99.**
+
 A 402 `INSUFFICIENT_CREDITS` routes to Buy Credits rather than the paywall — the user is mid-action,
 and plans stay one tap away from inside that screen.
+
+When Apple has no products (no Paid Applications Agreement, no ASC products, or a missing local
+StoreKit config), Buy Credits shows every pack with its **credit count** and **"Price unavailable"**
+in place of a price, plus a banner carrying the reason — it never blanks the screen. `credits` is
+server-authoritative and true regardless of StoreKit; the USD `price_cents` is display-only config
+and is deliberately *not* shown there, because it is not what Apple would charge.
 
 > **Open item, tracked here because it moves the margin floor:** the tier allocations were sized
 > against "~17 Gemini calls per report", a figure still repeated in five source files. The real

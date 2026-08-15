@@ -59,7 +59,7 @@
          </EnvironmentVariable>
       </EnvironmentVariables>
       <StoreKitConfigurationFileReference
-         identifier = "../../Caydex.storekit">
+         identifier = "../../../Caydex.storekit">
       </StoreKitConfigurationFileReference>
    </LaunchAction>
    <ProfileAction

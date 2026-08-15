@@ -253,6 +253,27 @@ backend/data/book_covers/.tmp_*
 backend/data/book_covers/*.art.v*.jpg
 backend/data/book_covers/*.candidates.jpg
 
+# --- Money Moves art generation scratch (regenerable; never commit) ---
+# Same rule as the book covers above: each slug's .art.jpg master, its .hero/.card
+# derivatives AND its .manifest.json ARE committed. The manifest is load-bearing beyond
+# reproducibility — seed_money_moves.py skips an upload on the derivative's sha256 recorded
+# there, so losing it re-uploads every plate.
+#
+# ⚠️ Do NOT add *.subject.txt. generate_money_moves_art.resolve() READS it for any
+# --auto-written article, which makes it an input to art_prompt_sha1 — ignoring it would
+# silently re-roll that plate at full cost on a fresh clone.
+#
+# (gitignore has no inline comments — a trailing "# ..." becomes part of the pattern and
+# silently matches nothing, so each note goes on its own line.)
+#
+# --compare bake-offs: one slug rendered across N treatments.
+backend/data/money_moves_art/_compare/
+# Superseded masters, archived automatically on EVERY re-roll. Without this rule each
+# regeneration quietly adds another ~1 MB blob to history.
+backend/data/money_moves_art/_prev/
+# Orphaned 3:2 style bake-off from the pre-16:9 system. Nothing in the tree reads it.
+backend/data/money_moves_art/_style/
+
 dump.rdb
 
 # Sentry CLI configuration file for Xcode

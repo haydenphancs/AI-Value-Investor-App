@@ -11,11 +11,11 @@
 //  guests reach this sheet constantly: the Updates chip, the Home signals lock, both whale
 //  limits and the narration lock all open it.
 //
-//  ⚠️ It gates the CTA, NOT the plan list — deliberately the opposite of `BuyCreditsView`,
-//  which hides its packs entirely. `GET /billing/plans` is public precisely so the paywall
-//  renders for guests, and hiding what a plan includes from the people deciding whether to
-//  make an account is both worse selling and worse for the "significant content without a
-//  login" posture the rest of the app is built around.
+//  It gates the CTA, NOT the plan list. `GET /billing/plans` is public precisely so the
+//  paywall renders for guests, and hiding what a plan includes from the people deciding
+//  whether to make an account is both worse selling and worse for the "significant content
+//  without a login" posture the rest of the app is built around. `BuyCreditsView` used to do
+//  the opposite and hide its packs entirely; it now follows this rule too.
 //
 //  Takes a closure rather than reaching for `@Environment` so it stays a Molecule.
 //

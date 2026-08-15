@@ -339,3 +339,39 @@ def test_bundle_has_no_invented_reader_comments():
         "articles ship invented reader comments (there is no comment feature to "
         f"source real ones from): {offenders}"
     )
+
+
+def test_read_time_is_consistent_with_word_count():
+    """`readTimeMinutes` is authored by hand and never recomputed, so a slip is invisible.
+
+    It matters twice over: it is the number on the card the reader chooses from, AND every
+    `relatedArticles` entry pointing at the article must repeat it exactly
+    (test_related_read_time_matches_the_real_article), so a wrong value propagates.
+
+    The band is deliberately wide — the corpus measures 150-220 words/minute and adult
+    non-fiction reading runs roughly 200-250 — so this catches an order-of-magnitude authoring
+    error (the deleted sampleData teasers claimed 12-16 minutes for articles of this length),
+    not a debatable minute.
+    """
+    _MIN_WPM, _MAX_WPM = 120, 260
+    offenders = []
+    for a in _bundle_articles():
+        words = 0
+        for section in a.get("sections") or []:
+            for block in section.get("content") or []:
+                if block.get("type") == "bulletList":
+                    words += sum(len(i.split()) for i in block.get("items") or [])
+                else:
+                    words += len(str(block.get("text") or "").split())
+        minutes = a.get("readTimeMinutes") or 0
+        if not minutes or not words:
+            offenders.append(f"{a['slug']}: {words} words, readTimeMinutes={minutes!r}")
+            continue
+        wpm = words / minutes
+        if not (_MIN_WPM <= wpm <= _MAX_WPM):
+            offenders.append(
+                f"{a['slug']}: {words} words / {minutes} min = {wpm:.0f} wpm "
+                f"(outside {_MIN_WPM}-{_MAX_WPM}); "
+                f"suggested readTimeMinutes={max(1, round(words / 180))}"
+            )
+    assert not offenders, "\n  " + "\n  ".join(offenders)

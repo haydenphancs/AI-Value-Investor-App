@@ -2,8 +2,9 @@
 user's current entitlement.
 
 READ-ONLY. The tier catalog lives in `plan_credits` (migration 100), the consumable
-credit-pack catalog in `credit_packs` (migration 117); a user's entitlement lives in
-`subscriptions` (written server-side by receipt validation, never by the client). A
+credit-pack catalog in `credit_packs` (migration 117, repriced in 138); a user's
+entitlement lives in `subscriptions` (written server-side by receipt validation, never by
+the client). A
 3-row config read is not "expensive", so there is no cache layer here (per CLAUDE.md
 invariant #4).
 """
@@ -25,20 +26,20 @@ _FALLBACK_PLANS: List[dict] = [
     {"tier": "premium", "monthly_credits": 4000, "price_cents": 3999, "display_name": "Max"},
 ]
 
-# Fallback consumable catalog if credit_packs is unreadable (mirrors the migration-117
-# seed). Keeps the Buy Credits screen renderable if the config table is briefly
-# unavailable. NOTE this is a DISPLAY fallback only — the grant amount is always read
-# from the DB row inside the purchase path, never from here, so a stale constant can
-# never cause the wrong number of credits to be granted.
+# Fallback consumable catalog if credit_packs is unreadable (mirrors the migration-138
+# seed, which supersedes 117's). Keeps the Buy Credits screen renderable if the config
+# table is briefly unavailable. NOTE this is a DISPLAY fallback only — the grant amount is
+# always read from the DB row inside the purchase path, never from here, so a stale
+# constant can never cause the wrong number of credits to be granted.
 _FALLBACK_PACKS: List[dict] = [
-    {"product_id": "com.phan.caydex.credits.starter", "credits": 90,
-     "price_cents": 199, "display_name": "Starter", "sort_order": 1},
-    {"product_id": "com.phan.caydex.credits.plus", "credits": 250,
-     "price_cents": 499, "display_name": "Plus", "sort_order": 2},
-    {"product_id": "com.phan.caydex.credits.power", "credits": 550,
-     "price_cents": 999, "display_name": "Power", "sort_order": 3},
-    {"product_id": "com.phan.caydex.credits.mega", "credits": 1200,
-     "price_cents": 1999, "display_name": "Mega", "sort_order": 4},
+    {"product_id": "com.phan.caydex.credits.starter", "credits": 130,
+     "price_cents": 299, "display_name": "Starter", "sort_order": 1},
+    {"product_id": "com.phan.caydex.credits.plus", "credits": 280,
+     "price_cents": 599, "display_name": "Plus", "sort_order": 2},
+    {"product_id": "com.phan.caydex.credits.power", "credits": 600,
+     "price_cents": 1199, "display_name": "Power", "sort_order": 3},
+    {"product_id": "com.phan.caydex.credits.mega", "credits": 1300,
+     "price_cents": 2499, "display_name": "Mega", "sort_order": 4},
 ]
 
 # Tie-break ordering when two tiers share a price (shouldn't happen, but keeps

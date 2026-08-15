@@ -65,20 +65,55 @@ final class BuyCreditsViewModel: ObservableObject {
     var reportCost: Int { catalog?.reportCost ?? AnalysisCost.standard.credits }
     var chatCost: Int { catalog?.chatCost ?? 1 }
 
-    /// Packs Apple will actually sell.
+    /// Every pack the backend offers. NOT filtered against StoreKit.
     ///
-    /// Filtered against the loaded `Product`s rather than shown raw. The catalog is a DB table
-    /// and StoreKit is App Store Connect: a row present in one and not the other renders a card
-    /// with a USD-only price and a Buy button that can only ever say "That pack isn't available
-    /// right now". Showing a price we cannot charge is the part that matters.
-    var packs: [CreditPackDTO] {
-        (catalog?.packs ?? []).filter { store.creditPackProduct(id: $0.productId) != nil }
+    /// This used to be the intersection with the loaded `Product`s, on the reasoning that a row
+    /// present in the DB but not in App Store Connect renders "a card with a USD-only price and
+    /// a Buy button that can only ever fail — showing a price we cannot charge is the part that
+    /// matters."
+    ///
+    /// That was right about the danger and wrong about the remedy. It deleted the ENTIRE screen
+    /// to avoid quoting one number, so the commonest configuration state of all — Apple returns
+    /// nothing, because the Paid Applications Agreement isn't active yet — rendered as a blank
+    /// page under "No purchase options are available right now." It reads as a deleted feature,
+    /// and it is what sent someone looking for the code.
+    ///
+    /// The price is what must be suppressed, not the pack. `credits` is the server's
+    /// authoritative grant value — read from the DB on every purchase — and is true whatever
+    /// StoreKit knows, so the card can say what you would get. `priceLabel` is USD from our own
+    /// display config, so the card says "Price unavailable" instead of quoting it. See
+    /// `isPurchasable`.
+    var packs: [CreditPackDTO] { catalog?.packs ?? [] }
+
+    /// Packs Apple will actually sell. Only `hasUnpurchasablePacks` needs this.
+    private var purchasablePacks: [CreditPackDTO] {
+        packs.filter { store.creditPackProduct(id: $0.productId) != nil }
     }
 
-    /// True when the backend offers packs but Apple returned none of them — a configuration
-    /// drift the user must not be left staring at an empty screen over.
+    /// Per-card gate. A PARTIAL drift — three of the four ids created in App Store Connect —
+    /// now renders the fourth as unavailable in place, instead of vanishing it. A hole in the
+    /// ladder is the state an operator needs to see; a silently shorter list is not.
+    func isPurchasable(_ pack: CreditPackDTO) -> Bool {
+        store.creditPackProduct(id: pack.productId) != nil
+    }
+
+    /// True when the backend offers packs but Apple returned NONE of them.
+    ///
+    /// ⚠️ The name reads as "some are unpurchasable"; it means "none are purchasable". Those
+    /// two collapsed to the same blank screen before, so the difference never showed. Use
+    /// `isPurchasable` for the per-card question.
     var hasUnpurchasablePacks: Bool {
-        !(catalog?.packs ?? []).isEmpty && packs.isEmpty
+        !packs.isEmpty && purchasablePacks.isEmpty
+    }
+
+    /// Why the storefront can't sell anything, or nil. Rendered as a banner ABOVE the packs.
+    ///
+    /// Computed, never stored: a stored copy survives a successful retry and leaves a stale
+    /// warning sitting over working cards.
+    var storefrontNotice: String? {
+        guard hasUnpurchasablePacks else { return nil }
+        return store.productLoadError
+            ?? "Credit packs aren't available on this device right now."
     }
 
     func load() async {
@@ -91,10 +126,12 @@ final class BuyCreditsViewModel: ObservableObject {
         await store.loadProducts(
             extraProductIDs: (catalog?.packs ?? []).map(\.productId)
         )
-        if hasUnpurchasablePacks && errorMessage == nil {
-            errorMessage = store.productLoadError
-                ?? "Credit packs aren't available on this device right now. Please try again."
-        }
+        // Deliberately does NOT write `store.productLoadError` into `errorMessage`. That
+        // conflated two failures with different remedies into one field, and the field renders
+        // only in the branch where there is nothing else to show — so once packs render it was
+        // unreachable, and while it WAS reachable it replaced the whole list. `errorMessage`
+        // now means only "the catalog failed to load", which is what its own doc comment
+        // already claims; `storefrontNotice` carries the StoreKit half, beside the packs.
         isLoading = false
 
         // Recover any purchase that was paid for but never recorded — killed mid-purchase,

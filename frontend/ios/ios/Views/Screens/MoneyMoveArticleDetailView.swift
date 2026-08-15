@@ -63,6 +63,12 @@ struct MoneyMoveArticleDetailView: View {
         // and `readAlongActiveTime` already returns nil once the episode no longer matches,
         // so the new article simply renders without read-along highlighting.
         current = next
+        // ⚠️ Reset both hero edges to the offscreen sentinel. `.id(shown.id)` rebuilds the
+        // scroll view so the new article opens at the top, but THIS screen's @State survives
+        // the swap — without the reset, the outgoing article's (already scrolled past)
+        // measurements would flash the mini header over the incoming article's hero.
+        heroNavBottom = .greatestFiniteMagnitude
+        heroTitleBottom = .greatestFiniteMagnitude
     }
 
     /// The narration playhead (seconds) when THIS article's audio is the active episode, else nil
@@ -72,14 +78,40 @@ struct MoneyMoveArticleDetailView: View {
         return audioManager.currentTime
     }
 
-    // Computed property for header opacity based on scroll
-    private var headerOpacity: Double {
-        let fadeStart: CGFloat = 200
-        let fadeEnd: CGFloat = 280
-        if scrollOffset < fadeStart { return 0 }
-        if scrollOffset > fadeEnd { return 1 }
-        return Double((scrollOffset - fadeStart) / (fadeEnd - fadeStart))
+    /// Ramp length, in points of travel. One mini-bar height, which is what makes the
+    /// crossfade read like the system's large-title → inline-title transition.
+    private static let headerFadeDistance: CGFloat = 44
+
+    /// Bottom edge of the hero's back/share row, reported in `MoneyMoveArticleSpace.screen`.
+    ///
+    /// ⚠️ `.greatestFiniteMagnitude`, not 0, is load-bearing. `fade(0) == 1`, so a
+    /// default-zero `@State` would render the mini header fully opaque on top of an
+    /// unscrolled hero for the frame before the first measurement lands.
+    @State private var heroNavBottom: CGFloat = .greatestFiniteMagnitude
+
+    /// Bottom edge of the hero's title. Same sentinel rule.
+    @State private var heroTitleBottom: CGFloat = .greatestFiniteMagnitude
+
+    /// 0 while `bottom` is below the bar, 1 once it has travelled a full ramp past the top.
+    private func fade(_ bottom: CGFloat) -> Double {
+        Double(min(max(1 - bottom / Self.headerFadeDistance, 0), 1))
     }
+
+    /// Gates the sticky bar itself. Ramps as the hero's OWN back button leaves, so there is
+    /// never a stretch of article with no back affordance — the old fixed 200→280 window left
+    /// ~150pt of exactly that, and keying the bar off the title instead would have widened it.
+    private var chromeOpacity: Double { fade(heroNavBottom) }
+
+    /// Gates only the sticky bar's title text. Reaches 1 exactly as the hero title's last line
+    /// clears the top edge, so no scroll position shows two readable titles at once.
+    ///
+    /// This replaces a hardcoded 200→280 scroll window inherited from the old 380pt full-bleed
+    /// hero. Under the current layout the title starts around 309pt on a 402pt device — but
+    /// that number is not a constant to re-tune: artwork height is (width − 32) × 9/16 and
+    /// AppTypography scales to 1.4×, so the title's top swings ~130pt across device widths and
+    /// text sizes. That is wider than the entire fade window, i.e. any fixed pair is wrong for
+    /// most (width × Dynamic Type) combinations. Measure it instead.
+    private var titleOpacity: Double { fade(heroTitleBottom) }
 
     /// Fraction (0...1) of the article scrolled through — drives the top reading-progress bar.
     private var readingProgress: Double {
@@ -104,7 +136,9 @@ struct MoneyMoveArticleDetailView: View {
                             article: shown,
                             audioEpisode: audioEpisode,
                             onBackTapped: handleBackTapped,
-                            onShareTapped: handleShareTapped
+                            onShareTapped: handleShareTapped,
+                            onNavBottomChange: { heroNavBottom = $0 },
+                            onTitleBottomChange: { heroTitleBottom = $0 }
                         )
 
                         // Content
@@ -142,9 +176,9 @@ struct MoneyMoveArticleDetailView: View {
                 }
 
                 // Sticky mini header (appears on scroll)
-                if headerOpacity > 0 {
+                if chromeOpacity > 0 {
                     miniHeader
-                        .opacity(headerOpacity)
+                        .opacity(chromeOpacity)
                         .zIndex(10)
                 }
 
@@ -156,6 +190,12 @@ struct MoneyMoveArticleDetailView: View {
                 .allowsHitTesting(false)
                 .zIndex(11)
             }
+            // ⚠️ This space MUST be established here — on the ZStack that hosts the mini
+            // header — and NOT on the outer ZStack or on anything carrying .ignoresSafeArea().
+            // Those extend above the status bar, so every edge the hero reports would come
+            // back ~59pt larger and both ramps would fire a full bar-height early. It would
+            // look almost right, which is the worst way for this to be wrong.
+            .coordinateSpace(.named(MoneyMoveArticleSpace.screen))
 
             // Bottom bar: Mini Player + AI Chat
             VStack(spacing: 0) {
@@ -226,9 +266,24 @@ struct MoneyMoveArticleDetailView: View {
 
     // MARK: - Mini Header
 
+    /// The sticky bar that replaces the hero chrome on scroll.
+    ///
+    /// ⚠️ Its chips are filled with `textPrimary.opacity(0.15)`, NOT `cardBackground` — this
+    /// deliberately does NOT match the hero header, despite an older comment here claiming it
+    /// "mirrors the hero header's capsule style". The hero's capsules sit on
+    /// `AppColors.background`, where `cardBackground` separates cleanly. These sit on
+    /// `.ultraThinMaterial`, where `cardBackground` disappears in BOTH appearances: its light
+    /// arm (#FFFFFF) is the light frost, and its dark arm (#1E2330) is within a hair of the
+    /// dark frost. A scrim chip derived from an adaptive ink is dark-on-light-frost and
+    /// light-on-dark-frost by construction, and it survives Reduce Transparency (where the
+    /// material collapses to an opaque fill). This is the codebase's established chip-on-
+    /// material idiom — see LessonStoryProgressBar, FullScreenAudioPlayer, PortfolioHeaderBar.
+    ///
+    /// Not a token: `ThemeContrastAudit` measures every token against a fixed list of surfaces,
+    /// and a material is not — cannot be — on that list. A `chipOnMaterial` token would have to
+    /// declare a surface it does not sit on, which a launch guard would then certify as correct.
     private var miniHeader: some View {
         HStack(spacing: AppSpacing.md) {
-            // Back button — mirrors the hero header's capsule style
             Button(action: handleBackTapped) {
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: "chevron.left")
@@ -246,15 +301,18 @@ struct MoneyMoveArticleDetailView: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            // Title
+            // Title — on its OWN ramp, keyed to the hero title rather than the hero chrome.
+            // The bar itself arrives ~250pt earlier; if the title came with it, it would sit
+            // opaque over the still-visible hero title with only translucent material between.
             Text(shown.title)
                 .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .lineLimit(1)
+                .opacity(titleOpacity)
 
             Spacer(minLength: AppSpacing.sm)
 
-            // Share button — mirrors the hero header's circular style
+            // Same scrim-chip reasoning as the back capsule above.
             Button(action: handleShareTapped) {
                 Image(systemName: "square.and.arrow.up")
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
@@ -279,19 +337,21 @@ struct MoneyMoveArticleDetailView: View {
     // MARK: - Reading Progress Bar
 
     /// Thin full-width line capping the top of the screen; fill tracks `readingProgress`.
-    /// Reads well over both the orange hero (top of article) and the dark sticky bar.
+    ///
+    /// This is `ProgressBar` at `height: 2`, not a hand-rolled `ZStack{track;fill}` — four
+    /// atoms already are that shape (ProgressBar, LevelProgressBar, StorageProgressBar,
+    /// GradientProgressBar) and all four fill their track with `cardBackgroundLight`. The
+    /// inline version here used a hardcoded `Color.white.opacity(0.12)`, which was correct
+    /// only in dark: its comment claimed it "reads well over the orange hero", but that hero
+    /// stopped existing when the headline moved off the artwork, so in light mode it was
+    /// white-on-#F4F5F8 — an invisible rail.
+    ///
+    /// The track is deliberately decorative (1.05:1 light, 1.22:1 dark against the page).
+    /// The FILL carries the meaning and is measured: `primaryBlue` is 4.7:1 light / 8.8:1
+    /// dark. Same posture the palette already takes for chart gridlines.
     private var readingProgressBar: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Rectangle()
-                    .fill(Color.white.opacity(0.12))
-                Rectangle()
-                    .fill(AppColors.primaryBlue)
-                    .frame(width: geo.size.width * CGFloat(readingProgress))
-            }
-        }
-        .frame(height: 2)
-        .animation(.linear(duration: 0.1), value: readingProgress)
+        ProgressBar(progress: readingProgress, height: 2, showPercentage: false)
+            .animation(.linear(duration: 0.1), value: readingProgress)
     }
 
     // MARK: - Action Handlers

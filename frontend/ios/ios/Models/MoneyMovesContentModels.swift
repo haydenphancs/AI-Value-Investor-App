@@ -263,7 +263,6 @@ struct MoneyMoveArticleDTO: Decodable {
             category: MoneyMoveArticleDTO.category(from: category),
             estimatedMinutes: readTimeMinutes,
             learnerCount: learnerCount ?? viewCount,
-            hasAudio: audioUrl != nil,
             // The tile uses the SMALL derivative. Falling back to the hero would pull a
             // 1206px plate into a 600px slot for every card in a horizontal scroll row.
             imageUrl: imageCardUrl ?? imageUrl,

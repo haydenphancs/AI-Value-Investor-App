@@ -5,16 +5,15 @@ Reused by align_journey_audio.py (word-level) and align_money_moves_audio.py (se
 Mirrors the alignment core of align_book_audio.py, but standalone: no Gemini key, no module-level
 side effects, no book imports — alignment is free (local CTC) and key-independent.
 
-Also provides a tiny public-bucket downloader so the aligners can pull the deployed audio bytes
-(the exact bytes users hear) before aligning.
+Also provides a tiny SERVICE-ROLE Storage downloader so the aligners can pull the deployed audio
+bytes (the exact bytes users hear) before aligning. It is service-role rather than public
+because migration 128 made every learn-media bucket private — see `download_object`.
 """
-import os
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 
-import httpx
 import torch
 import torchaudio
 from scipy.io import wavfile
@@ -120,28 +119,37 @@ def fill_gaps(timings: list, total: float) -> list:
     return [(min(s, total), min(e, total)) for s, e in out]
 
 
-def _supabase_base() -> str:
-    url = os.environ.get("SUPABASE_URL")
-    if not url:
-        env = ROOT / ".env"
-        if env.exists():
-            for line in env.read_text().splitlines():
-                if line.startswith("SUPABASE_URL="):
-                    url = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
-    assert url, "SUPABASE_URL not found in env or backend/.env"
-    return url.rstrip("/")
+def download_object(bucket: str, object_path: str, dest: Path) -> bool:
+    """Download a Storage object to `dest` with the SERVICE-ROLE key. False (+ warn) on failure.
 
+    ⚠️ NOT the public URL. This used to be `download_public`, building
+    `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}` and plain-GETting it — but
+    migration 128 set `journey-media`, `money-moves-media` AND `book-media` to
+    `public = false` and dropped their `*_public_read` policies. Every such fetch has 404'd
+    since, and silently: the caller warns and falls through to "skipped (no audio)", so a
+    missing local clip looked like a missing NARRATION rather than a broken download.
 
-def download_public(bucket: str, object_path: str, dest: Path) -> bool:
-    """Download a public Storage object to `dest`. Returns False (and warns) if it 404s."""
-    url = f"{_supabase_base()}/storage/v1/object/public/{bucket}/{object_path}"
+    service_role bypasses RLS, which is the same key `seed_money_moves.py` uploads with, so
+    the aligner reads back exactly the bytes it published. Do NOT route `money-moves-images`
+    through here — artwork is public and free by design (see migration 137).
+    """
     try:
-        r = httpx.get(url, timeout=120)
-        r.raise_for_status()
+        # Lazy, and inside the try: importing app.database pulls app.config.Settings, which
+        # requires a populated backend/.env. Aligning a clip that is already on disk must keep
+        # working on a box that has none — that is the common case.
+        import sys
+
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from app.database import get_supabase
+
+        blob = get_supabase().storage.from_(bucket).download(object_path)
     except Exception as exc:  # noqa: BLE001
-        print(f"    ! could not download {object_path}: {exc}")
+        print(f"    ! could not download {bucket}/{object_path}: {type(exc).__name__}: {exc}")
+        return False
+    if not blob:
+        print(f"    ! {bucket}/{object_path} downloaded 0 bytes")
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(r.content)
+    dest.write_bytes(blob)
     return True

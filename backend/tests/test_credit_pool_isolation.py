@@ -237,8 +237,14 @@ def test_monthly_reset_does_not_zero_purchased_used_either():
 
 def test_tier_upgrade_still_grants_when_a_large_pack_is_held():
     """The bug this design exists to prevent: `grant_tier_upgrade` no-ops when
-    `alloc <= total`. With one shared column, a user holding the 1,200-credit Mega pack sits
-    at total=1250, so buying Pro (alloc 1200) grants NOTHING — $14.99 for zero credits."""
+    `alloc <= total`. With one shared column, a user holding a purchased balance equal to
+    Pro's allocation (1,200) sits at total=1250, so buying Pro grants NOTHING — $14.99 for
+    zero credits.
+
+    The 1200 below is load-bearing and must keep matching Pro's allocation, not any
+    particular pack's size — it is what reaches the no-op branch. (Mega was 1,200 credits
+    under migration 117's ladder and is 1,300 under 138's; the coincidence is gone, the
+    test is not about Mega.)"""
     c = _Credits(total=50, used=50, purchased_total=1200, purchased_used=0, tier="free")
     c.tier = "pro"                        # reconcile_user_tier mirrors the purchased tier
     c.grant_tier_upgrade()

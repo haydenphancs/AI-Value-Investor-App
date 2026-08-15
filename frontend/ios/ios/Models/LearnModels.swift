@@ -208,8 +208,6 @@ struct MoneyMove: Identifiable {
     let category: MoneyMoveCategory
     let estimatedMinutes: Int
     let learnerCount: String
-    /// True when this move has narration audio (drives the headphones glyph on See-All cards).
-    var hasAudio: Bool = false
     /// 640x360 cover plate from the public money-moves-images bucket. Defaults to nil so the
     /// `sampleData` placeholders keep compiling and keep their SF Symbol badge.
     var imageUrl: String? = nil
@@ -666,15 +664,6 @@ extension MoneyMove {
         
         // New Blueprints from brainstorm
         MoneyMove(
-            slug: "nvidias-ai-dominance",
-            title: "NVIDIA's AI Dominance",
-            subtitle: "How a gaming chip company became the engine of the AI revolution.",
-            category: .blueprints,
-            estimatedMinutes: 12,
-            learnerCount: "",
-            imageUrl: placeholderArt("nvidias-ai-dominance")
-        ),
-        MoneyMove(
             slug: "the-rise-of-lvmh",
             title: "The Rise of LVMH",
             subtitle: "The art of acquiring and cultivating timeless brands.",
@@ -703,15 +692,6 @@ extension MoneyMove {
         ),
 
         // New Battles from brainstorm
-        MoneyMove(
-            slug: "amd-vs-intel-the-cpu-wars",
-            title: "AMD vs. Intel: The CPU Wars",
-            subtitle: "A multi-decade battle for the heart of the computer.",
-            category: .battles,
-            estimatedMinutes: 14,
-            learnerCount: "",
-            imageUrl: placeholderArt("amd-vs-intel-the-cpu-wars")
-        ),
         MoneyMove(
             slug: "the-home-depot-vs-lowes",
             title: "The Home Depot vs. Lowe's",
@@ -749,15 +729,6 @@ extension MoneyMove {
             estimatedMinutes: 14,
             learnerCount: "",
             imageUrl: placeholderArt("metas-metaverse-pivot")
-        ),
-        MoneyMove(
-            slug: "the-fall-of-sears",
-            title: "The Fall of Sears",
-            subtitle: "How a retail titan was hollowed out from the inside.",
-            category: .valueTraps,
-            estimatedMinutes: 15,
-            learnerCount: "",
-            imageUrl: placeholderArt("the-fall-of-sears")
         ),
     ]
 }

@@ -180,11 +180,29 @@ class TrackingViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        // Load real data on init
-        Task { [weak self] in
-            await self?.loadData()
-            self?.startPriceRefreshTimer()
-        }
+        // Deliberately NO load here — same rule as `UpdatesViewModel.init`.
+        //
+        // `ContentView` opacity-mounts all five tabs in one ZStack, so this initializer runs
+        // at app launch for every user, including one who never opens the Assets tab. That
+        // made `loadData()` — which is five requests (`/tracking/assets`, `/portfolios`,
+        // `/whales`, `/whales/activity`, `/portfolios/{id}/insights`) — unconditional launch
+        // traffic, and it started the 30s price-refresh timer for a screen nobody was
+        // looking at. The view calls `loadIfNeeded()` when the tab first becomes active.
+    }
+
+    /// Called when the Assets tab becomes visible. Idempotent.
+    ///
+    /// Pairs with `.reloadOnIdentityChange`, which covers signing in or out while already on
+    /// the tab; this covers the first visit. `loadData()`'s own single-flight guard means an
+    /// overlap between the two costs one request, not two.
+    func loadIfNeeded() async {
+        guard !hasLoadedOnce else { return }
+        await loadData()
+        // Latch only on a genuine completion. `.task(id:)` cancels its body when the tab
+        // switches away, and latching there would leave the tab permanently empty.
+        guard !Task.isCancelled else { return }
+        hasLoadedOnce = true
+        startPriceRefreshTimer()
     }
 
     deinit {
@@ -447,7 +465,41 @@ class TrackingViewModel: ObservableObject {
 
     // MARK: - Data Loading (Real API)
 
+    /// Whether a genuine load has completed. Reset by `reloadForIdentityChange`.
+    private var hasLoadedOnce = false
+
+    /// The load currently in flight, if any. Concurrent callers JOIN it.
+    ///
+    /// `isLoading` was published but never consulted, so every trigger became a real
+    /// request: tab activation and the identity-change reload land within milliseconds of
+    /// each other on a signed-in launch, and each one fanned out five calls.
+    private var loadTask: Task<Void, Never>?
+
     func loadData() async {
+        // Join a running load rather than starting a second one. Awaiting the SAME task
+        // (rather than returning early) matters: callers use completion to decide what to
+        // render, so an early return would report "done" while the data was still arriving.
+        if let running = loadTask, !running.isCancelled {
+            await running.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performLoad()
+            // Cleared HERE, as the task's own last act, rather than after `await
+            // task.value` below. Between a task finishing and its awaiting caller
+            // being resumed, a THIRD caller can run and observe a completed-but-still
+            // -registered task: it would "join" something already done and return
+            // instantly without ever loading. That is a silently skipped refresh —
+            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // completed under the PREVIOUS identity.
+            self.loadTask = nil
+        }
+        loadTask = task
+        await task.value
+    }
+
+    private func performLoad() async {
         isLoading = true
         defer { isLoading = false }
 
@@ -704,7 +756,13 @@ class TrackingViewModel: ObservableObject {
     func reloadForIdentityChange() async {
         trackedAssets = []
         assetsErrorMessage = nil
+        // Cleared so a later tab activation re-loads for the NEW identity rather than
+        // treating the previous account's completed load as this one's.
+        hasLoadedOnce = false
         await loadData()
+        if !Task.isCancelled { hasLoadedOnce = true }
+        // The timer is keyed to whoever is signed in now; restart it against their assets.
+        startPriceRefreshTimer()
     }
 
     // MARK: - Live Price Refresh

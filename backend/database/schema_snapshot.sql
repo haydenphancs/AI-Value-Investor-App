@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fOuXFyXx5xdGmDPiVuC9M89ea2Cs8Inlk7yImBA8QkkZpFl08LB3IdeLy9SFEz5
+\restrict 9jciLCnzLHzGtoKGBEieuJvvCfayNTvs0yRrUrJ9HBo98PYdyBn2qR4SItSvJJS
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1523,19 +1523,17 @@ DECLARE
     _GUEST       CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
     v_tier       public.user_tier;
     v_alloc      INTEGER;
-    v_now_et     TIMESTAMP;      -- ET wall-clock (no tz)
+    v_now_et     TIMESTAMP;
     v_next_reset TIMESTAMPTZ;
     v_row        public.user_credits%ROWTYPE;
     v_remaining  INTEGER;
 BEGIN
-    -- Never reset the shared guest bucket (protects the live guest app's fixed balance).
     IF p_user_id = _GUEST THEN
         SELECT (total - used) INTO v_remaining
           FROM public.user_credits WHERE user_id = p_user_id;
         RETURN COALESCE(v_remaining, 0);
     END IF;
 
-    -- Resolve tier -> monthly allocation (fall back to 'free' / 0 if unknown).
     SELECT u.tier INTO v_tier FROM public.users u WHERE u.id = p_user_id;
     IF v_tier IS NULL THEN
         v_tier := 'free';
@@ -1545,49 +1543,43 @@ BEGIN
         v_alloc := 0;
     END IF;
 
-    -- Next month boundary in ET, as a timestamptz.
     v_now_et     := (now() AT TIME ZONE 'America/New_York');
     v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
                         AT TIME ZONE 'America/New_York';
 
-    -- Lock (or create) the balance row.
     SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
 
     IF NOT FOUND THEN
-        -- FOR UPDATE cannot lock a row that does not exist yet, so two concurrent
-        -- first-touch calls could both reach here. ON CONFLICT DO NOTHING makes the
-        -- loser a no-op instead of a unique_violation on user_credits_user_id_key.
-        INSERT INTO public.user_credits (user_id, total, used, resets_at, updated_at)
-        VALUES (p_user_id, v_alloc, 0, v_next_reset, NOW())
+        INSERT INTO public.user_credits (user_id, total, used, tier_alloc, resets_at, updated_at)
+        VALUES (p_user_id, v_alloc, 0, v_alloc, v_next_reset, NOW())
         ON CONFLICT (user_id) DO NOTHING;
-
         IF FOUND THEN
-            -- We created the row: log the initial grant exactly once.
-            INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
-            VALUES (p_user_id, v_alloc, 'grant', to_char(v_now_et, 'YYYY-MM'), v_alloc);
+            INSERT INTO public.credit_transactions
+                (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, v_alloc, v_alloc, 0, 'grant',
+                    to_char(v_now_et, 'YYYY-MM'), v_alloc);
             RETURN v_alloc;
         END IF;
-
-        -- A concurrent call created it first; return the live remaining (no grant log).
         SELECT (total - used) INTO v_remaining
           FROM public.user_credits WHERE user_id = p_user_id;
         RETURN COALESCE(v_remaining, v_alloc);
     END IF;
 
-    -- Due for reset? (never set, or the stored boundary has passed.)
     IF v_row.resets_at IS NULL OR now() >= v_row.resets_at THEN
         UPDATE public.user_credits
            SET total      = v_alloc,
                used       = 0,
+               tier_alloc = v_alloc,
                resets_at  = v_next_reset,
                updated_at = NOW()
          WHERE user_id = p_user_id;
-        INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
-        VALUES (p_user_id, v_alloc, 'monthly_reset', to_char(v_now_et, 'YYYY-MM'), v_alloc);
+        INSERT INTO public.credit_transactions
+            (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+        VALUES (p_user_id, v_alloc, v_alloc, 0, 'monthly_reset',
+                to_char(v_now_et, 'YYYY-MM'), v_alloc);
         RETURN v_alloc;
     END IF;
 
-    -- Not due: return the live remaining unchanged.
     RETURN (v_row.total - v_row.used);
 END;
 $$;
@@ -1658,16 +1650,10 @@ DECLARE
     v_next_reset TIMESTAMPTZ;
     v_delta     INTEGER;
 BEGIN
-    -- Never touch the shared guest bucket. It is a fixed sentinel (seeded 100000 by
-    -- 046_seed_guest_user.sql) that keeps the signed-out app from being walled out; it is
-    -- not a balance, is never metered, and must not be reset. Same guard as
-    -- ensure_credit_period.
     IF p_user_id = _GUEST THEN
         RETURN 0;
     END IF;
 
-    -- Resolve tier -> monthly allocation. `reconcile_user_tier` has already mirrored the
-    -- winning tier onto users.tier before calling this, so this reads the NEW tier.
     SELECT u.tier INTO v_tier FROM public.users u WHERE u.id = p_user_id;
     IF v_tier IS NULL THEN
         v_tier := 'free';
@@ -1681,50 +1667,54 @@ BEGIN
     v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
                         AT TIME ZONE 'America/New_York';
 
-    -- Lock the balance row so a concurrent verify + webhook for the same purchase cannot
-    -- both observe the pre-grant total and both raise it.
     SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
 
     IF NOT FOUND THEN
-        -- No balance row yet (upgrade before the first credit read). Create it at the new
-        -- tier's allocation. ON CONFLICT DO NOTHING mirrors ensure_credit_period: FOR UPDATE
-        -- cannot lock a row that does not exist, so two first-touch calls can both land here.
-        INSERT INTO public.user_credits (user_id, total, used, resets_at, updated_at)
-        VALUES (p_user_id, v_alloc, 0, v_next_reset, NOW())
+        INSERT INTO public.user_credits (user_id, total, used, tier_alloc, resets_at, updated_at)
+        VALUES (p_user_id, v_alloc, 0, v_alloc, v_next_reset, NOW())
         ON CONFLICT (user_id) DO NOTHING;
-
         IF FOUND THEN
             INSERT INTO public.credit_transactions
-                (user_id, delta, reason, ref_id, balance_after)
-            VALUES (p_user_id, v_alloc, 'tier_upgrade',
+                (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+            VALUES (p_user_id, v_alloc, v_alloc, 0, 'tier_upgrade',
                     to_char(v_now_et, 'YYYY-MM'), v_alloc);
             RETURN v_alloc;
         END IF;
-
         SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
         IF NOT FOUND THEN
             RETURN 0;
         END IF;
     END IF;
 
-    -- The whole fix, and the whole replay guard, is this comparison. An upgrade raises the
-    -- ceiling; a replay or a downgrade finds nothing to do.
-    IF v_alloc <= v_row.total THEN
+    -- THE FIX. This compared against `v_row.total`, which `revoke_tier_credits` overwrites
+    -- with GREATEST(free_alloc, used) — so after an Apple refund of a subscription, a user
+    -- who had spent more than the next plan's allocation looked like they had "already been
+    -- granted" it, and a fresh PAID subscription granted nothing. `tier_alloc` records what
+    -- was actually granted for this period and is reset to the free allocation on a revoke,
+    -- so a genuine re-subscribe is never mistaken for a replay.
+    IF v_alloc <= v_row.tier_alloc THEN
         RETURN (v_row.total - v_row.used);
     END IF;
 
-    v_delta := v_alloc - v_row.total;
+    -- `total` can legitimately already be at or above the allocation (a revoke high-water
+    -- mark, or a mid-period downgrade). Never LOWER it here — this function only ever raises
+    -- the ceiling — but always record the allocation we just granted.
+    v_delta := GREATEST(v_alloc - v_row.total, 0);
 
     UPDATE public.user_credits
-       SET total      = v_alloc,
+       SET total      = GREATEST(v_alloc, v_row.total),
+           tier_alloc = v_alloc,
            updated_at = NOW()
      WHERE user_id = p_user_id;
 
-    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
-    VALUES (p_user_id, v_delta, 'tier_upgrade',
-            to_char(v_now_et, 'YYYY-MM'), v_alloc - v_row.used);
+    IF v_delta > 0 THEN
+        INSERT INTO public.credit_transactions
+            (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+        VALUES (p_user_id, v_delta, v_delta, 0, 'tier_upgrade',
+                to_char(v_now_et, 'YYYY-MM'), GREATEST(v_alloc, v_row.total) - v_row.used);
+    END IF;
 
-    RETURN (v_alloc - v_row.used);
+    RETURN (GREATEST(v_alloc, v_row.total) - v_row.used);
 END;
 $$;
 
@@ -1870,10 +1860,11 @@ DECLARE
     v_spendable      INTEGER;
     v_old_used       INTEGER;
     v_old_pused      INTEGER;
-    v_debit_id       BIGINT;     -- the debit row this refund pairs with, NULL if none
-    v_spent_granted  INTEGER;    -- positive magnitude taken from granted by that spend
-    v_spent_purch    INTEGER;    -- positive magnitude taken from purchased
+    v_debit_id       BIGINT;
+    v_spent_granted  INTEGER;
+    v_spent_purch    INTEGER;
     v_have_split     BOOLEAN := FALSE;
+    v_searched       BOOLEAN := FALSE;
     v_back_granted   INTEGER := 0;
     v_back_purch     INTEGER := 0;
 BEGIN
@@ -1883,36 +1874,33 @@ BEGIN
         RETURN COALESCE(v_spendable, 0);
     END IF;
 
-    -- Non-positive refund is a caller/sign bug — no-op (a negative amount would DEBIT).
     IF p_amount IS NULL OR p_amount <= 0 THEN
         SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
         RETURN v_spendable;
     END IF;
 
-    -- Lock the balance row for the rest of the transaction. Everything below is computed in
-    -- plpgsql against these captured values, which is safe precisely because of this lock — no
-    -- other transaction can move the row underneath us, and that same lock serialises two
-    -- concurrent refunds so they cannot both pass the NOT EXISTS check on one debit.
     SELECT used, purchased_used INTO v_old_used, v_old_pused
       FROM public.user_credits
      WHERE user_id = p_user_id
        FOR UPDATE;
 
     IF NOT FOUND THEN
-        RETURN NULL;  -- no credit row for this user (nothing to refund)
+        RETURN NULL;
     END IF;
 
-    -- Pair with the newest debit of this amount on this ref_id that NOTHING has reversed yet.
-    -- The `NOT EXISTS` anti-join is the entire fix — see the header for why pairing-at-most-once
-    -- is what makes over-returning to either pool impossible.
     IF p_ref_id IS NOT NULL AND p_ref_id <> '' THEN
+        v_searched := TRUE;
         SELECT t.id, -t.granted_delta, -t.purchased_delta
           INTO v_debit_id, v_spent_granted, v_spent_purch
           FROM public.credit_transactions t
          WHERE t.user_id = p_user_id
            AND t.ref_id  = p_ref_id
            AND t.delta   = -p_amount
+           -- A clawback is not a spend. Both carry a negative delta AND a ref_id, so without
+           -- this they are pairable debits: a refund could "reverse" a subscription or pack
+           -- revocation and hand back credits that were deliberately taken away.
+           AND t.reason NOT IN ('pack_revoked', 'tier_revoked')
            AND NOT EXISTS (
                  SELECT 1 FROM public.credit_transactions r
                   WHERE r.reverses_id = t.id
@@ -1920,39 +1908,53 @@ BEGIN
          ORDER BY t.id DESC
          LIMIT 1;
 
-        -- A row written before migration 117 carries 0/0 with a non-zero delta: the split is
-        -- unknown, not zero. Treat it as unknown and take the fallback — but keep v_debit_id so
-        -- the row is still marked reversed and cannot be paired twice.
         IF FOUND AND (COALESCE(v_spent_granted, 0) <> 0 OR COALESCE(v_spent_purch, 0) <> 0) THEN
             v_have_split := TRUE;
         END IF;
     END IF;
 
     IF v_have_split THEN
-        -- Exact reversal, each side capped BOTH by what the paired spend took from that pool and
-        -- by what the pool currently shows as spent.
+        -- Exact reversal, each side capped BOTH by what the paired spend took from that pool
+        -- and by what the pool currently shows as spent.
         v_back_purch   := LEAST(GREATEST(v_spent_purch, 0), p_amount, v_old_pused);
         v_back_granted := LEAST(GREATEST(v_spent_granted, 0), p_amount - v_back_purch,
                                 v_old_used);
-    ELSE
-        -- Unknown split (no ref_id, no un-reversed debit, or a pre-117 row): granted-first,
-        -- overflowing to purchased only if granted cannot absorb it (otherwise the credits would
-        -- simply vanish). The non-farmable direction.
+    ELSIF v_debit_id IS NOT NULL OR NOT v_searched THEN
+        -- Either a debit was found whose split is unknown (a pre-117 row), or there was no
+        -- ref_id to search by at all. Both are genuinely "unknown split": granted-first,
+        -- overflowing to purchased only if granted cannot absorb it. The non-farmable
+        -- direction, and the one that cannot silently swallow a legitimate refund.
         v_back_granted := LEAST(p_amount, v_old_used);
         v_back_purch   := LEAST(p_amount - v_back_granted, v_old_pused);
+    ELSE
+        -- THE FIX. We DID search on a ref_id and found no un-reversed debit: this charge was
+        -- already refunded, or never happened. Paying from the user's current `used` would
+        -- MINT credits — returning money for a debit that no longer exists. Fall through to
+        -- the zero branch below.
+        --
+        -- Note the `NOT v_searched` arm above: without it a refund called with no ref_id
+        -- would pay nothing and silently lose a legitimate refund, which is the same bug
+        -- pointing the other way.
+        --
+        -- ⚠️ This branch also catches a MISMATCHED ref_id — a refund keyed differently from
+        -- its charge (the shape of a real bug: the reconciliation sweep once refunded with
+        -- report_id while research.py charged with the ticker). Before 139 that silently
+        -- expired paid credits by refunding them into the granted pool; now it is a no-op,
+        -- which does not destroy or mint anything but DOES leave the user owed. Neither is
+        -- correct, so make it findable instead of silent — this is the only signal a
+        -- mismatched key produces.
+        RAISE WARNING 'refund_credits: no un-reversed debit for user=% ref_id=% amount=% '
+                      '(already refunded, or the refund ref_id does not match its charge) '
+                      '— refunding nothing',
+                      p_user_id, p_ref_id, p_amount;
     END IF;
 
     IF v_back_granted + v_back_purch = 0 THEN
-        -- Genuinely nothing to give back: both pools already show the spend returned. Distinct
-        -- from the pre-124 bug, where this branch fired because the refund had re-selected an
-        -- already-reversed debit. Return the live balance without writing a zero-delta row.
         SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
         RETURN v_spendable;
     END IF;
 
-    -- Both terms are capped at the corresponding `*_used` above, so neither can go negative and
-    -- the purchased_used <= purchased_total CHECK cannot be tripped.
     UPDATE public.user_credits
        SET used           = used - v_back_granted,
            purchased_used = purchased_used - v_back_purch,
@@ -1960,9 +1962,6 @@ BEGIN
      WHERE user_id = p_user_id
     RETURNING spendable INTO v_spendable;
 
-    -- Ledger the ACTUAL movement, not the requested amount, so a (contract-forbidden)
-    -- over-refund cannot desync sum(delta) from the balance. `reverses_id` is what retires the
-    -- paired debit from any future lookup.
     INSERT INTO public.credit_transactions
         (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after,
          reverses_id)
@@ -2069,6 +2068,7 @@ DECLARE
     v_credits_row public.user_credits%ROWTYPE;
     v_new_total   INTEGER;
     v_delta       INTEGER;
+    v_writeoff    INTEGER;
     v_spendable   INTEGER;
 BEGIN
     IF p_transaction_id IS NULL OR p_transaction_id = '' THEN
@@ -2077,16 +2077,11 @@ BEGIN
 
     v_env := COALESCE(NULLIF(p_environment, ''), 'Production');
 
-    -- Lock the purchase row so two concurrent REFUND deliveries cannot both pass the
-    -- revoked_at check and claw back twice.
     SELECT * INTO v_row FROM public.credit_purchases
      WHERE environment = v_env AND transaction_id = p_transaction_id
      FOR UPDATE;
 
     IF NOT FOUND THEN
-        -- A refund for a transaction we never granted (a subscription id routed here by
-        -- mistake, or a purchase predating this feature). Not an error — the webhook must
-        -- still answer 200 or Apple retries for days.
         RETURN jsonb_build_object('outcome', 'unknown');
     END IF;
 
@@ -2107,7 +2102,6 @@ BEGIN
      WHERE user_id = v_row.user_id FOR UPDATE;
 
     IF NOT FOUND THEN
-        -- Nothing was ever granted to claw back from. revoked_at is set, so retries no-op.
         RETURN jsonb_build_object('outcome', 'revoked', 'spendable', 0, 'reclaimed', 0);
     END IF;
 
@@ -2115,9 +2109,15 @@ BEGIN
                             v_credits_row.purchased_total - v_row.credits);
     v_delta     := v_new_total - v_credits_row.purchased_total;   -- <= 0
 
-    IF v_delta = 0 THEN
-        -- Fully spent already: the floor bites and there is nothing to reclaim. Still counts
-        -- as revoked (revoked_at is set), so a retry short-circuits above.
+    -- How far the floor lifted the total: the portion of this pack already spent. Clamped to
+    -- [0, purchased_used] so a corrupt row (credits > purchased_total) cannot drive either
+    -- column negative and trip a CHECK.
+    v_writeoff := LEAST(
+        GREATEST(v_new_total - (v_credits_row.purchased_total - v_row.credits), 0),
+        v_credits_row.purchased_used
+    );
+
+    IF v_delta = 0 AND v_writeoff = 0 THEN
         RETURN jsonb_build_object(
             'outcome',   'revoked',
             'spendable', v_credits_row.spendable,
@@ -2126,15 +2126,20 @@ BEGIN
     END IF;
 
     UPDATE public.user_credits
-       SET purchased_total = v_new_total,
+       SET purchased_total = v_new_total - v_writeoff,
+           purchased_used  = purchased_used - v_writeoff,
            updated_at      = NOW()
      WHERE user_id = v_row.user_id
     RETURNING spendable INTO v_spendable;
 
-    INSERT INTO public.credit_transactions
-        (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
-    VALUES
-        (v_row.user_id, v_delta, 0, v_delta, 'pack_revoked', p_transaction_id, v_spendable);
+    -- Ledger the change in SPENDABLE (v_delta). The write-off moves total and used by the
+    -- same amount, so it contributes nothing to the balance and must not be double-counted.
+    IF v_delta <> 0 THEN
+        INSERT INTO public.credit_transactions
+            (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+        VALUES
+            (v_row.user_id, v_delta, 0, v_delta, 'pack_revoked', p_transaction_id, v_spendable);
+    END IF;
 
     RETURN jsonb_build_object(
         'outcome',   'revoked',
@@ -2159,11 +2164,10 @@ DECLARE
     v_free      INTEGER;
     v_row       public.user_credits%ROWTYPE;
     v_floor     INTEGER;
+    v_writeoff  INTEGER;
     v_delta     INTEGER;
     v_now_et    TIMESTAMP;
 BEGIN
-    -- Same guard as grant_tier_upgrade / ensure_credit_period: the shared guest bucket is a
-    -- fixed sentinel seeded 100000 by 046_seed_guest_user.sql, not a balance. Never meter it.
     IF p_user_id = _GUEST THEN
         RETURN 0;
     END IF;
@@ -2173,33 +2177,47 @@ BEGIN
         v_free := 0;
     END IF;
 
-    -- Lock so a concurrent REFUND retry and a verify cannot both read the pre-revoke total.
     SELECT * INTO v_row FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
     IF NOT FOUND THEN
-        -- No balance row: nothing was ever granted, so nothing to take back.
         RETURN 0;
     END IF;
 
-    -- Floor at `used` so `remaining` (a GENERATED column, total - used) can never go negative.
-    -- Spent credits are not recoverable; this only reclaims the UNSPENT balance.
     v_floor := GREATEST(v_free, v_row.used);
 
-    -- Idempotent: a replayed REFUND finds total already at the floor.
-    IF v_row.total <= v_floor THEN
+    -- Write off the spend that the refunded subscription paid for, exactly as section 5 does
+    -- for a charged-back pack. Flooring `total` at `used` and leaving `used` alone left a
+    -- high-water mark that survives into the NEXT subscription: `grant_tier_upgrade` would
+    -- raise `total` to the new allocation but `used` still carried the old tier's spending,
+    -- so `remaining` stayed 0 and the paid re-subscribe delivered nothing usable.
+    -- `remaining` is unchanged by the write-off (both columns move together).
+    v_writeoff := GREATEST(v_row.used - v_free, 0);
+
+    -- Idempotent: a replayed REFUND finds total already at the floor. `tier_alloc` is still
+    -- written, because the first delivery may have landed before this migration.
+    IF v_row.total <= v_floor AND v_writeoff = 0 THEN
+        UPDATE public.user_credits
+           SET tier_alloc = LEAST(v_row.tier_alloc, v_free),
+               updated_at = NOW()
+         WHERE user_id = p_user_id;
         RETURN (v_row.total - v_row.used);
     END IF;
 
-    v_delta  := v_floor - v_row.total;          -- negative
+    v_delta  := v_floor - v_row.total;          -- <= 0, the change in `remaining`
     v_now_et := (now() AT TIME ZONE 'America/New_York');
 
     UPDATE public.user_credits
-       SET total      = v_floor,
+       SET total      = v_floor - v_writeoff,
+           used       = used - v_writeoff,
+           tier_alloc = LEAST(v_row.tier_alloc, v_free),
            updated_at = NOW()
      WHERE user_id = p_user_id;
 
-    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
-    VALUES (p_user_id, v_delta, 'tier_revoked',
-            to_char(v_now_et, 'YYYY-MM'), v_floor - v_row.used);
+    IF v_delta <> 0 THEN
+        INSERT INTO public.credit_transactions
+            (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+        VALUES (p_user_id, v_delta, v_delta, 0, 'tier_revoked',
+                to_char(v_now_et, 'YYYY-MM'), v_floor - v_row.used);
+    END IF;
 
     RETURN (v_floor - v_row.used);
 END;
@@ -7094,6 +7112,7 @@ CREATE TABLE public.user_credits (
     purchased_total integer DEFAULT 0 NOT NULL,
     purchased_used integer DEFAULT 0 NOT NULL,
     spendable integer GENERATED ALWAYS AS (((total - used) + (purchased_total - purchased_used))) STORED,
+    tier_alloc integer DEFAULT 0 NOT NULL,
     CONSTRAINT user_credits_purchased_total_nonneg CHECK ((purchased_total >= 0)),
     CONSTRAINT user_credits_purchased_used_le_total CHECK ((purchased_used <= purchased_total)),
     CONSTRAINT user_credits_purchased_used_nonneg CHECK ((purchased_used >= 0)),
@@ -7135,6 +7154,13 @@ COMMENT ON COLUMN public.user_credits.purchased_used IS 'Credits spent out of th
 --
 
 COMMENT ON COLUMN public.user_credits.spendable IS 'Auto-computed: (total - used) + (purchased_total - purchased_used). The real balance and the one the API returns. `remaining` deliberately still means the GRANTED half only, so pre-existing SQL readers keep their original semantics. Never set directly.';
+
+
+--
+-- Name: COLUMN user_credits.tier_alloc; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_credits.tier_alloc IS 'Monthly allocation actually granted for the CURRENT period. Written by ensure_credit_period (on reset), grant_tier_upgrade (on grant) and revoke_tier_credits (down to the free allocation). Read only by grant_tier_upgrade''s replay guard. Exists because `total` is a high-water mark after a revoke, not an allocation, and using it as the guard made a paid re-subscribe grant nothing. See migration 139.';
 
 
 --
@@ -13932,5 +13958,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fOuXFyXx5xdGmDPiVuC9M89ea2Cs8Inlk7yImBA8QkkZpFl08LB3IdeLy9SFEz5
+\unrestrict 9jciLCnzLHzGtoKGBEieuJvvCfayNTvs0yRrUrJ9HBo98PYdyBn2qR4SItSvJJS
 

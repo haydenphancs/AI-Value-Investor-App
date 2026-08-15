@@ -109,7 +109,39 @@ final class HomeDashboardViewModel: ObservableObject {
         await load()
     }
 
+    /// The load currently in flight, if any. Concurrent callers JOIN it.
+    ///
+    /// Five triggers point at this one ViewModel — tab activation, `didBecomeActive`, the
+    /// tier `onChange`, the identity-change reload and the active-group notification — and
+    /// on a signed-in cold launch at least three of them fire within the same instant. The
+    /// `lastLoadedAt` window cannot collapse them, because it is only stamped once a load
+    /// COMPLETES, so every trigger that arrives while the first is still in flight saw a nil
+    /// timestamp and issued its own request. That is why one launch fetched
+    /// `/home/dashboard` three times.
+    private var loadTask: Task<Void, Never>?
+
     func load() async {
+        if let running = loadTask, !running.isCancelled {
+            await running.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performLoad()
+            // Cleared HERE, as the task's own last act, rather than after `await
+            // task.value` below. Between a task finishing and its awaiting caller
+            // being resumed, a THIRD caller can run and observe a completed-but-still
+            // -registered task: it would "join" something already done and return
+            // instantly without ever loading. That is a silently skipped refresh —
+            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // completed under the PREVIOUS identity.
+            self.loadTask = nil
+        }
+        loadTask = task
+        await task.value
+    }
+
+    private func performLoad() async {
         isLoading = true
         errorMessage = nil
         do {

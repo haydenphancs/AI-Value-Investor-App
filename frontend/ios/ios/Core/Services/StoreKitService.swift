@@ -29,6 +29,22 @@ import Combine
 import Foundation
 import StoreKit
 
+/// Failures originating in the StoreKit layer itself, before the backend is involved.
+///
+/// Its own type rather than an `AppError`, mirroring how `APIClient` throws `APIError` and lets
+/// `AppError.from(_:)` decide the user-facing case. It also keeps Apple's underlying
+/// `VerificationResult.VerificationError` attached, which is the entire diagnostic — the
+/// user-facing string deliberately does not carry it.
+enum StoreKitError: Error {
+    /// Apple's own signature check on the transaction failed.
+    ///
+    /// Thrown rather than returned as `nil`, because a `nil` return is invisible to the three
+    /// sweeps that call `handle` in a loop: they record failures from `catch`, so a
+    /// non-throwing failure produced `seen > 0, applied: 0, lastError: nil` — an "everything
+    /// failed" result carrying no error and emitting no analytics.
+    case unverified(underlying: Error)
+}
+
 extension Notification.Name {
     /// Posted after the backend has RECORDED a verified transaction, so the app can adopt the
     /// new tier and credit balance without waiting for a relaunch. Fired for interactive
@@ -117,6 +133,15 @@ final class StoreKitService: ObservableObject {
                 do {
                     try await self?.handle(verificationResult: update, origin: "updates")
                 } catch {
+                    // Release-VISIBLE, not just a DEBUG print. `.claude/rules/auth.md` §6 bans
+                    // `#if DEBUG`-only reporting on a path that moves money, and this listener
+                    // is where renewals, Ask-to-Buy approvals and redeliveries land — the
+                    // failures nobody is watching for. `Analytics` is an actor with a
+                    // `nonisolated` `track`, so this is safe from the detached task.
+                    Analytics.shared.track(.backgroundSyncFailed, [
+                        "op": .string("iap_updates"),
+                        "code": .string(AppError.from(error).analyticsCode),
+                    ])
                     #if DEBUG
                     print("🔴 [StoreKit] updates listener: \(error) — left unfinished for redelivery")
                     #endif
@@ -243,12 +268,12 @@ final class StoreKitService: ObservableObject {
 
         switch result {
         case .success(let verification):
-            // `handle` returns nil for exactly one reason: `.unverified`, which it refuses to
-            // forward. Report that as itself — folding it into `.pending` told the user to
-            // wait for something that is never coming.
+            // Checked HERE rather than by catching `StoreKitError.unverified` from `handle`,
+            // because this is the one caller that must not treat it as an error to report:
+            // `.unverified` is a `PurchaseOutcome` the sheet renders with its own copy.
+            // Folding it into `.pending` told the user to wait for something never coming.
             guard case .verified = verification else { return .unverified }
             let applied = try await handle(verificationResult: verification, origin: "purchase")
-            guard let applied else { return .unverified }
             return .success(applied)
 
         case .userCancelled:
@@ -284,9 +309,8 @@ final class StoreKitService: ObservableObject {
             // entitlements Apple DID return but whose every submission failed — telling
             // someone with an active subscription that they never bought anything.
             do {
-                if try await handle(verificationResult: entitlement, origin: "restore") != nil {
-                    result.applied += 1
-                }
+                _ = try await handle(verificationResult: entitlement, origin: "restore")
+                result.applied += 1
             } catch {
                 result.record(error, op: "iap_restore")
             }
@@ -298,8 +322,11 @@ final class StoreKitService: ObservableObject {
 
     /// Send a signed transaction to the backend and finish it only once recorded.
     ///
-    /// Returns what the backend applied, or nil when the transaction was unverified or not
-    /// something we act on.
+    /// Returns what the backend applied. Every failure THROWS — there is no "failed quietly"
+    /// return value. It used to answer an unverified transaction with `nil`, which the three
+    /// sweeps below could not see: they classify from `catch`, so the failure reached the user
+    /// as `allFailed` with a nil `lastError` ("The purchase couldn't be applied. Please try
+    /// again.") and emitted no analytics at all, on a payment path.
     ///
     /// Handles BOTH product families. That is the point: subscriptions and consumable credit
     /// packs differ only in what the server does with them, while the parts that are easy to
@@ -309,15 +336,20 @@ final class StoreKitService: ObservableObject {
     @discardableResult
     private func handle(
         verificationResult: VerificationResult<Transaction>, origin: String
-    ) async throws -> PurchaseApplied? {
+    ) async throws -> PurchaseApplied {
         switch verificationResult {
         case .unverified(_, let error):
             // Apple itself could not verify this. Do NOT forward it and do NOT finish it —
-            // forwarding wastes a round-trip on something guaranteed to fail server-side.
+            // forwarding wastes a round-trip on something guaranteed to fail server-side, and
+            // finishing would discard something we cannot prove is not a real purchase.
+            //
+            // THROW rather than return nil. The transaction stays unfinished either way; what
+            // changes is that the sweeps can now see it, so it is reported and counted instead
+            // of silently producing "nothing applied, no error".
             #if DEBUG
             print("🔴 [StoreKit] unverified transaction (\(origin)): \(error)")
             #endif
-            return nil
+            throw StoreKitError.unverified(underlying: error)
 
         case .verified(let transaction):
             // The JWS Apple signed — `VerificationResult.jwsRepresentation`, NOT
@@ -440,11 +472,10 @@ final class StoreKitService: ObservableObject {
         for await unfinished in Transaction.unfinished {
             result.seen += 1
             do {
-                if let applied = try await handle(verificationResult: unfinished,
-                                                  origin: "unfinished") {
-                    result.applied += 1
-                    result.creditsGranted += applied.creditsGranted
-                }
+                let applied = try await handle(verificationResult: unfinished,
+                                               origin: "unfinished")
+                result.applied += 1
+                result.creditsGranted += applied.creditsGranted
             } catch {
                 result.record(error, op: "iap_drain_unfinished")
             }

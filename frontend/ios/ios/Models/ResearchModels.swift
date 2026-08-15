@@ -10,8 +10,41 @@ import SwiftUI
 
 // MARK: - Cached Formatters
 private enum ResearchFormatters {
+    /// `"MMM d, yyyy"` for a plain instant, rendered in the DEVICE's zone.
+    ///
+    /// Locale/calendar are pinned even though the zone is not: a fixed `dateFormat` is
+    /// resolved against the device's calendar unless told otherwise, so on a phone set to
+    /// Thai (Buddhist), Japanese (era) or an Islamic calendar this pattern rendered that
+    /// calendar's month and year — "9月 1, 0008" — which matches nothing else in the app.
+    /// `en_US_POSIX` is the fixed-format locale that regional settings cannot reinterpret.
+    ///
+    /// Device zone is CORRECT here: the only caller is `AnalysisReport.formattedDate`, whose
+    /// `created_at` is a plain moment in time with no business timezone attached, so "when it
+    /// happened where you are" is the right reading.
     static let mediumDateFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "MMM d, yyyy"
+        return f
+    }()
+
+    /// `"MMM d, yyyy"` for the monthly credit reset — additionally pinned to ET.
+    ///
+    /// SEPARATE FROM THE ABOVE ON PURPOSE. `resets_at` is not a plain instant: it is written
+    /// by `ensure_credit_period` as `date_trunc('month', now() AT TIME ZONE 'America/New_York')
+    /// + 1 month`, i.e. midnight EASTERN, which arrives as `…T04:00:00+00:00`. Rendering that
+    /// in the device's zone moves it to the PREVIOUS calendar day for everyone west of ET, so
+    /// the Research credits card said "Renews Aug 31" while Profile — which pins ET already —
+    /// said "Resets on Sep 1", in the same session, about the same field.
+    ///
+    /// Keep this in step with `ProfileViewModel.resetDateFormatter`; they render the same
+    /// backend value and must never disagree.
+    static let creditResetFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = TimeZone(identifier: "America/New_York")
         f.dateFormat = "MMM d, yyyy"
         return f
     }()
@@ -332,7 +365,7 @@ struct CreditBalance {
     /// purchased component should render `purchasedSummary` alongside.
     var formattedRenewalDate: String? {
         guard monthlyCredits > 0 else { return nil }
-        return "Renews \(ResearchFormatters.mediumDateFormatter.string(from: renewalDate))"
+        return "Renews \(ResearchFormatters.creditResetFormatter.string(from: renewalDate))"
     }
 
     /// "N never expire" — the honest counterpart, or nil when there is no purchased balance.

@@ -31,6 +31,13 @@ final class WidgetRefreshService {
 
     private var inFlight: Task<Void, Never>?
 
+    /// A `force: true` request that arrived while a refresh was already running.
+    ///
+    /// It cannot simply join that run: the reason `onAuthenticated` forces a refresh is
+    /// that the in-flight one is very likely fetching under the WRONG identity (see
+    /// `refresh(force:)`), so its result is exactly what we need to replace.
+    private var forcedRefreshPending = false
+
     private init() {}
 
     /// Refresh both modes and hand the result to the widget.
@@ -47,14 +54,46 @@ final class WidgetRefreshService {
         // the first is cancelled mid-flight, and the second is then rejected by the
         // throttle the first already consumed. Verified on the simulator: the app made
         // 20+ requests on launch and zero widget fetches.
-        if let running = inFlight, !running.isCancelled { return }
+        if let running = inFlight, !running.isCancelled {
+            // …but a FORCED request must not be dropped on the floor.
+            //
+            // `AppState.onAuthenticated` forces one precisely because the run already in
+            // flight went out before the bearer was installed, so it is resolving the
+            // per-install GUEST — who owns no portfolio — and the backend degrades that to
+            // the market payload. Returning here left that guest result as the final word
+            // for the whole session: the Home Screen "My Holdings" tile kept showing market
+            // movers until some unrelated foreground 60s later. The observed launch only
+            // recovered because a 9-second gap let the first run finish first; a fast auth
+            // restore would not have.
+            //
+            // Remember it and re-run on completion rather than starting a second task, so
+            // `inFlight` stays a single cancellable handle and `clearForEndedSession()`
+            // can still stop everything in one call (auth.md §7).
+            if force { forcedRefreshPending = true }
+            return
+        }
 
         if !force, let last = lastRefresh, Date().timeIntervalSince(last) < Self.minimumInterval {
             return
         }
+        startRefresh()
+    }
+
+    /// Runs a refresh unconditionally — throttling and joining are decided by `refresh(force:)`.
+    private func startRefresh() {
         inFlight = Task { [weak self] in
             await self?.performRefresh()
-            self?.inFlight = nil
+            guard let self else { return }
+            self.inFlight = nil
+
+            // Drain a forced request that landed mid-run. Skipped when this task was
+            // cancelled: that means the session ended, and re-running would re-publish
+            // the ended session's holdings — the leak the cancellation check in
+            // `performRefresh` exists to prevent.
+            if self.forcedRefreshPending, !Task.isCancelled {
+                self.forcedRefreshPending = false
+                self.startRefresh()
+            }
         }
     }
 
@@ -120,6 +159,9 @@ final class WidgetRefreshService {
     /// portfolio snapshot is visible on the Home Screen without even unlocking the app.
     func clearForEndedSession() {
         inFlight?.cancel()
+        // Drop any queued forced refresh too — otherwise the ended session's pending
+        // request re-runs after cancellation and re-publishes their holdings.
+        forcedRefreshPending = false
         lastRefresh = nil
         WidgetSnapshotStore.clear()
     }

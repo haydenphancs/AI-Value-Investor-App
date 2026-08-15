@@ -57,9 +57,16 @@ def test_default_environment_is_a_recognized_value():
 
 
 def test_local_environments_are_still_reachable_when_asked_for_explicitly():
-    """Local development must keep working — it just has to be opted into."""
+    """Local development must keep working — it just has to be opted into.
+
+    `ENVIRONMENT` is pinned explicitly rather than inherited from `.env`: the local
+    environments are now gated on it, so leaving it implicit would make this test's meaning
+    depend on the developer's own dotenv.
+    """
     original = settings.IAP_ENVIRONMENT
+    original_deploy = settings.ENVIRONMENT
     try:
+        settings.ENVIRONMENT = "development"
         for value in ("Xcode", "LocalTesting", "local_testing", "  xcode  "):
             settings.IAP_ENVIRONMENT = value
             app_store.reset_verifier_cache()
@@ -67,6 +74,57 @@ def test_local_environments_are_still_reachable_when_asked_for_explicitly():
             assert env_name in _LOCAL_ONLY, f"{value!r} should resolve to a local environment"
     finally:
         settings.IAP_ENVIRONMENT = original
+        settings.ENVIRONMENT = original_deploy
+        app_store.reset_verifier_cache()
+
+
+@pytest.mark.parametrize("deploy_env", ["production", "staging", "PRODUCTION", "prod"])
+@pytest.mark.parametrize("iap_env", ["Xcode", "LocalTesting", "local_testing", "  xcode  "])
+def test_a_signature_skipping_environment_is_refused_outside_local_development(
+    deploy_env, iap_env
+):
+    """The OTHER half of the fail-closed story: an EXPLICIT local setting on a real deploy.
+
+    The default is already `Production` (pinned above), so a deploy that forgets the variable
+    fails closed. Nothing, however, stopped a Railway instance from carrying
+    `IAP_ENVIRONMENT=Xcode` — at which point Apple's `SignedDataVerifier` returns the decoded
+    JWT without checking its signature at all, `_load_root_certificates` is permitted to find
+    zero trust anchors, and online revocation checks are off. `POST /billing/verify` would
+    then accept any unsigned JWT anyone posts as a genuine purchase: free Max tier and 4,000
+    credits for the asking.
+
+    Note the guard is `!= "development"`, not `== "production"` — staging is a real deploy
+    reachable from the internet, and a typo'd `ENVIRONMENT` must fail closed too.
+    """
+    original = settings.IAP_ENVIRONMENT
+    original_deploy = settings.ENVIRONMENT
+    try:
+        settings.IAP_ENVIRONMENT = iap_env
+        settings.ENVIRONMENT = deploy_env
+        app_store.reset_verifier_cache()
+        with pytest.raises(app_store.AppStoreNotConfigured):
+            app_store._resolve_environment()
+    finally:
+        settings.IAP_ENVIRONMENT = original
+        settings.ENVIRONMENT = original_deploy
+        app_store.reset_verifier_cache()
+
+
+@pytest.mark.parametrize("iap_env", ["Production", "Sandbox"])
+def test_the_real_environments_are_unaffected_by_the_deployment_gate(iap_env):
+    """The gate must not become a second way to break a correctly-configured deploy: only the
+    signature-SKIPPING environments are restricted."""
+    original = settings.IAP_ENVIRONMENT
+    original_deploy = settings.ENVIRONMENT
+    try:
+        settings.IAP_ENVIRONMENT = iap_env
+        settings.ENVIRONMENT = "production"
+        app_store.reset_verifier_cache()
+        _env, env_name = app_store._resolve_environment()
+        assert env_name == iap_env.upper()
+    finally:
+        settings.IAP_ENVIRONMENT = original
+        settings.ENVIRONMENT = original_deploy
         app_store.reset_verifier_cache()
 
 

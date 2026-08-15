@@ -156,6 +156,9 @@ struct TrackingContentView: View {
 // MARK: - TrackingContentViewWithBinding (Used when tab navigation needed)
 struct TrackingContentViewWithBinding: View {
     @Environment(\.appState) private var appState
+    /// `ContentView` has always injected this (`selectedTab == .tracking`); this screen was
+    /// simply the one tab that never read it, which is why it had no activation trigger.
+    @Environment(\.isActiveTab) private var isActiveTab
     @StateObject private var viewModel = TrackingViewModel()
     @Binding var selectedTab: HomeTab
     @Binding var researchTickerSymbol: String?
@@ -279,6 +282,14 @@ struct TrackingContentViewWithBinding: View {
         // teardown does not reach into ViewModels. Signing in or out left the previous
         // identity's holdings on screen until the user happened to pull-to-refresh.
         .reloadOnIdentityChange { await viewModel.reloadForIdentityChange() }
+        // The first-visit load, which used to happen in `TrackingViewModel.init` — i.e. at
+        // app launch, for every user, whether or not they ever opened this tab, and while
+        // auth was still restoring. Same `.task(id: isActiveTab)` idiom as HomeDashboardView,
+        // UpdatesView and ResearchView.
+        .task(id: isActiveTab) {
+            guard isActiveTab else { return }
+            await viewModel.loadIfNeeded()
+        }
     }
 
     // MARK: - Action Handlers

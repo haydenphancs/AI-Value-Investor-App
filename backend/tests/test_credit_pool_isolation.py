@@ -68,14 +68,21 @@ class _Credits:
         return self.remaining + self.purchased_remaining
 
     def _check(self):
-        """The CHECK constraints from migrations 041 and 117. Any writer that trips one of
-        these has a sign or ordering bug, so the model asserts rather than clamping."""
+        """The CHECK constraints from migrations 041, 117 and 140. Any writer that trips one
+        of these has a sign or ordering bug, so the model asserts rather than clamping."""
         assert self.total >= 0, "user_credits_total_nonneg"
         assert self.used >= 0, "user_credits_used_nonneg"
         assert self.purchased_total >= 0, "user_credits_purchased_total_nonneg"
         assert self.purchased_used >= 0, "user_credits_purchased_used_nonneg"
         assert self.purchased_used <= self.purchased_total, \
             "user_credits_purchased_used_le_total"
+        # migration 140. The granted pool's half of the same tripwire — the purchased pool
+        # has had it since 117, and the asymmetry is why `spend_credits` still carries a
+        # defensive `GREATEST(0, total - used)` clamp (118 names `used > total` explicitly as
+        # "not forbidden by any CHECK" and the route to "a silent credit mint"). `<=`, not
+        # `<`: revoke_tier_credits deliberately lands on total == used == free_alloc.
+        # `_check` runs at the tail of every modelled RPC, so this arms every case in the file.
+        assert self.used <= self.total, "user_credits_used_le_total"
 
     def _ledger(self, delta, granted_delta, purchased_delta, reason, ref_id, reverses_id=None):
         self.ledger.append({
@@ -538,6 +545,67 @@ def test_no_refund_sequence_can_return_more_to_purchased_than_was_taken():
     assert given <= taken, f"returned {given} to the permanent pool but only took {taken}"
     assert c.purchased_total == 100, "purchased_total must never move on a spend/refund"
     assert c.spendable == 20 + 100, "a full charge/refund round trip conserves the balance"
+
+
+def test_no_writer_can_drive_used_past_total_on_the_granted_pool():
+    """Migration 140's tripwire, asserted by name rather than only via `_check`.
+
+    The purchased pool has had `purchased_used <= purchased_total` since 117; the granted pool
+    had no equivalent, which is why `spend_credits` still carries a defensive
+    `GREATEST(0, total - used)` — migration 118 names `used > total` as "not forbidden by any
+    CHECK" and the route to "a silent credit mint".
+
+    The interesting writer is `revoke_tier_credits`, the only one that LOWERS `total`. It moves
+    both columns by the same write-off, so a heavy spender lands exactly on equality — which is
+    why the constraint has to be `<=`. A `<` would reject every Apple subscription refund.
+    """
+    # Spend far past the free allocation, then take the subscription away.
+    c = _Credits(total=1200, used=900, tier="pro")
+    c.revoke_tier_credits()
+    assert c.used <= c.total, "revoke_tier_credits drove used past total"
+    assert (c.total, c.used) == (50, 50), (
+        "a clawback must land on the free allocation with the spend written off, not on a "
+        "high-water mark"
+    )
+    assert c.remaining == 0
+
+    # The light spender: writeoff is 0 and `used` must simply survive under the new total.
+    c2 = _Credits(total=1200, used=10, tier="pro")
+    c2.revoke_tier_credits()
+    assert (c2.total, c2.used) == (50, 10)
+    assert c2.used <= c2.total
+
+    # And a full drain-then-refund round trip stays inside the constraint at every step.
+    c3 = _Credits(total=50, used=0)
+    c3.spend_credits(50, ref_id="AAPL")
+    assert (c3.used, c3.total) == (50, 50)
+    c3.refund_credits(50, ref_id="AAPL")
+    assert c3.used == 0 and c3.used <= c3.total
+
+
+def test_a_fresh_signup_row_records_the_allocation_it_was_granted():
+    """Migration 140(B). 139 added `tier_alloc` and backfilled it, but only for rows that
+    existed at apply time — `create_user_credits` still inserted the pre-139 column list, so
+    every account created afterwards carried `tier_alloc = 0` beside a non-zero `total`.
+
+    `_Credits.__init__` models the post-140 trigger: the opening row states the allocation it
+    was actually granted, which is what `grant_tier_upgrade`'s replay guard reads.
+    """
+    fresh = _Credits(total=50)
+    assert fresh.tier_alloc == 50, (
+        "a newly seeded row leaves tier_alloc at 0, so the replay guard compares against a "
+        "number that never described a grant"
+    )
+    # And the guard still behaves: the first paid upgrade grants in full.
+    fresh.tier = "pro"
+    fresh.grant_tier_upgrade()
+    assert (fresh.total, fresh.tier_alloc) == (1200, 1200)
+    # A replayed delivery of the same purchase grants nothing further.
+    fresh.grant_tier_upgrade()
+    assert (fresh.total, fresh.tier_alloc) == (1200, 1200)
+    assert len([r for r in fresh.ledger if r["reason"] == "tier_upgrade"]) == 1, (
+        "a replayed upgrade wrote a second grant row"
+    )
 
 
 def test_refund_without_a_recorded_split_falls_back_to_granted_first():

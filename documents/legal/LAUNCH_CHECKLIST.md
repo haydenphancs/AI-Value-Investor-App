@@ -878,8 +878,20 @@ customer early is worse than carrying a lapsed one another day.
 ### Railway environment
 
 - [ ] `IAP_ENVIRONMENT=Sandbox` while testing, then `Production` at launch
+- [ ] `ENVIRONMENT=production` — **now load-bearing for payments**, not just for Sentry and the
+      background-job gate
 - [ ] `IAP_APP_APPLE_ID=<numeric app id>`
 - [ ] `IAP_ROOT_CERT_DIR=certs/apple` (default; set it if you put them elsewhere)
+
+> **You can no longer skip signature verification by accident on a deploy.** The default already
+> fails closed (`Production`, below), but nothing stopped an *explicit* `IAP_ENVIRONMENT=Xcode` on
+> Railway — and in `Xcode`/`LocalTesting` Apple's library skips the JWS signature check entirely,
+> runs with zero trust anchors, and disables revocation checks, so `POST /billing/verify` would
+> accept any unsigned JWT as a real purchase. `_resolve_environment()` now refuses those two values
+> unless `ENVIRONMENT=development`, failing the payment path closed with a 503 (the same answer as
+> missing root certificates) rather than refusing to boot the whole app. Consequence for you:
+> **local work needs BOTH `IAP_ENVIRONMENT=Xcode` and `ENVIRONMENT=development`** (the latter is
+> already the default in `backend/.env`). Guarded by `tests/test_iap_environment_fails_closed.py`.
 
 > **App Review buys in SANDBOX against the build you submit for PRODUCTION.** Apple's
 > `SignedDataVerifier` is built for exactly one environment and hard-rejects a payload whose

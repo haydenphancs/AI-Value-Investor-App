@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.error_response import ErrorCode, make_error_response
 from app.config import settings
-from app.dependencies import GUEST_USER_ID, get_current_user
+from app.dependencies import get_current_user
 from app.integrations.app_store import (
     AppStoreNotConfigured,
     AppStoreVerificationFailed,
@@ -90,19 +90,22 @@ async def verify_purchase(
     mint credits.
 
     Guests are rejected: entitlement has to attach to a real account, and the shared guest
-    id would grant a tier to every signed-out install at once.
+    id would grant a tier to every signed-out install at once. That rejection is enforced
+    entirely by the `get_current_user` dependency — see below.
     """
+    # No guest check here, and that is deliberate rather than an omission.
+    #
+    # `get_current_user` is the STRICT dependency: a missing credential raises AUTH_REQUIRED,
+    # an unverifiable one is rejected rather than downgraded to guest (`.claude/rules/auth.md`
+    # §4), and a token whose `sub` has no `public.users` row raises AUTH_ACCOUNT_NOT_FOUND. It
+    # can only ever return a real account row, and it never stamps `is_guest`.
+    #
+    # This used to test `user["id"] == GUEST_USER_ID`, which was unconditionally dead — nothing
+    # in the backend mints a token for the sentinel. Keeping it invited the opposite mistake:
+    # per-install guest ids never equal the sentinel either (migrations 108/110/111), so that
+    # comparison is the known-wrong guest test, and leaving one in the money path as a model to
+    # copy is worse than having none.
     user_id = user["id"]
-    if user_id == GUEST_USER_ID:
-        # Was `ErrorCode.UNAUTHORIZED`, which is not a member of the enum — so this line raised
-        # AttributeError, the global Exception handler caught it, and a guest submitting a
-        # purchase got a 500 "internal server error" instead of the 401 written here.
-        return make_error_response(
-            ErrorCode.AUTH_REQUIRED,
-            status_code=401,
-            message="Purchases require a signed-in account",
-            user_message="Please sign in before completing your purchase.",
-        )
 
     # 1. Verify with Apple's chain. Never trust the client's own description of the purchase.
     try:

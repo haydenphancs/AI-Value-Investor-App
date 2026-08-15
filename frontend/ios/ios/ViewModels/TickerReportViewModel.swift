@@ -16,6 +16,13 @@ class TickerReportViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var error: String?
 
+    /// What the error view's primary button should DO. Defaults to `.retry`, which is right
+    /// for the transient majority (network, 5xx, generation timeout) and is what the screen
+    /// offered unconditionally before. Set from `AppError.from(_:).suggestedAction` so an
+    /// error that retrying cannot fix — chiefly a 402 out-of-credits — routes somewhere that
+    /// can actually resolve it.
+    @Published var errorAction: ErrorAction = .retry
+
     // AI chat input (bound directly to CaydexAIChatBar in the View). The bar's onSend now seeds
     // the unified full-screen chat (AIChatScreen) with report context — see TickerReportView.
     @Published var aiInputText: String = ""
@@ -266,6 +273,17 @@ class TickerReportViewModel: ObservableObject {
 
             self.isLoading = false
             self.error = self.userFriendlyError(error)
+            // What the user can actually DO about it.
+            //
+            // The message copy below stays bespoke (it names the ticker, which
+            // `AppError` cannot), but the ACTION is taken from `AppError.from(_:)` so this
+            // screen agrees with every other surface about where an error sends you. It
+            // used to be dropped entirely: a 402 INSUFFICIENT_CREDITS carries
+            // `action: "upgrade"`, but the error view offered only Retry — which re-issues
+            // the identical request and 402s again — with no route to Buy Credits. A user
+            // out of credits was stuck in a loop on the one screen that could sell them the
+            // fix (SYSTEM_DESIGN_GUIDELINES §9b.7).
+            self.errorAction = AppError.from(error).suggestedAction
             // Don't set reportData — let the error view show with retry button
         }
     }

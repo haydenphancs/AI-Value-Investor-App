@@ -454,6 +454,30 @@ public enum WidgetSnapshotStore {
             return false
         }
 
+        // ⚠️ NOR MAY A SCOPE-MISMATCHED PAYLOAD REPLACE A GOOD ONE.
+        //
+        // `/widget/portfolio-mover` is `.guestAllowed`, so a call made before the bearer is
+        // installed is ANSWERED — as this install's per-install guest, who owns no
+        // portfolio — and the backend's documented "degrade, never error" path returns the
+        // MARKET payload instead (`endpoints/widget.py`). That is a perfectly valid,
+        // non-empty body, so the empty-check above waves it through and market movers land
+        // in the portfolio slot, where they persist until some later refresh replaces them.
+        //
+        // Keeping the previous good snapshot is strictly better: it is the user's real
+        // holdings, correctly labelled with its own session date. A first-ever fetch (no
+        // existing snapshot) still writes, so someone who genuinely holds nothing gets a
+        // populated tile rather than a blank one — `MoversWidget.mismatched` captions that
+        // case honestly.
+        if mode == .portfolio, snapshot.mode != "portfolio", let existing, !existing.isEmpty {
+            log.warning(
+                """
+                widget: ignoring \(snapshot.mode, privacy: .public)-scope payload for the \
+                portfolio slot — keeping the last good holdings snapshot
+                """
+            )
+            return false
+        }
+
         switch mode {
         case .market:    envelope.market = snapshot
         case .portfolio: envelope.portfolio = snapshot

@@ -14,6 +14,7 @@ from app.database import get_supabase
 from app.dependencies import get_watchlist_identity
 from app.integrations.fmp import get_fmp_client
 from app.services.tracking_service import invalidate_feed_cache
+from app.services._classification_common import classification_from_profile
 from app.schemas.watchlist import (
     AddToWatchlistRequest,
     RemoveFromWatchlistRequest,
@@ -100,16 +101,30 @@ async def add_to_watchlist(
         logger.error("[Watchlist] DB error checking duplicate for %s: %s", ticker, exc)
         raise HTTPException(status_code=500, detail=f"Database error: {exc}")
 
-    # Fetch company info from FMP for display
+    # Fetch company info from FMP for display AND classification.
+    #
+    # The profile call below already returns sector/industry/country/marketCap/beta —
+    # this used to read only companyName and image off it and throw the rest away, so a
+    # ticker added from the watchlist star (or onboarding, or the Updates tab) had
+    # `sector` NULL forever. Nothing else fills it in: `POST /tracking/holdings` writes it
+    # only for holdings, and `PortfolioInsightsService._enrich_missing` only sees tickers
+    # that already carry shares/market_value. The result was `"sector": null` on every
+    # watchlist-only row in `GET /tracking/assets`. Keeping these costs zero extra calls.
     company_name = ticker
     logo_url = None
+    classification: dict = {}
     try:
         fmp = get_fmp_client()
         profile = await fmp.get_company_profile(ticker)
         if profile:
             company_name = profile.get("companyName", ticker)
             logo_url = profile.get("image")
-            logger.info("[Watchlist] FMP profile: %s → %s", ticker, company_name)
+            classification = classification_from_profile(profile)
+            logger.info(
+                "[Watchlist] FMP profile: %s → %s (%s)",
+                ticker, company_name,
+                ", ".join(f"{k}={v}" for k, v in classification.items()) or "unclassified",
+            )
         else:
             logger.warning("[Watchlist] FMP returned no profile for %s", ticker)
     except Exception as exc:
@@ -122,6 +137,9 @@ async def add_to_watchlist(
         "company_name": company_name,
         "logo_url": logo_url,
     }
+    # Only keys that actually resolved — `classification_from_profile` never yields a
+    # key mapped to None, so this cannot blank a column on a partial FMP response.
+    data.update(classification)
 
     try:
         result = supabase.table("watchlist_items").insert(data).execute()

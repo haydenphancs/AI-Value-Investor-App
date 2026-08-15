@@ -165,10 +165,15 @@ class ResearchViewModel: ObservableObject {
             Task { @MainActor [weak self] in await self?.loadCredits() }
         }
 
-        // Fetch real data from backend
-        Task { [weak self] in
-            await self?.loadBackendData()
-        }
+        // Deliberately NO load here — same rule as `UpdatesViewModel.init` and
+        // `TrackingViewModel.init`.
+        //
+        // `ContentView` opacity-mounts all five tabs in one ZStack, so this initializer runs
+        // at app launch for every user, including one who never opens the Research tab. That
+        // made `loadBackendData()` — four requests (`/research/reports`, `/users/me/credits`,
+        // `/research/trending`, `/research/personas`) — unconditional launch traffic. The
+        // view's `.task(id: isActiveTab)` calls `loadIfStale()` when the tab first becomes
+        // active, and `.reloadOnIdentityChange` covers signing in or out while already here.
     }
 
     /// Token for the `.caydexEntitlementChanged` observer, removed on deinit.
@@ -184,7 +189,36 @@ class ResearchViewModel: ObservableObject {
 
     /// Load real reports + credits + trending + personas from the backend.
     /// Falls back to mock/static defaults on failure.
+    /// The load currently in flight, if any. Concurrent callers JOIN it.
+    ///
+    /// Tab activation and the identity-change reload land within milliseconds of each other
+    /// on a signed-in launch, and each one fanned out four requests because nothing here
+    /// consulted an in-flight flag — only `lastLoadedAt`, which is not yet set while the
+    /// first load is still running.
+    private var loadTask: Task<Void, Never>?
+
     private func loadBackendData() async {
+        if let running = loadTask, !running.isCancelled {
+            await running.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performBackendLoad()
+            // Cleared HERE, as the task's own last act, rather than after `await
+            // task.value` below. Between a task finishing and its awaiting caller
+            // being resumed, a THIRD caller can run and observe a completed-but-still
+            // -registered task: it would "join" something already done and return
+            // instantly without ever loading. That is a silently skipped refresh —
+            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // completed under the PREVIOUS identity.
+            self.loadTask = nil
+        }
+        loadTask = task
+        await task.value
+    }
+
+    private func performBackendLoad() async {
         async let reportsTask: () = loadReports()
         async let creditsTask: () = loadCredits()
         async let trendingTask: () = loadTrending()

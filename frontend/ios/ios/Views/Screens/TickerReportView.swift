@@ -11,9 +11,15 @@ import SwiftUI
 struct TickerReportView: View {
     @StateObject private var viewModel: TickerReportViewModel
     @Environment(\.dismiss) private var dismiss
+    /// Keyed rather than `@Environment(AppState.self)`: this screen is presented from
+    /// `fullScreenCover`s and from a `#Preview` with no injection, and the keyed entry has a
+    /// default so those cannot trap. The root supplies the real one (`iosApp.swift`).
+    @Environment(\.appState) private var appState
 
     // Overflow-menu UI state (••• menu actions)
     @State private var showDeleteConfirm: Bool = false
+    /// Buy Credits, raised from the error view when the report failed for lack of credits.
+    @State private var showBuyCreditsFromError = false
     /// Stable token keying this screen's compact-mode request + audio overlay host registration.
     @State private var compactToken = UUID().uuidString
     /// Owns the chat conversation for this report so it resumes while the screen is open.
@@ -357,24 +363,62 @@ struct TickerReportView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, AppSpacing.xxl)
 
-            Button(action: { viewModel.loadReport() }) {
-                HStack(spacing: AppSpacing.sm) {
-                    Image(systemName: "arrow.clockwise")
-                    Text("Retry")
+            // The primary button follows the error, not the other way round.
+            //
+            // This was an unconditional "Retry", which is a dead end for the one error the
+            // user can actually resolve: a 402 out-of-credits re-issues the same request and
+            // 402s again, on the single screen that could have sold them the credits.
+            // `.upgrade` sends them to Buy Credits instead — matching the routing in
+            // `ErrorPresentationHost` and SYSTEM_DESIGN_GUIDELINES §9b.7.
+            switch viewModel.errorAction {
+            case .upgrade:
+                errorActionButton(icon: "creditcard", title: "Get Credits") {
+                    showBuyCreditsFromError = true
                 }
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.primaryBlue)
-                .padding(.horizontal, AppSpacing.xxl)
-                .padding(.vertical, AppSpacing.md)
-                .background(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                        .stroke(AppColors.primaryBlue, lineWidth: 1)
-                )
+            case .signIn:
+                errorActionButton(icon: "person.crop.circle", title: "Sign In") {
+                    // Via AppActions, not `appState` — the prompt is owned by the root and
+                    // this screen can be inside a cover that cannot present a sheet itself.
+                    AppActions.shared.requestSignIn(for: "AI research reports")
+                }
+            case .goBack:
+                errorActionButton(icon: "chevron.left", title: "Go Back") { dismiss() }
+            default:
+                errorActionButton(icon: "arrow.clockwise", title: "Retry") {
+                    viewModel.loadReport()
+                }
             }
 
-            Button("Go Back") { dismiss() }
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textMuted)
+            // Suppressed when it would duplicate the primary button above.
+            if viewModel.errorAction != .goBack {
+                Button("Go Back") { dismiss() }
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textMuted)
+            }
+        }
+        .sheet(isPresented: $showBuyCreditsFromError) {
+            BuyCreditsView()
+                .environment(\.appState, appState)
+        }
+    }
+
+    /// The error view's primary button. One shape, three destinations.
+    private func errorActionButton(
+        icon: String, title: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: icon)
+                Text(title)
+            }
+            .font(AppTypography.bodySmallEmphasis)
+            .foregroundColor(AppColors.primaryBlue)
+            .padding(.horizontal, AppSpacing.xxl)
+            .padding(.vertical, AppSpacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: AppCornerRadius.large)
+                    .stroke(AppColors.primaryBlue, lineWidth: 1)
+            )
         }
     }
 

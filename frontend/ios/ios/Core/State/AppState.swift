@@ -227,6 +227,13 @@ final class AppState {
             // One line later here, that is simply sequenced. `onAuthenticated` still forces a
             // refresh once the identity fully settles, which now also survives landing
             // mid-flight (see `WidgetRefreshService.forcedRefreshPending`).
+            //
+            // `markCredentialReady()` also releases the gate that suppresses any EARLIER
+            // refresh. `UIApplication.didBecomeActiveNotification` is delivered before the
+            // root `.task` reaches `configure()`, so `iosApp`'s foreground trigger fires
+            // first on every cold launch — and being `.guestAllowed`, it did not fail, it
+            // succeeded as the guest.
+            WidgetRefreshService.shared.markCredentialReady()
             WidgetRefreshService.shared.refresh()
 
             await restoreSession(trigger: "launch")

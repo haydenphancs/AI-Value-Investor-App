@@ -38,6 +38,30 @@ final class WidgetRefreshService {
     /// `refresh(force:)`), so its result is exactly what we need to replace.
     private var forcedRefreshPending = false
 
+    /// Whether the app has decided what credential (if any) to send.
+    ///
+    /// ⚠️ A REFRESH BEFORE THIS IS POINTLESS AND ACTIVELY WRONG, which is not obvious
+    /// because it does not fail — it succeeds with someone else's data.
+    /// `/widget/portfolio-mover` is `.guestAllowed`, so a request carrying no bearer is
+    /// answered for this install's per-install GUEST, who owns no portfolio; the backend's
+    /// documented "degrade, never error" path then returns the MARKET payload, and market
+    /// movers land in the "My Holdings" tile.
+    ///
+    /// It fires that early on every cold launch: `UIApplication.didBecomeActiveNotification`
+    /// is delivered BEFORE the root `.task` runs `AppState.configure`, so the foreground
+    /// trigger in `iosApp` beat the credential to the wire. Measured in a launch log — the
+    /// widget requests appear above the appearance probe's `task-pre` line.
+    ///
+    /// Opened by `AppState` the instant the stored credential is armed, which is also where
+    /// the cold-launch seed fires — so nothing is lost by dropping the early call.
+    private var credentialReady = false
+
+    /// Called by `AppState` once the stored credential (if any) is on `APIClient`.
+    func markCredentialReady() {
+        guard !credentialReady else { return }
+        credentialReady = true
+    }
+
     private init() {}
 
     /// Refresh both modes and hand the result to the widget.
@@ -46,6 +70,14 @@ final class WidgetRefreshService {
     /// surface to the user or block anything. A stale widget is fine; an error alert
     /// because a Home Screen tile could not update is not.
     func refresh(force: Bool = false) {
+        // Nothing may go out before we know who we are — see `credentialReady`. Dropped
+        // rather than queued: `AppState` fires the seed the moment it opens this gate, so a
+        // queued copy would just be a duplicate of that.
+        guard credentialReady else {
+            log.info("widget refresh skipped — credential not armed yet")
+            return
+        }
+
         // JOIN a running refresh, never cancel it.
         //
         // The obvious version — `inFlight?.cancel()` then start a new task — silently

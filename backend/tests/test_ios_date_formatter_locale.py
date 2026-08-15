@@ -80,7 +80,11 @@ _KNOWN_UNLOCALISED = {
     "Models/IndexDetailResponseModels.swift",
     "Models/InvestorPathModels.swift",
     "Models/MoneyMoveArticleModels.swift",
-    "Models/ResearchModels.swift",
+    # Models/ResearchModels.swift — CLEARED. Both of its formatters are now pinned to
+    # `en_US_POSIX` + Gregorian, and the credit-reset one is additionally pinned to ET.
+    # It was rendering `resets_at` (a midnight-EASTERN month boundary) in the device zone,
+    # so every US zone west of ET showed "Renews Aug 31" while the Profile screen — which
+    # already pinned ET — said "Resets on Sep 1" about the same field in the same session.
     "Models/SignalOfConfidenceModels.swift",
     "Models/TickerDetailModels.swift",
     "Models/TickerNewsModels.swift",

@@ -99,7 +99,14 @@ ALLOWED_PROP_KEYS: frozenset[str] = frozenset({
     "ticker",     # report_*, watchlist_added
     "persona",    # report_* — fixed persona key
     "tier",       # paywall_*, purchase_completed
-    "reason",     # report_failed — AppError.analyticsCode, never the message
+    "reason",     # report_failed — AppError.analyticsCode, never the message.
+                  # ALSO paywall_shown / paywall_purchase_started / purchase_completed,
+                  # where it carries the `PaywallContext` raw value (7 fixed values:
+                  # general, more_credits, updates_tickers, signals, whale_follow_limit,
+                  # whale_detail, learn_audio) — WHICH lock opened the upgrade sheet. It
+                  # is on all three so conversion-per-lock is one funnel join; before it,
+                  # the sheet was opened from eight places and the impression carried no
+                  # trace of which, so "does the narration lock sell plans?" had no answer.
     "kind",       # lesson_completed, audio_played — fixed category
     "context",    # chat_sent — ChatContextType enum, never the message body
     "seconds",    # durations

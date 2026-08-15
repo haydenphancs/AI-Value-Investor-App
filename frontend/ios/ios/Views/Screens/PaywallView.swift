@@ -43,8 +43,16 @@ struct PaywallView: View {
     @StateObject private var personalizationConsent = PersonalizationConsentViewModel()
     @State private var showPersonalizationConsent = false
 
-    /// Which plan's feature list is on screen. `nil` until the catalog loads, then seeded
-    /// from `context` — see `defaultSelection`.
+    /// The plan the user has TAPPED. Stays nil until they pick one, and the displayed
+    /// selection falls back to `defaultSelection` while it is.
+    ///
+    /// Deliberately not seeded once the catalog arrives: the default depends on
+    /// `appState.user.tier`, and the catalog is a public endpoint that routinely resolves
+    /// BEFORE the profile does (and again after a session restore, which `AppState` runs
+    /// on launch, foreground and network-restore). Anything computed at catalog-time is
+    /// computed against whatever tier happened to be known then — a Pro subscriber would
+    /// open on Pro, be told "Current Plan", and see no upgrade at all. Deriving on read
+    /// makes the selection follow the tier until the moment the user overrides it.
     @State private var selectedTier: String?
 
     /// Alerts keyed off optional state, so dismissing clears the value rather than leaving
@@ -80,7 +88,8 @@ struct PaywallView: View {
 
     private var selectedPlan: PlanDTO? {
         guard let catalog = viewModel.catalog else { return nil }
-        return catalog.plans.first { $0.tier == selectedTier } ?? catalog.plans.last
+        let tier = selectedTier ?? defaultSelection(catalog)
+        return catalog.plans.first { $0.tier == tier } ?? catalog.plans.last
     }
 
     /// The plan to open on: the cheapest one ABOVE the user's current tier that actually
@@ -232,10 +241,6 @@ struct PaywallView: View {
             // rather than crediting whoever happens to be signed in when Apple retries.
             viewModel.accountID = appState.user.profile?.id
             await viewModel.load()
-        }
-        .onChange(of: viewModel.catalog) { _, catalog in
-            guard let catalog else { return }
-            selectedTier = defaultSelection(catalog)
         }
     }
 

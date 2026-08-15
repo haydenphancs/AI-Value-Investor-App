@@ -195,15 +195,42 @@ def test_the_modifier_ignores_restoring_but_fires_on_sign_out():
 
 def test_the_staleness_guard_cannot_suppress_the_healing_reload():
     """`loadIfStale` must not treat a signed-out / reconnecting pass as a completed load, or the
-    5-minute window would swallow the very reload that clears the latch."""
-    block = _decl_block(_read(_VIEW_MODEL), "private func loadBackendData()")
-    assert "lastLoadedAt" in block, "loadBackendData never records a load timestamp"
+    5-minute window would swallow the very reload that clears the latch.
+
+    Reads `performBackendLoad`, not `loadBackendData`: the latter is now a single-flight
+    wrapper that joins an in-flight load, and the fan-out plus the freshness stamp live in the
+    former. The assertion is unchanged — only the function that owns the logic moved.
+    """
+    block = _decl_block(_read(_VIEW_MODEL), "private func performBackendLoad()")
+    assert "lastLoadedAt" in block, "performBackendLoad never records a load timestamp"
     assert re.search(
         r"if\s+!requiresSignInForReports\s*&&\s*!isReconnectingReports\s*\{", block
     ), (
-        "loadBackendData marks the load fresh unconditionally. A signed-out or mid-restore pass "
-        "would then be 'fresh' for 5 minutes and `loadIfStale()` would skip the reload that "
-        "heals the sign-in latch."
+        "performBackendLoad marks the load fresh unconditionally. A signed-out or mid-restore "
+        "pass would then be 'fresh' for 5 minutes and `loadIfStale()` would skip the reload "
+        "that heals the sign-in latch."
+    )
+
+
+def test_the_research_load_is_single_flight():
+    """Tab activation and the identity-change reload land within milliseconds of each other on a
+    signed-in launch. `lastLoadedAt` cannot collapse them — it is only stamped once a load
+    COMPLETES — so without an in-flight join both fan out four requests each."""
+    block = _decl_block(_read(_VIEW_MODEL), "private func loadBackendData()")
+    assert "loadTask" in block and "await running.value" in block, (
+        "loadBackendData no longer joins an in-flight load. Concurrent triggers will each "
+        "issue their own /research/reports + /users/me/credits + /trending + /personas."
+    )
+
+
+def test_the_research_view_model_does_not_load_in_init():
+    """`ContentView` opacity-mounts all five tabs, so a load in `init` is launch traffic for a
+    tab the user may never open — and it goes out before session restore has armed the token,
+    which for a `.guestAllowed` endpoint means it is ANSWERED as the per-install guest."""
+    block = _decl_block(_read(_VIEW_MODEL), "init(prefilledTicker: String? = nil")
+    assert "loadBackendData()" not in block, (
+        "ResearchViewModel.init loads again. The view's `.task(id: isActiveTab)` owns the "
+        "first-visit load; see UpdatesViewModel.init for the rule."
     )
 
 

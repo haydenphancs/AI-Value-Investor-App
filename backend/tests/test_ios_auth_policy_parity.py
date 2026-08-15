@@ -210,8 +210,11 @@ def test_strict_endpoints_are_signInRequired(case_name):
         "getWhaleList", "getWhaleProfile",
         "getWhaleTradeGroups", "getWhaleTradeGroupDetail", "getSignalDetail",
         # Learn content. Both were `.public` with no backend dependency until narration
-        # became Pro/Max; they now take `get_learn_identity` purely to read `tier`. The
-        # TEXT is still free on every tier, so they must stay guest-capable — marking
+        # became Pro/Max. `getMoneyMoves` still takes `get_learn_identity` to read `tier`.
+        # `getJourney` no longer reads it at all — Journey narration is free on every tier
+        # (entitlements.JOURNEY_AUDIO_UNLOCKED_TIERS) — but keeps the dependency so a
+        # signed-out caller still resolves to a per-install guest for the rest of the Learn
+        # surface, and so re-gating is a one-line change. Both stay guest-capable: marking
         # either signInRequired would put a login wall in front of the education content
         # 5.1.1(v) exists to protect.
         "getJourney", "getMoneyMoves",

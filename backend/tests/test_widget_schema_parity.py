@@ -38,6 +38,13 @@ _ISO_NO_FRACTION = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 # Every key the Swift decoder reads, at the level it reads it.
 _PAYLOAD_KEYS = {
     "mode", "as_of", "market_session", "headline_mover", "basket", "runners_up",
+    # Session LABELLING. `as_of` is when the payload was built; `session_date` is which
+    # trading session the numbers describe. Keeping them separate is what lets the tile
+    # re-derive "Fri close" on a Sunday instead of presenting Friday's move as today's.
+    "session_date", "session_label",
+    # Which universe the movers came from — an empty active group falls back to market
+    # data, and nothing used to tell the user their "My Holdings" tile showed the market.
+    "scope_label",
 }
 _MOVER_KEYS = {
     "ticker", "company_name", "change_percent", "price", "tier", "z",

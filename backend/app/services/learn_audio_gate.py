@@ -1,17 +1,21 @@
-"""Wiser (Learn) narration gate — read free, listen with Pro.
+"""Wiser (Learn) narration gate — read free, listen with Pro. Except the Journey.
 
 Withholds the produced narration from a caller whose plan doesn't include it, while leaving
 every word of text intact. See `entitlements.LEARN_AUDIO_UNLOCKED_TIERS` for why the line is
 drawn between text and audio rather than around the content.
 
+⚠️ **The Investor Journey is NOT gated here.** Its narration is free on every tier including
+signed-out guests (`entitlements.JOURNEY_AUDIO_UNLOCKED_TIERS`), so this module holds only
+`sign_journey` for it — no redactor. Money Moves and Books are still Pro/Max, which is why
+this file now contains two different mechanisms rather than one with two shapes.
+
 What is withheld, per product:
-  • Journey     — each card's ``audioUrl`` and ``readAlongWords``
+  • Journey     — NOTHING. Free on every tier.
   • Money Moves — ``audioUrl`` / ``audioDurationSeconds``, and every block's ``readAlong`` /
                   ``itemsReadAlong``
 
 The read-along timings go with the audio deliberately: they are unusable without it (both
-clients derive the highlight from playback time), and they are bulk payload — Journey alone
-carries 6,435 word timings.
+clients derive the highlight from playback time), and they are bulk payload.
 
 ⚠️ **``hasAudioVersion`` is left ALONE.** It means "narration exists for this article", and
 the client hides the Listen control entirely when it is false. Locked has to be a THIRD
@@ -56,46 +60,15 @@ from app.services.learn_audio_urls import parse_storage_url, sign_many
 
 logger = logging.getLogger(__name__)
 
-# Card-level (Journey) and block-level (Money Moves) keys that carry narration.
-_JOURNEY_CARD_AUDIO_KEYS = ("audioUrl", "readAlongWords")
+# Article-level and block-level (Money Moves) keys that carry narration.
+#
+# There is deliberately NO Journey equivalent. Journey narration is free on every tier
+# (entitlements.JOURNEY_AUDIO_UNLOCKED_TIERS), so nothing strips a Journey card and
+# `redact_journey` was deleted rather than left unreachable — unused security code rots
+# and gets rewired by accident. If the Journey ever needs re-gating, `redact_money_moves`
+# below is the working template; it was a near byte-for-byte sibling.
 _MONEY_MOVES_ARTICLE_AUDIO_KEYS = ("audioUrl", "audioDurationSeconds")
 _MONEY_MOVES_BLOCK_AUDIO_KEYS = ("readAlong", "itemsReadAlong")
-
-
-def redact_journey(response: JourneyResponse, tier_required: str) -> JourneyResponse:
-    """Return a NEW JourneyResponse with narration withheld. Never mutates ``response``.
-
-    Journey's ``audioUrl`` is not a request-time overlay — `seed_journey.py` bakes it into
-    the `story_content` JSONB per card — so this walks the cards rather than clearing a
-    column.
-    """
-    lessons: List[JourneyLessonResponse] = []
-    for lesson in response.lessons:
-        lessons.append(
-            lesson.model_copy(update={"story_content": _strip_story_content(lesson.story_content)})
-        )
-    return JourneyResponse(lessons=lessons, audio_locked=True, tier_required=tier_required)
-
-
-def _strip_story_content(story: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Copy a lesson's story_content with every card's narration removed.
-
-    Tolerant of shape: a lesson with no story_content, no `cards` key, or a non-dict card
-    passes through untouched rather than raising — this blob is authored content that a bad
-    row edit can malform, and a 500 on the Learn tab is worse than one un-stripped card.
-    """
-    if not isinstance(story, dict):
-        return story
-    out = copy.deepcopy(story)
-    cards = out.get("cards")
-    if not isinstance(cards, list):
-        return out
-    for card in cards:
-        if not isinstance(card, dict):
-            continue
-        for key in _JOURNEY_CARD_AUDIO_KEYS:
-            card.pop(key, None)
-    return out
 
 
 def redact_money_moves(

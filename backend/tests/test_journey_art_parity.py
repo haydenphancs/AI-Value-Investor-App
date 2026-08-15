@@ -192,25 +192,20 @@ def test_seeder_targets_the_public_journey_images_bucket():
 
 
 def test_journey_images_is_never_signed():
-    """The direct guard against the migration-128 trap.
+    """Artwork and narration are both free now, but they are delivered differently and
+    must stay that way.
 
-    journey-media is destined to go private because narration is Pro/Max. Artwork is
-    free, and locked callers go through redact_journey (which deliberately does NOT
-    strip imageUrl), so a signed artwork URL would work for paying users and fail for
-    free ones — the exact inverse of the intent.
+    `journey-media` is PRIVATE (migration 128), so narration is signed for every caller.
+    `journey-images` is PUBLIC, so artwork is served as a plain stable URL that caches
+    indefinitely on device. Signing artwork would rotate its URL every few hours, defeat
+    URLCache, and re-download all 27 heroes twice a day for no benefit.
     """
     from app.services import learn_audio_urls
 
     assert BUCKET not in learn_audio_urls._SIGNABLE_BUCKETS, (
         f"{BUCKET} must never be signable — see migration 136")
-
-
-def test_redaction_keeps_image_url_for_locked_users():
-    """Artwork is free. If imageUrl ever joins the audio-strip list, every free-tier
-    reader loses the art with no error anywhere."""
-    from app.services import learn_audio_gate
-
-    assert "imageUrl" not in learn_audio_gate._JOURNEY_CARD_AUDIO_KEYS
+    assert "journey-media" in learn_audio_urls._SIGNABLE_BUCKETS, (
+        "narration must stay signable — its bucket is private")
 
 
 def test_manifest_image_urls_point_at_the_public_bucket():

@@ -189,13 +189,10 @@ class AIVoiceManager: NSObject, ObservableObject {
 
     /// Speak the given text with word-by-word progress tracking
     func speak(_ text: String, onComplete: (() -> Void)? = nil) {
-        // Journey narration is Pro/Max. Gated here as well as at the caller because EVERY
-        // failure path of the clip player routes into this method — a locked listener would
-        // otherwise get on-device TTS as a consolation prize the moment a clip 404'd.
-        guard LearnAudioEntitlement.shared.isUnlocked else {
-            LearnAudioEntitlement.shared.upgradeRequested.send()
-            return
-        }
+        // No entitlement gate. Journey narration is free on every tier including signed-out
+        // guests (backend: entitlements.JOURNEY_AUDIO_UNLOCKED_TIERS). This class is
+        // Journey-only — Money Moves and book narration run through AudioManager, which
+        // still consults LearnAudioEntitlement and is unaffected.
         AudioManager.shared.pauseForExternalAudio()   // see playClip
         guard let synthesizer = synthesizer else { return }
 
@@ -227,10 +224,8 @@ class AIVoiceManager: NSObject, ObservableObject {
     /// driving the same word-highlight + progress as the synthesizer path via estimated timing.
     /// Falls back to on-device speech if the clip is missing.
     func playClip(named name: String, text: String, readAlong: [ReadAlongWord]? = nil, onComplete: (() -> Void)? = nil) {
-        guard LearnAudioEntitlement.shared.isUnlocked else {
-            LearnAudioEntitlement.shared.upgradeRequested.send()
-            return
-        }
+        // No entitlement gate — see `speak(_:onComplete:)`.
+        //
         // Yield the shared audio session. AudioManager (Money Moves / book
         // narration) and this class each drive their own AVPlayer on the same
         // non-mixable `.playback` session and previously had no knowledge of one

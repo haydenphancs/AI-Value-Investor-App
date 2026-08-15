@@ -527,6 +527,19 @@ final class AppState {
         SettingsSyncManager.shared.hydrate()
         PushNotificationManager.shared.flushPendingToken()
         hydrateLearnStores()
+
+        // Rebuild the Home Screen widget for the identity that just settled.
+        //
+        // This is the RELIABLE trigger. The cold-launch call in `iosApp` races
+        // `restoreSession`, and `didBecomeActive` only fires on re-entry — so without
+        // this, a user who signed in (or switched accounts) kept a tile built for the
+        // previous identity, or for the guest partition, for the whole app session. The
+        // account-switch branch above has already cleared the portfolio snapshot, which
+        // otherwise leaves that widget blank until the next foreground.
+        //
+        // `force` skips the 60s throttle: an identity change is exactly the case where
+        // the throttle is wrong, because the previous fetch answered for someone else.
+        WidgetRefreshService.shared.refresh(force: true)
     }
 
     /// Pull the user's Learn progress down at the auth transition.

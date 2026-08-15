@@ -184,7 +184,11 @@ def compute_gap(
     op = _finite(open_price)
     pc = _finite(previous_close)
     total = _finite(change_percent)
-    if op is None or pc is None or pc <= 0 or total is None:
+    # BOTH prices must be positive, not just the denominator. A batch-quote row can
+    # carry `open: 0` for a name that has not traded yet in the session, and an
+    # unguarded `op` turned that into a gap of exactly −100.0% — a number the docstring
+    # above promises cannot be produced, and one that then reads as gap-dominant.
+    if op is None or pc is None or op <= 0 or pc <= 0 or total is None:
         return None, None, False
 
     gap = (op - pc) / pc * 100.0
@@ -223,11 +227,23 @@ def _moved_with_group(change: float, group_change: Optional[float]) -> bool:
 def detect_earnings(
     ticker: str, change: float, earnings_row: Optional[Dict[str, Any]], today: date
 ) -> Optional[Attribution]:
-    """Reported today or last night.
+    """Reported today or last night — and ONLY if it has actually reported.
 
     The row comes from the market-wide `earnings-calendar` — ONE FMP call covering every
     ticker, which the earnings notification sender already makes daily and then throws
     away.
+
+    ⚠️ A CALENDAR ROW IS A SCHEDULE, NOT AN EVENT. The calendar lists what is *due*, so a
+    today-dated row is routinely a company that will report TONIGHT. Gating on the date
+    alone made the widget say "NVDA reported earnings this morning" at 11:00 about a
+    company that had not reported at all — and because earnings sits at the top of the
+    precedence chain, it also discarded the move's real cause (a same-day downgrade).
+    A fabricated event outranking a true one is the worst failure this module can have.
+
+    The reliable signal is `epsActual`: `earnings_service` and `earnings_sender` both
+    already use its presence as the "has reported" test. FMP's `time` field is free-form
+    and often blank, so it is a useful *secondary* guard and a wording input, never the
+    primary gate.
     """
     if not isinstance(earnings_row, dict):
         return None
@@ -237,22 +253,54 @@ def detect_earnings(
 
     actual = _finite(earnings_row.get("epsActual"))
     estimate = _finite(earnings_row.get("epsEstimated"))
+
+    from app.services._earnings_common import (
+        AFTER_CLOSE,
+        BEFORE_OPEN,
+        parse_fmp_timing,
+    )
+
+    timing = parse_fmp_timing(earnings_row.get("time"))
+
+    if actual is None:
+        # No reported number. For a TODAY-dated row that means it has not happened yet
+        # (or the print has not landed), so it cannot be today's cause.
+        if when == today:
+            return None
+        # A t-1 row with no number is ambiguous enough that claiming it moved today's
+        # tape is not supportable either.
+        return None
+
+    if when == today:
+        # A same-day AFTER-CLOSE print cannot explain the session that preceded it.
+        if timing == AFTER_CLOSE:
+            return None
+        when_word = "this morning"
+    else:
+        # Yesterday's row: say which side of the session it landed on rather than
+        # assuming "after the close". A BMO print is ~30 hours old and belongs to the
+        # PREVIOUS session's move, not this one.
+        if timing == BEFORE_OPEN:
+            return None
+        when_word = "after yesterday's close"
+
     beat: Optional[bool] = None
     surprise: Optional[float] = None
-    if actual is not None and estimate is not None and abs(estimate) > 1e-9:
+    if estimate is not None and abs(estimate) > 1e-9:
         surprise = (actual - estimate) / abs(estimate) * 100.0
-        beat = actual >= estimate
+        beat = actual > estimate
 
-    when_word = "this morning" if when == today else "after yesterday's close"
-    if beat is None:
+    # An in-line print is neither a beat nor a miss, and "beat estimates by 0.0%"
+    # contradicts itself in a single sentence.
+    if beat is None or surprise is None or abs(surprise) < 0.05:
         tag = "Earnings"
         detail = f"{ticker} reported earnings {when_word}."
     elif beat:
         tag = "Earnings Beat"
-        detail = f"{ticker} beat EPS estimates by {_pct(surprise or 0)}, reported {when_word}."
+        detail = f"{ticker} beat EPS estimates by {_pct(surprise)}, reported {when_word}."
     else:
         tag = "Earnings Miss"
-        detail = f"{ticker} missed EPS estimates by {_pct(surprise or 0)}, reported {when_word}."
+        detail = f"{ticker} missed EPS estimates by {_pct(abs(surprise))}, reported {when_word}."
     return Attribution(kind=CauseKind.EARNINGS, tag=tag, detail=detail)
 
 
@@ -273,24 +321,31 @@ def detect_analyst_action(
             continue
 
         firm = str(row.get("gradingCompany") or "").strip()
-        action = str(row.get("action") or "").strip().lower()
         new_grade = str(row.get("newGrade") or "").strip()
         prev = str(row.get("previousGrade") or "").strip()
 
-        # "maintain" is not why a stock moved 5% — it is the absence of a change.
-        if action in {"maintain", "maintains", "reiterate", "reiterates", "hold"}:
-            continue
+        # Normalise via the SHARED classifier rather than substring-matching the raw
+        # string. FMP's `action` is inconsistent — it labels genuine cuts "maintain" —
+        # and `normalize_fmp_action` exists precisely to fall back to comparing
+        # previousGrade against newGrade on a 0-4 rank when the label cannot be trusted.
+        # Matching the raw text here dropped real same-day rating changes, and the
+        # detector below then asserted a SECTOR cause instead: a false explanation
+        # substituted for a true one.
+        from app.services._analyst_common import normalize_fmp_action
 
-        if "downgrade" in action:
+        action = normalize_fmp_action(row.get("action"), prev, new_grade)
+
+        if action == "downgrade":
             tag = "Analyst Downgrade"
             verb = "downgraded"
-        elif "upgrade" in action:
+        elif action == "upgrade":
             tag = "Analyst Upgrade"
             verb = "upgraded"
-        elif "initiat" in action:
+        elif action == "initiate":
             tag = "New Coverage"
             verb = "initiated coverage on"
         else:
+            # "maintain" is not why a stock moved 5% — it is the absence of a change.
             continue
 
         who = firm or "An analyst"
@@ -360,7 +415,7 @@ def detect_group_move(
 
 
 def describe_no_cause(
-    ticker: str, ctx: MoveContext, had_news: bool
+    ticker: str, ctx: MoveContext, had_news: bool, news_checked: bool = True
 ) -> str:
     """The honest answer, and the most common one.
 
@@ -368,6 +423,13 @@ def describe_no_cause(
     the move was for this particular stock, and how it compares with its industry. For
     ACHR that reads "Aerospace & Defense fell 1.2%; ACHR fell far more" — which is
     genuinely useful, and is exactly what a generic PR headline failed to convey.
+
+    `news_checked=False` means the news lookup itself FAILED — a Supabase error, or a
+    ticker the sweeper has never covered. That is a third state, and it must not be
+    collapsed into either of the other two. "No company news today" is an assertion about
+    the world; making it because a database call errored is a confident lie, and the
+    reader has no way to tell it from a real finding. Silence about what we could not
+    check is the only honest option left.
     """
     parts: List[str] = []
 
@@ -386,9 +448,19 @@ def describe_no_cause(
             )
 
     if ctx.gap_dominant and ctx.gap_percent is not None:
-        parts.append(f"Most of it was an overnight gap at the open.")
+        parts.append("Most of it was an overnight gap at the open.")
 
-    parts.append("No company news today." if not had_news else "No clear catalyst in today's news.")
+    if not news_checked:
+        # Do NOT assert a negative we never established. If the arithmetic above already
+        # said something true and useful, let that stand alone rather than appending a
+        # hedge nobody can act on.
+        if not parts:
+            parts.append("Today's news could not be checked.")
+    else:
+        parts.append(
+            "No company news today." if not had_news
+            else "No clear catalyst in today's news."
+        )
     return " ".join(parts)
 
 
@@ -411,6 +483,9 @@ def attribute(
     grade_rows: Optional[Sequence[Dict[str, Any]]] = None,
     classified_news: Optional[Sequence[tuple[str, str]]] = None,
     had_news: bool = False,
+    # False when the news lookup FAILED, as opposed to succeeding and finding nothing.
+    # Defaults True so every existing caller and test keeps its current meaning.
+    news_checked: bool = True,
 ) -> Optional[Attribution]:
     """Best available same-day explanation, plus always-true context.
 
@@ -478,7 +553,7 @@ def attribute(
     return Attribution(
         kind=CauseKind.NONE,
         tag=None,
-        detail=describe_no_cause(ticker, ctx, had_news),
+        detail=describe_no_cause(ticker, ctx, had_news, news_checked),
         context=ctx,
         considered=considered,
     )

@@ -1,10 +1,15 @@
 """
 One-off: generate short Gemini TTS voice SAMPLES (one per candidate book voice) so we can pick a
-per-book "author voice" for the Book Library. Each sample = a prebuilt voice + a persona style
-prompt + a short line in that author's tone. Delivered at the voice's NATURAL pace (no tempo
+per-book narration voice for the Book Library. Each sample = a prebuilt synthetic voice + a
+DELIVERY-STYLE direction + a short line. Delivered at the voice's NATURAL pace (no tempo
 normalization) so the character comes through; the real book pipeline normalizes pace later.
 
-Output: backend/data/voice_samples/<NN>_<author>_<voice>.m4a  (skips existing)
+⚠️ Style directions describe a DELIVERY ("an erudite, classically-educated finance professor"),
+never a person. Do not reintroduce "narrate as <real person>" wording or label a row with an
+author's name: these are stock synthetic voices, and naming them for a real investor both
+misdescribes what they are and manufactures a record of intent to imitate someone's voice.
+
+Output: backend/data/voice_samples/<NN>_<style>_<voice>.m4a  (skips existing)
 
 Usage (from backend/):
     ./venv/bin/python scripts/gen_voice_samples.py
@@ -35,33 +40,33 @@ MODEL = "gemini-2.5-flash-preview-tts"
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={KEY}"
 THROTTLE = float(os.environ.get("TTS_THROTTLE", "8"))
 
-# (order, author, book, voice, style direction, sample line)
+# (order, style slug, book, voice, style direction, sample line)
 SAMPLES = [
-    (1, "graham", "The Intelligent Investor", "Iapetus",
+    (1, "erudite_professor", "The Intelligent Investor", "Iapetus",
      "Read this as an erudite, classically-educated finance professor — articulate, precise, emotionally detached and measured, with dry wit and dignified, calm authority:",
      "The intelligent investor is a realist who sells to optimists and buys from pessimists. Mr. Market is there to serve you, not to instruct you."),
-    (2, "buffett", "The Essays of Warren Buffett", "Zubenelgenubi",
+    (2, "warm_elder", "The Essays of Warren Buffett", "Zubenelgenubi",
      "Read this as a warm, wise, plain-spoken older man — patient, unhurried, with gentle good humor. Use a neutral American accent, not a strong regional or folksy twang:",
      "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price. If you wouldn't own it for ten years, don't own it for ten minutes."),
-    (9, "fisher", "Common Stocks and Uncommon Profits", "Schedar",
+    (9, "scholarly_analyst", "Common Stocks and Uncommon Profits", "Schedar",
      "Read this as a meticulous, reserved, scholarly analyst — even, careful, methodical and precise, slightly formal:",
      "The wise investor buys a stock not because it is cheap, but because the business behind it can grow for many years to come."),
-    (3, "lynch", "One Up On Wall Street", "Enceladus",
+    (3, "sharp_stockpicker", "One Up On Wall Street", "Enceladus",
      "Read this as a seasoned, older stock-picker — sharp and engaging, in a mature, refined older man's voice. Not folksy, not regional:",
      "Behind every stock is a company. Go find out what it's doing! Often the best stock to buy is the one already sitting in your shopping cart."),
-    (4, "housel", "The Psychology of Money", "Puck",
+    (4, "modern_essayist", "The Psychology of Money", "Puck",
      "Read this as a calm, thoughtful modern essayist — reflective, intimate and understated, with gentle pacing:",
      "Doing well with money has little to do with how smart you are, and a lot to do with how you behave."),
-    (5, "bogle", "The Little Book of Common Sense Investing", "Alnilam",
+    (5, "elder_statesman", "The Little Book of Common Sense Investing", "Alnilam",
      "Read this as a principled elder statesman of investing — steady, firm, full of conviction, plain and direct:",
      "Don't look for the needle in the haystack. Just buy the haystack, and let the miracle of compounding do the rest."),
-    (6, "malkiel", "A Random Walk Down Wall Street", "Orus",
+    (6, "witty_emeritus", "A Random Walk Down Wall Street", "Orus",
      "Read this as a normal older man in his eighties — a witty professor emeritus, clear and plain-spoken, in a low, measured register:",
      "A blindfolded monkey throwing darts at the stock pages could pick a portfolio that does just as well as one chosen by the experts."),
-    (7, "marks", "The Most Important Thing", "Sadaltager",
+    (7, "contemplative", "The Most Important Thing", "Sadaltager",
      "Read this as a seasoned, contemplative investor weighing each idea — calm gravitas, thoughtful and measured:",
      "Risk means more things can happen than will happen. The riskiest belief of all is that there is no risk."),
-    (8, "greenblatt", "The Little Book that Still Beats the Market", "Achird",
+    (8, "patient_teacher", "The Little Book that Still Beats the Market", "Achird",
      "Read this as a friendly, patient teacher explaining a clever idea simply to a curious beginner — warm and a touch playful:",
      "Here's the secret, and it isn't complicated: buy good companies at bargain prices. That's really the whole game."),
 ]

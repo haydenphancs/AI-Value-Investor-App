@@ -27,7 +27,6 @@ from app.schemas.journey import JourneyLessonResponse, JourneyResponse
 from app.schemas.money_moves import MoneyMovesResponse
 from app.services import learn_audio_urls as urls
 from app.services.learn_audio_gate import (
-    redact_journey,
     redact_money_moves,
     sign_journey,
     sign_money_moves,
@@ -164,18 +163,27 @@ async def test_sign_money_moves_does_not_mutate_the_shared_cache_entry(fake_sign
 
 
 @pytest.mark.asyncio
-async def test_alternating_paid_and_free_callers_each_get_the_right_payload(fake_sign):
-    """The end-to-end shape of the cache trap: one shared object, many plans, any order."""
-    shared = _journey()
+async def test_journey_and_money_moves_diverge_for_the_same_caller(fake_sign):
+    """The end-to-end shape of the cache trap — one shared object, many plans, any order —
+    AND the product decision, asserted in one place.
 
-    paid_1 = (await sign_journey(shared)).model_dump_json()
-    free = redact_journey(shared, "pro").model_dump_json()
-    paid_2 = (await sign_journey(shared)).model_dump_json()
+    The same free caller hears the Journey and does NOT hear Money Moves. Anyone
+    "simplifying" the two Learn gates back into one fails here.
+    """
+    shared_journey, shared_mm = _journey(), _money_moves()
 
-    assert "/object/sign/" in paid_1
-    assert "/storage/v1/object/" not in free
-    # The regression this guards: after a free request, a paying caller still gets audio.
-    assert "/object/sign/" in paid_2
+    free_journey_1 = (await sign_journey(shared_journey)).model_dump_json()
+    free_mm = redact_money_moves(shared_mm, "pro").model_dump_json()
+    free_journey_2 = (await sign_journey(shared_journey)).model_dump_json()
+
+    # Journey: free callers get real, signed narration.
+    assert "/object/sign/" in free_journey_1
+    assert free_journey_1.count("/object/sign/") == free_journey_2.count("/object/sign/")
+    # Money Moves: the same caller gets none.
+    assert "/storage/v1/object/" not in free_mm
+    # The cache regression: serving one product does not poison the other's shared entry.
+    assert shared_journey.lessons[0].story_content["cards"][0]["audioUrl"] == _JOURNEY_AUDIO
+    assert shared_mm.articles[0]["audioUrl"] == _MM_AUDIO
 
 
 # ── what actually goes over the wire ─────────────────────────────────────────
@@ -380,3 +388,41 @@ def test_a_signature_outlives_the_longest_asset_by_a_wide_margin():
     headroom = urls._SIGNED_TTL_SECONDS - urls._CACHE_TTL_SECONDS
     longest_asset_seconds = 3502
     assert headroom > longest_asset_seconds * 4
+
+
+# ── Journey shape-tolerance (re-homed from test_learn_audio_entitlement) ─────
+#
+# These moved here when `redact_journey` was deleted. The intent is unchanged and now
+# matters more, not less: `story_content` is authored JSONB that a bad row edit can
+# malform, and `sign_journey` is the ONLY Journey path left — a raise here is a 500 on
+# the Learn tab for every user on every tier, not just the paying slice.
+
+@pytest.mark.asyncio
+async def test_signing_a_lesson_with_no_story_content_does_not_raise(fake_sign):
+    out = await sign_journey(_journey(story_content=None))
+    assert out.lessons[0].story_content is None
+    assert out.audio_locked is False
+
+
+@pytest.mark.asyncio
+async def test_signing_malformed_story_content_passes_through_rather_than_500ing(fake_sign):
+    for bad in ({"cards": "not-a-list"}, {"no_cards_key": 1}, {"cards": ["str", None, 7]}):
+        out = await sign_journey(_journey(story_content=bad))
+        assert out.lessons[0].story_content == bad
+        assert out.audio_locked is False
+
+
+@pytest.mark.asyncio
+async def test_signing_an_empty_catalogue_does_not_raise(fake_sign):
+    from app.schemas.journey import JourneyResponse
+
+    out = await sign_journey(JourneyResponse(lessons=[]))
+    assert out.lessons == []
+
+
+@pytest.mark.asyncio
+async def test_a_card_without_narration_survives_signing_byte_identically(fake_sign):
+    """The completion card carries no audio. Signing must not invent a key or drop one."""
+    out = await sign_journey(_journey())
+    completion = out.lessons[0].story_content["cards"][2]
+    assert completion == {"type": "completion", "headline": "Done", "text": "You finished."}

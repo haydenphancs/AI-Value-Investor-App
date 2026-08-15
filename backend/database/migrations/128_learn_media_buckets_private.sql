@@ -1,6 +1,12 @@
 -- 128_learn_media_buckets_private.sql
 --
--- ⚠️⚠️ DO NOT APPLY YET. Read all of this first. ⚠️⚠️
+-- ✅ APPLIED. Verified 2026-08-14 by probing a public object URL:
+--      GET .../object/public/journey-media/audio/<clip>.m4a
+--      → HTTP 400  {"statusCode":"404","error":"Bucket not found"}
+--    All three buckets are private; the *_public_read policies are gone from
+--    schema_snapshot.sql. The "DO NOT APPLY YET" banner this file carried for weeks after
+--    it was applied is what made two later reviews reach the wrong conclusion — hence the
+--    stamp. LAUNCH_CHECKLIST.md agrees.
 --
 -- Why: Wiser narration is Pro/Max (see services/entitlements.LEARN_AUDIO_UNLOCKED_TIERS),
 -- but all three audio buckets are PUBLIC — 061 (journey-media), 065 (money-moves-media),
@@ -43,15 +49,26 @@
 -- (seed_journey.py / seed_money_moves.py / seed_book_audio.py) run as service_role and must
 -- keep working. service_role also bypasses RLS for the reads that mint signed URLs.
 --
--- ⚠️ ONE MORE THING TO CHECK BEFORE APPLYING. Only `audioUrl` is signed. A Journey card also
--- carries `imageUrl` and `videoUrl` (seed_journey.py writes both as NULL today, and lesson
--- artwork ships as bundled iOS assets), so nothing else in these buckets is referenced right
--- now. If either field is ever populated from `journey-media`, it must be added to
--- `learn_audio_gate._journey_audio_urls` FIRST — this migration would otherwise break lesson
--- artwork silently, and only for content that had been working.
---   Check with:  select count(*) from lessons
---                where story_content::text like '%"imageUrl": "http%'
---                   or story_content::text like '%"videoUrl": "http%';
+-- ── RESOLVED: the imageUrl question this file used to raise ──────────────────────────────
+--
+-- This warned that only `audioUrl` is signed, so populating a Journey card's `imageUrl` or
+-- `videoUrl` from `journey-media` would break lesson artwork silently. Migration 136
+-- answered it: all 27 lessons now carry an `imageUrl`, and it points at the SEPARATE PUBLIC
+-- `journey-images` bucket, deliberately unsigned so it caches on device. Nothing artwork-
+-- related lives in `journey-media`.
+--
+-- So the old check below now returns 27 and reads as an alarm that isn't one. The real
+-- assertion is that no imageUrl/videoUrl points at a PRIVATE bucket:
+--   select count(*) from lessons
+--    where story_content::text like '%"imageUrl": "%journey-media%'
+--       or story_content::text like '%"videoUrl": "%journey-media%';   -- must be 0
+--
+-- ── Journey narration is now FREE on every tier (2026-08-14) ─────────────────────────────
+--
+-- This does NOT reopen the bucket. `journey-media` stays private and every caller — free,
+-- guest and paid — is served a signed URL by `sign_journey`, which is why that path now
+-- carries 100% of Journey traffic rather than the Pro slice. Money Moves and book narration
+-- are still Pro/Max. See entitlements.JOURNEY_AUDIO_UNLOCKED_TIERS.
 
 -- 1. Flip the three Learn media buckets to private (idempotent).
 UPDATE storage.buckets

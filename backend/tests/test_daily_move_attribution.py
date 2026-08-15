@@ -106,9 +106,92 @@ def test_earnings_miss_from_last_night():
     assert "after yesterday's close" in a.detail
 
 
-def test_earnings_without_numbers_still_reports_the_event():
-    a = detect_earnings("AAPL", 3.0, {"date": "2026-08-14"}, TODAY)
-    assert a.tag == "Earnings" and "reported earnings" in a.detail
+def test_a_scheduled_but_unreported_row_is_not_an_event():
+    """A CALENDAR ROW IS A SCHEDULE, NOT AN EVENT.
+
+    This replaces `test_earnings_without_numbers_still_reports_the_event`, which pinned
+    the opposite and was wrong — it contradicted its own sibling three tests below
+    (`test_future_dated_earnings_are_not_a_cause`: "An upcoming report has not happened
+    yet and cannot have moved the stock"). The calendar lists what is DUE, so a
+    today-dated row is routinely a company reporting TONIGHT.
+
+    Live shape of the bug: at 11:00 the tile rendered badge "Earnings" + "NVDA reported
+    earnings this morning" about a company that had not reported at all — and because
+    earnings is top of the precedence chain, it also discarded the real cause.
+    """
+    assert detect_earnings("AAPL", 3.0, {"date": "2026-08-14"}, TODAY) is None
+    assert (
+        detect_earnings(
+            "AAPL", 3.0,
+            {"date": "2026-08-14", "time": "amc", "epsEstimated": 1.01},
+            TODAY,
+        )
+        is None
+    )
+
+
+def test_a_reported_print_this_morning_is_an_event():
+    a = detect_earnings(
+        "AAPL", 3.0,
+        {"date": "2026-08-14", "time": "bmo", "epsActual": 1.4, "epsEstimated": 1.0},
+        TODAY,
+    )
+    assert a is not None and a.tag == "Earnings Beat"
+    assert "this morning" in a.detail
+
+
+def test_a_same_day_after_close_print_cannot_explain_the_session_before_it():
+    """Numbers that landed at 16:05 did not move the 09:30-16:00 tape."""
+    assert (
+        detect_earnings(
+            "AAPL", 3.0,
+            {"date": "2026-08-14", "time": "amc", "epsActual": 1.4, "epsEstimated": 1.0},
+            TODAY,
+        )
+        is None
+    )
+
+
+def test_yesterdays_after_close_print_is_todays_cause():
+    a = detect_earnings(
+        "AAPL", 3.0,
+        {"date": "2026-08-13", "time": "amc", "epsActual": 1.4, "epsEstimated": 1.0},
+        TODAY,
+    )
+    assert a is not None and "after yesterday's close" in a.detail
+
+
+def test_yesterdays_before_open_print_belongs_to_yesterdays_session():
+    """A BMO print is ~30 hours old — it moved YESTERDAY's tape, not today's."""
+    assert (
+        detect_earnings(
+            "AAPL", 3.0,
+            {"date": "2026-08-13", "time": "bmo", "epsActual": 1.4, "epsEstimated": 1.0},
+            TODAY,
+        )
+        is None
+    )
+
+
+def test_an_in_line_print_is_neither_a_beat_nor_a_miss():
+    """"beat EPS estimates by 0.0%" contradicts itself in a single sentence."""
+    a = detect_earnings(
+        "AAPL", 3.0,
+        {"date": "2026-08-14", "epsActual": 1.0, "epsEstimated": 1.0},
+        TODAY,
+    )
+    assert a is not None and a.tag == "Earnings"
+    assert "beat" not in a.detail and "missed" not in a.detail
+
+
+def test_a_miss_reports_a_positive_magnitude():
+    a = detect_earnings(
+        "AAPL", -3.0,
+        {"date": "2026-08-14", "epsActual": 0.8, "epsEstimated": 1.0},
+        TODAY,
+    )
+    assert a is not None and a.tag == "Earnings Miss"
+    assert "-" not in a.detail.split("by")[1]  # "missed ... by 20.0%", never "by -20.0%"
 
 
 def test_stale_earnings_are_not_todays_cause():
@@ -169,6 +252,38 @@ def test_the_first_dated_action_wins_over_older_ones():
 
 def test_an_unknown_action_verb_is_skipped_not_guessed():
     assert detect_analyst_action("X", [{"date": "2026-08-14", "action": "sideways"}], TODAY) is None
+
+
+def test_a_real_cut_mislabelled_maintain_is_still_a_downgrade():
+    """FMP labels genuine cuts "maintain"; the grades are the ground truth.
+
+    Substring-matching the raw `action` dropped these, and the SECTOR detector then
+    fired instead — substituting a false explanation for a true one, which is worse
+    than saying nothing. `_analyst_common.normalize_fmp_action` exists precisely to
+    rank-compare previousGrade against newGrade when the label cannot be trusted, and
+    is already pinned by `test_analyst_actions.py`.
+    """
+    a = detect_analyst_action(
+        "X",
+        [{"date": "2026-08-14", "gradingCompany": "RBC", "action": "maintain",
+          "previousGrade": "Outperform", "newGrade": "Sector Perform"}],
+        TODAY,
+    )
+    assert a is not None and a.tag == "Analyst Downgrade"
+    assert "RBC" in a.detail
+
+
+def test_a_true_reiteration_is_still_not_a_cause():
+    """Same rating on both sides really is the absence of a change."""
+    assert (
+        detect_analyst_action(
+            "X",
+            [{"date": "2026-08-14", "gradingCompany": "RBC", "action": "maintain",
+              "previousGrade": "Outperform", "newGrade": "Outperform"}],
+            TODAY,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("rows", [None, [], ["junk"], [None], [{"date": None}]])
@@ -245,7 +360,12 @@ def test_a_faded_gap_is_not_called_dominant():
 @pytest.mark.parametrize(
     "op, pc, chg",
     [(None, 100.0, -5.0), (94.0, None, -5.0), (94.0, 0.0, -5.0),
-     (94.0, -10.0, -5.0), (float("nan"), 100.0, -5.0), (94.0, 100.0, float("nan"))],
+     (94.0, -10.0, -5.0), (float("nan"), 100.0, -5.0), (94.0, 100.0, float("nan")),
+     # A batch-quote row can carry `open: 0` for a name that has not traded yet in the
+     # session. Guarding only the DENOMINATOR turned that into a gap of exactly
+     # -100.0%, which then read as gap-dominant — a number this function's own
+     # docstring promises it cannot produce.
+     (0.0, 100.0, -5.0), (-3.0, 100.0, -5.0)],
 )
 def test_unusable_prices_yield_no_gap_rather_than_a_wrong_one(op, pc, chg):
     gap, intraday, dominant = compute_gap(op, pc, chg)
@@ -354,6 +474,42 @@ def test_the_no_cause_line_distinguishes_no_news_from_no_catalyst():
     ctx = MoveContext(change_percent=-3.0)
     assert "No company news today" in describe_no_cause("X", ctx, had_news=False)
     assert "No clear catalyst" in describe_no_cause("X", ctx, had_news=True)
+
+
+def test_an_unchecked_news_lookup_never_asserts_that_there_was_no_news():
+    """The third state. Silence about what we could not check, not a false negative.
+
+    "No company news today" is an assertion about the WORLD. Making it because a
+    Supabase read errored, or because the sweeper has never covered this ticker, is a
+    confident lie the reader cannot distinguish from a real finding — and it is printed
+    under a red percentage on a Home Screen, where there is nothing to tap for more.
+    """
+    from app.services.daily_move_attribution import MoveContext
+
+    ctx = MoveContext(change_percent=-3.0)
+    for had_news in (True, False):
+        text = describe_no_cause("X", ctx, had_news, news_checked=False)
+        assert "No company news today" not in text
+        assert "No clear catalyst" not in text
+        assert text.strip()
+
+
+def test_an_unchecked_lookup_still_reports_the_arithmetic_it_does_know():
+    """Losing the news must not cost the industry comparison, which is still true."""
+    from app.services.daily_move_attribution import MoveContext
+
+    ctx = MoveContext(
+        change_percent=-5.0, industry_name="Aerospace & Defense",
+        industry_change_percent=-1.2,
+    )
+    text = describe_no_cause("X", ctx, had_news=False, news_checked=False)
+    assert "Aerospace & Defense" in text and "moved far more" in text
+
+
+def test_attribute_threads_the_unchecked_state_through():
+    a = _attr(change_percent=-5.0, sigma_daily=0.045, had_news=False, news_checked=False)
+    assert a.kind is CauseKind.NONE
+    assert "No company news today" not in a.detail
 
 
 def test_no_output_anywhere_contains_a_multi_day_window_phrase():

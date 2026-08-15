@@ -55,8 +55,24 @@ public enum WidgetSharedConfig {
 /// the user to retry and no crash report anyone would think to send.
 public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     public let mode: String
+    /// When the payload was BUILT — not what day the numbers describe. Use
+    /// `sessionDate` for that; see `WidgetSessionLabel`.
     public let asOf: Date
     public let marketSession: String
+    /// ET calendar date (`YYYY-MM-DD`) of the trading session these numbers describe.
+    ///
+    /// A `String`, deliberately NOT a `Date`: it is a plain calendar date with no time,
+    /// and running it through the `.iso8601` strategy would fail to decode.
+    ///
+    /// This is what lets the tile age its own label with no network and no flag. The app
+    /// may have fetched Friday at 15:58 and the tile may be read on Sunday; the date says
+    /// which day, so the widget re-derives "Fri close" at render time.
+    public let sessionDate: String?
+    /// The sentence that was true at `asOf` — "Live 2:14 PM ET", "Fri close". The client
+    /// may DOWNGRADE it as it ages but never composes its own.
+    public let sessionLabel: String?
+    /// Which universe the movers came from — "Your holdings", "The stocks Caydex tracks".
+    public let scopeLabel: String?
     public let headlineMover: WidgetMover?
     public let basket: WidgetBasket?
     /// Next few movers, for the large family. Empty on smaller sizes' data too —
@@ -67,19 +83,29 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
         case mode
         case asOf = "as_of"
         case marketSession = "market_session"
+        case sessionDate = "session_date"
+        case sessionLabel = "session_label"
+        case scopeLabel = "scope_label"
         case headlineMover = "headline_mover"
         case basket
         case runnersUp = "runners_up"
     }
 
-    /// Tolerant of an older backend that has not shipped `runners_up` yet: a missing
-    /// key must degrade to an empty list, not fail the whole decode and leave the
-    /// widget on its placeholder.
+    /// ⚠️ EVERY OPTIONAL FIELD MUST BE READ WITH `decodeIfPresent`, WITH A DEFAULT.
+    ///
+    /// The widget ships in an app update; the backend deploys independently. A new app
+    /// running against a not-yet-deployed backend must still render — and a decode
+    /// failure here has no error surface at all: `read()` returns nil and the user gets
+    /// the placeholder on their Home Screen, with no retry and no crash report anyone
+    /// would think to send. `runners_up` set this precedent; keep it for everything.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         mode = try c.decode(String.self, forKey: .mode)
         asOf = try c.decode(Date.self, forKey: .asOf)
         marketSession = try c.decode(String.self, forKey: .marketSession)
+        sessionDate = try c.decodeIfPresent(String.self, forKey: .sessionDate)
+        sessionLabel = try c.decodeIfPresent(String.self, forKey: .sessionLabel)
+        scopeLabel = try c.decodeIfPresent(String.self, forKey: .scopeLabel)
         headlineMover = try c.decodeIfPresent(WidgetMover.self, forKey: .headlineMover)
         basket = try c.decodeIfPresent(WidgetBasket.self, forKey: .basket)
         runnersUp = try c.decodeIfPresent([WidgetMover].self, forKey: .runnersUp) ?? []
@@ -87,15 +113,26 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
 
     public init(
         mode: String, asOf: Date, marketSession: String,
+        sessionDate: String? = nil, sessionLabel: String? = nil, scopeLabel: String? = nil,
         headlineMover: WidgetMover?, basket: WidgetBasket?, runnersUp: [WidgetMover] = []
     ) {
         self.mode = mode
         self.asOf = asOf
         self.marketSession = marketSession
+        self.sessionDate = sessionDate
+        self.sessionLabel = sessionLabel
+        self.scopeLabel = scopeLabel
         self.headlineMover = headlineMover
         self.basket = basket
         self.runnersUp = runnersUp
     }
+
+    /// True when the payload carries no mover at all.
+    ///
+    /// The backend degrades-never-errors: an upstream failure answers HTTP 200 with
+    /// `headline_mover: null`. That is a legitimate response but NOT something worth
+    /// overwriting a good snapshot with — see `WidgetSnapshotStore.write`.
+    public var isEmpty: Bool { headlineMover == nil && runnersUp.isEmpty }
 }
 
 public struct WidgetMover: Codable, Equatable, Sendable {
@@ -119,9 +156,21 @@ public struct WidgetMover: Codable, Equatable, Sendable {
 
     /// `nil` ⇒ the number is HIDDEN, never rendered as 0.0%. A fabricated flat reading
     /// on a stock that actually moved is worse than no reading.
+    ///
+    /// A stock that closed EXACTLY flat prints "0.00%", not "+0.00%". `%+.2f%%` emits a
+    /// leading `+` for zero while `isPositive` (`> 0`) is false for it, so the same glyph
+    /// run said "gain" with its sign and "loss" with its colour.
     public var formattedChange: String? {
         guard let c = changePercent else { return nil }
+        if isFlat { return "0.00%" }
         return String(format: "%+.2f%%", c)
+    }
+
+    /// Rounded to the two decimals actually displayed, so a value that PRINTS as flat is
+    /// treated as flat. `-0.001` renders "0.00%" and must not be painted red.
+    public var isFlat: Bool {
+        guard let c = changePercent else { return false }
+        return (c * 100).rounded() == 0
     }
 
     /// `-0.0 > 0` is false, so a signed zero cannot paint a gainer.
@@ -286,6 +335,23 @@ public enum WidgetSnapshotStore {
             return false
         }
         var envelope = read() ?? WidgetSnapshotEnvelope()
+
+        // ⚠️ AN EMPTY PAYLOAD MUST NOT REPLACE A GOOD ONE.
+        //
+        // The backend degrades-never-errors, so a transient FMP or Supabase failure comes
+        // back as a perfectly valid HTTP 200 with `headline_mover: null`. Writing that
+        // unconditionally replaced a live tile with "Open the app to load today's
+        // movers" — an instruction that cannot help, shown WHILE the app is open, from a
+        // blip the user never saw. Yesterday's mover, correctly labelled with its own
+        // session date, is strictly better than nothing.
+        let existing = (mode == .market) ? envelope.market : envelope.portfolio
+        if snapshot.isEmpty, let existing, !existing.isEmpty {
+            log.warning(
+                "widget: ignoring empty \(mode.rawValue, privacy: .public) payload — keeping the last good snapshot"
+            )
+            return false
+        }
+
         switch mode {
         case .market:    envelope.market = snapshot
         case .portfolio: envelope.portfolio = snapshot
@@ -302,11 +368,33 @@ public enum WidgetSnapshotStore {
         return true
     }
 
-    /// Clears both modes. Called when a session ends — see `.claude/rules/auth.md` §7:
-    /// a device-global store that survives sign-out hands the next account the previous
-    /// user's data. A portfolio snapshot on the Home Screen is exactly that, and it is
-    /// visible without even unlocking into the app.
+    /// Clears the PORTFOLIO snapshot when a session ends — see `.claude/rules/auth.md`
+    /// §7: a device-global store that survives sign-out hands the next account the
+    /// previous user's data, and a portfolio snapshot on the Home Screen is visible
+    /// without even unlocking into the app.
+    ///
+    /// The MARKET snapshot deliberately survives. It comes from a `.public` route, is
+    /// identical for every caller, and carries nothing about the user — so §7 does not
+    /// reach it. Wiping it too meant the default-configured widget (Market is the
+    /// AppIntent default) went blank on sign-out and stayed blank until the user next
+    /// backgrounded and re-foregrounded the app, which reads as the sign-out having
+    /// broken something.
     public static func clear() {
+        guard let defaults else { return }
+        var envelope = read() ?? WidgetSnapshotEnvelope()
+        envelope.portfolio = nil
+        envelope.writtenAt = Date()
+        if let market = envelope.market, !market.isEmpty,
+           let data = try? encoder.encode(envelope) {
+            defaults.set(data, forKey: WidgetSharedConfig.snapshotKey)
+        } else {
+            defaults.removeObject(forKey: WidgetSharedConfig.snapshotKey)
+        }
+        reloadTimelines()
+    }
+
+    /// Removes BOTH modes. For a deliberate reset, not for a session ending.
+    public static func clearAll() {
         defaults?.removeObject(forKey: WidgetSharedConfig.snapshotKey)
         reloadTimelines()
     }

@@ -70,6 +70,21 @@ final class WidgetRefreshService {
 
         let (m, p) = await (market, portfolio)
 
+        // ⚠️ CHECK CANCELLATION BEFORE WRITING.
+        //
+        // `clearForEndedSession()` cancels this task and wipes the App Group — but
+        // cancelling cannot un-finish a child task that already resolved. Without this
+        // check, a response that landed just before sign-out resumed here afterwards and
+        // re-published the ended session's holdings to the Home Screen, where they are
+        // visible without even unlocking. That is precisely what `.claude/rules/auth.md`
+        // §7 exists to prevent.
+        if Task.isCancelled {
+            log.warning("widget refresh cancelled — discarding fetched snapshots")
+            return
+        }
+
+        // `write` itself refuses to replace a good snapshot with an empty one; see the
+        // note there. A degraded backend 200 must not blank a working tile.
         if let m { WidgetSnapshotStore.write(mode: .market, snapshot: m) }
         if let p { WidgetSnapshotStore.write(mode: .portfolio, snapshot: p) }
 

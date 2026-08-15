@@ -2,7 +2,13 @@
 //  LearnAudioEntitlement.swift
 //  ios
 //
-//  Wiser (Learn) narration gate — read free, listen with Pro.
+//  Wiser (Learn) narration gate — read free, listen with Pro. MONEY MOVES + BOOKS ONLY.
+//
+//  ⚠️ THE INVESTOR JOURNEY IS NOT GATED BY THIS OBJECT.
+//  Journey narration is free on every tier including signed-out guests (backend:
+//  entitlements.JOURNEY_AUDIO_UNLOCKED_TIERS). `AIVoiceManager`, the Journey engine, no
+//  longer consults this class at all, and `LessonTopicCardView` references it zero times.
+//  Two source-scan tests fail the build if either starts again.
 //
 //  WHY THIS EXISTS AS A SERVICE RATHER THAN A VIEW CHECK
 //  -----------------------------------------------------
@@ -23,9 +29,9 @@
 //  Storage URLs into the binary, so there is no server request to refuse. This object is the
 //  only gate books have until those URLs move behind a signed-URL endpoint.
 //
-//  Two engines read it — `AudioManager` (Money Moves + Books) and `AIVoiceManager` (Journey,
-//  its own AVPlayer + AVSpeechSynthesizer). There is no single kill switch, so both consult
-//  this one flag.
+//  ONE engine reads it now — `AudioManager` (Money Moves + Books). `AIVoiceManager` (the
+//  Journey's own AVPlayer + AVSpeechSynthesizer) used to as well; reason 2 above is now the
+//  reason the Journey needs no gate rather than the reason it needed a special one.
 //
 
 import Foundation
@@ -35,8 +41,9 @@ import Combine
 final class LearnAudioEntitlement: ObservableObject {
     static let shared = LearnAudioEntitlement()
 
-    /// Whether this account may hear the produced Learn narration. Mirrors the backend's
-    /// `entitlements.learn_audio_unlocked` (Pro/Max).
+    /// Whether this account may hear MONEY MOVES / BOOK narration. Mirrors the backend's
+    /// `entitlements.learn_audio_unlocked` (Pro/Max). Says nothing about the Journey, which
+    /// is free on every tier.
     ///
     /// Defaults to LOCKED. An unknown tier must fall closed onto the paid surface, and on a
     /// cold launch this is false until `AppState.applyProfile` runs — a moment of silence is
@@ -56,24 +63,29 @@ final class LearnAudioEntitlement: ObservableObject {
         guard unlocked != isUnlocked else { return }
         isUnlocked = unlocked
         if unlocked {
-            // ⚠️ THE UPGRADE MUST INVALIDATE THE CONTENT STORES, or it buys nothing this run.
+            // ⚠️ THE UPGRADE MUST INVALIDATE THE MONEY MOVES STORE, or it buys nothing this run.
             //
-            // Both Learn stores latch a once-per-session prefetch (`didPrefetch`) that never
-            // ages out. A caller who was locked at launch holds a payload the backend REDACTED:
+            // The store latches a once-per-session prefetch (`didPrefetch`) that never ages
+            // out. A caller who was locked at launch holds a payload the backend REDACTED:
             // text intact, `audioUrl` and the read-along spans gone. Flipping this flag changes
             // the labels — `hasAudioVersion` is deliberately left true so the offer stays
-            // visible — but the URLs are still missing, so:
-            //   • Money Moves "Listen Now" hits `AudioManager.isMissingNarration` and dies in a
-            //     `print`: no audio, no error, no paywall. Just a dead button.
-            //   • Journey cards fall through to `AVSpeechSynthesizer`, silently substituting the
-            //     system voice for the narration the user just paid for.
-            // Neither recovers without a relaunch. Re-fetch so the signed URLs actually arrive.
+            // visible — but the URLs are still missing, so "Listen Now" hits
+            // `AudioManager.isMissingNarration` and dies in a `print`: no audio, no error, no
+            // paywall. Just a dead button. It does not recover without a relaunch.
+            //
+            // JourneyContentStore is deliberately NOT refreshed: its payload is complete on
+            // the first fetch for every tier, so re-fetching 27 lessons and 6,435 word timings
+            // on upgrade would buy nothing.
             Task { await MoneyMovesContentStore.shared.forceRefresh() }
-            Task { await JourneyContentStore.shared.forceRefresh() }
         } else {
-            // A downgrade mid-session must not leave narration playing.
+            // A downgrade mid-session must not leave PAID narration playing.
+            // `stopForLostEntitlement` self-filters to Money Moves / book episodes.
+            //
+            // ⚠️ Do NOT add `AIVoiceManager.shared.stop()` back here. `AppState` funnels
+            // EVERY auth transition through `update(tier: .free)`, so that call would cut a
+            // Journey lesson off mid-sentence the moment a user signed out — narration they
+            // are still entitled to, because the Journey is free on every tier.
             AudioManager.shared.stopForLostEntitlement()
-            AIVoiceManager.shared.stop()
         }
     }
 

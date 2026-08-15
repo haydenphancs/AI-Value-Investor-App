@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 9jciLCnzLHzGtoKGBEieuJvvCfayNTvs0yRrUrJ9HBo98PYdyBn2qR4SItSvJJS
+\restrict vsHguchqLTldRdvEketYP7O8TUqAHk7QWo95wND18fNBke1XToDf3z0WeEXVPGk
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1425,15 +1425,22 @@ BEGIN
     v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
                         AT TIME ZONE 'America/New_York';
 
-    INSERT INTO public.user_credits (user_id, total, used, resets_at, updated_at)
-    VALUES (NEW.id, v_alloc, 0, v_next_reset, NOW())
+    -- `tier_alloc` alongside `total`: this IS the allocation granted for this period, and
+    -- it is what `grant_tier_upgrade`'s replay guard reads. Left at its 0 default, a fresh
+    -- account's guard compares against a number that never described a grant.
+    INSERT INTO public.user_credits (user_id, total, used, tier_alloc, resets_at, updated_at)
+    VALUES (NEW.id, v_alloc, 0, v_alloc, v_next_reset, NOW())
     ON CONFLICT (user_id) DO NOTHING;
 
     -- Only log the opening grant if we are the writer that created the row, so a re-insert
-    -- or a race cannot double-log. Mirrors ensure_credit_period's own grant row shape.
+    -- or a race cannot double-log. Mirrors ensure_credit_period's own grant row shape —
+    -- including, now, the split: `delta = granted_delta + purchased_delta` is a documented
+    -- invariant, and an unsplit row here is indistinguishable from a pre-117 one.
     IF FOUND THEN
-        INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
-        VALUES (NEW.id, v_alloc, 'grant', to_char(v_now_et, 'YYYY-MM'), v_alloc);
+        INSERT INTO public.credit_transactions
+            (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+        VALUES (NEW.id, v_alloc, v_alloc, 0, 'grant',
+                to_char(v_now_et, 'YYYY-MM'), v_alloc);
     END IF;
 
     RETURN NEW;
@@ -1452,7 +1459,7 @@ $$;
 -- Name: FUNCTION create_user_credits(); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.create_user_credits() IS 'AFTER INSERT on public.users: seeds user_credits from plan_credits (never a literal), sets resets_at to the ET month boundary so ensure_credit_period does not treat a fresh row as due, and logs the opening grant. Skips the guest sentinel. Fails soft — see 135.';
+COMMENT ON FUNCTION public.create_user_credits() IS 'AFTER INSERT on public.users: seeds user_credits from plan_credits (never a literal), stamps tier_alloc with the same allocation (140), sets resets_at to the ET month boundary so ensure_credit_period does not treat a fresh row as due, and logs the opening grant with an honest granted/purchased split. Skips the guest sentinel. Fails soft — see 135/140.';
 
 
 --
@@ -1752,8 +1759,8 @@ BEGIN
       FROM public.plan_credits
      WHERE tier = 'free'::public.user_tier;
 
-    INSERT INTO public.user_credits (user_id, total, used)
-    VALUES (NEW.id, COALESCE(v_alloc, 0), 0)
+    INSERT INTO public.user_credits (user_id, total, used, tier_alloc)
+    VALUES (NEW.id, COALESCE(v_alloc, 0), 0, COALESCE(v_alloc, 0))
     ON CONFLICT (user_id) DO NOTHING;
 
     RETURN NEW;
@@ -7117,6 +7124,7 @@ CREATE TABLE public.user_credits (
     CONSTRAINT user_credits_purchased_used_le_total CHECK ((purchased_used <= purchased_total)),
     CONSTRAINT user_credits_purchased_used_nonneg CHECK ((purchased_used >= 0)),
     CONSTRAINT user_credits_total_nonneg CHECK ((total >= 0)),
+    CONSTRAINT user_credits_used_le_total CHECK ((used <= total)),
     CONSTRAINT user_credits_used_nonneg CHECK ((used >= 0))
 );
 
@@ -13958,5 +13966,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 9jciLCnzLHzGtoKGBEieuJvvCfayNTvs0yRrUrJ9HBo98PYdyBn2qR4SItSvJJS
+\unrestrict vsHguchqLTldRdvEketYP7O8TUqAHk7QWo95wND18fNBke1XToDf3z0WeEXVPGk
 

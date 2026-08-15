@@ -54,6 +54,24 @@ def _aligners() -> list[Path]:
     return sorted(p for p in SCRIPTS.glob("align_*.py"))
 
 
+# Prose claiming a bucket is public. Deliberately NOT a bare "public" search: the corrected
+# docstrings have to quote the dead URL shape (`/object/public/{bucket}/...`) in order to
+# explain what stopped working, so a match containing a slash or a brace is a code/URL
+# fragment rather than a claim, and is skipped.
+_PUBLIC_CLAIM = re.compile(
+    r"public[^.\n]{0,40}bucket|bucket[^.\n]{0,40}(?:are|is) (?:all )?public", re.I)
+
+
+def _public_claims(text: str) -> list[tuple[int, str]]:
+    out = []
+    for m in _PUBLIC_CLAIM.finditer(text):
+        phrase = m.group(0)
+        if "/" in phrase or "{" in phrase:
+            continue
+        out.append((text[:m.start()].count("\n") + 1, phrase.strip()))
+    return out
+
+
 def _py_body(path: Path) -> str:
     """Strip docstrings and comments: this file's whole point is that the PROSE was wrong for
     months while claiming the buckets were public, so prose must never satisfy an assertion."""
@@ -119,16 +137,14 @@ def test_no_script_or_service_still_calls_the_learn_media_buckets_public():
     """The prose is the bug's accomplice. `learn_audio_urls` and both aligners each carried a
     docstring stating these buckets are public long after 128 applied."""
     private = _private_buckets()
-    pattern = re.compile(r"public[^.\n]{0,40}bucket|bucket[^.\n]{0,40}(?:are|is) (?:all )?public",
-                         re.I)
     offenders = []
     for path in [*_aligners(), FORCED_ALIGN, LEARN_AUDIO_URLS]:
         text = path.read_text()
-        for m in pattern.finditer(text):
-            window = text[max(0, m.start() - 200): m.end() + 200]
+        lines = text.splitlines()
+        for line_no, phrase in _public_claims(text):
+            window = "\n".join(lines[max(0, line_no - 4): line_no + 3])
             if any(b in window for b in private):
-                line = text[:m.start()].count("\n") + 1
-                offenders.append(f"{path.name}:{line}: {m.group(0).strip()!r}")
+                offenders.append(f"{path.name}:{line_no}: {phrase!r}")
     assert not offenders, (
         "documentation still describes a 128-private bucket as public:\n  "
         + "\n  ".join(offenders))
@@ -154,15 +170,22 @@ def test_the_scans_are_not_vacuous():
     probe = '"""x public bucket x"""\n# public bucket\nCODE = 1\n'
     assert "public bucket" not in _py_body_str(probe)
 
-    # And the prose detector must fire on the exact strings that shipped.
-    pattern = re.compile(r"public[^.\n]{0,40}bucket|bucket[^.\n]{0,40}(?:are|is) (?:all )?public",
-                         re.I)
+    # And the prose detector must fire on the exact strings that shipped...
     for shipped in (
         "Missing audio is downloaded from the public money-moves-media bucket first (free).",
         "`money-moves-media` are all PUBLIC buckets (migrations 068 / 061 / 065)",
         "Also provides a tiny public-bucket downloader so the aligners can pull",
+        "Missing clips are downloaded from the public `journey-media` bucket first (free).",
     ):
-        assert pattern.search(shipped), f"detector would not have caught: {shipped!r}"
+        assert _public_claims(shipped), f"detector would not have caught: {shipped!r}"
+
+    # ...while NOT firing on a quoted URL shape, which the corrected docstrings must contain
+    # in order to say what stopped working. Getting this wrong makes the fix un-documentable.
+    for allowed in (
+        "building `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}` and plain-GETting it",
+        "curl -sI \"$SUPABASE_URL/storage/v1/object/public/book-media/audio/x.m4a\"",
+    ):
+        assert not _public_claims(allowed), f"detector false-positives on: {allowed!r}"
 
 
 def _py_body_str(src: str) -> str:

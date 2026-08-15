@@ -93,8 +93,14 @@ struct MoneyMoveArticleDetailView: View {
     @State private var heroTitleBottom: CGFloat = .greatestFiniteMagnitude
 
     /// 0 while `bottom` is below the bar, 1 once it has travelled a full ramp past the top.
+    ///
+    /// The `isFinite` guard is not decoration: `min`/`max` propagate NaN rather than absorbing
+    /// it (Swift's are `>=`-based, and every comparison with NaN is false), so a single bad
+    /// geometry reading would reach `.opacity(nan)`. Non-finite means "we have no usable
+    /// measurement", and the safe reading of that is the same as offscreen — 0, hidden.
     private func fade(_ bottom: CGFloat) -> Double {
-        Double(min(max(1 - bottom / Self.headerFadeDistance, 0), 1))
+        guard bottom.isFinite else { return 0 }
+        return Double(min(max(1 - bottom / Self.headerFadeDistance, 0), 1))
     }
 
     /// Gates the sticky bar itself. Ramps as the hero's OWN back button leaves, so there is

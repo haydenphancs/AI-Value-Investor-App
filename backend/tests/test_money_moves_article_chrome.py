@@ -258,3 +258,29 @@ def test_source_scan_helpers_are_not_vacuous():
     assert [int(n) for n in re.findall(r"\b(\d+)\b", probe) if int(n) >= 100] == [200, 280]
     # ...and the chip-fill regex must actually match a real fill, not silently find nothing.
     assert re.findall(r"\.fill\(([^)]*\)?[^)]*)\)", "  .fill(AppColors.textPrimary.opacity(0.15))")
+
+
+# --------------------------------------------------------------------------
+# Hardening — two crash/NaN paths found by adversarial review of the new code
+# --------------------------------------------------------------------------
+def test_fade_rejects_a_non_finite_measurement():
+    """`min`/`max` PROPAGATE NaN rather than absorbing it — Swift's are `>=`-based and every
+    comparison with NaN is false — so `fade(nan)` returns nan and reaches `.opacity(nan)`.
+    Verified in a scratch Swift file before the guard was added. Non-finite means "no usable
+    measurement", which must read the same as offscreen: 0."""
+    src = _strip(SCREEN.read_text())
+    body = src.split("private func fade(", 1)[1].split("\n    }", 1)[0]
+    assert "isFinite" in body, "fade() does not reject a non-finite measurement"
+    assert "return 0" in body, "the non-finite branch must hide the bar, not show it"
+
+
+def test_grain_clamps_before_converting_to_int():
+    """`Int(_: Double)` TRAPS on a non-finite or out-of-range value — a crash, not a glitch.
+    An unbounded proposed size reaches this line as an infinite area, so the clamp has to
+    happen in floating point BEFORE the conversion, not as `min(maxSpecks, Int(area))`."""
+    src = _strip(GRAIN.read_text())
+    body = src.split("Canvas(", 1)[1]
+    assert "isFinite" in body, "the speck count is converted without a finiteness guard"
+    conv = body.split("Int(", 1)[1].split(")", 1)[0]
+    assert "min(" in conv and "max(" in conv, (
+        f"Int() is applied to an unclamped value ({conv!r}) — a non-finite area traps")

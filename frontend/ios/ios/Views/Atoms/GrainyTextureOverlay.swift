@@ -58,7 +58,13 @@ struct GrainyTextureOverlay: View {
         // only add a redundant Metal offscreen pass — and anything inside a drawingGroup then
         // needs `.id(colorScheme)` to avoid keeping stale colours across an appearance flip.
         Canvas(opaque: false, rendersAsynchronously: true) { context, size in
-            let wanted = min(Self.maxSpecks, Int(size.width * size.height / density))
+            // ⚠️ Clamp in Double BEFORE converting. `Int(_: Double)` TRAPS on a non-finite or
+            // out-of-range value — a crash, not a glitch — and an unbounded proposed size
+            // (`.frame(maxWidth: .infinity)` in a badly-constrained container) is exactly how
+            // an infinite area reaches this line.
+            let area = size.width * size.height / density
+            guard area.isFinite else { return }
+            let wanted = Int(min(max(area, 0), CGFloat(Self.maxSpecks)))
             guard wanted > 0 else { return }
 
             var paths = [Path](repeating: Path(), count: Self.bucketAlpha.count)

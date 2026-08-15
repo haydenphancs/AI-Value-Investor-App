@@ -5333,11 +5333,60 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "For most of its life NVIDIA sold a component. The thing in the picture above is a graphics board: a slab of silicon under a finned heatsink, built to work out what colour several million pixels should be, sixty times a second. It was a good business and an unglamorous one. Gamers bought the cards. Almost nobody outside that world thought about the company at all."
+              "text": "For most of its life NVIDIA sold a component. The thing in the picture above is a graphics board: a slab of silicon under a finned heatsink, built to work out what colour several million pixels should be, sixty times a second. It was a good business and an unglamorous one. Gamers bought the cards. Almost nobody outside that world thought about the company at all.",
+              "readAlong": [
+                {
+                  "text": "For most of its life NVIDIA sold a component.",
+                  "start": 12.18,
+                  "end": 14.9
+                },
+                {
+                  "text": "The thing in the picture above is a graphics board: a slab of silicon under a finned heatsink, built to work out what colour several million pixels should be, sixty times a second.",
+                  "start": 15.5,
+                  "end": 25.42
+                },
+                {
+                  "text": "It was a good business and an unglamorous one.",
+                  "start": 26.04,
+                  "end": 28.32
+                },
+                {
+                  "text": "Gamers bought the cards.",
+                  "start": 28.96,
+                  "end": 29.9
+                },
+                {
+                  "text": "Almost nobody outside that world thought about the company at all.",
+                  "start": 30.4,
+                  "end": 33.48
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "The arithmetic that draws a game frame turns out to be the arithmetic that trains a neural network. Both are enormous piles of the same simple multiplication, done all at once rather than one after another. That coincidence was not something NVIDIA engineered. What it did engineer, starting years before anyone needed it, was the software that let people other than game developers reach the hardware."
+              "text": "The arithmetic that draws a game frame turns out to be the arithmetic that trains a neural network. Both are enormous piles of the same simple multiplication, done all at once rather than one after another. That coincidence was not something NVIDIA engineered. What it did engineer, starting years before anyone needed it, was the software that let people other than game developers reach the hardware.",
+              "readAlong": [
+                {
+                  "text": "The arithmetic that draws a game frame turns out to be the arithmetic that trains a neural network.",
+                  "start": 34.42,
+                  "end": 39.6
+                },
+                {
+                  "text": "Both are enormous piles of the same simple multiplication, done all at once rather than one after another.",
+                  "start": 40.12,
+                  "end": 45.9
+                },
+                {
+                  "text": "That coincidence was not something NVIDIA engineered.",
+                  "start": 46.74,
+                  "end": 49.32
+                },
+                {
+                  "text": "What it did engineer, starting years before anyone needed it, was the software that let people other than game developers reach the hardware.",
+                  "start": 49.74,
+                  "end": 56.91
+                }
+              ]
             }
           ]
         },
@@ -5347,23 +5396,88 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "In 2006 NVIDIA shipped CUDA, a way to write ordinary programs that run on the graphics processor instead of the main one. At the time this looked like a solution in search of a problem. Selling a programming model to university researchers is not how a company makes a quarter."
+              "text": "In 2006 NVIDIA shipped CUDA, a way to write ordinary programs that run on the graphics processor instead of the main one. At the time this looked like a solution in search of a problem. Selling a programming model to university researchers is not how a company makes a quarter.",
+              "readAlong": [
+                {
+                  "text": "In 2006 NVIDIA shipped CUDA, a way to write ordinary programs that run on the graphics processor instead of the main one.",
+                  "start": 60.15,
+                  "end": 67.37
+                },
+                {
+                  "text": "At the time this looked like a solution in search of a problem.",
+                  "start": 67.91,
+                  "end": 70.75
+                },
+                {
+                  "text": "Selling a programming model to university researchers is not how a company makes a quarter.",
+                  "start": 71.31,
+                  "end": 75.47
+                }
+              ]
             },
             {
               "type": "subheading",
-              "text": "Then the problem arrived"
+              "text": "Then the problem arrived",
+              "readAlong": [
+                {
+                  "text": "Then the problem arrived",
+                  "start": 76.21,
+                  "end": 77.49
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "In 2012 a neural network called AlexNet won an image-recognition contest by a margin wide enough to redirect an entire field of research. It had been trained on two consumer NVIDIA cards. Every researcher who read that result and wanted to repeat it reached for the same hardware, because the software to drive it already existed and already worked."
+              "text": "In 2012 a neural network called AlexNet won an image-recognition contest by a margin wide enough to redirect an entire field of research. It had been trained on two consumer NVIDIA cards. Every researcher who read that result and wanted to repeat it reached for the same hardware, because the software to drive it already existed and already worked.",
+              "readAlong": [
+                {
+                  "text": "In 2012 a neural network called AlexNet won an image-recognition contest by a margin wide enough to redirect an entire field of research.",
+                  "start": 77.95,
+                  "end": 86.13
+                },
+                {
+                  "text": "It had been trained on two consumer NVIDIA cards.",
+                  "start": 86.67,
+                  "end": 89.17
+                },
+                {
+                  "text": "Every researcher who read that result and wanted to repeat it reached for the same hardware, because the software to drive it already existed and already worked.",
+                  "start": 89.73,
+                  "end": 97.81
+                }
+              ]
             },
             {
               "type": "subheading",
-              "text": "What compounds after that"
+              "text": "What compounds after that",
+              "readAlong": [
+                {
+                  "text": "What compounds after that",
+                  "start": 98.61,
+                  "end": 100.09
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "Each year produced more libraries, more published code that assumed CUDA, and more graduate students who learned it first and everything else second. A competitor could match the silicon. Matching two decades of accumulated tooling, and the habits of everyone who uses it, is a different problem — and it is the one that actually protects the revenue."
+              "text": "Each year produced more libraries, more published code that assumed CUDA, and more graduate students who learned it first and everything else second. A competitor could match the silicon. Matching two decades of accumulated tooling, and the habits of everyone who uses it, is a different problem — and it is the one that actually protects the revenue.",
+              "readAlong": [
+                {
+                  "text": "Each year produced more libraries, more published code that assumed CUDA, and more graduate students who learned it first and everything else second.",
+                  "start": 100.69,
+                  "end": 108.79
+                },
+                {
+                  "text": "A competitor could match the silicon.",
+                  "start": 109.59,
+                  "end": 111.37
+                },
+                {
+                  "text": "Matching two decades of accumulated tooling, and the habits of everyone who uses it, is a different problem — and it is the one that actually protects the revenue.",
+                  "start": 111.97,
+                  "end": 120.29
+                }
+              ]
             }
           ]
         },
@@ -5373,7 +5487,29 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "This is the distinction worth carrying out of the story. NVIDIA's defensibility does not live in the board. Boards get copied. It lives in the cost a customer would have to pay in order to leave."
+              "text": "This is the distinction worth carrying out of the story. NVIDIA's defensibility does not live in the board. Boards get copied. It lives in the cost a customer would have to pay in order to leave.",
+              "readAlong": [
+                {
+                  "text": "This is the distinction worth carrying out of the story.",
+                  "start": 125.25,
+                  "end": 127.75
+                },
+                {
+                  "text": "NVIDIA's defensibility does not live in the board.",
+                  "start": 128.73,
+                  "end": 131.27
+                },
+                {
+                  "text": "Boards get copied.",
+                  "start": 131.77,
+                  "end": 132.73
+                },
+                {
+                  "text": "It lives in the cost a customer would have to pay in order to leave.",
+                  "start": 133.19,
+                  "end": 136.53
+                }
+              ]
             },
             {
               "type": "bulletList",
@@ -5382,17 +5518,81 @@
                 "The engineers who know that toolchain and would need retraining",
                 "The networking that moves data between thousands of chips at once",
                 "The published research that quietly assumes your platform by default"
+              ],
+              "itemsReadAlong": [
+                [
+                  {
+                    "text": "The software a buyer already runs, and the years of work encoded in it",
+                    "start": 137.43,
+                    "end": 141.17
+                  }
+                ],
+                [
+                  {
+                    "text": "The engineers who know that toolchain and would need retraining",
+                    "start": 142.51,
+                    "end": 145.47
+                  }
+                ],
+                [
+                  {
+                    "text": "The networking that moves data between thousands of chips at once",
+                    "start": 146.85,
+                    "end": 150.07
+                  }
+                ],
+                [
+                  {
+                    "text": "The published research that quietly assumes your platform by default",
+                    "start": 151.43,
+                    "end": 154.57
+                  }
+                ]
               ]
             },
             {
               "type": "paragraph",
-              "text": "NVIDIA paid roughly 6.9 billion dollars for the networking company Mellanox because a single chip stopped being the unit of sale — a room full of them, wired together, is. Measured against the silicon that price looks steep. Measured against the lock-in it looks cheap."
+              "text": "NVIDIA paid roughly 6.9 billion dollars for the networking company Mellanox because a single chip stopped being the unit of sale — a room full of them, wired together, is. Measured against the silicon that price looks steep. Measured against the lock-in it looks cheap.",
+              "readAlong": [
+                {
+                  "text": "NVIDIA paid roughly 6.9 billion dollars for the networking company Mellanox because a single chip stopped being the unit of sale — a room full of them, wired together, is.",
+                  "start": 156.03,
+                  "end": 165.8
+                },
+                {
+                  "text": "Measured against the silicon that price looks steep.",
+                  "start": 166.68,
+                  "end": 168.94
+                },
+                {
+                  "text": "Measured against the lock-in it looks cheap.",
+                  "start": 169.38,
+                  "end": 171.24
+                }
+              ]
             },
             {
               "type": "callout",
               "icon": "lightbulb.fill",
               "style": "info",
-              "text": "The question to ask of any dominant supplier is not \"could someone build this?\" It is \"what would it cost the customer to switch?\" Those two questions have very different answers, and only the second one shows up in the margin."
+              "text": "The question to ask of any dominant supplier is not \"could someone build this?\" It is \"what would it cost the customer to switch?\" Those two questions have very different answers, and only the second one shows up in the margin.",
+              "readAlong": [
+                {
+                  "text": "The question to ask of any dominant supplier is not \"could someone build this?\"",
+                  "start": 172.54,
+                  "end": 176.48
+                },
+                {
+                  "text": "It is \"what would it cost the customer to switch?\"",
+                  "start": 176.94,
+                  "end": 179.08
+                },
+                {
+                  "text": "Those two questions have very different answers, and only the second one shows up in the margin.",
+                  "start": 180.48,
+                  "end": 184.78
+                }
+              ]
             }
           ]
         },
@@ -5402,17 +5602,78 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "A moat explains why a business is hard to attack. It says nothing whatsoever about the price you pay for it. The same lock-in that makes revenue durable also makes it obvious, and obvious durability gets capitalised into a share price long before it shows up in the earnings."
+              "text": "A moat explains why a business is hard to attack. It says nothing whatsoever about the price you pay for it. The same lock-in that makes revenue durable also makes it obvious, and obvious durability gets capitalised into a share price long before it shows up in the earnings.",
+              "readAlong": [
+                {
+                  "text": "A moat explains why a business is hard to attack.",
+                  "start": 189.04,
+                  "end": 191.54
+                },
+                {
+                  "text": "It says nothing whatsoever about the price you pay for it.",
+                  "start": 191.92,
+                  "end": 194.38
+                },
+                {
+                  "text": "The same lock-in that makes revenue durable also makes it obvious, and obvious durability gets capitalised into a share price long before it shows up in the earnings.",
+                  "start": 195.72,
+                  "end": 203.84
+                }
+              ]
             },
             {
               "type": "callout",
               "icon": "exclamationmark.triangle.fill",
               "style": "warning",
-              "text": "A wide moat and a good investment are two separate findings. The first is about the company. The second is about the company and the price together, and only the second one can be acted on."
+              "text": "A wide moat and a good investment are two separate findings. The first is about the company. The second is about the company and the price together, and only the second one can be acted on.",
+              "readAlong": [
+                {
+                  "text": "A wide moat and a good investment are two separate findings.",
+                  "start": 204.3,
+                  "end": 207.9
+                },
+                {
+                  "text": "The first is about the company.",
+                  "start": 208.3,
+                  "end": 209.64
+                },
+                {
+                  "text": "The second is about the company and the price together, and only the second one can be acted on.",
+                  "start": 210.12,
+                  "end": 215.14
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "The useful habit here is smaller than the headline. When a supplier looks unassailable, go and find the switching cost, then write down what would actually have to break it. Sometimes the answer is a rival chip. More often it is something duller — an open toolchain, an industry standard, or a customer large enough to fund its own alternative. That is the list worth watching."
+              "text": "The useful habit here is smaller than the headline. When a supplier looks unassailable, go and find the switching cost, then write down what would actually have to break it. Sometimes the answer is a rival chip. More often it is something duller — an open toolchain, an industry standard, or a customer large enough to fund its own alternative. That is the list worth watching.",
+              "readAlong": [
+                {
+                  "text": "The useful habit here is smaller than the headline.",
+                  "start": 215.86,
+                  "end": 218.32
+                },
+                {
+                  "text": "When a supplier looks unassailable, go and find the switching cost, then write down what would actually have to break it.",
+                  "start": 218.72,
+                  "end": 224.9
+                },
+                {
+                  "text": "Sometimes the answer is a rival chip.",
+                  "start": 225.52,
+                  "end": 227.28
+                },
+                {
+                  "text": "More often it is something duller — an open toolchain, an industry standard, or a customer large enough to fund its own alternative.",
+                  "start": 227.82,
+                  "end": 234.76
+                },
+                {
+                  "text": "That is the list worth watching.",
+                  "start": 235.22,
+                  "end": 236.68
+                }
+              ]
             }
           ]
         }
@@ -5469,7 +5730,7 @@
           ]
         }
       ],
-      "audioDurationSeconds": 290,
+      "audioDurationSeconds": 237,
       "viewCount": ""
     },
     {
@@ -5520,11 +5781,50 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "The object in the picture above is a mail-order catalogue, and for most of a century its publisher ran the most powerful retail machine in America. Sears, Roebuck and Co. was incorporated in 1893 and sold by post to farms with no shop within a day's ride. The book ran to hundreds of pages. You could order a sewing machine from it, or a violin, or an entire house delivered as a numbered kit of parts."
+              "text": "The object in the picture above is a mail-order catalogue, and for most of a century its publisher ran the most powerful retail machine in America. Sears, Roebuck and Co. was incorporated in 1893 and sold by post to farms with no shop within a day's ride. The book ran to hundreds of pages. You could order a sewing machine from it, or a violin, or an entire house delivered as a numbered kit of parts.",
+              "readAlong": [
+                {
+                  "text": "The object in the picture above is a mail-order catalogue, and for most of a century its publisher ran the most powerful retail machine in America.",
+                  "start": 13.26,
+                  "end": 21.28
+                },
+                {
+                  "text": "Sears, Roebuck and Co. was incorporated in 1893 and sold by post to farms with no shop within a day's ride.",
+                  "start": 21.92,
+                  "end": 29.64
+                },
+                {
+                  "text": "The book ran to hundreds of pages.",
+                  "start": 30.14,
+                  "end": 32.12
+                },
+                {
+                  "text": "You could order a sewing machine from it, or a violin, or an entire house delivered as a numbered kit of parts.",
+                  "start": 32.62,
+                  "end": 38.8
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "The tower the company put up in Chicago in 1973 was the tallest building in the world. The catalogue itself was discontinued in 1993, four years before an online bookseller shipped its first order. Then the slow part of the story began, and it took twenty-five years to finish."
+              "text": "The tower the company put up in Chicago in 1973 was the tallest building in the world. The catalogue itself was discontinued in 1993, four years before an online bookseller shipped its first order. Then the slow part of the story began, and it took twenty-five years to finish.",
+              "readAlong": [
+                {
+                  "text": "The tower the company put up in Chicago in 1973 was the tallest building in the world.",
+                  "start": 39.4,
+                  "end": 44.62
+                },
+                {
+                  "text": "The catalogue itself was discontinued in 1993, four years before an online bookseller shipped its first order.",
+                  "start": 45.1,
+                  "end": 51.82
+                },
+                {
+                  "text": "Then the slow part of the story began, and it took twenty-five years to finish.",
+                  "start": 52.46,
+                  "end": 56.64
+                }
+              ]
             }
           ]
         },
@@ -5534,23 +5834,108 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "By the 2000s Sears did not look like a dying company on a spreadsheet. It looked like an underpriced one. It held an enormous quantity of property. It owned brand names with real standing — Kenmore appliances, Craftsman tools, DieHard batteries. Add those up and the total comfortably exceeded what the market was paying for the whole business."
+              "text": "By the 2000s Sears did not look like a dying company on a spreadsheet. It looked like an underpriced one. It held an enormous quantity of property. It owned brand names with real standing — Kenmore appliances, Craftsman tools, DieHard batteries. Add those up and the total comfortably exceeded what the market was paying for the whole business.",
+              "readAlong": [
+                {
+                  "text": "By the 2000s Sears did not look like a dying company on a spreadsheet.",
+                  "start": 59.2,
+                  "end": 62.76
+                },
+                {
+                  "text": "It looked like an underpriced one.",
+                  "start": 63.1,
+                  "end": 64.64
+                },
+                {
+                  "text": "It held an enormous quantity of property.",
+                  "start": 65.06,
+                  "end": 67.1
+                },
+                {
+                  "text": "It owned brand names with real standing — Kenmore appliances, Craftsman tools, DieHard batteries.",
+                  "start": 67.56,
+                  "end": 72.78
+                },
+                {
+                  "text": "Add those up and the total comfortably exceeded what the market was paying for the whole business.",
+                  "start": 73.34,
+                  "end": 77.56
+                }
+              ]
             },
             {
               "type": "subheading",
-              "text": "The sum-of-the-parts case"
+              "text": "The sum-of-the-parts case",
+              "readAlong": [
+                {
+                  "text": "The sum-of-the-parts case",
+                  "start": 78.12,
+                  "end": 79.5
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "That is a respectable way to value a company: work out what the pieces would fetch if sold separately, then buy when the market offers you less than that. It is the logic behind a great deal of successful value investing. Applied to Sears it was arithmetically correct and financially fatal."
+              "text": "That is a respectable way to value a company: work out what the pieces would fetch if sold separately, then buy when the market offers you less than that. It is the logic behind a great deal of successful value investing. Applied to Sears it was arithmetically correct and financially fatal.",
+              "readAlong": [
+                {
+                  "text": "That is a respectable way to value a company: work out what the pieces would fetch if sold separately, then buy when the market offers you less than that.",
+                  "start": 80.06,
+                  "end": 87.38
+                },
+                {
+                  "text": "It is the logic behind a great deal of successful value investing.",
+                  "start": 87.84,
+                  "end": 91.0
+                },
+                {
+                  "text": "Applied to Sears it was arithmetically correct and financially fatal.",
+                  "start": 91.42,
+                  "end": 94.8
+                }
+              ]
             },
             {
               "type": "subheading",
-              "text": "What the arithmetic left out"
+              "text": "What the arithmetic left out",
+              "readAlong": [
+                {
+                  "text": "What the arithmetic left out",
+                  "start": 95.3,
+                  "end": 96.66
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "The pieces were not sitting in a vault. They were bolted to a retail operation that consumed cash every year it stayed open. Selling assets funded the losses, and the losses then required more asset sales. The 2015 spin-off of a large property portfolio and the 2017 sale of Craftsman to Stanley Black & Decker were not value being unlocked for shareholders. That was the value being spent."
+              "text": "The pieces were not sitting in a vault. They were bolted to a retail operation that consumed cash every year it stayed open. Selling assets funded the losses, and the losses then required more asset sales. The 2015 spin-off of a large property portfolio and the 2017 sale of Craftsman to Stanley Black & Decker were not value being unlocked for shareholders. That was the value being spent.",
+              "readAlong": [
+                {
+                  "text": "The pieces were not sitting in a vault.",
+                  "start": 97.12,
+                  "end": 99.18
+                },
+                {
+                  "text": "They were bolted to a retail operation that consumed cash every year it stayed open.",
+                  "start": 99.68,
+                  "end": 104.7
+                },
+                {
+                  "text": "Selling assets funded the losses, and the losses then required more asset sales.",
+                  "start": 105.4,
+                  "end": 110.24
+                },
+                {
+                  "text": "The 2015 spin-off of a large property portfolio and the 2017 sale of Craftsman to Stanley Black & Decker were not value being unlocked for shareholders.",
+                  "start": 110.88,
+                  "end": 120.82
+                },
+                {
+                  "text": "That was the value being spent.",
+                  "start": 121.32,
+                  "end": 122.98
+                }
+              ]
             }
           ]
         },
@@ -5560,21 +5945,84 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "A value trap is not simply a bad company. It is a company whose cheapness is a correct reading of a deteriorating fact rather than a mistake by the market. The gap between price and asset value never closes, because the asset value is falling towards the price rather than the price rising to meet it."
+              "text": "A value trap is not simply a bad company. It is a company whose cheapness is a correct reading of a deteriorating fact rather than a mistake by the market. The gap between price and asset value never closes, because the asset value is falling towards the price rather than the price rising to meet it.",
+              "readAlong": [
+                {
+                  "text": "A value trap is not simply a bad company.",
+                  "start": 125.98,
+                  "end": 128.42
+                },
+                {
+                  "text": "It is a company whose cheapness is a correct reading of a deteriorating fact rather than a mistake by the market.",
+                  "start": 129.02,
+                  "end": 135.22
+                },
+                {
+                  "text": "The gap between price and asset value never closes, because the asset value is falling towards the price rather than the price rising to meet it.",
+                  "start": 135.88,
+                  "end": 143.82
+                }
+              ]
             },
             {
               "type": "callout",
               "icon": "exclamationmark.triangle.fill",
               "style": "warning",
-              "text": "Book value is a photograph, not a promise. It describes what a business owned on one particular day. If the operation is losing money, that photograph is being redrawn downward every quarter you hold the shares."
+              "text": "Book value is a photograph, not a promise. It describes what a business owned on one particular day. If the operation is losing money, that photograph is being redrawn downward every quarter you hold the shares.",
+              "readAlong": [
+                {
+                  "text": "Book value is a photograph, not a promise.",
+                  "start": 144.76,
+                  "end": 147.16
+                },
+                {
+                  "text": "It describes what a business owned on one particular day.",
+                  "start": 147.58,
+                  "end": 150.4
+                },
+                {
+                  "text": "If the operation is losing money, that photograph is being redrawn downward every quarter you hold the shares.",
+                  "start": 150.96,
+                  "end": 156.66
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "Sears merged with Kmart in 2005 and spent the following years under a management approach that treated the retailer largely as a portfolio of financial positions. Capital that might have gone into the shops went into buying back stock and rearranging the corporate structure instead. The stores got visibly worse. Customers noticed well before the balance sheet admitted it."
+              "text": "Sears merged with Kmart in 2005 and spent the following years under a management approach that treated the retailer largely as a portfolio of financial positions. Capital that might have gone into the shops went into buying back stock and rearranging the corporate structure instead. The stores got visibly worse. Customers noticed well before the balance sheet admitted it.",
+              "readAlong": [
+                {
+                  "text": "Sears merged with Kmart in 2005 and spent the following years under a management approach that treated the retailer largely as a portfolio of financial positions.",
+                  "start": 157.68,
+                  "end": 166.4
+                },
+                {
+                  "text": "Capital that might have gone into the shops went into buying back stock and rearranging the corporate structure instead.",
+                  "start": 167.0,
+                  "end": 172.28
+                },
+                {
+                  "text": "The stores got visibly worse.",
+                  "start": 172.84,
+                  "end": 174.56
+                },
+                {
+                  "text": "Customers noticed well before the balance sheet admitted it.",
+                  "start": 175.02,
+                  "end": 177.72
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "The Chapter 11 filing came in October 2018."
+              "text": "The Chapter 11 filing came in October 2018.",
+              "readAlong": [
+                {
+                  "text": "The Chapter 11 filing came in October 2018.",
+                  "start": 178.56,
+                  "end": 180.52
+                }
+              ]
             }
           ]
         },
@@ -5585,15 +6033,61 @@
             {
               "type": "quote",
               "text": "Time is the friend of the wonderful business and the enemy of the mediocre one.",
-              "attribution": "A long-standing principle in value investing"
+              "attribution": "A long-standing principle in value investing",
+              "readAlong": [
+                {
+                  "text": "Time is the friend of the wonderful business and the enemy of the mediocre one.",
+                  "start": 184.54,
+                  "end": 188.52
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "The practical version is a question about direction rather than level. Is this cheap because the market is wrong about a stable business, or cheap because the business is shrinking and the price has simply arrived there first? Those two look identical on a screener and behave in opposite ways over five years."
+              "text": "The practical version is a question about direction rather than level. Is this cheap because the market is wrong about a stable business, or cheap because the business is shrinking and the price has simply arrived there first? Those two look identical on a screener and behave in opposite ways over five years.",
+              "readAlong": [
+                {
+                  "text": "The practical version is a question about direction rather than level.",
+                  "start": 189.12,
+                  "end": 192.42
+                },
+                {
+                  "text": "Is this cheap because the market is wrong about a stable business, or cheap because the business is shrinking and the price has simply arrived there first?",
+                  "start": 193.06,
+                  "end": 199.9
+                },
+                {
+                  "text": "Those two look identical on a screener and behave in opposite ways over five years.",
+                  "start": 200.5,
+                  "end": 204.72
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "One workable test: assume you cannot sell for a decade. Over that decade, does the asset base grow, hold, or quietly fund the losses? If the answer is the third one, the discount is not a margin of safety. It is a countdown — and the swollen, water-damaged catalogue on this article's cover is what the end of one looks like."
+              "text": "One workable test: assume you cannot sell for a decade. Over that decade, does the asset base grow, hold, or quietly fund the losses? If the answer is the third one, the discount is not a margin of safety. It is a countdown — and the swollen, water-damaged catalogue on this article's cover is what the end of one looks like.",
+              "readAlong": [
+                {
+                  "text": "One workable test: assume you cannot sell for a decade.",
+                  "start": 205.46,
+                  "end": 209.14
+                },
+                {
+                  "text": "Over that decade, does the asset base grow, hold, or quietly fund the losses?",
+                  "start": 209.72,
+                  "end": 215.13
+                },
+                {
+                  "text": "If the answer is the third one, the discount is not a margin of safety.",
+                  "start": 215.85,
+                  "end": 219.67
+                },
+                {
+                  "text": "It is a countdown — and the swollen, water-damaged catalogue on this article's cover is what the end of one looks like.",
+                  "start": 220.23,
+                  "end": 227.05
+                }
+              ]
             }
           ]
         }
@@ -5650,7 +6144,7 @@
           ]
         }
       ],
-      "audioDurationSeconds": 290,
+      "audioDurationSeconds": 227,
       "viewCount": ""
     },
     {
@@ -5701,11 +6195,45 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "Put an AMD processor and an Intel processor side by side, as in the picture above, and you will struggle to tell them apart. Same rough dimensions, same polished metal lid, same dense field of gold contacts underneath. They drop into comparable sockets and run the same software. Seen from the outside this is one product, sold by two companies."
+              "text": "Put an AMD processor and an Intel processor side by side, as in the picture above, and you will struggle to tell them apart. Same rough dimensions, same polished metal lid, same dense field of gold contacts underneath. They drop into comparable sockets and run the same software. Seen from the outside this is one product, sold by two companies.",
+              "readAlong": [
+                {
+                  "text": "Put an AMD processor and an Intel processor side by side, as in the picture above, and you will struggle to tell them apart.",
+                  "start": 9.28,
+                  "end": 16.32
+                },
+                {
+                  "text": "Same rough dimensions, same polished metal lid, same dense field of gold contacts underneath.",
+                  "start": 16.96,
+                  "end": 22.6
+                },
+                {
+                  "text": "They drop into comparable sockets and run the same software.",
+                  "start": 23.14,
+                  "end": 26.36
+                },
+                {
+                  "text": "Seen from the outside this is one product, sold by two companies.",
+                  "start": 27.04,
+                  "end": 30.62
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "For most of the last forty years that symmetry was misleading, because one of those companies was vastly larger and made its own chips. Then, over roughly five years, the gap closed — and the reason had far less to do with circuit design than with factories."
+              "text": "For most of the last forty years that symmetry was misleading, because one of those companies was vastly larger and made its own chips. Then, over roughly five years, the gap closed — and the reason had far less to do with circuit design than with factories.",
+              "readAlong": [
+                {
+                  "text": "For most of the last forty years that symmetry was misleading, because one of those companies was vastly larger and made its own chips.",
+                  "start": 31.24,
+                  "end": 38.32
+                },
+                {
+                  "text": "Then, over roughly five years, the gap closed — and the reason had far less to do with circuit design than with factories.",
+                  "start": 38.96,
+                  "end": 45.62
+                }
+              ]
             }
           ]
         },
@@ -5715,23 +6243,93 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "Intel manufactured what it designed. That was, for decades, the entire point. Owning the fabrication plants meant tuning the process and the architecture against each other and reaching each new generation first. It is one of the strongest competitive positions in industrial history, and it worked exactly as intended for a very long time."
+              "text": "Intel manufactured what it designed. That was, for decades, the entire point. Owning the fabrication plants meant tuning the process and the architecture against each other and reaching each new generation first. It is one of the strongest competitive positions in industrial history, and it worked exactly as intended for a very long time.",
+              "readAlong": [
+                {
+                  "text": "Intel manufactured what it designed.",
+                  "start": 49.12,
+                  "end": 50.86
+                },
+                {
+                  "text": "That was, for decades, the entire point.",
+                  "start": 51.32,
+                  "end": 53.62
+                },
+                {
+                  "text": "Owning the fabrication plants meant tuning the process and the architecture against each other and reaching each new generation first.",
+                  "start": 54.26,
+                  "end": 60.98
+                },
+                {
+                  "text": "It is one of the strongest competitive positions in industrial history, and it worked exactly as intended for a very long time.",
+                  "start": 61.5,
+                  "end": 68.0
+                }
+              ]
             },
             {
               "type": "subheading",
-              "text": "Until the process slipped"
+              "text": "Until the process slipped",
+              "readAlong": [
+                {
+                  "text": "Until the process slipped",
+                  "start": 68.67,
+                  "end": 70.19
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "Intel's move to its 10-nanometre process ran years behind schedule. Because design and manufacturing were fused into one company, there was no way to route around the problem. A delayed factory meant delayed products, and Intel could not simply take its designs somewhere else."
+              "text": "Intel's move to its 10-nanometre process ran years behind schedule. Because design and manufacturing were fused into one company, there was no way to route around the problem. A delayed factory meant delayed products, and Intel could not simply take its designs somewhere else.",
+              "readAlong": [
+                {
+                  "text": "Intel's move to its 10-nanometre process ran years behind schedule.",
+                  "start": 70.97,
+                  "end": 74.61
+                },
+                {
+                  "text": "Because design and manufacturing were fused into one company, there was no way to route around the problem.",
+                  "start": 75.05,
+                  "end": 80.17
+                },
+                {
+                  "text": "A delayed factory meant delayed products, and Intel could not simply take its designs somewhere else.",
+                  "start": 80.69,
+                  "end": 85.95
+                }
+              ]
             },
             {
               "type": "subheading",
-              "text": "AMD had already given that up"
+              "text": "AMD had already given that up",
+              "readAlong": [
+                {
+                  "text": "AMD had already given that up",
+                  "start": 86.57,
+                  "end": 88.19
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "AMD sold off its own fabrication business in 2009. At the time this read as an admission of weakness — it could no longer afford to compete on plants — and it became a customer of the contract manufacturer TSMC instead. When TSMC's process pulled ahead of Intel's, AMD inherited the lead without having built anything at all."
+              "text": "AMD sold off its own fabrication business in 2009. At the time this read as an admission of weakness — it could no longer afford to compete on plants — and it became a customer of the contract manufacturer TSMC instead. When TSMC's process pulled ahead of Intel's, AMD inherited the lead without having built anything at all.",
+              "readAlong": [
+                {
+                  "text": "AMD sold off its own fabrication business in 2009.",
+                  "start": 88.71,
+                  "end": 91.47
+                },
+                {
+                  "text": "At the time this read as an admission of weakness — it could no longer afford to compete on plants — and it became a customer of the contract manufacturer TSMC instead.",
+                  "start": 92.83,
+                  "end": 101.49
+                },
+                {
+                  "text": "When TSMC's process pulled ahead of Intel's, AMD inherited the lead without having built anything at all.",
+                  "start": 102.27,
+                  "end": 108.09
+                }
+              ]
             }
           ]
         },
@@ -5741,11 +6339,35 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "The second decision was architectural. A processor had traditionally been one large piece of silicon. AMD's Zen designs, shipping from 2017, split it into several small ones — chiplets — joined by a high-speed interconnect."
+              "text": "The second decision was architectural. A processor had traditionally been one large piece of silicon. AMD's Zen designs, shipping from 2017, split it into several small ones — chiplets — joined by a high-speed interconnect.",
+              "readAlong": [
+                {
+                  "text": "The second decision was architectural.",
+                  "start": 111.83,
+                  "end": 113.53
+                },
+                {
+                  "text": "A processor had traditionally been one large piece of silicon.",
+                  "start": 114.21,
+                  "end": 117.15
+                },
+                {
+                  "text": "AMD's Zen designs, shipping from 2017, split it into several small ones — chiplets — joined by a high-speed interconnect.",
+                  "start": 117.89,
+                  "end": 125.57
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "The reason is a yield argument, and it is worth following because it is pure economics rather than engineering flourish:"
+              "text": "The reason is a yield argument, and it is worth following because it is pure economics rather than engineering flourish:",
+              "readAlong": [
+                {
+                  "text": "The reason is a yield argument, and it is worth following because it is pure economics rather than engineering flourish:",
+                  "start": 126.67,
+                  "end": 132.55
+                }
+              ]
             },
             {
               "type": "bulletList",
@@ -5754,13 +6376,60 @@
                 "One large die that catches a defect is scrapped in its entirety",
                 "Four small dies covering that same area lose only the one that was hit",
                 "So an identical, imperfect factory yields far more sellable product"
+              ],
+              "itemsReadAlong": [
+                [
+                  {
+                    "text": "Defects land on a silicon wafer at a roughly fixed rate per unit of area",
+                    "start": 133.91,
+                    "end": 137.63
+                  }
+                ],
+                [
+                  {
+                    "text": "One large die that catches a defect is scrapped in its entirety",
+                    "start": 138.53,
+                    "end": 141.37
+                  }
+                ],
+                [
+                  {
+                    "text": "Four small dies covering that same area lose only the one that was hit",
+                    "start": 142.23,
+                    "end": 145.75
+                  }
+                ],
+                [
+                  {
+                    "text": "So an identical, imperfect factory yields far more sellable product",
+                    "start": 146.75,
+                    "end": 150.47
+                  }
+                ]
               ]
             },
             {
               "type": "callout",
               "icon": "chart.bar.fill",
               "style": "highlight",
-              "text": "The chiplet was not a faster idea. It was a cheaper one. AMD could assemble large server processors out of parts that were individually easy to manufacture, while a rival building one big die paid for every defect at full price."
+              "text": "The chiplet was not a faster idea. It was a cheaper one. AMD could assemble large server processors out of parts that were individually easy to manufacture, while a rival building one big die paid for every defect at full price.",
+              "readAlong": [
+                {
+                  "text": "The chiplet was not a faster idea.",
+                  "start": 151.51,
+                  "end": 153.09
+                },
+                {
+                  "text": "It was a cheaper one.",
+                  "start": 153.53,
+                  "end": 154.33
+                },
+                {
+                  "text": "AMD could assemble large server processors out of parts that were individually easy to manufacture, while a rival building one big die paid for every defect at full price.",
+                  "start": 155.13,
+                  "end": 164.17
+                }
+              ]
             }
           ]
         },
@@ -5770,17 +6439,63 @@
           "content": [
             {
               "type": "paragraph",
-              "text": "Lisa Su took over AMD in 2014, when the shares traded near two dollars and the company's survival was a live question. The recovery that followed was not a single product launch. It was two structural choices — outsource the factory, split the die — that took years to show up in the results at all."
+              "text": "Lisa Su took over AMD in 2014, when the shares traded near two dollars and the company's survival was a live question. The recovery that followed was not a single product launch. It was two structural choices — outsource the factory, split the die — that took years to show up in the results at all.",
+              "readAlong": [
+                {
+                  "text": "Lisa Su took over AMD in 2014, when the shares traded near two dollars and the company's survival was a live question.",
+                  "start": 167.81,
+                  "end": 174.65
+                },
+                {
+                  "text": "The recovery that followed was not a single product launch.",
+                  "start": 175.73,
+                  "end": 178.27
+                },
+                {
+                  "text": "It was two structural choices — outsource the factory, split the die — that took years to show up in the results at all.",
+                  "start": 178.73,
+                  "end": 184.93
+                }
+              ]
             },
             {
               "type": "callout",
               "icon": "lightbulb.fill",
               "style": "info",
-              "text": "In a two-player market the interesting variable is rarely the product specification. It is the thing neither company can change quickly: who does the manufacturing, what the customers have already standardised on, and how long a mistake takes to unwind."
+              "text": "In a two-player market the interesting variable is rarely the product specification. It is the thing neither company can change quickly: who does the manufacturing, what the customers have already standardised on, and how long a mistake takes to unwind.",
+              "readAlong": [
+                {
+                  "text": "In a two-player market the interesting variable is rarely the product specification.",
+                  "start": 185.79,
+                  "end": 189.71
+                },
+                {
+                  "text": "It is the thing neither company can change quickly: who does the manufacturing, what the customers have already standardised on, and how long a mistake takes to unwind.",
+                  "start": 190.33,
+                  "end": 198.55
+                }
+              ]
             },
             {
               "type": "paragraph",
-              "text": "That last point cuts both ways, which is the honest end of the story. A process delay took years to hurt Intel and will take years to repair — but the same slowness protects an incumbent's installed base long after the technical case has moved on. Neither the crash nor the comeback arrives on the timetable a share price implies."
+              "text": "That last point cuts both ways, which is the honest end of the story. A process delay took years to hurt Intel and will take years to repair — but the same slowness protects an incumbent's installed base long after the technical case has moved on. Neither the crash nor the comeback arrives on the timetable a share price implies.",
+              "readAlong": [
+                {
+                  "text": "That last point cuts both ways, which is the honest end of the story.",
+                  "start": 199.17,
+                  "end": 202.55
+                },
+                {
+                  "text": "A process delay took years to hurt Intel and will take years to repair — but the same slowness protects an incumbent's installed base long after the technical case has moved on.",
+                  "start": 203.15,
+                  "end": 213.16
+                },
+                {
+                  "text": "Neither the crash nor the comeback arrives on the timetable a share price implies.",
+                  "start": 213.82,
+                  "end": 218.16
+                }
+              ]
             }
           ]
         }
@@ -5837,7 +6552,7 @@
           ]
         }
       ],
-      "audioDurationSeconds": 290,
+      "audioDurationSeconds": 218,
       "viewCount": ""
     }
   ]

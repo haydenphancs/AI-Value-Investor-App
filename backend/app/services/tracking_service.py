@@ -274,6 +274,22 @@ class TrackingService:
             if item.get("ticker")
         }
 
+        # 1b. Heal rows whose classification was never written.
+        #
+        # `sector`/`country` live on the watchlist row, but for most of this table's
+        # life the only writers were `POST /tracking/holdings` and
+        # `PortfolioInsightsService._enrich_missing` — and the latter only ever sees
+        # tickers that already carry shares/market_value. A ticker added from the
+        # watchlist star was therefore never classified by anything and reported
+        # `"sector": null` forever. `POST /api/v1/watchlist` now persists it going
+        # forward; this backfills the rows already stored NULL, so the fix does not
+        # need a migration and does not wait for the user to re-add anything.
+        #
+        # Read from the SHARED `company_profile_cache` for the same reason
+        # `widget_movers_service._industries` does: it is ticker-keyed, already warm,
+        # and gives every user the same answer for the same stock.
+        await self._backfill_classification(user_id, watchlist)
+
         # 2. Fetch data concurrently
         quotes_task = self._get_batch_quotes(tickers)
         sparklines_task = self._get_all_sparklines(tickers, asset_types)
@@ -436,6 +452,101 @@ class TrackingService:
                 len(tickers), user_id,
             )
         return feed
+
+    # ── Classification backfill ─────────────────────────────────────
+
+    async def _backfill_classification(
+        self, user_id: str, watchlist: List[Dict[str, Any]]
+    ) -> None:
+        """Fill missing `sector`/`country` on watchlist rows from the shared profile cache.
+
+        MUTATES `watchlist` in place so this request already serves the healed values,
+        and writes them back so the next request does not have to look again.
+
+        Best-effort by design: this is cosmetic enrichment on a hot read path, so every
+        failure degrades to "leave it null" and is logged rather than raised. A tracking
+        feed that renders without a sector badge is fine; a 500 because a cache lookup
+        blipped is not.
+        """
+        missing = [
+            item for item in watchlist
+            if item.get("ticker") and not item.get("sector")
+        ]
+        if not missing:
+            return
+
+        syms = sorted({str(item["ticker"]).upper() for item in missing})
+
+        def _read_profiles() -> Dict[str, Dict[str, Any]]:
+            res = (
+                get_supabase()
+                .table("company_profile_cache")
+                .select("ticker, profile_json")
+                .in_("ticker", syms)
+                .execute()
+            )
+            return {
+                str(r["ticker"]).upper(): (r.get("profile_json") or {})
+                for r in (res.data or [])
+                if r.get("ticker")
+            }
+
+        try:
+            profiles = await asyncio.to_thread(_read_profiles)
+        except Exception as exc:
+            logger.warning(
+                "[Tracking] sector backfill: profile cache read failed for %d ticker(s) "
+                "(%s: %s) — serving rows unclassified",
+                len(syms), type(exc).__name__, exc,
+            )
+            return
+
+        healed: Dict[str, Dict[str, Any]] = {}
+        for item in missing:
+            prof = profiles.get(str(item["ticker"]).upper())
+            if not prof:
+                continue
+            sector = str(prof.get("sector") or "").strip() or None
+            if not sector:
+                continue
+            patch: Dict[str, Any] = {"sector": sector}
+            # Only fill country when it is genuinely absent — the column has a 'US'
+            # default, so an existing value is real data and must not be overwritten.
+            if not item.get("country"):
+                country = str(prof.get("country") or "").strip() or None
+                if country:
+                    patch["country"] = country
+            item.update(patch)
+            healed[str(item["ticker"])] = patch
+
+        if not healed:
+            logger.info(
+                "[Tracking] sector backfill: no cached profile for %d ticker(s): %s",
+                len(syms), ", ".join(syms[:10]),
+            )
+            return
+
+        def _persist() -> None:
+            sb = get_supabase()
+            for ticker, patch in healed.items():
+                sb.table("watchlist_items").update(patch).eq(
+                    "user_id", user_id
+                ).eq("ticker", ticker).execute()
+
+        try:
+            await asyncio.to_thread(_persist)
+            logger.info(
+                "[Tracking] sector backfill: healed %d watchlist row(s): %s",
+                len(healed), ", ".join(sorted(healed)[:10]),
+            )
+        except Exception as exc:
+            # Non-fatal: the in-memory patch above still serves this request correctly,
+            # we just pay the lookup again next time. Logged so a permanently failing
+            # write (e.g. a permissions regression) is visible rather than silent.
+            logger.warning(
+                "[Tracking] sector backfill: write-back failed for %d row(s) (%s: %s)",
+                len(healed), type(exc).__name__, exc,
+            )
 
     # ── Batch Quotes ────────────────────────────────────────────────
 

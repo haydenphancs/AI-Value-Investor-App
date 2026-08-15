@@ -80,23 +80,23 @@ final class PaywallViewModel: ObservableObject {
         store.product(for: tier) != nil
     }
 
-    /// The signed-in user's id, stamped onto the purchase as StoreKit's `appAccountToken` so a
-    /// transaction redelivered into a different session can be refused server-side.
-    ///
-    /// ⚠️ Passed in at TAP time, never snapshotted. It used to be assigned once from `.task`,
-    /// so a sheet that stayed mounted across a `.restoring → .authenticated` transition — a
-    /// cold launch holding a Keychain token, a transient failure leaving `profile` nil, the
-    /// backoff healing seconds later — stamped a stale or nil token onto a real purchase. The
-    /// server-side cross-account guard then had nothing to check.
-    private var accountID: String?
-
     /// Which lock opened the sheet. Carried onto the purchase events so conversion is a
     /// single funnel join (`paywall_shown` → `paywall_purchase_started` → `purchase_completed`
     /// on one `reason`) rather than a session-level correlation between three unrelated rows.
     var context: PaywallContext = .general
 
+    /// - Parameter accountID: the signed-in user's id, stamped onto the purchase as StoreKit's
+    ///   `appAccountToken` so a transaction redelivered into a different session can be refused
+    ///   server-side.
+    ///
+    ///   ⚠️ Passed in at TAP time and used only from this parameter — deliberately NOT stored.
+    ///   It used to be assigned once from `.task`, so a sheet that stayed mounted across a
+    ///   `.restoring → .authenticated` transition — a cold launch holding a Keychain token, a
+    ///   transient failure leaving `profile` nil, the backoff healing seconds later — stamped a
+    ///   stale or nil token onto a real purchase, and the server-side cross-account guard had
+    ///   nothing to check. A `private var accountID` survived that fix as a write-only property;
+    ///   it is gone, because the next reader of it would have reintroduced exactly that staleness.
     func purchase(tier: String, accountID: String?) async {
-        self.accountID = accountID
         Analytics.shared.track(.paywallPurchaseStarted, [
             "tier": .string(tier),
             "reason": .string(context.rawValue),
@@ -129,7 +129,7 @@ final class PaywallViewModel: ObservableObject {
                 // Apple could not verify its own transaction, so it was never sent
                 // to the server. Nothing is pending and nothing will arrive.
                 purchaseError = "Apple couldn't verify that purchase, so no "
-                    + "subscription were added. If you were charged, contact support."
+                    + "subscription was added. If you were charged, contact support."
             }
         } catch {
             purchaseError = AppError.from(error).message

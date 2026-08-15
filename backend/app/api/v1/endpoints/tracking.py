@@ -39,6 +39,7 @@ from app.schemas.tracking import (
     PortfolioInsightsResponse,
     BulkHoldingUpdateItem,
 )
+from app.services._classification_common import classification_from_profile
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import TrackingService
 from app.utils.supabase_errors import is_transient_supabase_error
@@ -148,11 +149,7 @@ async def add_holding(
     # a failed/partial FMP fetch during a re-add must not overwrite good
     # enrichment already stored (the "$0.00 / Other-sector after re-add" bug).
     resolved_company_name: Optional[str] = request.company_name or None
-    sector: Optional[str] = None
-    industry: Optional[str] = None
-    market_cap: Optional[float] = None
-    beta: Optional[float] = None
-    country: Optional[str] = None
+    classification: dict = {}
     current_price: Optional[float] = None
     try:
         fmp = get_fmp_client()
@@ -160,20 +157,7 @@ async def add_holding(
         if profile:
             if not resolved_company_name:
                 resolved_company_name = profile.get("companyName") or None
-            sector = profile.get("sector") or None
-            industry = profile.get("industry") or None
-            country = profile.get("country") or None
-            mc = profile.get("marketCap") or profile.get("mktCap")
-            if mc:
-                try:
-                    market_cap = float(mc)
-                except (TypeError, ValueError):
-                    market_cap = None
-            if profile.get("beta") is not None:
-                try:
-                    beta = float(profile["beta"])
-                except (TypeError, ValueError):
-                    beta = None
+            classification = classification_from_profile(profile)
         if request.shares is not None and request.market_value is None:
             quote = await fmp.get_stock_price_quote(ticker)
             if quote and quote.get("price"):
@@ -191,16 +175,7 @@ async def add_holding(
     # column untouched on upsert (vs. clobbering it with None/'US').
     if resolved_company_name is not None:
         data["company_name"] = resolved_company_name
-    if sector is not None:
-        data["sector"] = sector
-    if country is not None:
-        data["country"] = country
-    if industry is not None:
-        data["industry"] = industry
-    if market_cap is not None:
-        data["market_cap"] = market_cap
-    if beta is not None:
-        data["beta"] = beta
+    data.update(classification)
     # market_value: the user's explicit amount, or shares×live price when both
     # are known. When shares is set but the price couldn't be fetched, OMIT it
     # rather than persisting a misleading 0.0 (which would show $0.00 and count

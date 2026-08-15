@@ -98,6 +98,23 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// forever with a user-visible error.
     case purchaseRevoked(message: String)
 
+    /// Apple's OWN signature check on the transaction failed, so it was never sent to us.
+    ///
+    /// The FOURTH answer to "this purchase isn't grantable", and the only one that never
+    /// reaches the backend — the other three are decisions the server made. It exists because
+    /// `.unknown` was what a caller actually saw: `StoreKitService.handle` reported an
+    /// unverified transaction by returning `nil` without throwing, so every sweep produced
+    /// `SweepResult{seen > 0, applied: 0, lastError: nil}` and fell back to
+    /// "The purchase couldn't be applied. Please try again." Retrying cannot help — the blob
+    /// is unverifiable and will fail identically forever — and because `record(_:op:)` was
+    /// never reached, no analytics event was emitted either.
+    ///
+    /// Terminal but NOT finishable: an unverified transaction must never be `finish()`ed
+    /// (Apple's guidance, and the file header's rule 2), so it stays in
+    /// `Transaction.unfinished` and the sweeps re-report it. That is intentional — the
+    /// alternative is discarding something we cannot prove is not a real purchase.
+    case purchaseUnverified(message: String)
+
     /// No installed app can handle a URL we tried to open — `mailto:` with no mail client,
     /// an App Store link on a device without the App Store, and so on.
     ///
@@ -139,6 +156,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .purchaseAlreadyLinked: return "purchase_already_linked"
         case .purchaseAccountMismatch: return "purchase_account_mismatch"
         case .purchaseRevoked: return "purchase_revoked"
+        case .purchaseUnverified: return "purchase_unverified"
         case .noAppToOpenURL: return "no_app_to_open_url"
         case .apiError(let code, _): return "api_\(code)"
         case .unknown: return "unknown"
@@ -183,6 +201,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Different Account"
         case .purchaseRevoked:
             return "Purchase Refunded"
+        case .purchaseUnverified:
+            return "Couldn’t Verify Purchase"
         case .noAppToOpenURL:
             return "Can’t Open That Here"
         case .apiError:
@@ -244,6 +264,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return message
         case .purchaseRevoked(let message):
             return message
+        case .purchaseUnverified(let message):
+            return message
         case .noAppToOpenURL(let what):
             return "This device has no app set up to open \(what)."
         case .rateLimited(let seconds):
@@ -294,6 +316,11 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // Terminal: a refund can never become grantable, so `.retry` would be a lie and is
         // exactly what left the transaction redelivering.
         case .purchaseRevoked:
+            return .contactSupport
+        // Also NOT .retry, for the same reason and a different cause: the signature check is
+        // deterministic, so the next attempt fails identically. If money did change hands,
+        // support is the only route to it.
+        case .purchaseUnverified:
             return .contactSupport
         // NOT .retry: nothing on the device can service the URL, so a retry is guaranteed to
         // fail. NOT .contactSupport either — the link that failed may BE contact support.
@@ -387,6 +414,19 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // API response errors
         if let apiError = error as? APIError {
             return mapAPIError(apiError)
+        }
+
+        // StoreKit-layer failures, which never reach the backend at all. Same shape as the
+        // `APIError` mapping above: the service throws the low-level typed error, the
+        // user-facing case is decided here.
+        if let storeKitError = error as? StoreKitError {
+            switch storeKitError {
+            case .unverified:
+                return .purchaseUnverified(
+                    message: "Apple couldn’t verify this purchase, so nothing was added to "
+                        + "your account. If you were charged, please contact support."
+                )
+            }
         }
 
         return .unknown(message: error.localizedDescription)
@@ -766,6 +806,7 @@ extension AppError {
         case .purchaseAlreadyLinked: return "purchase_already_linked"
         case .purchaseAccountMismatch: return "purchase_account_mismatch"
         case .purchaseRevoked:        return "purchase_revoked"
+        case .purchaseUnverified:     return "purchase_unverified"
         case .noAppToOpenURL:      return "no_app_to_open_url"
         // The backend's ErrorCode enum is already a stable machine-readable
         // vocabulary, so it is safe as a dimension. The message is not.

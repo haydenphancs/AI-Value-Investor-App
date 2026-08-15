@@ -386,9 +386,14 @@ def test_the_app_account_token_is_resolved_at_tap_not_snapshotted():
         assert "accountID: appState.user.profile?.id" in v, (
             f"{view} does not resolve the account id from AppState at the purchase call"
         )
-        assert "private var accountID" in m, (
-            f"{vm} exposes accountID for external assignment — that is what allowed the "
-            "stale snapshot"
+        # Originally "the property must be `private`", which stopped the VIEW assigning it but
+        # still left a write-only property inside the ViewModel. The property is now gone
+        # entirely — a strictly stronger form of the same invariant, since a member that does
+        # not exist cannot be assigned from anywhere or misread as the live value.
+        # `test_the_account_token_is_not_also_kept_in_a_stored_property` pins the absence.
+        assert "var accountID" not in m, (
+            f"{vm} declares an accountID property again — the tap-time parameter is the only "
+            "value that is guaranteed current"
         )
 
 
@@ -407,8 +412,121 @@ def test_an_unverified_transaction_is_not_reported_as_pending():
     for vm in ("ViewModels/PaywallViewModel.swift", "ViewModels/BuyCreditsViewModel.swift"):
         m = _strip_comments(_read(_ROOT / vm))
         assert "case .unverified:" in m, f"{vm} does not handle the unverified outcome"
-        i, j = m.index("case .unverified:"), m.index("case .pending:")
+        i = m.index("case .unverified:")
         arm = m[i:i + 400]
         assert "isPendingApproval" not in arm.split("case ")[1], (
             f"{vm} still routes an unverified transaction to the approval alert"
         )
+
+
+# ── Defect 8: `.unverified` must be VISIBLE at all four call sites, not just the sheet ─
+
+
+def test_handle_throws_on_unverified_rather_than_returning_nil():
+    """`handle()` has FOUR callers, and only the interactive one could see a `nil` return.
+
+    `purchase(_:accountID:)` checks `.unverified` itself and renders its own copy. The other
+    three — the `Transaction.updates` listener, `restorePurchases()` and
+    `drainUnfinishedTransactions()` — call `handle` in a loop and classify failures from
+    `catch`. A non-throwing failure was therefore invisible to them: `seen` incremented,
+    `applied` did not, `record(_:op:)` was never reached, so `SweepResult.lastError` stayed
+    nil and `allFailed` was true with no error and NO analytics event — on a payment path,
+    which `.claude/rules/auth.md` §6 bans outright.
+
+    The user-visible shape was a permanent, unclearable banner: an unverified transaction is
+    correctly never finished, so it stays in `Transaction.unfinished` and re-reports on every
+    Buy Credits load, each time as "The purchase couldn't be applied. Please try again." —
+    advice that cannot work, for a cause reported nowhere.
+    """
+    svc = _read(_SERVICE)
+    body = _strip_comments(_func_body(svc, "private func handle("))
+
+    assert "throw StoreKitError.unverified" in body, (
+        "handle() no longer throws on an unverified transaction. If it returns nil instead, "
+        "the three sweep callers cannot see the failure at all"
+    )
+    assert "-> PurchaseApplied {" in body, (
+        "handle()'s return type is optional again — an optional return is exactly the "
+        "'failed quietly' channel that made this invisible"
+    )
+    # The transaction must STILL not be finished on this path: throwing changed reporting, not
+    # the retention rule. `finish()` legitimately appears later in the function for the
+    # recorded-and-terminal cases, so bound the window to the unverified arm itself.
+    unverified_arm = body[body.index("case .unverified"):body.index("case .verified")]
+    assert "finish()" not in unverified_arm, (
+        "the unverified branch finishes the transaction — Apple's guidance and this file's own "
+        "rule 2 forbid it, and it discards something we cannot prove is not a real purchase"
+    )
+
+
+def test_every_sweep_reports_the_failures_it_counts():
+    """No sweep may produce `seen > 0, applied: 0` with nothing recorded anywhere.
+
+    `restorePurchases()` and `drainUnfinishedTransactions()` report via `record(_:op:)`, which
+    is what emits `.backgroundSyncFailed`. The `Transaction.updates` listener holds no
+    `SweepResult`, so it must track analytics directly — it previously only `print`ed under
+    `#if DEBUG`, meaning renewals and redeliveries failed silently in every release build.
+    """
+    svc = _strip_comments(_read(_SERVICE))
+
+    for func, op in (
+        ("func restorePurchases()", "iap_restore"),
+        ("func drainUnfinishedTransactions()", "iap_drain_unfinished"),
+    ):
+        body = _func_body(svc, func)
+        assert f'result.record(error, op: "{op}")' in body, (
+            f"{func} no longer records its failures — an all-failed sweep would render with a "
+            f"nil lastError and emit no analytics"
+        )
+
+    listener = _func_body(svc, "func startObservingTransactions()")
+    assert "Analytics.shared.track(.backgroundSyncFailed" in listener, (
+        "the Transaction.updates listener reports failures only under #if DEBUG. That stream "
+        "carries renewals, Ask-to-Buy approvals and redeliveries; a release build that says "
+        "nothing there is a silent money-path failure (.claude/rules/auth.md §6)"
+    )
+    assert '"iap_updates"' in listener
+
+
+def test_the_unverified_message_does_not_promise_a_retry():
+    """`.unknown` was the fallback, and its copy is "Please try again." The signature check is
+    deterministic, so a retry fails identically — the advice was simply false."""
+    err = _strip_comments(_read(_ROOT / "Core/Utilities/AppError.swift"))
+    # The FULL declaration, not the bare prefix: `case purchaseUnverified` is a substring of
+    # any renamed variant, so the prefix form stayed green when the case was renamed away.
+    # (Caught by mutation testing — see `project_source_scan_guard_vacuity`.)
+    assert "case purchaseUnverified(message: String)" in err, (
+        "AppError has no distinct case for an unverified purchase, so it falls back to "
+        ".unknown — 'An unexpected error occurred. Please try again.'"
+    )
+    assert "StoreKitError" in err, (
+        "AppError.from(_:) does not map StoreKitError, so a thrown .unverified arrives as "
+        ".unknown with Swift's localizedDescription"
+    )
+    action = _func_body(err, "var suggestedAction:")
+    i = action.index("case .purchaseUnverified")
+    assert ".retry" not in action[i:i + 120], (
+        "an unverified purchase suggests .retry — deterministic failure, so retrying cannot help"
+    )
+
+
+def test_the_paywall_unverified_copy_is_grammatical():
+    """User-visible string on the money path. The plural was copy-pasted from the credits
+    version ('no credits were added'), which is correct for ITS subject."""
+    vm = _read(_VM)
+    assert "subscription were added" not in vm, (
+        "PaywallViewModel shows 'so no subscription were added' after a failed purchase"
+    )
+
+
+def test_the_account_token_is_not_also_kept_in_a_stored_property():
+    """The tap-time parameter is the whole fix; a `private var accountID` alongside it was a
+    write-only property that shadowed nothing and was read nowhere. It mattered only as a trap:
+    the next person to read `self.accountID` gets whatever the LAST tap wrote, which is exactly
+    the staleness the parameter exists to prevent."""
+    for vm in ("ViewModels/PaywallViewModel.swift", "ViewModels/BuyCreditsViewModel.swift"):
+        m = _strip_comments(_read(_ROOT / vm))
+        assert "private var accountID" not in m, (
+            f"{vm} stores accountID again — pass it at tap time and read only the parameter"
+        )
+        assert "self.accountID = accountID" not in m

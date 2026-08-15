@@ -136,6 +136,30 @@ def _resolve_environment():
             f"IAP_ENVIRONMENT={settings.IAP_ENVIRONMENT!r} is not one of "
             "Production | Sandbox | Xcode | LocalTesting"
         )
+
+    # A LOCAL environment outside local development is a forged-purchase hole, not a
+    # convenience setting. In Xcode/LocalTesting Apple's `SignedDataVerifier` returns the
+    # decoded JWT WITHOUT checking the signature at all
+    # (`signed_data_verifier._decode_signed_object`), `_load_root_certificates` below is
+    # allowed to find zero trust anchors, and online revocation checks are disabled. A deploy
+    # set that way accepts any unsigned JWT anyone posts to `POST /billing/verify` as a
+    # genuine Apple purchase — free Max tier and 4,000 credits for the asking.
+    #
+    # The default already fails closed (`Production`, pinned by
+    # `tests/test_iap_environment_fails_closed.py`). This closes the other half: an EXPLICIT
+    # setting. Nothing else stopped a Railway instance from carrying `IAP_ENVIRONMENT=Xcode`.
+    #
+    # Raised here rather than validated on `Settings` deliberately. This fails the payment
+    # path closed — 503, exactly like the missing-root-certificates case below — instead of
+    # refusing to boot the whole app on a misconfigured deploy, which would take down market
+    # data, Learn and chat over an IAP setting.
+    if raw in _LOCAL_ENVIRONMENTS and settings.ENVIRONMENT != "development":
+        raise AppStoreNotConfigured(
+            f"IAP_ENVIRONMENT={settings.IAP_ENVIRONMENT!r} skips Apple signature verification "
+            f"and is only permitted when ENVIRONMENT=development (got "
+            f"{settings.ENVIRONMENT!r}). Set IAP_ENVIRONMENT=Sandbox or Production."
+        )
+
     return env, raw
 
 

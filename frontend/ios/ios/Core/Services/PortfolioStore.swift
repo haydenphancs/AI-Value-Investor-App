@@ -81,7 +81,36 @@ final class PortfolioStore: ObservableObject {
 
     // MARK: - Loading
 
+    /// The load currently in flight, if any. Concurrent callers JOIN it.
+    ///
+    /// This is a SINGLETON read by several unrelated triggers, and `isLoading` /
+    /// `hasLoadedOnce` were published but never consulted here — so a launch that fired
+    /// `TrackingViewModel.loadData()` and the identity-change reload issued two identical
+    /// `GET /portfolios` calls whose responses then raced to assign `self.portfolios`.
+    private var loadTask: Task<Void, Never>?
+
     func loadPortfolios() async {
+        if let running = loadTask, !running.isCancelled {
+            await running.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performLoad()
+            // Cleared HERE, as the task's own last act, rather than after `await
+            // task.value` below. Between a task finishing and its awaiting caller
+            // being resumed, a THIRD caller can run and observe a completed-but-still
+            // -registered task: it would "join" something already done and return
+            // instantly without ever loading. That is a silently skipped refresh —
+            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // completed under the PREVIOUS identity.
+            self.loadTask = nil
+        }
+        loadTask = task
+        await task.value
+    }
+
+    private func performLoad() async {
         isLoading = true
         defer {
             isLoading = false

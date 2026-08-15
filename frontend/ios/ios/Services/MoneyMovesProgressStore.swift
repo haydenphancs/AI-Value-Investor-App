@@ -110,7 +110,38 @@ final class MoneyMovesProgressStore: ObservableObject {
 
     // MARK: - Backend sync (best-effort; the local cache is the source of truth)
 
+    /// The hydrate currently in flight, if any. Concurrent callers JOIN it.
+    ///
+    /// Two independent triggers hydrate this store on a signed-in launch —
+    /// `AppState.hydrateLearnStores()` from the auth fan-out and the Wiser screen's own
+    /// `.task` — and both are legitimate: the Wiser tab must work for a guest, who never
+    /// reaches the fan-out. The `localVersion` / `LearnIdentityEpoch` checks below guard the
+    /// MERGE, not the REQUEST, so without this both went out and this store's endpoint was
+    /// fetched twice per launch.
+    private var hydrateTask: Task<Void, Never>?
+
     func hydrate() async {
+        if let running = hydrateTask, !running.isCancelled {
+            await running.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performHydrate()
+            // Cleared HERE, as the task's own last act, rather than after `await
+            // task.value` below. Between a task finishing and its awaiting caller
+            // being resumed, a THIRD caller can run and observe a completed-but-still
+            // -registered task: it would "join" something already done and return
+            // instantly without ever loading. That is a silently skipped refresh —
+            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // completed under the PREVIOUS identity.
+            self.hydrateTask = nil
+        }
+        hydrateTask = task
+        await task.value
+    }
+
+    private func performHydrate() async {
         let token = localVersion
         let epoch = LearnIdentityEpoch.current
         do {

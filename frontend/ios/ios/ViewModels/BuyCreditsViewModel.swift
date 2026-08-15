@@ -48,15 +48,6 @@ final class BuyCreditsViewModel: ObservableObject {
     private let repository: AccountRepositoryProtocol
     let store: StoreKitService
 
-    /// The signed-in user's id, stamped onto the purchase as StoreKit's `appAccountToken`.
-    /// Stamped onto the purchase as StoreKit's `appAccountToken`.
-    ///
-    /// ⚠️ Passed in at TAP time, never snapshotted. It used to be assigned once from `.task`,
-    /// so a sheet that stayed mounted across a `.restoring → .authenticated` transition
-    /// stamped a stale or nil token onto a real purchase, leaving the server-side
-    /// cross-account guard with nothing to check.
-    private var accountID: String?
-
     init(
         repository: AccountRepositoryProtocol = AccountRepository.shared,
         store: StoreKitService = .shared
@@ -177,8 +168,16 @@ final class BuyCreditsViewModel: ObservableObject {
         store.purchasingProductID == pack.productId
     }
 
+    /// - Parameter accountID: the signed-in user's id, stamped onto the purchase as StoreKit's
+    ///   `appAccountToken`.
+    ///
+    ///   ⚠️ Passed in at TAP time and used only from this parameter — deliberately NOT stored.
+    ///   It used to be assigned once from `.task`, so a sheet that stayed mounted across a
+    ///   `.restoring → .authenticated` transition stamped a stale or nil token onto a real
+    ///   purchase, leaving the server-side cross-account guard with nothing to check. A
+    ///   `private var accountID` survived that fix as a write-only property; it is gone,
+    ///   because the next reader of it would have reintroduced exactly that staleness.
     func purchase(_ pack: CreditPackDTO, accountID: String?) async {
-        self.accountID = accountID
         Analytics.shared.track(
             .creditPackPurchaseStarted, ["product_id": .string(pack.productId)]
         )

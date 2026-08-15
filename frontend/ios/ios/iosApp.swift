@@ -194,26 +194,15 @@ struct iosApp: App {
                         authService: authService
                     )
 
-                    // Seed the widget on COLD LAUNCH — AFTER `configure`, never before.
+                    // The cold-launch widget seed now lives INSIDE `configure()`'s restore
+                    // task, immediately after the stored credential is armed.
                     //
-                    // `didBecomeActive` below covers returning to the foreground, but it
-                    // races the first frame on a cold start: verified on the simulator, a
-                    // launch-only run produced 20+ requests and ZERO widget fetches, so a
-                    // freshly installed widget stayed on its placeholder until the user
-                    // backgrounded and returned.
-                    //
-                    // ⚠️ ORDER IS LOad-BEARING. This used to run ~50 lines earlier, ahead
-                    // of `configure` — which is the only path to `restoreSession()` and
-                    // therefore to `apiClient.setAuthToken`. The portfolio fetch went out
-                    // with NO bearer, so `get_watchlist_identity` resolved a signed-in
-                    // user to their per-install GUEST partition, which is empty, which
-                    // makes the backend fall back to market data. Net effect: a signed-in
-                    // user's "My Holdings" tile showed market movers on every cold launch.
-                    //
-                    // `restoreSession` is async, so this is still best-effort rather than
-                    // guaranteed; `AppState.onAuthenticated` refreshes again once the
-                    // identity actually settles, which is the reliable trigger.
-                    WidgetRefreshService.shared.refresh()
+                    // It used to be this line. Ordering it correctly is impossible from here:
+                    // `configure()` cannot await, so it only SPAWNS the restore, and a call
+                    // on the next line races the token rather than following it. Since
+                    // `/widget/portfolio-mover` is `.guestAllowed`, losing that race did not
+                    // fail — it silently answered for the per-install guest and wrote market
+                    // movers into the user's "My Holdings" tile. See `AppState.configure`.
                 }
                 // Authoritative unread count, broadcast from wherever it was last
                 // observed: an inbox load, a mark-read, or a badge arriving on a push.

@@ -879,6 +879,45 @@ def test_billing_answers_it_before_the_retryable_arm():
     )
 
 
+def test_billing_does_not_test_for_a_guest_by_comparing_to_the_sentinel():
+    """`verify_purchase` used to answer 401 when `user["id"] == GUEST_USER_ID`.
+
+    Two things were wrong with it, and the second is why the branch is gone rather than
+    rewritten. First, it was unreachable: the route depends on the STRICT `get_current_user`,
+    which raises AUTH_REQUIRED with no credential, refuses an unverifiable one rather than
+    downgrading it to guest (`.claude/rules/auth.md` §4), and raises AUTH_ACCOUNT_NOT_FOUND
+    when the verified `sub` has no `public.users` row — so it can only return a real account.
+
+    Second, the comparison itself is the known-wrong guest test. Under migrations 108/110/111 a
+    guest resolves to a per-INSTALL uuid5 that never equals the shared sentinel, so
+    `user["id"] == GUEST_USER_ID` silently classifies every guest as a paying account. Leaving
+    a dead instance of it on the payment path left the wrong pattern sitting there to be copied.
+    The correct test, where one is needed at all, is `user.get("is_guest")`.
+    """
+    import inspect
+
+    from app.api.v1.endpoints import billing
+
+    src = inspect.getsource(billing.verify_purchase)
+    # Comments legitimately NAME the retired comparison to explain why it is wrong; only live
+    # code can reinstate it.
+    code = "\n".join(
+        line for line in src.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert 'user["id"] == GUEST_USER_ID' not in code, (
+        "verify_purchase compares against the guest sentinel again — dead on this dependency, "
+        "and the wrong test everywhere else"
+    )
+    assert "GUEST_USER_ID" not in code, (
+        "the sentinel is referenced in live code in verify_purchase"
+    )
+    # The protection it purported to give must still exist, and it comes from the dependency.
+    assert "Depends(get_current_user)" in code, (
+        "verify_purchase no longer uses the STRICT dependency — that, not an id comparison, is "
+        "what keeps guests out of the purchase path"
+    )
+
+
 def test_billing_returns_a_terminal_4xx_with_its_own_code():
     """409 + a distinct code is what lets the client finish the transaction. Sharing
     INVALID_INPUT with the 400 verify-failure path would leave it indistinguishable."""

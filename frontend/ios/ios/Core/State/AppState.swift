@@ -185,10 +185,62 @@ final class AppState {
             }
         }
 
-        // Restore auth state from keychain
+        // Restore auth state from keychain.
+        //
+        // ⚠️ THE TOKEN IS ARMED BEFORE ANYTHING ELSE IN THIS TASK, and that ordering is
+        // load-bearing for correctness, not just for speed.
+        //
+        // `configure()` cannot await — it is called from the root `.task` — so it can only
+        // SPAWN the restore. Meanwhile `ContentView` opacity-mounts all five tabs at once,
+        // so their ViewModels and `.task` triggers fire immediately, and `restoreSession`
+        // did not arm the credential until after it had already set `.restoring` and
+        // suspended on the network. Every request issued in that window went out with NO
+        // bearer — and most of them are `.guestAllowed`, which the backend ANSWERS by
+        // resolving the caller to their per-install guest partition rather than refusing.
+        //
+        // So a signed-in user's launch fetched a stranger's empty data: an empty watchlist,
+        // no portfolios, and — because `/widget/portfolio-mover` degrades an empty holdings
+        // list to the market payload — market movers written into the "My Holdings" widget
+        // slot. The identity-change reload then replaced it all a second later, which is
+        // both the visible flash AND most of the duplicate traffic in a launch log.
+        //
+        // Arming first makes those same first requests authentic. A token that turns out to
+        // be expired is not a new problem: it 401s and `APIClient`'s single-flight refresh
+        // interceptor handles it, which is the designed path. `enterRestoringWindow` still
+        // DISARMS deliberately on a transient failure — that divergence is intact.
         Task {
+            await primeStoredCredential()
+
+            // Seed the widget on COLD LAUNCH, from HERE rather than from `iosApp`.
+            //
+            // `didBecomeActive` covers returning to the foreground but races the first frame
+            // on a cold start (verified: a launch-only run produced 20+ requests and ZERO
+            // widget fetches), so a freshly installed widget sat on its placeholder until the
+            // user backgrounded and returned. It therefore has to fire at launch — but from
+            // `iosApp` it could only ever fire ALONGSIDE this task, never after the token was
+            // armed, because `configure()` cannot await. That is a real ordering bug, not a
+            // latency one: `/widget/portfolio-mover` is `.guestAllowed`, so a tokenless call
+            // is answered for the per-install guest, whose holdings are empty, which the
+            // backend degrades to the MARKET payload — and market movers were then written
+            // into the "My Holdings" tile on every cold launch of a signed-in user.
+            //
+            // One line later here, that is simply sequenced. `onAuthenticated` still forces a
+            // refresh once the identity fully settles, which now also survives landing
+            // mid-flight (see `WidgetRefreshService.forcedRefreshPending`).
+            WidgetRefreshService.shared.refresh()
+
             await restoreSession(trigger: "launch")
         }
+    }
+
+    /// Arm `APIClient` with the stored credential, if there is one, before any request goes out.
+    ///
+    /// Deliberately does NOT touch `auth.status`: this says nothing about whether the session
+    /// is valid, only that we hold something worth sending. `restoreSession` immediately
+    /// follows and owns the validation — and owns clearing it if the credential is dead.
+    private func primeStoredCredential() async {
+        guard let token = authService.getStoredToken() else { return }
+        await apiClient.setAuthToken(token)
     }
 
     // MARK: - Session Healing
@@ -337,9 +389,7 @@ final class AppState {
         do {
             let profile = try await fetchCurrentUserNoRetry()
             applyProfile(profile)
-            auth.status = .authenticated
-            cancelRestoreBackoff()
-            await onAuthenticated(userId: profile.id)
+            await establishAuthenticatedSession(userId: profile.id)
             return
         } catch {
             // A non-auth error (offline / 5xx) → preserve the STORED token, run as guest.
@@ -397,9 +447,7 @@ final class AppState {
         do {
             let profile = try await fetchCurrentUserNoRetry()
             applyProfile(profile)
-            auth.status = .authenticated
-            cancelRestoreBackoff()
-            await onAuthenticated(userId: profile.id)
+            await establishAuthenticatedSession(userId: profile.id)
         } catch {
             // Refreshed OK but the profile read still failed → transient; preserve the STORED
             // token so a later attempt can restore, but disarm the client one so the wire
@@ -466,6 +514,46 @@ final class AppState {
 
     /// Post-authentication side effects: claim guest data, refresh credits, pull synced settings.
     /// Called from every path that transitions to `.authenticated`.
+    /// Publish a confirmed identity and run its fan-out, in the one order that is safe.
+    ///
+    /// ⚠️ THE GUEST CLAIM COMPLETES BEFORE `.authenticated` IS PUBLISHED. That ordering is
+    /// the entire reason this method exists, and it was wrong at all five call sites.
+    ///
+    /// `onAuthenticated` documents that the claim must run "FIRST — before any read of the
+    /// user's data", but it lived INSIDE `onAuthenticated`, which is called one line AFTER
+    /// `auth.status = .authenticated`. Publishing that status synchronously fires
+    /// `ReloadOnIdentityChange` on every eagerly-mounted tab, and each of those launches an
+    /// unstructured `Task` that reads the account partition — concurrently with the still
+    /// in-flight `POST /users/me/claim-guest-data`. So the reads could and did land first,
+    /// and the tickers being claimed were absent from the list the user was looking at until
+    /// something else happened to refetch. The comment described a happens-before that
+    /// nothing enforced.
+    ///
+    /// Callers pass a profile they have ALREADY applied, because `applyProfile` writes
+    /// `user.tier`, which is itself observed.
+    private func establishAuthenticatedSession(userId: String) async {
+        await claimGuestDataForIncomingIdentity(userId: userId)
+        auth.status = .authenticated
+        cancelRestoreBackoff()
+        await onAuthenticated(userId: userId)
+    }
+
+    /// The one piece of the fan-out that cannot wait until after the status is published.
+    ///
+    /// Deliberately mirrors `onAuthenticated`'s transition test rather than inventing a
+    /// second rule: "does this identity need a claim" is the same question in both places,
+    /// and answering it differently is how the two would drift.
+    private func claimGuestDataForIncomingIdentity(userId: String) async {
+        // Same account as last time — the claim is genuinely redundant UNLESS we spent time
+        // in `.restoring`, where requests went out tokenless and anything the user created
+        // landed in this install's guest partition.
+        if userId == lastAuthenticatedUserId, !didWriteAsGuestWhileRestoring {
+            return
+        }
+        didWriteAsGuestWhileRestoring = false
+        await claimGuestDataIfNeeded()
+    }
+
     private func onAuthenticated(userId: String? = nil) async {
         // Fire the fan-out only on a real identity TRANSITION.
         //
@@ -476,16 +564,14 @@ final class AppState {
         //
         // Keyed on the user id, not a bool, so an account SWITCH still runs the fan-out.
         if let userId, userId == lastAuthenticatedUserId {
-            // Same account, so the rest of the fan-out is genuinely redundant — with ONE
-            // exception. If we spent time in `.restoring`, requests went out tokenless and
-            // anything the user created landed in this install's guest partition; returning
-            // here without claiming is what made those writes disappear the moment the
-            // session healed. Idempotent by construction, so this costs one indexed POST.
-            if didWriteAsGuestWhileRestoring {
-                didWriteAsGuestWhileRestoring = false
-                await claimGuestDataIfNeeded()
-            }
-            // ...and one more. `SettingsSyncManager.push()` correctly DEFERS a change made
+            // Same account, so the rest of the fan-out is genuinely redundant.
+            //
+            // The `.restoring`-window guest claim that used to sit here has moved UP into
+            // `claimGuestDataForIncomingIdentity`, which runs before `.authenticated` is
+            // published — see `establishAuthenticatedSession`. It is still conditional on
+            // `didWriteAsGuestWhileRestoring` exactly as it was; only its timing changed.
+            //
+            // `SettingsSyncManager.push()` correctly DEFERS a change made
             // during `.restoring` into its pending-key set, and this early return is the only
             // reason nothing ever drained it: `hydrate()` sits at the bottom of this method,
             // past the `return`. A user who flipped a toggle on a flaky connection kept that
@@ -508,12 +594,14 @@ final class AppState {
         }
         lastAuthenticatedUserId = userId
 
-        // FIRST — before any read of the user's data. Migration 108 partitions guest watchlists
-        // per install, so a user who added tickers during onboarding and then signed up owns
-        // nothing until these rows are moved. Claiming after a watchlist read would show them an
-        // empty list they'd have to pull-to-refresh away.
-        didWriteAsGuestWhileRestoring = false
-        await claimGuestDataIfNeeded()
+        // The guest claim that belongs FIRST — before any read of the user's data — has
+        // already run, in `claimGuestDataForIncomingIdentity`, before `.authenticated` was
+        // published. Migration 108 partitions guest watchlists per install, so a user who
+        // added tickers during onboarding and then signed up owns nothing until those rows
+        // are moved; claiming after a watchlist read shows them an empty list they have to
+        // pull-to-refresh away. Doing it from HERE could not deliver that guarantee, because
+        // publishing the status one line earlier had already started those reads.
+        //
         // Apply any credit-pack purchase that Apple delivered while there was no account to
         // attach it to. `POST /billing/verify` is `.signInRequired`, so a transaction arriving
         // during a signed-out session is refused by `APIClient` before it goes out and stays
@@ -678,7 +766,37 @@ final class AppState {
     /// Refresh the credit balance into `user.credits` (single source of truth).
     /// Best-effort: failures are logged, not surfaced (the Profile screen shows
     /// the last-known balance rather than an error toast).
+    /// The credits fetch currently in flight, if any. Concurrent callers JOIN it.
+    ///
+    /// Three independent paths call this on a signed-in launch — the `onAuthenticated`
+    /// fan-out, `ResearchViewModel.loadCredits()`, and `refreshEntitlement()` via the
+    /// `.caydexEntitlementChanged` observer that `drainUnfinishedTransactions()` can post —
+    /// and they collided on `GET /users/me/credits`. Worse than wasteful: the two responses
+    /// raced to assign `user.credits`, so the balance shown could be the OLDER of the two.
+    private var creditsTask: Task<Void, Never>?
+
     func refreshCredits() async {
+        if let running = creditsTask, !running.isCancelled {
+            await running.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performCreditsRefresh()
+            // Cleared HERE, as the task's own last act, rather than after `await
+            // task.value` below. Between a task finishing and its awaiting caller
+            // being resumed, a THIRD caller can run and observe a completed-but-still
+            // -registered task: it would "join" something already done and return
+            // instantly without ever loading. That is a silently skipped refresh —
+            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // completed under the PREVIOUS identity.
+            self.creditsTask = nil
+        }
+        creditsTask = task
+        await task.value
+    }
+
+    private func performCreditsRefresh() async {
         do {
             user.credits = try await apiClient.request(
                 endpoint: .getUserCredits,
@@ -811,8 +929,7 @@ final class AppState {
             // next restore re-ran the whole fan-out. See `onAuthenticated` for the leak.
             let profile = try await authService.signIn(email: email, password: password)
             applyProfile(profile)
-            auth.status = .authenticated
-            await onAuthenticated(userId: profile.id)
+            await establishAuthenticatedSession(userId: profile.id)
         } catch {
             // Status untouched: the caller was already `.unauthenticated` or `.restoring`, and
             // forcing `.unauthenticated` here would discard a `.restoring` credential that is
@@ -854,8 +971,7 @@ final class AppState {
                 break   // no session yet; leave the status exactly as it was
             case .signedIn(let profile):
                 applyProfile(profile)
-                auth.status = .authenticated
-                await onAuthenticated(userId: profile.id)
+                await establishAuthenticatedSession(userId: profile.id)
             }
             return outcome
         } catch {
@@ -898,8 +1014,7 @@ final class AppState {
                 profile = try await authService.exchangeSupabaseSession(accessToken: accessToken)
             }
             applyProfile(profile)
-            auth.status = .authenticated
-            await onAuthenticated(userId: profile.id)
+            await establishAuthenticatedSession(userId: profile.id)
         } catch {
             auth.status = .unauthenticated
             throw error

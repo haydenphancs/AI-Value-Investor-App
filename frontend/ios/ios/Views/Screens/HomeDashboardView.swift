@@ -225,7 +225,14 @@ struct HomeDashboardView: View {
         // TIER rather than on the sheet dismissing, so a restore-purchases or a
         // background profile refresh re-fetches too — and so dismissing without buying
         // costs nothing.
+        //
+        // `oldTier` is inspected rather than ignored: `user.tier` starts at the `.free`
+        // default and `applyProfile` writes the real value during session restore, so an
+        // unconditional refresh here fired on EVERY cold launch of a paid account — a third
+        // `/home/dashboard` on top of the tab-activation load and the identity-change
+        // reload. A launch settling into the tier the user already had is not an unlock.
         .onChange(of: appState.user.tier) {
+            guard appState.auth.status == .authenticated else { return }
             Task { await viewModel.refresh() }
         }
     }

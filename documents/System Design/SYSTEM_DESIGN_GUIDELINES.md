@@ -1692,11 +1692,33 @@ cash-bought balance:
 | `revoke_tier_credits` (mig. 114) | floors `total` on a refunded **subscription** | erases a separately-bought pack |
 
 Migration **117** adds `purchased_total` / `purchased_used` plus a generated
-`spendable = (total - used) + (purchased_total - purchased_used)`. Those three functions are
-**deliberately not modified** — they are column-explicit, so isolation is structural rather than
-maintained by care. `remaining` keeps its original meaning (granted only); `spendable` is the real
-balance. *(A generated column may not reference `remaining`, which is itself generated — the
+`spendable = (total - used) + (purchased_total - purchased_used)`. Those three functions stay
+**column-explicit** — they name only the granted columns — so pool isolation is structural rather
+than maintained by care. `remaining` keeps its original meaning (granted only); `spendable` is the
+real balance. *(A generated column may not reference `remaining`, which is itself generated — the
 expression is written out, and must stay that way.)*
+
+> **Migration 139 later rewrote all three** (and `refund_credits` / `revoke_purchased_credits`).
+> Column-explicitness is preserved — that is the invariant, not "these bodies are frozen" — but
+> the table above no longer describes their current behaviour. What changed:
+>
+> - **`user_credits.tier_alloc`** (new column) records *the allocation actually granted this
+>   period*. `total` cannot answer that once `revoke_tier_credits` overwrites it with a
+>   high-water mark, so `grant_tier_upgrade`'s replay guard now reads `tier_alloc`, not `total`.
+>   Without it a **paid re-subscribe after an Apple refund granted nothing**.
+>   Migration **140** extends the same stamp to `create_user_credits` / `handle_new_auth_user`,
+>   which still inserted the pre-139 column list and so left every account created after 139
+>   carrying `tier_alloc = 0` beside a non-zero `total`.
+> - **`revoke_tier_credits`** now writes off the spend as well as flooring `total`, so the old
+>   tier's `used` no longer survives into the next subscription and hold `remaining` at 0.
+> - All three used to write ledger rows with `granted_delta = purchased_delta = 0` beside a
+>   non-zero `delta`, which made the split invariant below false and rendered those rows
+>   indistinguishable from pre-117 unknown-split rows — the exact shape that fed the refund
+>   fallback. They now write an honest split. Migration **140** fixes the one function 139
+>   missed, `create_user_credits`, which logs every account's opening grant.
+> - Migration **140** also adds `CHECK (used <= total)`, the granted-pool twin of 117's
+>   `purchased_used <= purchased_total`. It must be `<=`: `revoke_tier_credits` deliberately
+>   lands on `total == used == free_alloc`.
 
 ### 9b.2 Spend order and refund order are not inverses
 
@@ -1718,12 +1740,22 @@ Both simple orderings are wrong, and both are tempting:
 - *Granted-first* is worse: it converts purchased → granted, which `ensure_credit_period` then
   wipes. That literally expires credits the user paid for.
 
-> ⚠️ **Consequence for every refund call site: pass the `ref_id` ITS CHARGE USED.** A mismatch is
-> no longer cosmetic — it misses the split lookup, takes the granted-first fallback, and destroys
-> paid credits. This shipped once: `research_reconciliation_service` refunded with `report_id`
-> while `research.py` charges with the ticker, putting every reconciled report failure on that
-> path. Pinned by `test_research_reconciliation.py::test_refund_is_keyed_by_ticker_to_match_the_charge`.
-> The fallback itself (granted-first) is retained only for pre-117 ledger rows, which carry no split.
+> ⚠️ **Consequence for every refund call site: pass the `ref_id` ITS CHARGE USED.** This shipped
+> once: `research_reconciliation_service` refunded with `report_id` while `research.py` charges
+> with the ticker, putting every reconciled report failure on the wrong path. Pinned by
+> `test_research_reconciliation.py::test_refund_is_keyed_by_ticker_to_match_the_charge`.
+>
+> **What a mismatch costs changed in migration 139.** It used to miss the split lookup, fall
+> through to the granted-first fallback, and destroy paid credits. The fallback now fires only
+> when a debit was *found* carrying an unknown split, or when there was no `ref_id` to search by
+> at all — so a **mismatched `ref_id` is a no-op**: nothing minted, nothing destroyed, the user
+> still owed. The SQL `RAISE WARNING`s, which is the only signal there is, since by definition
+> there is no row to point at. Passing the right `ref_id` is still mandatory; the failure is now
+> a silent non-refund rather than a silent theft.
+>
+> The pre-139 fallback was itself a **credit mint**: it fired whenever no un-reversed debit was
+> found and paid out `LEAST(amount, used)` — bounded by the caller's *current* spend rather than
+> by the debit being refunded.
 
 ### 9b.3 Exactly-once granting
 
@@ -1755,6 +1787,38 @@ delivery of a transaction we already own is caught by the dedup row → 409. A *
 someone else's session (A buys, verify fails, A signs out, B signs in, StoreKit redelivers) has no
 prior row at all — only StoreKit's `appAccountToken`, stamped by the client and returned inside
 Apple's signed payload, proves who paid.
+
+**Every ungrantable purchase needs its own terminal answer, because "terminal" and "finishable"
+are not the same question.** iOS finishes a transaction only when the server has *recorded* it;
+finishing anything else destroys a purchase with no redelivery left to repair it. Four distinct
+outcomes, and collapsing any two re-opens a shipped bug:
+
+| Outcome | Code / status | Recorded? | iOS finishes it? |
+|---|---|---|---|
+| Already granted to another account | `PURCHASE_ALREADY_LINKED` / 409 | yes, to someone else | **yes** — nothing will ever change |
+| `appAccountToken` names another account | `PURCHASE_ACCOUNT_MISMATCH` / 409 | **no** — refused before any grant | **no** — the buyer signing in claims it |
+| Apple already refunded it | `PURCHASE_REVOKED` / 409 | n/a — never grantable | **yes** |
+| Apple's own signature check failed | client-side `StoreKitError.unverified` | never sent | **no** — but it *is* reported |
+
+`PURCHASE_REVOKED` exists because a revoked purchase used to raise `UnknownProduct` → 400
+`INVALID_INPUT` → `.validationFailed`, which the client does not finish — so Apple redelivered it
+on **every launch, forever**, with a user-visible error each time. Only the REVOKED arm was
+widened: the genuinely-unmapped product arms must keep raising `UnknownProduct` and stay
+unfinished, so they self-heal once the catalog is fixed.
+
+The last row is client-side and has no backend code at all. It must still be *visible*: an
+unverified transaction is correctly never finished, so it re-reports on every sweep, and
+`StoreKitService.handle` throws rather than returning `nil` precisely so the three sweeps
+(`Transaction.updates`, `restorePurchases`, `drainUnfinishedTransactions`) record it. Returning
+`nil` made them report `seen > 0, applied: 0` with a nil error and **no analytics**, rendering as
+"The purchase couldn't be applied. Please try again." — a permanent banner offering an action that
+cannot work.
+
+**A failed revocation answers 503, not 200.** The REFUND webhook is Apple's only delivery of that
+news; answering 200 consumes it permanently, and nothing sweeps `credit_purchases` afterwards, so
+a refunded buyer kept their credits with no repair path. 503 makes Apple redeliver. This is safe
+to retry because `credit_purchases.revoked_at` is an idempotency tombstone — a replayed revocation
+returns `already_revoked` rather than reclaiming twice.
 
 ### 9b.4 Restore, and why buying requires an account
 
@@ -1793,10 +1857,18 @@ extra keys, so the splat would silently serve the granted-only balance with no e
   adjudicate a refund; replying needs an App Store Server API client (signed JWT + ASC key) that
   this repo does not have. The webhook answers 200 with a distinct log line — a non-2xx would make
   Apple retry for days. Consequence: Apple decides those refunds without our input.
-- **Refund after full consumption reclaims 0.** `revoke_purchased_credits` floors at
-  `purchased_used`, which is correct (spent credits are a business loss, and `spendable` must never
-  go negative) but exploitable as a business rule. Logged distinctly so the exposure is measurable
-  before deciding to build the API client above.
+- **Refund after full consumption reclaims 0.** `revoke_purchased_credits` cannot claw back
+  credits the user already spent (spent credits are a business loss, and `spendable` must never go
+  negative). Logged distinctly so the exposure is measurable before deciding to build the API
+  client above.
+
+  > **Corrected by migration 139.** This previously read "floors at `purchased_used`, which is
+  > correct". Flooring `purchased_total` at `purchased_used` and leaving `purchased_used` alone
+  > was *not* correct: `spendable` subtracts `purchased_used`, so a later report refund lowered it
+  > and **raised the balance on a pack Apple had already refunded** — money back *and* credits
+  > kept. Both columns now drop by the write-off, retiring the spent baseline. `purchased_remaining`
+  > is unchanged (0) either way; what changes is that a subsequent refund correctly caps
+  > `back_purch` at `purchased_used = 0`.
 - **`REFUND_REVERSED` is not automated** — logged loudly, restored by hand.
 
 ### 9b.7 Pricing

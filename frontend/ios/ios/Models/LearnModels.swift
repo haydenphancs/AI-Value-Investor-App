@@ -211,12 +211,20 @@ struct MoneyMove: Identifiable {
     /// 640x360 cover plate from the public money-moves-images bucket. Defaults to nil so the
     /// `sampleData` placeholders keep compiling and keep their SF Symbol badge.
     var imageUrl: String? = nil
-    /// When the article was published. NEVER RENDERED — it exists only to order the rows so a
-    /// newly seeded topic surfaces at the top of its section without an app update.
+    /// When the article was published. Orders the rows (newest first, on both surfaces) AND is
+    /// now RENDERED on the card as "Today" / "Yesterday" / "Wednesday" / "Aug 3".
     ///
-    /// Defaults to `.distantPast`, which is the honest value for a `sampleData` placeholder:
-    /// it has no publication date because it has not been written yet. That also sorts those
-    /// teasers below every real article, which is where they belong.
+    /// ⚠️ Rendering it is why the backend had to start serving the real `published_at`. This
+    /// value used to be derived on every decode as `now − publishedDaysAgo` days, which is
+    /// order-preserving forever but not a date: the offset is a constant, so an article stayed
+    /// permanently "12 days old". `MoneyMoveArticleDTO.resolvedPublishedAt` prefers the served
+    /// timestamp and keeps that derivation only as a fallback.
+    ///
+    /// Defaults to `.distantPast`, which is the honest value for a `sampleData` placeholder: it
+    /// has no publication date because it has not been written yet. That sorts those teasers
+    /// below every real article, and `MoneyMoveDateFormatting.label` returns nil for it so the
+    /// card shows no date rather than "Jan 1, 1". Seven such cards ship today — the sentinel is
+    /// load-bearing, not theoretical.
     var createdAt: Date = .distantPast
 
     var iconName: String {

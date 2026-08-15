@@ -37,7 +37,12 @@ from __future__ import annotations
 import pytest
 
 from app.integrations.app_store import _to_dict
-from app.services.iap_service import IAPError, IAPService
+from app.services.iap_service import (
+    IAPError,
+    IAPService,
+    PurchaseAccountMismatch,
+    PurchaseBoundToAnotherAccount,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -252,3 +257,103 @@ def test_a_row_with_no_owner_recorded_does_not_block_the_apply():
     )
     assert result["was_replay"] is True
     assert store[0]["user_id"] == "user-A"
+
+
+# ── First-delivery cross-account guard (appAccountToken) ──────────────────────────────
+
+
+def test_a_first_delivery_for_another_account_is_refused_before_any_write():
+    """The gap the rebind check above CANNOT cover.
+
+    `test_a_transaction_bound_to_another_account_is_refused` needs a `subscriptions` row to
+    already exist. On a FIRST delivery there is none — so if A's purchase completes at Apple
+    but the verify never lands (offline, app killed, signed out), the transaction stays
+    unfinished, and when B signs in on the same device `drainUnfinishedTransactions()`
+    re-submits it under B's bearer token. Nothing distinguished that from B's own purchase:
+    B was granted the tier AND its credit allocation, and A could never be given the row back.
+
+    `appAccountToken` is the only evidence of who paid, and Apple returns it inside the
+    SIGNED payload so the client cannot forge it independently of the transaction.
+    """
+    store = []
+    svc = _svc(store)
+
+    with pytest.raises(PurchaseAccountMismatch):
+        svc.apply_transaction(
+            "user-B",
+            {**_PRO, "originalTransactionId": "TXN-NEW", "transactionId": "TXN-NEW",
+             "appAccountToken": "user-A"},
+        )
+
+    assert store == [], "a refused first delivery must write nothing at all"
+
+
+def test_the_mismatch_is_raised_before_a_row_exists_so_the_client_keeps_the_transaction():
+    """`PurchaseAccountMismatch` must stay a distinct type from its parent.
+
+    The parent means "we already credited someone else, finish it so Apple stops
+    redelivering". This one means "nobody has been credited yet" — finishing it would destroy
+    a purchase the buyer paid for, with no redelivery left to repair it.
+    """
+    assert issubclass(PurchaseAccountMismatch, PurchaseBoundToAnotherAccount)
+    assert PurchaseAccountMismatch is not PurchaseBoundToAnotherAccount
+
+
+def test_a_matching_token_is_accepted_case_insensitively():
+    """uuids round-trip through Apple with inconsistent case; a case difference is not theft."""
+    store = []
+    svc = _svc(store)
+    result = svc.apply_transaction(
+        "USER-a",
+        {**_PRO, "originalTransactionId": "TXN-OK", "transactionId": "TXN-OK",
+         "appAccountToken": "user-A"},
+    )
+    assert result["was_replay"] is False
+    assert store and store[0]["user_id"] == "USER-a"
+
+
+def test_a_transaction_without_a_token_still_applies():
+    """Older clients stamped no token. Refusing them would strand real purchases; the
+    per-transaction dedup and the rebind check still bound the damage."""
+    store = []
+    svc = _svc(store)
+    result = svc.apply_transaction(
+        "user-A", {**_PRO, "originalTransactionId": "TXN-OLD", "transactionId": "TXN-OLD"}
+    )
+    assert result["was_replay"] is False
+    assert store and store[0]["user_id"] == "user-A"
+
+
+def test_the_webhook_call_site_opts_out_of_the_token_check():
+    """Apple's notification is not client-submitted: `user_id` is resolved from our OWN
+    subscriptions row, so there is no cross-account question — and raising would return a
+    non-200 that Apple retries for days against a legacy mis-bound row.
+
+    ⚠️ Drives the REAL webhook entry point (`apply_notification`), not `apply_transaction`
+    directly. Calling the inner method with `client_submitted=False` would pin only the
+    parameter's behaviour and pass even if the webhook call site dropped the kwarg — which is
+    exactly the regression this exists to catch. Verified by mutation: deleting
+    `client_submitted=False` at iap_service.py's `apply_notification` call site turns this red.
+    """
+    store = [{
+        "id": "sub-1", "user_id": "user-B", "tier": "pro", "status": "active",
+        "original_transaction_id": "TXN-HOOK", "current_period_end": None,
+    }]
+    svc = _svc(store)
+
+    # The stored owner is user-B; the signed payload names user-A. A client submitting this
+    # would (correctly) be refused — Apple must not be.
+    notification = {
+        "notificationType": "DID_RENEW",
+        "signedDate": 1_700_000_000_000,
+        "data": {"signedTransactionInfo": "ignored-by-the-fake"},
+    }
+    transaction = {**_PRO, "originalTransactionId": "TXN-HOOK", "transactionId": "TXN-HOOK",
+                   "appAccountToken": "user-A"}
+
+    outcome, resolved = svc.apply_notification(notification, transaction)
+
+    assert "account" not in str(outcome).lower(), (
+        f"the webhook was refused on a cross-account check: {outcome}"
+    )
+    assert store[0]["user_id"] == "user-B"

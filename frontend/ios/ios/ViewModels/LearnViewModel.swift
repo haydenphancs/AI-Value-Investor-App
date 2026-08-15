@@ -70,12 +70,13 @@ class LearnViewModel: ObservableObject {
             .sink { [weak self] _ in self?.rebuildJourney() }
             .store(in: &cancellables)
 
-        // Completing a Money Move (here, from its card, or by finishing its narration) re-sorts
-        // the row so unread moves stay on the left and completed ones slide to the end.
-        MoneyMovesProgressStore.shared.$completed
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.resortMoneyMoves() }
-            .store(in: &cancellables)
+        // NOTE: there is deliberately no `MoneyMovesProgressStore.$completed` subscription here.
+        // It used to re-sort the row on completion, back when completed moves slid to the end.
+        // The row is ordered purely by date now (the section is labelled "Most Recent"), so
+        // that sink would be an identity function that still republishes `@Published moneyMoves`
+        // — forcing a full LearnView body pass and 16 card bodies on every completion, for no
+        // visible change. `MoneyMoveCard` observes the store itself, so its checkmark still
+        // updates live.
     }
 
     // MARK: - Data Loading
@@ -183,31 +184,22 @@ class LearnViewModel: ObservableObject {
         var cards = MoneyMovesContentStore.shared.cards()
         let authoredTitles = Set(cards.map { $0.title })
         cards += MoneyMove.sampleData.filter { !authoredTitles.contains($0.title) }
-        moneyMoves = sortedIncompleteFirst(cards)
+        moneyMoves = Self.newestFirst(cards)
     }
 
-    /// Re-sort the existing cards (preserving identity) so a just-completed move slides to the end.
-    private func resortMoneyMoves() {
-        moneyMoves = sortedIncompleteFirst(moneyMoves)
-    }
-
-    /// Unread moves on the left, completed ones at the end; NEWEST FIRST inside each group.
+    /// Newest first, full stop — the ONE sorter, shared with `MoneyMovesDetailView`.
     ///
-    /// The two keys compose rather than compete. Unread-first is the existing behaviour and
-    /// stays primary. Newest-first is nested under it so that a freshly seeded article — which
-    /// is unread by definition — lands at the very front of the row, which is the whole point
-    /// of carrying `createdAt`. Sorting purely by date would instead bury a brand new article
-    /// behind everything the reader has already finished.
+    /// This used to be `sortedIncompleteFirst`: unread moves on the left, completed ones at the
+    /// end, newest-first nested inside each group. That was dropped when the section was
+    /// labelled "Most Recent", because the two keys disagreed the moment a reader finished the
+    /// newest article — it slid to the tail of a row that claims to be ordered by recency.
+    ///
+    /// The cost is real and worth naming: finishing an article no longer moves it, so the
+    /// checkmark is now the only completion feedback in the row.
     ///
     /// `sorted(by:)` is not stable in Swift, so the date comparison falls back to the title to
     /// keep a deterministic order among same-day articles rather than letting them shuffle
     /// between renders.
-    private func sortedIncompleteFirst(_ cards: [MoneyMove]) -> [MoneyMove] {
-        let store = MoneyMovesProgressStore.shared
-        return Self.newestFirst(cards.filter { !store.isCompleted(slug: $0.slug) })
-            + Self.newestFirst(cards.filter { store.isCompleted(slug: $0.slug) })
-    }
-
     static func newestFirst(_ cards: [MoneyMove]) -> [MoneyMove] {
         cards.sorted {
             $0.createdAt == $1.createdAt ? $0.title < $1.title : $0.createdAt > $1.createdAt

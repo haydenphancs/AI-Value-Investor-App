@@ -55,6 +55,12 @@ from app.services.ticker_report_cache import (
 
 logger = logging.getLogger(__name__)
 
+# Statuses whose credits are still owed back if the row leaves the pipeline. Mirrors
+# `research_reconciliation_service._CLAIMABLE_STATUSES` — kept as its own name because the two
+# answer different questions (that one is "can the sweep claim this?", this one is "does
+# deleting this owe a refund?") and coupling them would tie a UI action to a sweeper detail.
+_REFUNDABLE_ON_DELETE = ("pending", "processing", "failed")
+
 router = APIRouter()
 
 
@@ -604,10 +610,74 @@ async def delete_report(
     user: dict = Depends(get_current_user),  # account-only: AI generation costs real money
     supabase: Client = Depends(get_supabase),
 ):
-    """Soft-delete a research report (sets status = 'deleted')."""
-    supabase.table("research_reports").update({
-        "status": "deleted"
-    }).eq("id", report_id).eq("user_id", user["id"]).execute()
+    """Soft-delete a research report, refunding it if it was still in flight.
+
+    ⚠️ THE REFUND IS NOT OPTIONAL HERE, because 'deleted' is a TERMINAL state no other
+    mechanism can reach. `_CLAIMABLE_STATUSES` is ("pending", "processing", "failed"), so the
+    moment this sets 'deleted' the reconciliation sweep and `claim_and_mark_failed` both stop
+    seeing the row — and the 20 credits charged at generation time can never be returned by
+    anything, ever.
+
+    That was reachable on the ORDINARY path, not just on a worker death: iOS lets a user
+    select and delete a still-generating card (selection is gated only on `backendId != nil`,
+    unlike tap and retry which gate on status). The worker then finishes normally and hits the
+    conditional completion write, whose filter `.in_("status", ["pending", "processing"])` no
+    longer matches — it logs a warning and returns WITHOUT raising, so no except fires and no
+    refund happens. On a free account that is 40% of the monthly allocation, silently.
+
+    The claim below is the SAME compare-and-set the sweep uses (`is_refunded=False` + a
+    claimable status), so this and `claim_and_mark_failed` can race safely: exactly one of them
+    wins the row and exactly one refund is issued.
+    """
+    # Atomically: mark deleted AND claim the refund, but only for a row that is still in
+    # flight, was actually charged, and has not already been refunded.
+    try:
+        claimed = (
+            supabase.table("research_reports")
+            .update({"status": "deleted", "is_refunded": True})
+            .eq("id", report_id)
+            .eq("user_id", user["id"])
+            .eq("is_refunded", False)
+            .in_("status", _REFUNDABLE_ON_DELETE)
+            .gt("credits_charged", 0)
+            .execute()
+        )
+    except Exception as e:
+        logger.error(
+            "delete_report: refund claim failed for report=%s user=%s: %s: %s",
+            report_id, user["id"], type(e).__name__, e,
+        )
+        claimed = None
+
+    row = (getattr(claimed, "data", None) or [None])[0]
+    if row:
+        amount = int(row.get("credits_charged") or 0)
+        # ref_id MUST match the one the CHARGE used (`request.stock_id.upper()`), or
+        # `refund_credits` cannot find the debit's recorded granted/purchased split and falls
+        # back to granted-first — which converts permanent purchased credits into expiring
+        # ones. Same rule `claim_and_mark_failed` follows.
+        ticker = (row.get("ticker") or "").upper() or None
+        refunded = CreditService().refund_ledgered(
+            user["id"], amount, reason="report_refund_deleted", ref_id=ticker,
+        )
+        if refunded is None:
+            logger.error(
+                "REFUND LEAK: user=%s deleted in-flight report=%s (%s) charged %s credits; "
+                "the row is now 'deleted' and unreachable by the sweep, and the refund RPC "
+                "failed — manual credit correction needed",
+                user["id"], report_id, ticker, amount,
+            )
+        else:
+            logger.info(
+                "Refunded %s credits for deleted in-flight report %s (user %s)",
+                amount, report_id, user["id"],
+            )
+    else:
+        # Terminal (ready), already refunded, or not ours — plain soft-delete. Unconditional
+        # so deleting a finished report keeps working exactly as before.
+        supabase.table("research_reports").update({
+            "status": "deleted"
+        }).eq("id", report_id).eq("user_id", user["id"]).execute()
 
     return {"message": "Report deleted successfully"}
 

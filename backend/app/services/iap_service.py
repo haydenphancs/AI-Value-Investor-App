@@ -103,6 +103,61 @@ def product_tier_map() -> Dict[str, str]:
     }
 
 
+def _assert_app_account_token_matches(
+    payload: Dict[str, Any],
+    user_id: str,
+    *,
+    kind: str,
+    transaction_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+) -> Optional[str]:
+    """Refuse a CLIENT-submitted transaction whose `appAccountToken` names another account.
+
+    Returns the token when present (callers persist it alongside the purchase), else None.
+
+    This is the FIRST-delivery guard, and it is the only one that exists. The second-delivery
+    case is caught by a stored owner (consumables: the `credit_purchases` unique key;
+    subscriptions: the `prior["user_id"] != user_id` rebind check) — but on a first delivery
+    there is no stored owner to compare against, so without the token nothing distinguishes
+    "B bought this" from "A bought this and B happens to be signed in now".
+
+    That gap is reachable: if A's purchase completes at Apple but the verify never succeeds
+    (offline, killed app, signed out), the transaction stays unfinished; when B signs in on
+    the same device `AppState.onAuthenticated` → `drainUnfinishedTransactions()` re-submits it
+    under B's bearer token. Apple returns the token INSIDE the signed payload, so the client
+    cannot forge it independently of the transaction.
+
+    ⚠️ Client-submitted paths only. An App Store Server Notification is not client-submitted
+    and its `user_id` is resolved from our OWN subscriptions row rather than from a bearer
+    token, so there is no cross-account question to answer — and raising there would return a
+    non-200 that Apple retries for days.
+    """
+    token = payload.get("appAccountToken")
+    if token:
+        if str(token).lower() != str(user_id).lower():
+            logger.error(
+                "IAP: %s txn=%s carries appAccountToken=%s but was submitted by user=%s — "
+                "refusing to credit a different account",
+                kind, transaction_id, token, user_id,
+            )
+            # NOT `PurchaseBoundToAnotherAccount`: we are refusing BEFORE any grant, so no
+            # row exists and nobody has been credited. The client must keep the transaction
+            # unfinished — see `PurchaseAccountMismatch`.
+            raise PurchaseAccountMismatch(
+                "this purchase belongs to a different account"
+            )
+    else:
+        # Older client, or a purchase made before the token was wired in. Not fatal — the
+        # per-transaction dedup still prevents double-granting — but it means this particular
+        # delivery cannot be proven to belong to the submitter.
+        logger.warning(
+            "IAP: %s txn=%s has no appAccountToken (product=%s user=%s) — proceeding without "
+            "the cross-account proof",
+            kind, transaction_id, product_id, user_id,
+        )
+    return str(token) if token else None
+
+
 def tier_for_product(product_id: Optional[str]) -> str:
     """Resolve a product id to a tier, or raise.
 
@@ -444,32 +499,10 @@ class IAPService:
         # `Transaction.updates` redelivers into B's session. The insert succeeds under B's id
         # and B receives credits A paid for.
         #
-        # `appAccountToken` is the only evidence of who actually paid — the client stamps the
-        # buying account's id onto the purchase, and Apple returns it inside the SIGNED
-        # payload, so it cannot be forged separately from the transaction.
-        token = payload.get("appAccountToken")
-        if token:
-            if str(token).lower() != str(user_id).lower():
-                logger.error(
-                    "IAP: consumable txn=%s carries appAccountToken=%s but was submitted by "
-                    "user=%s — refusing to credit a different account",
-                    transaction_id, token, user_id,
-                )
-                # NOT `PurchaseBoundToAnotherAccount`: we are refusing BEFORE any grant, so no
-                # row exists and nobody has been credited. The client must keep the transaction
-                # unfinished — see `PurchaseAccountMismatch`.
-                raise PurchaseAccountMismatch(
-                    "this purchase belongs to a different account"
-                )
-        else:
-            # Older client, or a purchase made before the token was wired in. Not fatal — the
-            # per-transaction dedup still prevents double-granting — but it means this
-            # particular delivery cannot be proven to belong to the submitter.
-            logger.warning(
-                "IAP: consumable txn=%s has no appAccountToken (product=%s user=%s) — "
-                "granting without the cross-account proof",
-                transaction_id, product_id, user_id,
-            )
+        token = _assert_app_account_token_matches(
+            payload, user_id, kind="consumable", transaction_id=transaction_id,
+            product_id=product_id,
+        )
 
         from app.services.credit_service import CreditService, PackGrantConflict
 
@@ -549,6 +582,7 @@ class IAPService:
         *,
         status_override: Optional[str] = None,
         event_at: Optional[datetime] = None,
+        client_submitted: bool = True,
     ) -> Dict[str, Any]:
         """Record a verified transaction and reconcile the user's entitlement.
 
@@ -556,10 +590,26 @@ class IAPService:
         does not re-check signatures — it trusts its caller to have done so, which is why
         nothing but the verified path may call it.
 
+        `client_submitted` defaults to True so the cross-account guard is FAIL-CLOSED for any
+        new caller; the App Store Server Notification path opts out explicitly.
+
         Returns a summary: the resolved tier, the winning tier actually applied, and whether
         this delivery was new or a replay.
         """
         tier = tier_for_product(payload.get("productId"))
+
+        # FIRST-delivery cross-account guard. The rebind check further down only fires when a
+        # `subscriptions` row already exists for this transaction; on a first delivery there is
+        # none, so a transaction A paid for but never got recorded would be granted — tier AND
+        # the tier's credit allocation — to whoever happens to be signed in when
+        # `drainUnfinishedTransactions` re-submits it. The consumable path has always checked
+        # this; the subscription path did not, while §9b.3 described the protection as general.
+        if client_submitted:
+            _assert_app_account_token_matches(
+                payload, user_id, kind="subscription",
+                transaction_id=str(payload.get("transactionId") or ""),
+                product_id=payload.get("productId"),
+            )
         # An App Store Server Notification knows things the transaction alone does not: a
         # DID_FAIL_TO_RENEW/GRACE_PERIOD carries a transaction whose expiresDate has already
         # passed, so deriving status from the payload reads it as "expired" — exactly when
@@ -1179,6 +1229,10 @@ class IAPService:
                 user_id, transaction,
                 status_override=status_override,
                 event_at=event_at,
+                # Apple called us; `user_id` came from our own subscriptions row, not from a
+                # bearer token, so there is no cross-account question. Enforcing here would
+                # also mean a non-200 that Apple retries for days on a legacy mis-bound row.
+                client_submitted=False,
             )
         except UnknownProduct as e:
             logger.error("IAP webhook: %s", e)

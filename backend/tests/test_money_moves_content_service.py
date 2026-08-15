@@ -342,3 +342,111 @@ async def test_a_real_catalog_still_gets_the_full_ttl():
     svc._fetch_rows = lambda: [_good_row("alpha", 0)]  # type: ignore[assignment]
     resp = await svc._load()
     assert MoneyMovesContentService._ttl_for(resp) == MoneyMovesContentService._TTL_SECONDS
+
+
+# ── published_at: the card renders a real date, so the column has to reach the client ──
+#
+# Before this, both the card and the article computed their date at DECODE time as
+# `now - content.publishedDaysAgo` days. That offset is a constant baked into the blob, so the
+# derived date never ages — an article authored with `publishedDaysAgo: 12` reads "12 days ago"
+# today and "12 days ago" in 2030. Harmless while it only ordered rows; wrong once rendered.
+
+
+def _row_with_published(raw, slug: str = "enron") -> dict:
+    return {
+        "slug": slug,
+        "sort_order": 0,
+        "published_at": raw,
+        "content": {"slug": slug, "title": "Enron", "publishedDaysAgo": 12},
+    }
+
+
+@pytest.mark.asyncio
+async def test_published_at_column_is_selected():
+    """A column that is never SELECTed can never be overlaid — the bug this closes was
+    literally that the value existed in the table and never reached the response."""
+    import inspect
+
+    from app.services import money_moves_content_service as mod
+
+    src = inspect.getsource(mod.MoneyMovesContentService._fetch_rows)
+    assert "published_at" in src, "published_at is not in the service's .select(...)"
+
+
+@pytest.mark.asyncio
+async def test_published_at_is_normalized_to_whole_seconds_utc():
+    """PostgREST renders timestamptz with up to SIX fractional digits and a `+00:00` offset.
+    Both iOS parsers use ISO8601DateFormatter with `.withFractionalSeconds`, which accepts
+    exactly THREE — so the raw column value fails to decode client-side and the article falls
+    back to the drifting estimate. Emit whole seconds with a `Z`."""
+    svc = MoneyMovesContentService()
+    svc._fetch_rows = lambda: [_row_with_published("2026-06-12T14:03:21.123456+00:00")]  # type: ignore[assignment]
+    out = await svc._load()
+    assert out.articles[0]["publishedAt"] == "2026-06-12T14:03:21Z"
+
+
+@pytest.mark.asyncio
+async def test_published_at_converts_a_non_utc_offset():
+    svc = MoneyMovesContentService()
+    svc._fetch_rows = lambda: [_row_with_published("2026-06-12T08:03:21-06:00")]  # type: ignore[assignment]
+    out = await svc._load()
+    assert out.articles[0]["publishedAt"] == "2026-06-12T14:03:21Z"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [None, "", "not-a-date", 12345])
+async def test_missing_or_malformed_published_at_leaves_the_estimate_intact(raw):
+    """ONE DIRECTION, like image_url and deliberately NOT like audio_url.
+
+    The column is nullable and only the seeder writes it, so a Studio-inserted row — or any row
+    predating the seeder — is NULL. Under the audio rule that single row would have its date
+    actively stripped. Unlike a narration URL a date has no affordance to leave dangling and
+    cannot 404, so stale-but-plausible beats absent: leave the client on `publishedDaysAgo`.
+    """
+    svc = MoneyMovesContentService()
+    svc._fetch_rows = lambda: [_row_with_published(raw)]  # type: ignore[assignment]
+    out = await svc._load()
+    article = out.articles[0]
+    assert "publishedAt" not in article, f"a {raw!r} column must not publish a date key"
+    assert article["publishedDaysAgo"] == 12, "the fallback estimate must survive untouched"
+
+
+@pytest.mark.asyncio
+async def test_one_bad_published_at_does_not_cost_the_other_articles_their_dates():
+    svc = MoneyMovesContentService()
+    svc._fetch_rows = lambda: [  # type: ignore[assignment]
+        _row_with_published("garbage", slug="bad"),
+        _row_with_published("2026-06-12T14:03:21+00:00", slug="good"),
+    ]
+    out = await svc._load()
+    by_slug = {a["slug"]: a for a in out.articles}
+    assert len(by_slug) == 2, "a malformed timestamp dropped an article"
+    assert "publishedAt" not in by_slug["bad"]
+    assert by_slug["good"]["publishedAt"] == "2026-06-12T14:03:21Z"
+
+
+def test_published_at_survives_the_narration_redaction():
+    """`redact_money_moves` strips narration for a locked caller. If `publishedAt` ever joined
+    that list, free-tier readers alone would lose every date — a difference nothing else in the
+    app would surface. Mirrors test_image_keys_survive_redaction."""
+    from app.services.learn_audio_gate import (
+        _MONEY_MOVES_ARTICLE_AUDIO_KEYS,
+        _MONEY_MOVES_BLOCK_AUDIO_KEYS,
+        redact_money_moves,
+    )
+
+    assert "publishedAt" not in _MONEY_MOVES_ARTICLE_AUDIO_KEYS
+    assert "publishedAt" not in _MONEY_MOVES_BLOCK_AUDIO_KEYS
+
+    from app.schemas.money_moves import MoneyMovesResponse
+
+    payload = MoneyMovesResponse(articles=[{
+        "slug": "enron", "title": "Enron",
+        "publishedAt": "2026-06-12T14:03:21Z", "publishedDaysAgo": 12,
+        "audioUrl": "https://media.example/enron.m4a", "audioDurationSeconds": 305,
+    }])
+    out = redact_money_moves(payload, tier_required="pro")
+    article = out.articles[0]
+    assert article["publishedAt"] == "2026-06-12T14:03:21Z", "redaction stripped the date"
+    assert article["publishedDaysAgo"] == 12
+    assert "audioUrl" not in article, "the redaction under test did not actually redact"

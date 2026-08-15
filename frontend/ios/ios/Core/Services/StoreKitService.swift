@@ -68,6 +68,15 @@ final class StoreKitService: ObservableObject {
         case cancelled
         /// Ask to Buy / Screen Time — Apple will deliver later via `Transaction.updates`.
         case pending
+        /// Apple's OWN signature check on the transaction failed, so it was never forwarded.
+        ///
+        /// Deliberately not `.pending`: nothing is coming later. This used to be laundered
+        /// into `.pending` under a comment claiming "the backend accepted it but reported
+        /// nothing usable" — the backend was never called — and the user was shown
+        /// "Waiting for approval… it will be applied automatically" for a purchase that will
+        /// never complete. Narrow (a tampered device, or a broken local certificate state)
+        /// but the classification was simply false.
+        case unverified
     }
 
     @Published private(set) var products: [Product] = []
@@ -234,10 +243,12 @@ final class StoreKitService: ObservableObject {
 
         switch result {
         case .success(let verification):
+            // `handle` returns nil for exactly one reason: `.unverified`, which it refuses to
+            // forward. Report that as itself — folding it into `.pending` told the user to
+            // wait for something that is never coming.
+            guard case .verified = verification else { return .unverified }
             let applied = try await handle(verificationResult: verification, origin: "purchase")
-            // A nil result here means the backend accepted it but reported nothing usable;
-            // treat as pending rather than claiming success we can't substantiate.
-            guard let applied else { return .pending }
+            guard let applied else { return .unverified }
             return .success(applied)
 
         case .userCancelled:
@@ -353,7 +364,17 @@ final class StoreKitService: ObservableObject {
                 // would delete a purchase the user paid for, with no redelivery left to repair
                 // it. It must fall through to the "leave unfinished" branch below, so the same
                 // transaction is redelivered and granted once the buying account signs in.
-                if case .purchaseAlreadyLinked = AppError.from(error) {
+                // Two terminal-and-finishable conditions, and ONLY these two.
+                //   .purchaseAlreadyLinked — we already credited another account.
+                //   .purchaseRevoked       — Apple refunded it; it can never be grantable.
+                // `.purchaseAccountMismatch` is deliberately excluded: nothing was recorded
+                // and nobody was credited, so finishing it would destroy a paid purchase with
+                // no redelivery left to repair it.
+                let mapped = AppError.from(error)
+                var isTerminalAndFinishable = false
+                if case .purchaseAlreadyLinked = mapped { isTerminalAndFinishable = true }
+                if case .purchaseRevoked = mapped { isTerminalAndFinishable = true }
+                if isTerminalAndFinishable {
                     await transaction.finish()
                     #if DEBUG
                     print("🔴 [StoreKit] transaction belongs to another account (\(origin)); finishing so Apple stops redelivering it")

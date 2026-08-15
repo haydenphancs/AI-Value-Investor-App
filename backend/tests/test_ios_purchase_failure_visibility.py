@@ -78,7 +78,7 @@ def test_purchase_failures_use_a_channel_that_is_not_gated_on_the_catalog():
         "while `catalog == nil`, which a post-tap failure never is"
     )
 
-    body = _func_body(vm, "func purchase(tier: String) async {")
+    body = _func_body(vm, "func purchase(tier: String, accountID: String?) async {")
     assert "purchaseError" in body, "purchase(tier:) must report through purchaseError"
     assert "errorMessage" not in body, (
         "purchase(tier:) wrote to errorMessage — that is the catalog channel, and the view "
@@ -88,7 +88,7 @@ def test_purchase_failures_use_a_channel_that_is_not_gated_on_the_catalog():
 
 def test_both_purchase_failure_paths_report_not_just_the_thrown_one():
     """The missing-product guard fails the same way the thrown error does — silently."""
-    body = _func_body(_read(_VM), "func purchase(tier: String) async {")
+    body = _func_body(_read(_VM), "func purchase(tier: String, accountID: String?) async {")
     assert body.count("purchaseError =") >= 3, (
         "expected purchaseError to be cleared on entry, set on the missing-product guard, "
         "and set in the catch — one of those paths is still silent"
@@ -158,7 +158,7 @@ def test_the_purchase_call_logs_the_nserror_domain_and_code():
 def test_the_purchase_error_is_not_shown_to_the_user_raw():
     """`.claude/rules/ios-swiftui.md`: never surface a raw system/backend string. The domain
     and code go to the log; the user gets the AppError message."""
-    vm = _func_body(_read(_VM), "func purchase(tier: String) async {")
+    vm = _func_body(_read(_VM), "func purchase(tier: String, accountID: String?) async {")
     assert "AppError.from(error).message" in vm
     assert "ns.domain" not in vm and "localizedDescription" not in vm
 
@@ -314,3 +314,101 @@ def test_the_client_sends_the_jws_not_the_decoded_transaction():
     assert re.search(r"verificationResult\.jwsRepresentation", body), (
         "jwsRepresentation must be read from the VerificationResult parameter"
     )
+
+
+# ── Phase 3: three iOS money defects from the adversarial review ──────────────────────
+
+
+def test_pull_to_refresh_cannot_enter_the_billable_path():
+    """`refresh()` used to call `_fetchReport()` directly — skipping `loadReport`'s sign-in
+    gate and falling through to the path its OWN comment marks "Path B below is BILLABLE".
+
+    Not a rare state: the backend cache is close-ALIGNED, not a rolling TTL (`is_cache_fresh`
+    compares against the most recent weekday 6pm ET), so a report generated at 5:55pm is stale
+    at 6:00pm. Open the screen, wait ten minutes, pull down — 20 credits, no disclosure, same
+    session. A pull gesture is a reflex and must never be able to spend money.
+    """
+    src = _strip_comments(_read(_ROOT / "ViewModels/TickerReportViewModel.swift"))
+    body = _func_body(src, "func refresh() async")
+    assert body, "TickerReportViewModel.refresh not found — this guard has drifted"
+
+    assert "allowPaidGeneration: false" in body, (
+        "refresh() must call the fetch with paid generation DISABLED"
+    )
+    assert "isSignedIn" in body, "refresh() bypasses the sign-in gate loadReport() applies"
+
+    # Both doors into Path B must honour the flag: the Path-A catch AND the direct entry that
+    # runs when `reportId` is nil (navigation from search/watchlist, where Path A is skipped).
+    fetch = _func_body(src, "private func _fetchReport(")
+    assert fetch.count("!allowPaidGeneration") >= 2, (
+        "only one of the two routes into the billable Path B is guarded — a ticker opened "
+        "directly from search has no Path A at all, so a refresh lands straight in Path B"
+    )
+    # And the paid route must still exist, behind a deliberate tap.
+    assert "func regenerateForCredits()" in src
+
+
+def test_the_regenerate_affordance_states_its_cost():
+    """The app's disclosure pattern is pre-tap cost on the control itself
+    (`GenerateAnalysisButton` renders "Uses N Credits"), never a silent spend."""
+    view = _strip_comments(_read(_ROOT / "Views/Screens/TickerReportView.swift"))
+    assert "needsPaidRegeneration" in view, "the refresh miss surfaces nothing to the user"
+    import re as _re
+    # EVERY place the cost is rendered must read the shared constant. Asserting mere presence
+    # is not enough: a partial hardcode leaves one correct reference and one that silently
+    # drifts from REPORT_CREDIT_COST the next time the ladder is repriced.
+    alert = view[view.index("needsPaidRegeneration"):][:900]
+    refs = alert.count("AnalysisCost.standard.credits")
+    assert refs >= 2, (
+        f"the regenerate affordance renders the cost in {refs} place(s) via the shared "
+        "constant — the button label and the explanatory copy must BOTH use it"
+    )
+    assert not _re.search(r"\b\d+\s+credits\b", alert), (
+        "a literal credit count is hardcoded in the regenerate copy; it will drift from "
+        "settings.REPORT_CREDIT_COST"
+    )
+    assert "regenerateForCredits" in view
+
+
+def test_the_app_account_token_is_resolved_at_tap_not_snapshotted():
+    """Both purchase sheets assigned `viewModel.accountID` once inside `.task`. Across a
+    `.restoring → .authenticated` transition — cold launch holding a Keychain token, a
+    transient failure leaving `profile` nil, the backoff healing seconds later — the sheet
+    stamped a stale or nil `appAccountToken` onto a real purchase, leaving the server-side
+    cross-account guard with nothing to check."""
+    for view, vm in (("Views/Screens/BuyCreditsView.swift", "ViewModels/BuyCreditsViewModel.swift"),
+                     ("Views/Screens/PaywallView.swift", "ViewModels/PaywallViewModel.swift")):
+        v = _strip_comments(_read(_ROOT / view))
+        m = _strip_comments(_read(_ROOT / vm))
+        assert "viewModel.accountID =" not in v, (
+            f"{view} still snapshots accountID; it must be passed at tap time"
+        )
+        assert "accountID: appState.user.profile?.id" in v, (
+            f"{view} does not resolve the account id from AppState at the purchase call"
+        )
+        assert "private var accountID" in m, (
+            f"{vm} exposes accountID for external assignment — that is what allowed the "
+            "stale snapshot"
+        )
+
+
+def test_an_unverified_transaction_is_not_reported_as_pending():
+    """`.unverified` means Apple's OWN signature check failed, so the blob was never sent to
+    the server. Folding it into `.pending` told the user "Waiting for approval… it will be
+    applied automatically" for a purchase that will never complete."""
+    svc = _strip_comments(_read(_ROOT / "Core/Services/StoreKitService.swift"))
+    assert "case unverified" in svc, "PurchaseOutcome has no distinct unverified case"
+    purchase = _func_body(svc, "func purchase(")
+    assert "return .unverified" in purchase, (
+        "an unverified transaction is still being laundered into another outcome"
+    )
+    assert "guard let applied else { return .pending }" not in purchase
+
+    for vm in ("ViewModels/PaywallViewModel.swift", "ViewModels/BuyCreditsViewModel.swift"):
+        m = _strip_comments(_read(_ROOT / vm))
+        assert "case .unverified:" in m, f"{vm} does not handle the unverified outcome"
+        i, j = m.index("case .unverified:"), m.index("case .pending:")
+        arm = m[i:i + 400]
+        assert "isPendingApproval" not in arm.split("case ")[1], (
+            f"{vm} still routes an unverified transaction to the approval alert"
+        )

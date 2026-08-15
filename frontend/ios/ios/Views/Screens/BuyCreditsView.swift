@@ -172,9 +172,6 @@ struct BuyCreditsView: View {
         }
         .task {
             Analytics.shared.track(.creditPackShown)
-            // Stamped onto the purchase as StoreKit's `appAccountToken`, so a transaction
-            // redelivered into a different signed-in session can be refused server-side.
-            viewModel.accountID = appState.user.profile?.id
             // Re-read the balance on open. Nothing else does: `AppState.user.credits` is
             // populated at sign-in and refreshed only by an entitlement change, so a user who
             // spent credits elsewhere in the session arrived here to a stale number — on the
@@ -328,7 +325,8 @@ struct BuyCreditsView: View {
                     )
             } else if viewModel.isPurchasable(pack) {
                 Button {
-                    Task { await viewModel.purchase(pack) }
+                    Task { await viewModel.purchase(pack,
+                                                    accountID: appState.user.profile?.id) }
                 } label: {
                     HStack(spacing: AppSpacing.xs) {
                         // See PaywallView: a spinner appears on exactly ONE card, so "which pack am

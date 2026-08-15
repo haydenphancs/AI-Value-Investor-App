@@ -130,6 +130,18 @@ struct TickerReportView: View {
                 .refreshable {
                     await viewModel.refresh()
                 }
+                // A refresh that found no cached report asks BEFORE spending. The cost is
+                // stated on the button, matching `GenerateAnalysisButton`'s "Uses N Credits" —
+                // the app's established disclosure pattern. Nothing is charged until this tap.
+                .alert("Report no longer cached", isPresented: $viewModel.needsPaidRegeneration) {
+                    Button("Cancel", role: .cancel) {}
+                    Button("Regenerate · \(AnalysisCost.standard.credits) credits") {
+                        Task { await viewModel.regenerateForCredits() }
+                    }
+                } message: {
+                    Text("This analysis has aged out of the cache. Generating a fresh one uses "
+                         + "\(AnalysisCost.standard.credits) credits.")
+                }
 
                 // Floating chat bar
                 CaydexAIChatBar(

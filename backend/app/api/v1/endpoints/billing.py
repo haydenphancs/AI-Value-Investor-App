@@ -7,6 +7,7 @@ This router only exposes the public, guest-safe tier catalog so the paywall
 renders for signed-out users too.
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -30,6 +31,7 @@ from app.services.iap_service import (
     IAPError,
     PurchaseAccountMismatch,
     PurchaseBoundToAnotherAccount,
+    PurchaseRevoked,
     UnknownProduct,
     get_iap_service,
 )
@@ -104,7 +106,12 @@ async def verify_purchase(
 
     # 1. Verify with Apple's chain. Never trust the client's own description of the purchase.
     try:
-        payload = verify_signed_transaction(request.signed_transaction)
+        # OFF the event loop. The App Store Server Library builds an X.509 chain and, in
+        # Sandbox/Production, makes a blocking OCSP request — on the single uvicorn worker
+        # that stalls every other in-flight request for the duration.
+        payload = await asyncio.to_thread(
+            verify_signed_transaction, request.signed_transaction
+        )
     except AppStoreNotConfigured as e:
         # OUR misconfiguration, not a bad receipt. 503 so the client retries rather than
         # telling the user their legitimate purchase was invalid.
@@ -138,6 +145,17 @@ async def verify_purchase(
     # summary shape, and every error arm below serves both.
     try:
         result = get_iap_service().apply_verified_transaction(user_id, payload)
+    except PurchaseRevoked as e:
+        # Apple refunded or cancelled this purchase. TERMINAL and finishable — distinct from
+        # the UnknownProduct arm below, which stays unfinished on purpose so a missing
+        # `credit_packs` row can self-heal on the next redelivery.
+        logger.warning("IAP purchase already revoked for user=%s: %s", user_id, e)
+        return make_error_response(
+            ErrorCode.PURCHASE_REVOKED,
+            message=str(e),
+            details={"transaction": "revoked"},
+        )
+
     except UnknownProduct as e:
         # Verified but unmapped: a REAL purchase we can't price. The user paid, so this is
         # ours to fix — loud log, honest message, no silent free tier.
@@ -235,7 +253,7 @@ async def app_store_notifications(
         raise HTTPException(status_code=400, detail="Missing signedPayload")
 
     try:
-        notification = verify_notification(signed_payload)
+        notification = await asyncio.to_thread(verify_notification, signed_payload)
     except AppStoreNotConfigured as e:
         # 503 is right here: Apple SHOULD retry, because the fault is ours and transient.
         logger.error("IAP webhook verification unavailable: %s", e)
@@ -247,7 +265,9 @@ async def app_store_notifications(
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     try:
-        transaction = extract_transaction_from_notification(notification)
+        transaction = await asyncio.to_thread(
+            extract_transaction_from_notification, notification
+        )
     except AppStoreVerificationFailed as e:
         logger.warning("IAP webhook: inner transaction failed verification: %s", e)
         raise HTTPException(status_code=400, detail="Invalid signature")

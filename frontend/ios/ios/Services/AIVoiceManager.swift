@@ -299,14 +299,21 @@ class AIVoiceManager: NSObject, ObservableObject {
         // Fall back to on-device speech if the clip load FAILS (not just if the URL is missing),
         // so a failed remote clip never leaves the lesson stuck "playing" with no audio and the
         // auto-advance (onComplete) never firing.
+        // `guard let self` OUTSIDE the Task, matching the two observers above.
+        //
+        // These two used `self?.` INSIDE the Task, which reads the captured `weak var self`
+        // from concurrently-executing code — a data race on the optional itself, and an error
+        // in the Swift 6 language mode. Unwrapping first turns it into a plain strong capture
+        // whose lifetime is the Task's.
         statusObserver = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
-            guard let item else { return }
-            Task { @MainActor in self?.handleClipStatus(item) }
+            guard let item, let self else { return }
+            Task { @MainActor in self.handleClipStatus(item) }
         }
         failObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.handleClipLoadFailed() }
+            guard let self else { return }
+            Task { @MainActor in self.handleClipLoadFailed() }
         }
 
         activateAudioSession()
@@ -555,8 +562,10 @@ class AIVoiceManager: NSObject, ObservableObject {
 
 extension AIVoiceManager: AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
+        let token = ObjectIdentifier(utterance)   // Sendable; crosses the hop safely
         Task { @MainActor in
-            guard utterance === self.currentUtterance else { return }   // stale utterance
+            guard let current = self.currentUtterance,
+                  ObjectIdentifier(current) == token else { return }   // stale utterance
             self.currentWordRange = characterRange
             self.currentWordIndex = self.wordIndex(forCharacterAt: characterRange.location)
 
@@ -572,8 +581,10 @@ extension AIVoiceManager: AVSpeechSynthesizerDelegate {
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        let token = ObjectIdentifier(utterance)   // Sendable; crosses the hop safely
         Task { @MainActor in
-            guard utterance === self.currentUtterance else { return }   // a stale finish must not fire the new card's onComplete
+            guard let current = self.currentUtterance,
+                  ObjectIdentifier(current) == token else { return }   // a stale finish must not fire the new card's onComplete
             self.currentUtterance = nil
             self.isPlaying = false
             self.progress = 1.0
@@ -582,25 +593,31 @@ extension AIVoiceManager: AVSpeechSynthesizerDelegate {
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didPause utterance: AVSpeechUtterance) {
+        let token = ObjectIdentifier(utterance)   // Sendable; crosses the hop safely
         Task { @MainActor in
-            guard utterance === self.currentUtterance else { return }
+            guard let current = self.currentUtterance,
+                  ObjectIdentifier(current) == token else { return }
             self.isPlaying = false
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didContinue utterance: AVSpeechUtterance) {
+        let token = ObjectIdentifier(utterance)   // Sendable; crosses the hop safely
         Task { @MainActor in
-            guard utterance === self.currentUtterance else { return }
+            guard let current = self.currentUtterance,
+                  ObjectIdentifier(current) == token else { return }
             self.isPlaying = true
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        let token = ObjectIdentifier(utterance)   // Sendable; crosses the hop safely
         Task { @MainActor in
             // Gate on the owning utterance: a cancel from the PREVIOUS card (triggered by
             // stopSpeaking during navigation) can land after the next speak() already set
             // isPlaying=true, and would otherwise freeze the orb/highlight for the whole new card.
-            guard utterance === self.currentUtterance else { return }
+            guard let current = self.currentUtterance,
+                  ObjectIdentifier(current) == token else { return }
             self.isPlaying = false
             self.currentWordIndex = 0
             self.progress = 0.0

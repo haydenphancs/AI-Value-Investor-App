@@ -32,7 +32,12 @@ enum HTTPMethod: String, Sendable {
 ///
 /// There are exactly three answers, and every endpoint must pick one (see
 /// `APIEndpoint.authPolicy`, whose switch is exhaustive on purpose).
-enum AuthPolicy: Sendable, Equatable {
+/// `nonisolated`: this is a pure, `Sendable` value type describing a ROUTE, not UI state.
+/// Without it the enum inherits `@MainActor` from `SWIFT_DEFAULT_ACTOR_ISOLATION`, which
+/// makes even its synthesised `==` main-actor-bound — so `requiresAuth` (nonisolated) and
+/// `isUsableWithoutCredential` (read inside the `APIClient` actor) both warned.
+/// The `switch` over it must stay exhaustive — see .claude/rules/auth.md §1.
+nonisolated enum AuthPolicy: Sendable, Equatable {
     /// The backend reads no identity. Fine to call with or without a token.
     case `public`
 

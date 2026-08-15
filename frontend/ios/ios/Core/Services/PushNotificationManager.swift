@@ -49,8 +49,13 @@ final class PushNotificationManager {
 
     private static let registeredTokenKey = "registered_apns_device_token"
 
-    private init(repository: AccountRepositoryProtocol = AccountRepository.shared) {
-        self.repository = repository
+    /// Optional + nil-coalesce, matching the codebase's repository-injection idiom (see
+    /// `HomeDashboardViewModel.init` / `SearchViewModel.init`): `AccountRepository.shared` is
+    /// MainActor-isolated, and a default-argument expression is evaluated at the CALL SITE,
+    /// which the compiler checks as nonisolated. Resolving it inside this `@MainActor` init
+    /// keeps the isolation honest. Injection for tests/previews is unchanged.
+    private init(repository: AccountRepositoryProtocol? = nil) {
+        self.repository = repository ?? AccountRepository.shared
     }
 
     func configure(appState: AppState) {

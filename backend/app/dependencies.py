@@ -73,11 +73,15 @@ def _bearer_from_header(authorization: Optional[str]) -> Optional[str]:
     return token or None
 
 
-def _user_id_from_token(token: str) -> Optional[str]:
+async def _user_id_from_token(token: str) -> Optional[str]:
     """Resolve a bearer token to a user id, trying app-minted then Supabase-issued.
 
     Returns None when neither verifier accepts it. Callers decide what that means — the strict
     dependencies 401, the identity-only one degrades to guest.
+
+    `async` because `verify_supabase_token` may have to fetch Supabase's JWKS to verify an
+    ES256 token. Doing that synchronously would block the event loop on an outbound HTTP call
+    inside an auth dependency — i.e. on essentially every request.
     """
     try:
         payload = _decode_access_token(token)
@@ -88,7 +92,7 @@ def _user_id_from_token(token: str) -> Optional[str]:
         pass
 
     try:
-        payload = verify_supabase_token(token)
+        payload = await verify_supabase_token(token)
         if payload:
             user_id = payload.get("sub")
             if user_id:
@@ -180,7 +184,7 @@ async def get_current_user_id(
             message=f"No authentication credential presented for {route}",
         )
 
-    user_id = _user_id_from_token(token)
+    user_id = await _user_id_from_token(token)
     if user_id:
         return user_id
 
@@ -330,7 +334,7 @@ async def get_optional_user_id(
     if token is None:
         return None
 
-    user_id = _user_id_from_token(token)
+    user_id = await _user_id_from_token(token)
     if user_id:
         return user_id
 
@@ -366,7 +370,7 @@ async def get_current_user_or_guest(
     """
     token = _bearer_from_header(authorization)
     if token is not None:
-        user_id = _user_id_from_token(token)
+        user_id = await _user_id_from_token(token)
         if not user_id:
             _reject_unverifiable_token(token, route=_route_of(request))
 
@@ -472,7 +476,7 @@ async def get_identity_only_user(
     """
     token = _bearer_from_header(authorization)
     if token is not None:
-        user_id = _user_id_from_token(token)
+        user_id = await _user_id_from_token(token)
         if user_id:
             return {"id": user_id, "email": "", "tier": "free"}
         logger.warning(

@@ -46,9 +46,6 @@ struct SparklineView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let width = geometry.size.width
-            let height = geometry.size.height
-
             if data.count > 1 {
                 // Baseline = previous trading day's close when provided, else the
                 // first point. Included in the scale so the dotted line is always

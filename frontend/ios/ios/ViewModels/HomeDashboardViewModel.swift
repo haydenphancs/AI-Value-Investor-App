@@ -55,7 +55,11 @@ final class HomeDashboardViewModel: ObservableObject {
     /// Keep this equal to `_CACHE_TTL_SECONDS` in `home_dashboard_service.py`.
     /// At 300s against a 60s server cache, arriving on the tab could show prices
     /// up to five minutes old under a live "Markets Open" header.
-    static let stalenessWindow: TimeInterval = 60
+    /// `nonisolated` so it can be a default argument on `loadIfStale(maxAge:)`: a default
+    /// argument expression is evaluated at the CALL SITE, which the compiler checks as
+    /// nonisolated, and this type is `@MainActor`. Safe — an immutable `Sendable` literal
+    /// with no isolated initializer. Same lever as `APIConfig.researchPollInterval`.
+    nonisolated static let stalenessWindow: TimeInterval = 60
 
     /// Poll cadence. Deliberately shorter than `stalenessWindow` so the
     /// market-status header (recomputed fresh on every backend request, never

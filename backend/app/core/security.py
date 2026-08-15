@@ -11,6 +11,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import secrets
 import logging
+import time
 
 from app.config import settings
 
@@ -157,32 +158,146 @@ def decode_token(token: str) -> Optional[dict[str, Any]]:
         raise
 
 
-def verify_supabase_token(token: str) -> Optional[dict[str, Any]]:
-    """
-    Verify a Supabase Auth JWT token.
-    Used when iOS app authenticates users via Supabase Auth.
+# Supabase JWT signing keys (JWKS)
+# ================================
+#
+# Supabase is migrating projects off the single shared HS256 secret onto asymmetric signing
+# keys (ES256), published at `{SUPABASE_URL}/auth/v1/.well-known/jwks.json`. During the
+# migration a project has BOTH: a current key and a standby, and the dashboard's "Rotate keys"
+# promotes the standby. Tokens minted before a rotation stay valid until the old key is
+# explicitly revoked.
+#
+# This verifier therefore has to accept both, or sign-in breaks in the window between the
+# rotation and a matching deploy — and, worse, revoking the legacy key would be gated on a
+# code change nobody remembered was needed.
+_JWKS_CACHE: dict[str, Any] = {"keys": {}, "fetched_at": 0.0}
+_JWKS_TTL_SECONDS = 600.0
+# Refusing to re-fetch more than once a minute bounds the damage from a flood of tokens
+# carrying unknown `kid`s, which would otherwise be a free way to make us hammer Supabase.
+_JWKS_MIN_REFETCH_INTERVAL = 60.0
+_jwks_lock: Optional[Any] = None   # asyncio.Lock, created lazily on the running loop
 
-    Args:
-        token: Supabase JWT token
 
-    Returns:
-        Optional[dict]: Decoded token payload or None if invalid
-    """
-    if not settings.SUPABASE_JWT_SECRET:
-        logger.error("SUPABASE_JWT_SECRET not configured")
-        return None
+async def _fetch_jwks() -> dict[str, Any]:
+    """Fetch and index the project's JWKS by `kid`. Returns {} on any failure."""
+    import httpx  # noqa: PLC0415
 
+    url = f"{str(settings.SUPABASE_URL).rstrip('/')}/auth/v1/.well-known/jwks.json"
     try:
-        payload = jwt.decode(
-            token,
-            settings.SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated"
-        )
-        return payload
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            keys = {k["kid"]: k for k in resp.json().get("keys", []) if k.get("kid")}
+            logger.info("Supabase JWKS refreshed: %d key(s)", len(keys))
+            return keys
+    except Exception as e:
+        # Non-fatal by design: a JWKS outage must degrade to the legacy HS256 path rather
+        # than locking every Supabase-authenticated user out.
+        logger.warning("Supabase JWKS fetch failed (%s: %s)", type(e).__name__, e)
+        return {}
+
+
+async def _jwks_key_for(kid: str) -> Optional[dict[str, Any]]:
+    """Return the JWK for `kid`, refreshing the cache when it is unknown or stale."""
+    import asyncio  # noqa: PLC0415
+
+    global _jwks_lock
+    if _jwks_lock is None:
+        _jwks_lock = asyncio.Lock()
+
+    now = time.monotonic()
+    cached = _JWKS_CACHE["keys"]
+    fresh = (now - _JWKS_CACHE["fetched_at"]) < _JWKS_TTL_SECONDS
+    if kid in cached and fresh:
+        return cached[kid]
+
+    # Single-flight: a rotation makes every in-flight request miss at once, and without this
+    # each one would launch its own fetch.
+    async with _jwks_lock:
+        now = time.monotonic()
+        cached = _JWKS_CACHE["keys"]
+        if kid in cached and (now - _JWKS_CACHE["fetched_at"]) < _JWKS_TTL_SECONDS:
+            return cached[kid]
+        if (now - _JWKS_CACHE["fetched_at"]) < _JWKS_MIN_REFETCH_INTERVAL and cached:
+            return cached.get(kid)
+        keys = await _fetch_jwks()
+        if keys:
+            _JWKS_CACHE["keys"] = keys
+            _JWKS_CACHE["fetched_at"] = now
+            return keys.get(kid)
+        # Keep serving the stale cache on a fetch failure.
+        return cached.get(kid)
+
+
+def _reset_jwks_cache_for_tests() -> None:
+    _JWKS_CACHE["keys"] = {}
+    _JWKS_CACHE["fetched_at"] = 0.0
+
+
+async def verify_supabase_token(token: str) -> Optional[dict[str, Any]]:
+    """
+    Verify a Supabase Auth JWT, accepting both asymmetric (ES256/RS256) and legacy HS256.
+
+    ⚠️ The algorithm decides WHICH key is used, and the two are never interchangeable. An
+    asymmetric token is verified ONLY against the JWKS public key; an HS256 token ONLY against
+    the shared secret. Passing a union of algorithms to a single `jwt.decode` is the classic
+    algorithm-confusion shape: an attacker re-signs chosen claims as HS256 using the *public*
+    key bytes as the HMAC secret, and a verifier that accepts either algorithm against either
+    key admits them as any user.
+
+    Measured, so the comment doesn't overstate it: **python-jose blocks that attack on its
+    own** — it refuses an asymmetric key as an HMAC secret ("Incorrect key type. Expected:
+    'oct', Received: EC") on both encode and decode. So the split here is defence in depth and
+    a guard against a future library swap, not the only thing standing in the way. It is still
+    the right shape, and `test_supabase_jwks_verification.py` pins it at the source level
+    because no behavioural test can tell a correct verifier from a permissive one while the
+    library is refusing the forgery underneath.
+
+    Returns the payload, or None if the token is not valid.
+    """
+    try:
+        header = jwt.get_unverified_header(token)
     except JWTError as e:
-        logger.warning(f"Supabase token verification failed: {e}")
+        logger.warning("Supabase token has an unreadable header: %s", e)
         return None
+
+    alg = (header or {}).get("alg", "")
+    kid = (header or {}).get("kid")
+
+    if alg in ("ES256", "RS256"):
+        if not kid:
+            logger.warning("Supabase token uses %s with no kid; cannot select a key", alg)
+            return None
+        key = await _jwks_key_for(kid)
+        if not key:
+            logger.warning("No Supabase JWKS key matches kid=%s", kid)
+            return None
+        try:
+            return jwt.decode(token, key, algorithms=[alg], audience="authenticated")
+        except JWTError as e:
+            logger.warning("Supabase token verification failed (%s): %s", alg, e)
+            return None
+
+    if alg == "HS256":
+        # Legacy path. Stays until the project revokes its legacy signing key; after that
+        # Supabase stops issuing HS256 tokens and this branch is simply never taken.
+        if not settings.SUPABASE_JWT_SECRET:
+            logger.error("SUPABASE_JWT_SECRET not configured; cannot verify a legacy token")
+            return None
+        try:
+            return jwt.decode(
+                token,
+                settings.SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                audience="authenticated",
+            )
+        except JWTError as e:
+            logger.warning("Supabase token verification failed (HS256): %s", e)
+            return None
+
+    # Anything else — including `none` — is refused rather than guessed at.
+    logger.warning("Supabase token uses unsupported alg=%r", alg)
+    return None
 
 
 # API Key Utilities

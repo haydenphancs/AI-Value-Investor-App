@@ -48,12 +48,20 @@ final class BuyCreditsViewModel: ObservableObject {
     private let repository: AccountRepositoryProtocol
     let store: StoreKitService
 
+    /// Optional + nil-coalesce, matching the codebase's injection idiom (`SearchViewModel`,
+    /// `HomeDashboardViewModel`). Both singletons are MainActor-isolated, and a default
+    /// argument is evaluated at the CALL SITE under nonisolated checking — so the live
+    /// defaults are resolved here, inside the `@MainActor` init. Injection is unchanged.
+    ///
+    /// `StoreKitService` in particular must STAY MainActor-isolated (it owns `@Published`
+    /// purchase state and a `weak var appState`), so `nonisolated static let shared` is not
+    /// an option for it — this is the correct lever.
     init(
-        repository: AccountRepositoryProtocol = AccountRepository.shared,
-        store: StoreKitService = .shared
+        repository: AccountRepositoryProtocol? = nil,
+        store: StoreKitService? = nil
     ) {
-        self.repository = repository
-        self.store = store
+        self.repository = repository ?? AccountRepository.shared
+        self.store = store ?? .shared
     }
 
     /// Costs, for the "what a credit buys" explainer. Falls back to the shipped values so the

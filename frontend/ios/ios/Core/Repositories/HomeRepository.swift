@@ -50,19 +50,29 @@ final class HomeRepository: HomeRepositoryProtocol {
     }
 
     // MARK: - DTO → presentation mapping
+    //
+    // ⚠️ These are invoked as `.map { mapPulse($0) }`, never `.map(mapPulse)`.
+    //
+    // An UNAPPLIED method reference is converted to a *nonisolated* function type, so
+    // `dto.pulse.map(mapPulse)` calls a `@MainActor` helper from a nonisolated context and
+    // warns (an error in Swift 6). A closure LITERAL formed here inherits this type's
+    // MainActor isolation, and `map` is a synchronous `rethrows` call, so it is free to run
+    // it. Wrapping is deliberately preferred over marking these `nonisolated`: they build
+    // `MarketPulseItem` / `DailyScanner` and read `AppColors`, so making them nonisolated
+    // only moves the same warning into the model and theme layers.
 
     private static func map(_ dto: HomeDashboardResponseDTO) -> HomeDashboardData {
         HomeDashboardData(
             marketStatusText: dto.marketStatusText,
             marketIsOpen: dto.marketIsOpen,
-            pulse: dto.pulse.map(mapPulse),
+            pulse: dto.pulse.map { mapPulse($0) },
             scanners: mapScanners(dto.scanners),
             signals: mapSignals(dto.signals),
             themes: mapThemes(dto.themes),
             // Same tile shape as the pulse strip, so the same mapper. `spark` arrives
             // empty by design (a per-ticker intraday series would be one call each on
             // the most-visited screen), which the card already handles.
-            watchlist: (dto.watchlist ?? []).map(mapWatchlistTile),
+            watchlist: (dto.watchlist ?? []).map { mapWatchlistTile($0) },
             watchlistTitle: watchlistTitle(dto.watchlistTitle),
             watchlistIsGroup: dto.watchlistIsGroup ?? false
         )
@@ -172,8 +182,8 @@ final class HomeRepository: HomeRepositoryProtocol {
                 iconSystemName: "chart.line.uptrend.xyaxis",
                 accent: AppColors.bullish,
                 expandCTA: "See full leaderboard",
-                gainers: m.gainers.map(mapMoverRow),
-                losers: m.losers.map(mapMoverRow)
+                gainers: m.gainers.map { mapMoverRow($0) },
+                losers: m.losers.map { mapMoverRow($0) }
             ))
         }
 
@@ -186,7 +196,7 @@ final class HomeRepository: HomeRepositoryProtocol {
                 accent: AppColors.accentCyan,
                 badgeText: "Volume",
                 expandCTA: "See all unusual volume",
-                entries: v.entries.map(mapVolumeRow)
+                entries: v.entries.map { mapVolumeRow($0) }
             ))
         }
 
@@ -200,7 +210,7 @@ final class HomeRepository: HomeRepositoryProtocol {
                 badgeText: "Shorts",
                 expandCTA: "See all high short interest",
                 infoNote: "High short interest reflects skepticism — and can fuel a short squeeze if the stock rallies.",
-                entries: s.entries.map(mapShortRow)
+                entries: s.entries.map { mapShortRow($0) }
             ))
         }
 

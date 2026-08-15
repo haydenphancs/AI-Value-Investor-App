@@ -224,7 +224,9 @@ struct InvestorProfileDTO: Codable, Sendable {
 
 /// `PUT` body. Every field optional so a skipped onboarding step leaves the stored
 /// value alone rather than clearing it — `nil` is omitted from the JSON entirely.
-struct UpdateInvestorProfileBody: Encodable, Sendable {
+/// `nonisolated`: returned from `APIEndpoint.body`, which is nonisolated and hands it to
+/// the encoder off the main actor — see `AnalyticsBatchRequest`.
+nonisolated struct UpdateInvestorProfileBody: Encodable, Sendable {
     var experienceLevel: InvestorExperienceLevel?
     var explanationStyle: InvestorExplanationStyle?
     var answerDepth: InvestorAnswerDepth?

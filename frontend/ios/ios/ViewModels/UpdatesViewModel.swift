@@ -696,7 +696,10 @@ final class UpdatesViewModel: ObservableObject {
             for delay in [10.0, 45.0] {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 if Task.isCancelled { return }
-                guard let self, await self.loadToken == token else { return }
+                // No `await` on `loadToken`: this Task inherits the enclosing @MainActor
+                // isolation, so the read is synchronous. (`repollInsight` below is genuinely
+                // async and keeps its `await`.)
+                guard let self, self.loadToken == token else { return }
                 let done = await self.repollInsight(scope: scope, token: token)
                 if done { return }
             }

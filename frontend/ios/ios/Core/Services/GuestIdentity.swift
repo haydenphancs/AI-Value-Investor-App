@@ -30,7 +30,11 @@
 import Foundation
 import Security
 
-enum GuestIdentity {
+/// `nonisolated`: read by `APIClient.buildRequest` (inside an actor) on every request, so it
+/// cannot be main-actor-bound. This type was already built for cross-thread use — the cache is
+/// `nonisolated(unsafe)` behind an explicit `NSLock` — so the annotation states what the
+/// implementation already guarantees rather than weakening anything.
+nonisolated enum GuestIdentity {
 
     private static let service = "com.phan.caydex.guest"
     private static let account = "install-id"

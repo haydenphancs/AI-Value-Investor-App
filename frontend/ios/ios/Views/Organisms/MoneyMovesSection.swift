@@ -21,7 +21,11 @@ struct MoneyMovesSection: View {
                         .font(AppTypography.heading)
                         .foregroundColor(AppColors.textPrimary)
 
-                    Text("Most Read")
+                    // "Most Recent", and the row is sorted to match: LearnViewModel orders
+                    // purely by date now. It used to say "Most Read" while sorting unread-first
+                    // — nothing counts reads, and the order changed under the reader as they
+                    // completed things, so the label was wrong twice over.
+                    Text("Most Recent")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }

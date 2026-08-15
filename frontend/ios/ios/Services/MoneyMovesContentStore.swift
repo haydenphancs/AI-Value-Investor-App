@@ -24,9 +24,14 @@ final class MoneyMovesContentStore {
     // resolve by slug first so two articles sharing a title still open the right one.
     private var bundledBySlug: [String: MoneyMoveArticle] = [:]
     private var remoteBySlug: [String: MoneyMoveArticle] = [:]
-    // Ordered card lists (by sortOrder) so the catalog can be served from content
-    // instead of hardcoded in the view. Remote is authoritative; bundled is the
-    // offline fallback for whatever shipped in the binary.
+    // Card lists so the catalog can be served from content instead of hardcoded in the view.
+    // Remote is authoritative; bundled is the offline fallback for whatever shipped in the
+    // binary.
+    //
+    // ⚠️ These are built in `sortOrder` order, but that is NOT the order the reader sees: both
+    // surfaces re-sort by date via `LearnViewModel.newestFirst` (the Wiser section is labelled
+    // "Most Recent"). `sortOrder`'s only surviving display effect is the featured tie-break
+    // below. Don't "restore" a sortOrder ordering downstream on the strength of this comment.
     private var bundledCards: [MoneyMove] = []
     private var remoteCards: [MoneyMove] = []
     /// Latched only after remote content has actually LANDED (see `prefetch()`).
@@ -67,7 +72,9 @@ final class MoneyMovesContentStore {
         remoteFeatured ?? bundledFeatured
     }
 
-    /// Authored catalog cards, ordered by sortOrder. Remote (backend) takes precedence;
+    /// Authored catalog cards, in `sortOrder` order — which callers then re-sort by date, so
+    /// treat this as a stable input order rather than a presentation order. Remote (backend)
+    /// takes precedence;
     /// any bundled-only article (e.g. shipped but not yet seeded) is appended so nothing
     /// disappears offline. Adding a new article server-side makes a new card appear here
     /// with no app update.

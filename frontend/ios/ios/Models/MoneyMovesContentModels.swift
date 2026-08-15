@@ -219,10 +219,30 @@ struct MoneyMoveArticleDTO: Decodable {
     /// that renders a saturated "Listen Now" (not the paywall) whose tap dies in
     /// `AudioManager.isMissingNarration`. Bundled articles therefore derive the flag from the
     /// URL, which is the honest signal there.
-    func toArticle(trustAudioFlag: Bool = false) -> MoneyMoveArticle {
-        let published = Calendar.current.date(
+    /// The publication instant, preferring the REAL one.
+    ///
+    /// ⚠️ ONE implementation, consumed by both `toArticle()` and `toCard()`. They used to
+    /// derive this separately from `publishedDaysAgo`, and the comment on the second copy
+    /// claimed "a card and the article it opens can never disagree about how old the piece
+    /// is" — a claim maintained by hand across two expressions. Now it is structural.
+    ///
+    /// The fallback is the old derivation, `now − publishedDaysAgo` days. It DRIFTS: the
+    /// offset is a constant in the content blob, so a piece authored with
+    /// `publishedDaysAgo: 12` reads as 12 days old forever. That is harmless for ordering
+    /// (relative order is preserved) and wrong for a rendered date, which is why the backend
+    /// now serves `published_at` and why this prefers it. The fallback only survives for the
+    /// bundled offline JSON and for rows that predate the seeder.
+    var resolvedPublishedAt: Date {
+        if let iso = publishedAt, let parsed = MoneyMoveDateFormatting.parseISO8601(iso) {
+            return parsed
+        }
+        return Calendar.current.date(
             byAdding: .day, value: -(publishedDaysAgo ?? 3), to: Date()
         ) ?? Date()
+    }
+
+    func toArticle(trustAudioFlag: Bool = false) -> MoneyMoveArticle {
+        let published = resolvedPublishedAt
         let mappedComments = (comments ?? []).map { $0.toComment() }
         return MoneyMoveArticle(
             slug: slug,
@@ -271,11 +291,10 @@ struct MoneyMoveArticleDTO: Decodable {
             // The tile uses the SMALL derivative. Falling back to the hero would pull a
             // 1206px plate into a 600px slot for every card in a horizontal scroll row.
             imageUrl: imageCardUrl ?? imageUrl,
-            // Same derivation as `toArticle`, so a card and the article it opens can never
-            // disagree about how old the piece is.
-            createdAt: Calendar.current.date(
-                byAdding: .day, value: -(publishedDaysAgo ?? 3), to: Date()
-            ) ?? Date()
+            // The SAME resolver `toArticle` uses, so a card and the article it opens cannot
+            // disagree about how old the piece is — the card renders this date now, so a
+            // divergence would be visible rather than merely latent.
+            createdAt: resolvedPublishedAt
         )
     }
 
@@ -304,8 +323,8 @@ struct MoneyMoveArticleDTO: Decodable {
 extension MoneyMoveArticleDTO {
     private enum CodingKeys: String, CodingKey {
         case slug, title, subtitle, cardSubtitle, category, author, readTimeMinutes, viewCount,
-             learnerCount, sortOrder, commentCount, publishedDaysAgo, tagLabel, isFeatured,
-             hasAudioVersion, audioUrl, audioDurationSeconds, imageUrl, imageCardUrl,
+             learnerCount, sortOrder, commentCount, publishedDaysAgo, publishedAt, tagLabel,
+             isFeatured, hasAudioVersion, audioUrl, audioDurationSeconds, imageUrl, imageCardUrl,
              heroGradientColors, keyHighlights, sections, statistics, comments, relatedArticles
     }
 
@@ -326,6 +345,10 @@ extension MoneyMoveArticleDTO {
         sortOrder = c.flexibleInt(forKey: .sortOrder)
         commentCount = c.flexibleInt(forKey: .commentCount)
         publishedDaysAgo = c.flexibleInt(forKey: .publishedDaysAgo)
+        // Empty-string coalesced to nil for the same reason as the image urls: an empty value
+        // occupies the slot and would suppress the publishedDaysAgo fallback while never
+        // parsing to a date.
+        publishedAt = c.flexibleString(forKey: .publishedAt).flatMap { $0.isEmpty ? nil : $0 }
         tagLabel = c.flexibleString(forKey: .tagLabel)
         isFeatured = (try? c.decodeIfPresent(Bool.self, forKey: .isFeatured)) ?? nil
         hasAudioVersion = (try? c.decodeIfPresent(Bool.self, forKey: .hasAudioVersion)) ?? nil

@@ -376,9 +376,18 @@ def test_ios_card_always_draws_a_cover_plate():
     assert "if " not in body, (
         f"the cover plate is conditional again — found a branch before it: {body.strip()!r}")
 
-    assert "showIcon" not in src, (
-        "showIcon is back on MoneyMoveCard; it has no reader and a parameter that is accepted "
-        "and ignored lies to its callers")
+    # MoneyMoveCard must not DECLARE a showIcon of its own — it had no reader, and a parameter
+    # that is accepted and ignored lies to its callers.
+    #
+    # Scoped to the declaration, not to the bare string: `ReadTimeLabel` has its own unrelated
+    # `showIcon:`, which the meta row legitimately passes when ViewThatFits falls back to the
+    # compact layout. Asserting the string never appears conflated the two and failed on
+    # correct code.
+    assert "var showIcon" not in src, (
+        "showIcon is back as a property on MoneyMoveCard")
+    struct_head = src.split("struct MoneyMoveCard: View {", 1)[1].split("var body", 1)[0]
+    assert "showIcon" not in struct_head, (
+        f"showIcon reappeared among MoneyMoveCard's stored properties: {struct_head.strip()!r}")
     # url: is passed straight through, Optional and all — not force-unwrapped behind a guard.
     assert "url: moneyMove.imageUrl" in src
 
@@ -420,10 +429,17 @@ def test_ios_card_meta_row_carries_the_completion_mark_and_no_headphones():
         "the completion mark must sit in the meta row, after ReadTimeLabel")
 
 
-def test_ios_card_ordering_is_newest_first_within_unread():
-    """`createdAt` exists only to order rows, so a newly seeded topic reaches the top of its
-    section with no app update. Unread-first stays PRIMARY — sorting purely by date would
-    bury a brand new article behind everything already finished."""
+def test_ios_card_ordering_is_purely_newest_first():
+    """Ordering is by DATE ALONE, on both surfaces, because the section says "Most Recent".
+
+    This replaces an unread-first partition (completed moves slid to the tail, newest-first
+    nested inside each group). The two keys disagreed the moment a reader finished the newest
+    article: it left the front of a row that claims to be ordered by recency. Completion
+    feedback is now the checkmark alone.
+
+    The tiebreak survives: `sorted(by:)` is not stable in Swift, so same-day articles would
+    otherwise shuffle between renders.
+    """
     vm = _strip_swift_comments(
         (REPO / "frontend/ios/ios/ViewModels/LearnViewModel.swift").read_text())
     assert "static func newestFirst" in vm
@@ -431,15 +447,82 @@ def test_ios_card_ordering_is_newest_first_within_unread():
     assert "createdAt >" in body, "newestFirst must sort DESCENDING by createdAt"
     assert "$0.title <" in body, (
         "needs a deterministic tiebreak — Swift's sorted(by:) is not stable")
-    sorter = vm.split("sortedIncompleteFirst(_ cards", 1)[1].split("\n    }", 1)[0]
-    assert sorter.count("newestFirst") == 2, (
-        "both the unread and the completed group must be date-ordered")
-    assert "isCompleted" in sorter, "unread-first must still be the primary key"
+
+    assert "sortedIncompleteFirst" not in vm, (
+        "the unread-first partition is back — the row would stop matching its 'Most Recent' "
+        "label as soon as anything is completed")
+    # No partition on completion anywhere in the ordering path.
+    loader = vm.split("private func loadMoneyMoves", 1)[1].split("\n    }", 1)[0]
+    assert "isCompleted" not in loader, "loadMoneyMoves partitions on completion again"
+    assert "newestFirst" in loader
 
     # And the See-All screen must share the very same sorter rather than reimplementing it.
     detail = _strip_swift_comments(
         (REPO / "frontend/ios/ios/Views/Screens/MoneyMovesDetailView.swift").read_text())
     assert "LearnViewModel.newestFirst" in detail
+    assert "incompleteFirst" not in detail, (
+        "the See-All screen reintroduced its own unread-first partition; the two surfaces must "
+        "not drift into disagreeing about the order of the same cards")
+
+
+def test_ios_section_subtitle_matches_the_ordering():
+    """The label and the sort are one claim. "Most Read" was wrong twice over — nothing counts
+    reads, and the order changed under the reader as they completed things."""
+    section = _strip_swift_comments(
+        (REPO / "frontend/ios/ios/Views/Organisms/MoneyMovesSection.swift").read_text())
+    assert 'Text("Most Recent")' in section, "the Money Moves section subtitle is not Most Recent"
+    assert "Most Read" not in section, "the Money Moves section still claims Most Read"
+
+
+def test_ios_card_shows_a_publication_date_before_the_read_time():
+    """The date is the first thing in the meta row, and it is OMITTED when unknown.
+
+    That omission is live behaviour, not a defensive branch: seven "coming soon" placeholder
+    cards ship with `createdAt == .distantPast`, which any naive format renders as "Jan 1, 1".
+    """
+    src = _strip_swift_comments(CARD_SWIFT.read_text())
+    assert "MoneyMoveDateFormatting.label" in src, "the card no longer formats a date"
+    assert "TimeAgoLabel" in src, "the date is not rendered through the shared atom"
+
+    # Position: the date must precede the read time in the row.
+    meta = src.split("MoneyMoveDateFormatting.label", 1)[1]
+    assert "ReadTimeLabel" in meta, "the date label is not before ReadTimeLabel"
+
+    # Optionality: an `if let` (or `guard`) around it, so nil means no label at all.
+    assert "if let" in src.split("MoneyMoveDateFormatting.label", 1)[0].rsplit("\n", 3)[-1] \
+        or "if let date = MoneyMoveDateFormatting.label" in src, (
+        "the date must be conditionally rendered — .distantPast formats as 'Jan 1, 1'")
+
+    # Ink parity with the label it sits beside.
+    assert "color: AppColors.textSecondary" in src, (
+        "the date must take ReadTimeLabel's ink; two greys in a two-item row reads as a bug")
+
+
+def test_ios_card_meta_row_survives_large_dynamic_type():
+    """The row overflows at xLarge — a NON-accessibility size — because AppSpacing is unscaled
+    while the text scales to readingCap 1.4x. Inside a horizontal ScrollView that wraps
+    silently (every card grows a line together) rather than clipping visibly."""
+    src = _strip_swift_comments(CARD_SWIFT.read_text())
+    assert "ViewThatFits" in src, "the meta row has no fallback layout for large text"
+    # The two candidates, in order: full first (preferred), compact second.
+    fits = src.split("ViewThatFits", 1)[1].split("\n    }", 1)[0]
+    assert ".full" in fits and ".short" in fits, (
+        f"both a full and an abbreviated candidate must be offered, got: {fits.strip()!r}")
+    assert fits.index(".full") < fits.index(".short"), (
+        "the FULL candidate must come first — ViewThatFits takes the first that fits")
+    assert "showClock: false" in fits, (
+        "the compact candidate must drop the clock glyph — that is where its width comes from")
+    # ...and the flag actually has to reach the atom.
+    assert "showIcon: showClock" in src, "showClock is computed but never passed to ReadTimeLabel"
+
+
+def test_the_dead_learner_count_branch_is_gone():
+    """`learnerCount` is always empty (the backend never writes it; two test files forbid
+    non-blank engagement numbers), and the badge needed ~184pt in a 176pt row. A branch that
+    can only ever break the layout is worse than no branch."""
+    src = _strip_swift_comments(CARD_SWIFT.read_text())
+    assert "LearnerCountBadge" not in src, "the dead learner-count badge is back on the card"
+    assert "learnerCount" not in src
 
 
 def test_ios_cover_atom_falls_back_to_the_gradient_on_error():
@@ -616,3 +699,37 @@ def test_source_scan_helpers_are_not_vacuous():
     # ...while still allowing the legitimate senses that broke it once.
     assert not art._BANNED_SUBJECT.search("a coin standing on its edge, its face engraved")
     assert not art._BANNED_SUBJECT.search("a hand-cranked brass machine")
+
+
+def test_ios_dto_decodes_published_at_and_both_paths_consume_it():
+    """The real timestamp has to survive the wire AND reach both surfaces.
+
+    Three edits are required and any one missing is silent: the property, the CodingKeys entry
+    (a key absent there is NEVER decoded — same trap as the image keys), and a lenient decode.
+
+    And it must feed BOTH `toCard()` and `toArticle()`. They used to derive the date separately
+    from `publishedDaysAgo`, with a comment claiming "a card and the article it opens can never
+    disagree about how old the piece is" — a claim maintained by hand across two expressions.
+    The card renders the date now, so a divergence would be visible rather than latent.
+    """
+    src = _strip_swift_comments(MODELS_SWIFT.read_text())
+    keys_block = _article_dto_coding_keys()
+
+    assert "publishedAt" in keys_block, "publishedAt missing from MoneyMoveArticleDTO.CodingKeys"
+    assert "let publishedAt: String?" in src, "publishedAt must be Optional on the DTO"
+    assert "c.flexibleString(forKey: .publishedAt)" in src, (
+        "publishedAt must decode leniently")
+
+    assert "var resolvedPublishedAt: Date" in src, (
+        "the shared resolver is gone — the two paths will drift apart again")
+    resolver = src.split("var resolvedPublishedAt: Date", 1)[1].split("\n    }", 1)[0]
+    assert "MoneyMoveDateFormatting.parseISO8601" in resolver, (
+        "the resolver must prefer the served timestamp")
+    assert "publishedDaysAgo" in resolver, (
+        "the derived estimate must remain as the fallback for bundled/pre-seeder content")
+
+    for fn in ("func toArticle", "func toCard"):
+        body = src.split(fn, 1)[1].split("\n    }", 1)[0]
+        assert "resolvedPublishedAt" in body, f"{fn} does not use the shared resolver"
+        assert "byAdding: .day" not in body, (
+            f"{fn} still derives its own date — that is how the card and article drift apart")

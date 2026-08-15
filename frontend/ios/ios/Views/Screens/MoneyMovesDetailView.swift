@@ -16,8 +16,10 @@ struct MoneyMovesDetailView: View {
     @State private var battles: [MoneyMove] = []
     @State private var featured: MoneyMoveArticle?
     @State private var selectedArticle: MoneyMoveArticle?
-    /// Observed so the rows re-sort live (completed moves slide to the end) when a move completes.
-    @ObservedObject private var moneyMovesProgress = MoneyMovesProgressStore.shared
+    // NOTE: this screen deliberately does NOT observe MoneyMovesProgressStore. It used to, so
+    // the rows could re-sort as completed moves slid to the end; ordering is purely by date
+    // now, so the observation drove nothing but extra body passes. Each MoneyMoveCard observes
+    // the store itself, so completion checkmarks still update live.
     /// Stable token keying this screen's audio overlay host registration.
     @State private var compactToken = UUID().uuidString
 
@@ -52,21 +54,21 @@ struct MoneyMovesDetailView: View {
                         // Section 1: The Blueprints
                         MoneyMovesCategorySection(
                             category: .blueprints,
-                            moves: incompleteFirst(blueprints),
+                            moves: newestFirst(blueprints),
                             onMoveTap: handleMoveTap
                         )
 
                         // Section 2: Value Traps
                         MoneyMovesCategorySection(
                             category: .valueTraps,
-                            moves: incompleteFirst(valueTraps),
+                            moves: newestFirst(valueTraps),
                             onMoveTap: handleMoveTap
                         )
 
                         // Section 3: Battles
                         MoneyMovesCategorySection(
                             category: .battles,
-                            moves: incompleteFirst(battles),
+                            moves: newestFirst(battles),
                             onMoveTap: handleMoveTap
                         )
 
@@ -123,14 +125,13 @@ struct MoneyMovesDetailView: View {
         battles = cards.filter { $0.category == .battles && !isHero($0) }
     }
 
-    /// Recomputed each render; `moneyMovesProgress` observation makes the row re-sort live on
-    /// completion. Unread first, then newest first inside each group — the same composition
-    /// `LearnViewModel.sortedIncompleteFirst` uses, and it shares that sorter so the two
-    /// screens cannot drift into disagreeing about the order of the very same cards.
-    private func incompleteFirst(_ moves: [MoneyMove]) -> [MoneyMove] {
-        let store = MoneyMovesProgressStore.shared
-        return LearnViewModel.newestFirst(moves.filter { !store.isCompleted(slug: $0.slug) })
-            + LearnViewModel.newestFirst(moves.filter { store.isCompleted(slug: $0.slug) })
+    /// Newest first, via the SHARED sorter — the Wiser row and this screen must never drift
+    /// into disagreeing about the order of the very same cards.
+    ///
+    /// This wrapped `newestFirst` in an unread-first partition until the Wiser section was
+    /// relabelled "Most Recent"; see `LearnViewModel.newestFirst` for why that partition went.
+    private func newestFirst(_ moves: [MoneyMove]) -> [MoneyMove] {
+        LearnViewModel.newestFirst(moves)
     }
 
     private func handleMoveTap(_ move: MoneyMove) {

@@ -39,5 +39,10 @@
     "mean_luma": 0.4355,
     "inner_mean_luma": 0.4366,
     "needs_hairline": false
-  }
+  },
+  "uploaded": {
+    "hero": "a45890722c828d67ef6589a8c4ce384e4aa87784a53f4f78005f59ec9de5900f",
+    "card": "55cae8dbf95e69fbb4b330d018be3cdb758a03916510c95c279304fba7a41c23"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/visa-vs-mastercard.hero.jpg"
 }

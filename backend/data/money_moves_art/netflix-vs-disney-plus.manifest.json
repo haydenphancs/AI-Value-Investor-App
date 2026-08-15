@@ -39,5 +39,10 @@
     "mean_luma": 0.6971,
     "inner_mean_luma": 0.678,
     "needs_hairline": true
-  }
+  },
+  "uploaded": {
+    "hero": "f12240e09c2e0c6f4b64ba6e58a645742625d7003aed3fb1be2de9da8668b83b",
+    "card": "6185528a3621d2348fecc2b623a6d6b3007e68671a1f985e3521dbcda81728d0"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/netflix-vs-disney-plus.hero.jpg"
 }

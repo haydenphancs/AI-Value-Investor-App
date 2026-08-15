@@ -103,13 +103,19 @@ struct MoneyMoveCoverImage: View {
 }
 
 /// `.aspectRatio(nil, contentMode:)` is not expressible inline, and applying the modifier
-/// unconditionally would force a ratio on the article header, which sets its own height.
+/// unconditionally would force a ratio on a caller that sets its own height.
+///
+/// ⚠️ `.fit`, NOT `.fill`, and the difference is visible rather than theoretical. `.fill`
+/// sizes the view to COVER the proposed space, so inside `MoneyMoveCard`'s `.frame(width: 200)`
+/// the plate grew wider than the tile and hung out past its rounded corners on both sides.
+/// `.fit` derives the height from the offered width, which is what a banner wants; the inner
+/// image still uses `.fill` + `clipShape` so it crops rather than letterboxes.
 private struct OptionalAspectRatio: ViewModifier {
     let ratio: CGFloat?
 
     func body(content: Content) -> some View {
         if let ratio {
-            content.aspectRatio(ratio, contentMode: .fill)
+            content.aspectRatio(ratio, contentMode: .fit)
         } else {
             content
         }

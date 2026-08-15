@@ -242,6 +242,24 @@ class MoneyMovesContentService:
                     content.pop("audioUrl", None)
                     content.pop("audioDurationSeconds", None)
 
+                # Artwork, overlaid the same way audio is — the column wins in ONE direction only,
+                # and the asymmetry with audio above is deliberate.
+                #
+                # A populated column overwrites the blob, so re-pointing a plate is a single UPDATE.
+                # But an EMPTY column must NOT clear a baked `imageUrl`, which is exactly the
+                # opposite of the audio rule. Artwork lives in a PUBLIC bucket and is never signed
+                # or expired, so a baked URL cannot go stale the way a narration URL can; whereas
+                # the column is written only by seed_money_moves.py, and a seed run from a box
+                # without backend/data/money_moves_art/ legitimately produces no column value. Under
+                # the audio rule that run would silently strip the artwork from every article.
+                #
+                # There is also no `hasImage` flag to keep in step: iOS gates purely on a non-empty
+                # url and falls back to the article's heroGradientColors otherwise, so a missing
+                # image degrades to exactly today's appearance rather than to a broken slot.
+                image_url = row.get("image_url")
+                if image_url:
+                    content["imageUrl"] = image_url
+
                 # Overlay the row's `sort_order` COLUMN unconditionally. The response carries only
                 # these `content` blobs, so without this the column — the thing this service sorts
                 # by — never reaches the client at all, and iOS re-sorts by `content.sortOrder ?? .max`
@@ -275,7 +293,8 @@ class MoneyMovesContentService:
             # `title` is fetched for the same reason as `slug`: it is a HARD-REQUIRED field on the
             # iOS DTO, so a blob that lost it decodes to nothing and the article silently vanishes
             # client-side. The column is NOT NULL, so it is always a usable fallback.
-            .select("id, slug, title, sort_order, audio_url, audio_duration_seconds, content")
+            .select("id, slug, title, sort_order, audio_url, audio_duration_seconds, "
+                    "image_url, content")
             .execute()
         )
         return result.data or []

@@ -189,6 +189,13 @@ struct MoneyMoveArticleDTO: Decodable {
     let hasAudioVersion: Bool?
     let audioUrl: String?
     let audioDurationSeconds: Int?    // real narration length (sec) — drives the Listen time
+    // Cover artwork, served from the PUBLIC money-moves-images bucket. Optional at every
+    // layer on purpose: an article with no plate falls back to `heroGradientColors`, which is
+    // exactly how every article looked before artwork existed, so the degraded state is the
+    // old design rather than a hole. Unlike narration these are never signed or expired, and
+    // `redact_money_moves` deliberately leaves them alone — artwork is free on every tier.
+    let imageUrl: String?             // 1206x678 — the article header card + the featured card
+    let imageCardUrl: String?         // 640x360  — the 200pt catalog tile
     let heroGradientColors: [String]
     let keyHighlights: [ArticleHighlightDTO]
     let sections: [ArticleSectionDTO]
@@ -239,7 +246,9 @@ struct MoneyMoveArticleDTO: Decodable {
             comments: mappedComments,
             relatedArticles: (relatedArticles ?? []).map { $0.toRelated() },
             audioUrl: audioUrl,
-            audioDurationSeconds: audioDurationSeconds
+            audioDurationSeconds: audioDurationSeconds,
+            imageUrl: imageUrl,
+            imageCardUrl: imageCardUrl
         )
     }
 
@@ -254,7 +263,10 @@ struct MoneyMoveArticleDTO: Decodable {
             category: MoneyMoveArticleDTO.category(from: category),
             estimatedMinutes: readTimeMinutes,
             learnerCount: learnerCount ?? viewCount,
-            hasAudio: audioUrl != nil
+            hasAudio: audioUrl != nil,
+            // The tile uses the SMALL derivative. Falling back to the hero would pull a
+            // 1206px plate into a 600px slot for every card in a horizontal scroll row.
+            imageUrl: imageCardUrl ?? imageUrl
         )
     }
 
@@ -284,8 +296,8 @@ extension MoneyMoveArticleDTO {
     private enum CodingKeys: String, CodingKey {
         case slug, title, subtitle, cardSubtitle, category, author, readTimeMinutes, viewCount,
              learnerCount, sortOrder, commentCount, publishedDaysAgo, tagLabel, isFeatured,
-             hasAudioVersion, audioUrl, audioDurationSeconds, heroGradientColors, keyHighlights,
-             sections, statistics, comments, relatedArticles
+             hasAudioVersion, audioUrl, audioDurationSeconds, imageUrl, imageCardUrl,
+             heroGradientColors, keyHighlights, sections, statistics, comments, relatedArticles
     }
 
     init(from decoder: Decoder) throws {
@@ -310,6 +322,10 @@ extension MoneyMoveArticleDTO {
         hasAudioVersion = (try? c.decodeIfPresent(Bool.self, forKey: .hasAudioVersion)) ?? nil
         audioUrl = (try? c.decodeIfPresent(String.self, forKey: .audioUrl)) ?? nil
         audioDurationSeconds = c.flexibleInt(forKey: .audioDurationSeconds)
+        // Empty-string coalesced to nil: an empty url still occupies the slot and would
+        // suppress the gradient fallback while never resolving to a picture.
+        imageUrl = c.flexibleString(forKey: .imageUrl).flatMap { $0.isEmpty ? nil : $0 }
+        imageCardUrl = c.flexibleString(forKey: .imageCardUrl).flatMap { $0.isEmpty ? nil : $0 }
         heroGradientColors = c.lenientArray(String.self, forKey: .heroGradientColors)
         keyHighlights = c.lenientArray(ArticleHighlightDTO.self, forKey: .keyHighlights)
         sections = c.lenientArray(ArticleSectionDTO.self, forKey: .sections)
@@ -575,12 +591,17 @@ struct RelatedArticleDTO: Decodable {
     let readTimeMinutes: Int
     let viewCount: String
     let gradientColors: [String]
+    // Stamped in by seed_money_moves.py from a title -> card-url map built across every
+    // article, so the tile needs no runtime title->slug lookup and no second request. Nil
+    // for a related entry pointing at an article that has no plate yet — it falls back to
+    // its own `gradientColors`, which is what the tile has always drawn.
+    let imageCardUrl: String?
 
     // Mirrors the PARENT article's handling of the very same fields (`readTimeMinutes` via
     // `flexibleInt`, `viewCount` via `flexibleString`) — they were coerced there and strict here,
     // so an authoring slip that the article itself survived still deleted its related-article card.
     private enum CodingKeys: String, CodingKey {
-        case title, subtitle, category, readTimeMinutes, viewCount, gradientColors
+        case title, subtitle, category, readTimeMinutes, viewCount, gradientColors, imageCardUrl
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -590,6 +611,7 @@ struct RelatedArticleDTO: Decodable {
         readTimeMinutes = c.flexibleInt(forKey: .readTimeMinutes) ?? 0
         viewCount = c.flexibleString(forKey: .viewCount) ?? "0"
         gradientColors = c.flexibleStringArray(forKey: .gradientColors) ?? []
+        imageCardUrl = c.flexibleString(forKey: .imageCardUrl).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     func toRelated() -> RelatedArticle {
@@ -599,7 +621,8 @@ struct RelatedArticleDTO: Decodable {
             category: MoneyMoveArticleDTO.category(from: category),
             readTimeMinutes: readTimeMinutes,
             viewCount: viewCount,
-            gradientColors: gradientColors
+            gradientColors: gradientColors,
+            imageCardUrl: imageCardUrl
         )
     }
 }

@@ -18,6 +18,21 @@ struct MoneyMoveCard: View {
             onTap?()
         } label: {
             VStack(alignment: .leading, spacing: AppSpacing.md) {
+                // Cover plate, when the article has one.
+                //
+                // ⚠️ Deliberately NOT gated on `showIcon`. The See-All grid passes
+                // `showIcon: false` (MoneyMovesDetailView) to suppress the category badge, so
+                // gating artwork on the same flag would leave that entire screen — the one
+                // built for browsing — the only place with no pictures.
+                if let imageUrl = moneyMove.imageUrl {
+                    MoneyMoveCoverImage(
+                        url: imageUrl,
+                        gradientColors: moneyMove.category.gradientColors,
+                        cornerRadius: AppCornerRadius.medium,
+                        aspectRatio: 16 / 9
+                    )
+                }
+
                 // Header: leading icon/audio slot + completion mark (centered on the badge).
                 HStack(alignment: .center) {
                     if showIcon {

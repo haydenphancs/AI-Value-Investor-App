@@ -1,0 +1,43 @@
+{
+  "slug": "the-fall-of-enron",
+  "category": "valueTraps",
+  "treatment": "ledger_still",
+  "subject": "a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "The object resting on a sheet of aged green-bar ACCOUNTING LEDGER PAPER \u2014 pale green and cream alternating horizontal bands with fine ruled column lines \u2014 foxed and yellowed at the edges, on a dark wooden desk. Warm low tungsten light from one side, deep but not black shadows, visible dust and paper fibre. The ruled bands and columns are empty: no figures, no writing, no annotations anywhere. Archival, forensic and quietly damning \u2014 the record, long after the fact.\n\nSUBJECT: a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "e0f0901c7e7d",
+  "art_file": "the-fall-of-enron.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "the-fall-of-enron.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "fb1df8a2021264fb95e66218cd7bfa9f71772ce63910f764c449252af27ed74c",
+      "bytes": 145492,
+      "cropped": true
+    },
+    "card": {
+      "file": "the-fall-of-enron.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "2df91155640c254f9751bf5c13f8977a252bf356fd038e59706ece77d249cd0d",
+      "bytes": 48413,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.9898,
+    "ring_spread": 0.9875,
+    "inner_spread": 0.503,
+    "edge_activity": 1.963,
+    "mean_luma": 0.2155,
+    "inner_mean_luma": 0.1602,
+    "needs_hairline": true
+  }
+}

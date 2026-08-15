@@ -100,6 +100,41 @@ public enum WidgetSessionLabel {
         return "\(monthDay(day)) — open Caydex"
     }
 
+    /// The label ONLY when it changes how the numbers should be read — nil otherwise.
+    ///
+    /// "Live 2:14 PM ET" beside a live quote is noise: it tells the reader something they
+    /// already assume. "Fri close" on a Sunday is not noise — it is the difference between
+    /// a fact and a lie, because the tile is otherwise showing a −5.02% that looks like
+    /// today's.
+    ///
+    /// So this returns nil for the current session and a label for everything else. That
+    /// keeps the honesty guarantee while costing zero pixels on the overwhelmingly common
+    /// day, which is what makes it affordable on a 155pt tile.
+    ///
+    /// Absent `sessionDate` (an old backend) is NOT treated as current: we cannot tell,
+    /// and the safe answer to "is this today's data" is to say what we know rather than
+    /// imply freshness we have not established.
+    public static func agedLabel(
+        asOf: Date,
+        sessionDate: String?,
+        marketSession: String,
+        sessionLabel: String?,
+        now: Date = Date()
+    ) -> String? {
+        if let sessionDate, let day = parseDay(sessionDate) {
+            let cal = easternCalendar
+            let daysAgo = cal.dateComponents(
+                [.day], from: cal.startOfDay(for: day), to: cal.startOfDay(for: now)
+            ).day ?? 0
+            if daysAgo <= 0 { return nil }   // today's session — nothing to warn about
+        }
+        let label = displayLabel(
+            asOf: asOf, sessionDate: sessionDate, marketSession: marketSession,
+            sessionLabel: sessionLabel, now: now
+        )
+        return label.isEmpty ? nil : label
+    }
+
     /// What the tile said before `session_date` existed. Kept verbatim so a new app
     /// against an old backend behaves exactly as it does today.
     private static func legacyLabel(_ marketSession: String) -> String {

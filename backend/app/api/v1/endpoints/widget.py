@@ -45,10 +45,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# A widget only ever renders one mover (plus, on the large family, a few
-# runners-up), so ranking the whole of a very large group buys nothing and costs a
-# bigger batch quote. Matches `_MAX_TABS` in updates.py.
-_MAX_HOLDINGS = 30
+# How many of the caller's holdings are RANKED.
+#
+# This is a cap on the ranking input, not on what is rendered — and that distinction is
+# why 30 was wrong. Holdings arrive ordered by `position` (active group) or `added_at
+# desc` (watchlist), so truncating at 30 dropped tickers by RECENCY before anything was
+# ranked: a user with 40 holdings was told the biggest mover among the 30 they happened
+# to add most recently, and `basket.total_count` then stated a denominator that was not
+# their portfolio. Neither is detectable from the tile.
+#
+# 200 costs nothing extra. `get_batch_quotes_bulk` chunks at 300, so the whole set plus
+# the index symbols is still ONE request — market mode already ranks 200 this way. It
+# also matches `_MAX_UNIVERSE`, so neither mode can be asked about a wider scope than
+# the other.
+_MAX_HOLDINGS = 200
 
 _MAX_SCOPE_LEN = 32
 

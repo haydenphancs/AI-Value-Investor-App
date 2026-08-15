@@ -333,15 +333,9 @@ struct LearnContentView: View {
 
     /// Creates a full MoneyMoveArticle from a MoneyMove card data
     private func createArticleFromMove(_ move: MoneyMove) -> MoneyMoveArticle {
-        let gradientColors: [String]
-        switch move.category {
-        case .blueprints:
-            gradientColors = ["059669", "047857", "064E3B"]
-        case .valueTraps:
-            gradientColors = ["DC2626", "991B1B", "7F1D1D"]
-        case .battles:
-            gradientColors = ["7C3AED", "5B21B6", "4C1D95"]
-        }
+        // Was an inline switch duplicated verbatim in MoneyMovesDetailView — see
+        // MoneyMoveCategory.gradientColors.
+        let gradientColors = move.category.gradientColors
 
         return MoneyMoveArticle(
             title: move.title,

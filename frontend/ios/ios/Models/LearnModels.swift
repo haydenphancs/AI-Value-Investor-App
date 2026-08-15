@@ -166,6 +166,23 @@ enum MoneyMoveCategory: String, CaseIterable {
         }
     }
 
+    /// The authored hero-gradient triple for this category (hex, no `#`), used wherever we
+    /// need a gradient for an article that carries none of its own — a placeholder card, or
+    /// the fallback behind a cover plate that failed to load.
+    ///
+    /// These exact three triples were duplicated verbatim in `LearnView` and
+    /// `MoneyMovesDetailView`, which is the kind of copy that drifts silently: the two are
+    /// building the SAME placeholder article and nothing would have failed if one of them
+    /// had been edited alone. They stay raw hex rather than tokens because they mirror the
+    /// server-authored `heroGradientColors` strings and are consumed by the same code path.
+    var gradientColors: [String] {
+        switch self {
+        case .blueprints: return ["059669", "047857", "064E3B"]
+        case .valueTraps: return ["DC2626", "991B1B", "7F1D1D"]
+        case .battles:    return ["7C3AED", "5B21B6", "4C1D95"]
+        }
+    }
+
     /// The ink `iconFillColor` requires, mirroring that switch CASE FOR CASE.
     /// `gainFill`/`lossFill` are ADAPTIVE (bright in dark) and need near-black
     /// `textOnFill`; the frozen fills need white `textOnAccent`. One ink cannot
@@ -193,7 +210,10 @@ struct MoneyMove: Identifiable {
     let learnerCount: String
     /// True when this move has narration audio (drives the headphones glyph on See-All cards).
     var hasAudio: Bool = false
-    
+    /// 640x360 cover plate from the public money-moves-images bucket. Defaults to nil so the
+    /// `sampleData` placeholders keep compiling and keep their SF Symbol badge.
+    var imageUrl: String? = nil
+
     var iconName: String {
         category.iconName
     }

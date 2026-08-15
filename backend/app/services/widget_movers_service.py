@@ -75,11 +75,20 @@ from app.integrations.fmp import get_fmp_client
 from app.schemas.widget import (
     WidgetBasketResponse,
     WidgetCauseResponse,
+    WidgetIndexResponse,
+    WidgetMarketContextResponse,
     WidgetMoveContextResponse,
     WidgetMoverPayload,
     WidgetMoverResponse,
 )
-from app.services.daily_move_attribution import attribute
+from app.services.daily_move_attribution import (
+    attribute,
+    # Shared so the market band and the cause sentence can never disagree about how a
+    # percentage reads. Duplicating the formatting is how two surfaces on the same tile
+    # end up rendering the same number differently.
+    _dir_word,
+    _pct,
+)
 from app.services.news_insight_service import get_news_insight_service
 from app.services.updates_materiality import classify_move, finite, move_z
 from app.services.volatility_cache_service import get_volatility_cache_service
@@ -93,8 +102,20 @@ from app.utils.market_hours import (
 logger = logging.getLogger(__name__)
 
 MARKET_SCOPE = "__MARKET__"
-# The index the sweeper already quotes; its daily move is the "whole market" leg.
+# The index whose daily move is the "whole market" leg of the attribution.
 MARKET_INDEX_SYMBOL = "^GSPC"
+
+# The market band, in render order. Labels live HERE, not on the client: an already
+# installed widget cannot learn a new index's display name without an app update.
+#
+# These ride the universe batch quote (`get_batch_quotes_bulk` chunks at 300, the
+# universe is capped at 200), so the whole band costs ZERO additional FMP calls — it is
+# in fact one call FEWER than before, because `^GSPC` used to be fetched separately.
+_INDEX_SYMBOLS: List[Tuple[str, str]] = [
+    (MARKET_INDEX_SYMBOL, "S&P 500"),
+    ("^IXIC", "Nasdaq"),
+    ("^DJI", "Dow"),
+]
 
 # How many tickers we will rank. The sweeper's own ceiling is 200; matching it means
 # the widget can never be asked about a scope the sweeper has not considered.
@@ -125,12 +146,23 @@ _SCOPE_PORTFOLIO = "Your holdings"
 # polled unattended by WidgetKit rather than driven by someone looking at a screen.
 _CACHE_MAX_ENTRIES = 2000
 
-# How many movers the payload carries. 1 headline + 3 runners-up fills the large
-# family without a second round trip; the service already reads their cards.
-_RUNNERS_UP = 4
+# How many movers the payload carries: 1 headline + (_RUNNERS_UP - 1) runners-up.
+#
+# Six, not four. The medium family now renders a ranked column beside the headline and
+# the large family lists five, and both were previously showing ONE name on a tile with
+# room for several — `runners_up` was fetched on every payload and rendered only by
+# Large. Widening this costs NOTHING upstream: the movers all come from the single batch
+# quote already made, and `get_cards` is one batched Supabase select regardless of how
+# many scopes it is handed.
+_RUNNERS_UP = 6
 
-# The two universe-wide snapshots change at most once a day, so an hour of reuse is
-# generous and still costs at most 24 calls/day for the whole product.
+# The universe-wide snapshots change at most once a day, so an hour of reuse is generous
+# and still costs at most 24 calls/day for the whole product.
+#
+# ⚠️ This must NOT cover anything with an intraday value. The index quote used to sit
+# here and was therefore frozen for an hour while every stock's own change was refetched
+# each minute — see `_fetch_market_context`, where the indices now ride the universe
+# batch quote instead.
 _CONTEXT_TTL_SECONDS = 3600
 
 
@@ -172,9 +204,17 @@ class _MarketContext:
     # ticker -> today's/yesterday's earnings-calendar row
     earnings: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    # (sector name, today's % change), in the snapshot's own order.
+    sector_changes: List[Tuple[str, float]] = field(default_factory=list)
+
     # Which legs actually answered. False ⇒ we know nothing, NOT "nothing happened".
     industry_available: bool = False
     earnings_available: bool = False
+    sector_available: bool = False
+    # Set when the index quote was readable. Unlike the three above this is filled in
+    # per-request from the universe batch quote rather than from the hourly cache — the
+    # market's own intraday percentage is the one thing here that must never be an hour
+    # old, since it is the denominator of the "moved with the market" test.
     market_available: bool = False
     # ET date (YYYY-MM-DD) the industry snapshot itself describes. FMP's
     # `industry-performance-snapshot` walks back to the last trading day, so on a Monday
@@ -187,9 +227,14 @@ class _MarketContext:
     # The ET session being attributed (YYYY-MM-DD). Compared against
     # `industry_snapshot_date` to refuse a cross-session comparison.
     session_date: Optional[str] = None
+    # symbol -> batch-quote row for each index, filled per request (never cached).
+    index_rows: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def for_tickers(
-        self, ticker_industry: Dict[str, str], session_date: str
+        self,
+        ticker_industry: Dict[str, str],
+        session_date: str,
+        index_rows: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> "_MarketContext":
         """A per-request view over the shared universe-wide facts.
 
@@ -200,9 +245,20 @@ class _MarketContext:
         `session_date` is set HERE rather than at fetch time because the context is cached
         for up to an hour and the session can roll over inside that window — a context
         filled at 19:59 ET and read at 20:01 belongs to a different session date.
+
+        `index_rows` likewise: they come from the CALLER'S batch quote, so they are as
+        fresh as the payload rather than as old as the hourly cache.
         """
+        rows = index_rows or {}
+        head = rows.get(MARKET_INDEX_SYMBOL) or {}
+        market_change = finite(head.get("changePercentage"))
         return replace(
-            self, ticker_industry=ticker_industry, session_date=session_date
+            self,
+            ticker_industry=ticker_industry,
+            session_date=session_date,
+            index_rows=rows,
+            market_change=market_change,
+            market_available=market_change is not None,
         )
 
     def industry_for(self, ticker: str) -> tuple[Optional[str], Optional[float]]:
@@ -390,6 +446,89 @@ def _classified_today_news(
         )
         return [], True, True
     return ([(tag, headline)] if tag else []), True, True
+
+
+def build_market_context(
+    index_rows: Dict[str, Dict[str, Any]],
+    sectors: Sequence[Tuple[str, float]],
+    *,
+    sector_available: bool,
+) -> Optional[WidgetMarketContextResponse]:
+    """The tape, as the tile leads with it. Pure — no I/O, exhaustively testable.
+
+    Returns None when NOTHING was readable, so the widget simply omits the band and
+    leads with the mover exactly as it did before this existed. It never emits a band
+    of zeroes: "the market was flat and no sector moved" is a claim, and making it out
+    of two failed upstream calls is the same class of lie as `describe_no_cause`
+    announcing "no company news" after a Supabase error.
+
+    Breadth is counted over SECTORS because they are a real population — all 11, always
+    present — so "8 of 11 sectors up" is a defined statistic. Counting greens in FMP's
+    biggest-gainers list would not be: that is a top-50 cut, and its denominator means
+    nothing.
+    """
+    indices: List[WidgetIndexResponse] = []
+    for symbol, label in _INDEX_SYMBOLS:
+        row = index_rows.get(symbol) or {}
+        chg = finite(row.get("changePercentage"))
+        price = finite(row.get("price"))
+        if chg is None and price is None:
+            continue
+        indices.append(
+            WidgetIndexResponse(
+                symbol=symbol,
+                label=label,
+                change_percent=round(chg, 2) if chg is not None else None,
+                price=round(price, 2) if price is not None else None,
+            )
+        )
+
+    usable = [(n, c) for n, c in (sectors or []) if n and c is not None] if sector_available else []
+
+    breadth_up: Optional[int] = None
+    breadth_total: Optional[int] = None
+    lead_name = lead_chg = lag_name = lag_chg = None
+    if usable:
+        breadth_total = len(usable)
+        breadth_up = sum(1 for _, c in usable if c > 0)
+        ordered = sorted(usable, key=lambda kv: kv[1], reverse=True)
+        lead_name, lead_chg = ordered[0]
+        lag_name, lag_chg = ordered[-1]
+        # One sector cannot be both the best and the worst. With a single readable
+        # sector, naming a leader AND a laggard would print the same row twice.
+        if len(ordered) < 2:
+            lag_name = lag_chg = None
+
+    if not indices and breadth_total is None:
+        return None
+
+    # The sentence, built once, server-side — same posture as `basket.text`, so the
+    # wording can never contradict the numbers rendered beside it.
+    parts: List[str] = []
+    head = next((i for i in indices if i.change_percent is not None), None)
+    if head is not None:
+        c = head.change_percent
+        # `_dir_word` answers "rose" or "fell"; neither is true of a flat tape, and
+        # "fell 0.0%" is the kind of self-contradicting phrase this file exists to avoid.
+        parts.append(
+            f"{head.label} flat" if abs(c) < 0.05
+            else f"{head.label} {_dir_word(c)} {_pct(c)}"
+        )
+    if breadth_up is not None and breadth_total:
+        parts.append(f"{breadth_up} of {breadth_total} sectors up")
+    if lead_name and lead_chg is not None and lead_chg > 0:
+        parts.append(f"{lead_name} leads {_pct(lead_chg)}")
+
+    return WidgetMarketContextResponse(
+        indices=indices,
+        breadth_up=breadth_up,
+        breadth_total=breadth_total,
+        leading_sector=lead_name,
+        leading_sector_change_percent=round(lead_chg, 2) if lead_chg is not None else None,
+        lagging_sector=lag_name,
+        lagging_sector_change_percent=round(lag_chg, 2) if lag_chg is not None else None,
+        text=" · ".join(parts) if parts else None,
+    )
 
 
 def _better_earnings_row(candidate: Dict[str, Any], incumbent: Dict[str, Any]) -> bool:
@@ -604,8 +743,8 @@ class WidgetMoversService:
 
     async def _build_market(self) -> WidgetMoverPayload:
         tickers = await self._swept_universe()
-        ranked, cards, news_ok = await self._rank_and_read(tickers)
-        ctx = await self._market_context([m.ticker for m in ranked])
+        ranked, cards, news_ok, index_rows = await self._rank_and_read(tickers)
+        ctx = await self._market_context([m.ticker for m in ranked], index_rows)
         ctx = replace(ctx, news_available=news_ok)
         grades = await self._head_grades(ranked)
         return self._payload(
@@ -617,10 +756,10 @@ class WidgetMoversService:
     async def _build_portfolio(
         self, user_id: str, tickers: Sequence[str]
     ) -> WidgetMoverPayload:
-        ranked, cards, news_ok = await self._rank_and_read(tickers)
+        ranked, cards, news_ok, index_rows = await self._rank_and_read(tickers)
         symbols = [m.ticker for m in ranked]
         ctx, sectors, grades = await asyncio.gather(
-            self._market_context(symbols),
+            self._market_context(symbols, index_rows),
             self._sectors(user_id, symbols),
             self._head_grades(ranked),
             return_exceptions=True,
@@ -644,7 +783,11 @@ class WidgetMoversService:
 
     # ── same-day context (the whole cost story) ──────────────────────
 
-    async def _market_context(self, tickers: Sequence[str]) -> "_MarketContext":
+    async def _market_context(
+        self,
+        tickers: Sequence[str],
+        index_rows: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> "_MarketContext":
         """Two universe-wide FMP calls plus one batched Supabase read.
 
         Cached for an hour because none of it changes intraday in a way that would
@@ -662,7 +805,7 @@ class WidgetMoversService:
             if (
                 shared.industry_available
                 or shared.earnings_available
-                or shared.market_available
+                or shared.sector_available
             ):
                 self._ctx_cache = (time.monotonic(), shared)
             else:
@@ -690,7 +833,9 @@ class WidgetMoversService:
         # `ctx.ticker_industry` in place with further awaits afterwards — so the two
         # builds erased each other's map and the market tile reported "no catalyst" for
         # a plainly sector-driven move.
-        return shared.for_tickers(industry_map, session_trading_date().isoformat())
+        return shared.for_tickers(
+            industry_map, session_trading_date().isoformat(), index_rows
+        )
 
     async def _industry_for_one(self, ticker: str) -> Optional[str]:
         try:
@@ -748,15 +893,37 @@ class WidgetMoversService:
                     out[sym] = r
             return out
 
-        async def _market():
-            rows = await fmp.get_batch_quotes_bulk([MARKET_INDEX_SYMBOL])
-            for r in rows or []:
-                if str(r.get("symbol") or "").upper() == MARKET_INDEX_SYMBOL:
-                    return finite(r.get("changePercentage"))
-            return None
+        # NOTE: there is deliberately NO index leg here any more.
+        #
+        # `^GSPC`'s intraday `changePercentage` used to be fetched in this function and
+        # therefore cached for an hour alongside the earnings calendar — while every
+        # stock's own change was refetched every 60s. `_moved_with_group` then compared a
+        # ≤60s-old stock move against an up-to-3600s-old market move inside a ratio band
+        # of [0.6, 1.7], which is exactly the test mismatched timestamps corrupt. The
+        # indices now ride the universe batch quote in `_rank_and_read`: one call FEWER
+        # than before, and as fresh as the payload itself.
 
-        industry, earnings, market = await asyncio.gather(
-            _industry_perf(), _earnings(), _market(), return_exceptions=True
+        async def _sector_perf():
+            # ONE shared call in the normal case — the dated snapshot covers all 11
+            # sectors, for every user, and lands in the hourly context cache.
+            #
+            # ⚠️ `get_sector_performance` has an ETF FALLBACK (`_sector_perf_from_etfs`)
+            # that fans out ~2 calls per sector ETF when the snapshot is unavailable. That
+            # is ~22 calls, not 1. It is bounded — the hourly cache caps it at 24 rounds a
+            # day for the whole product, and it is still O(1) in user count — but it is
+            # why this leg must stay inside `_ctx_cache` and must never be moved onto the
+            # 60-second payload path.
+            rows = await fmp.get_sector_performance()
+            out: List[Tuple[str, float]] = []
+            for r in rows or []:
+                name = str(r.get("sector") or "").strip()
+                chg = finite(r.get("changesPercentage") or r.get("averageChange"))
+                if name and chg is not None:
+                    out.append((name, chg))
+            return out
+
+        industry, earnings, sectors = await asyncio.gather(
+            _industry_perf(), _earnings(), _sector_perf(), return_exceptions=True
         )
         ctx = _MarketContext()
         # Each leg degrades independently: losing the earnings calendar must not cost
@@ -783,13 +950,14 @@ class WidgetMoversService:
                 "widget: earnings calendar failed (%s: %s)",
                 type(earnings).__name__, earnings,
             )
-        if not isinstance(market, BaseException):
-            ctx.market_change = market
-            ctx.market_available = True
+        if isinstance(sectors, list):
+            ctx.sector_changes = sectors
+            ctx.sector_available = True
         else:
             logger.warning(
-                "widget: market quote failed (%s: %s)",
-                type(market).__name__, market,
+                "widget: sector snapshot failed (%s: %s) — breadth will be omitted "
+                "rather than reported as zero",
+                type(sectors).__name__, sectors,
             )
         return ctx
 
@@ -941,13 +1109,30 @@ class WidgetMoversService:
                 ranked[0], cards=cards, ctx=ctx, today=today,
                 today_iso=today_iso, grade_rows=head_grades,
             )
+            # ONE ROW PER TICKER, and the headline never repeats below itself.
+            #
+            # `rank_movers` deliberately keeps duplicates ("dedup is the caller's job"),
+            # and `_swept_universe` trusts the RPC to be unique. That contract ends here:
+            # iOS renders these with `ForEach(id: \.ticker)`, and duplicate ids are
+            # undefined behaviour in SwiftUI — on a Home Screen, with no way for the user
+            # to recover. Cheap to guarantee, so guarantee it.
+            seen = {ranked[0].ticker}
+            deduped = []
+            for m in ranked[1:]:
+                if m.ticker in seen:
+                    continue
+                seen.add(m.ticker)
+                deduped.append(m)
+                if len(deduped) >= _RUNNERS_UP - 1:
+                    break
+
             # Runners-up get everything except the per-ticker grades lookup, which is
             # the only paid call in the chain and is spent on the headline alone.
             runners = [
                 self._build_mover(
                     m, cards=cards, ctx=ctx, today=today, today_iso=today_iso
                 )
-                for m in ranked[1:_RUNNERS_UP]
+                for m in deduped
             ]
 
         return WidgetMoverPayload(
@@ -961,6 +1146,10 @@ class WidgetMoversService:
             session_date=today_iso,
             session_label=session_label(),
             scope_label=scope_label,
+            market_context=build_market_context(
+                ctx.index_rows, ctx.sector_changes,
+                sector_available=ctx.sector_available,
+            ),
             headline_mover=head,
             basket=basket,
             runners_up=runners,
@@ -992,13 +1181,17 @@ class WidgetMoversService:
 
     async def _rank_and_read(
         self, tickers: Sequence[str]
-    ) -> Tuple[List[RankedMover], Dict[str, Optional[Dict[str, Any]]]]:
+    ) -> Tuple[List[RankedMover], Dict[str, Optional[Dict[str, Any]]], bool, Dict[str, Dict[str, Any]]]:
         symbols = [t.upper() for t in dict.fromkeys(tickers) if t]
         if not symbols:
-            return [], {}
+            return [], {}, True, {}
 
+        # The indices ride along on the SAME request — `batch-quote` chunks at 300 and the
+        # universe is capped at 200, so this is free. They are excluded from ranking
+        # below; an index is not a "mover" the widget can attribute.
+        index_syms = [s for s, _ in _INDEX_SYMBOLS]
         quotes, sigmas = await asyncio.gather(
-            self._quotes(symbols),
+            self._quotes(symbols + [s for s in index_syms if s not in symbols]),
             get_volatility_cache_service().get_sigmas_bulk(symbols),
             return_exceptions=True,
         )
@@ -1048,7 +1241,8 @@ class WidgetMoversService:
                 "not check, not that there was nothing",
                 type(e).__name__, e,
             )
-        return ranked, cards, news_available
+        index_rows = {s: (quotes.get(s) or {}) for s in index_syms if quotes.get(s)}
+        return ranked, cards, news_available, index_rows
 
     async def _quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         rows = await get_fmp_client().get_batch_quotes_bulk(symbols)

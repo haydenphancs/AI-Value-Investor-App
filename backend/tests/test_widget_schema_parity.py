@@ -26,6 +26,8 @@ import pytest
 from app.schemas.widget import (
     WidgetBasketResponse,
     WidgetCauseResponse,
+    WidgetIndexResponse,
+    WidgetMarketContextResponse,
     WidgetMoveContextResponse,
     WidgetMoverPayload,
     WidgetMoverResponse,
@@ -45,7 +47,16 @@ _PAYLOAD_KEYS = {
     # Which universe the movers came from — an empty active group falls back to market
     # data, and nothing used to tell the user their "My Holdings" tile showed the market.
     "scope_label",
+    # How the market itself did — the band the tile leads with.
+    "market_context",
 }
+_MARKET_CONTEXT_KEYS = {
+    "indices", "breadth_up", "breadth_total",
+    "leading_sector", "leading_sector_change_percent",
+    "lagging_sector", "lagging_sector_change_percent",
+    "text",
+}
+_INDEX_KEYS = {"symbol", "label", "change_percent", "price"}
 _MOVER_KEYS = {
     "ticker", "company_name", "change_percent", "price", "tier", "z",
     "cause", "context",
@@ -101,6 +112,16 @@ def _full_payload() -> WidgetMoverPayload:
             text="3 of your 5 holdings fell together.",
         ),
         runners_up=[_mover("JOBY")],
+        market_context=WidgetMarketContextResponse(
+            indices=[
+                WidgetIndexResponse(symbol="^GSPC", label="S&P 500",
+                                    change_percent=-0.62, price=6412.1),
+            ],
+            breadth_up=3, breadth_total=11,
+            leading_sector="Energy", leading_sector_change_percent=0.81,
+            lagging_sector="Technology", lagging_sector_change_percent=-1.44,
+            text="S&P 500 fell 0.6% · 3 of 11 sectors up · Energy leads 0.8%",
+        ),
     )
 
 
@@ -112,6 +133,8 @@ def test_every_documented_key_is_present_at_the_documented_level():
     assert set(d["headline_mover"]["context"]) == _CONTEXT_KEYS
     assert set(d["basket"]) == _BASKET_KEYS
     assert set(d["runners_up"][0]) == _MOVER_KEYS
+    assert set(d["market_context"]) == _MARKET_CONTEXT_KEYS
+    assert set(d["market_context"]["indices"][0]) == _INDEX_KEYS
 
 
 def test_field_names_stay_snake_case():

@@ -43,6 +43,50 @@ from pydantic import BaseModel, Field
 
 
 
+class WidgetIndexResponse(BaseModel):
+    """One index in the market band.
+
+    Three of these cost ZERO extra calls: they ride the universe batch quote the service
+    already makes (`get_batch_quotes_bulk` chunks at 300, and the swept universe is 200).
+    They previously rode a SEPARATE call that was cached for an hour — see the note on
+    `_CONTEXT_TTL_SECONDS`.
+    """
+
+    symbol: str
+    # The display name is owned by the BACKEND, not the client: an already-installed
+    # widget cannot learn that '^RUT' is "Russell 2000" without an app update.
+    label: str
+    # None ⇒ iOS hides the number. Never 0.0 — same rule as `change_percent` below.
+    change_percent: Optional[float] = None
+    price: Optional[float] = None
+
+
+class WidgetMarketContextResponse(BaseModel):
+    """How the market ITSELF is doing — the band the tile leads with.
+
+    Not to be confused with `WidgetMoveContextResponse`, which is arithmetic about one
+    ticker's move. This describes the tape.
+
+    Every field is optional and every leg degrades on its own: losing the sector snapshot
+    must not cost the indices, and vice versa.
+    """
+
+    indices: List["WidgetIndexResponse"] = Field(default_factory=list)
+    # Breadth over the 11 SECTORS, which is a real population — so "8 of 11" is a defined
+    # statistic. Deliberately not computed from FMP's biggest-gainers list: that is a
+    # top-50 cut, not a population, and "how many are up" in it is meaningless.
+    breadth_up: Optional[int] = None
+    breadth_total: Optional[int] = None
+    leading_sector: Optional[str] = None
+    leading_sector_change_percent: Optional[float] = None
+    lagging_sector: Optional[str] = None
+    lagging_sector_change_percent: Optional[float] = None
+    # The rendered sentence, deterministic — same posture as `basket.text` and
+    # `cause.detail`: the wording lives in ONE place and can never contradict the numbers
+    # printed beside it. None when nothing was readable.
+    text: Optional[str] = None
+
+
 class WidgetMoverResponse(BaseModel):
     """The single ticker the widget leads with."""
 
@@ -171,6 +215,10 @@ class WidgetMoverPayload(BaseModel):
     # was showing the market.
     scope_label: Optional[str] = None
 
+    # How the market itself did. Absent only when every leg failed — the tile then leads
+    # with the mover, exactly as it did before this field existed.
+    market_context: Optional[WidgetMarketContextResponse] = None
+
     # None only when nothing was readable — an empty portfolio falls back to market
     # mode at the endpoint, so this is absent far less often than it used to be.
     headline_mover: Optional[WidgetMoverResponse] = None
@@ -182,3 +230,4 @@ class WidgetMoverPayload(BaseModel):
 
 
 WidgetMoverResponse.model_rebuild()
+WidgetMarketContextResponse.model_rebuild()

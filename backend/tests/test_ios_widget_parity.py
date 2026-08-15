@@ -191,6 +191,8 @@ def _swift_coding_keys(struct: str) -> set[str]:
         ("WidgetMover", "WidgetMoverResponse"),
         ("WidgetBasket", "WidgetBasketResponse"),
         ("WidgetMoveContext", "WidgetMoveContextResponse"),
+        ("WidgetMarketContext", "WidgetMarketContextResponse"),
+        ("WidgetIndex", "WidgetIndexResponse"),
     ],
 )
 def test_swift_decodes_every_field_the_backend_sends(swift_struct, pydantic_model):

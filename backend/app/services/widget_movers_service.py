@@ -66,7 +66,7 @@ import asyncio
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -83,7 +83,12 @@ from app.services.daily_move_attribution import attribute
 from app.services.news_insight_service import get_news_insight_service
 from app.services.updates_materiality import classify_move, finite, move_z
 from app.services.volatility_cache_service import get_volatility_cache_service
-from app.utils.market_hours import ET, session_phase
+from app.utils.market_hours import (
+    ET,
+    session_label,
+    session_phase,
+    session_trading_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +114,17 @@ _BASKET_SECTOR_SHARE = 2.0 / 3.0
 
 _MEM_TTL_SECONDS = 60
 
+# Which universe the movers were drawn from. Sent so the tile can SAY it: an empty
+# active group falls back to market data at the endpoint, and nothing used to tell the
+# user their "My Holdings" widget was showing the market.
+_SCOPE_MARKET = "The stocks Caydex tracks"
+_SCOPE_PORTFOLIO = "Your holdings"
+
+# `_cache` is keyed by user id + ticker set, so its key space is unbounded across users.
+# Every sibling service in this repo bounds its cache; this one did not, and a widget is
+# polled unattended by WidgetKit rather than driven by someone looking at a screen.
+_CACHE_MAX_ENTRIES = 2000
+
 # How many movers the payload carries. 1 headline + 3 runners-up fills the large
 # family without a second round trip; the service already reads their cards.
 _RUNNERS_UP = 4
@@ -131,6 +147,21 @@ class _MarketContext:
     move rides on the batch quote already fetched. So attributing 200 movers costs the
     same two calls as attributing one — versus a per-ticker paid web search, which is
     what the old design did.
+
+    ⚠️ TREAT INSTANCES HELD IN `_ctx_cache` AS IMMUTABLE. This object is shared by every
+    concurrent caller in the cache window, and the iOS app fires BOTH widget routes at
+    once on every launch and foreground. An earlier version assigned `ctx.ticker_industry`
+    per request directly onto the cached instance, with further `await`s afterwards — so
+    the market build and the portfolio build erased each other's industry map and the
+    market tile reported "no catalyst" for a plainly sector-driven move. Use
+    `for_tickers()` to derive a per-request view instead.
+
+    THE `*_available` FLAGS EXIST BECAUSE SILENCE IS NOT A FINDING. Each leg degrades
+    independently, which is right, but an empty `industry_changes` is ambiguous: it means
+    either "checked, nothing to report" or "the call failed". `describe_no_cause` asserts
+    a NEGATIVE ("No clear catalyst in today's news"), and asserting a negative you never
+    actually checked is a lie on someone's Home Screen. So availability travels with the
+    data.
     """
 
     market_change: Optional[float] = None
@@ -141,10 +172,64 @@ class _MarketContext:
     # ticker -> today's/yesterday's earnings-calendar row
     earnings: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    # Which legs actually answered. False ⇒ we know nothing, NOT "nothing happened".
+    industry_available: bool = False
+    earnings_available: bool = False
+    market_available: bool = False
+    # ET date (YYYY-MM-DD) the industry snapshot itself describes. FMP's
+    # `industry-performance-snapshot` walks back to the last trading day, so on a Monday
+    # morning it legitimately returns FRIDAY's numbers — which must not be compared
+    # against a live Monday quote. None ⇒ unknown, and the comparison is refused.
+    industry_snapshot_date: Optional[str] = None
+    # True when the news-card read succeeded. Same reasoning as the flags above: a failed
+    # Supabase read must not become "no company news today".
+    news_available: bool = True
+    # The ET session being attributed (YYYY-MM-DD). Compared against
+    # `industry_snapshot_date` to refuse a cross-session comparison.
+    session_date: Optional[str] = None
+
+    def for_tickers(
+        self, ticker_industry: Dict[str, str], session_date: str
+    ) -> "_MarketContext":
+        """A per-request view over the shared universe-wide facts.
+
+        Shallow by design: the universe-wide maps are read-only after the fetch, so
+        sharing them is safe and copying them per request would be pure waste. Only the
+        per-request fields are replaced.
+
+        `session_date` is set HERE rather than at fetch time because the context is cached
+        for up to an hour and the session can roll over inside that window — a context
+        filled at 19:59 ET and read at 20:01 belongs to a different session date.
+        """
+        return replace(
+            self, ticker_industry=ticker_industry, session_date=session_date
+        )
+
     def industry_for(self, ticker: str) -> tuple[Optional[str], Optional[float]]:
+        """The ticker's industry and TODAY's move for it — or the name alone.
+
+        Returning `(name, None)` rather than `(name, stale_number)` is the point. Every
+        other dated input in the attribution chain is age-gated (earnings by
+        `_EARNINGS_MAX_AGE_DAYS`, grades by `_GRADE_MAX_AGE_DAYS`, news by the card's ET
+        date); the industry figure was the only one that was not, so a Friday snapshot
+        served on Monday morning printed "Aerospace & Defense fell 1.2% TODAY" and could
+        manufacture a whole SECTOR cause out of the previous session.
+
+        `FMPClient._latest_perf_snapshot` walks back to the last trading day by design, so
+        receiving an older date is normal operation, not an error — which is exactly why
+        it has to be checked rather than assumed.
+        """
         name = self.ticker_industry.get(ticker.upper())
         if not name:
             return None, None
+        if not self.industry_available:
+            return name, None
+        if (
+            self.industry_snapshot_date
+            and self.session_date
+            and self.industry_snapshot_date != self.session_date
+        ):
+            return name, None
         return name, self.industry_changes.get(name.strip().lower())
 
     def earnings_for(self, ticker: str) -> Optional[Dict[str, Any]]:
@@ -260,7 +345,9 @@ def _et_date(value: Any) -> Optional[str]:
     return dt.astimezone(ET).date().isoformat()
 
 
-def _classified_today_news(card: Optional[Dict[str, Any]], today_et: str) -> tuple[list, bool]:
+def _classified_today_news(
+    card: Optional[Dict[str, Any]], today_et: str
+) -> tuple[list, bool, bool]:
     """Today's headlines, run through the EXISTING catalyst classifier.
 
     Reuses `_classify_news_catalyst` / `NEWS_CATALYST_KEYWORDS` from the report
@@ -268,16 +355,28 @@ def _classified_today_news(card: Optional[Dict[str, Any]], today_et: str) -> tup
     in exactly one place. Only the card's own headline is available here, and only when
     the card was generated TODAY — a 48h roll-up is not a same-day catalyst.
 
-    Returns `(classified, had_news)` so the no-cause sentence can distinguish "no news
-    at all" from "news, but nothing that explains a move".
+    Returns `(classified, had_news, checked)` — THREE states, not two:
+
+    * `checked=False` — there is no insight row for this ticker at all. `get_cards`
+      returns None for a scope it has never stored or whose card expired, and that is
+      NOT the same as "the sweeper looked and found nothing". It is most reachable in
+      portfolio mode, where holdings are the caller's own and need not be inside the
+      swept top-200 universe at all — so the tile would confidently announce "No company
+      news today" about a ticker nothing has ever examined.
+    * `checked=True, had_news=False` — a card exists but is not from today's session.
+      The sweeper HAS covered this ticker and has nothing current, which is a real
+      finding and may be stated.
+    * `checked=True, had_news=True` — news exists; whether it explains the move is the
+      classifier's business.
     """
     if not isinstance(card, dict):
-        return [], False
+        return [], False, False
     if _et_date(card.get("generated_at")) != today_et:
-        return [], False
+        # Covered, nothing from today's session — a genuine negative.
+        return [], False, True
     headline = str(card.get("headline") or "").strip()
     if not headline:
-        return [], False
+        return [], False, True
 
     try:
         from app.services.agents.ticker_report_data_collector import (
@@ -289,8 +388,24 @@ def _classified_today_news(card: Optional[Dict[str, Any]], today_et: str) -> tup
         logger.warning(
             "widget: news classifier unavailable (%s: %s)", type(e).__name__, e
         )
-        return [], True
-    return ([(tag, headline)] if tag else []), True
+        return [], True, True
+    return ([(tag, headline)] if tag else []), True, True
+
+
+def _better_earnings_row(candidate: Dict[str, Any], incumbent: Dict[str, Any]) -> bool:
+    """Prefer the row that actually REPORTED, then the more recent one.
+
+    The window is two days wide, so a symbol can appear twice — and `setdefault` kept
+    whichever one FMP happened to serialise first. That is arbitrary, and it is
+    arbitrary in a way that matters: a row carrying `epsActual` is an event that
+    happened, while a row without one is a schedule. Picking the schedule over the
+    result loses the beat/miss and can suppress the attribution entirely.
+    """
+    cand_reported = finite(candidate.get("epsActual")) is not None
+    inc_reported = finite(incumbent.get("epsActual")) is not None
+    if cand_reported != inc_reported:
+        return cand_reported
+    return str(candidate.get("date") or "") > str(incumbent.get("date") or "")
 
 
 def _moved(m: RankedMover) -> bool:
@@ -414,7 +529,20 @@ class WidgetMoversService:
         return await self._cached("market", self._build_market)
 
     async def get_portfolio_mover(self, user_id: str, tickers: Sequence[str]) -> WidgetMoverPayload:
-        key = "portfolio:" + ",".join(sorted({t.upper() for t in tickers if t}))
+        # KEYED ON THE USER, not just the ticker set.
+        #
+        # The build is not a pure function of the tickers: `_build_portfolio` calls
+        # `_sectors(user_id, ...)`, which fills sector gaps from the CALLER'S OWN
+        # `watchlist_items.sector` rows. Two users holding the same names therefore
+        # shared a cached `basket.factor_label` derived from one of them's private
+        # annotations. Ticker-only keying also becomes an outright financial-data leak
+        # the moment anything per-user (a weighting, a value) enters this payload.
+        #
+        # The cost is losing cross-user dedup for portfolio mode; collision on an exact
+        # 30-ticker set is vanishingly rare, so in practice nothing is lost.
+        key = "portfolio:" + user_id + ":" + ",".join(
+            sorted({t.upper() for t in tickers if t})
+        )
         return await self._cached(key, lambda: self._build_portfolio(user_id, tickers))
 
     # ── cache plumbing ───────────────────────────────────────────────
@@ -432,6 +560,7 @@ class WidgetMoversService:
         self._inflight[key] = fut
         try:
             payload = await build()
+            self._evict_expired()
             self._cache[key] = (time.monotonic(), payload)
             if not fut.done():
                 fut.set_result(payload)
@@ -445,22 +574,50 @@ class WidgetMoversService:
         finally:
             self._inflight.pop(key, None)
 
+    def _evict_expired(self) -> None:
+        """Drop entries no reader can still use, once the map gets large.
+
+        Only runs past the ceiling, so the common path stays a plain dict insert. Entries
+        older than the TTL can never be returned by `_cached` anyway — they are pure
+        retention, and with a per-user key the map would otherwise grow for the life of
+        the process.
+        """
+        if len(self._cache) <= _CACHE_MAX_ENTRIES:
+            return
+        cutoff = time.monotonic() - _MEM_TTL_SECONDS
+        stale = [k for k, (stamp, _) in self._cache.items() if stamp < cutoff]
+        for k in stale:
+            self._cache.pop(k, None)
+        if len(self._cache) > _CACHE_MAX_ENTRIES:
+            # Everything is live and we are still over: shed the oldest rather than let
+            # the map grow without bound.
+            for k, _ in sorted(self._cache.items(), key=lambda kv: kv[1][0])[
+                : len(self._cache) - _CACHE_MAX_ENTRIES
+            ]:
+                self._cache.pop(k, None)
+        logger.info(
+            "widget: cache swept, %d entries remain (dropped %d expired)",
+            len(self._cache), len(stale),
+        )
+
     # ── builders ─────────────────────────────────────────────────────
 
     async def _build_market(self) -> WidgetMoverPayload:
         tickers = await self._swept_universe()
-        ranked, cards = await self._rank_and_read(tickers)
+        ranked, cards, news_ok = await self._rank_and_read(tickers)
         ctx = await self._market_context([m.ticker for m in ranked])
+        ctx = replace(ctx, news_available=news_ok)
         grades = await self._head_grades(ranked)
         return self._payload(
             mode="market", ranked=ranked, cards=cards, ctx=ctx,
             basket=None, head_grades=grades,
+            scope_label=_SCOPE_MARKET,
         )
 
     async def _build_portfolio(
         self, user_id: str, tickers: Sequence[str]
     ) -> WidgetMoverPayload:
-        ranked, cards = await self._rank_and_read(tickers)
+        ranked, cards, news_ok = await self._rank_and_read(tickers)
         symbols = [m.ticker for m in ranked]
         ctx, sectors, grades = await asyncio.gather(
             self._market_context(symbols),
@@ -477,10 +634,12 @@ class WidgetMoversService:
         if isinstance(grades, BaseException):
             logger.warning("widget: grades read failed: %s", grades)
             grades = None
+        ctx = replace(ctx, news_available=news_ok)
 
         return self._payload(
             mode="portfolio", ranked=ranked, cards=cards, ctx=ctx,
             basket=detect_basket(ranked, sectors), head_grades=grades,
+            scope_label=_SCOPE_PORTFOLIO,
         )
 
     # ── same-day context (the whole cost story) ──────────────────────
@@ -494,14 +653,26 @@ class WidgetMoversService:
         """
         hit = self._ctx_cache
         if hit and (time.monotonic() - hit[0]) < _CONTEXT_TTL_SECONDS:
-            ctx = hit[1]
+            shared = hit[1]
         else:
-            ctx = await self._fetch_market_context()
-            self._ctx_cache = (time.monotonic(), ctx)
+            shared = await self._fetch_market_context()
+            # Do NOT pin a context in which every leg failed. Caching it turns one bad
+            # minute upstream into a full hour of "no clear catalyst in today's news" —
+            # a confident negative produced entirely by an outage.
+            if (
+                shared.industry_available
+                or shared.earnings_available
+                or shared.market_available
+            ):
+                self._ctx_cache = (time.monotonic(), shared)
+            else:
+                logger.warning(
+                    "widget: every market-context leg failed — not caching, will retry"
+                )
 
         # The ticker→industry map is per-request (it depends on which tickers we are
         # attributing), but it is one batched select against a shared cache table.
-        ctx.ticker_industry = await self._industries(tickers)
+        industry_map = await self._industries(tickers)
 
         # `company_profile_cache` is populated lazily on ticker-detail views, so a
         # newer or less-visited name can be missing — measured: ACHR and JOBY were,
@@ -509,11 +680,17 @@ class WidgetMoversService:
         # the gap for the HEADLINE ticker only: one FMP call, spent on the one line
         # the reader actually looks at. Runners-up degrade to no industry line.
         head = tickers[0].upper() if tickers else None
-        if head and head not in ctx.ticker_industry:
+        if head and head not in industry_map:
             name = await self._industry_for_one(head)
             if name:
-                ctx.ticker_industry[head] = name
-        return ctx
+                industry_map[head] = name
+
+        # Derive a per-request VIEW. Never write onto the shared cached instance: the
+        # iOS app fires both widget routes concurrently, and an earlier version assigned
+        # `ctx.ticker_industry` in place with further awaits afterwards — so the two
+        # builds erased each other's map and the market tile reported "no catalyst" for
+        # a plainly sector-driven move.
+        return shared.for_tickers(industry_map, session_trading_date().isoformat())
 
     async def _industry_for_one(self, ticker: str) -> Optional[str]:
         try:
@@ -532,17 +709,30 @@ class WidgetMoversService:
 
     async def _fetch_market_context(self) -> "_MarketContext":
         fmp = get_fmp_client()
-        today = datetime.now(ET).date()
+        # The SESSION being attributed, so the earnings window matches the day the
+        # detectors gate on. With the wall clock, a Saturday build fetched Fri..Sat while
+        # `attribute()` was gating on Friday — so a Thursday-evening report, which is
+        # inside the t-1 window for a Friday session, was never even fetched.
+        today = session_trading_date()
 
         async def _industry_perf():
             rows = await fmp.get_industry_performance()
             out: Dict[str, float] = {}
+            # FMP stamps every row with the session it describes, and
+            # `_latest_perf_snapshot` deliberately walks back to the last trading day —
+            # so on a Monday morning these are legitimately FRIDAY's numbers. Keep the
+            # date; `industry_for` refuses to print a cross-session comparison as "today".
+            snap_date: Optional[str] = None
             for r in rows or []:
+                if snap_date is None:
+                    d = str(r.get("date") or "").strip()
+                    if d:
+                        snap_date = d[:10]
                 name = str(r.get("industry") or "").strip().lower()
                 chg = finite(r.get("changesPercentage") or r.get("averageChange"))
                 if name and chg is not None:
                     out[name] = chg
-            return out
+            return out, snap_date
 
         async def _earnings():
             rows = await fmp.get_earnings_calendar(
@@ -551,8 +741,11 @@ class WidgetMoversService:
             out: Dict[str, Dict[str, Any]] = {}
             for r in rows or []:
                 sym = str(r.get("symbol") or "").upper()
-                if sym:
-                    out.setdefault(sym, r)
+                if not sym:
+                    continue
+                prior = out.get(sym)
+                if prior is None or _better_earnings_row(r, prior):
+                    out[sym] = r
             return out
 
         async def _market():
@@ -568,18 +761,36 @@ class WidgetMoversService:
         ctx = _MarketContext()
         # Each leg degrades independently: losing the earnings calendar must not cost
         # us the industry attribution.
-        if isinstance(industry, dict):
-            ctx.industry_changes = industry
+        #
+        # The `*_available` flag is set ONLY on success, and is what stops a failure
+        # being reported downstream as a checked negative. An empty dict from a
+        # successful call ("no industries moved enough to report") and an empty dict
+        # from a 429 are the same value; only the flag tells them apart.
+        if isinstance(industry, tuple):
+            ctx.industry_changes, ctx.industry_snapshot_date = industry
+            ctx.industry_available = True
         else:
-            logger.warning("widget: industry snapshot failed: %s", industry)
+            logger.warning(
+                "widget: industry snapshot failed (%s: %s) — industry comparison "
+                "will be omitted rather than reported as absent",
+                type(industry).__name__, industry,
+            )
         if isinstance(earnings, dict):
             ctx.earnings = earnings
+            ctx.earnings_available = True
         else:
-            logger.warning("widget: earnings calendar failed: %s", earnings)
+            logger.warning(
+                "widget: earnings calendar failed (%s: %s)",
+                type(earnings).__name__, earnings,
+            )
         if not isinstance(market, BaseException):
             ctx.market_change = market
+            ctx.market_available = True
         else:
-            logger.warning("widget: market quote failed: %s", market)
+            logger.warning(
+                "widget: market quote failed (%s: %s)",
+                type(market).__name__, market,
+            )
         return ctx
 
     async def _head_grades(
@@ -646,7 +857,9 @@ class WidgetMoversService:
         today_iso: str,
         grade_rows: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> WidgetMoverResponse:
-        classified, had_news = _classified_today_news(cards.get(m.ticker), today_iso)
+        classified, had_news, card_checked = _classified_today_news(
+            cards.get(m.ticker), today_iso
+        )
         industry = ctx.industry_for(m.ticker)
 
         a = attribute(
@@ -663,6 +876,9 @@ class WidgetMoversService:
             grade_rows=grade_rows,
             classified_news=classified,
             had_news=had_news,
+            # Both must hold: the batched read has to have succeeded AND this particular
+            # ticker has to have an insight row behind it.
+            news_checked=ctx.news_available and card_checked,
         )
         # `attribute` returns None only for an unreadable move, which `rank_movers`
         # has already filtered out — but degrade rather than crash if that changes.
@@ -707,8 +923,15 @@ class WidgetMoversService:
         ctx: "_MarketContext",
         basket: Optional[WidgetBasketResponse],
         head_grades: Optional[Sequence[Dict[str, Any]]] = None,
+        scope_label: Optional[str] = None,
     ) -> WidgetMoverPayload:
-        today = datetime.now(ET).date()
+        # The SESSION date, not the wall clock. Every detector below is gated on this:
+        # earnings rows, analyst grades and news cards are all stamped with a trading
+        # day. Using `datetime.now(ET).date()` meant that on a Saturday — when the quotes
+        # being described are Friday's close — nothing could match, so every detector
+        # went dark AND the tile still asserted "No company news today." A confident
+        # negative produced by asking about the wrong day.
+        today = session_trading_date()
         today_iso = today.isoformat()
 
         head: Optional[WidgetMoverResponse] = None
@@ -731,6 +954,13 @@ class WidgetMoversService:
             mode=mode,
             as_of=_iso_now(),
             market_session=session_phase(),
+            # The session these numbers describe, and the sentence that names it. The
+            # client re-derives an aged label from `session_date` at RENDER time, which
+            # is how a Friday snapshot read on Sunday says "Fri close" instead of
+            # silently presenting Friday's −5% as today's.
+            session_date=today_iso,
+            session_label=session_label(),
+            scope_label=scope_label,
             headline_mover=head,
             basket=basket,
             runners_up=runners,
@@ -799,8 +1029,26 @@ class WidgetMoversService:
         # Only the head needs a card today, but reading the top few keeps the door
         # open for a large-family widget listing runners-up without a second round
         # trip — and `get_cards` is one batched select regardless.
-        cards = await get_news_insight_service().get_cards([m.ticker for m in ranked[:5]])
-        return ranked, cards
+        #
+        # BEST-EFFORT. This read is the least important thing on the tile and it used to
+        # be the most dangerous: unwrapped, one Supabase hiccup propagated to the route's
+        # catch-all and returned the EMPTY payload — discarding the mover, the price, the
+        # σ multiple and the industry comparison that were all already in hand. A widget
+        # whose news lookup failed should lose its news line, not its contents.
+        cards: Dict[str, Optional[Dict[str, Any]]] = {}
+        news_available = True
+        try:
+            cards = await get_news_insight_service().get_cards(
+                [m.ticker for m in ranked[:_RUNNERS_UP + 1]]
+            )
+        except Exception as e:
+            news_available = False
+            logger.warning(
+                "widget: news cards unavailable (%s: %s) — the tile will say it could "
+                "not check, not that there was nothing",
+                type(e).__name__, e,
+            )
+        return ranked, cards, news_available
 
     async def _quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         rows = await get_fmp_client().get_batch_quotes_bulk(symbols)

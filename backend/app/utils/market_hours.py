@@ -3,7 +3,7 @@ US Market Hours Utility
 Determines whether US equity markets are in an active trading session.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
@@ -141,3 +141,111 @@ def is_market_active(now: datetime | None = None) -> bool:
     ``now`` is injectable for tests; production calls it with no argument.
     """
     return session_phase(now) != SESSION_CLOSED
+
+
+# ── Which SESSION a set of numbers describes ──────────────────────────
+#
+# `session_phase` answers "what is happening right now". That is a different
+# question from "which trading day do these numbers belong to", and conflating
+# them is what let a Friday snapshot render on Monday with no label: the phase
+# on Monday morning is `premarket`, so a phase-only reading calls Friday's close
+# "pre-market" and says nothing about the date.
+#
+# The date is the honest anchor. It lets a client re-derive "Fri close" at RENDER
+# time, days later, without anyone having to keep a staleness flag true.
+
+
+def _close_minute(d: date) -> int:
+    """Minute-of-day the tape shuts on ``d`` — 13:00 ET on a half-day, else 16:00."""
+    return (
+        _EARLY_CLOSE
+        if (d.year, d.month, d.day) in US_MARKET_EARLY_CLOSES
+        else _REGULAR_CLOSE
+    )
+
+
+def is_trading_day(d: date) -> bool:
+    """True when the tape opens at all on ``d``. Half-days ARE trading days."""
+    if d.weekday() >= 5:
+        return False
+    return (d.year, d.month, d.day) not in US_MARKET_HOLIDAYS
+
+
+def previous_trading_day(d: date) -> date:
+    """The most recent trading day strictly before ``d``.
+
+    Bounded rather than a `while True`: the longest US market closure in modern
+    history is four consecutive sessions, so ten calendar days cannot be exhausted
+    by a real calendar. An unbounded loop here would hang a request on a malformed
+    holiday table instead of returning a slightly wrong date, and a widget that
+    hangs is worse than a widget that is a day off.
+    """
+    probe = d - timedelta(days=1)
+    for _ in range(10):
+        if is_trading_day(probe):
+            return probe
+        probe -= timedelta(days=1)
+    return probe
+
+
+def session_trading_date(now: datetime | None = None) -> date:
+    """The ET calendar date of the session the current numbers describe.
+
+    Not "today". At 03:00 ET on a Tuesday the freshest quotes available are
+    Monday's close, and calling them Tuesday's is the lie this function exists to
+    prevent.
+
+        premarket / regular / afterhours  -> today (the session is live or just was)
+        closed, and today's close already happened -> today
+        anything else                     -> the previous trading day
+
+    "Today's close already happened" is minute-of-day past the close, which is
+    13:00 on a half-day. That matters: on the Friday after Thanksgiving at 14:00 ET
+    `session_phase` returns `closed`, but the session did happen and the numbers
+    are that Friday's.
+    """
+    if now is None:
+        now = datetime.now(ET)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(ET)
+    today = now.date()
+
+    if session_phase(now) != SESSION_CLOSED:
+        return today
+
+    if is_trading_day(today) and (now.hour * 60 + now.minute) >= _close_minute(today):
+        return today
+
+    return previous_trading_day(today)
+
+
+def session_label(now: datetime | None = None) -> str:
+    """One short sentence naming the session, true at ``now``.
+
+    Deterministic and built server-side so the wording lives in one place — the
+    same posture as the widget's `cause.detail` and `basket.text`. Clients may
+    DOWNGRADE it as it ages (a "Live" label stops being true within minutes) but
+    never compose their own.
+    """
+    if now is None:
+        now = datetime.now(ET)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(ET)
+
+    phase = session_phase(now)
+    if phase == SESSION_CLOSED:
+        # Name the DAY, because that is the only thing still true tomorrow.
+        return f"{session_trading_date(now).strftime('%a')} close"
+
+    # `%-I` is glibc/BSD-only and silently differs on other libcs; do it by hand.
+    hour12 = now.hour % 12 or 12
+    meridiem = "AM" if now.hour < 12 else "PM"
+    clock = f"{hour12}:{now.minute:02d} {meridiem} ET"
+
+    if phase == SESSION_PREMARKET:
+        return f"Pre-market {clock}"
+    if phase == SESSION_AFTERHOURS:
+        return f"After hours {clock}"
+    return f"Live {clock}"

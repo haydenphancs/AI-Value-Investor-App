@@ -32,6 +32,11 @@ import WidgetKit
 struct MoversEntry: TimelineEntry {
     let date: Date
     let snapshot: WidgetMoverSnapshot?
+    /// What the USER configured this instance to show. Kept alongside the snapshot so the
+    /// views can tell "showing your holdings" from "showing the market because you have
+    /// none" — the payload's own `mode` says what the data IS, this says what was ASKED
+    /// for, and only the pair reveals a mismatch.
+    var configuredMode: MoversMode = .market
     /// True when no snapshot exists at all — first install, or the app has never run.
     var isPlaceholder: Bool { snapshot == nil }
 }
@@ -51,22 +56,59 @@ struct MoversProvider: AppIntentTimelineProvider {
     }
 
     func timeline(for configuration: MoversConfigurationIntent, in context: Context) async -> Timeline<MoversEntry> {
-        // One entry, refreshed on a cadence WidgetKit is free to stretch. Asking for
-        // more is pointless: the content only changes when the APP writes a new
-        // snapshot, and it calls `reloadTimelines` when it does. This interval is the
-        // backstop for "the app has not been opened in a while".
-        let next = Calendar.current.date(byAdding: .minute, value: 20, to: Date()) ?? Date()
-        return Timeline(entries: [entry(for: configuration)], policy: .after(next))
+        // SEVERAL entries over ONE snapshot, not one.
+        //
+        // The content only changes when the APP writes a new snapshot, and it calls
+        // `reloadTimelines` when it does — so re-rendering buys no new DATA. What it buys
+        // is an honest LABEL: `WidgetSessionLabel` derives the time wording at render
+        // time, so a tile written at 14:14 says "Live 2:14 PM ET" now, "As of 2:14 PM ET"
+        // an hour later, and "Fri close" tomorrow — with no fetch, no background task,
+        // and nothing for anyone to keep true. Each entry is the same bytes at a later
+        // clock, which is exactly what the derivation needs.
+        let now = Date()
+        let cal = Calendar.current
+        var dates: [Date] = [now]
+        for minutes in [20, 60, 180] {
+            if let d = cal.date(byAdding: .minute, value: minutes, to: now) { dates.append(d) }
+        }
+        // Cross midnight so "today" becomes "yesterday" without waiting for a refresh.
+        if let midnight = cal.nextDate(
+            after: now, matching: DateComponents(hour: 0, minute: 1),
+            matchingPolicy: .nextTime
+        ) {
+            dates.append(midnight)
+        }
+
+        let snap = snapshot(for: configuration)
+        let entries = dates.map {
+            MoversEntry(date: $0, snapshot: snap, configuredMode: configuration.mode)
+        }
+        let next = dates.last ?? now
+        return Timeline(entries: entries, policy: .after(next))
     }
 
     private func entry(for configuration: MoversConfigurationIntent) -> MoversEntry {
+        MoversEntry(
+            date: Date(),
+            snapshot: snapshot(for: configuration),
+            configuredMode: configuration.mode
+        )
+    }
+
+    private func snapshot(for configuration: MoversConfigurationIntent) -> WidgetMoverSnapshot? {
         let envelope = WidgetSnapshotStore.read()
-        let snap: WidgetMoverSnapshot?
         switch configuration.mode {
-        case .portfolio: snap = envelope?.portfolio ?? envelope?.market
-        case .market:    snap = envelope?.market
+        case .portfolio:
+            // Fall back to market data rather than showing nothing — but the tile MUST
+            // say so. Two independent fallbacks land here (this one, and the backend
+            // serving a market payload on the portfolio route when the caller has no
+            // holdings), and `scopeLabel` travels with the payload precisely so a widget
+            // the user configured as "My Holdings" cannot silently present a stock they
+            // do not own as one of theirs.
+            return envelope?.portfolio ?? envelope?.market
+        case .market:
+            return envelope?.market
         }
-        return MoversEntry(date: Date(), snapshot: snap)
     }
 }
 
@@ -103,9 +145,9 @@ struct MoversWidgetView: View {
         switch family {
         case .accessoryInline:      InlineView(entry: entry)
         case .accessoryRectangular: RectangularView(entry: entry)
-        case .systemSmall:          SmallView(entry: entry)
-        case .systemLarge:          LargeView(entry: entry)
-        default:                    MediumView(entry: entry)
+        case .systemSmall:          SmallView(entry: entry, configured: entry.configuredMode)
+        case .systemLarge:          LargeView(entry: entry, configured: entry.configuredMode)
+        default:                    MediumView(entry: entry, configured: entry.configuredMode)
         }
     }
 }
@@ -115,14 +157,30 @@ struct MoversWidgetView: View {
 /// The change badge. Renders NOTHING when the percentage is unknown — a fabricated
 /// "0.00%" on a stock whose quote we could not read is worse than an absent number.
 private struct ChangeBadge: View {
+    @Environment(\.widgetRenderingMode) private var renderingMode
     let mover: WidgetMover
     var font: Font = .caption.weight(.semibold)
+
+    /// Colour is a REINFORCEMENT of the sign, never the only carrier of direction.
+    ///
+    /// Accessory families render monochrome, and on a tinted Home Screen (iOS 18) or in
+    /// StandBy every colour is flattened into the accent tint — so green and red become
+    /// the same pixel. `formattedChange` always carries an explicit `+`/`-`, which is
+    /// what actually survives; asking for a colour that will be discarded just produces
+    /// a worse contrast ratio in the modes where it is honoured.
+    private var tint: Color {
+        guard renderingMode == .fullColor else { return .primary }
+        if mover.isFlat { return .secondary }
+        return mover.isPositive ? .green : .red
+    }
 
     var body: some View {
         if let text = mover.formattedChange {
             Text(text)
                 .font(font)
-                .foregroundStyle(mover.isPositive ? Color.green : Color.red)
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
     }
 }
@@ -184,23 +242,57 @@ private struct CauseView: View {
     }
 }
 
-/// Says when the data is from, so "−4.8%" is never mistaken for live. The sweeper
-/// sleeps overnight and all weekend; that is normal, not broken.
+/// Says when the data is from, so "−4.8%" is never mistaken for live.
+///
+/// Derived at RENDER time from `session_date` (see `WidgetSessionLabel`) rather than read
+/// from the frozen `market_session` string. The extension cannot fetch, so a stored
+/// wording decays with nothing to update it: this footer used to render an EMPTY string
+/// during regular hours and "After hours" all weekend, which is how a Friday −5% could
+/// sit on a Monday Home Screen with no time cue at all.
 private struct SessionFooter: View {
     let snapshot: WidgetMoverSnapshot
+    /// Supplied by the timeline entry, so each entry re-derives against ITS date.
+    let now: Date
 
     private var label: String {
-        switch snapshot.marketSession {
-        case "closed":     return "At the close"
-        case "premarket":  return "Pre-market"
-        case "afterhours": return "After hours"
-        default:           return ""
-        }
+        WidgetSessionLabel.displayLabel(
+            asOf: snapshot.asOf,
+            sessionDate: snapshot.sessionDate,
+            marketSession: snapshot.marketSession,
+            sessionLabel: snapshot.sessionLabel,
+            now: now
+        )
     }
 
     var body: some View {
         if !label.isEmpty {
-            Text(label).font(.caption2).foregroundStyle(.tertiary)
+            Text(label).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+        }
+    }
+}
+
+/// Names the universe when it is NOT what the widget was configured to show.
+///
+/// A "My Holdings" tile can end up rendering market data two different ways — the backend
+/// serves a market payload when the caller has no holdings, and the provider falls back to
+/// the market slot when no portfolio snapshot exists. Both are reasonable; neither may be
+/// silent. Presenting a stock the user does not own where their own holding belongs is a
+/// misattribution they have no way to detect.
+private struct ScopeBanner: View {
+    let snapshot: WidgetMoverSnapshot
+    let configured: MoversMode
+
+    private var mismatched: Bool {
+        configured == .portfolio && snapshot.mode != "portfolio"
+    }
+
+    var body: some View {
+        if mismatched {
+            Text(snapshot.scopeLabel ?? "The stocks Caydex tracks")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
     }
 }
@@ -217,19 +309,44 @@ private struct RunnerRow: View {
             if let tag = mover.cause.tag, mover.cause.kind.isEstablished {
                 Text(tag).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             } else if let z = mover.z {
-                Text(String(format: "%.1f×", z)).font(.caption2).foregroundStyle(.tertiary)
+                // "0.9× normal", not a bare "0.9×". This sits in the column other rows
+                // use for a cause TAG, so an unlabelled multiplier reads as a reason.
+                Text(String(format: "%.1f× normal", z))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
     }
 }
 
+/// Two DIFFERENT empty states, because they call for different actions.
+///
+/// "No snapshot has ever been written" is fixed by opening the app. "A snapshot exists and
+/// its headline_mover is null" is not — the app has already run, and telling the user to
+/// open it is a dead end that reads as the widget being broken. Collapsing the two into
+/// one message meant the only instruction on the tile was, half the time, useless.
 private struct EmptyStateView: View {
+    /// nil ⇒ nothing has ever been written.
+    let snapshot: WidgetMoverSnapshot?
+    var now: Date = Date()
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Caydex").font(.caption.weight(.semibold))
-            Text("Open the app to load today's movers.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            if let snapshot {
+                Text("No unusual moves to report.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                SessionFooter(snapshot: snapshot, now: now)
+            } else {
+                Text("Open the app to load today's movers.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
     }
 }
@@ -237,21 +354,33 @@ private struct EmptyStateView: View {
 // MARK: - Families
 
 private struct SmallView: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let entry: MoversEntry
+    var configured: MoversMode = .market
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             if let snap = entry.snapshot, let m = snap.headlineMover {
-                Text(m.ticker).font(.headline.weight(.bold))
+                ScopeBanner(snapshot: snap, configured: configured)
+                Text(m.ticker)
+                    .font(.headline.weight(.bold))
+                    // The tile is a FIXED ~155pt with no scrolling, so anything without
+                    // a limit here wraps at accessibility sizes and pushes the cause,
+                    // the context line and the footer straight off the bottom — the
+                    // ticker survives and everything that gives it meaning is clipped.
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
                 ChangeBadge(mover: m, font: .subheadline.weight(.semibold))
                 // No tag at this size: there is not room for both a badge and enough
                 // of the sentence for it to mean anything.
-                CauseView(cause: m.cause, lineLimit: 3, showTag: false)
+                CauseView(cause: m.cause, lineLimit: typeSize.isAccessibilitySize ? 2 : 3, showTag: false)
                 Spacer(minLength: 0)
-                ContextLine(context: m.context, showIndustry: false)
-                SessionFooter(snapshot: snap)
+                if !typeSize.isAccessibilitySize {
+                    ContextLine(context: m.context, showIndustry: false)
+                }
+                SessionFooter(snapshot: snap, now: entry.date)
             } else {
-                EmptyStateView()
+                EmptyStateView(snapshot: entry.snapshot, now: entry.date)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -260,16 +389,18 @@ private struct SmallView: View {
 
 private struct MediumView: View {
     let entry: MoversEntry
+    var configured: MoversMode = .market
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             if let snap = entry.snapshot, let m = snap.headlineMover {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(m.ticker).font(.headline.weight(.bold))
+                    Text(m.ticker).font(.headline.weight(.bold)).lineLimit(1)
                     ChangeBadge(mover: m, font: .subheadline.weight(.semibold))
-                    Spacer()
-                    SessionFooter(snapshot: snap)
+                    Spacer(minLength: 4)
+                    SessionFooter(snapshot: snap, now: entry.date)
                 }
+                ScopeBanner(snapshot: snap, configured: configured)
                 ContextLine(context: m.context)
                 CauseView(cause: m.cause, lineLimit: 3)
                 if let basket = snap.basket {
@@ -278,7 +409,7 @@ private struct MediumView: View {
                 }
                 Spacer(minLength: 0)
             } else {
-                EmptyStateView()
+                EmptyStateView(snapshot: entry.snapshot, now: entry.date)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -287,16 +418,18 @@ private struct MediumView: View {
 
 private struct LargeView: View {
     let entry: MoversEntry
+    var configured: MoversMode = .market
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let snap = entry.snapshot, let m = snap.headlineMover {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(m.ticker).font(.title2.weight(.bold))
+                    Text(m.ticker).font(.title2.weight(.bold)).lineLimit(1)
                     ChangeBadge(mover: m, font: .headline.weight(.semibold))
-                    Spacer()
-                    SessionFooter(snapshot: snap)
+                    Spacer(minLength: 4)
+                    SessionFooter(snapshot: snap, now: entry.date)
                 }
+                ScopeBanner(snapshot: snap, configured: configured)
                 if let name = m.companyName {
                     Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -320,7 +453,7 @@ private struct LargeView: View {
                 }
                 Spacer(minLength: 0)
             } else {
-                EmptyStateView()
+                EmptyStateView(snapshot: entry.snapshot, now: entry.date)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -332,17 +465,20 @@ private struct RectangularView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            if let m = entry.snapshot?.headlineMover {
+            if let snap = entry.snapshot, let m = snap.headlineMover {
                 HStack(spacing: 4) {
                     Text(m.ticker).font(.caption.weight(.bold))
                     if let c = m.formattedChange { Text(c).font(.caption) }
+                    Spacer(minLength: 2)
+                    SessionFooter(snapshot: snap, now: entry.date)
                 }
                 // No colour on the Lock Screen — accessory widgets render monochrome,
                 // so red/green would vanish and the sign is the only cue left.
                 Text(m.cause.detail).font(.caption2).lineLimit(2)
             } else {
                 Text("Caydex").font(.caption.weight(.bold))
-                Text("Open to load movers").font(.caption2)
+                Text(entry.snapshot == nil ? "Open to load movers" : "No unusual moves")
+                    .font(.caption2)
             }
         }
     }
@@ -353,8 +489,17 @@ private struct InlineView: View {
 
     var body: some View {
         // One short line, no wrapping — the system truncates hard here.
-        if let m = entry.snapshot?.headlineMover, let c = m.formattedChange {
-            Text("\(m.ticker) \(c)")
+        //
+        // A KNOWN TICKER IS WORTH SHOWING WITHOUT ITS PERCENTAGE. `change_percent` is
+        // legitimately null while the ticker and cause are valid, and requiring both
+        // collapsed the whole Lock Screen line to the bare word "Caydex" — throwing away
+        // the one fact it had.
+        if let m = entry.snapshot?.headlineMover {
+            if let c = m.formattedChange {
+                Text("\(m.ticker) \(c)")
+            } else {
+                Text(m.ticker)
+            }
         } else {
             Text("Caydex")
         }
@@ -377,6 +522,15 @@ extension WidgetMoverSnapshot {
             mode: "market",
             asOf: Date(),
             marketSession: "regular",
+            sessionDate: {
+                let f = DateFormatter()
+                f.locale = Locale(identifier: "en_US_POSIX")
+                f.timeZone = TimeZone(identifier: "America/New_York")
+                f.dateFormat = "yyyy-MM-dd"
+                return f.string(from: Date())
+            }(),
+            sessionLabel: "Live 2:14 PM ET",
+            scopeLabel: "The stocks Caydex tracks",
             headlineMover: WidgetMover(
                 ticker: "ACHR", companyName: "Archer Aviation Inc.",
                 changePercent: -5.02, price: 6.62, tier: "Notable", z: 1.1,

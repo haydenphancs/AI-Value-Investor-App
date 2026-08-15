@@ -4,7 +4,7 @@
   "author": "Howard Marks",
   "slug": "the-most-important-thing",
   "audio_file": "10_the-most-important-thing.m4a",
-  "voice": "clone:marks_sadaltager",
+  "voice": "clone:sadaltager_contemplative",
   "engine": "chatterbox",
   "target_wpm": null,
   "pitch_semitones": 0,

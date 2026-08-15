@@ -63,14 +63,20 @@ def _empty(mode: str) -> WidgetMoverPayload:
     """Last-resort payload. Renders as the widget's empty state, not an error."""
     from datetime import datetime, timezone
 
-    from app.utils.market_hours import session_phase
+    from app.utils.market_hours import (
+        session_label,
+        session_phase,
+        session_trading_date,
+    )
 
-    phase = session_phase()
+    # Even the empty payload carries an honest time anchor: a blank tile that also
+    # cannot say WHEN it went blank is indistinguishable from a broken one.
     return WidgetMoverPayload(
         mode=mode,
         as_of=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        market_session=phase,
-        is_stale=phase == "closed",
+        market_session=session_phase(),
+        session_date=session_trading_date().isoformat(),
+        session_label=session_label(),
     )
 
 

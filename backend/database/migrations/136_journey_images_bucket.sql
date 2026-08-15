@@ -21,23 +21,25 @@
 -- seed_journey.py already refuses to run when two lessons collide on it.
 --
 -- ⚠️ THIS BUCKET IS PUBLIC ON PURPOSE AND MUST STAY PUBLIC.
--- 128_learn_media_buckets_private.sql (staged, not yet applied) flips journey-media /
+-- 128_learn_media_buckets_private.sql (APPLIED) flipped journey-media /
 -- money-moves-media / book-media to private because narration is a paid (Pro/Max)
 -- feature. LESSON ARTWORK IS FREE and must render for a locked, signed-out reader.
 -- Three independent reasons it lives here rather than in journey-media:
 --
---   1. The day 128 is applied, every hero in journey-media would 404. The iOS
---      AsyncImage error phase renders the placeholder — no crash, no log, no toast —
---      so the art would silently vanish for content that had been working. 128's own
---      header predicts exactly this and asks for the question to be settled first.
---   2. Signing would INVERT the entitlement. Only entitled callers reach sign_journey
---      (api/v1/endpoints/learn.py); locked callers go through redact_journey, which
---      strips ("audioUrl", "readAlongWords") and deliberately leaves imageUrl intact.
---      A private-bucket imageUrl would therefore work for Pro/Max and fail for free
---      users — the precise opposite of the intent.
---   3. Signed URLs are re-minted with a fresh ?token= every few hours, and iOS
+--   1. journey-media is ALREADY private, so a hero stored there would 404 outright. The
+--      iOS AsyncImage error phase renders the placeholder — no crash, no log, no toast —
+--      so the art would silently vanish for content that had been working.
+--   2. Signed URLs are re-minted with a fresh ?token= every few hours, and iOS
 --      URLCache keys on the whole URL, so all 27 heroes would re-download twice a day
---      forever. A stable public URL caches indefinitely.
+--      forever. A stable public URL caches indefinitely. Narration accepts that cost
+--      because its bucket is private and there is no alternative; artwork does not have
+--      to, and should not.
+--
+-- (A third reason used to be recorded here: that signing would INVERT the entitlement,
+-- because only entitled callers reached sign_journey while locked callers went through
+-- redact_journey. That argument is now void — Journey narration is free on every tier,
+-- redact_journey was deleted, and EVERY caller reaches sign_journey. Reasons 1 and 2
+-- stand on their own and are why this bucket is still public.)
 --
 -- Therefore: never add journey-images to 128's flip list, and never add it to
 -- app/services/learn_audio_urls.py::_SIGNABLE_BUCKETS. Pinned by

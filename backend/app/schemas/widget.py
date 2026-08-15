@@ -138,10 +138,38 @@ class WidgetMoverPayload(BaseModel):
     # 'market' | 'portfolio'.
     mode: str
     # ISO-8601 UTC, no fractional seconds. REQUIRED — see the module header.
+    # This is when the payload was BUILT, not what day the numbers describe.
+    # Keeping those two separate is the whole fix below.
     as_of: str
     # 'premarket' | 'regular' | 'afterhours' | 'closed', from `market_hours.session_phase`.
-    # Lets the widget say "at Friday's close" instead of implying live data.
+    # Unchanged — an already-installed widget still switches on exactly this.
     market_session: str
+
+    # ── Session LABELLING. NOT a staleness flag; see the class docstring. ──
+    #
+    # `market_session` alone cannot carry this. On Monday at 08:00 the phase is
+    # 'premarket', so a phase-only client labels FRIDAY'S CLOSE as pre-market and
+    # says nothing about the date — which is exactly the case the widget got wrong.
+    #
+    # ET calendar date of the trading session these numbers describe, YYYY-MM-DD.
+    # A plain DATE, deliberately not a timestamp: iOS decodes it as `String` and
+    # must never run it through the `.iso8601` Date strategy.
+    #
+    # This is what lets the tile age its own label with no refresh and no flag.
+    # The app may have fetched Friday 15:58 with session_label="Live 3:58 PM ET"
+    # and the tile may be read on Sunday; `session_date` says WHICH DAY, so the
+    # client re-derives "Fri close" at RENDER time.
+    session_date: Optional[str] = None
+    # The sentence true AT `as_of` — 'Live 2:14 PM ET', 'Fri close'. Built once,
+    # server-side, same posture as `cause.detail` and `basket.text`. Clients may
+    # DOWNGRADE it as it ages ('Live' stops being true within minutes) but never
+    # compose their own.
+    session_label: Optional[str] = None
+    # Which universe the movers were drawn from — 'The stocks Caydex tracks',
+    # 'Your holdings'. Needed because an empty active group falls back to market
+    # data at the endpoint, and nothing told the user their "My Holdings" tile
+    # was showing the market.
+    scope_label: Optional[str] = None
 
     # None only when nothing was readable — an empty portfolio falls back to market
     # mode at the endpoint, so this is absent far less often than it used to be.

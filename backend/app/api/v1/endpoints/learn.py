@@ -42,7 +42,6 @@ from app.services.entitlements import (
     required_tier_for_learn_audio,
 )
 from app.services.learn_audio_gate import (
-    redact_journey,
     redact_money_moves,
     sign_journey,
     sign_money_moves,
@@ -64,20 +63,30 @@ async def get_journey(user: dict = Depends(get_learn_identity)):
     Each lesson includes its `story_content` (cards with audio/image/video URLs).
     Degrades gracefully to stale cache or an empty list on a backend hiccup.
 
-    Every word of every lesson is free on every tier. The NARRATION is Pro/Max, so a
-    locked caller gets the same lessons with each card's `audioUrl` + `readAlongWords`
-    stripped. The identity dependency exists only to read `tier` — a signed-out caller
-    still resolves to a per-install guest and still gets the full text.
+    Every word AND the narration are free on every tier, including signed-out guests —
+    the Journey is the deliberate exception to the Learn audio gate
+    (entitlements.JOURNEY_AUDIO_UNLOCKED_TIERS). Money Moves and Books are still Pro/Max.
+
+    There is no locked branch: `audio_locked` and `tier_required` on the envelope are
+    therefore permanently False/None. They are retained because already-shipped builds
+    decode this response and because MoneyMovesResponse still uses the identical pair.
+
+    `journey-media` is a PRIVATE bucket (migration 128), so the stored `audioUrl` is a
+    public-form URL that no longer resolves. Signing is not an optimisation here — it is
+    the only thing that makes narration play, and it now runs for 100% of callers.
+
+    The identity dependency no longer reads `tier`; it stays because a signed-out caller
+    must still resolve to a per-install guest for the rest of the Learn surface, and
+    because two source-scan tests pin this route as identity-bearing.
     """
     service = get_journey_content_service()
     response = await service.get_journey()
-    # Gated HERE, per request, never inside the service: `get_journey()` returns the object
-    # held in a process-wide 1-hour cache, shared by every caller regardless of plan. BOTH
-    # branches deep-copy for that reason — the entitled one rewrites URLs, which would
-    # otherwise pin one caller's signed URLs into the shared payload for an hour.
-    tier = user.get("tier")
-    if not learn_audio_unlocked(tier):
-        return redact_journey(response, required_tier_for_learn_audio(tier) or TIER_PRO)
+    # Signed HERE, per request, never inside the service: `get_journey()` returns the object
+    # held in a process-wide 1-hour cache, shared by every caller. `sign_journey` must not
+    # mutate it — rewriting URLs in place would pin one caller's short-lived signed URLs
+    # into the shared payload for an hour and hand them to everyone. That invariant now
+    # carries every Journey request rather than the Pro slice, so it is MORE load-bearing,
+    # not less; it is pinned by test_sign_journey_does_not_mutate_the_shared_cache_entry.
     return await sign_journey(response)
 
 

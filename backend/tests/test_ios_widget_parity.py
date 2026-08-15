@@ -229,3 +229,47 @@ def test_the_cause_kinds_agree_in_both_directions():
     assert swift == backend, (
         f"cause kinds diverged — Swift {sorted(swift)} vs backend {sorted(backend)}"
     )
+
+
+def test_every_optional_payload_key_is_decoded_leniently():
+    """The new-app-against-old-backend guarantee, and nothing else pins it.
+
+    The widget ships inside an app update; the backend deploys independently, so a user
+    can run a new binary against a backend that has not shipped the new fields yet. A
+    plain `decode(...)` on an absent key throws `keyNotFound`, `read()` catches it and
+    returns nil, and the user gets the PLACEHOLDER on their Home Screen — with no error
+    surface, no retry affordance, and no crash report anyone would think to send.
+
+    `runners_up` set the precedent with a custom `init(from:)`; this asserts every
+    optional field on the payload follows it. Only fields the backend can genuinely omit
+    are checked: `mode`, `as_of` and `market_session` are required on both sides.
+    """
+    src = _strip_swift_comments(_swift_source())
+    m = re.search(r"struct\s+WidgetMoverSnapshot\s*:.*?\n\}\n", src, re.S)
+    assert m, "WidgetMoverSnapshot not found"
+    init = re.search(r"public init\(from decoder: Decoder\) throws \{(.*?)\n    \}", m.group(0), re.S)
+    assert init, "WidgetMoverSnapshot has no custom init(from:) — optional keys would be strict"
+    body = init.group(1)
+
+    import importlib
+    mod = importlib.import_module("app.schemas.widget")
+    fields = mod.WidgetMoverPayload.model_fields
+
+    required = {"mode", "as_of", "market_session"}
+    optional = {
+        name for name, f in fields.items()
+        if name not in required and not f.is_required()
+    }
+    assert optional, "expected some optional payload fields — did the schema change?"
+
+    for wire_name in sorted(optional):
+        # Find the CodingKeys case that maps to this wire name, then assert the init
+        # reads it leniently.
+        case = re.search(
+            rf"case\s+(\w+)\s*=\s*\"{re.escape(wire_name)}\"", m.group(0)
+        )
+        swift_case = case.group(1) if case else wire_name
+        assert re.search(rf"decodeIfPresent\([^)]*forKey:\s*\.{swift_case}\b", body), (
+            f"`{wire_name}` (.{swift_case}) is not read with decodeIfPresent — a backend "
+            f"that omits it would fail the WHOLE decode and blank the widget"
+        )

@@ -6,7 +6,7 @@
 //
 //  One modifier rather than a sheet on each screen: the refusal happens down in the two audio
 //  ENGINES (see LearnAudioEntitlement), so the tap that triggers it can come from a Money
-//  Moves hero, an article action bar, a book listen row, a book core header, a Journey card,
+//  Moves hero, an article action bar, a book listen row, or a book core header.
 //  the mini player, or a Lock Screen remote command. Wiring a presenter per tap site would be
 //  six copies of the same three lines, each free to drift.
 //

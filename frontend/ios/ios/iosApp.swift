@@ -139,14 +139,6 @@ struct iosApp: App {
                     // below can repeat it without a second window.
                     AppLockManager.shared.syncLockWindow()
 
-                    // Seed the widget on COLD LAUNCH. `didBecomeActive` below covers
-                    // returning to the foreground, but it races the first frame on a cold
-                    // start — verified on the simulator: a launch-only run produced 20+
-                    // requests and ZERO widget fetches, so a freshly installed widget stayed
-                    // on its placeholder until the user backgrounded and returned. Both
-                    // triggers, throttled to one fetch per minute, so the overlap is free.
-                    WidgetRefreshService.shared.refresh()
-
                     #if DEBUG
                     AppearanceProbe.dump("task-post")
                     Task { await AppearanceProbe.runTransitionSelfTestIfRequested() }
@@ -201,6 +193,27 @@ struct iosApp: App {
                         apiClient: apiClient,
                         authService: authService
                     )
+
+                    // Seed the widget on COLD LAUNCH — AFTER `configure`, never before.
+                    //
+                    // `didBecomeActive` below covers returning to the foreground, but it
+                    // races the first frame on a cold start: verified on the simulator, a
+                    // launch-only run produced 20+ requests and ZERO widget fetches, so a
+                    // freshly installed widget stayed on its placeholder until the user
+                    // backgrounded and returned.
+                    //
+                    // ⚠️ ORDER IS LOad-BEARING. This used to run ~50 lines earlier, ahead
+                    // of `configure` — which is the only path to `restoreSession()` and
+                    // therefore to `apiClient.setAuthToken`. The portfolio fetch went out
+                    // with NO bearer, so `get_watchlist_identity` resolved a signed-in
+                    // user to their per-install GUEST partition, which is empty, which
+                    // makes the backend fall back to market data. Net effect: a signed-in
+                    // user's "My Holdings" tile showed market movers on every cold launch.
+                    //
+                    // `restoreSession` is async, so this is still best-effort rather than
+                    // guaranteed; `AppState.onAuthenticated` refreshes again once the
+                    // identity actually settles, which is the reliable trigger.
+                    WidgetRefreshService.shared.refresh()
                 }
                 // Authoritative unread count, broadcast from wherever it was last
                 // observed: an inbox load, a mark-read, or a badge arriving on a push.

@@ -47,7 +47,8 @@ def _card(headline="Chipmaker lowers guidance for the year", generated_at=_UNSET
 
 
 def test_a_card_generated_today_can_supply_a_classified_catalyst():
-    classified, had_news = _classified_today_news(_card(), TODAY_ISO)
+    classified, had_news, checked = _classified_today_news(_card(), TODAY_ISO)
+    assert checked is True
     assert had_news is True
     assert classified and classified[0][0] == "Guidance Cut"
 
@@ -57,40 +58,56 @@ def test_the_classifier_vocabulary_is_narrow_on_purpose():
     trade for this surface: a loose matcher would put a confident wrong tag on a
     Home Screen tile. A missed catalyst degrades to `none`, which is honest; a
     mislabelled one is a lie."""
-    hit, _ = _classified_today_news(_card("Acme lowers guidance"), TODAY_ISO)
-    miss, had_news = _classified_today_news(_card("Acme cuts guidance"), TODAY_ISO)
+    hit, _, _ = _classified_today_news(_card("Acme lowers guidance"), TODAY_ISO)
+    miss, had_news, _ = _classified_today_news(_card("Acme cuts guidance"), TODAY_ISO)
     assert hit and hit[0][0] == "Guidance Cut"
     assert miss == [] and had_news is True
 
 
 def test_a_card_from_a_previous_session_supplies_nothing():
     """A 48h news roll-up is not a same-day catalyst, whatever it says."""
-    classified, had_news = _classified_today_news(
+    classified, had_news, checked = _classified_today_news(
         _card(generated_at=_ts(days_ago=1)), TODAY_ISO
     )
+    # The sweeper HAS covered this ticker; it simply has nothing from today. That is
+    # a real negative and may be stated, unlike a ticker with no row at all.
+    assert checked is True
     assert classified == []
     assert had_news is False
 
 
 @pytest.mark.parametrize("bad", [None, "", "not-a-date", 12345, {}])
 def test_an_unreadable_generated_at_is_treated_as_not_today(bad):
-    classified, had_news = _classified_today_news(_card(generated_at=bad), TODAY_ISO)
+    classified, had_news, _ = _classified_today_news(_card(generated_at=bad), TODAY_ISO)
     assert classified == [] and had_news is False
 
 
 def test_an_unclassifiable_headline_still_reports_that_news_exists():
     """"There was news but none of it explains the move" is a different, and more
     honest, statement than "there was no news"."""
-    classified, had_news = _classified_today_news(
+    classified, had_news, _ = _classified_today_news(
         _card(headline="Company announces new office location"), TODAY_ISO
     )
     assert classified == []
     assert had_news is True
 
 
-@pytest.mark.parametrize("card", [None, {}, "junk", 42, {"headline": "   "}])
-def test_malformed_cards_yield_nothing_and_do_not_raise(card):
-    assert _classified_today_news(card, TODAY_ISO) == ([], False)
+@pytest.mark.parametrize("card", [None, "junk", 42])
+def test_a_ticker_with_no_insight_row_is_UNCHECKED_not_news_free(card):
+    """`get_cards` yields None for a scope it has never stored or whose card expired.
+
+    Most reachable in portfolio mode, where holdings need not be inside the swept
+    top-200 universe — so without the third state the tile would announce "No company
+    news today" about a ticker nothing has ever examined.
+    """
+    classified, had_news, checked = _classified_today_news(card, TODAY_ISO)
+    assert classified == [] and had_news is False and checked is False
+
+
+@pytest.mark.parametrize("card", [{}, {"headline": "   "}])
+def test_a_present_but_empty_card_is_checked_and_news_free(card):
+    classified, had_news, checked = _classified_today_news(card, TODAY_ISO)
+    assert classified == [] and had_news is False
 
 
 # ── the date helper the whole daily contract rests on ─────────────────

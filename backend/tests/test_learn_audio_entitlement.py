@@ -1,8 +1,13 @@
-"""Wiser (Learn) narration gate — read free, listen with Pro.
+"""Wiser (Learn) narration gate — read free, listen with Pro. Except the Journey.
 
 The packaging: every word of all 27 Journey lessons, 13 Money Moves articles and 10 books is
 free on every tier, and so is progress tracking. What is paid is the produced NARRATION and
-the read-along highlighting it drives.
+the read-along highlighting it drives — for MONEY MOVES and BOOKS.
+
+⚠️ **The Investor Journey narration is FREE on every tier**, including signed-out guests.
+That divergence is the subject of `test_the_paid_gates_share_one_floor_and_journey_is_
+deliberately_outside_it` and `test_every_tier_hears_journey_narration`; the Journey has no
+redactor at all, so the tests below that exercise redaction are Money Moves only.
 
 Three things here are load-bearing beyond the happy path:
 
@@ -27,7 +32,7 @@ import pytest
 from app.schemas.journey import JourneyLessonResponse, JourneyResponse
 from app.schemas.money_moves import MoneyMovesResponse
 from app.services import entitlements as ent
-from app.services.learn_audio_gate import redact_journey, redact_money_moves
+from app.services.learn_audio_gate import redact_money_moves
 
 
 # ── builders ─────────────────────────────────────────────────────────────────
@@ -98,54 +103,61 @@ def _money_moves(**overrides) -> MoneyMovesResponse:
 # ── the tier table ───────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("tier", ["pro", "premium", " Pro ", "PREMIUM"])
-def test_paid_tiers_hear_narration(tier):
+def test_paid_tiers_hear_money_moves_and_book_narration(tier):
     assert ent.learn_audio_unlocked(tier) is True
     assert ent.required_tier_for_learn_audio(tier) is None
 
 
 @pytest.mark.parametrize("tier", ["free", "FREE", "", None, "enterprise", 0, [], {}])
-def test_free_unknown_and_garbage_tiers_are_locked(tier):
+def test_free_unknown_and_garbage_tiers_are_locked_out_of_money_moves_and_books(tier):
     assert ent.learn_audio_unlocked(tier) is False
     assert ent.required_tier_for_learn_audio(tier) == ent.TIER_PRO
 
 
-def test_all_three_gates_share_one_floor():
-    """Signals, whale detail and Learn audio are deliberately the same frozenset so they
+@pytest.mark.parametrize(
+    "tier", ["free", "FREE", "pro", "premium", " Pro ", "", None, "enterprise", 0, [], {}]
+)
+def test_every_tier_hears_journey_narration(tier):
+    """The Journey gate FAILS OPEN, which is the exact inversion of every other gate here.
+
+    `normalize_tier` folds anything unrecognised to "free" — and "free" is in the Journey
+    set — so garbage, None and a signed-out guest all hear the lesson. Anyone "fixing" this
+    to fall closed like its neighbours breaks the feature for the largest cohort.
+    """
+    assert ent.journey_audio_unlocked(tier) is True
+
+
+def test_the_paid_gates_share_one_floor_and_journey_is_deliberately_outside_it():
+    """Signals, whale detail and Money-Moves/Book audio are the same frozenset so they
     cannot drift into 'Pro unlocks two of them but only Max unlocks the third' — which no
-    pricing page would ever describe."""
+    pricing page would ever describe.
+
+    The Investor Journey is the one deliberate exception: its narration is free on every
+    tier. This asserts the divergence explicitly so it reads as a decision rather than as
+    drift, and so that "simplifying" the four sets back into one fails here.
+    """
     assert ent.LEARN_AUDIO_UNLOCKED_TIERS is ent.SIGNALS_UNLOCKED_TIERS
     assert ent.WHALE_DETAIL_UNLOCKED_TIERS is ent.SIGNALS_UNLOCKED_TIERS
 
-
-# ── Journey redaction ────────────────────────────────────────────────────────
-
-def test_locked_journey_withholds_narration():
-    out = redact_journey(_journey(), "pro")
-    cards = out.lessons[0].story_content["cards"]
-    assert all("audioUrl" not in c for c in cards)
-    assert all("readAlongWords" not in c for c in cards)
-    assert out.audio_locked is True
-    assert out.tier_required == "pro"
+    assert ent.JOURNEY_AUDIO_UNLOCKED_TIERS is not ent.SIGNALS_UNLOCKED_TIERS
+    assert ent.JOURNEY_AUDIO_UNLOCKED_TIERS != ent.SIGNALS_UNLOCKED_TIERS
+    # Every known tier is in it — that is what "free for everyone" means as a table.
+    assert set(ent.TIER_ORDER) <= ent.JOURNEY_AUDIO_UNLOCKED_TIERS
+    assert ent.TIER_FREE in ent.JOURNEY_AUDIO_UNLOCKED_TIERS
+    assert ent.TIER_FREE not in ent.LEARN_AUDIO_UNLOCKED_TIERS
 
 
-def test_locked_journey_keeps_every_word():
-    """The premise of the whole gate: the lesson still reads end to end."""
-    out = redact_journey(_journey(), "pro")
-    cards = out.lessons[0].story_content["cards"]
-    assert len(cards) == 3
-    assert all(c["text"] for c in cards)
-    assert cards[0]["headline"] == "Stock vs. Business"
-    assert out.lessons[0].title == "Stock vs. Business"
-    assert out.lessons[0].story_content["estimatedMinutes"] == 5
+def test_there_is_no_journey_redactor():
+    """`redact_journey` was deleted, not left unreachable. Unused gating code rots and gets
+    wired back by accident; if the Journey is ever re-gated, `redact_money_moves` is the
+    working template. Its absence is what makes the route branchless."""
+    import app.services.learn_audio_gate as gate
 
-
-def test_no_journey_audio_url_survives_serialisation():
-    """Asserted on the JSON, not the object graph, so a card field added later that carries
-    a Storage URL fails here rather than in production."""
-    blob = redact_journey(_journey(), "pro").model_dump_json()
-    assert _JOURNEY_AUDIO not in blob
-    assert "journey-media" not in blob
-    assert _LESSON_PROSE in blob          # ...and the prose is still there
+    assert not hasattr(gate, "redact_journey")
+    assert not hasattr(gate, "_strip_story_content")
+    assert not hasattr(gate, "_JOURNEY_CARD_AUDIO_KEYS")
+    assert hasattr(gate, "redact_money_moves")      # still gated, still here
+    assert hasattr(gate, "sign_journey")            # now carries 100% of Journey traffic
 
 
 # ── Money Moves redaction ────────────────────────────────────────────────────
@@ -195,20 +207,6 @@ def test_no_money_moves_audio_url_survives_serialisation():
 
 # ── the shared-cache regression (P0) ─────────────────────────────────────────
 
-def test_journey_redaction_does_not_mutate_its_input():
-    """`get_journey()` returns the object held in a process-wide 1-hour cache, shared by
-    every caller regardless of plan. An in-place strip would silence every PAYING user for
-    up to an hour, long after the free request that caused it."""
-    response = _journey()
-    before = response.model_dump_json()
-
-    redact_journey(response, "pro")
-
-    assert response.model_dump_json() == before
-    assert response.lessons[0].story_content["cards"][0]["audioUrl"] == _JOURNEY_AUDIO
-    assert response.audio_locked is False
-
-
 def test_money_moves_redaction_does_not_mutate_its_input():
     response = _money_moves()
     before = response.model_dump_json()
@@ -223,40 +221,30 @@ def test_money_moves_redaction_does_not_mutate_its_input():
 def test_redactions_return_new_objects_all_the_way_down():
     """A non-mutating call that still hands back the SAME nested dict is a landmine: any
     later write downstream lands in the cache."""
-    j, m = _journey(), _money_moves()
-    rj, rm = redact_journey(j, "pro"), redact_money_moves(m, "pro")
-    assert rj is not j and rj.lessons[0].story_content is not j.lessons[0].story_content
+    m = _money_moves()
+    rm = redact_money_moves(m, "pro")
     assert rm is not m and rm.articles[0] is not m.articles[0]
 
 
 def test_a_free_request_then_a_paid_one_both_get_the_right_thing():
-    """Order must not matter — the end-to-end form of the cache regression."""
-    cached_journey, cached_mm = _journey(), _money_moves()
+    """Order must not matter — the end-to-end form of the cache regression. Money Moves
+    only: the Journey has no locked branch left to interleave."""
+    cached_mm = _money_moves()
 
-    free_j = redact_journey(cached_journey, "pro")
     free_m = redact_money_moves(cached_mm, "pro")
-    assert free_j.audio_locked and free_m.audio_locked
+    assert free_m.audio_locked
 
     # A paid caller is served the cache object directly, unredacted.
-    assert cached_journey.lessons[0].story_content["cards"][0]["audioUrl"] == _JOURNEY_AUDIO
     assert cached_mm.articles[0]["audioUrl"] == _MM_AUDIO
-    assert cached_journey.audio_locked is False
+    assert cached_mm.audio_locked is False
 
 
 # ── degenerate inputs ────────────────────────────────────────────────────────
 
-def test_lesson_with_no_story_content_does_not_raise():
-    out = redact_journey(_journey(story_content=None), "pro")
-    assert out.lessons[0].story_content is None
-    assert out.audio_locked is True
-
-
-def test_malformed_story_content_passes_through_rather_than_500ing():
-    """`story_content` is authored JSONB a bad row edit can malform. A 500 on the Learn tab
-    is worse than one un-stripped card, so the walk is shape-tolerant."""
-    for bad in ({"cards": "not-a-list"}, {"no_cards_key": 1}, {"cards": ["str", None, 7]}):
-        out = redact_journey(_journey(story_content=bad), "pro")
-        assert out.audio_locked is True
+# NOTE: the Journey's malformed-`story_content` tolerance tests moved to
+# test_learn_audio_signing.py when `redact_journey` was deleted. The intent — authored
+# JSONB that a bad row edit can malform must never 500 the Learn tab — now attaches to
+# `sign_journey`, which is the only Journey path left.
 
 
 def test_article_with_no_sections_or_odd_shapes_does_not_raise():
@@ -268,22 +256,26 @@ def test_article_with_no_sections_or_odd_shapes_does_not_raise():
 
 
 def test_empty_catalogues_do_not_raise():
-    assert redact_journey(JourneyResponse(lessons=[]), "pro").lessons == []
     assert redact_money_moves(MoneyMovesResponse(articles=[]), "pro").articles == []
 
 
-def test_a_card_or_block_without_narration_is_left_alone():
-    """The completion card and un-narrated blocks must survive byte-identically — popping a
-    key that isn't there must not invent one or drop a sibling."""
-    out = redact_journey(_journey(), "pro")
-    completion = out.lessons[0].story_content["cards"][2]
-    assert completion == {"type": "completion", "headline": "Nice work", "text": "You finished."}
+def test_a_block_without_narration_is_left_alone():
+    """An un-narrated block must survive byte-identically — popping a key that isn't there
+    must not invent one or drop a sibling."""
+    out = redact_money_moves(_money_moves(), "pro")
+    blocks = out.articles[0]["sections"][0]["content"]
+    assert all("readAlong" not in b for b in blocks if isinstance(b, dict))
 
 
 # ── the response shapes iOS decodes ──────────────────────────────────────────
 
 def test_unlocked_responses_default_to_not_locked():
-    """Defaulted so an already-shipped build, which knows neither field, decodes unchanged —
-    and so a paid caller's untouched response reads as unlocked without anyone setting it."""
-    assert json.loads(_journey().model_dump_json())["audio_locked"] is False
+    """Defaulted so an already-shipped build, which knows neither field, decodes unchanged.
+
+    For the Journey this is no longer merely a default — it is the ONLY reachable value,
+    since the writer was deleted. Both fields stay on the wire for shipped builds.
+    """
+    blob = json.loads(_journey().model_dump_json())
+    assert blob["audio_locked"] is False
+    assert blob["tier_required"] is None
     assert json.loads(_money_moves().model_dump_json())["tier_required"] is None

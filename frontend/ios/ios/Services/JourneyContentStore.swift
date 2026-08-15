@@ -296,15 +296,16 @@ final class JourneyContentStore {
 
     /// Re-fetch even though this session already has content.
     ///
-    /// Two reasons, both of which make the once-per-session latch wrong now:
-    ///   • **Entitlement.** A locked caller is served lessons with every card's `audioUrl` and
-    ///     `readAlongWords` stripped, and that payload latches. Upgrading mid-session would
-    ///     otherwise leave every card silently narrating through on-device TTS — the free
-    ///     robotic voice — for the rest of the run, with no way back but a relaunch.
-    ///   • **Expiry.** Card URLs are signed and finite-lived, and `didPrefetch` never ages out.
+    /// **Expiry** is now the only reason, and it is enough: card audio URLs are signed and
+    /// finite-lived, while `didPrefetch` never ages out. A long-lived session would otherwise
+    /// hold expired URLs and fall through to on-device TTS — the robotic voice — for the rest
+    /// of the run, with no way back but a relaunch.
     ///
-    /// Called from `LearnAudioEntitlement.update(tier:)` on the locked→unlocked transition and
-    /// from `AIVoiceManager`'s one-shot recovery after a clip fails to load.
+    /// The entitlement reason is gone: Journey narration is free on every tier, so the first
+    /// fetch is already complete for everybody and there is no locked→unlocked transition to
+    /// recover from. `LearnAudioEntitlement` no longer calls this.
+    ///
+    /// Called from `AIVoiceManager`'s one-shot recovery after a clip fails to load.
     func forceRefresh() async {
         didPrefetch = false
         await prefetch()

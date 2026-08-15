@@ -153,9 +153,64 @@ Commit that.
 
 ### 3. Rewrite history
 
+⚠️ **Do steps 3a and 3b in the SAME pass.** Both rewrite every commit and both force a
+re-clone, so running them separately doubles the disruption for no benefit.
+
+#### 3a. Real-investor names in narration source — `--replace-text`
+
+Added 2026-08-14 (plan Phase 2.4). `--invert-paths` below removes *paths*; it does not touch
+`backend/scripts/`, so without this the strings survive the purge:
+
+- `backend/scripts/generate_book_audio.py` carried `"Narrate as Warren Buffett, …"` and six
+  siblings until commit `4bce04f`. The current file is clean — **the history is not.**
+  Confirm with `git log --all -S"Narrate as" --oneline` (3 commits today).
+- `generate_book_audio_clone.py` and `clone_prototype.py` carried a `REFS` dict of
+  `<author>_<voice>.wav` filenames. Also cleaned in the tree, also still in history.
+
+Why it matters: these are stock synthetic TTS voices given delivery-style directions, and no
+real person was ever recorded. A public history saying "Narrate as Warren Buffett" beside a
+product called *The Essays of Warren Buffett* misdescribes what was built and reads as intent
+to imitate a real person's voice. The `.wav` clips themselves were never committed
+(`.gitignore:245`), so this is the whole of the exposure.
+
+Write the expressions file (NOT inside the repo — `filter-repo` refuses a dirty tree):
+
+```bash
+cat > /tmp/caydex-replace.txt <<'EOF'
+Narrate as Warren Buffett, a==>Read this as a
+Narrate as Peter Lynch, a==>Read this as a
+Narrate as Philip Fisher, a==>Read this as a
+Narrate as John Bogle, a==>Read this as a
+Narrate as Burton Malkiel, a==>Read this as a
+Narrate as Joel Greenblatt, a==>Read this as a
+Narrate as Howard Marks, a==>Read this as a
+graham_iapetus.wav==>iapetus_erudite_professor.wav
+buffett_zubenelgenubi.wav==>zubenelgenubi_warm_elder.wav
+fisher_schedar.wav==>schedar_scholarly_analyst.wav
+bogle_alnilam.wav==>alnilam_elder_statesman.wav
+malkiel_orus.wav==>orus_witty_emeritus.wav
+greenblatt_achird.wav==>achird_patient_teacher.wav
+marks_sadaltager.wav==>sadaltager_contemplative.wav
+clone:graham_iapetus==>clone:iapetus_erudite_professor
+clone:buffett_zubenelgenubi==>clone:zubenelgenubi_warm_elder
+clone:fisher_schedar==>clone:schedar_scholarly_analyst
+clone:bogle_alnilam==>clone:alnilam_elder_statesman
+clone:malkiel_orus==>clone:orus_witty_emeritus
+clone:greenblatt_achird==>clone:achird_patient_teacher
+clone:marks_sadaltager==>clone:sadaltager_contemplative
+EOF
+```
+
+Each line is `old==>new` and is a literal match (no regex). The `, a` on the prompt lines is
+deliberate: it makes the replacement produce grammatical text ("Read this as a seasoned,
+sharp stock-picker…") identical in shape to what the file says today.
+
+#### 3b. The path removal, with 3a folded in
+
 ```bash
 cd /Users/haiphan/BIGDATA/myApp/AI-Value-Investor-App
 git filter-repo --force \
+  --replace-text /tmp/caydex-replace.txt \
   --path backend/data/book_audio --path backend/data/journey_audio \
   --path backend/data/money_moves_audio \
   --path backend/data/money_moves_audio_clone \
@@ -166,6 +221,13 @@ git filter-repo --force \
   --path backend/scripts/caydex_report_poc.pdf \
   --path app_logic.txt \
   --invert-paths
+```
+
+Verify afterwards — both must be empty:
+
+```bash
+git log --all -S"Narrate as" --oneline
+git log --all -S"buffett_zubenelgenubi" --oneline
 ```
 
 **Two paths were missing from this list until 2026-08-14**, and both defeat the success

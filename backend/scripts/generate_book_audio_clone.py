@@ -38,12 +38,14 @@ OUT = ROOT / "data/book_audio"
 REFDIR = ROOT / "data/voice_clone/refs"
 BREAK = gba.BREAK_SECONDS
 
-# Per-book reference voice clip (the clone source) — built from the Gemini audition samples so each
-# book keeps the voice we cast. Add entries here as we roll out to more books.
-REFS = {1: "rdpd_achird.wav", 2: "graham_iapetus.wav", 3: "psychology_puck.wav",
-        4: "oneup_core2.wav", 5: "fisher_schedar.wav", 6: "bogle_alnilam.wav",
-        7: "malkiel_orus.wav", 8: "buffett_zubenelgenubi.wav",
-        9: "greenblatt_achird.wav", 10: "marks_sadaltager.wav"}
+# Per-book reference voice clip (the clone source), named <ttsVoice>_<style> after the synthetic
+# voice it was cut from and the delivery it carries. Never after a real person: these clips are
+# stock TTS voices given style directions, and naming them for an author misdescribes what they are.
+# ⚠️ This dict is DUPLICATED in clone_prototype.py — change both or a re-voice picks the wrong clip.
+REFS = {1: "rdpd_achird.wav", 2: "iapetus_erudite_professor.wav", 3: "psychology_puck.wav",
+        4: "oneup_core2.wav", 5: "schedar_scholarly_analyst.wav", 6: "alnilam_elder_statesman.wav",
+        7: "orus_witty_emeritus.wav", 8: "zubenelgenubi_warm_elder.wav",
+        9: "achird_patient_teacher.wav", 10: "sadaltager_contemplative.wav"}
 
 
 def split_sentences(text: str) -> list[str]:

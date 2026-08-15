@@ -4,7 +4,7 @@
   "author": "Benjamin Graham",
   "slug": "the-intelligent-investor",
   "audio_file": "2_the-intelligent-investor.m4a",
-  "voice": "clone:graham_iapetus",
+  "voice": "clone:iapetus_erudite_professor",
   "engine": "chatterbox",
   "target_wpm": null,
   "pitch_semitones": 0,

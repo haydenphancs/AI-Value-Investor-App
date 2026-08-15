@@ -22,8 +22,8 @@ Ordered by **when to start**, not by importance.
 > Still true and worth trusting: §5's migration tables, §1's residual-review-risk analysis,
 > §3's hosted↔in-app legal parity, §5b (d)(e)(f), §8.
 >
-> **§5 re-verified against the LIVE DATABASE 2026-08-14** (migrations 103–134, all applied,
-> nothing pending).
+> **§5 re-verified against the LIVE DATABASE 2026-08-14 evening** (migrations 103–**136**, all
+> applied, nothing pending — including 135 and 136, which landed that day).
 >
 > **Verified against the live system 2026-08-05.** §5 previously listed six migrations as
 > pending that were all already applied — checked this time against
@@ -42,29 +42,82 @@ existing Individual Apple account, so the whole list is workable in days rather 
 
 ---
 
-## 👉 START HERE — next actions, re-ordered 2026-08-14
+## 🔴🔴 §0 — A LIVE PRODUCTION CREDENTIAL IS PUBLIC RIGHT NOW (added 2026-08-14 evening)
+
+**This was in no section of this file, and it is the only item where an attacker's clock is
+running.** Everything else on this list is a deadline you control.
+
+The **current, unrotated** Supabase `service_role` JWT is in mainline git history at
+`MarketPulse/MarketPulse/App/Config.swift`, mislabeled as a constant called `supabaseAnonKey`,
+valid to 2035. Verified by hashing it against `backend/.env` — **byte-identical, never rotated** —
+and an anonymous fetch at commit `dd81c7b0` returns **HTTP 200**. Re-verified still exposed and
+still unrotated at 23:40 ET on 2026-08-14.
+
+`service_role` bypasses **every** RLS policy: read/write/delete on `users`, `user_credits`,
+`chat_sessions`, everything.
+
+Why the usual sweeps missed it: a filename grep for `.p8` / `.pem` / `.key` comes back clean
+because it lives in a `.swift` file, and the constant name reads like the anon key, which is
+*meant* to be public. Only a content scan hashing history blobs against the live `.env` finds it.
+Confirmed clean by that same scan: `SUPABASE_JWT_SECRET`, `SUPABASE_DB_PASSWORD`, `DATABASE_URL`,
+`ADMIN_TOKEN`, and the FMP and Gemini keys appear in **zero** history blobs.
+
+- [ ] 🔴 Supabase → Project Settings → API → **rotate the service role key**
+- [ ] Update `backend/.env` **and** the Railway variable, redeploy, smoke-test one authed endpoint
+
+⚠️ **Since the repo now stays public by decision (§4), rotation is the ONLY mitigation.** There is
+no belt-and-braces here.
+
+Also in history, lower severity: an OpenSSH **ed25519 private key** committed under the filename
+`eval "$(ssh-agent -s)"` (commit `3f784c89`). Its fingerprint does **not** match the key on the
+GitHub account, but confirm it is not a deploy key or on any server before dismissing it.
+
+---
+
+## 👉 START HERE — next actions, re-ordered 2026-08-14 (evening)
 
 Ordered by **third-party lead time first**, because those are the only items you cannot
-compress by working harder. Everything here is yours — the code-side work is tracked separately
-and most of it landed 2026-08-14.
+compress by working harder.
 
 | # | Do this | Why now | Where |
 |---|---|---|---|
-| **1** | **App Store Connect → Business: accept the Paid Applications Agreement, add banking + W-9** | 🔴 **Was in NO section of this file.** It gates *every* §6b item: until it is active ASC returns **no products at all** to `Product.products(for:)`, and the paywall shows "Credit packs aren't available on this device right now" — identical to a wrong product id, and the most commonly misdiagnosed IAP failure. Bank verification takes days. | §6b |
-| **2** | **Set up Resend (or Postmark/SES) and point Supabase SMTP at it** | 🔴 Email/password signup is still a dead end — Confirm email is ON and Supabase's built-in mailer does not deliver. ⚠️ **MERGE** the provider's `include:` into the existing SPF record; do not replace it, or you break the §2 inbound mail. | §5c |
-| **3** | **Flip the repo private** (30 seconds) | Both copyrighted PDFs are anonymously downloadable **today** by commit SHA — re-verified 2026-08-14. This kills the exposure instantly while the full 1.0 GB history purge waits on its runbook fixes. | §4 |
-| **4** | Publish the Google OAuth consent screen (*Testing* → *In production*) | Google sign-in works **only for allow-listed accounts** and refresh tokens die after 7 days. Looks exactly like an app bug, and only after release. | §5e |
-| **5** | Create **six** IAP products + subscription-group localization | Not two. Four **consumable** credit packs ship and this file never mentioned them. Blocked on #1. | §6b |
-| **6** | Ask FMP and CoinGecko about commercial redistribution | Free to ask, slow to answer — start the clock early. | §6 |
-| **7** | Flag your own account as `is_admin` | 🔴 Buried in §5 and absent from this table until now. `is_admin` matches **zero** rows, so every admin route 403s for every account including yours. One SQL `UPDATE`. | §5 |
+| **0** | 🔴 **Rotate the leaked `service_role` key** | A live production credential that bypasses all RLS is anonymously downloadable today. The repo stays public, so rotation is the only fix. | §0 |
+| **1** | **ASC → Business: Paid Applications Agreement, banking, W-9** | Gates *every* §6b item: until active, ASC returns **no products at all** and the paywall reads "not available on this device" — identical to a wrong product id, the most commonly misdiagnosed IAP failure. Bank verification takes days. | §6b |
+| **2** | Ask **FMP and CoinGecko** about commercial redistribution | Free to send, slow to answer — and the answer feeds the ASC **Content Rights** declaration (§7), so it is on the submission path, not beside it. | §6 |
+| **3** | **Create the App Review demo account** | The review notes you are told to paste promise credentials that do not exist. Live DB: 4 users, none of them a reviewer. Anonymous `GET /stocks/AAPL/report` → **401**, so a reviewer signed out cannot reach the headline feature. Cheapest self-inflicted rejection on the list. | §7 |
+| **4** | **SMTP** (Resend/Postmark/SES) → Supabase | Email/password signup is a dead end: Confirm email is ON and the built-in mailer does not deliver. ⚠️ **MERGE** the provider's `include:` into the existing SPF; replacing it breaks §2 inbound mail. Note this is **no longer a submission blocker** — create the demo account in Supabase Studio with "Auto Confirm" and SMTP drops off the critical path. | §5c |
+| **5** | Create **six** IAP products + subscription-group localization | Four **consumable** credit packs, not just the two subscriptions. Blocked on #1. | §6b |
+| **6** | **Decide the real-investor-name question**, then shoot screenshots | Five user-visible surfaces put a living investor's name in a capturable frame. This gates screenshots, not the reverse. | §7 |
+| **7** | Flag your own account `is_admin` | Matches **zero** rows, so every admin route 403s for every account including yours. One SQL `UPDATE` — and do it **before** clearing `ADMIN_TOKEN` or you lock yourself out. | §5 |
+| **8** | Publish the Google OAuth consent screen | Works only for allow-listed accounts; refresh tokens die at 7 days. ⚠️ **Not a lead-time item** — non-sensitive scopes need no verification review, so it is ~60 seconds. It was ranked #4 in a lead-time-ordered table by mistake. | §5e |
 
-**What changed in this table on 2026-08-14:** the old #1 (SMTP) is now #2 behind a longer-lead
-item; the old #3 ("purge the two copyrighted PDFs — can be done any time") sold a 10-minute job
-that is actually a full history rewrite requiring every clone deleted, so it is now split into
-the 30-second mitigation above and the real purge in §4; the old #4 conflated the ASC record
-(which **probably already exists** — see §7) with the IAP products (which do not).
+**What changed on 2026-08-14 (evening).** A full re-verification against the **live** database,
+live HTTP, the anonymous GitHub API and the Xcode archives on disk. The old #3 ("flip the repo
+private") is **withdrawn — the repo stays public by decision**; see §4 for the two consequences.
+Two genuine submission blockers were absent from this file entirely (the demo account, and the
+ASC Content Rights / Copyright / reviewer-contact fields), and several ticked items turned out to
+be either already done or never a problem — see the new **Corrections** section.
 
-**Already done, stop re-reading these:** migrations 103–134 — ALL of them (§5, re-verified live 2026-08-14), Supabase Apple + Google
+### ✅ Corrections — verified 2026-08-14 evening, stop spending time on these
+
+Each was checked against the live system, not against this file's memory.
+
+| Claim in this file | Reality |
+|---|---|
+| "Check the app icon for an **alpha channel** first" (§9), treated as a pre-screenshot gate | **Fixed 2026-06-06, twenty minutes after it broke.** The two archives are a complete forensic record: 12:23 upload fails 90717 → icon replaced 12:41 → 12:43 upload succeeds. Confirmed three ways — `sips` reports `hasAlpha:no`, the file is a baseline JPEG (which physically cannot carry alpha), and the built `Assets.car` rendition reports `Opaque: True`. **Zero work remains.** |
+| "**47** remote `origin/claude/*` branches" (§4 + runbook) | **23.** `git branch -r` reads 47 because 24 tracking refs are stale. The runbook's own check (`git branch -r \| grep … # expect 0`) will still read 47 after a *perfect* cleanup. Use `git ls-remote --heads origin 'refs/heads/claude/*'`, and `git fetch --prune` first. |
+| Export compliance — not mentioned anywhere | **Already handled.** `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO` in **both** build configs and baked into the built plist. ASC will not ask. |
+| "The ASC record **probably** already exists" (§7) | **It does.** The 2026-06-06 archive records `uploadedBuildNumber="1", state="success"` for adamId **6759525689**. Do not create a second record — and note this makes the build-number bump a *hard* rejection rather than housekeeping. |
+| Migrations "103–134" | **103 through 136 are all applied; nothing is pending.** 135 (signup credit seed) and 136 (journey-images bucket) landed 2026-08-14 and were verified against the live database. |
+| App Store listing copy — §7 states a *constraint* on it (the no-real-names rule) but never assigns writing it | **Now written**: [`app-store-listing.md`](app-store-listing.md). Every field measured against Apple's limits — the description came in at 4,018 on the first pass and would have been silently truncated on paste; it is now 3,906 / 4,000. |
+
+**Verified clean, do not re-audit:** in-app account deletion (5.1.1(v)) is implemented and
+hardened; paywall 3.1.2 disclosure is complete in both `PaywallView` and `BuyCreditsView`; every
+linked SPM package ships a privacy manifest; required-reason APIs are correctly declared;
+`PrivacyInfo.xcprivacy` re-parsed and agrees with the answer sheet at exactly ten data types; §8
+device support is fully accurate.
+
+**Already done, stop re-reading these:** migrations 103–136 — ALL of them (§5, re-verified live 2026-08-14), Supabase Apple + Google
 providers and redirect URL (§5b d/e/f), the Apple capabilities — Sign in with Apple,
 Associated Domains, Push Notifications (§5b, §9), the native Google SDK and its iOS OAuth
 client (§5e), iPhone-only device support (§8), and **as of 2026-08-06** the whole domain
@@ -229,14 +282,23 @@ is a *size* problem. The two PDFs remain a genuine copyright item and ride the s
 clips are in Supabase Storage, so the repo copies are redundant and recoverable. Re-check
 before running (command in the runbook).
 
-- [ ] 🔴 **First, the 30-second mitigation: flip the repo private.** Re-verified 2026-08-14 —
-      the repo is public (`"private": false`) and **both** PDFs return `HTTP/2 200` to an
-      anonymous SHA-pinned `raw.githubusercontent` fetch. They are deleted at tip, so `/main/`
-      404s; direct-SHA access is exactly the mechanism this section anticipated. Going private
-      ends the exposure immediately and buys time to do the rewrite properly.
+- [x] ~~**Flip the repo private**~~ — 🚫 **DECIDED 2026-08-14: the repo STAYS PUBLIC.**
+      Ticked as *decided*, not as *done*. Two consequences follow, and neither is optional:
+      1. **Rotating the leaked `service_role` key (§0) is now the ONLY mitigation** for that
+         credential, not a belt-and-braces one.
+      2. **This purge stops being optional cleanup.** Both copyrighted PDFs stay anonymously
+         fetchable by commit SHA (`raw.githubusercontent` at `58f91f4e…` → `HTTP 200`,
+         re-verified 2026-08-14) for as long as the repo is public. The purge is now the
+         actual fix for the copyright exposure, so it belongs on the pre-launch list rather
+         than "after submission". Same for the ed25519 private key in §0.
+- [ ] ⚠️ **Add three paths the runbook's `--path` list is missing**, all found 2026-08-14:
+      `--path MarketPulse` (the leaked `service_role` key),
+      `--path 'eval "$(ssh-agent -s)"'` and `--path 'eval "$(ssh-agent -s)".pub'`.
+      Purging without these leaves both secrets fetchable by SHA. **Rotation still comes
+      first** — GitHub serves unreachable objects for a while after a rewrite.
 - [ ] **Commit or stash your working tree** — `git filter-repo --force` ends in an
       unconditional `git reset --hard` and will destroy uncommitted work (runbook §1b)
-- [ ] Delete the **47** remote `origin/claude/*` branches on GitHub — `--all` does *not*
+- [ ] Delete the ~~**47**~~ **23** remote `origin/claude/*` branches on GitHub — `--all` does *not*
       rewrite them, and each keeps the full old history alive (runbook *After*)
 - [ ] Run the runbook (back up first — it rewrites every commit)
 - [ ] Force-push, then delete and re-clone every other copy of the repo
@@ -251,11 +313,21 @@ work from a cached memory of it; re-read it.
 
 ---
 
-## 5. Migrations — ✅ 103–134 ALL APPLIED, NONE PENDING (re-verified 2026-08-14)
+## 5. Migrations — ✅ 103–136 ALL APPLIED, NONE PENDING (re-verified 2026-08-14 evening)
 
-> **Re-verified 2026-08-14 by querying the LIVE database directly** (not the snapshot, not
-> this file's memory), after 134 was applied. Every migration from 103 to 134 is applied and
+> **Re-verified 2026-08-14 (evening) by querying the LIVE database directly** — not the
+> snapshot, not this file's memory. Every migration from **103 to 136** is applied and
 > **nothing is pending.** The table below covers 103–115; 116–134 are itemised after it.
+>
+> **135 `signup_credit_seed_from_plan_credits`** — applied, both halves verified
+> (`create_user_credits` AND `handle_new_auth_user` now read `plan_credits`). It fixed a real
+> defect: BOTH signup seeds hardcoded a dead pricing generation — 3/25/100 and a flat 50 —
+> against a live `plan_credits` of 50/1200/4000. The nested trigger runs first, so the outer
+> `50` hit its `ON CONFLICT DO NOTHING` and was unreachable code; what actually landed for a
+> new free account was **3 credits, against a 20-credit report.** Migration 100 saw both and
+> deferred them. Confirmed live: a new free account now gets **50**.
+>
+> **136 `journey_images_bucket`** — applied (bucket present).
 >
 > ⚠️ **121 and 122 do not exist** — no files, and `git log --diff-filter=D` shows none were
 > ever deleted. They are skipped numbers, not a hole in the apply chain. Same for 033. Do not
@@ -853,6 +925,13 @@ No longer blocked — your existing Individual account can create this record (s
         on 2026-06-06, so you **must bump the build number** or the upload is rejected outright.
 
       Note the numeric app ID either way — IAP setup needs it (`IAP_APP_APPLE_ID`).
+- [ ] **Paste the listing copy** — written 2026-08-14, [`app-store-listing.md`](app-store-listing.md):
+      app name, subtitle, keywords, promotional text and the full description, each measured
+      against Apple's character limits. Nothing existed before that date; this file stated the
+      no-real-names *constraint* on the copy but never assigned writing it.
+      ⚠️ The description came in at **4,018 / 4,000** on the first pass — Apple truncates
+      silently — so it is now 3,906 with ~94 characters of headroom. If you add a sentence, cut
+      one. "What's New" does **not** apply to a 1.0.
 - [ ] **Availability: United States only.** This defers EU AI Act Article 50, GDPR, and the
       Article 27 EU-representative requirement entirely, at zero engineering cost
 - [ ] Privacy Policy URL → `https://caydexinvest.com/privacy`
@@ -890,6 +969,39 @@ No longer blocked — your existing Individual account can create this record (s
 - [ ] IAP products: **do create them now** — see §6b. (This line used to say "not yet, wait for
       Phase 8"; Phase 8 is done and the StoreKit code ships, so §6b is the live instruction and
       this is no longer a reason to defer.)
+
+### 🔴 Added 2026-08-14 evening — four required items that were in NO section
+
+- [ ] 🔴 **A demo account, actually created and seeded.** The App Review notes you are told to
+      paste promise *"Credentials are in the App Review sign-in fields; the account is pre-loaded
+      with credits."* Live DB: **4 users, none of them a review account.** And anonymous
+      `GET /stocks/AAPL/report` returns **401 `AUTH_REQUIRED`** — so a reviewer signed out
+      literally cannot exercise the headline feature. Pasting that paragraph with the sign-in
+      fields empty converts a fixed problem back into a rejection.
+      ⚠️ **Google SSO will not work here** — ASC's Sign-In Required fields take a username and a
+      password the reviewer types into the app; there is nothing to type for a Google account.
+      **Best path:** Supabase Studio → Authentication → Add user with **Auto Confirm User**
+      ticked. That bypasses the dead SMTP entirely and takes §5c off the submission path.
+- [ ] 🔴 **Content Rights** declaration (ASC → App Information). **Substantive here, not
+      clerical**: the Learn library ships original study guides for ten in-copyright books, the
+      book cover art typesets real author names in a public bucket, and the app redistributes
+      FMP / CoinGecko / FRED data. Answering "I have the rights" depends on §6 (the
+      redistribution questions, still unasked) and the lawyer item on the study guides.
+      **Do not answer it before those come back.**
+- [ ] **Copyright** field — suggested `2026 Duc Hai Phan` (must match the Individual account's
+      seller name), and **App Review Information contact details** (first name, last name, phone,
+      email). Pure data entry, but hard-required to reach Submit.
+- [ ] ⚠️ **The first Release export must be driven from the Xcode UI, not a script.**
+      `security find-identity -v -p codesigning` returns **2 valid identities, both "Apple
+      Development"** — there is no Apple Distribution certificate on this machine, and the Release
+      config still specifies `CODE_SIGN_IDENTITY = "Apple Development"`. Organizer → Distribute
+      App mints the distribution cert while you are signed in; a headless
+      `xcodebuild -exportArchive … app-store-connect` fails outright.
+      Related: **the Release configuration has never been compiled.** DerivedData holds only
+      `Debug-iphonesimulator`, and the only archives are the two from 2026-06-06 — so ~10 weeks of
+      work has never been through archive / validate / sign. Budget time for first-archive
+      surprises, and note that a missing App-ID capability shows up here as a *signing failure*,
+      which is itself the cheapest way to verify the entitlements are really enabled.
 
 **Metadata rule:** no real investor names anywhere in the app name, subtitle, description,
 keywords, or screenshots (Guideline 5.2.1). The personas are now style names — keep the

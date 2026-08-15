@@ -111,11 +111,11 @@ FREE_TIER_WHALE_NAME = "Bill Gates"
 #             their drill-down), and the AI Sentiment Summary — the position-level detail.
 WHALE_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 
-# ── Wiser (Learn): read free, listen with Pro ────────────────────────────────────────
+# ── Wiser (Learn): read free, listen with Pro — EXCEPT the Investor Journey ──────────
 #
 # TEXT is free on every tier — all 27 Journey lessons, 13 Money Moves articles and 10
 # books stay fully readable, and so does progress tracking. What is paid is the produced
-# NARRATION (230 clips, 7h33m) and the read-along highlighting it drives.
+# NARRATION and the read-along highlighting it drives — for MONEY MOVES and BOOKS only.
 #
 # The line is drawn here for three reasons that all point the same way:
 #   • Cost. Serving Learn is ~2 cached Supabase selects an hour for the entire user base;
@@ -131,6 +131,25 @@ WHALE_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 # Same floor as the other two gates, and deliberately the same frozenset so they cannot
 # drift into "Pro unlocks signals but only Max unlocks narration".
 LEARN_AUDIO_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
+
+# ── The Investor Journey is the deliberate exception: narration free on every tier ────
+#
+# 207 of the 230 clips are Journey. Freeing them inverts the Cost bullet above, and that
+# is accepted on purpose: the Journey is the top of the funnel — the thing a stranger
+# opens first — and a lesson that reads itself aloud is the product demo. The paid floor
+# is RETAINED on Money Moves and the book library, where the same egress argument still
+# holds and where the Blinkist comparison actually bites.
+#
+# Deliberately a real table over a real set rather than `return True`:
+#   • it composes with `normalize_tier`, which folds garbage to "free" — and "free" is IN
+#     this set, so this gate FAILS OPEN. That is the exact inversion of every other gate
+#     in this module, and it is intentional: an unrecognised tier should hear the lesson,
+#     not be refused. Do not "fix" it by reaching for LEARN_AUDIO_UNLOCKED_TIERS.
+#   • re-gating the Journey later is a one-line edit here, not a route rewrite.
+#
+# NOT aliased to SIGNALS_UNLOCKED_TIERS — the divergence is the point, and
+# tests/test_learn_audio_entitlement.py pins that these two are NOT the same object.
+JOURNEY_AUDIO_UNLOCKED_TIERS = frozenset(TIER_ORDER)
 
 
 def normalize_tier(tier: Optional[str]) -> str:
@@ -209,13 +228,29 @@ def required_tier_for_whales(tier: Optional[str]) -> Optional[str]:
 
 
 def learn_audio_unlocked(tier: Optional[str]) -> bool:
-    """Pure: may this tier hear the produced Learn narration?
+    """Pure: may this tier hear MONEY MOVES / BOOK narration?
 
     False for Free, for guests (whose identity dict hardcodes ``"free"``), and for anything
     unrecognised — the unknown case must fall CLOSED onto the paid surface. Note this gates
     AUDIO only; the text of every lesson, article and book core is free at any tier.
+
+    ⚠️ This does NOT cover the Investor Journey — that narration is free on every tier.
+    Use ``journey_audio_unlocked`` there, which fails OPEN.
     """
     return normalize_tier(tier) in LEARN_AUDIO_UNLOCKED_TIERS
+
+
+def journey_audio_unlocked(tier: Optional[str]) -> bool:
+    """Pure: may this tier hear Investor Journey narration? Always yes.
+
+    True for every tier including Free, for guests, and for anything unrecognised —
+    ``normalize_tier`` folds garbage to "free", which is in the set, so this FAILS OPEN by
+    construction. That inversion is deliberate; see JOURNEY_AUDIO_UNLOCKED_TIERS.
+
+    Kept as a function rather than inlined so the Journey route reads like the other two
+    and so re-gating is a single edit to the frozenset.
+    """
+    return normalize_tier(tier) in JOURNEY_AUDIO_UNLOCKED_TIERS
 
 
 def required_tier_for_learn_audio(tier: Optional[str]) -> Optional[str]:

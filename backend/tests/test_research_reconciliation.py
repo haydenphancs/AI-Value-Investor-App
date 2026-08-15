@@ -477,3 +477,143 @@ async def test_sweep_does_not_retry_a_non_transient_lookup_failure():
     await recon.sweep_once(now=now, supabase=sb)
 
     assert sb.select_calls == 1
+
+
+# ── Deleting an in-flight report must refund it ───────────────────────────────────────
+#
+# 'deleted' is TERMINAL and unreachable by the sweep: `_CLAIMABLE_STATUSES` is
+# (pending, processing, failed), so once delete_report sets it, nothing can ever return the
+# credits. The iOS list lets a user select and delete a still-generating card (selection is
+# gated only on `backendId != nil`, unlike tap and retry which gate on status), and the worker
+# then finishes into a conditional write whose status filter no longer matches — it logs and
+# returns WITHOUT raising, so no except fires and no refund happens. 20 credits, silently; on a
+# free account (50/month) that is 40% of the allocation.
+
+
+def _delete(rows, report_id="rep-1", user_id="user-1", refunds=None):
+    import asyncio
+    from app.api.v1.endpoints import research as research_ep
+
+    calls = refunds if refunds is not None else []
+
+    class _Credits:
+        def refund_ledgered(self, uid, amount, *, reason, ref_id):
+            calls.append({"user_id": uid, "amount": amount, "reason": reason, "ref_id": ref_id})
+            return 999
+
+    original = research_ep.CreditService
+    research_ep.CreditService = _Credits
+    try:
+        return asyncio.run(research_ep.delete_report(
+            report_id, {"id": user_id}, FakeSupabase(rows)
+        )), calls
+    finally:
+        research_ep.CreditService = original
+
+
+def test_deleting_an_in_flight_report_refunds_it():
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "processing",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    _, calls = _delete(rows)
+
+    assert rows[0]["status"] == "deleted"
+    assert rows[0]["is_refunded"] is True, "the refund must be CLAIMED, or the sweep could double it"
+    assert len(calls) == 1 and calls[0]["amount"] == 20
+
+
+def test_the_delete_refund_uses_the_ticker_the_charge_used():
+    """`refund_credits` matches the debit on (user_id, ref_id, delta). research.py charges with
+    `request.stock_id.upper()`, so a lowercase or None ref_id finds no split and falls back to
+    granted-first — converting PERMANENT purchased credits into expiring ones (3.1.1)."""
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "pending",
+             "is_refunded": False, "credits_charged": 20, "ticker": "aapl"}]
+    _, calls = _delete(rows)
+    assert calls[0]["ref_id"] == "AAPL"
+
+
+def test_deleting_a_finished_report_refunds_nothing():
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "ready",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    _, calls = _delete(rows)
+    assert rows[0]["status"] == "deleted"
+    assert calls == [], "a delivered report is not owed a refund"
+
+
+def test_deleting_an_already_refunded_report_does_not_refund_twice():
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "failed",
+             "is_refunded": True, "credits_charged": 20, "ticker": "AAPL"}]
+    _, calls = _delete(rows)
+    assert rows[0]["status"] == "deleted"
+    assert calls == []
+
+
+def test_deleting_a_zero_charge_report_refunds_nothing():
+    """Cache hits and guest-era rows carry credits_charged=0. Refunding 0 would write a
+    meaningless ledger row and, worse, could pair with an unrelated debit."""
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "pending",
+             "is_refunded": False, "credits_charged": 0, "ticker": "AAPL"}]
+    _, calls = _delete(rows)
+    assert rows[0]["status"] == "deleted"
+    assert calls == []
+
+
+def test_a_user_cannot_delete_or_refund_another_users_report():
+    rows = [{"id": "rep-1", "user_id": "victim", "status": "processing",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    _, calls = _delete(rows, user_id="attacker")
+    assert rows[0]["status"] == "processing", "another user's report was mutated"
+    assert calls == [], "an attacker triggered a refund against someone else's row"
+
+
+# ── The commit-then-error double refund ───────────────────────────────────────────────
+
+
+def test_the_insert_failure_path_claims_a_committed_row_before_refunding():
+    """`insert` raising does NOT prove Postgres rolled back.
+
+    A Cloudflare edge 520 or a read timeout after the commit reaches the failure branch with
+    the row PRESENT and pristine (status='pending', is_refunded=False, credits_charged=20) —
+    matching every filter the reconciliation sweep uses. The endpoint refunds; hours later the
+    sweep wins its own claim, knows nothing about that refund, and refunds AGAIN. By then
+    `refund_credits` finds no un-reversed debit, takes its granted-first fallback bounded only
+    by the user's CURRENT `used`, and pays out a second time from unrelated spend.
+
+    Source-scanned because the surrounding endpoint needs the full FastAPI dependency graph,
+    while the property is structural: the refund on this path must be preceded by the same
+    `is_refunded=False` compare-and-set the sweep uses. `test_claim_is_idempotent...` above
+    already proves that flag blocks a second claim.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "app/api/v1/endpoints/research.py"
+    code = src.read_text(encoding="utf-8")
+    code = "\n".join("" if l.strip().startswith("#") else l for l in code.splitlines())
+
+    start = code.index("if not insert_ok:")
+    end = code.index("return make_error_response", start)
+    branch = code[start:end]
+
+    assert 'refund_ledgered' in branch, "the insert-failure branch no longer refunds"
+    claim = branch.index('.eq("is_refunded", False)')
+    refund = branch.index("refund_ledgered")
+    assert claim < refund, (
+        "the insert-failure path refunds WITHOUT first claiming a possibly-committed row — "
+        "the reconciliation sweep can then refund the same charge a second time"
+    )
+    assert '"is_refunded": True' in branch[:refund], "the claim does not set the flag"
+    assert '.in_("status", ["pending", "processing"])' in branch[:refund]
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_orphan_is_invisible_to_the_sweep():
+    """The other half of the pair: once the endpoint sets is_refunded=True, the sweep's own
+    claim must find nothing, so the same charge cannot be refunded twice. Real code, not a
+    scan."""
+    rows = [_row(is_refunded=True)]
+    FakeCreditService.calls.clear()
+
+    won = await recon.claim_and_mark_failed("r1", _BLOB, supabase=FakeSupabase(rows))
+
+    assert won is False, "the sweep re-claimed a row the endpoint had already refunded"
+    assert FakeCreditService.calls == [], "a second refund was issued for one charge"

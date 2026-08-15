@@ -32,7 +32,19 @@ from typing import Literal, Optional, List, Dict, Any
 
 
 class GenerateResearchRequest(BaseModel):
-    stock_id: str = Field(description="Ticker symbol (e.g. AAPL)")
+    # Validated at the SCHEMA, so an unusable ticker is rejected before the 20-credit
+    # precharge rather than after it. An empty or whitespace `stock_id` used to be charged
+    # and then refunded with `ref_id=""` — and `refund_credits` gates its whole split lookup
+    # on `p_ref_id IS NOT NULL AND p_ref_id <> ''`, so that refund could never find the
+    # debit's recorded granted/purchased split and always took the granted-first fallback,
+    # converting permanent purchased credits into expiring ones. It also burned one of the
+    # user's MAX_CONCURRENT_REPORTS_PER_USER slots for the close cycle.
+    stock_id: str = Field(
+        min_length=1,
+        max_length=12,
+        pattern=r"^[A-Za-z0-9.\-]+$",
+        description="Ticker symbol (e.g. AAPL)",
+    )
     investor_persona: str = Field(description="Persona key (e.g. warren_buffett)")
     # Phase 3 forward-compat: lets iOS opt into a faster Stage A+B-only
     # generation path (no agentic deep-research loop). Today the

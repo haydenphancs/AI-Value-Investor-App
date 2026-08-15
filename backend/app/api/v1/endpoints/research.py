@@ -247,12 +247,53 @@ async def generate_research_report(
         result = None
         insert_ok = False
     if not insert_ok:
-        # DB insert failed AFTER we charged credits — refund immediately so the
-        # user isn't out the charged credits for a row that never existed. There
-        # is NO research_reports row here for the reconciliation sweep to catch,
-        # so this is the only backstop: if the best-effort refund ALSO fails we
-        # log a greppable REFUND LEAK marker with everything a human needs to
-        # correct it manually (mirrors claim_and_mark_failed's leak path).
+        # DB insert failed AFTER we charged credits — refund so the user isn't out the
+        # charged credits for a row that never existed.
+        #
+        # ⚠️ "the row never existed" IS NOT SAFE TO ASSUME, and assuming it double-refunded.
+        # `insert` raising says nothing about whether Postgres committed: a Cloudflare edge 520
+        # or a read timeout after the commit lands here with the row PRESENT (status='pending',
+        # is_refunded=False, credits_charged=20) — which matches every filter the reconciliation
+        # sweep uses. The sweep then wins its own per-row claim, knows nothing about this
+        # refund, and issues a SECOND one. `refund_credits` finds no un-reversed debit by then,
+        # falls through to its granted-first fallback bounded only by the user's CURRENT `used`,
+        # and pays out again from unrelated spend — minting up to `credits_charged` credits.
+        #
+        # So arm the SAME at-most-once guard the sweep uses before refunding. If a row did
+        # commit, this claim wins it (is_refunded=True) and the sweep can never touch it; if no
+        # row exists the claim matches nothing and we refund directly, as before. Either branch
+        # refunds exactly once.
+        try:
+            orphan = (
+                supabase.table("research_reports")
+                .update({"status": "failed", "is_refunded": True})
+                .eq("user_id", user["id"])
+                .eq("ticker", ticker)
+                .eq("investor_persona", request.investor_persona)
+                .eq("is_refunded", False)
+                .in_("status", ["pending", "processing"])
+                .gte("created_at", cycle_start)
+                .execute()
+            )
+            claimed_orphan = bool(getattr(orphan, "data", None))
+        except Exception as e:
+            # Best-effort. If this fails the sweep may still refund later; that is the
+            # pre-existing behaviour and strictly better than not refunding at all here.
+            logger.warning(
+                "research_reports orphan claim failed for %s (user=%s): %s: %s",
+                ticker, user["id"], type(e).__name__, e,
+            )
+            claimed_orphan = False
+        if claimed_orphan:
+            logger.warning(
+                "research_reports insert reported failure for %s (user=%s) but a row HAD "
+                "committed — claimed it for refund so the reconciliation sweep cannot refund "
+                "it a second time",
+                ticker, user["id"],
+            )
+
+        # If the best-effort refund ALSO fails we log a greppable REFUND LEAK marker with
+        # everything a human needs to correct it manually (mirrors claim_and_mark_failed's).
         refunded = credit_service.refund_ledgered(
             user["id"], CreditService.DEEP_RESEARCH_COST,
             reason="report_refund", ref_id=ticker,

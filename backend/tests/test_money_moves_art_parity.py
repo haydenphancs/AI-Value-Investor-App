@@ -356,15 +356,56 @@ def test_ios_dto_declares_the_image_keys_and_decodes_them_leniently():
             f"{k} must decode leniently — a strict decode drops the whole article")
 
 
-def test_ios_card_art_is_not_gated_on_showIcon():
-    """The See-All grid passes `showIcon: false` to suppress the category badge. Gating the
-    plate on the same flag would leave the browsing screen the only one with no pictures."""
+def test_ios_card_always_draws_a_cover_plate():
+    """The plate is UNCONDITIONAL — no `if`, no `showIcon`, no category-badge branch.
+
+    Previously the cover was drawn only `if let imageUrl`, with a badge as the else-branch and
+    that badge itself gated on `showIcon`. The See-All carousels pass no artwork before the
+    backend prefetch resolves (the bundled money_moves.json carries none) AND used to pass
+    `showIcon: false`, so every card there took NEITHER branch: it began at the title and then
+    reflowed taller when the art landed. MoneyMoveCoverImage already falls back to the
+    category gradient for a nil url, so drawing it unconditionally makes all three states —
+    absent, loading, arrived — occupy the same 16:9 box.
+    """
     src = _strip_swift_comments(CARD_SWIFT.read_text())
-    art_block = src.split("MoneyMoveCoverImage", 1)[0]
-    tail = art_block.rsplit("if let imageUrl", 1)
-    assert len(tail) == 2, "MoneyMoveCard no longer renders MoneyMoveCoverImage"
-    assert "showIcon" not in tail[1], (
-        "artwork is gated on showIcon — See-All would render no plates")
+    assert "MoneyMoveCoverImage" in src, "MoneyMoveCard no longer renders MoneyMoveCoverImage"
+
+    # Nothing may stand between the VStack opening and the atom — that is what "unconditional"
+    # means here, and an `if` re-appearing is exactly the regression.
+    body = src.split("VStack(alignment: .leading", 1)[1].split("MoneyMoveCoverImage", 1)[0]
+    assert "if " not in body, (
+        f"the cover plate is conditional again — found a branch before it: {body.strip()!r}")
+
+    assert "showIcon" not in src, (
+        "showIcon is back on MoneyMoveCard; it has no reader and a parameter that is accepted "
+        "and ignored lies to its callers")
+    # url: is passed straight through, Optional and all — not force-unwrapped behind a guard.
+    assert "url: moneyMove.imageUrl" in src
+
+
+def test_no_caller_passes_showIcon_to_a_money_move_card():
+    """A leftover `showIcon:` argument is a compile error, but the failure message points at
+    the call site rather than the reason — so pin the reason here."""
+    offenders = []
+    for path in (REPO / "frontend/ios/ios/Views").rglob("*.swift"):
+        src = _strip_swift_comments(path.read_text())
+        for chunk in src.split("MoneyMoveCard(")[1:]:
+            if "showIcon" in chunk.split(")", 1)[0]:
+                offenders.append(path.name)
+    assert not offenders, f"MoneyMoveCard no longer takes showIcon; still passed by {offenders}"
+
+
+def test_the_card_model_carries_no_dead_audio_flag():
+    """`MoneyMove.hasAudio` drove the headphones badge. The badge is gone (pinned by the test
+    below), so the flag became write-only: set by toCard(), read by nothing. A model field
+    nothing reads is a false promise to the next person who greps for it."""
+    models = _strip_swift_comments((REPO / "frontend/ios/ios/Models/LearnModels.swift").read_text())
+    dto = _strip_swift_comments(MODELS_SWIFT.read_text())
+    card_struct = models.split("struct MoneyMove:", 1)[1].split("\n}", 1)[0]
+    assert "hasAudio" not in card_struct, "MoneyMove.hasAudio is back but still has no reader"
+    assert "hasAudio:" not in dto, "toCard() still writes the dead hasAudio flag"
+    # The live flag on the ARTICLE model is a different thing and must survive.
+    assert "hasAudioVersion" in dto
 
 
 def test_ios_card_meta_row_carries_the_completion_mark_and_no_headphones():
@@ -453,9 +494,77 @@ def test_plate_files_are_small_enough_for_the_bucket():
             assert path.stat().st_size < 900_000, f"{rec['file']} is {path.stat().st_size} B"
 
 
+def test_prompt_hash_matches_every_generated_manifest():
+    """THE re-roll guard. Every plate is paid and nondeterministic, so an approved one can
+    never be recovered — only replaced by a different picture.
+
+    `generate()` decides a slug is up to date by comparing sha1(prompt)[:12] against the
+    manifest's `art_prompt_sha1`. So any edit to BASE, TREATMENTS, PALETTES, a subject string
+    or a palette override silently re-rolls every plate it touches on the next run. That
+    includes a promotion from PLACEHOLDER_TOPICS into ARTICLES: moving the entry is free,
+    but retyping the subject instead of moving it is not.
+
+    Drift here means "the next generate run will spend money and change approved artwork".
+    """
+    import hashlib
+
+    mans = _manifests()
+    if not mans:
+        pytest.skip("no art generated yet")
+    drift = []
+    for man in mans:
+        recorded = man.get("art_prompt_sha1")
+        if not recorded:
+            continue
+        slug = man["slug"]
+        current = hashlib.sha1(art.prompt_for_slug(slug).encode()).hexdigest()[:12]
+        if current != recorded:
+            drift.append(f"{slug}: manifest {recorded} != current {current}")
+    assert not drift, (
+        "the prompt changed for an already-generated plate — the next generate run would "
+        "re-roll it at full cost:\n  " + "\n  ".join(drift))
+
+
+def test_scratch_art_dirs_are_ignored_and_shipping_plates_are_not():
+    """`_compare/`, `_prev/` and `_style/` are scratch; the plates and manifests are not.
+
+    `_prev/` matters most: generate() writes the outgoing master there on EVERY re-roll, so
+    with no rule each regeneration quietly adds another ~1 MB blob to history forever.
+
+    ⚠️ `*.subject.txt` must NOT be ignored — resolve() reads it back for any --auto-written
+    article, which makes it an input to art_prompt_sha1. Ignoring it would re-roll that plate
+    on a fresh clone, i.e. the exact failure the test above exists to catch.
+
+    `--no-index` is required: without it `git check-ignore` reports a TRACKED file as
+    not-ignored regardless of the rules, so this test would pass vacuously until someone
+    actually untracks the directories.
+    """
+    import subprocess
+
+    def ignored(rel: str) -> bool:
+        r = subprocess.run(
+            ["git", "check-ignore", "--no-index", "-q", rel],
+            cwd=REPO, capture_output=True,
+        )
+        if r.returncode not in (0, 1):
+            pytest.skip(f"git check-ignore unavailable: {r.stderr.decode().strip()}")
+        return r.returncode == 0
+
+    base = "backend/data/money_moves_art"
+    for scratch in ("_compare/x.jpg", "_compare/_rejected/x.jpg", "_prev/x.art.jpg",
+                    "_style/index.json"):
+        assert ignored(f"{base}/{scratch}"), f"{scratch} should be gitignored scratch"
+    for shipped in ("the-fall-of-enron.art.jpg", "the-fall-of-enron.hero.jpg",
+                    "the-fall-of-enron.card.jpg", "the-fall-of-enron.manifest.json",
+                    "the-fall-of-enron.subject.txt"):
+        assert not ignored(f"{base}/{shipped}"), (
+            f"{shipped} is gitignored but it ships — a fresh clone could not reproduce or "
+            f"re-upload the plate")
+
+
 def test_light_ground_plates_are_reported_so_the_hairline_can_be_drawn():
-    """Not a failure — a rendering fact. Eight of thirteen plates have a near-white ground
-    and rely on AppColors.cardEdge to separate the card from the light-mode page."""
+    """Not a failure — a rendering fact. Most plates have a near-white ground and rely on
+    AppColors.cardEdge to separate the card from the light-mode page."""
     mans = [m for m in _manifests() if m.get("plate")]
     if not mans:
         pytest.skip("no art generated yet")

@@ -2,52 +2,52 @@
   "identifier" : "CAYDEX-LOCAL-STOREKIT",
   "nonRenewingSubscriptions" : [ ],
   "products" : [ {
-    "displayPrice" : "1.99",
+    "displayPrice" : "2.99",
     "familyShareable" : false,
     "internalID" : "6740002001",
     "localizations" : [ {
-      "description" : "90 credits for AI reports and Cay AI chat. Never expires.",
+      "description" : "130 credits. Never expire.",
       "displayName" : "Starter",
       "locale" : "en_US"
     } ],
     "productID" : "com.phan.caydex.credits.starter",
-    "referenceName" : "Caydex Credits Starter (90)",
+    "referenceName" : "Caydex Credits Starter (130)",
     "type" : "Consumable"
   }, {
-    "displayPrice" : "4.99",
+    "displayPrice" : "5.99",
     "familyShareable" : false,
     "internalID" : "6740002002",
     "localizations" : [ {
-      "description" : "250 credits for AI reports and Cay AI chat. Never expires.",
+      "description" : "280 credits. Never expire.",
       "displayName" : "Plus",
       "locale" : "en_US"
     } ],
     "productID" : "com.phan.caydex.credits.plus",
-    "referenceName" : "Caydex Credits Plus (250)",
+    "referenceName" : "Caydex Credits Plus (280)",
     "type" : "Consumable"
   }, {
-    "displayPrice" : "9.99",
+    "displayPrice" : "11.99",
     "familyShareable" : false,
     "internalID" : "6740002003",
     "localizations" : [ {
-      "description" : "550 credits for AI reports and Cay AI chat. Never expires.",
+      "description" : "600 credits. Never expire.",
       "displayName" : "Power",
       "locale" : "en_US"
     } ],
     "productID" : "com.phan.caydex.credits.power",
-    "referenceName" : "Caydex Credits Power (550)",
+    "referenceName" : "Caydex Credits Power (600)",
     "type" : "Consumable"
   }, {
-    "displayPrice" : "19.99",
+    "displayPrice" : "24.99",
     "familyShareable" : false,
     "internalID" : "6740002004",
     "localizations" : [ {
-      "description" : "1,200 credits for AI reports and Cay AI chat. Never expires.",
+      "description" : "1,300 credits. Never expire.",
       "displayName" : "Mega",
       "locale" : "en_US"
     } ],
     "productID" : "com.phan.caydex.credits.mega",
-    "referenceName" : "Caydex Credits Mega (1200)",
+    "referenceName" : "Caydex Credits Mega (1300)",
     "type" : "Consumable"
   } ],
   "settings" : {
@@ -68,7 +68,7 @@
       "internalID" : "6740001001",
       "introductoryOffer" : null,
       "localizations" : [ {
-        "description" : "1,200 credits a month for AI reports and Cay AI chat.",
+        "description" : "1,200 credits a month for reports and chat.",
         "displayName" : "Pro",
         "locale" : "en_US"
       } ],
@@ -87,7 +87,7 @@
       "internalID" : "6740001002",
       "introductoryOffer" : null,
       "localizations" : [ {
-        "description" : "4,000 credits a month for AI reports and Cay AI chat.",
+        "description" : "4,000 credits a month for reports and chat.",
         "displayName" : "Max",
         "locale" : "en_US"
       } ],

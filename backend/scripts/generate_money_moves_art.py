@@ -321,6 +321,13 @@ ARTICLES = {
     "costcos-membership-magic": ("blueprints", "flat_deco",
         "a chrome three-armed turnstile rotor on its polished central post, seen from a "
         "slight angle, with soft rounded geometric shapes and arcs filling the space behind it"),
+    # Promoted from PLACEHOLDER_TOPICS when the article was authored. The subject string is
+    # UNCHANGED, byte for byte — it feeds art_prompt_sha1, and the plate is already approved
+    # and published, so any edit here re-rolls it at full cost.
+    "nvidias-ai-dominance": ("blueprints", "cutout_grid",
+        "a dense graphics accelerator board lying flat and seen from above, its finned "
+        "heatsink, twin fan shrouds and long gold edge connector all clearly readable, "
+        "completely blank with no printing or markings anywhere on the board"),
 
     # ---- VALUE TRAPS --------------------------------------------------------
     # Smoke and mirrors, on the ledger it was hidden in. The two halves of the story in one
@@ -343,6 +350,11 @@ ARTICLES = {
     "theranos-blood-and-lies": ("valueTraps", "specimen_plate",
         "a single small glass laboratory vial lying flat and perfectly horizontal, completely "
         "unlabelled and unmarked, with one dark red droplet pooled beside its open mouth"),
+    # Promoted verbatim — see the note on nvidias-ai-dominance above.
+    "the-fall-of-sears": ("valueTraps", "ledger_still",
+        "one very thick mail-order catalogue lying closed, its pages swollen and rippled "
+        "with old water damage and its cover worn blank, a few loose pages slipping out of "
+        "the block"),
 
     # ---- BATTLES ------------------------------------------------------------
     "netflix-vs-disney-plus": ("battles", "cutout_grid",
@@ -366,6 +378,11 @@ ARTICLES = {
     "google-vs-microsoft-ai-wars": ("battles", "tech_noir",
         "two dense server-grade aluminium heatsinks standing face to face, their fin stacks "
         "almost interleaving, both complete and clearly readable as heatsinks"),
+    # Promoted verbatim — see the note on nvidias-ai-dominance above.
+    "amd-vs-intel-the-cpu-wars": ("battles", "macro_noir",
+        "two identical square computer processor chips lying flat side by side, their "
+        "polished metal heat spreaders and the dense grid of gold contact pads around the "
+        "edge of each clearly readable, both completely blank and unmarked"),
 }
 
 # =============================================================================
@@ -382,10 +399,6 @@ ARTICLES = {
 # the already-published plate is already at the right path. Nothing has to be re-uploaded.
 # =============================================================================
 PLACEHOLDER_TOPICS = {
-    "nvidias-ai-dominance": ("blueprints", "cutout_grid",
-        "a dense graphics accelerator board lying flat and seen from above, its finned "
-        "heatsink, twin fan shrouds and long gold edge connector all clearly readable, "
-        "completely blank with no printing or markings anywhere on the board"),
     "the-rise-of-lvmh": ("blueprints", "colour_field",
         "two rigid leather travel trunks stacked one on the other, their brass corner caps, "
         "riveted edging and unmarked latches clearly readable, the leather grain visible"),
@@ -398,10 +411,6 @@ PLACEHOLDER_TOPICS = {
         "flat notch visible at the rim and no printing anywhere on it"),
 
     # ---- BATTLES: two identical objects, the product both rivals actually sell ----
-    "amd-vs-intel-the-cpu-wars": ("battles", "macro_noir",
-        "two identical square computer processor chips lying flat side by side, their "
-        "polished metal heat spreaders and the dense grid of gold contact pads around the "
-        "edge of each clearly readable, both completely blank and unmarked"),
     "the-home-depot-vs-lowes": ("battles", "cutout_grid",
         "two identical open metal paint tins standing side by side, each filled to the rim "
         "with smooth level paint and a clean stir stick resting across it, both tins "
@@ -420,10 +429,6 @@ PLACEHOLDER_TOPICS = {
         "a single virtual-reality headset lying on its side, its twin lens ports, foam face "
         "seal and slack head strap all clearly readable, the whole thing completely blank "
         "and unmarked"),
-    "the-fall-of-sears": ("valueTraps", "ledger_still",
-        "one very thick mail-order catalogue lying closed, its pages swollen and rippled "
-        "with old water damage and its cover worn blank, a few loose pages slipping out of "
-        "the block"),
 }
 
 # =============================================================================

@@ -40,6 +40,7 @@
 /* Begin PBXFileReference section */
 		9A10000000000000000001 /* CaydexWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = CaydexWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		938B285E2F04A07A00A3CE08 /* ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ios.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A10000000000000000010 /* Caydex.storekit */ = {isa = PBXFileReference; lastKnownFileType = text; path = Caydex.storekit; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -117,6 +118,7 @@
 				938B28602F04A07A00A3CE08 /* ios */,
 				9A10000000000000000003 /* CaydexWidgets */,
 				9A10000000000000000004 /* Shared */,
+				9A10000000000000000010 /* Caydex.storekit */,
 				93350E242FFF40D100351547 /* Frameworks */,
 				938B285F2F04A07A00A3CE08 /* Products */,
 			);

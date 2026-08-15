@@ -762,9 +762,11 @@ against real Apple infrastructure.
 - [ ] 🔴 **Accept the Paid Applications Agreement**, add **banking** details and complete the
       **W-9 / tax forms** (Business → Agreements, Tax, and Banking).
       Until this is active ASC returns **no IAP products at all** — `Product.products(for:)`
-      comes back empty and the paywall shows *"Credit packs aren't available on this device
-      right now."* That is the same symptom as a wrong product id, which is why this is the
-      most commonly misdiagnosed IAP failure. Bank verification is not instant; start it early.
+      comes back empty, so Add Credits renders every pack with its credit count and
+      **"Price unavailable"** where the price belongs, no Buy button, and a banner carrying
+      the reason. That is the designed degraded state, **not** a bug — and it is the same
+      symptom a wrong product id produces, which is why this is the most commonly
+      misdiagnosed IAP failure. Bank verification is not instant; start it early.
 
 ### App Store Connect — products (all SIX, blocked on the agreement above)
 
@@ -772,16 +774,41 @@ against real Apple infrastructure.
       must match exactly, or a real purchase verifies and then fails to map to a plan:
       - `com.phan.caydex.pro.monthly` — $14.99/month
       - `com.phan.caydex.max.monthly` — $39.99/month
-- [ ] Create four **consumable** in-app purchases. Prices and credit grants come from
-      `credit_packs` (migration 117) — ASC and the table must agree or the user is charged one
-      price and shown another:
-      - `com.phan.caydex.credits.starter` — 90 credits
-      - `com.phan.caydex.credits.plus` — 250 credits
-      - `com.phan.caydex.credits.power` — 550 credits
-      - `com.phan.caydex.credits.mega` — 1200 credits
+- [ ] Create four **consumable** in-app purchases. Type matters: *Consumable*, not
+      Non-Consumable (which would let one purchase be restored forever) and not
+      Non-Renewing Subscription. Each must be **Cleared for Sale**, and on the first
+      submission all four must be **attached to the app version**.
+
+      Prices and credit grants come from `credit_packs` (migration **138**, superseding
+      117's ladder) — ASC and the table must agree or the user is charged one price and
+      shown another. Every cell below is **character-identical** to
+      `frontend/ios/Caydex.storekit`; `tests/test_iap_product_and_privacy_parity.py` pins
+      those two in-repo copies to each other, and this table is the only control on ASC.
+
+      | Product ID | Reference Name (internal) | Price | Display Name (≤30) | Description (≤45) |
+      |---|---|---|---|---|
+      | `com.phan.caydex.credits.starter` | `Caydex Credits Starter (130)` | **$2.99** | `Starter` | `130 credits. Never expire.` |
+      | `com.phan.caydex.credits.plus` | `Caydex Credits Plus (280)` | **$5.99** | `Plus` | `280 credits. Never expire.` |
+      | `com.phan.caydex.credits.power` | `Caydex Credits Power (600)` | **$11.99** | `Power` | `600 credits. Never expire.` |
+      | `com.phan.caydex.credits.mega` | `Caydex Credits Mega (1300)` | **$24.99** | `Mega` | `1,300 credits. Never expire.` |
+
       ⚠️ The `com.phan.caydex.credits.` **prefix is load-bearing**: the backend routes a
       verified transaction to the credit path by prefix (`IAP_CREDIT_PACK_PREFIX`). A pack id
       outside it is diagnosed as an unmapped *subscription* and refused.
+      ⚠️ **Set United States as the base price country** and let ASC generate the rest. Never
+      hand-set a foreign price: Apple's localized `displayPrice` always wins in the UI, so a
+      hand-set price is a number nobody reviews and everybody pays.
+      ⚠️ **Once these exist, a reprice must change ASC and `credit_packs` in the SAME
+      session.** A repriced row against an old ASC price means the app quotes $5.99 while
+      Apple charges $4.99. (Today this is safe only because nothing is purchasable yet.)
+- [ ] **Review screenshot** for the IAPs — required before submission. One screenshot of the
+      Add Credits screen showing all four cards satisfies all four products.
+- [ ] **Review notes** for the IAPs, one line: *"Consumable credit packs. Credits are spent
+      in-app on AI-generated research reports and chat. Purchased credits never expire
+      (Guideline 3.1.1); the monthly subscription allowance resets separately. Requires
+      sign-in — test account below."* Reuse the reviewer account from §7.
+- [ ] **Tax category** — leave the default. These are digital services, not e-books, news, or
+      software subscriptions.
 - [ ] Give the **subscription group** a localized display name — it currently has
       `localizations: []`, and subscriptions cannot be submitted for review without one
 - [ ] Fill in the localised display name, description, and a review screenshot for each

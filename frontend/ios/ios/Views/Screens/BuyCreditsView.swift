@@ -72,9 +72,27 @@ struct BuyCreditsView: View {
                         balanceHeader
                         whatCreditsBuy
 
+                        // The sign-in gate now sits ABOVE the packs instead of replacing them.
+                        // `/billing/credit-packs` is public precisely so this screen renders
+                        // before we know who is looking, and hiding what a pack contains from
+                        // the person deciding whether to make an account is both worse selling
+                        // and the opposite of what `PaywallView` does. The safety rule it
+                        // enforces is untouched: no purchase button until there is an account
+                        // to attach a consumable to — that was always about the BUTTON.
                         if !appState.auth.isAuthenticated {
                             signInGate
-                        } else if !viewModel.packs.isEmpty {
+                        }
+
+                        if !viewModel.packs.isEmpty {
+                            // The notice sits ABOVE the packs and never instead of them. When
+                            // Apple has no products the cards still say what each pack grants;
+                            // only the price and the Buy button are withheld.
+                            if let notice = viewModel.storefrontNotice,
+                               appState.auth.isAuthenticated {
+                                InlineRetryNotice(message: notice) {
+                                    Task { await viewModel.load() }
+                                }
+                            }
                             VStack(spacing: AppSpacing.md) {
                                 ForEach(viewModel.packs) { pack in
                                     packCard(pack)
@@ -232,23 +250,55 @@ struct BuyCreditsView: View {
 
     // MARK: - Pack card
 
+    private func packName(_ pack: CreditPackDTO) -> some View {
+        Text(pack.displayName)
+            .font(AppTypography.heading)
+            .foregroundColor(AppColors.textPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Apple's localized price, or NOTHING — never our USD `priceLabel`.
+    ///
+    /// The old fallback to `priceLabel` was unreachable when it was safe and wrong when it was
+    /// reachable: if the `Product` exists then so does `displayPrice`, so the fallback could
+    /// only ever fire in exactly the state where we cannot tell "App Store Connect has no
+    /// products" from "this storefront can't quote a price". `priceLabel` is USD from our own
+    /// display config, and printing it there claims a price we might not charge.
+    ///
+    /// `credits` on the card below is the opposite case — it is the server's authoritative
+    /// grant value, read from the DB on every purchase, so the card can still say exactly what
+    /// you would get. Assert what we know; visibly refuse to assert what we don't.
+    @ViewBuilder
+    private func priceLabel(_ pack: CreditPackDTO) -> some View {
+        if let price = viewModel.displayPrice(for: pack) {
+            Text(price)
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+        } else {
+            Text("Price unavailable")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private func packCard(_ pack: CreditPackDTO) -> some View {
         let reports = viewModel.reportCost > 0 ? pack.credits / viewModel.reportCost : 0
         let isThisPack = viewModel.isPurchasing(pack)
         return VStack(alignment: .leading, spacing: AppSpacing.md) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(pack.displayName)
-                    .font(AppTypography.heading)
-                    .foregroundColor(AppColors.textPrimary)
-                Spacer()
-                // Apple's localized price wins whenever products have loaded. The catalog's
-                // USD `priceLabel` is only a fallback — showing "$9.99" while Apple charges
-                // €10.99 is a refund request and an App Review note.
-                Text(viewModel.displayPrice(for: pack) ?? pack.priceLabel)
-                    .font(AppTypography.headingSmall)
-                    .foregroundColor(AppColors.textPrimary)
+            // "Price unavailable" is far wider than "$5.99", so the name/price row is allowed
+            // to stack rather than truncate the pack name at the accessibility text sizes.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline) {
+                    packName(pack)
+                    Spacer()
+                    priceLabel(pack)
+                }
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    packName(pack)
+                    priceLabel(pack)
+                }
             }
-
             HStack(spacing: AppSpacing.xs) {
                 Image(systemName: "creditcard.fill")
                     .font(AppTypography.iconTiny)
@@ -263,37 +313,66 @@ struct BuyCreditsView: View {
                 }
             }
 
-            Button {
-                Task { await viewModel.purchase(pack) }
-            } label: {
-                HStack(spacing: AppSpacing.xs) {
-                    // See PaywallView: a spinner appears on exactly ONE card, so "which pack am
-                    // I buying" is answered at a glance rather than inferred from which button
-                    // is dimmer.
-                    if isThisPack {
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                            .tint(AppColors.textOnAccent)
-                            .scaleEffect(0.8)
+            if !appState.auth.isAuthenticated {
+                // The one real sign-in CTA is the gate card above; repeating it four times
+                // would be four buttons for one decision. The card states what it contains
+                // and defers.
+                Text("Sign in to buy")
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.md)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .fill(AppColors.cardBackgroundLight)
+                    )
+            } else if viewModel.isPurchasable(pack) {
+                Button {
+                    Task { await viewModel.purchase(pack) }
+                } label: {
+                    HStack(spacing: AppSpacing.xs) {
+                        // See PaywallView: a spinner appears on exactly ONE card, so "which pack am
+                        // I buying" is answered at a glance rather than inferred from which button
+                        // is dimmer.
+                        if isThisPack {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(AppColors.textOnAccent)
+                                .scaleEffect(0.8)
+                        }
+                        Text(isThisPack ? "Processing…" : "Buy")
                     }
-                    Text(isThisPack ? "Processing…" : "Buy")
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textOnAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.md)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .fill(AppColors.primaryFill)
+                    )
                 }
-                .font(AppTypography.bodyEmphasis)
-                .foregroundColor(AppColors.textOnAccent)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, AppSpacing.md)
-                .background(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .fill(AppColors.primaryFill)
-                )
+                // Every button disables while ANY purchase is in flight — two concurrent StoreKit
+                // sheets is not a state worth supporting — but only the one being bought says
+                // "Processing…", and the rest desaturate so they read as unavailable rather than
+                // as also-working.
+                .disabled(store.isPurchasing)
+                .opacity(store.isPurchasing && !isThisPack ? 0.3 : 1)
+                .saturation(store.isPurchasing && !isThisPack ? 0 : 1)
+            } else {
+                // A non-button, NOT a `.disabled()` Button: a disabled button is still an
+                // accessibility button and still invites the tap that cannot do anything.
+                // Same height and radius as the Buy button so a partial App Store Connect
+                // drift leaves a visible hole in the ladder rather than reflowing the list.
+                Text("Unavailable")
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.md)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .fill(AppColors.cardBackgroundLight)
+                    )
             }
-            // Every button disables while ANY purchase is in flight — two concurrent StoreKit
-            // sheets is not a state worth supporting — but only the one being bought says
-            // "Processing…", and the rest desaturate so they read as unavailable rather than
-            // as also-working.
-            .disabled(store.isPurchasing)
-            .opacity(store.isPurchasing && !isThisPack ? 0.3 : 1)
-            .saturation(store.isPurchasing && !isThisPack ? 0 : 1)
         }
         .padding(AppSpacing.lg)
         .background(

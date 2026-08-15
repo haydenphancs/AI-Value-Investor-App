@@ -2,15 +2,18 @@
 
 The narration gate (`learn_audio_gate`) withholds `audioUrl` from a caller whose plan
 doesn't include audio. That strip is only *enforcement* if the object itself is unreachable
-without a signature — and today it isn't: `book-media`, `journey-media` and
-`money-moves-media` are all PUBLIC buckets (migrations 068 / 061 / 065) whose paths are
-deterministic, and the clip NAMES ship inside the app bundle (207 in
-`Resources/Journey/journey_lessons.json`, 13 in `Resources/MoneyMoves/money_moves.json`).
-Anyone with a build can reconstruct every URL offline. Stripping the field is obscurity.
+without a signature. It once wasn't: `book-media`, `journey-media` and `money-moves-media`
+were created PUBLIC (migrations 068 / 061 / 065) with deterministic paths, and the clip
+NAMES ship inside the app bundle (207 in `Resources/Journey/journey_lessons.json`, 13+ in
+`Resources/MoneyMoves/money_moves.json`), so anyone with a build could reconstruct every URL
+offline and the strip was pure obscurity.
 
-This module is the other half: every narration URL handed to an entitled caller is a
-short-lived **signed** URL, so migration 128 can flip those three buckets private and the
-gate becomes real.
+**Migration 128 closed that** — it is applied, and all three buckets are private now. (Note
+`money-moves-images` is a SEPARATE, deliberately public bucket from migration 137: artwork is
+free on every tier and must never be signed.)
+
+This module is the other half of 128: every narration URL handed to an entitled caller is a
+short-lived **signed** URL, which is what makes the gate real.
 
 ⚠️ **Why signed URLs and not an authed proxy.** Both iOS audio engines build players with a
 bare `AVPlayerItem(url:)` (`AudioManager.swift`, `AIVoiceManager.swift`) — there is no
@@ -20,10 +23,10 @@ audio request. The `research-pdfs` proxy shape (buffer the whole object into mem
 return it) is also unusable here: 276 MB of audio, with seeking.
 
 ⚠️ **Never raise.** A signing failure must not take down the Learn tab. Every failure path
-falls back to the ORIGINAL url and logs — which today still plays, because the buckets are
-still public. Migration 128 converts that degradation from "still works" to "playback
-error", which is exactly why 128's header says signing health must be proven in production
-BEFORE the flip.
+falls back to the ORIGINAL url and logs. Before 128 that degraded to "still plays" because
+the buckets were public; now it degrades to a playback error, which is exactly why 128's
+header required signing health to be proven in production BEFORE the flip. Treat a spike in
+those fallback logs as a user-visible outage, not as noise.
 """
 
 from __future__ import annotations

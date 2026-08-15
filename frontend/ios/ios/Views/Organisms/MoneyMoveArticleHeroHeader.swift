@@ -26,6 +26,12 @@
 
 import SwiftUI
 
+/// The coordinate space the detail screen establishes so this header can report where its
+/// pieces are. Shared here rather than in the screen because both halves must agree on it.
+enum MoneyMoveArticleSpace {
+    static let screen = "moneyMoveArticleScreen"
+}
+
 struct MoneyMoveArticleHeroHeader: View {
     @EnvironmentObject private var audioManager: AudioManager
 
@@ -33,6 +39,16 @@ struct MoneyMoveArticleHeroHeader: View {
     var audioEpisode: AudioEpisode?
     var onBackTapped: (() -> Void)?
     var onShareTapped: (() -> Void)?
+
+    /// Bottom edge of the back/share row, in `MoneyMoveArticleSpace.screen`. Drives when the
+    /// sticky bar's CHROME arrives — i.e. the moment this screen's own back button leaves.
+    var onNavBottomChange: ((CGFloat) -> Void)?
+
+    /// Bottom edge of the title, same space. Drives when the sticky bar's TITLE arrives, so
+    /// the two titles can never both be readable. Separate from the chrome on purpose: they
+    /// are ~250pt apart, and tying the back button to the title would leave a long stretch
+    /// of the article with no back affordance at all.
+    var onTitleBottomChange: ((CGFloat) -> Void)?
 
     private var isCurrentlyPlaying: Bool {
         guard let episode = audioEpisode else { return false }
@@ -42,6 +58,9 @@ struct MoneyMoveArticleHeroHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             navigationBar
+                .onGeometryChange(for: CGFloat.self) {
+                    $0.frame(in: .named(MoneyMoveArticleSpace.screen)).maxY
+                } action: { onNavBottomChange?($0) }
 
             // The artwork. 16:9 and contained, so a light-ground plate keeps its hairline
             // and a dark one keeps its own edge — see MoneyMoveCoverImage.
@@ -107,6 +126,12 @@ struct MoneyMoveArticleHeroHeader: View {
                 .foregroundColor(AppColors.textPrimary)
                 .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)
+                // Measured, never assumed: this edge moves with the device width (the artwork
+                // above is 16:9 of it), with Dynamic Type, and with how many lines the title
+                // reflows to — a swing wider than any fixed threshold could track.
+                .onGeometryChange(for: CGFloat.self) {
+                    $0.frame(in: .named(MoneyMoveArticleSpace.screen)).maxY
+                } action: { onTitleBottomChange?($0) }
 
             Text(article.subtitle)
                 .font(AppTypography.body)

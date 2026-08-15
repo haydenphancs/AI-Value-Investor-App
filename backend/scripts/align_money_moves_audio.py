@@ -10,8 +10,9 @@ Writes (additive, optional) into frontend money_moves.json:
 Times are absolute within the article's single audio file (iOS compares to AudioManager.currentTime).
 The transcript order mirrors generate_money_moves_audio.narration_blocks (title, subtitle, then each
 section's title + content). Title / subtitle / section-titles are spoken CONTEXT — fed to the
-aligner so the body timings stay correct, but not highlighted. Missing audio is downloaded from the
-public money-moves-media bucket first (free).
+aligner so the body timings stay correct, but not highlighted. Missing audio is downloaded from
+money-moves-media first — with the SERVICE-ROLE key, because migration 128 made that bucket
+private; the old public-URL fetch has 404'd ever since and needs live Supabase creds now.
 
 Usage (from backend/):
     ./venv/bin/python scripts/align_money_moves_audio.py            # all articles
@@ -41,7 +42,7 @@ def ensure_audio(slug: str) -> Path | None:
     local = AUDIO_DIR / f"{slug}.m4a"
     if local.exists():
         return local
-    if fa.download_public(BUCKET, f"audio/{slug}.m4a", local):
+    if fa.download_object(BUCKET, f"audio/{slug}.m4a", local):
         print(f"    ↓ fetched {slug}.m4a")
         return local
     return None

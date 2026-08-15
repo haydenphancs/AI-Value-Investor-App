@@ -22,6 +22,8 @@ TWO BUG CLASSES, both of which had already happened by 2026-08-14.
 
 import plistlib
 import re
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -31,9 +33,18 @@ _IOS = _REPO / "frontend/ios/ios"
 _STOREKIT = _REPO / "frontend/ios/Caydex.storekit"
 _MANIFEST = _IOS / "PrivacyInfo.xcprivacy"
 _ANSWERS = _REPO / "documents/legal/app-privacy-answers.md"
-_MIGRATION_117 = _REPO / "backend/database/migrations/117_purchased_credits_and_packs.sql"
+_MIGRATIONS = _REPO / "backend/database/migrations"
+# 117 is where the credit_purchases DDL lives, permanently. Deliberately NOT used for the
+# SEED any more — see `_effective_seed`.
+_MIGRATION_CREDIT_PURCHASES_DDL = _MIGRATIONS / "117_purchased_credits_and_packs.sql"
 
 _PRODUCT_RE = re.compile(r"com\.phan\.caydex\.[a-z0-9.]+")
+
+# App Store Connect field limits. The local config's strings are what a person retypes into
+# ASC, so a string that cannot fit there can never be made identical to it — which is what
+# the price/credits parity assertions below are ultimately protecting.
+_ASC_DISPLAY_NAME_MAX = 30
+_ASC_DESCRIPTION_MAX = 45
 
 
 def _read(path: Path) -> str:
@@ -75,16 +86,233 @@ def test_the_storekit_config_is_readable_and_not_empty():
     assert any("Subscription" in t for t in products.values()), "no subscriptions found"
 
 
-def test_every_consumable_pack_is_seeded_in_migration_117():
-    """A pack Apple sells but `credit_packs` does not know = verified purchase, no credits."""
-    packs = {p for p, t in _storekit_products().items() if t == "Consumable"}
-    seed = _read(_MIGRATION_117)
-    missing = sorted(p for p in packs if p not in seed)
-    assert not missing, (
-        f"consumable products absent from the credit_packs seed in 117: {missing}. "
-        "The purchase verifies against Apple and then cannot be mapped to a credit grant — "
-        "the user is charged and receives nothing."
+def _storekit_catalog() -> dict[str, dict]:
+    """product id -> {type, displayPrice, referenceName, displayName, description}.
+
+    Richer sibling of `_storekit_products`; the extra fields are exactly the ones a person
+    retypes into App Store Connect, which is why they are worth pinning.
+    """
+    import json
+
+    data = json.loads(_read(_STOREKIT))
+    found: dict[str, dict] = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            pid = node.get("productID")
+            if isinstance(pid, str) and pid.startswith("com.phan.caydex."):
+                loc = (node.get("localizations") or [{}])[0]
+                found[pid] = {
+                    "type": str(node.get("type") or ""),
+                    "displayPrice": str(node.get("displayPrice") or ""),
+                    "referenceName": str(node.get("referenceName") or ""),
+                    "displayName": str(loc.get("displayName") or ""),
+                    "description": str(loc.get("description") or ""),
+                }
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(data)
+    return found
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Blank `--` line comments and `/* */` blocks.
+
+    Load-bearing for `_effective_seed`: migration 138's header DISCUSSES the seed it
+    supersedes and quotes the old ladder. A scan over raw text would let any migration that
+    merely mentions the insert win the max(), and would then parse rows out of prose.
+    """
+    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.S)
+    return re.sub(r"--[^\n]*", "", sql)
+
+
+def _effective_seed(table: str) -> tuple[Path, dict[str, dict]]:
+    """(file, {pk -> row}) from the HIGHEST-numbered migration that INSERTs into `table`.
+
+    Resolved, never hardcoded to a filename. A test pinned to `117_*.sql` silently pins a
+    SUPERSEDED ladder the moment 138 reprices everything: 117 still contains a perfectly
+    valid `credit_packs` seed, and `product_id in seed_text` — all the old assertion ever
+    checked — keeps passing against it forever.
+
+    Columns are indexed BY NAME from the INSERT header rather than by position: a future
+    migration that lists `price_cents` before `credits` would otherwise silently swap two
+    numbers that are both small integers, and every assertion downstream would still pass.
+    """
+    candidates: list[tuple[int, Path, str]] = []
+    for path in sorted(_MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")):
+        code = _strip_sql_comments(path.read_text(encoding="utf-8"))
+        if re.search(rf"INSERT\s+INTO\s+(?:public\.)?{table}\b", code, re.I):
+            candidates.append((int(path.name[:3]), path, code))
+    assert candidates, f"no migration INSERTs into {table} — the resolver has drifted"
+
+    _, path, code = max(candidates, key=lambda c: c[0])
+    m = re.search(
+        rf"INSERT\s+INTO\s+(?:public\.)?{table}\s*\(([^)]*)\)\s*VALUES(.*?)(?:ON\s+CONFLICT|;)",
+        code,
+        re.I | re.S,
     )
+    assert m, f"could not parse the {table} seed in {path.name}"
+    columns = [c.strip() for c in m.group(1).split(",")]
+
+    rows: dict[str, dict] = {}
+    for tup in re.findall(r"\(([^()]*)\)", m.group(2)):
+        raw = [v.strip() for v in tup.split(",")]
+        if len(raw) != len(columns):
+            continue
+        row = {}
+        for col, val in zip(columns, raw):
+            if val.startswith("'") and val.endswith("'"):
+                row[col] = val[1:-1]
+            else:
+                row[col] = int(val)
+        rows[str(row[columns[0]])] = row
+    return path, rows
+
+
+def _pack_seed() -> dict[str, dict]:
+    path, rows = _effective_seed("credit_packs")
+    # Anti-vacuity: a resolver that returned {} would make every assertion below trivially
+    # true. Four packs, five columns each, all ids in the credit namespace.
+    assert len(rows) == 4, f"{path.name} seeded {len(rows)} packs, expected 4"
+    for pid, row in rows.items():
+        assert pid.startswith("com.phan.caydex.credits."), pid
+        for col in ("product_id", "credits", "price_cents", "display_name", "sort_order"):
+            assert col in row, f"{pid}: {path.name} seed did not yield {col}"
+    return rows
+
+
+def test_the_seed_resolver_finds_the_current_ladder_not_a_superseded_one():
+    """Guard against the guard. If this ever resolves back to 117 while a later migration
+    reprices `credit_packs`, every parity assertion below is checking history."""
+    path, rows = _effective_seed("credit_packs")
+    numbers = sorted(int(p.name[:3]) for p in _MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")
+                     if re.search(r"INSERT\s+INTO\s+(?:public\.)?credit_packs\b",
+                                  _strip_sql_comments(p.read_text(encoding="utf-8")), re.I))
+    assert int(path.name[:3]) == max(numbers), (
+        f"resolved {path.name} but {max(numbers)} also seeds credit_packs"
+    )
+    assert len(rows) == 4
+
+
+def test_every_consumable_pack_is_seeded_in_the_effective_seed():
+    """A pack Apple sells but `credit_packs` does not know = verified purchase, no credits.
+
+    Equality, not containment. The two directions fail differently and both cost money:
+    config-only is charged-and-granted-nothing; seed-only is a pack we price, advertise and
+    cannot sell.
+    """
+    packs = {p for p, t in _storekit_products().items() if t == "Consumable"}
+    seeded = set(_pack_seed())
+    assert packs == seeded, (
+        f"only in Caydex.storekit: {sorted(packs - seeded)}; only in the seed: "
+        f"{sorted(seeded - packs)}. A product Apple sells that credit_packs cannot map "
+        "charges the user and grants nothing."
+    )
+
+
+def test_the_storekit_price_equals_the_seeded_price():
+    """`LAUNCH_CHECKLIST.md:775`: "ASC and the table must agree or the user is charged one
+    price and shown another." Nothing tested it. ASC is out of reach, but the local config
+    is the text a person copies INTO ASC, so pinning it to the seed is the closest control
+    that exists."""
+    seed = _pack_seed()
+    catalog = _storekit_catalog()
+    for pid, row in seed.items():
+        # Decimal, never float: 11.99 * 100 == 1198.9999... in binary floating point.
+        cents = int(Decimal(catalog[pid]["displayPrice"]) * 100)
+        assert cents == row["price_cents"], (
+            f"{pid}: Caydex.storekit says {catalog[pid]['displayPrice']} "
+            f"({cents}c), the seed says {row['price_cents']}c"
+        )
+
+
+def test_the_storekit_copy_states_the_seeded_credit_count():
+    """The config carries no credits field, so the number lives in `referenceName` and
+    `description` — and those are the strings retyped into ASC. A pack whose copy promises
+    130 credits while the seed grants 90 is a complaint, not a rounding error."""
+    seed = _pack_seed()
+    catalog = _storekit_catalog()
+    checked = 0
+    for pid, row in seed.items():
+        entry = catalog[pid]
+        desc_n = re.search(r"([\d,]+)", entry["description"])
+        ref_n = re.search(r"\((\d+)\)", entry["referenceName"])
+        assert desc_n, f"{pid}: no credit count in description {entry['description']!r}"
+        assert ref_n, f"{pid}: no credit count in referenceName {entry['referenceName']!r}"
+        assert int(desc_n.group(1).replace(",", "")) == row["credits"], (
+            f"{pid}: description promises {desc_n.group(1)}, the seed grants {row['credits']}"
+        )
+        assert int(ref_n.group(1)) == row["credits"], (
+            f"{pid}: referenceName says {ref_n.group(1)}, the seed grants {row['credits']}"
+        )
+        checked += 1
+    # Anti-vacuity: a regex that stopped matching must fail, not silently check nothing.
+    assert checked == 4
+
+
+def test_the_storekit_copy_fits_app_store_connect_s_fields():
+    """These strings have to be enterable in ASC verbatim, or "identical to the config" is
+    not a reachable state. All four descriptions were 57-60 chars against a 45-char limit
+    until the 138 reprice."""
+    for pid, entry in _storekit_catalog().items():
+        assert len(entry["displayName"]) <= _ASC_DISPLAY_NAME_MAX, (
+            f"{pid}: displayName is {len(entry['displayName'])} chars, ASC allows "
+            f"{_ASC_DISPLAY_NAME_MAX}"
+        )
+        assert len(entry["description"]) <= _ASC_DESCRIPTION_MAX, (
+            f"{pid}: description is {len(entry['description'])} chars, ASC allows "
+            f"{_ASC_DESCRIPTION_MAX} — it cannot be entered verbatim"
+        )
+
+
+def test_no_pack_undercuts_the_cheapest_subscription_per_credit():
+    """The rule migration 117 stated in a comment and nothing enforced: a top-up must never
+    be better value per credit than a plan, or the subscription is dominated by a one-off.
+
+    The ceiling is DERIVED from the plan seed, not hardcoded — the binding constraint is the
+    most expensive paid plan per credit (Pro at $0.01249; Max at $0.00999 is looser), so a
+    future subscription reprice re-arms this automatically.
+    """
+    _, plans = _effective_seed("plan_credits")
+    paid = {
+        t: r for t, r in plans.items()
+        if int(r.get("price_cents") or 0) > 0 and int(r.get("monthly_credits") or 0) > 0
+    }
+    # Anti-vacuity: without this, dropping a plan from the seed LOWERS the ceiling and makes
+    # the invariant trivially satisfiable — a derived bound going quietly vacuous.
+    assert {"pro", "premium"} <= set(paid), f"plan seed lost a paid tier: {sorted(paid)}"
+
+    ceiling = max(Fraction(r["price_cents"], r["monthly_credits"]) for r in paid.values())
+    assert ceiling > 0
+    for pid, row in _pack_seed().items():
+        rate = Fraction(row["price_cents"], row["credits"])
+        assert rate > ceiling, (
+            f"{pid} is ${float(rate):.6f}/credit, at or below the subscription rate "
+            f"${float(ceiling):.6f} — a top-up would undercut a plan"
+        )
+
+
+def test_the_pack_ladder_is_strictly_monotonic():
+    """A dearer pack must be BETTER per credit, never worse.
+
+    This is what rejected keeping Mega at Pro's 1,200 credits when it was repriced to
+    $24.99: that is $0.020825/credit, 4% worse than Power, so the biggest pack would have
+    become the worst value and penalised the user who spends most. Mechanical, not an
+    argument in a comment.
+    """
+    rows = sorted(_pack_seed().values(), key=lambda r: r["price_cents"])
+    rates = [Fraction(r["price_cents"], r["credits"]) for r in rows]
+    assert len(set(rates)) == len(rates), f"two packs share a $/credit rate: {rates}"
+    assert rates == sorted(rates, reverse=True), (
+        "the ladder inverts — a more expensive pack is worse per credit: "
+        + ", ".join(f"{r['display_name']} ${float(x):.6f}" for r, x in zip(rows, rates))
+    )
+    # sort_order must agree with price, or the storefront lists them out of ladder order.
+    assert [r["sort_order"] for r in rows] == list(range(1, len(rows) + 1))
 
 
 def _swift_product_ids() -> set[str]:
@@ -224,7 +452,7 @@ def test_a_shipped_purchase_flow_is_declared_in_the_manifest_and_the_answer_shee
 def test_purchase_history_is_linked_because_credit_purchases_stores_a_user_id():
     """`credit_purchases.user_id` is NOT NULL, so the history is tied to an account.
     Answering "not linked" here would be a false statement to Apple."""
-    seed = _read(_MIGRATION_117)
+    seed = _read(_MIGRATION_CREDIT_PURCHASES_DDL)
     assert re.search(r"user_id\s+UUID\s+NOT NULL", seed), (
         "credit_purchases.user_id is no longer NOT NULL — re-check whether Purchase History "
         "is still 'Linked to the user' before changing the manifest."

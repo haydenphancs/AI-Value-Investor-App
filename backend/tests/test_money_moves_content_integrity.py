@@ -16,6 +16,14 @@ Two defects this pins, both found 2026-08-14 and both App Store Guideline 2.3.1 
 This file guards the bundled JSON, which is the OFFLINE FALLBACK. The live content is the
 Supabase row — so fixing the JSON is necessary but NOT sufficient: re-run
 `backend/scripts/seed_money_moves.py` to publish, per `.claude/rules/learn-content.md`.
+
+3. **THE VENDORED COPY DRIFTED.** Every check here originally scanned only the frontend file,
+   so `backend/data/money_moves.json` kept all 36 fabricated view counts for months. That copy
+   is not dead weight: `seed_money_moves.py`, `generate_money_moves_audio.py` and
+   `align_money_moves_audio.py` all resolve
+   `JSON_PATH = frontend_json if frontend_json.exists() else backend/data/money_moves.json`,
+   so a backend-only checkout — Railway, a slim CI image — seeds the vendored one straight
+   into production. `test_vendored_backend_copy_matches_the_frontend_bundle` below closes it.
 """
 
 import json
@@ -27,6 +35,7 @@ _JSON = (
     Path(__file__).resolve().parents[2]
     / "frontend/ios/ios/Resources/MoneyMoves/money_moves.json"
 )
+_VENDORED = Path(__file__).resolve().parents[1] / "data/money_moves.json"
 
 
 @pytest.fixture(scope="module")
@@ -125,6 +134,61 @@ def test_related_read_time_matches_the_real_article(articles):
                 f"article says {target.get('readTimeMinutes')} min"
             )
     assert not mismatches, "\n  " + "\n  ".join(sorted(set(mismatches)))
+
+
+def test_every_article_is_reachable_from_another_article(articles):
+    """No islands. `relatedArticles` is the only in-article navigation there is, so an article
+    nothing links to can be reached only by scrolling the catalog rows — which is exactly what
+    happens to a newly authored one if the back-links are forgotten."""
+    titles = {a["title"] for a in articles}
+    linked = {rel.get("title") for _, rel in _related(articles)}
+    orphans = sorted(titles - linked)
+    assert not orphans, (
+        "no other article links to these, so they are unreachable while reading:\n  "
+        + "\n  ".join(orphans)
+        + "\n  → add a relatedArticles entry pointing at each (append; don't replace a "
+          "reviewed link), matching the target's real readTimeMinutes."
+    )
+
+
+def test_vendored_backend_copy_matches_the_frontend_bundle():
+    """`backend/data/money_moves.json` must be byte-equivalent content to the frontend bundle.
+
+    It is NOT a stale mirror that nobody reads: all three scripts fall back to it when
+    `frontend/` is absent, which is the normal shape of a backend-only checkout. When these
+    two drifted, the vendored copy still held the 36 fabricated view counts this file was
+    written to eliminate — and a seed run from that checkout would have republished them.
+
+    `align_money_moves_audio.py` rewrites BOTH files on every run, so the repair is a side
+    effect of aligning; this test is what stops it drifting again in between.
+    """
+    if not _VENDORED.exists():
+        pytest.skip("no vendored copy in this checkout")
+    frontend = json.loads(_JSON.read_text(encoding="utf-8"))
+    vendored = json.loads(_VENDORED.read_text(encoding="utf-8"))
+
+    f_slugs = [a["slug"] for a in frontend["articles"]]
+    v_slugs = [a["slug"] for a in vendored["articles"]]
+    assert v_slugs == f_slugs, (
+        f"vendored copy has different articles — only in frontend: "
+        f"{sorted(set(f_slugs) - set(v_slugs))}, only in vendored: "
+        f"{sorted(set(v_slugs) - set(f_slugs))}"
+    )
+    if frontend == vendored:
+        return
+    # Same articles, different content — report the first differing field per slug rather
+    # than dumping two 250 KB blobs.
+    diffs = []
+    for fa, va in zip(frontend["articles"], vendored["articles"]):
+        for key in sorted(set(fa) | set(va)):
+            if fa.get(key) != va.get(key):
+                diffs.append(f"{fa['slug']}.{key}")
+    assert not diffs, (
+        "vendored backend copy has drifted from the frontend bundle at:\n  "
+        + "\n  ".join(diffs[:40])
+        + f"\n  ({len(diffs)} field(s) total)\n"
+        "  → re-run scripts/align_money_moves_audio.py, which rewrites both, and commit both."
+    )
 
 
 # ── Anti-vacuity ───────────────────────────────────────────────────────────────

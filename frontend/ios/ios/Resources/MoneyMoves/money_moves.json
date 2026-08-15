@@ -950,6 +950,17 @@
             "7C3AED",
             "5B21B6"
           ]
+        },
+        {
+          "title": "NVIDIA's AI Dominance",
+          "subtitle": "How a graphics chip became the AI toll booth.",
+          "category": "blueprints",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "16A34A",
+            "15803D"
+          ]
         }
       ],
       "cardSubtitle": "The strategy behind unstoppable dominance.",
@@ -2767,6 +2778,17 @@
             "E11D48",
             "9F1239"
           ]
+        },
+        {
+          "title": "The Fall of Sears",
+          "subtitle": "The retailer that invented everything Amazon did.",
+          "category": "valueTraps",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "9A3412",
+            "7C2D12"
+          ]
         }
       ],
       "audioDurationSeconds": 305,
@@ -3119,6 +3141,17 @@
           "gradientColors": [
             "8B5CF6",
             "6D28D9"
+          ]
+        },
+        {
+          "title": "AMD vs. Intel: The CPU Wars",
+          "subtitle": "How a near-dead challenger caught the giant.",
+          "category": "battles",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "A855F7",
+            "7E22CE"
           ]
         }
       ],
@@ -3831,6 +3864,17 @@
           "gradientColors": [
             "E11D48",
             "9F1239"
+          ]
+        },
+        {
+          "title": "The Fall of Sears",
+          "subtitle": "The retailer that invented everything Amazon did.",
+          "category": "valueTraps",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "9A3412",
+            "7C2D12"
           ]
         }
       ],
@@ -4866,6 +4910,17 @@
             "6D28D9",
             "5B21B6"
           ]
+        },
+        {
+          "title": "AMD vs. Intel: The CPU Wars",
+          "subtitle": "How a near-dead challenger caught the giant.",
+          "category": "battles",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "A855F7",
+            "7E22CE"
+          ]
         }
       ],
       "audioDurationSeconds": 245,
@@ -5214,9 +5269,575 @@
             "7C3AED",
             "5B21B6"
           ]
+        },
+        {
+          "title": "NVIDIA's AI Dominance",
+          "subtitle": "How a graphics chip became the AI toll booth.",
+          "category": "blueprints",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "16A34A",
+            "15803D"
+          ]
         }
       ],
       "audioDurationSeconds": 264,
+      "viewCount": ""
+    },
+    {
+      "slug": "nvidias-ai-dominance",
+      "title": "NVIDIA's AI Dominance",
+      "subtitle": "How a company that sold graphics cards to gamers ended up owning the toll booth on artificial intelligence.",
+      "cardSubtitle": "How a graphics chip became the AI toll booth.",
+      "category": "blueprints",
+      "author": {
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
+      },
+      "readTimeMinutes": 4,
+      "sortOrder": 13,
+      "publishedDaysAgo": 2,
+      "tagLabel": "ANATOMY OF A MOAT",
+      "isFeatured": false,
+      "hasAudioVersion": true,
+      "audioUrl": null,
+      "heroGradientColors": [
+        "16A34A",
+        "15803D",
+        "14532D"
+      ],
+      "keyHighlights": [
+        {
+          "icon": "cpu.fill",
+          "title": "Not the Chip",
+          "description": "The hardware is copyable. Two decades of software that researchers already know is not."
+        },
+        {
+          "icon": "arrow.triangle.branch",
+          "title": "Accidental Market",
+          "description": "The board was built to draw game frames. Neural networks happened to need the same arithmetic."
+        },
+        {
+          "icon": "lock.fill",
+          "title": "Switching Cost",
+          "description": "Rewriting a lab's entire toolchain to save on silicon is a bill few buyers will pay."
+        }
+      ],
+      "sections": [
+        {
+          "title": "An Accident, Then a Decade of Work",
+          "icon": "sparkles",
+          "hasGlowEffect": true,
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "For most of its life NVIDIA sold a component. The thing in the picture above is a graphics board: a slab of silicon under a finned heatsink, built to work out what colour several million pixels should be, sixty times a second. It was a good business and an unglamorous one. Gamers bought the cards. Almost nobody outside that world thought about the company at all."
+            },
+            {
+              "type": "paragraph",
+              "text": "The arithmetic that draws a game frame turns out to be the arithmetic that trains a neural network. Both are enormous piles of the same simple multiplication, done all at once rather than one after another. That coincidence was not something NVIDIA engineered. What it did engineer, starting years before anyone needed it, was the software that let people other than game developers reach the hardware."
+            }
+          ]
+        },
+        {
+          "title": "The Part That Was Not the Chip",
+          "icon": "chevron.left.forwardslash.chevron.right",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "In 2006 NVIDIA shipped CUDA, a way to write ordinary programs that run on the graphics processor instead of the main one. At the time this looked like a solution in search of a problem. Selling a programming model to university researchers is not how a company makes a quarter."
+            },
+            {
+              "type": "subheading",
+              "text": "Then the problem arrived"
+            },
+            {
+              "type": "paragraph",
+              "text": "In 2012 a neural network called AlexNet won an image-recognition contest by a margin wide enough to redirect an entire field of research. It had been trained on two consumer NVIDIA cards. Every researcher who read that result and wanted to repeat it reached for the same hardware, because the software to drive it already existed and already worked."
+            },
+            {
+              "type": "subheading",
+              "text": "What compounds after that"
+            },
+            {
+              "type": "paragraph",
+              "text": "Each year produced more libraries, more published code that assumed CUDA, and more graduate students who learned it first and everything else second. A competitor could match the silicon. Matching two decades of accumulated tooling, and the habits of everyone who uses it, is a different problem — and it is the one that actually protects the revenue."
+            }
+          ]
+        },
+        {
+          "title": "Reading the Moat, Not the Product",
+          "icon": "shield.lefthalf.filled",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "This is the distinction worth carrying out of the story. NVIDIA's defensibility does not live in the board. Boards get copied. It lives in the cost a customer would have to pay in order to leave."
+            },
+            {
+              "type": "bulletList",
+              "items": [
+                "The software a buyer already runs, and the years of work encoded in it",
+                "The engineers who know that toolchain and would need retraining",
+                "The networking that moves data between thousands of chips at once",
+                "The published research that quietly assumes your platform by default"
+              ]
+            },
+            {
+              "type": "paragraph",
+              "text": "NVIDIA paid roughly 6.9 billion dollars for the networking company Mellanox because a single chip stopped being the unit of sale — a room full of them, wired together, is. Measured against the silicon that price looks steep. Measured against the lock-in it looks cheap."
+            },
+            {
+              "type": "callout",
+              "icon": "lightbulb.fill",
+              "style": "info",
+              "text": "The question to ask of any dominant supplier is not \"could someone build this?\" It is \"what would it cost the customer to switch?\" Those two questions have very different answers, and only the second one shows up in the margin."
+            }
+          ]
+        },
+        {
+          "title": "What This Does Not Promise",
+          "icon": "exclamationmark.triangle.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "A moat explains why a business is hard to attack. It says nothing whatsoever about the price you pay for it. The same lock-in that makes revenue durable also makes it obvious, and obvious durability gets capitalised into a share price long before it shows up in the earnings."
+            },
+            {
+              "type": "callout",
+              "icon": "exclamationmark.triangle.fill",
+              "style": "warning",
+              "text": "A wide moat and a good investment are two separate findings. The first is about the company. The second is about the company and the price together, and only the second one can be acted on."
+            },
+            {
+              "type": "paragraph",
+              "text": "The useful habit here is smaller than the headline. When a supplier looks unassailable, go and find the switching cost, then write down what would actually have to break it. Sometimes the answer is a rival chip. More often it is something duller — an open toolchain, an industry standard, or a customer large enough to fund its own alternative. That is the list worth watching."
+            }
+          ]
+        }
+      ],
+      "statistics": [
+        {
+          "value": "2006",
+          "label": "Year CUDA Shipped",
+          "trend": "neutral"
+        },
+        {
+          "value": "2 GPUs",
+          "label": "Trained AlexNet in 2012",
+          "trend": "neutral"
+        },
+        {
+          "value": "~$6.9B",
+          "label": "Paid for Mellanox",
+          "trend": "up"
+        }
+      ],
+      "relatedArticles": [
+        {
+          "title": "How Amazon Built Its Moat",
+          "subtitle": "The strategy behind unstoppable dominance.",
+          "category": "blueprints",
+          "readTimeMinutes": 6,
+          "viewCount": "",
+          "gradientColors": [
+            "059669",
+            "047857"
+          ]
+        },
+        {
+          "title": "Apple's Services Revolution",
+          "subtitle": "How Apple transformed from hardware to ecosystem.",
+          "category": "blueprints",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "64748B",
+            "475569"
+          ]
+        },
+        {
+          "title": "Google vs. Microsoft: AI Wars",
+          "subtitle": "The battle for AI supremacy.",
+          "category": "battles",
+          "readTimeMinutes": 3,
+          "viewCount": "",
+          "gradientColors": [
+            "7E22CE",
+            "6B21A8"
+          ]
+        }
+      ],
+      "audioDurationSeconds": 290,
+      "viewCount": ""
+    },
+    {
+      "slug": "the-fall-of-sears",
+      "title": "The Fall of Sears",
+      "subtitle": "The company that invented mail-order retail spent twenty years looking cheap — and cheap is not the same thing as safe.",
+      "cardSubtitle": "The retailer that invented everything Amazon did.",
+      "category": "valueTraps",
+      "author": {
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
+      },
+      "readTimeMinutes": 4,
+      "sortOrder": 14,
+      "publishedDaysAgo": 1,
+      "tagLabel": "ANATOMY OF A VALUE TRAP",
+      "isFeatured": false,
+      "hasAudioVersion": true,
+      "audioUrl": null,
+      "heroGradientColors": [
+        "9A3412",
+        "7C2D12",
+        "431407"
+      ],
+      "keyHighlights": [
+        {
+          "icon": "book.closed.fill",
+          "title": "The Original Everything Store",
+          "description": "A catalogue that would post you a house in numbered parts, a century before one-click delivery."
+        },
+        {
+          "icon": "chart.line.downtrend.xyaxis",
+          "title": "Cheap For A Decade",
+          "description": "Property and brand names kept the sum-of-the-parts case alive while the shops bled."
+        },
+        {
+          "icon": "hourglass",
+          "title": "Assets Burn",
+          "description": "A liquidation value is only a floor if the business stops standing on top of it."
+        }
+      ],
+      "sections": [
+        {
+          "title": "The Everything Store, 1893 Edition",
+          "icon": "book.closed.fill",
+          "hasGlowEffect": true,
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The object in the picture above is a mail-order catalogue, and for most of a century its publisher ran the most powerful retail machine in America. Sears, Roebuck and Co. was incorporated in 1893 and sold by post to farms with no shop within a day's ride. The book ran to hundreds of pages. You could order a sewing machine from it, or a violin, or an entire house delivered as a numbered kit of parts."
+            },
+            {
+              "type": "paragraph",
+              "text": "The tower the company put up in Chicago in 1973 was the tallest building in the world. The catalogue itself was discontinued in 1993, four years before an online bookseller shipped its first order. Then the slow part of the story began, and it took twenty-five years to finish."
+            }
+          ]
+        },
+        {
+          "title": "Why It Kept Looking Cheap",
+          "icon": "magnifyingglass",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "By the 2000s Sears did not look like a dying company on a spreadsheet. It looked like an underpriced one. It held an enormous quantity of property. It owned brand names with real standing — Kenmore appliances, Craftsman tools, DieHard batteries. Add those up and the total comfortably exceeded what the market was paying for the whole business."
+            },
+            {
+              "type": "subheading",
+              "text": "The sum-of-the-parts case"
+            },
+            {
+              "type": "paragraph",
+              "text": "That is a respectable way to value a company: work out what the pieces would fetch if sold separately, then buy when the market offers you less than that. It is the logic behind a great deal of successful value investing. Applied to Sears it was arithmetically correct and financially fatal."
+            },
+            {
+              "type": "subheading",
+              "text": "What the arithmetic left out"
+            },
+            {
+              "type": "paragraph",
+              "text": "The pieces were not sitting in a vault. They were bolted to a retail operation that consumed cash every year it stayed open. Selling assets funded the losses, and the losses then required more asset sales. The 2015 spin-off of a large property portfolio and the 2017 sale of Craftsman to Stanley Black & Decker were not value being unlocked for shareholders. That was the value being spent."
+            }
+          ]
+        },
+        {
+          "title": "The Shape of the Trap",
+          "icon": "arrow.down.right.circle.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "A value trap is not simply a bad company. It is a company whose cheapness is a correct reading of a deteriorating fact rather than a mistake by the market. The gap between price and asset value never closes, because the asset value is falling towards the price rather than the price rising to meet it."
+            },
+            {
+              "type": "callout",
+              "icon": "exclamationmark.triangle.fill",
+              "style": "warning",
+              "text": "Book value is a photograph, not a promise. It describes what a business owned on one particular day. If the operation is losing money, that photograph is being redrawn downward every quarter you hold the shares."
+            },
+            {
+              "type": "paragraph",
+              "text": "Sears merged with Kmart in 2005 and spent the following years under a management approach that treated the retailer largely as a portfolio of financial positions. Capital that might have gone into the shops went into buying back stock and rearranging the corporate structure instead. The stores got visibly worse. Customers noticed well before the balance sheet admitted it."
+            },
+            {
+              "type": "paragraph",
+              "text": "The Chapter 11 filing came in October 2018."
+            }
+          ]
+        },
+        {
+          "title": "The Test That Would Have Helped",
+          "icon": "checkmark.shield.fill",
+          "content": [
+            {
+              "type": "quote",
+              "text": "Time is the friend of the wonderful business and the enemy of the mediocre one.",
+              "attribution": "A long-standing principle in value investing"
+            },
+            {
+              "type": "paragraph",
+              "text": "The practical version is a question about direction rather than level. Is this cheap because the market is wrong about a stable business, or cheap because the business is shrinking and the price has simply arrived there first? Those two look identical on a screener and behave in opposite ways over five years."
+            },
+            {
+              "type": "paragraph",
+              "text": "One workable test: assume you cannot sell for a decade. Over that decade, does the asset base grow, hold, or quietly fund the losses? If the answer is the third one, the discount is not a margin of safety. It is a countdown — and the swollen, water-damaged catalogue on this article's cover is what the end of one looks like."
+            }
+          ]
+        }
+      ],
+      "statistics": [
+        {
+          "value": "1893",
+          "label": "Year Incorporated",
+          "trend": "neutral"
+        },
+        {
+          "value": "1993",
+          "label": "Big Book Discontinued",
+          "trend": "down"
+        },
+        {
+          "value": "2018",
+          "label": "Chapter 11 Filing",
+          "trend": "down"
+        }
+      ],
+      "relatedArticles": [
+        {
+          "title": "The Fall of Enron",
+          "subtitle": "Red flags every investor should know.",
+          "category": "valueTraps",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "DC2626",
+            "991B1B"
+          ]
+        },
+        {
+          "title": "WeWork's Unraveling",
+          "subtitle": "When valuations don't match reality.",
+          "category": "valueTraps",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "B91C1C",
+            "7F1D1D"
+          ]
+        },
+        {
+          "title": "Theranos: Blood & Lies",
+          "subtitle": "The $9 billion medical fraud.",
+          "category": "valueTraps",
+          "readTimeMinutes": 3,
+          "viewCount": "",
+          "gradientColors": [
+            "BE123C",
+            "881337"
+          ]
+        }
+      ],
+      "audioDurationSeconds": 290,
+      "viewCount": ""
+    },
+    {
+      "slug": "amd-vs-intel-the-cpu-wars",
+      "title": "AMD vs. Intel: The CPU Wars",
+      "subtitle": "Two companies selling the same square of silicon, separated by one decision about who should manufacture it.",
+      "cardSubtitle": "How a near-dead challenger caught the giant.",
+      "category": "battles",
+      "author": {
+        "name": "Caydex Research",
+        "title": "Editorial",
+        "isVerified": false
+      },
+      "readTimeMinutes": 4,
+      "sortOrder": 15,
+      "publishedDaysAgo": 0,
+      "tagLabel": "ANATOMY OF A COMEBACK",
+      "isFeatured": false,
+      "hasAudioVersion": true,
+      "audioUrl": null,
+      "heroGradientColors": [
+        "A855F7",
+        "7E22CE",
+        "581C87"
+      ],
+      "keyHighlights": [
+        {
+          "icon": "square.grid.2x2.fill",
+          "title": "Small Dies Win",
+          "description": "Cut one big chip into four small ones and a single defect costs a quarter as much."
+        },
+        {
+          "icon": "building.2.fill",
+          "title": "The Factory Trap",
+          "description": "Owning the plant was the advantage until the plant slipped and nobody could route around it."
+        },
+        {
+          "icon": "arrow.2.squarepath",
+          "title": "Same Product, New Winner",
+          "description": "Both sell the identical part. The gap opened in manufacturing, not in design alone."
+        }
+      ],
+      "sections": [
+        {
+          "title": "Two Identical Squares",
+          "icon": "square.on.square",
+          "hasGlowEffect": true,
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Put an AMD processor and an Intel processor side by side, as in the picture above, and you will struggle to tell them apart. Same rough dimensions, same polished metal lid, same dense field of gold contacts underneath. They drop into comparable sockets and run the same software. Seen from the outside this is one product, sold by two companies."
+            },
+            {
+              "type": "paragraph",
+              "text": "For most of the last forty years that symmetry was misleading, because one of those companies was vastly larger and made its own chips. Then, over roughly five years, the gap closed — and the reason had far less to do with circuit design than with factories."
+            }
+          ]
+        },
+        {
+          "title": "The Advantage That Became the Anchor",
+          "icon": "building.2.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Intel manufactured what it designed. That was, for decades, the entire point. Owning the fabrication plants meant tuning the process and the architecture against each other and reaching each new generation first. It is one of the strongest competitive positions in industrial history, and it worked exactly as intended for a very long time."
+            },
+            {
+              "type": "subheading",
+              "text": "Until the process slipped"
+            },
+            {
+              "type": "paragraph",
+              "text": "Intel's move to its 10-nanometre process ran years behind schedule. Because design and manufacturing were fused into one company, there was no way to route around the problem. A delayed factory meant delayed products, and Intel could not simply take its designs somewhere else."
+            },
+            {
+              "type": "subheading",
+              "text": "AMD had already given that up"
+            },
+            {
+              "type": "paragraph",
+              "text": "AMD sold off its own fabrication business in 2009. At the time this read as an admission of weakness — it could no longer afford to compete on plants — and it became a customer of the contract manufacturer TSMC instead. When TSMC's process pulled ahead of Intel's, AMD inherited the lead without having built anything at all."
+            }
+          ]
+        },
+        {
+          "title": "Cutting the Chip Into Pieces",
+          "icon": "square.grid.2x2.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "The second decision was architectural. A processor had traditionally been one large piece of silicon. AMD's Zen designs, shipping from 2017, split it into several small ones — chiplets — joined by a high-speed interconnect."
+            },
+            {
+              "type": "paragraph",
+              "text": "The reason is a yield argument, and it is worth following because it is pure economics rather than engineering flourish:"
+            },
+            {
+              "type": "bulletList",
+              "items": [
+                "Defects land on a silicon wafer at a roughly fixed rate per unit of area",
+                "One large die that catches a defect is scrapped in its entirety",
+                "Four small dies covering that same area lose only the one that was hit",
+                "So an identical, imperfect factory yields far more sellable product"
+              ]
+            },
+            {
+              "type": "callout",
+              "icon": "chart.bar.fill",
+              "style": "highlight",
+              "text": "The chiplet was not a faster idea. It was a cheaper one. AMD could assemble large server processors out of parts that were individually easy to manufacture, while a rival building one big die paid for every defect at full price."
+            }
+          ]
+        },
+        {
+          "title": "What a Duopoly Actually Tells You",
+          "icon": "scalemass.fill",
+          "content": [
+            {
+              "type": "paragraph",
+              "text": "Lisa Su took over AMD in 2014, when the shares traded near two dollars and the company's survival was a live question. The recovery that followed was not a single product launch. It was two structural choices — outsource the factory, split the die — that took years to show up in the results at all."
+            },
+            {
+              "type": "callout",
+              "icon": "lightbulb.fill",
+              "style": "info",
+              "text": "In a two-player market the interesting variable is rarely the product specification. It is the thing neither company can change quickly: who does the manufacturing, what the customers have already standardised on, and how long a mistake takes to unwind."
+            },
+            {
+              "type": "paragraph",
+              "text": "That last point cuts both ways, which is the honest end of the story. A process delay took years to hurt Intel and will take years to repair — but the same slowness protects an incumbent's installed base long after the technical case has moved on. Neither the crash nor the comeback arrives on the timetable a share price implies."
+            }
+          ]
+        }
+      ],
+      "statistics": [
+        {
+          "value": "2009",
+          "label": "AMD Sold Its Fabs",
+          "trend": "neutral"
+        },
+        {
+          "value": "2014",
+          "label": "Lisa Su Named CEO",
+          "trend": "neutral"
+        },
+        {
+          "value": "2017",
+          "label": "First Zen Chips Ship",
+          "trend": "up"
+        }
+      ],
+      "relatedArticles": [
+        {
+          "title": "Netflix vs. Disney+",
+          "subtitle": "The streaming wars breakdown.",
+          "category": "battles",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "7C3AED",
+            "5B21B6"
+          ]
+        },
+        {
+          "title": "Visa vs. Mastercard",
+          "subtitle": "The payment network duopoly.",
+          "category": "battles",
+          "readTimeMinutes": 3,
+          "viewCount": "",
+          "gradientColors": [
+            "8B5CF6",
+            "6D28D9"
+          ]
+        },
+        {
+          "title": "Tesla vs. Traditional Auto",
+          "subtitle": "Innovation meets industry giants.",
+          "category": "battles",
+          "readTimeMinutes": 4,
+          "viewCount": "",
+          "gradientColors": [
+            "6D28D9",
+            "5B21B6"
+          ]
+        }
+      ],
+      "audioDurationSeconds": 290,
       "viewCount": ""
     }
   ]

@@ -10,7 +10,9 @@ where readAlongWords[i] corresponds 1:1 to the i-th whitespace token of strip_ma
 audioText to text with **markup** stripped; AIVoiceManager splits that on whitespace). So iOS just
 picks the active word index by time and the existing word-range highlight becomes accurate.
 
-Missing clips are downloaded from the public `journey-media` bucket first (free).
+Missing clips are downloaded from `journey-media` first — with the SERVICE-ROLE key, because
+migration 128 made that bucket private; the old public-URL fetch has 404'd ever since and needs
+live Supabase creds now.
 
 Usage (from backend/):
     ./venv/bin/python scripts/align_journey_audio.py            # all lessons
@@ -39,7 +41,7 @@ def ensure_clip(clip: str) -> Path | None:
     local = AUDIO_DIR / f"{clip}.m4a"
     if local.exists():
         return local
-    if fa.download_public(BUCKET, f"audio/{clip}.m4a", local):
+    if fa.download_object(BUCKET, f"audio/{clip}.m4a", local):
         print(f"    ↓ fetched {clip}.m4a")
         return local
     return None

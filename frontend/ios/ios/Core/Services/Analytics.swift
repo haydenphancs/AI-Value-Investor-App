@@ -131,7 +131,9 @@ extension AnalyticsValue: ExpressibleByStringLiteral,
     init(booleanLiteral value: Bool)   { self = .bool(value) }
 }
 
-struct AnalyticsBatchRequest: Encodable, Sendable {
+/// `nonisolated`: encoded by `APIClient` (an actor) off the main actor, so its `Encodable`
+/// conformance must not be main-actor-isolated. Already `Sendable`; this makes it honest.
+nonisolated struct AnalyticsBatchRequest: Encodable, Sendable {
     let events: [BufferedEvent]
     let sessionId: String
 
@@ -244,7 +246,8 @@ actor Analytics {
     }
 }
 
-struct AnalyticsBatchResponse: Decodable, Sendable {
+/// `nonisolated`: decoded inside the `Analytics` actor — see `AnalyticsBatchRequest`.
+nonisolated struct AnalyticsBatchResponse: Decodable, Sendable {
     let accepted: Int
     let dropped: Int
 }

@@ -82,7 +82,14 @@ struct NewsFilterTab: Identifiable, Equatable {
 enum UpdatesScope {
     /// Reserved key for the general (non-ticker) market feed. Must match
     /// `MARKET_SCOPE` in backend/app/services/news_cache_service.py.
-    static let market = "__MARKET__"
+    ///
+    /// `nonisolated` because it is a default argument in two places
+    /// (`NewsDetailViewModel.init` and `NewsDetailView.init`), and a default argument is
+    /// evaluated at the CALL SITE, which the compiler checks as nonisolated — while this
+    /// enum is implicitly `@MainActor` under `SWIFT_DEFAULT_ACTOR_ISOLATION`. Safe: an
+    /// immutable `Sendable` literal. Annotating here fixes both consumers at once; do NOT
+    /// inline the literal into them, or the backend-parity note above loses its anchor.
+    nonisolated static let market = "__MARKET__"
 }
 
 // MARK: - News Source

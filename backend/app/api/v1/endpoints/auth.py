@@ -673,7 +673,7 @@ async def session_exchange(
             headers={"Retry-After": "60"},
         )
 
-    payload = verify_supabase_token(request.supabase_access_token)
+    payload = await verify_supabase_token(request.supabase_access_token)
     if not payload or not payload.get("sub"):
         logger.warning("session-exchange rejected: Supabase token failed verification")
         raise auth_error(

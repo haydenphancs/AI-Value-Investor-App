@@ -116,7 +116,9 @@ enum CompanyNameFormatter {
 
     /// Index of the first token that begins any descriptor phrase, else nil.
     private static func firstDescriptorIndex(in tokens: [String]) -> Int? {
-        let normed = tokens.map(norm)
+        // `.map { norm($0) }`, not `.map(norm)` — an unapplied method reference is
+        // converted to a nonisolated function type. See HomeRepository's mapping note.
+        let normed = tokens.map { norm($0) }
         for i in 0..<normed.count {
             for phrase in descriptorPhrases where i + phrase.count <= normed.count {
                 var match = true

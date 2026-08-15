@@ -123,8 +123,11 @@ final class SettingsSyncManager {
         NotificationCenter.default.post(name: .caydexSettingsHydrated, object: nil)
     }
 
-    private init(repository: AccountRepositoryProtocol = AccountRepository.shared) {
-        self.repository = repository
+    /// Optional + nil-coalesce — see the note on `PushNotificationManager.init`.
+    /// `AccountRepository.shared` is MainActor-isolated and a default argument is evaluated
+    /// at the nonisolated call site, so the live default is built in this init body instead.
+    private init(repository: AccountRepositoryProtocol? = nil) {
+        self.repository = repository ?? AccountRepository.shared
     }
 
     func configure(appState: AppState) {

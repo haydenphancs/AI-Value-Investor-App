@@ -53,7 +53,8 @@ enum MonitoringConfig {
     /// Account UUIDs are deliberately NOT redacted — they are pseudonymous and are the
     /// primary handle for correlating a crash with a backend trace. They are disclosed
     /// in the privacy policy instead.
-    private static let redactionRules: [(NSRegularExpression, String)] = {
+    /// `nonisolated` so `redact` can be, below — an immutable table built from literals.
+    nonisolated private static let redactionRules: [(NSRegularExpression, String)] = {
         let patterns: [(String, String)] = [
             // Secret query params: ?apikey=… &token=… &password=…
             (#"(?i)([?&](?:api[_-]?key|token|access[_-]?token|secret|password|key)=)[^&\s'"]+"#, "$1***"),
@@ -71,7 +72,9 @@ enum MonitoringConfig {
     }()
 
     /// Apply every redaction rule to a free-text string.
-    static func redact(_ text: String) -> String {
+    /// `nonisolated`: called from Sentry's `beforeSend` hook, which is not main-actor.
+    /// Pure regex substitution over its argument.
+    nonisolated static func redact(_ text: String) -> String {
         var out = text
         for (re, template) in redactionRules {
             out = re.stringByReplacingMatches(

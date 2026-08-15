@@ -98,18 +98,25 @@ enum MarketHoursUtil {
     /// GOLD is Barrick Mining (NYSE), a regular-session equity, and treating it
     /// as a commodity here would un-gate the 30s poll 24/7 for an ordinary
     /// equity portfolio. Mirrors backend `asset_class._COMMODITY_SYMBOLS`.
-    private static let commoditySymbols: Set<String> = [
+    /// `nonisolated` so `symbolTradesAroundTheClock` can be — an immutable Sendable
+    /// literal set, safe to read from any isolation. Same lever as `APIConfig`'s constants.
+    nonisolated private static let commoditySymbols: Set<String> = [
         "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "HGUSD",
         "ZSUSD", "ZCUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
         "SBUSD", "CTUSD", "CCUSD",
     ]
 
-    private static let bareCryptoSymbols: Set<String> = [
+    /// `nonisolated` for the same reason as `commoditySymbols` above.
+    nonisolated private static let bareCryptoSymbols: Set<String> = [
         "BTC", "ETH", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK",
         "XRP", "DOGE", "SHIB", "UNI", "AAVE", "LTC", "BCH", "ATOM",
     ]
 
-    static func symbolTradesAroundTheClock(_ symbol: String) -> Bool {
+    /// `nonisolated`: passed as a function value to `symbols.contains(where:)`, which calls
+    /// it in a nonisolated context. Annotated rather than wrapped at the call site (the lever
+    /// used in `HomeRepository`) because this really is pure symbol-shape math with no state —
+    /// it was only MainActor by `SWIFT_DEFAULT_ACTOR_ISOLATION` default, never by need.
+    nonisolated static func symbolTradesAroundTheClock(_ symbol: String) -> Bool {
         let sid = symbol.trimmingCharacters(in: .whitespaces).uppercased()
         guard !sid.isEmpty, !sid.hasPrefix("^") else { return false }
         if commoditySymbols.contains(sid) { return true }

@@ -257,7 +257,9 @@ struct PlanFeature: Identifiable, Equatable, Sendable {
         chatCost: Int
     ) -> [PlanFeature] {
         let served = (dtos ?? [])
-            .map(PlanFeature.init(from:))
+            // `.map { … }`, not `.map(PlanFeature.init(from:))` — an unapplied initializer
+            // reference becomes a *nonisolated* function type. See HomeRepository's note.
+            .map { PlanFeature(from: $0) }
             .filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         if !served.isEmpty { return served }
 

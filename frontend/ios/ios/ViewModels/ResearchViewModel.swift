@@ -88,8 +88,16 @@ class ResearchViewModel: ObservableObject {
     /// early-returns — those must stay eligible for an immediate reload.
     private var lastLoadedAt: Date?
 
-    /// How long a completed load stays fresh. Matches `HomeDashboardViewModel.stalenessWindow`.
-    private static let stalenessWindow: TimeInterval = 300
+    /// How long a completed load stays fresh.
+    ///
+    /// Mirrors the SHAPE of `HomeDashboardViewModel.stalenessWindow` but deliberately not its
+    /// value: Home is pinned to 60s to match the server's `_CACHE_TTL_SECONDS`, while reports
+    /// change on human timescales, so 300s. Do not "unify" them.
+    ///
+    /// `nonisolated` for the same reason as Home's — it is a default argument on
+    /// `loadIfStale(maxAge:)`, and a default argument is checked as nonisolated at the call
+    /// site. Safe: an immutable `Sendable` literal.
+    nonisolated private static let stalenessWindow: TimeInterval = 300
 
     @Published var isSearching: Bool = false
     @Published var showSearchResults: Bool = false

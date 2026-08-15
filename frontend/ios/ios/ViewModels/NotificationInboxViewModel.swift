@@ -29,8 +29,12 @@ final class NotificationInboxViewModel: ObservableObject {
     private var nextCursor: String?
     private var loadTask: Task<Void, Never>?
 
-    init(repository: NotificationRepositoryProtocol = NotificationRepository()) {
-        self.repository = repository
+    /// Optional + nil-coalesce, matching the codebase's injection idiom (`SearchViewModel`,
+    /// `HomeDashboardViewModel`). `NotificationRepository.init` is MainActor-isolated, and a
+    /// default argument is evaluated at the CALL SITE under nonisolated checking — so the
+    /// live default is constructed here, inside this `@MainActor` init.
+    init(repository: NotificationRepositoryProtocol? = nil) {
+        self.repository = repository ?? NotificationRepository()
     }
 
     // MARK: - Loading

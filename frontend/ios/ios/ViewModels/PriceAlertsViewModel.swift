@@ -31,14 +31,18 @@ final class PriceAlertsViewModel: ObservableObject {
     let assetType: String
     private let repository: NotificationRepositoryProtocol
 
+    /// `repository` is Optional + nil-coalesced — see the note on
+    /// `NotificationInboxViewModel.init`. `NotificationRepository.init` is MainActor-isolated
+    /// and a default argument is checked as nonisolated at the call site, so the live default
+    /// is constructed inside this `@MainActor` init instead.
     init(
         ticker: String,
         assetType: String = "stock",
-        repository: NotificationRepositoryProtocol = NotificationRepository()
+        repository: NotificationRepositoryProtocol? = nil
     ) {
         self.ticker = ticker.uppercased()
         self.assetType = assetType
-        self.repository = repository
+        self.repository = repository ?? NotificationRepository()
     }
 
     /// True when this ticker is already at its per-ticker cap. Drives a disabled Add

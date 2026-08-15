@@ -197,7 +197,18 @@ struct SearchView: View {
     private func handleAskCayAI(_ query: String) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        chatViewModel.startNewConversation(firstMessage: trimmed, contextType: .none)
+        // Explicitly `nil`, NOT `.none`.
+        //
+        // `ChatContextType` has a `case none = "NONE"` AND the parameter is
+        // `ChatContextType?`, so a bare `.none` is ambiguous and Swift resolves it to
+        // `Optional.none` — i.e. nil. That is the behaviour that ships and the one we want
+        // (general chat, grounded on nothing); writing it out stops the ambiguity warning
+        // and stops anyone "correcting" it to the enum case later.
+        //
+        // The two are near-equivalent anyway — the backend folds "NONE" into `_NO_CONTEXT`
+        // (`chat_context_resolver.py`) and `AIChatScreen` renders the grounding chip only
+        // when `ctx != .none` — so this is a clarity fix, not a behaviour change.
+        chatViewModel.startNewConversation(firstMessage: trimmed, contextType: nil)
         showAIChat = true
     }
 

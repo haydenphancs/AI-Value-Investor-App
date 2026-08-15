@@ -387,7 +387,10 @@ struct ResearchViewWithBinding: View {
     ///
     /// Falling back rather than replacing keeps the purchase-adoption path intact.
     private var effectiveCreditBalance: CreditBalance? {
-        viewModel.creditBalance ?? appState.user.credits.map(CreditBalance.from)
+        // `.map { … }`, not `.map(CreditBalance.from)`: an unapplied method reference
+        // becomes a *nonisolated* function type, and `from` reads the @MainActor
+        // `purchasedCredits`. A closure literal here inherits this view's isolation.
+        viewModel.creditBalance ?? appState.user.credits.map { CreditBalance.from($0) }
     }
 
     private var researchTabContent: some View {

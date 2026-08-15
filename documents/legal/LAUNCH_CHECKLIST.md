@@ -62,11 +62,54 @@ because it lives in a `.swift` file, and the constant name reads like the anon k
 Confirmed clean by that same scan: `SUPABASE_JWT_SECRET`, `SUPABASE_DB_PASSWORD`, `DATABASE_URL`,
 `ADMIN_TOKEN`, and the FMP and Gemini keys appear in **zero** history blobs.
 
-- [ ] 🔴 Supabase → Project Settings → API → **rotate the service role key**
-- [ ] Update `backend/.env` **and** the Railway variable, redeploy, smoke-test one authed endpoint
+## ⚠️ PARTIALLY closed 2026-08-15 — DATABASE revoked, **STORAGE STILL EXPOSED**
 
-⚠️ **Since the repo now stays public by decision (§4), rotation is the ONLY mitigation.** There is
-no belt-and-braces here.
+Do not tick this off. Verified per-surface with a forged-key control (403), so the probe is sound:
+
+| Supabase surface | Leaked key | |
+|---|---|---|
+| PostgREST `/rest/v1/*` | 401 | ✅ blocked |
+| GoTrue `/auth/v1/admin/*` | 401 | ✅ |
+| Realtime, GraphQL | 401 | ✅ |
+| **Storage `/storage/v1/*`** | **200** | 🔴 **full service_role access** |
+
+It lists every bucket and the contents of the **private** ones — `research-pdfs`, `journey-media`,
+`money-moves-media`, `book-media`. Cause: Storage validates the JWT signature against the project's
+**legacy JWT secret**, which is untouched, so *Disable JWT-based API keys* never applied to it.
+
+- [ ] 🔴 **Settings → JWT Keys → JWT Signing Keys** — migrate to a new signing key, then revoke the
+      legacy secret. That is what finally kills the leaked JWT on Storage.
+- [ ] Re-verify all surfaces afterwards, forged-key control first.
+
+> Plan for one side effect: Storage **signed URLs** are signed with that secret, so outstanding ones
+> die on rotation. Learn audio memoises them for 6h in a module dict (`learn_audio_urls.py:89-96`) —
+> the Railway restart is the only cache-bust. **App logins are unaffected**: sessions are signed with
+> `settings.SECRET_KEY`, not the Supabase secret.
+
+**Lesson worth keeping: verifying ONE API surface and generalising is how this was briefly, and
+wrongly, marked closed.** Probe PostgREST, GoTrue, Storage, Realtime and GraphQL separately.
+
+Steps completed so far (necessary, not sufficient):
+
+- [x] Supabase → API Keys → **Publishable and secret API keys** → used the `sb_secret_…` key
+- [x] Set `SUPABASE_SERVICE_ROLE_KEY` to it in `backend/.env` **and** Railway, restarted the service
+- [x] Supabase → API Keys → **Disable JWT-based API keys** ← *this* is the revocation
+- [x] Verified: leaked key 401, forged-key control 401, new key 200, `/health` `{"status":"healthy"}`
+
+> **Rotating the JWT secret was NOT the fix, and is no longer even offered** — Settings → JWT Keys →
+> *Legacy JWT Secret* has only a Reveal button. The new-key path is better anyway: the JWT secret is
+> untouched, so Supabase Auth signatures and Storage signed URLs keep working and **nobody is logged
+> out**. `SUPABASE_JWT_SECRET` was not changed.
+>
+> ⚠️ Three things that nearly caused a wrong conclusion here, worth reusing:
+> 1. **Swapping the backend to the new key does NOT revoke the old one.** Only *Disable JWT-based
+>    API keys* does. Stopping after the swap feels finished while the exposure is fully live.
+> 2. **A Railway variable edit is not enough — restart.** `database.py:15,72` caches the client in a
+>    lazy module global, so the running process keeps the old key for its whole life.
+> 3. **~60 s propagation.** The leaked key returned 200 twice after Disable, then flipped to 401.
+>    And always run a **forged-key control** first — a probe that 200s on everything proves nothing.
+
+Still open from this finding: the copyrighted book PDFs in history (§4), and the ed25519 key below.
 
 Also in history, lower severity: an OpenSSH **ed25519 private key** committed under the filename
 `eval "$(ssh-agent -s)"` (commit `3f784c89`). Its fingerprint does **not** match the key on the
@@ -188,7 +231,14 @@ Why the original claim was wrong:
    actually regulated financial service.
 
 **Trade-off of staying Individual:** your personal legal name appears as the App Store
-seller instead of "Caydex". Cosmetic.
+seller instead of "Caydex". Cosmetic — **in the US.**
+
+> ⚠️ **Not cosmetic in the EU.** Under the Digital Services Act, a "trader" distributing in
+> the EU must have their name, **street address**, phone number and email **publicly shown on
+> the App Store listing**, and Apple verifies them. On an Individual account that is whatever
+> address is on the legal entity — i.e. a home address, published worldwide. This is the one
+> concrete, non-cosmetic cost of staying Individual, and it was missing from this file until
+> 2026-08-15. See §6a.
 
 ### The one residual review risk
 
@@ -741,6 +791,77 @@ in a paid product and persists it in Supabase cache tables (14 tables store raw 
 
 Free to ask, definitive answer, and it de-risks the single largest contractual unknown.
 Get it in writing.
+
+---
+
+## 6a. Business → Agreements: three gates in a fixed order 🔴
+
+*(Added 2026-08-15, after hitting this live. This section did not exist, and §6b jumped
+straight to "accept the Paid Applications Agreement" as though it were one click.)*
+
+**Agreements → Paid Apps only goes `Active` when THREE separate things are done**, and ASC
+shows the status as `New` until all of them are. In order, because each blocks the next:
+
+- [x] **1. Legal entity information** — the banner *"you must update your legal entity
+      information prior to signing the Paid Apps Agreement"* → **Edit Legal Entity**. This
+      blocks the signature; you cannot skip ahead. *(done 2026-08-15)*
+- [x] **2. Sign the Paid Apps Agreement** *(done 2026-08-15)*
+- [ ] **3. Bank account + W-9** — both, on the same Business page.
+
+**The status string tells you which gate you are on**, and it is the fastest way to see
+where you stand: `New` (not signed) → **`Pending User Info`** (signed; bank and/or tax
+still missing) → `Active` (sellable). Observed live 2026-08-15.
+
+Notes on gate 3:
+- The **bank account holder name must match the legal entity** — on an Individual account
+  that is your personal name, not an LLC's.
+- The **W-9 takes about five minutes**; bank verification is the slow half, so start it
+  first if you are doing them separately.
+- On an Individual account the W-9 wants an SSN **or an EIN**. An individual can get an EIN
+  from the IRS free in ~10 minutes, and using it keeps your SSN off the form — worth doing
+  anyway if you later form the LLC in §1.
+
+Until Paid Apps is `Active`, `Product.products(for:)` returns **empty** — Add Credits shows
+every pack with "Price unavailable" and no Buy button. That is the designed degraded state
+(§6b), not a bug.
+
+> **The Free Apps Agreement being `Active` tells you nothing about this.** They are separate
+> agreements with separate lifecycles; Free being live is why the app can already ship, and
+> is exactly why "Paid Apps: New" is easy to miss.
+
+### The DSA trader declaration — read before you answer it
+
+ASC also shows a red banner: *"you need to let us know whether or not you are a trader."*
+
+**It does not block in-app purchase.** It blocks **EU availability**. Do not let it stall the
+three gates above — but do settle it before an EU release, because both answers have a real
+cost and neither is reversible-by-accident:
+
+- **Declaring "trader"** → Apple **verifies and publicly displays** your trader contact
+  details — name, street address, phone, email — on the App Store listing in the EU. On an
+  Individual account that is your home address, published worldwide and indexed.
+- **Declaring "not a trader"** → Apple **removes the app from all EU storefronts**. And
+  someone taking recurring subscription and IAP revenue is very likely a trader under the
+  DSA, so this is not a free way out — an inaccurate declaration is its own problem.
+
+Practical options, roughly cheapest first: use a **non-residential contact address** you
+legally control (virtual business address / registered agent) — note Apple states the trader
+details are "for display purposes only and won't impact the contact details for your Apple
+accounts", so this address is a **separate field** from the legal entity's; form the **LLC**
+described in §1 and use its registered-agent address; or **drop the EU** from availability
+and accept the lost market. Worth 20 minutes with a CPA or attorney — this file is not legal
+advice, and the privacy exposure is permanent once published (scraped, archived, indexed).
+
+**DECISION 2026-08-15: declared NON-TRADER**, to ship without publishing a home address —
+no non-residential address or business phone existed yet. Consequences, all intended:
+
+- [x] Apple removes the app from **all EU storefronts**; expect availability to fall from
+      175 countries by the 27 EU member states. This is enforced by Apple, so the
+      declaration stays accurate rather than being a promise to keep.
+- [ ] **Revisit after launch.** The three fields needed to switch to trader and reclaim the
+      EU are: address (❌ needs a mailbox service / registered agent, ~$10–25/mo), phone
+      (❌ needs a non-personal number), email (✅ `support@caydexinvest.com`, already routed
+      per §2). Trader status is updatable in ASC later; the EU comes back when it is.
 
 ---
 

@@ -146,6 +146,12 @@ celerybeat.pid
 
 # Environments
 .env
+# The bare `.env` above does NOT cover siblings — `.env.bak`, `.env.local` and
+# `.env.production` were all committable until 2026-08-15. That is exactly the shape of an
+# accidental secret commit: you back up `.env` before a key rotation and the backup, holding
+# the key you just retired, is untracked-but-not-ignored and gets swept into `git add -A`.
+.env.*
+!.env.example
 .envrc
 .venv
 env/

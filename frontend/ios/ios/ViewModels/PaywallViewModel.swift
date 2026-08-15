@@ -40,12 +40,15 @@ final class PaywallViewModel: ObservableObject {
     private let repository: AccountRepositoryProtocol
     let store: StoreKitService
 
+    /// Optional + nil-coalesce — see the note on `BuyCreditsViewModel.init`. Both singletons
+    /// are MainActor-isolated and a default argument is checked as nonisolated at the call
+    /// site, so the live defaults are resolved inside this `@MainActor` init.
     init(
-        repository: AccountRepositoryProtocol = AccountRepository.shared,
-        store: StoreKitService = .shared
+        repository: AccountRepositoryProtocol? = nil,
+        store: StoreKitService? = nil
     ) {
-        self.repository = repository
-        self.store = store
+        self.repository = repository ?? AccountRepository.shared
+        self.store = store ?? .shared
     }
 
     /// Report cost fallback used in copy before the catalog loads.

@@ -147,6 +147,21 @@ class FakeSupabase:
         return _FakeQuery(self.log, name, self._row, self._fail)
 
 
+def _async_returning(value, *, on_call=None):
+    """Async stub for `verify_supabase_token`, which is now a coroutine.
+
+    It became `async` when Supabase JWT verification gained the JWKS path: an ES256 token needs
+    the project's public key fetched over HTTP, and doing that synchronously would block the
+    event loop inside an auth dependency. A plain `lambda` stub here silently produces a
+    coroutine-less value that `await` then rejects.
+    """
+    async def _stub(_token):
+        if on_call is not None:
+            on_call()
+        return value
+    return _stub
+
+
 def _body(response) -> dict:
     """Decode a JSONResponse body."""
     return json.loads(response.body)
@@ -406,7 +421,7 @@ async def test_oauth_succeeds_even_if_the_name_write_fails():
 
 @pytest.mark.asyncio
 async def test_session_exchange_rejects_an_unverifiable_supabase_token(monkeypatch):
-    monkeypatch.setattr(auth_ep, "verify_supabase_token", lambda _t: None)
+    monkeypatch.setattr(auth_ep, "verify_supabase_token", _async_returning(None))
     with pytest.raises(HTTPException) as ei:
         await auth_ep.session_exchange(
             SessionExchangeRequest(supabase_access_token="t" * 40), _FakeRequest(),
@@ -418,7 +433,7 @@ async def test_session_exchange_rejects_an_unverifiable_supabase_token(monkeypat
 @pytest.mark.asyncio
 async def test_session_exchange_issues_tokens_for_a_verified_token(monkeypatch):
     monkeypatch.setattr(
-        auth_ep, "verify_supabase_token", lambda _t: {"sub": _USER_ID, "email": _EMAIL}
+        auth_ep, "verify_supabase_token", _async_returning({"sub": _USER_ID, "email": _EMAIL})
     )
     out = await auth_ep.session_exchange(
         SessionExchangeRequest(supabase_access_token="t" * 40), _FakeRequest(), FakeSupabase()
@@ -431,7 +446,7 @@ async def test_session_exchange_refuses_when_no_app_user_row_exists(monkeypatch)
     """The DB trigger creates public.users on auth.users insert. Minting tokens for an id
     with no app row would produce a signed-in user that every endpoint 404s on."""
     monkeypatch.setattr(
-        auth_ep, "verify_supabase_token", lambda _t: {"sub": _USER_ID, "email": _EMAIL}
+        auth_ep, "verify_supabase_token", _async_returning({"sub": _USER_ID, "email": _EMAIL})
     )
     with pytest.raises(HTTPException) as ei:
         await auth_ep.session_exchange(
@@ -446,7 +461,7 @@ async def test_session_exchange_never_trusts_the_sub_before_verification(monkeyp
     """A forged token must not reach the DB lookup at all."""
     seen = []
     monkeypatch.setattr(
-        auth_ep, "verify_supabase_token", lambda _t: seen.append("verified") or None
+        auth_ep, "verify_supabase_token", _async_returning(None, on_call=lambda: seen.append("verified"))
     )
     sb = FakeSupabase()
     with pytest.raises(HTTPException):

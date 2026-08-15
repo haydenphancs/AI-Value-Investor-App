@@ -1,0 +1,43 @@
+{
+  "slug": "warren-buffetts-early-days",
+  "category": "blueprints",
+  "treatment": "found_artefact",
+  "subject": "a worn cigar butt resting in a heavy cut-crystal ashtray, one last ember alive at its tip, lying on a dark wooden desk scattered with more spent cigar butts",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "A single physical instant PHOTOGRAPH \u2014 a square print with a thick white border and a wide blank strip along its bottom edge \u2014 lying at a slight angle on a surface that belongs to the subject's own world. The print itself shows the object, sharply and unmistakably. The surface it lies on continues the same subject beyond the print's edges, so the photograph sits inside the scene it depicts. Shallow depth of field: the print is critically sharp, the surroundings fall away. The white bottom strip is COMPLETELY BLANK \u2014 no handwriting, no printing, nothing on it at all.\n\nSUBJECT: a worn cigar butt resting in a heavy cut-crystal ashtray, one last ember alive at its tip, lying on a dark wooden desk scattered with more spent cigar butts\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue and pale cyan against deep slate and near-black, with clean bone white. One warm accent at most, and only if the object needs it. Precise and engineered. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "ad1f488612b5",
+  "art_file": "warren-buffetts-early-days.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "warren-buffetts-early-days.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "e9225d540cfca0de1b719a976a6025cecfa4fd36cbf52c36333ecc8a282799be",
+      "bytes": 94342,
+      "cropped": true
+    },
+    "card": {
+      "file": "warren-buffetts-early-days.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "fc6571b2c93f40bc6c5bb84a108fa4fe3bc825addae473fccf2bab3cd8412f9b",
+      "bytes": 37187,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.0331,
+    "ring_spread": 0.3662,
+    "inner_spread": 0.5512,
+    "edge_activity": 0.664,
+    "mean_luma": 0.2966,
+    "inner_mean_luma": 0.3203,
+    "needs_hairline": false
+  }
+}

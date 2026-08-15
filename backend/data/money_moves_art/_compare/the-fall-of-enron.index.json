@@ -1,0 +1,172 @@
+[
+  {
+    "slug": "the-fall-of-enron",
+    "treatment": "ledger_still",
+    "category": "valueTraps",
+    "subject": "a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre",
+    "prompt": "The object resting on a sheet of aged green-bar ACCOUNTING LEDGER PAPER \u2014 pale green and cream alternating horizontal bands with fine ruled column lines \u2014 foxed and yellowed at the edges, on a dark wooden desk. Warm low tungsten light from one side, deep but not black shadows, visible dust and paper fibre. The ruled bands and columns are empty: no figures, no writing, no annotations anywhere. Archival, forensic and quietly damning \u2014 the record, long after the fact.\n\nSUBJECT: a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+    "masters": {
+      "hero": {
+        "file": "the-fall-of-enron__ledger_still.hero.jpg",
+        "width": 1206,
+        "height": 678,
+        "sha256": "466c109b3288cd0e9d3866f63856035827e360529c2652033ba1f9bbc89bf97f",
+        "bytes": 143254,
+        "cropped": true
+      },
+      "card": {
+        "file": "the-fall-of-enron__ledger_still.card.jpg",
+        "width": 640,
+        "height": 360,
+        "sha256": "cd2332ea6c02fdd64976c36a01638b3e92267e9fd78b7294239a49402873dba0",
+        "bytes": 45706,
+        "cropped": true
+      }
+    },
+    "plate": {
+      "margin_px_fraction": 0.04,
+      "ring_median_luma": 0.1135,
+      "ring_deviation": 0.5758,
+      "margin_clear": false,
+      "mean_luma": 0.1945,
+      "inner_mean_luma": 0.1979,
+      "needs_hairline": false
+    }
+  },
+  {
+    "slug": "the-fall-of-enron",
+    "treatment": "specimen_plate",
+    "category": "valueTraps",
+    "subject": "a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre",
+    "prompt": "The object presented as a MUSEUM SPECIMEN, laid flat and perfectly centred on a soft off-white cotton-rag paper ground with a faint fibrous texture and one gentle fold crease. Flat, even, shadowless top light exactly as a collections photographer would use, with one very soft contact shadow directly beneath the object. Directly below the object sits one small COMPLETELY BLANK cream card with a thin printed rule across it and no writing on it whatsoever. Clinical, immaculate, reverent \u2014 the object is evidence, catalogued after the fact.\n\nSUBJECT: a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+    "masters": {
+      "hero": {
+        "file": "the-fall-of-enron__specimen_plate.hero.jpg",
+        "width": 1206,
+        "height": 678,
+        "sha256": "b8668d2ba87360fd8d6dc2fe280da350b66eef8fd97ce6ed364d693c08686849",
+        "bytes": 92089,
+        "cropped": true
+      },
+      "card": {
+        "file": "the-fall-of-enron__specimen_plate.card.jpg",
+        "width": 640,
+        "height": 360,
+        "sha256": "253bddae0bea612bfa13a630f63b829ebaa2996730cee69b28ec444e40103bc3",
+        "bytes": 26294,
+        "cropped": true
+      }
+    },
+    "plate": {
+      "margin_px_fraction": 0.04,
+      "ring_median_luma": 0.897,
+      "ring_deviation": 0.0928,
+      "margin_clear": true,
+      "mean_luma": 0.7548,
+      "inner_mean_luma": 0.7357,
+      "needs_hairline": true
+    }
+  },
+  {
+    "slug": "the-fall-of-enron",
+    "treatment": "duotone_press",
+    "category": "valueTraps",
+    "subject": "a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre",
+    "prompt": "A photographic subject flattened into a hard two-colour DUOTONE screenprint and laid over a flat saturated background field, with a fine regular grid of hairlines ruled across the whole frame like graph paper. The object is a real photograph, not a drawing, but reduced to exactly two inks \u2014 one saturated field colour and one cool pale ink \u2014 with crisp edges, high contrast and no intermediate hues at all. Slight offset-print misregistration and a faint paper tooth. Confident, loud and modern: a financial magazine cover, not a photograph.\n\nSUBJECT: a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+    "masters": {
+      "hero": {
+        "file": "the-fall-of-enron__duotone_press.hero.jpg",
+        "width": 1206,
+        "height": 678,
+        "sha256": "6095dbbd2048ff0a429d160739392a31592c601fd4af749405f5268588cd9aee",
+        "bytes": 149845,
+        "cropped": true
+      },
+      "card": {
+        "file": "the-fall-of-enron__duotone_press.card.jpg",
+        "width": 640,
+        "height": 360,
+        "sha256": "58214ac9f36634746595d2da157d71638a28a58fd94d3c6c1f4e90cceea69235",
+        "bytes": 47734,
+        "cropped": true
+      }
+    },
+    "plate": {
+      "margin_px_fraction": 0.04,
+      "ring_median_luma": 0.1641,
+      "ring_deviation": 0.007,
+      "margin_clear": true,
+      "mean_luma": 0.2782,
+      "inner_mean_luma": 0.2937,
+      "needs_hairline": false
+    }
+  },
+  {
+    "slug": "the-fall-of-enron",
+    "treatment": "colour_field",
+    "category": "valueTraps",
+    "subject": "a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre",
+    "prompt": "One real photographed object resting exactly at the centre of a set of CONCENTRIC RECTANGLES of flat unmodulated colour, each band a different hue, nested inside one another and filling the whole frame edge to edge. A single sheet of heavy paper texture with one soft vertical fold crease runs across the entire image, colour bands and object alike, so the whole thing reads as one printed page. Flat even light, minimal shadow. Calm, graphic and abstract \u2014 a Rothko with one honest thing sitting on it.\n\nSUBJECT: a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+    "masters": {
+      "hero": {
+        "file": "the-fall-of-enron__colour_field.hero.jpg",
+        "width": 1206,
+        "height": 678,
+        "sha256": "473c96622d1a6a497da5ddb8182ba867c53376b28595d4f21d426702298cb551",
+        "bytes": 58334,
+        "cropped": true
+      },
+      "card": {
+        "file": "the-fall-of-enron__colour_field.card.jpg",
+        "width": 640,
+        "height": 360,
+        "sha256": "fbd0dad72559a9992bb014512a57704bd51352e1c7a3f07e4d5b663cdd253a35",
+        "bytes": 21147,
+        "cropped": true
+      }
+    },
+    "plate": {
+      "margin_px_fraction": 0.04,
+      "ring_median_luma": 0.8429,
+      "ring_deviation": 0.1211,
+      "margin_clear": true,
+      "mean_luma": 0.2566,
+      "inner_mean_luma": 0.1771,
+      "needs_hairline": true
+    }
+  },
+  {
+    "slug": "the-fall-of-enron",
+    "treatment": "cutout_grid",
+    "category": "valueTraps",
+    "subject": "a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre",
+    "prompt": "The object photographed against pure bright seamless white and treated as a crisp CUTOUT, with a faint pale-blue engineering grid of hairlines ruled behind it and a soft realistic drop shadow anchoring it to the ground. Clean daylight-balanced studio light, full colour, everything sharp. A few small related props scatter loosely around it at the edges of the composition. Bright, weightless and current \u2014 a news explainer, not a mood piece.\n\nSUBJECT: a large antique mirror in a heavy tarnished metal frame lying face up, its glass cracked, a fine web of fractures radiating outward from one single impact point near its centre\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+    "masters": {
+      "hero": {
+        "file": "the-fall-of-enron__cutout_grid.hero.jpg",
+        "width": 1206,
+        "height": 678,
+        "sha256": "d3c43a3037718b8c5e17fd0512ca15ca00a2093712aa375b40f957349fb2fb23",
+        "bytes": 114871,
+        "cropped": true
+      },
+      "card": {
+        "file": "the-fall-of-enron__cutout_grid.card.jpg",
+        "width": 640,
+        "height": 360,
+        "sha256": "924828bfe2e0f0892c5f73400c49e520d72aeb169f5de970fb4a3b6901fa189c",
+        "bytes": 37398,
+        "cropped": true
+      }
+    },
+    "plate": {
+      "margin_px_fraction": 0.04,
+      "ring_median_luma": 0.9911,
+      "ring_deviation": 0.9791,
+      "margin_clear": false,
+      "mean_luma": 0.7045,
+      "inner_mean_luma": 0.6843,
+      "needs_hairline": true
+    }
+  }
+]

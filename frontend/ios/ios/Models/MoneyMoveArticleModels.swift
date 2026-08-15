@@ -45,6 +45,13 @@ struct MoneyMoveArticle: Identifiable {
     /// nil for articles without audio (falls back to readTimeMinutes).
     var audioDurationSeconds: Int? = nil
 
+    /// Cover artwork from the public money-moves-images bucket. Both default to nil so every
+    /// existing construction site — the Swift sample statics, the placeholder articles built
+    /// in LearnView/MoneyMovesDetailView — keeps compiling and simply renders the gradient,
+    /// which is exactly what it rendered before artwork existed.
+    var imageUrl: String? = nil        // 1206x678 hero plate
+    var imageCardUrl: String? = nil    // 640x360 catalog derivative
+
     var formattedDate: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM dd, yyyy"
@@ -254,6 +261,9 @@ struct RelatedArticle: Identifiable {
     let readTimeMinutes: Int
     let viewCount: String
     let gradientColors: [String]
+    /// Stamped by the seeder from the referenced article's card plate. Defaults to nil so the
+    /// Swift sample statics keep compiling and fall back to `gradientColors`.
+    var imageCardUrl: String? = nil
 }
 
 // MARK: - Article Action Type

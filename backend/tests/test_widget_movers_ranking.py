@@ -190,3 +190,73 @@ def test_every_ranked_row_has_a_finite_change():
         [_row(f"T{i}", v, 0.02) for i, v in enumerate([1.0, float("nan"), -3.0, None])]
     )
     assert all(math.isfinite(m.change_percent) for m in ranked)
+
+
+# ── how many movers reach the payload ─────────────────────────────────
+
+
+def _ctx():
+    from app.services.widget_movers_service import _MarketContext
+    from app.utils.market_hours import session_trading_date
+
+    sd = session_trading_date().isoformat()
+    return _MarketContext(
+        industry_available=True, earnings_available=True, market_available=True,
+        news_available=True, industry_snapshot_date=sd, session_date=sd,
+    )
+
+
+def test_the_payload_carries_a_headline_plus_five_runners():
+    """Medium renders a ranked column and Large lists five; both were showing ONE.
+
+    Widening this costs nothing upstream — every mover comes from the single batch
+    quote already made, and `get_cards` is one batched select regardless of how many
+    scopes it receives. It is the highest value-per-risk change in the widget.
+    """
+    from app.services.widget_movers_service import (
+        WidgetMoversService, _RUNNERS_UP, _SCOPE_MARKET,
+    )
+
+    assert _RUNNERS_UP == 6
+    ranked = rank_movers([_row(f"T{i:02d}", -float(20 - i), 0.02) for i in range(12)])
+    p = WidgetMoversService()._payload(
+        mode="market", ranked=ranked, cards={}, ctx=_ctx(),
+        basket=None, scope_label=_SCOPE_MARKET,
+    )
+    assert p.headline_mover is not None
+    assert len(p.runners_up) == _RUNNERS_UP - 1 == 5
+
+
+def test_a_short_universe_does_not_pad_or_repeat():
+    from app.services.widget_movers_service import WidgetMoversService, _SCOPE_MARKET
+
+    ranked = rank_movers([_row("AAA", -5.0, 0.02), _row("BBB", -3.0, 0.02)])
+    p = WidgetMoversService()._payload(
+        mode="market", ranked=ranked, cards={}, ctx=_ctx(),
+        basket=None, scope_label=_SCOPE_MARKET,
+    )
+    assert p.headline_mover.ticker == "AAA"
+    assert [m.ticker for m in p.runners_up] == ["BBB"]
+
+
+def test_no_ticker_appears_twice_and_the_headline_never_repeats_below_itself():
+    """iOS renders these with `ForEach(id: \\.ticker)`.
+
+    Duplicate ids are undefined behaviour in SwiftUI — on a Home Screen, with no way
+    for the user to recover. `rank_movers` deliberately keeps duplicates and
+    `_swept_universe` trusts the RPC to be unique, so the guarantee has to be made
+    where the payload is built.
+    """
+    from app.services.widget_movers_service import WidgetMoversService, _SCOPE_MARKET
+
+    ranked = rank_movers([
+        _row("DUP", -9.0, 0.02), _row("DUP", -9.0, 0.02),
+        _row("AAA", -5.0, 0.02), _row("AAA", -4.0, 0.02), _row("BBB", -3.0, 0.02),
+    ])
+    p = WidgetMoversService()._payload(
+        mode="market", ranked=ranked, cards={}, ctx=_ctx(),
+        basket=None, scope_label=_SCOPE_MARKET,
+    )
+    tickers = [m.ticker for m in p.runners_up]
+    assert len(tickers) == len(set(tickers)), tickers
+    assert p.headline_mover.ticker not in tickers

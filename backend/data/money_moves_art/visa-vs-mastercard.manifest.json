@@ -1,0 +1,43 @@
+{
+  "slug": "visa-vs-mastercard",
+  "category": "battles",
+  "treatment": "flat_deco",
+  "subject": "two identical bank payment cards of exactly the same size standing upright side by side and facing the viewer, each with a small square contact chip on its face, both completely blank with no printing, embossing, numbers, names or marks of any kind",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "A flat 2D VECTOR ILLUSTRATION of the object, drawn with clean confident linework, solid unmodulated colour fills and simple geometric decorative shapes behind it \u2014 soft rounded clouds, arcs or bands filling the background. A limited warm palette of four or five colours, gently retro, with fine engraved-looking detail lines on the object itself. Absolutely flat: no photographic texture, no 3D rendering, no bevels, no gradients, no drop shadows. Warm, approachable and designed.\n\nSUBJECT: two identical bank payment cards of exactly the same size standing upright side by side and facing the viewer, each with a small square contact chip on its face, both completely blank with no printing, embossing, numbers, names or marks of any kind\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue on one side against warm amber and old gold on the other, over a neutral ground. Exactly two hues plus neutrals, split so the two halves of the picture are plainly opposed \u2014 the rivalry is carried by the colour. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "205d3dc4d619",
+  "art_file": "visa-vs-mastercard.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "visa-vs-mastercard.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "a45890722c828d67ef6589a8c4ce384e4aa87784a53f4f78005f59ec9de5900f",
+      "bytes": 67778,
+      "cropped": true
+    },
+    "card": {
+      "file": "visa-vs-mastercard.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "55cae8dbf95e69fbb4b330d018be3cdb758a03916510c95c279304fba7a41c23",
+      "bytes": 28297,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.3716,
+    "ring_spread": 0.4635,
+    "inner_spread": 0.4363,
+    "edge_activity": 1.063,
+    "mean_luma": 0.4355,
+    "inner_mean_luma": 0.4366,
+    "needs_hairline": false
+  }
+}

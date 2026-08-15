@@ -185,39 +185,6 @@ private struct ChangeBadge: View {
     }
 }
 
-/// "1.1× normal · Aerospace & Defense −1.2%" — pure arithmetic, always true.
-///
-/// This is the line that makes a bare percentage mean something: it says whether the
-/// move was remarkable *for this stock*, and whether its group went the same way.
-private struct ContextLine: View {
-    let context: WidgetMoveContext
-    var showIndustry: Bool = true
-
-    private var pieces: [String] {
-        var out: [String] = []
-        if let v = context.volatilityLabelText { out.append(v) }
-        if showIndustry, let i = context.industryLabel { out.append(i) }
-        return out
-    }
-
-    var body: some View {
-        if !pieces.isEmpty {
-            Text(pieces.joined(separator: " · "))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-    }
-}
-
-private extension WidgetMoveContext {
-    var volatilityLabelText: String? {
-        guard let z else { return nil }
-        return String(format: "%.1f× normal", z)
-    }
-}
-
 /// The cause line. The tag badge appears ONLY for an established cause — a `none`
 /// result gets the sentence with no badge, so nothing implies a known reason.
 private struct CauseView: View {
@@ -254,8 +221,12 @@ private struct SessionFooter: View {
     /// Supplied by the timeline entry, so each entry re-derives against ITS date.
     let now: Date
 
-    private var label: String {
-        WidgetSessionLabel.displayLabel(
+    private var label: String? {
+        // AGED only. During the session the numbers are what the reader already assumes,
+        // and a "Live 2:14 PM ET" line spends a row of a small tile saying so. It appears
+        // when the data is from a PREVIOUS session — the case where staying silent would
+        // present Friday's move as today's.
+        WidgetSessionLabel.agedLabel(
             asOf: snapshot.asOf,
             sessionDate: snapshot.sessionDate,
             marketSession: snapshot.marketSession,
@@ -265,8 +236,17 @@ private struct SessionFooter: View {
     }
 
     var body: some View {
-        if !label.isEmpty {
-            Text(label).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+        if let label, !label.isEmpty {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                // Scale rather than truncate. This label IS the honesty mechanism — it is
+                // the only thing telling the reader whether "−5.02%" is from today — so it
+                // is the last element on the tile that should be cut. "Live 2:14 P…" is a
+                // small ugliness; a clipped "Fri clo…" beside a stale number is not.
+                .minimumScaleFactor(0.7)
+                .layoutPriority(1)
         }
     }
 }
@@ -308,14 +288,95 @@ private struct RunnerRow: View {
             Spacer(minLength: 4)
             if let tag = mover.cause.tag, mover.cause.kind.isEstablished {
                 Text(tag).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            } else if let z = mover.z {
-                // "0.9× normal", not a bare "0.9×". This sits in the column other rows
-                // use for a cause TAG, so an unlabelled multiplier reads as a reason.
-                Text(String(format: "%.1f× normal", z))
-                    .font(.caption2)
+            }
+            // Nothing when there is no established cause. The σ multiple used to fill this
+            // slot, but it sits in the column every other row uses for a REASON — so
+            // "1.1× normal" read as one, when it is only a restatement of the percentage
+            // already printed to its left. An empty cell says "no known cause", which is
+            // both true and what `kind == .none` means.
+        }
+    }
+}
+
+/// The market band: how the tape itself did, above the single name.
+///
+/// This is what the widget was missing. A reader seeing "ACHR −5.02%" alone has no idea
+/// whether the whole market was red — the S&P's move existed in the payload but only
+/// buried inside the mover's own `context`, where nothing rendered it.
+private struct IndexStrip: View {
+    @Environment(\.widgetRenderingMode) private var renderingMode
+    let indices: [WidgetIndex]
+    /// Small has room for one; medium/large show the row.
+    var limit: Int
+
+    private func tint(_ i: WidgetIndex) -> Color {
+        guard renderingMode == .fullColor else { return .primary }
+        if i.isFlat { return .secondary }
+        return i.isPositive ? .green : .red
+    }
+
+    var body: some View {
+        if !indices.isEmpty {
+            HStack(spacing: 10) {
+                ForEach(indices.prefix(limit), id: \.symbol) { idx in
+                    HStack(spacing: 4) {
+                        Text(idx.label)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        if let c = idx.formattedChange {
+                            Text(c)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(tint(idx))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+}
+
+/// A runner-up in a NARROW column — ticker and change only.
+///
+/// The medium family's right-hand column is ~120pt. A cause tag does not fit there, and a
+/// truncated one ("Analyst Downg…") is worse than none: this column sits where the reader
+/// is scanning for names, not explanations. The headline mover keeps the full sentence;
+/// these answer "what else moved".
+private struct CompactMoverRow: View {
+    let mover: WidgetMover
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(mover.ticker)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Spacer(minLength: 2)
+            ChangeBadge(mover: mover, font: .caption2)
+        }
+    }
+}
+
+/// The "what else moved" column. Renders nothing when there is nothing to add, so the
+/// headline block reflows into the full width rather than sitting beside an empty rail.
+private struct RunnerColumn: View {
+    let movers: [WidgetMover]
+    var limit: Int
+
+    var body: some View {
+        if !movers.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Also moving")
+                    .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.tertiary)
+                    .textCase(.uppercase)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                ForEach(movers.prefix(limit), id: \.ticker) { CompactMoverRow(mover: $0) }
+                Spacer(minLength: 0)
             }
         }
     }
@@ -359,25 +420,44 @@ private struct SmallView: View {
     var configured: MoversMode = .market
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        // Six cramped lines became four legible ones. The ~155pt tile could not hold a
+        // cause sentence at a width that kept it meaningful — "Aerospace & Defense fe…"
+        // is not an explanation — so this size answers the two questions it CAN answer
+        // completely: how is the market, and what moved most.
+        VStack(alignment: .leading, spacing: 5) {
             if let snap = entry.snapshot, let m = snap.headlineMover {
-                ScopeBanner(snapshot: snap, configured: configured)
-                Text(m.ticker)
-                    .font(.headline.weight(.bold))
-                    // The tile is a FIXED ~155pt with no scrolling, so anything without
-                    // a limit here wraps at accessibility sizes and pushes the cause,
-                    // the context line and the footer straight off the bottom — the
-                    // ticker survives and everything that gives it meaning is clipped.
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                ChangeBadge(mover: m, font: .subheadline.weight(.semibold))
-                // No tag at this size: there is not room for both a badge and enough
-                // of the sentence for it to mean anything.
-                CauseView(cause: m.cause, lineLimit: typeSize.isAccessibilitySize ? 2 : 3, showTag: false)
-                Spacer(minLength: 0)
-                if !typeSize.isAccessibilitySize {
-                    ContextLine(context: m.context, showIndustry: false)
+                // ONE index at this size. Three rows would cost 3 of ~7 available lines
+                // for symbols that are ~90% correlated on a typical session; one answers
+                // "is the market up or down today", which is the whole job of this band.
+                if let mc = snap.marketContext, !mc.isEmpty, !typeSize.isAccessibilitySize {
+                    IndexStrip(indices: mc.indices, limit: 1)
                 }
+                ScopeBanner(snapshot: snap, configured: configured)
+
+                // Ticker and change on ONE row. Stacked, they spent two of the tile's
+                // few lines on a single fact.
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(m.ticker)
+                        .font(.title3.weight(.bold))
+                        // The tile is a FIXED ~155pt with no scrolling, so anything
+                        // without a limit here wraps at accessibility sizes and pushes
+                        // everything below it straight off the bottom.
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                    Spacer(minLength: 4)
+                    ChangeBadge(mover: m, font: .title3.weight(.semibold))
+                }
+
+                // The freed rows go to OTHER NAMES, which is the one kind of content that
+                // stays complete at this width — a ticker and a percentage never truncate
+                // into something misleading, and a truncated sentence does.
+                if !snap.runnersUp.isEmpty, !typeSize.isAccessibilitySize {
+                    Divider()
+                    ForEach(snap.runnersUp.prefix(3), id: \.ticker) {
+                        CompactMoverRow(mover: $0)
+                    }
+                }
+                Spacer(minLength: 0)
                 SessionFooter(snapshot: snap, now: entry.date)
             } else {
                 EmptyStateView(snapshot: entry.snapshot, now: entry.date)
@@ -388,26 +468,54 @@ private struct SmallView: View {
 }
 
 private struct MediumView: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let entry: MoversEntry
     var configured: MoversMode = .market
 
+    /// The ranked column is the FIRST thing to go at accessibility sizes. It is the least
+    /// information per pixel on the tile — names and numbers with no explanation — and
+    /// keeping it would squeeze the headline's cause sentence, which is the whole point
+    /// of the widget.
+    private var showsColumn: Bool { !typeSize.isAccessibilitySize }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        HStack(alignment: .top, spacing: 10) {
             if let snap = entry.snapshot, let m = snap.headlineMover {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(m.ticker).font(.headline.weight(.bold)).lineLimit(1)
-                    ChangeBadge(mover: m, font: .subheadline.weight(.semibold))
-                    Spacer(minLength: 4)
+                VStack(alignment: .leading, spacing: 4) {
+                    if let mc = snap.marketContext, !mc.isEmpty {
+                        // The strip gets the WHOLE row. Sharing it with anything else
+                        // squeezed both to "S&... -0... Na... -0..." — and a truncated
+                        // "-0..." could be -0.6% or -0.06%, which is worse than no number.
+                        IndexStrip(indices: mc.indices, limit: 2)
+                        Divider()
+                    }
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(m.ticker).font(.title3.weight(.bold)).lineLimit(1)
+                        Spacer(minLength: 4)
+                        ChangeBadge(mover: m, font: .title3.weight(.semibold))
+                    }
+                    ScopeBanner(snapshot: snap, configured: configured)
+                    // The breadth and volatility lines were two rows of secondary
+                    // qualifiers above the one sentence that says WHY. Their space goes
+                    // to the sentence, which now renders whole instead of "…catalyst in…".
+                    CauseView(cause: m.cause, lineLimit: 4)
+                        .layoutPriority(1)
                     SessionFooter(snapshot: snap, now: entry.date)
+                    if let basket = snap.basket {
+                        Text(basket.text)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 0)
                 }
-                ScopeBanner(snapshot: snap, configured: configured)
-                ContextLine(context: m.context)
-                CauseView(cause: m.cause, lineLimit: 3)
-                if let basket = snap.basket {
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                if showsColumn, !snap.runnersUp.isEmpty {
                     Divider()
-                    Text(basket.text).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    RunnerColumn(movers: snap.runnersUp, limit: 5)
+                        .frame(width: 104, alignment: .topLeading)
                 }
-                Spacer(minLength: 0)
             } else {
                 EmptyStateView(snapshot: entry.snapshot, now: entry.date)
             }
@@ -417,24 +525,49 @@ private struct MediumView: View {
 }
 
 private struct LargeView: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let entry: MoversEntry
     var configured: MoversMode = .market
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // spacing 5, not 8. Large now stacks ~11 elements (market band, headline block,
+        // five ranked rows), and at 8 the SPACING alone consumed ~80pt of a ~322pt tile —
+        // which SwiftUI recovered by collapsing the cause sentence to a single truncated
+        // line. "Aerospace & Defense fell 1.2%; ACHR moved far more. No cle…" is the one
+        // thing on this tile the user cannot get from the number beside it.
+        VStack(alignment: .leading, spacing: 5) {
             if let snap = entry.snapshot, let m = snap.headlineMover {
+                // BAND 1 — the tape. Large has the room for all three indices, and this
+                // is the size a reader places when they want the whole picture.
+                if let mc = snap.marketContext, !mc.isEmpty {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Market")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                            .textCase(.uppercase)
+                        Spacer(minLength: 4)
+                        SessionFooter(snapshot: snap, now: entry.date)
+                    }
+                    IndexStrip(indices: mc.indices, limit: typeSize.isAccessibilitySize ? 1 : 3)
+                    Divider()
+                }
+
+                // BAND 2 — the one thing.
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(m.ticker).font(.title2.weight(.bold)).lineLimit(1)
-                    ChangeBadge(mover: m, font: .headline.weight(.semibold))
                     Spacer(minLength: 4)
-                    SessionFooter(snapshot: snap, now: entry.date)
+                    ChangeBadge(mover: m, font: .title2.weight(.semibold))
                 }
                 ScopeBanner(snapshot: snap, configured: configured)
-                if let name = m.companyName {
-                    Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                ContextLine(context: m.context)
+                // The company name, the σ multiple and the breadth line were three rows
+                // of qualifiers around the two things a reader came for: what moved, and
+                // why. The cause sentence and the ranked list get their space.
+                // Priority over the ranked list below. When the tile is tight SwiftUI
+                // shrinks whatever it likes, and what it picked was this — leaving five
+                // tickers with percentages and no explanation, which is the layout the
+                // whole feature exists to beat.
                 CauseView(cause: m.cause, lineLimit: 4)
+                    .layoutPriority(1)
 
                 if let basket = snap.basket {
                     Divider()
@@ -449,7 +582,8 @@ private struct LargeView: View {
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(.secondary)
                         .textCase(.uppercase)
-                    ForEach(snap.runnersUp.prefix(3), id: \.ticker) { RunnerRow(mover: $0) }
+                    ForEach(snap.runnersUp.prefix(typeSize.isAccessibilitySize ? 2 : 5),
+                            id: \.ticker) { RunnerRow(mover: $0) }
                 }
                 Spacer(minLength: 0)
             } else {
@@ -466,11 +600,23 @@ private struct RectangularView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             if let snap = entry.snapshot, let m = snap.headlineMover {
+                // Three lines total. The index line earns the first only when there is a
+                // number to show; the mover is what this family exists for.
+                if let idx = snap.marketContext?.indices.first,
+                   let c = idx.formattedChange {
+                    HStack(spacing: 4) {
+                        Text("\(idx.label) \(c)").font(.caption2)
+                        Spacer(minLength: 2)
+                        SessionFooter(snapshot: snap, now: entry.date)
+                    }
+                }
                 HStack(spacing: 4) {
                     Text(m.ticker).font(.caption.weight(.bold))
                     if let c = m.formattedChange { Text(c).font(.caption) }
                     Spacer(minLength: 2)
-                    SessionFooter(snapshot: snap, now: entry.date)
+                    if snap.marketContext?.indices.first?.formattedChange == nil {
+                        SessionFooter(snapshot: snap, now: entry.date)
+                    }
                 }
                 // No colour on the Lock Screen — accessory widgets render monochrome,
                 // so red/green would vanish and the sign is the only cue left.
@@ -495,9 +641,15 @@ private struct InlineView: View {
         // collapsed the whole Lock Screen line to the bare word "Caydex" — throwing away
         // the one fact it had.
         if let m = entry.snapshot?.headlineMover {
-            if let c = m.formattedChange {
-                Text("\(m.ticker) \(c)")
-            } else {
+            // "S&P −0.62% · ACHR −5.0%" when both fit — the tape then the name, which is
+            // the same reading order as every other family.
+            let idx = entry.snapshot?.marketContext?.indices.first
+            switch (idx?.formattedChange, m.formattedChange) {
+            case let (.some(ic), .some(mc)):
+                Text("\(idx!.label) \(ic) · \(m.ticker) \(mc)")
+            case let (.none, .some(mc)):
+                Text("\(m.ticker) \(mc)")
+            default:
                 Text(m.ticker)
             }
         } else {
@@ -531,6 +683,17 @@ extension WidgetMoverSnapshot {
             }(),
             sessionLabel: "Live 2:14 PM ET",
             scopeLabel: "The stocks Caydex tracks",
+            marketContext: WidgetMarketContext(
+                indices: [
+                    WidgetIndex(symbol: "^GSPC", label: "S&P 500", changePercent: -0.62, price: 6412.1),
+                    WidgetIndex(symbol: "^IXIC", label: "Nasdaq", changePercent: -0.91, price: 21_340.5),
+                    WidgetIndex(symbol: "^DJI", label: "Dow", changePercent: -0.30, price: 44_812.0),
+                ],
+                breadthUp: 3, breadthTotal: 11,
+                leadingSector: "Energy", leadingSectorChangePercent: 0.81,
+                laggingSector: "Technology", laggingSectorChangePercent: -1.44,
+                text: "S&P 500 fell 0.6% · 3 of 11 sectors up · Energy leads 0.8%"
+            ),
             headlineMover: WidgetMover(
                 ticker: "ACHR", companyName: "Archer Aviation Inc.",
                 changePercent: -5.02, price: 6.62, tier: "Notable", z: 1.1,
@@ -548,7 +711,35 @@ extension WidgetMoverSnapshot {
                     cause: WidgetCause(kind: .sector, tag: "Sector Move",
                                        detail: "Aerospace & Defense fell 1.2% today."),
                     context: ctx
-                )
+                ),
+                WidgetMover(
+                    ticker: "RKLB", companyName: "Rocket Lab", changePercent: -3.91,
+                    price: 22.4, tier: "Unusual", z: 2.2,
+                    cause: WidgetCause(kind: .analyst, tag: "Analyst Downgrade",
+                                       detail: "Morgan Stanley downgraded RKLB to Equal Weight."),
+                    context: ctx
+                ),
+                WidgetMover(
+                    ticker: "SOFI", companyName: "SoFi Technologies", changePercent: 3.42,
+                    price: 14.8, tier: "Notable", z: 1.4,
+                    cause: WidgetCause(kind: .earnings, tag: "Earnings Beat",
+                                       detail: "SOFI beat EPS estimates by 12.0%, reported this morning."),
+                    context: ctx
+                ),
+                WidgetMover(
+                    ticker: "PLTR", companyName: "Palantir", changePercent: 3.11,
+                    price: 61.2, tier: "Notable", z: 1.1,
+                    cause: WidgetCause(kind: .none, tag: nil,
+                                       detail: "No clear catalyst in today's news."),
+                    context: ctx
+                ),
+                WidgetMover(
+                    ticker: "NVDA", companyName: "NVIDIA", changePercent: 2.80,
+                    price: 184.5, tier: "Typical", z: 0.9,
+                    cause: WidgetCause(kind: .analyst, tag: "Analyst Upgrade",
+                                       detail: "Bernstein upgraded NVDA to Outperform."),
+                    context: ctx
+                ),
             ]
         )
     }

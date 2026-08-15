@@ -11,34 +11,34 @@ struct RelatedMoneyMoveCard: View {
     let article: RelatedArticle
     var onTap: (() -> Void)?
 
-    private var gradientColors: [Color] {
-        article.gradientColors.map { Color(hex: $0) }
-    }
-
     var body: some View {
         Button(action: { onTap?() }) {
             VStack(alignment: .leading, spacing: 0) {
-                // Gradient header
+                // Header: the referenced article's own cover plate when the seeder found one
+                // (stamped from a title -> card-url map across every article, so no runtime
+                // lookup here), otherwise the gradient + category glyph this always drew.
                 ZStack(alignment: .topLeading) {
-                    // Background gradient
-                    LinearGradient(
-                        colors: gradientColors,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                    MoneyMoveCoverImage(
+                        url: article.imageCardUrl,
+                        gradientColors: article.gradientColors,
+                        cornerRadius: 0
                     )
                     .frame(height: 80)
 
-                    // Category icon
-                    ZStack {
-                        Circle()
-                            .fill(Color.white.opacity(0.2))
-                            .frame(width: 32, height: 32)
+                    // The glyph is redundant once there is a picture, and its white-on-
+                    // white.opacity(0.2) circle is unreadable over a light-ground plate.
+                    if article.imageCardUrl == nil {
+                        ZStack {
+                            Circle()
+                                .fill(Color.white.opacity(0.2))
+                                .frame(width: 32, height: 32)
 
-                        Image(systemName: article.category.iconName)
-                            .font(AppTypography.iconSmall).fontWeight(.semibold)
-                            .foregroundColor(AppColors.textOnAccent)
+                            Image(systemName: article.category.iconName)
+                                .font(AppTypography.iconSmall).fontWeight(.semibold)
+                                .foregroundColor(AppColors.textOnAccent)
+                        }
+                        .padding(AppSpacing.md)
                     }
-                    .padding(AppSpacing.md)
                 }
 
                 // Content

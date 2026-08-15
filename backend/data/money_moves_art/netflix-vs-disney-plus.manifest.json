@@ -1,0 +1,43 @@
+{
+  "slug": "netflix-vs-disney-plus",
+  "category": "battles",
+  "treatment": "cutout_grid",
+  "subject": "two identical metal film reels standing upright on their edges, squarely facing each other a short distance apart, the spokes and the wound film of both clearly readable, with a scatter of loose film frames on the ground around them",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "The object photographed against pure bright seamless white and treated as a crisp CUTOUT, with a faint pale-blue engineering grid of hairlines ruled behind it and a soft realistic drop shadow anchoring it to the ground. Clean daylight-balanced studio light, full colour, everything sharp. A few small related props scatter loosely around it at the edges of the composition. Bright, weightless and current \u2014 a news explainer, not a mood piece.\n\nSUBJECT: two identical metal film reels standing upright on their edges, squarely facing each other a short distance apart, the spokes and the wound film of both clearly readable, with a scatter of loose film frames on the ground around them\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue on one side against warm amber and old gold on the other, over a neutral ground. Exactly two hues plus neutrals, split so the two halves of the picture are plainly opposed \u2014 the rivalry is carried by the colour. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "17a45d970fb2",
+  "art_file": "netflix-vs-disney-plus.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "netflix-vs-disney-plus.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "f12240e09c2e0c6f4b64ba6e58a645742625d7003aed3fb1be2de9da8668b83b",
+      "bytes": 119547,
+      "cropped": true
+    },
+    "card": {
+      "file": "netflix-vs-disney-plus.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "6185528a3621d2348fecc2b623a6d6b3007e68671a1f985e3521dbcda81728d0",
+      "bytes": 41372,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.9096,
+    "ring_spread": 0.3085,
+    "inner_spread": 0.8698,
+    "edge_activity": 0.355,
+    "mean_luma": 0.6971,
+    "inner_mean_luma": 0.678,
+    "needs_hairline": true
+  }
+}

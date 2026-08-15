@@ -1,0 +1,43 @@
+{
+  "slug": "tesla-vs-traditional-auto",
+  "category": "battles",
+  "treatment": "exploded_kit",
+  "subject": "the components of an electric drive unit laid out on the left half and the components of a petrol engine laid out on the right half, both fully disassembled, the left group obviously far fewer and simpler parts than the dense crowded right group",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "The object completely DISASSEMBLED and every single component laid out flat and photographed from directly overhead, arranged in strict knolling order: parts aligned to an invisible grid, all edges parallel or at right angles, evenly spaced, grouped by size, nothing overlapping. A plain matte mid-tone surface beneath, even shadowless overhead light. Meticulous, obsessive, catalogue-like \u2014 the anatomy of the thing, shown as parts.\n\nSUBJECT: the components of an electric drive unit laid out on the left half and the components of a petrol engine laid out on the right half, both fully disassembled, the left group obviously far fewer and simpler parts than the dense crowded right group\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue on one side against warm amber and old gold on the other, over a neutral ground. Exactly two hues plus neutrals, split so the two halves of the picture are plainly opposed \u2014 the rivalry is carried by the colour. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "68251603157b",
+  "art_file": "tesla-vs-traditional-auto.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "tesla-vs-traditional-auto.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "50eb57a297cc364a69ccd1499f8d2bea9eacc4f9cb819e5047319a2b2cd20beb",
+      "bytes": 164604,
+      "cropped": true
+    },
+    "card": {
+      "file": "tesla-vs-traditional-auto.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "d65afd1aabde4d59842d9463774eee17c41d1b6bcafd198469c3c2dca973c7f6",
+      "bytes": 58551,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.855,
+    "ring_spread": 0.0162,
+    "inner_spread": 0.5125,
+    "edge_activity": 0.032,
+    "mean_luma": 0.3613,
+    "inner_mean_luma": 0.294,
+    "needs_hairline": true
+  }
+}

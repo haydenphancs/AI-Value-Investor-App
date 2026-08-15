@@ -1,0 +1,43 @@
+{
+  "slug": "the-ftx-collapse",
+  "category": "valueTraps",
+  "treatment": "macro_noir",
+  "subject": "a heavy steel safe door standing wide open on a dark vault, its thick cylindrical locking bolts thrown out around the edge and the spoked handwheel clearly visible, the interior behind it completely empty and black",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "Straight documentary macro photography. A single hard key light rakes across the subject from one side and everything outside its throw falls to genuine black \u2014 no fill, no bounce, no softbox wash. Shot on a fast macro prime with shallow depth of field. Real physical materials with visible microscopic texture \u2014 machined metal, oxidation, wear, dust suspended in the beam. Fine natural film grain, subtle lens vignette, slight halation on the brightest speculars. Restrained and near-monochrome. No digital gloss, no HDR, no plastic CGI look.\n\nSUBJECT: a heavy steel safe door standing wide open on a dark vault, its thick cylindrical locking bolts thrown out around the edge and the spoked handwheel clearly visible, the interior behind it completely empty and black\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "e70881e05ebc",
+  "art_file": "the-ftx-collapse.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "the-ftx-collapse.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "8b9d3eddeceb64de32957a404bedffee7b98a5da2933c3b637644b9d66cdc986",
+      "bytes": 81424,
+      "cropped": true
+    },
+    "card": {
+      "file": "the-ftx-collapse.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "5762037fc59d0466f08892d69b180be8650c3f2457dd401a899c2c896bae9c4a",
+      "bytes": 27965,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.0,
+    "ring_spread": 0.0496,
+    "inner_spread": 0.6427,
+    "edge_activity": 0.077,
+    "mean_luma": 0.0751,
+    "inner_mean_luma": 0.084,
+    "needs_hairline": false
+  }
+}

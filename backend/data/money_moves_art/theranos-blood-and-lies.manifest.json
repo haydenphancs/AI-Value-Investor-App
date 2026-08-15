@@ -1,0 +1,43 @@
+{
+  "slug": "theranos-blood-and-lies",
+  "category": "valueTraps",
+  "treatment": "specimen_plate",
+  "subject": "a single small glass laboratory vial lying flat and perfectly horizontal, completely unlabelled and unmarked, with one dark red droplet pooled beside its open mouth",
+  "subject_source": "authored",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "The object presented as a MUSEUM SPECIMEN, laid flat and perfectly centred on a soft off-white cotton-rag paper ground with a faint fibrous texture and one gentle fold crease. Flat, even, shadowless top light exactly as a collections photographer would use, with one very soft contact shadow directly beneath the object. Directly below the object sits one small COMPLETELY BLANK cream card with a thin printed rule across it and no writing on it whatsoever. Clinical, immaculate, reverent \u2014 the object is evidence, catalogued after the fact.\n\nSUBJECT: a single small glass laboratory vial lying flat and perfectly horizontal, completely unlabelled and unmarked, with one dark red droplet pooled beside its open mouth\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "edaef0496914",
+  "art_file": "theranos-blood-and-lies.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "theranos-blood-and-lies.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "9af991360fb6ad6a372cb0938c3ffce63bd9439c106adc2700850dc426261a9a",
+      "bytes": 67689,
+      "cropped": true
+    },
+    "card": {
+      "file": "theranos-blood-and-lies.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "58fb1e96452328d4f67e17c1ea95a36079dbf3f74233c30b0b05bbbfa2d9be27",
+      "bytes": 18707,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.7913,
+    "ring_spread": 0.3082,
+    "inner_spread": 0.174,
+    "edge_activity": 1.771,
+    "mean_luma": 0.7441,
+    "inner_mean_luma": 0.7418,
+    "needs_hairline": true
+  }
+}

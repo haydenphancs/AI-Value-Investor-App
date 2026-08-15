@@ -142,16 +142,9 @@ struct MoneyMovesDetailView: View {
 
     /// Creates a full MoneyMoveArticle from a MoneyMove card data
     private func createArticleFromMove(_ move: MoneyMove) -> MoneyMoveArticle {
-        // Generate gradient colors based on category
-        let gradientColors: [String]
-        switch move.category {
-        case .blueprints:
-            gradientColors = ["059669", "047857", "064E3B"]
-        case .valueTraps:
-            gradientColors = ["DC2626", "991B1B", "7F1D1D"]
-        case .battles:
-            gradientColors = ["7C3AED", "5B21B6", "4C1D95"]
-        }
+        // Was an inline switch duplicated verbatim in LearnView — see
+        // MoneyMoveCategory.gradientColors.
+        let gradientColors = move.category.gradientColors
 
         return MoneyMoveArticle(
             title: move.title,
@@ -295,111 +288,88 @@ private struct MoneyMovesDetailHeader: View {
 }
 
 // MARK: - Featured Deep Dive Hero Card
+//
+// THE TYPE SITS BELOW THE ARTWORK, for the same reason it does in MoneyMoveArticleHeroHeader.
+// This card used to draw the title, subtitle, meta row and tag pill over the image behind a
+// black 0.1 -> 0.5 scrim. That was survivable over the flat orange gradient it always used,
+// and is not survivable over cover artwork: eight of the thirteen plates have a near-white
+// ground, and clearing 4.5:1 for white type over a 0.99-luminance plate needs roughly 0.82
+// alpha of black — which does not dim the picture, it erases it.
+//
+// `ArticleTagPill(.standard)` moved down with the rest: it is white text on `black.opacity(0.4)`,
+// which measures about 1.6:1 on a light plate.
 private struct FeaturedDeepDiveHeroCard: View {
     let article: MoneyMoveArticle
     var onTap: (() -> Void)?
 
-    private var gradientColors: [Color] {
-        // Always use orange gradient based on EA580C
-        [
-            AppColors.alertOrange,
-            AppColors.alertOrange,
-            AppColors.alertOrange
-        ]
-    }
-
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            ZStack(alignment: .topTrailing) {
-                // Background with gradient and effects
-                ZStack {
-                    // Base gradient
-                    LinearGradient(
-                        colors: gradientColors,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            MoneyMoveCoverImage(
+                url: article.imageUrl,
+                // Falls back to the article's OWN authored gradient now. The previous card
+                // hardcoded flat orange for every featured article and ignored
+                // `heroGradientColors` entirely, so the hero disagreed with the article it
+                // opened — visible the moment you tapped it.
+                gradientColors: article.heroGradientColors,
+                cornerRadius: AppCornerRadius.extraLarge,
+                aspectRatio: 16 / 9
+            )
 
-                    // Grainy texture overlay
-                    GrainyTextureOverlay()
-
-                    // Dark overlay for text readability
-                    LinearGradient(
-                        colors: [
-                            Color.black.opacity(0.1),
-                            Color.black.opacity(0.5)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                }
-
-                // Content overlay
-                VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    Spacer()
-
-                    // Category label
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                HStack(spacing: AppSpacing.sm) {
                     Text("FEATURED DEEP DIVE")
                         .font(AppTypography.captionEmphasis)
-                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
+                        .foregroundColor(AppColors.caution)
                         .tracking(1.2)
 
-                    // Title
-                    Text(article.title)
-                        .font(AppTypography.titleLarge)
-                        .foregroundColor(AppColors.textOnAccent)
-                        .minimumScaleFactor(0.8)
-                        .lineLimit(2)
+                    if let tagLabel = article.tagLabel {
+                        ArticleTagPill(text: tagLabel, style: .featured)
+                    }
+                }
 
-                    // Description
-                    Text(article.subtitle)
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textOnAccent.opacity(0.9))
-                        .lineLimit(nil)
-                        .fixedSize(horizontal: false, vertical: true)
+                Text(article.title)
+                    .font(AppTypography.titleLarge)
+                    .foregroundColor(AppColors.textPrimary)
+                    .minimumScaleFactor(0.8)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
 
-                    // Meta info
-                    HStack(spacing: AppSpacing.lg) {
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "clock")
+                Text(article.subtitle)
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: AppSpacing.lg) {
+                    HStack(spacing: AppSpacing.xs) {
+                        Image(systemName: "clock")
+                            .font(AppTypography.iconXS).fontWeight(.medium)
+                        Text("\(article.readTimeMinutes) min")
+                            .font(AppTypography.caption)
+                    }
+
+                    HStack(spacing: AppSpacing.xs) {
+                        // Only shown when we have a real count. Empty means we don't
+                        // measure it — better to show nothing than to invent a number.
+                        if !article.viewCount.isEmpty {
+                            Image(systemName: "person.2.fill")
                                 .font(AppTypography.iconXS).fontWeight(.medium)
-                            Text("\(article.readTimeMinutes) min")
+                            Text("\(article.viewCount) investors")
                                 .font(AppTypography.caption)
                         }
-                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
 
-                        HStack(spacing: AppSpacing.xs) {
-                            // Only shown when we have a real count. Empty means we don't
-                            // measure it — better to show nothing than to invent a number.
-                            if !article.viewCount.isEmpty {
-                                Image(systemName: "person.2.fill")
-                                    .font(AppTypography.iconXS).fontWeight(.medium)
-                                Text("\(article.viewCount) investors")
-                                    .font(AppTypography.caption)
-                            }
-
-                            if article.hasAudioVersion {
-                                Image(systemName: "headphones")
-                                    .font(AppTypography.iconXS).fontWeight(.medium)
-                                    .padding(.leading, article.viewCount.isEmpty ? 0 : AppSpacing.md)
-                            }
+                        if article.hasAudioVersion {
+                            Image(systemName: "headphones")
+                                .font(AppTypography.iconXS).fontWeight(.medium)
+                                .padding(.leading, article.viewCount.isEmpty ? 0 : AppSpacing.md)
                         }
-                        .foregroundColor(AppColors.textOnAccent.opacity(0.8))
                     }
-                    .padding(.top, AppSpacing.xs)
                 }
-                .padding(AppSpacing.xl)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                // Tag pill
-                if let tagLabel = article.tagLabel {
-                    ArticleTagPill(text: tagLabel)
-                        .padding(AppSpacing.lg)
-                }
+                .foregroundColor(AppColors.textSecondary)
+                .padding(.top, AppSpacing.xs)
             }
-            .aspectRatio(16/9, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))
         }
+        .contentShape(Rectangle())
         .onTapGesture {
             onTap?()
         }

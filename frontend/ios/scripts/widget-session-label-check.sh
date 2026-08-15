@@ -130,6 +130,43 @@ check("a malformed session_date falls back to legacy rather than guessing",
       label(d("2026-08-16 11:00"), sessionDate: "not-a-date", phase: "closed"),
       "At the close")
 
+// `agedLabel` is what the VIEWS call. `displayLabel` is only reachable through it, so
+// asserting only the latter would leave the render path untested.
+//
+// The contract: SILENT for the current session (a "Live 2:14 PM ET" line spends a row of
+// a 155pt tile telling the reader something they already assume), and LOUD for anything
+// older (where saying nothing presents Friday's move as today's).
+print("— agedLabel: silent when current, loud when not —")
+func aged(_ now: Date, sessionDate: String? = "2026-08-14",
+          phase: String = "regular", server: String? = "Live 3:58 PM ET") -> String? {
+    WidgetSessionLabel.agedLabel(
+        asOf: asOf, sessionDate: sessionDate, marketSession: phase,
+        sessionLabel: server, now: now
+    )
+}
+func checkNil(_ label: String, _ got: String?) {
+    if got != nil { failures += 1 }
+    print("\(got == nil ? "  ok" : "FAIL")  \(label)")
+    if got != nil { print("        got=\"\(got!)\"  want=nil") }
+}
+
+checkNil("live, same session → nothing", aged(d("2026-08-14 15:59")))
+checkNil("later the same session → still nothing", aged(d("2026-08-14 16:38")))
+checkNil("that evening, after the close → still today's numbers",
+         aged(d("2026-08-14 21:00"), phase: "closed", server: "Fri close"))
+check("read on Saturday → speaks up", aged(d("2026-08-15 11:00")) ?? "<nil>", "Fri close")
+check("read on Sunday → speaks up", aged(d("2026-08-16 11:00")) ?? "<nil>", "Fri close")
+check("read Monday pre-market → speaks up", aged(d("2026-08-17 08:00")) ?? "<nil>", "Fri close")
+check("a week later → asks for a refresh",
+      aged(d("2026-08-24 11:00")) ?? "<nil>", "Aug 14 — open Caydex")
+// An old backend cannot tell us which session the numbers are from. Saying what we know
+// beats implying a freshness we have not established.
+check("old backend, closed → still warns",
+      aged(d("2026-08-16 11:00"), sessionDate: nil, phase: "closed", server: nil) ?? "<nil>",
+      "At the close")
+checkNil("old backend, regular → nothing to say",
+         aged(d("2026-08-16 11:00"), sessionDate: nil, phase: "regular", server: nil))
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)
 SWIFT

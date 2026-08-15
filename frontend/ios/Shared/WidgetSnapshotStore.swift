@@ -73,6 +73,9 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     public let sessionLabel: String?
     /// Which universe the movers came from — "Your holdings", "The stocks Caydex tracks".
     public let scopeLabel: String?
+    /// How the market itself did. Absent when every upstream leg failed — the tile
+    /// then leads with the mover, exactly as it did before this field existed.
+    public let marketContext: WidgetMarketContext?
     public let headlineMover: WidgetMover?
     public let basket: WidgetBasket?
     /// Next few movers, for the large family. Empty on smaller sizes' data too —
@@ -86,6 +89,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
         case sessionDate = "session_date"
         case sessionLabel = "session_label"
         case scopeLabel = "scope_label"
+        case marketContext = "market_context"
         case headlineMover = "headline_mover"
         case basket
         case runnersUp = "runners_up"
@@ -106,6 +110,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
         sessionDate = try c.decodeIfPresent(String.self, forKey: .sessionDate)
         sessionLabel = try c.decodeIfPresent(String.self, forKey: .sessionLabel)
         scopeLabel = try c.decodeIfPresent(String.self, forKey: .scopeLabel)
+        marketContext = try c.decodeIfPresent(WidgetMarketContext.self, forKey: .marketContext)
         headlineMover = try c.decodeIfPresent(WidgetMover.self, forKey: .headlineMover)
         basket = try c.decodeIfPresent(WidgetBasket.self, forKey: .basket)
         runnersUp = try c.decodeIfPresent([WidgetMover].self, forKey: .runnersUp) ?? []
@@ -114,6 +119,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     public init(
         mode: String, asOf: Date, marketSession: String,
         sessionDate: String? = nil, sessionLabel: String? = nil, scopeLabel: String? = nil,
+        marketContext: WidgetMarketContext? = nil,
         headlineMover: WidgetMover?, basket: WidgetBasket?, runnersUp: [WidgetMover] = []
     ) {
         self.mode = mode
@@ -122,6 +128,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
         self.sessionDate = sessionDate
         self.sessionLabel = sessionLabel
         self.scopeLabel = scopeLabel
+        self.marketContext = marketContext
         self.headlineMover = headlineMover
         self.basket = basket
         self.runnersUp = runnersUp
@@ -133,6 +140,101 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     /// `headline_mover: null`. That is a legitimate response but NOT something worth
     /// overwriting a good snapshot with — see `WidgetSnapshotStore.write`.
     public var isEmpty: Bool { headlineMover == nil && runnersUp.isEmpty }
+}
+
+/// One index in the market band.
+///
+/// `label` comes from the SERVER on purpose: an already-installed widget cannot learn
+/// that a newly added symbol is called "Russell 2000" without an app update, so the
+/// client must never map symbols to names itself.
+public struct WidgetIndex: Codable, Equatable, Sendable {
+    public let symbol: String
+    public let label: String
+    public let changePercent: Double?
+    public let price: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case symbol, label, price
+        case changePercent = "change_percent"
+    }
+
+    /// Flat prints "0.00%", never "+0.00%" — same rule as `WidgetMover`.
+    public var formattedChange: String? {
+        guard let c = changePercent else { return nil }
+        if (c * 100).rounded() == 0 { return "0.00%" }
+        return String(format: "%+.2f%%", c)
+    }
+
+    public var isPositive: Bool { (changePercent ?? 0) > 0 }
+    public var isFlat: Bool {
+        guard let c = changePercent else { return false }
+        return (c * 100).rounded() == 0
+    }
+}
+
+/// How the MARKET is doing — distinct from `WidgetMoveContext`, which is arithmetic
+/// about one ticker's move.
+///
+/// Every field is optional and each leg of the backend fetch degrades on its own, so a
+/// tile can legitimately show indices with no breadth line, or the reverse.
+public struct WidgetMarketContext: Codable, Equatable, Sendable {
+    public let indices: [WidgetIndex]
+    public let breadthUp: Int?
+    public let breadthTotal: Int?
+    public let leadingSector: String?
+    public let leadingSectorChangePercent: Double?
+    public let laggingSector: String?
+    public let laggingSectorChangePercent: Double?
+    /// The server's rendered sentence. Preferred over composing one here, so the wording
+    /// lives in one place and cannot contradict the numbers beside it.
+    public let text: String?
+
+    enum CodingKeys: String, CodingKey {
+        case indices, text
+        case breadthUp = "breadth_up"
+        case breadthTotal = "breadth_total"
+        case leadingSector = "leading_sector"
+        case leadingSectorChangePercent = "leading_sector_change_percent"
+        case laggingSector = "lagging_sector"
+        case laggingSectorChangePercent = "lagging_sector_change_percent"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        indices = try c.decodeIfPresent([WidgetIndex].self, forKey: .indices) ?? []
+        breadthUp = try c.decodeIfPresent(Int.self, forKey: .breadthUp)
+        breadthTotal = try c.decodeIfPresent(Int.self, forKey: .breadthTotal)
+        leadingSector = try c.decodeIfPresent(String.self, forKey: .leadingSector)
+        leadingSectorChangePercent = try c.decodeIfPresent(Double.self, forKey: .leadingSectorChangePercent)
+        laggingSector = try c.decodeIfPresent(String.self, forKey: .laggingSector)
+        laggingSectorChangePercent = try c.decodeIfPresent(Double.self, forKey: .laggingSectorChangePercent)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+    }
+
+    public init(
+        indices: [WidgetIndex] = [], breadthUp: Int? = nil, breadthTotal: Int? = nil,
+        leadingSector: String? = nil, leadingSectorChangePercent: Double? = nil,
+        laggingSector: String? = nil, laggingSectorChangePercent: Double? = nil,
+        text: String? = nil
+    ) {
+        self.indices = indices
+        self.breadthUp = breadthUp
+        self.breadthTotal = breadthTotal
+        self.leadingSector = leadingSector
+        self.leadingSectorChangePercent = leadingSectorChangePercent
+        self.laggingSector = laggingSector
+        self.laggingSectorChangePercent = laggingSectorChangePercent
+        self.text = text
+    }
+
+    /// "3 of 11 sectors up" — nil unless BOTH halves are present. A count without its
+    /// denominator is not a breadth reading.
+    public var breadthLabel: String? {
+        guard let up = breadthUp, let total = breadthTotal, total > 0 else { return nil }
+        return "\(up) of \(total) sectors up"
+    }
+
+    public var isEmpty: Bool { indices.isEmpty && breadthLabel == nil }
 }
 
 public struct WidgetMover: Codable, Equatable, Sendable {

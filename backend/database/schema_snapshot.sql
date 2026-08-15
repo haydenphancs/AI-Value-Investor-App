@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict FKXNpKAkjkyY9UwNlFV0ClyuriysHSXXY8M839MKOiujn0iy0HmoNhK98Ks9U8H
+\restrict fOuXFyXx5xdGmDPiVuC9M89ea2Cs8Inlk7yImBA8QkkZpFl08LB3IdeLy9SFEz5
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1396,19 +1396,63 @@ $$;
 --
 
 CREATE FUNCTION public.create_user_credits() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
     AS $$
+DECLARE
+    _GUEST       CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_alloc      INTEGER;
+    v_now_et     TIMESTAMP;
+    v_next_reset TIMESTAMPTZ;
 BEGIN
-    INSERT INTO user_credits (user_id, total, used)
-    VALUES (NEW.id, CASE NEW.tier
-        WHEN 'free' THEN 3
-        WHEN 'pro' THEN 25
-        WHEN 'premium' THEN 100
-    END, 0);
+    -- Never touch the shared guest bucket's fixed balance.
+    IF NEW.id = _GUEST THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT monthly_credits INTO v_alloc
+      FROM public.plan_credits
+     WHERE tier = NEW.tier;
+
+    -- An unknown tier seeds 0 rather than NULL. `total` is NOT NULL, so the old CASE (no
+    -- ELSE arm) would have raised here and taken the parent INSERT with it.
+    IF v_alloc IS NULL THEN
+        v_alloc := 0;
+    END IF;
+
+    v_now_et     := (now() AT TIME ZONE 'America/New_York');
+    v_next_reset := (date_trunc('month', v_now_et) + INTERVAL '1 month')
+                        AT TIME ZONE 'America/New_York';
+
+    INSERT INTO public.user_credits (user_id, total, used, resets_at, updated_at)
+    VALUES (NEW.id, v_alloc, 0, v_next_reset, NOW())
+    ON CONFLICT (user_id) DO NOTHING;
+
+    -- Only log the opening grant if we are the writer that created the row, so a re-insert
+    -- or a race cannot double-log. Mirrors ensure_credit_period's own grant row shape.
+    IF FOUND THEN
+        INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
+        VALUES (NEW.id, v_alloc, 'grant', to_char(v_now_et, 'YYYY-MM'), v_alloc);
+    END IF;
+
+    RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+    -- Seeding credits must never block account creation (the 044 pattern). Without this,
+    -- any failure here unwinds handle_new_auth_user's block and leaves an auth.users row
+    -- with no public.users mirror. ensure_credit_period creates the row on first read, so
+    -- a user who lands here is degraded, not broken.
+    RAISE WARNING 'create_user_credits failed for user % (tier %): %', NEW.id, NEW.tier, SQLERRM;
     RETURN NEW;
 END;
 $$;
+
+
+--
+-- Name: FUNCTION create_user_credits(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.create_user_credits() IS 'AFTER INSERT on public.users: seeds user_credits from plan_credits (never a literal), sets resets_at to the ET month boundary so ensure_credit_period does not treat a fresh row as due, and logs the opening grant. Skips the guest sentinel. Fails soft — see 135.';
 
 
 --
@@ -1694,6 +1738,8 @@ CREATE FUNCTION public.handle_new_auth_user() RETURNS trigger
     SET search_path TO 'public', 'pg_temp'
     SET row_security TO 'off'
     AS $$
+DECLARE
+    v_alloc INTEGER;
 BEGIN
     INSERT INTO public.users (id, email, display_name, avatar_url)
     VALUES (
@@ -1708,17 +1754,23 @@ BEGIN
     )
     ON CONFLICT (id) DO NOTHING;
 
-    -- Seed credits so the first /research/generate has a row to charge.
-    -- 50 credits = 10 deep-research runs at 5 credits each.
+    -- Belt-and-braces only: trg_create_user_credits on public.users has already created
+    -- this row, so the ON CONFLICT makes this a no-op on every real signup. It stays as a
+    -- safety net for a direct public.users insert that somehow skips the trigger — but it
+    -- must read the SAME source, or the net catches the user with the wrong number.
+    SELECT monthly_credits INTO v_alloc
+      FROM public.plan_credits
+     WHERE tier = 'free'::public.user_tier;
+
     INSERT INTO public.user_credits (user_id, total, used)
-    VALUES (NEW.id, 50, 0)
+    VALUES (NEW.id, COALESCE(v_alloc, 0), 0)
     ON CONFLICT (user_id) DO NOTHING;
 
     RETURN NEW;
 EXCEPTION WHEN OTHERS THEN
-    -- Mirror failure must never block the auth.users insert. Log it
-    -- (visible in Postgres logs) and let the auth row through. A
-    -- backfill script can sync any users that landed here.
+    -- Mirror failure must never block the auth.users insert. Log it (visible in Postgres
+    -- logs) and let the auth row through. A backfill script can sync any users that
+    -- landed here.
     RAISE WARNING 'handle_new_auth_user failed for user % (%): %',
         NEW.id, NEW.email, SQLERRM;
     RETURN NEW;
@@ -6209,7 +6261,8 @@ CREATE TABLE public.money_move_articles (
     audio_url text,
     audio_duration_seconds integer,
     sort_order integer DEFAULT 0 NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    image_url text
 );
 
 
@@ -6239,6 +6292,13 @@ COMMENT ON COLUMN public.money_move_articles.content IS 'JSONB passthrough of th
 --
 
 COMMENT ON COLUMN public.money_move_articles.audio_url IS 'Public money-moves-media URL of the narration .m4a (Achird TTS). NULL until voice is generated.';
+
+
+--
+-- Name: COLUMN money_move_articles.image_url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.money_move_articles.image_url IS 'Public URL of the 1206x678 hero plate in the money-moves-images bucket. Authoritative over content->>''imageUrl''. NULL means no artwork yet; iOS falls back to heroGradientColors.';
 
 
 --
@@ -10411,6 +10471,13 @@ CREATE INDEX idx_moat_intel_cache_expires ON public.moat_intel_cache USING btree
 
 
 --
+-- Name: idx_money_move_articles_missing_art; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_money_move_articles_missing_art ON public.money_move_articles USING btree (sort_order) WHERE (image_url IS NULL);
+
+
+--
 -- Name: idx_money_move_articles_slug; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13724,6 +13791,20 @@ CREATE POLICY home_theme_media_service_write ON storage.objects TO service_role 
 
 
 --
+-- Name: objects journey_images_public_read; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY journey_images_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'journey-images'::text));
+
+
+--
+-- Name: objects journey_images_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY journey_images_service_write ON storage.objects TO service_role USING ((bucket_id = 'journey-images'::text)) WITH CHECK ((bucket_id = 'journey-images'::text));
+
+
+--
 -- Name: objects journey_media_service_write; Type: POLICY; Schema: storage; Owner: -
 --
 
@@ -13735,6 +13816,20 @@ CREATE POLICY journey_media_service_write ON storage.objects TO service_role USI
 --
 
 ALTER TABLE storage.migrations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: objects money_moves_images_public_read; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY money_moves_images_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'money-moves-images'::text));
+
+
+--
+-- Name: objects money_moves_images_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY money_moves_images_service_write ON storage.objects TO service_role USING ((bucket_id = 'money-moves-images'::text)) WITH CHECK ((bucket_id = 'money-moves-images'::text));
+
 
 --
 -- Name: objects money_moves_media_service_write; Type: POLICY; Schema: storage; Owner: -
@@ -13837,5 +13932,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict FKXNpKAkjkyY9UwNlFV0ClyuriysHSXXY8M839MKOiujn0iy0HmoNhK98Ks9U8H
+\unrestrict fOuXFyXx5xdGmDPiVuC9M89ea2Cs8Inlk7yImBA8QkkZpFl08LB3IdeLy9SFEz5
 

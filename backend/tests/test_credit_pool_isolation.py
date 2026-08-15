@@ -46,6 +46,9 @@ class _Credits:
         self.used = used
         self.purchased_total = purchased_total
         self.purchased_used = purchased_used
+        # migration 139: the allocation actually granted for the CURRENT period. `total`
+        # cannot answer that once revoke_tier_credits overwrites it with a high-water mark.
+        self.tier_alloc = total
         self.tier = tier
         self.period_due = False
         self.ledger: list[dict] = []
@@ -96,6 +99,7 @@ class _Credits:
         if self.period_due:
             self.total = alloc
             self.used = 0
+            self.tier_alloc = alloc          # migration 139
             self.period_due = False
             self._ledger(alloc, alloc, 0, "monthly_reset", None)
         self._check()
@@ -104,18 +108,37 @@ class _Credits:
     # ── migration 112 ───────────────────────────────────────────────────────
     def grant_tier_upgrade(self) -> int:
         alloc = _PLAN_CREDITS.get(self.tier, 0)
-        if alloc > self.total:              # replay / downgrade -> no-op, no clawback
-            self.total = alloc
-            self._ledger(alloc, alloc, 0, "tier_upgrade", None)
+        # migration 139: guard on tier_alloc, NOT on total. revoke_tier_credits overwrites
+        # total with GREATEST(free_alloc, used) — a high-water mark, not an allocation — so
+        # guarding on it made a PAID re-subscribe after an Apple refund grant nothing.
+        if alloc > self.tier_alloc:
+            delta = max(alloc - self.total, 0)
+            self.total = max(alloc, self.total)   # only ever raises the ceiling
+            self.tier_alloc = alloc
+            if delta:
+                self._ledger(delta, delta, 0, "tier_upgrade", None)
         self._check()
         return self.remaining
 
     # ── migration 114 ───────────────────────────────────────────────────────
     def revoke_tier_credits(self) -> int:
-        floor = max(_PLAN_CREDITS["free"], self.used)
-        if self.total > floor:
-            self.total = floor
-            self._ledger(0, 0, 0, "tier_revoked", None)
+        free = _PLAN_CREDITS["free"]
+        floor = max(free, self.used)
+        # migration 139: tier_alloc drops to the free allocation whether or not `total` moves,
+        # or grant_tier_upgrade's guard would still see the pre-revoke allocation and refuse a
+        # genuine re-subscribe.
+        self.tier_alloc = min(self.tier_alloc, free)
+        # migration 139: write off the spend the refunded subscription paid for, exactly as
+        # revoke_purchased_credits does for a charged-back pack. Leaving `used` alone left a
+        # high-water mark that survived into the NEXT subscription, so a paid re-subscribe
+        # raised `total` but `remaining` stayed 0. `remaining` is unchanged here.
+        writeoff = max(self.used - free, 0)
+        if self.total > floor or writeoff:
+            delta = floor - self.total       # <= 0
+            self.total = floor - writeoff
+            self.used -= writeoff
+            if delta:
+                self._ledger(delta, delta, 0, "tier_revoked", None)
         self._check()
         return self.remaining
 
@@ -149,6 +172,11 @@ class _Credits:
             # (once that debit's split is already given back) silently refunds nothing.
             reversed_ids = {r["reverses_id"] for r in self.ledger if r["reverses_id"]}
             for row in reversed(self.ledger):
+                # migration 139: a clawback is not a spend. `pack_revoked` / `tier_revoked`
+                # both carry a negative delta AND a ref_id, so without this exclusion a refund
+                # could "reverse" a revocation and hand back credits deliberately taken away.
+                if row["reason"] in ("pack_revoked", "tier_revoked"):
+                    continue
                 if (row["ref_id"] == ref_id and row["delta"] == -amount
                         and row["id"] not in reversed_ids):
                     debit_id = row["id"]
@@ -161,9 +189,18 @@ class _Credits:
         if have_split:
             back_purch = min(max(spent_purch or 0, 0), amount, self.purchased_used)
             back_granted = min(max(spent_granted or 0, 0), amount - back_purch, self.used)
-        else:
+        elif debit_id is not None or not ref_id:
+            # A debit was found whose split is unknown (a pre-117 row), OR there was no ref_id
+            # to search by. Both are genuinely unknown: granted-first, the direction that
+            # cannot mint permanent credits — and the one that cannot swallow a real refund.
             back_granted = min(amount, self.used)
             back_purch = min(amount - back_granted, self.purchased_used)
+        else:
+            # migration 139: NO un-reversed debit matched — already refunded, or never
+            # charged. The old code paid out `min(amount, self.used)` here, bounded by the
+            # user's CURRENT spend rather than by the debit, so a second refund of the same
+            # charge MINTED credits out of unrelated activity.
+            back_granted = back_purch = 0
         if back_granted + back_purch == 0:
             return self.spendable
         self.used -= back_granted
@@ -202,11 +239,21 @@ class _Credits:
         row["revoked_at"] = "now"
         new_total = max(self.purchased_used, self.purchased_total - row["credits"])
         delta = new_total - self.purchased_total
-        if delta == 0:
+        # migration 139: how far the floor lifted the total — the already-spent portion of
+        # this charged-back pack. Leaving `purchased_used` alone meant a LATER report refund
+        # lowered it and RAISED spendable on a pack Apple had refunded: money back AND credits
+        # kept. Reduce both by the write-off so the spent baseline is retired too.
+        writeoff = min(
+            max(new_total - (self.purchased_total - row["credits"]), 0),
+            self.purchased_used,
+        )
+        if delta == 0 and writeoff == 0:
             return {"outcome": "revoked", "spendable": self.spendable, "reclaimed": 0}
-        self.purchased_total = new_total
+        self.purchased_total = new_total - writeoff
+        self.purchased_used -= writeoff
         self._check()
-        self._ledger(delta, 0, delta, "pack_revoked", txn)
+        if delta:
+            self._ledger(delta, 0, delta, "pack_revoked", txn)
         return {"outcome": "revoked", "spendable": self.spendable, "reclaimed": -delta}
 
 
@@ -367,24 +414,37 @@ def test_refund_cannot_expire_credits_the_user_paid_for():
     assert c.purchased_remaining == 250, "the refunded credit survived the month boundary"
 
 
-def test_a_refund_keyed_differently_from_its_charge_expires_paid_credits():
-    """Why `ref_id` on a refund MUST equal the one its charge used.
+def test_a_refund_keyed_differently_from_its_charge_now_no_ops_instead_of_expiring_them():
+    """Why `ref_id` on a refund MUST still equal the one its charge used — and what changed.
 
     This is the shape of a real bug: `research_reconciliation_service.claim_and_mark_failed`
     refunded with `ref_id=report_id` while `research.py` charged with `ref_id=ticker`. The
-    split lookup then never matched, every reconciled report failure took the granted-first
-    fallback, and a report paid for out of PURCHASED credits was refunded into the GRANTED
-    pool — which the next monthly reset wipes. Paid credits, destroyed, on the primary failure
-    path of the 20-credit action.
+    split lookup never matched, so every reconciled report failure took the granted-first
+    fallback and a report paid for out of PURCHASED credits was refunded into the GRANTED
+    pool — which the next monthly reset wipes. Paid credits, destroyed.
 
-    This test pins the CONSEQUENCE, so the mechanism stays visible even if the call sites move.
+    Migration 139 changed the outcome, and the trade-off is worth stating plainly. The
+    fallback now fires only when a debit was FOUND with an unknown split, or when there was no
+    ref_id to search by at all. A mismatched key means we searched and found nothing, so the
+    refund is a NO-OP: nothing is destroyed and nothing is minted, but the user is still owed.
+    That is strictly better than expiring paid credits, and strictly worse than being correct
+    — which is why the SQL raises a WARNING on this branch. It is the only signal a mismatched
+    key produces, since by construction there is no row to point at.
+
+    The mismatch itself is fixed at every call site and pinned by
+    `test_research_reconciliation.test_refund_is_keyed_by_ticker_to_match_the_charge`.
     """
     c = _Credits(total=50, used=50, purchased_total=500, purchased_used=0, tier="free")
     c.spend_credits(20, ref_id="NVDA")
     assert c.purchased_used == 20
 
+    before = c.spendable
     c.refund_credits(20, ref_id="report-uuid-not-the-ticker")   # the bug
-    assert c.used == 30 and c.purchased_used == 20, "fallback put it in the wrong pool"
+    assert c.used == 50 and c.purchased_used == 20, (
+        "a mismatched ref_id must not move either pool — the pre-139 code refunded into "
+        "granted, which the monthly reset then wiped"
+    )
+    assert c.spendable == before, "nothing minted, nothing destroyed"
 
     c.period_due = True
     c.ensure_credit_period()
@@ -588,8 +648,11 @@ def test_pack_revoke_reclaims_only_the_unspent_portion():
     c.spend_credits(100, ref_id="Y")      # granted exhausted -> 100 purchased
 
     out = c.revoke_purchased_credits("TXN-1")
-    assert out["reclaimed"] == 150
-    assert c.purchased_total == 100 and c.purchased_used == 100
+    assert out["reclaimed"] == 150, "only the UNSPENT 150 of the 250 pack is reclaimable"
+    # migration 139: the 100 already spent from this charged-back pack is WRITTEN OFF —
+    # both columns drop by it — so a later report refund cannot lower `purchased_used` and
+    # resurrect credits Apple has refunded. `purchased_remaining` is 0 either way.
+    assert c.purchased_total == 0 and c.purchased_used == 0
     assert c.purchased_remaining == 0
 
 
@@ -665,3 +728,160 @@ def test_ledger_deltas_always_tie_out_to_the_balance(amount):
     for row in c.ledger:
         assert row["delta"] == row["granted_delta"] + row["purchased_delta"], row
     assert c.spendable == 350, "a spend followed by its refund is a round trip"
+
+
+# ── Migration 139: the three defects the adversarial review confirmed ──────────────────
+
+
+def test_refunding_the_same_charge_twice_mints_nothing():
+    """DEFECT A. The fallback used to pay `min(amount, used)` whenever no un-reversed debit
+    was found — bounded by the user's CURRENT spend, not by the debit. So a second refund of
+    an already-reversed charge paid out again from unrelated activity.
+
+    Reachable without attacker control: a Cloudflare 520 or read timeout AFTER Postgres
+    commits makes research.py refund a row that IS in the table, and the reconciliation sweep
+    later refunds the same charge again.
+    """
+    c = _Credits(total=1200, used=0, tier="pro")
+    c.spend_credits(60, ref_id="OTHER")      # unrelated spend the fallback used to raid
+    c.spend_credits(20, ref_id="TSLA")
+    assert c.used == 80
+
+    c.refund_credits(20, ref_id="TSLA")
+    assert c.used == 60, "first refund reverses the paired debit"
+    after_first = c.spendable
+
+    c.refund_credits(20, ref_id="TSLA")      # the double refund
+    assert c.used == 60, "second refund minted 20 granted credits from unrelated spend"
+    assert c.spendable == after_first
+
+
+def test_a_clawback_row_is_never_paired_by_a_refund():
+    """`pack_revoked` and `tier_revoked` both carry a negative delta AND a ref_id, so before
+    139 they were pairable debits: a refund could 'reverse' a revocation and hand back credits
+    that were deliberately taken away."""
+    # TWO packs, so a live purchased_used survives the revoke — otherwise back_purch clamps to
+    # 0 and the test passes whether or not the exclusion exists.
+    c = _Credits(total=0, used=0)
+    c.add_purchased_credits("TXN-1", 200)
+    c.add_purchased_credits("TXN-2", 200)
+    c.spend_credits(150, ref_id="X")         # purchased_used = 150
+    c.revoke_purchased_credits("TXN-1")      # writes a pack_revoked row keyed on TXN-1
+    assert c.purchased_used > 0, "precondition: a refund must have something to give back"
+    before = c.spendable
+
+    # Refund keyed on the transaction id, amount matching the clawback's magnitude.
+    revoke_delta = next(r["delta"] for r in c.ledger if r["reason"] == "pack_revoked")
+    assert revoke_delta < 0
+    c.refund_credits(-revoke_delta, ref_id="TXN-1")
+
+    assert c.spendable == before, "a refund reversed a revocation and handed the credits back"
+
+
+def test_credits_apple_charged_back_cannot_be_resurrected_by_a_later_refund():
+    """DEFECT B. `spendable` subtracts `purchased_used`, so lowering it RAISES the balance.
+    revoke_purchased_credits floored `purchased_total` at `purchased_used` but left
+    `purchased_used` alone — so a report refund landing after the chargeback handed back
+    credits on a pack Apple had already refunded: money back AND credits kept."""
+    c = _Credits(total=50, used=50)          # granted exhausted
+    c.add_purchased_credits("TXN-1", 130)
+    c.spend_credits(20, ref_id="AAPL")       # funded from purchased
+    assert c.purchased_used == 20
+
+    c.revoke_purchased_credits("TXN-1")      # Apple refunds the pack
+    assert c.spendable == 0
+
+    c.refund_credits(20, ref_id="AAPL")      # the report then fails and is refunded
+    assert c.spendable == 0, "charged-back credits came back to life"
+    assert c.purchased_remaining == 0
+
+
+def test_a_paid_resubscribe_after_an_apple_refund_grants_the_full_allocation():
+    """DEFECT C. revoke_tier_credits sets `total = GREATEST(free, used)` — a high-water mark,
+    not an allocation — and grant_tier_upgrade's replay guard read that as 'already granted'.
+    A Max subscriber who had spent >1200, got refunded, then subscribed to Pro paid $14.99 and
+    received ZERO credits until the ET month rolled."""
+    c = _Credits(total=4000, used=0, tier="premium")
+    c.tier_alloc = 4000
+    c.spend_credits(1500, ref_id="X")
+
+    c.tier = "free"
+    c.revoke_tier_credits()                  # Apple refunds the Max subscription
+    assert c.remaining == 0
+
+    c.tier = "pro"                           # a NEW paid subscription
+    c.grant_tier_upgrade()
+    assert c.remaining > 0, "a paid subscription granted nothing"
+    assert c.tier_alloc == 1200
+
+
+def test_a_same_tier_resubscribe_after_a_refund_also_grants():
+    """The narrower half of DEFECT C: a Pro subscriber who spent the full 1,200 has `total`
+    floored to exactly 1,200 on the revoke, so `1200 <= 1200` short-circuited too."""
+    c = _Credits(total=1200, used=0, tier="pro")
+    c.tier_alloc = 1200
+    c.spend_credits(1200, ref_id="X")
+
+    c.tier = "free"
+    c.revoke_tier_credits()
+    c.tier = "pro"
+    c.grant_tier_upgrade()
+
+    assert c.tier_alloc == 1200
+    assert c.remaining > 0, "the same-tier re-purchase granted nothing"
+
+
+def test_replaying_a_grant_within_one_period_still_no_ops():
+    """The guard must still do its original job: StoreKit replays `Transaction.updates` on
+    every launch, and each replay calls grant_tier_upgrade."""
+    c = _Credits(total=1200, used=200, tier="pro")
+    c.tier_alloc = 1200
+    before_total, before_ledger = c.total, len(c.ledger)
+
+    for _ in range(5):
+        c.grant_tier_upgrade()
+
+    assert c.total == before_total
+    assert len(c.ledger) == before_ledger, "a replay wrote a ledger row"
+
+
+def test_every_ledger_row_carries_an_honest_split():
+    """The schema comment claims `delta = granted_delta + purchased_delta` for every row from
+    118 onward. Three writers left both at 0 with a non-zero delta, making their rows
+    indistinguishable from pre-117 unknown-split rows — which is what fed DEFECT A."""
+    c = _Credits(total=0, used=0, tier="pro")
+    c.period_due = True
+    c.ensure_credit_period()
+    c.spend_credits(20, ref_id="X")
+    c.refund_credits(20, ref_id="X")
+    c.tier = "free"
+    c.revoke_tier_credits()
+    c.tier = "premium"
+    c.grant_tier_upgrade()
+
+    assert c.ledger, "no ledger rows written"
+    for row in c.ledger:
+        assert row["delta"] == row["granted_delta"] + row["purchased_delta"], (
+            f"{row['reason']} row has delta={row['delta']} but split "
+            f"{row['granted_delta']}/{row['purchased_delta']}"
+        )
+
+
+def test_a_total_inflated_by_anything_but_an_allocation_cannot_block_a_grant():
+    """What `tier_alloc` protects that `total` cannot.
+
+    `total` is not an allocation — any writer may raise it (a pre-139 revoke high-water mark
+    still on a live row, a future clawback, a hand-correction in Studio). Guarding the replay
+    on it means any such value silently blocks a PAID grant. `tier_alloc` records only what a
+    grant actually issued, so it cannot be inflated by anything else.
+
+    This is the case the revoke write-off no longer produces on its own, which is exactly why
+    it needs its own test: rows written before migration 139 still carry the old shape.
+    """
+    c = _Credits(total=4000, used=0, tier="pro")   # legacy row: total inflated, never granted
+    c.tier_alloc = 0
+
+    c.grant_tier_upgrade()
+
+    assert c.tier_alloc == 1200, "the grant did not record the allocation it issued"
+    assert c.remaining >= 1200, "a paid grant was blocked by a total it did not set"

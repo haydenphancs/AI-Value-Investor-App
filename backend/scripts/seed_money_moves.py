@@ -55,6 +55,9 @@ FORCE = "--force" in sys.argv   # overwrite existing bucket audio (for re-runs /
 
 _EXISTING_AUDIO: set[str] = set()   # objects already in money-moves-media/audio/ — skip re-upload
 _EXISTING_IMAGES: set[str] = set()  # objects already in money-moves-images/articles/
+# slug -> the published_at ALREADY stored for that row. Loaded once in main() so a re-seed
+# preserves the original publication date instead of re-deriving it. See _resolve_published_at.
+_EXISTING_PUBLISHED_AT: dict[str, str] = {}
 # False until the bucket is confirmed to exist. Without this a --dry-run reports [art] for
 # every article while the real run that follows would publish none of it — the upload throws
 # and is swallowed per-file. A dry run that disagrees with the real run is worse than no dry
@@ -179,10 +182,50 @@ def upload_placeholder_art(sb) -> dict[str, str]:
     return out
 
 
+def _resolve_published_at(article: dict, slug: str) -> str:
+    """The publication timestamp for `slug`, resolved so a RE-SEED NEVER MOVES A DATE.
+
+    `publishedDaysAgo` is a RELATIVE offset, and this used to be the only source:
+    `now - publishedDaysAgo`, written unconditionally through `upsert(on_conflict="id")`.
+    That re-dated the entire catalog on every run. Every offset in the catalog is 0-13 days,
+    so the whole library perpetually claimed to have been published in the last fortnight:
+    re-seed in October and an article read in August comes back stamped "Today".
+
+    Harmless while nothing selected the column — but `published_at` is now the label rendered
+    on every card AND the sort key behind the row's "Most Recent" heading, so the jump is
+    user-visible. Resolution order:
+
+      1. An explicit `publishedAt` ISO string in the authored JSON. Authoritative: it is the
+         only source that is a FACT rather than a re-derivation, so an editor can pin a real
+         date and it survives everything below.
+      2. The value already stored for this row. This is what makes a re-seed a no-op for
+         dates — the first publish decides, and re-running to add artwork or a new article
+         leaves the other 15 untouched.
+      3. `now - publishedDaysAgo`. Reached only on a FIRST publish, which preserves the
+         existing behaviour for a genuinely new slug.
+    """
+    explicit = article.get("publishedAt")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    existing = _EXISTING_PUBLISHED_AT.get(slug)
+    if existing:
+        return existing
+
+    days_ago = article.get("publishedDaysAgo", 3)
+    if slug in _EXISTING_PUBLISHED_AT:
+        # The row exists but stores NULL. Deriving is the only option left, so this is correct
+        # — but it is also the one branch that can move a date that a reader already saw, and
+        # it is invisible in the row-per-article log below. Say so.
+        print(f"    ! {slug}: row exists with no published_at — deriving from "
+              f"publishedDaysAgo={days_ago}; this date will move again on the next re-seed "
+              f"unless it is pinned in the JSON as publishedAt")
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+
+
 def build_row(sb, article: dict, sort_order: int) -> dict:
     slug = article["slug"]
-    days_ago = article.get("publishedDaysAgo", 3)
-    published_at = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    published_at = _resolve_published_at(article, slug)
 
     audio_url = upload_audio(sb, slug)
     if audio_url:
@@ -219,6 +262,29 @@ def main():
     articles = data["articles"]
 
     sb = get_supabase()
+
+    # Learn the publication dates already stored, so `_resolve_published_at` can preserve them
+    # instead of re-deriving from the relative `publishedDaysAgo` offset on every run.
+    #
+    # A FAILURE HERE MUST ABORT. Degrading to "no existing dates" is not a safe fallback: it
+    # silently takes the derive branch for all 16 articles and re-dates the whole catalog —
+    # exactly the bug this exists to prevent, with no signal that it happened. A transient
+    # Supabase 520 must not be able to rewrite every publication date.
+    try:
+        stored = sb.table("money_move_articles").select("slug, published_at").execute()
+        for row in getattr(stored, "data", None) or []:
+            slug = row.get("slug")
+            if slug:
+                _EXISTING_PUBLISHED_AT[slug] = row.get("published_at")
+        dated = sum(1 for v in _EXISTING_PUBLISHED_AT.values() if v)
+        print(f"{len(_EXISTING_PUBLISHED_AT)} existing row(s), {dated} with a publication date "
+              f"— those dates will be preserved.\n")
+    except Exception as exc:
+        raise SystemExit(
+            f"ABORT: could not read existing published_at ({type(exc).__name__}: {exc}). "
+            f"Seeding now would re-date every article in the catalog. Fix the connection and "
+            f"re-run."
+        ) from exc
 
     # Learn which audio objects already exist so we only upload new ones.
     try:

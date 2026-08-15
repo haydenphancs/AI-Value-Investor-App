@@ -266,3 +266,51 @@ def test_the_credit_pack_cta_label_is_per_product_too():
     assert re.search(r"Text\(isThisPack \?", view), (
         "the pack CTA label must be driven by isThisPack, not by the global isPurchasing"
     )
+
+
+# ── The blob sent to /billing/verify must be Apple's SIGNED envelope ──────────────────
+
+
+def test_the_client_sends_the_jws_not_the_decoded_transaction():
+    """`handle` must forward `VerificationResult.jwsRepresentation`, never
+    `Transaction.jsonRepresentation`.
+
+    This shipped, and it broke IAP completely in EVERY environment:
+
+      let signed = String(decoding: transaction.jsonRepresentation, as: UTF8.self)
+
+    under a comment asserting that property "is the JWS Apple signed". It is not — it is the
+    DECODED payload as JSON. The backend hands the blob to PyJWT, which split the JSON on "."
+    and base64-decoded the first fragment into binary:
+
+      DecodeError: Invalid header string: 'utf-8' codec can't decode byte 0x9a in position 1
+
+    …so every purchase 400'd. No test saw it because nothing read this line, and the two
+    surfaces that could have disagreed (product ids, privacy manifest) both agreed.
+
+    The second consequence is the one that makes this a security assertion rather than a
+    correctness one: the decoded JSON is precisely the client-editable form the signature
+    exists to defend against. Had the server ever accepted it, a caller could have minted any
+    transaction they liked. So this test pins BOTH directions — the right property present and
+    the wrong one absent.
+    """
+    body = _strip_comments(_func_body(_read(_ROOT / "Core/Services/StoreKitService.swift"),
+                                      "private func handle("))
+    assert body, "StoreKitService.handle not found — this guard has drifted"
+
+    assert "jwsRepresentation" in body, (
+        "the verify hand-off must send VerificationResult.jwsRepresentation — the signed "
+        "envelope the backend re-verifies Apple's signature over"
+    )
+    assert "jsonRepresentation" not in body, (
+        "handle() references Transaction.jsonRepresentation — that is the DECODED, "
+        "client-editable payload, not the JWS. Sending it 400s every purchase and would "
+        "defeat signature verification if the server ever accepted it."
+    )
+    # Anti-vacuity: comment-stripping must not have emptied the window, and the property must
+    # be read off the VERIFICATION RESULT rather than off some other value that happens to
+    # expose a similarly-named member.
+    assert "verifyPurchase" in body and "case .verified" in body
+    assert re.search(r"verificationResult\.jwsRepresentation", body), (
+        "jwsRepresentation must be read from the VerificationResult parameter"
+    )

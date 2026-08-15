@@ -184,6 +184,11 @@ struct MoneyMoveArticleDTO: Decodable {
     let sortOrder: Int?           // catalog ordering within its category
     let commentCount: Int?
     let publishedDaysAgo: Int?
+    /// The REAL publication instant, ISO-8601 (`"2026-06-12T14:03:21Z"`), served from the
+    /// `published_at` column. Optional because the bundled offline JSON carries only
+    /// `publishedDaysAgo`, and because a row that predates the seeder has a NULL column —
+    /// `resolvedPublishedAt` falls back in both cases.
+    let publishedAt: String?
     let tagLabel: String?
     let isFeatured: Bool?
     let hasAudioVersion: Bool?

@@ -309,9 +309,23 @@ final class StoreKitService: ObservableObject {
             return nil
 
         case .verified(let transaction):
-            // `jsonRepresentation` is the JWS Apple signed. That is what the backend
-            // verifies — deliberately not the decoded fields, which the client could edit.
-            let signed = String(decoding: transaction.jsonRepresentation, as: UTF8.self)
+            // The JWS Apple signed — `VerificationResult.jwsRepresentation`, NOT
+            // `Transaction.jsonRepresentation`. The backend re-verifies Apple's signature over
+            // this blob, so it must be the signed envelope and deliberately not the decoded
+            // fields, which a client can edit.
+            //
+            // ⚠️ This previously sent `String(decoding: transaction.jsonRepresentation,
+            // as: UTF8.self)` under a comment asserting that WAS the JWS. It is not: that
+            // property is the decoded payload as JSON. Two consequences, and the second is
+            // the one that matters:
+            //   1. Every verification failed. PyJWT split the JSON on "." and base64-decoded
+            //      the first fragment, yielding binary — `DecodeError: Invalid header string:
+            //      'utf-8' codec can't decode byte 0x9a`. A 400 on every purchase, in every
+            //      environment, so IAP could never have worked in production either.
+            //   2. It inverted the security property the comment claims. The decoded JSON is
+            //      exactly the client-editable form; had the server accepted it, a caller
+            //      could have minted any transaction they liked.
+            let signed = verificationResult.jwsRepresentation
 
             let applied: PurchaseApplied
             do {

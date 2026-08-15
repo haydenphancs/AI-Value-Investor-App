@@ -4,22 +4,67 @@ Money Moves content service.
 Reads authored case-study articles from the `money_move_articles` table and returns
 them ordered by sort_order. Each row stores the full iOS-shaped article in its
 `content` JSONB column; we return that blob as-is, overlaying the row's `slug`,
-`audio_url` and `sort_order` columns onto the blob so the columns the table is actually
-keyed and ordered by survive into the response (the client re-sorts by
-`content.sortOrder`, so an un-overlaid column is an order the user never sees). Article content changes
-rarely, so a single in-memory tier with a long TTL is enough — the table itself is the
-durable store, so there is no separate *_cache table. Mirrors journey_content_service.
+`audio_url`, `image_url`, `published_at` and `sort_order` columns onto the blob so the
+columns the table is actually keyed and ordered by survive into the response. Article
+content changes rarely, so a single in-memory tier with a long TTL is enough — the table
+itself is the durable store, so there is no separate *_cache table. Mirrors
+journey_content_service.
+
+⚠️ On `sortOrder`: the overlay is still required (a blob missing the key sinks to the BOTTOM
+client-side via `?? .max`), but do NOT describe it as the order the user sees. iOS re-sorts
+the catalog by DATE — `LearnViewModel.newestFirst` — so `sortOrder`'s only surviving display
+effect is the featured tie-break in `MoneyMovesContentStore`. The Wiser section is labelled
+"Most Recent" for that reason.
 """
 
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.database import get_supabase
 from app.schemas.money_moves import MoneyMovesResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _iso_published_at(value: Any) -> Optional[str]:
+    """Normalize a `timestamptz` column into the ONE ISO-8601 shape iOS can parse.
+
+    PostgREST renders `timestamptz` as a string with up to SIX fractional digits and a
+    `+00:00` offset (`"2026-06-12T14:03:21.123456+00:00"`). Both ISO-8601 parsers shipped in
+    the app — `BackendISO8601` and `UpdatesDateParser` — use `ISO8601DateFormatter` with
+    `.withFractionalSeconds`, which accepts EXACTLY three. So the raw column value fails to
+    decode on the client and the card silently falls back to the drifting
+    `publishedDaysAgo` estimate, which is the whole thing this column exists to replace.
+
+    Second precision is plenty for a label that renders "Yesterday" / "Aug 3", so drop the
+    fraction entirely and emit `"2026-06-12T14:03:21Z"`.
+
+    Returns None (caller skips the overlay) rather than raising — one malformed timestamp
+    must not cost the article its date, let alone the catalog its row.
+    """
+    if value is None:
+        return None
+    try:
+        raw = value if isinstance(value, str) else str(value)
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:                      # Postgres always sends an offset for
+            parsed = parsed.replace(tzinfo=timezone.utc)  # timestamptz; be safe if it doesn't.
+        return (
+            parsed.astimezone(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except (ValueError, TypeError) as exc:
+        logger.warning(
+            "money_moves: unparseable published_at %r (%s: %s) — leaving the article on its "
+            "publishedDaysAgo estimate",
+            value, type(exc).__name__, exc,
+        )
+        return None
 
 
 def _sort_key(row: Dict[str, Any]) -> int:
@@ -260,6 +305,34 @@ class MoneyMovesContentService:
                 if image_url:
                     content["imageUrl"] = image_url
 
+                # The publication date — served so the client can render a REAL one.
+                #
+                # Without this the card and the article both compute their date at DECODE time
+                # as `now - content.publishedDaysAgo` days. That offset is a constant baked into
+                # the blob, so the derived date never ages: an article authored with
+                # `publishedDaysAgo: 12` reads "12 days ago" today and "12 days ago" in 2030.
+                # Fine as an ORDERING key (relative order is preserved forever, which is why the
+                # field was documented "never rendered"), useless as a date. This column is a
+                # real instant, stamped once by seed_money_moves.py.
+                #
+                # ONE DIRECTION, like `image_url` above and deliberately NOT like `audio_url`:
+                # a populated column wins, an empty one leaves the client on its estimate. The
+                # column is nullable and only the seeder writes it, so a row added through
+                # Studio — or any row predating the seeder — is NULL. Under the audio rule that
+                # single row would have its date actively stripped. And unlike a narration URL,
+                # a date has no affordance to leave dangling and cannot 404: stale-but-plausible
+                # beats absent. Warn on NULL so it is possible to tell which articles are
+                # showing a real date and which are still estimating.
+                published_at = _iso_published_at(row.get("published_at"))
+                if published_at:
+                    content["publishedAt"] = published_at
+                else:
+                    logger.warning(
+                        "money_moves: published_at is empty — article keeps its drifting "
+                        "publishedDaysAgo estimate (id=%s slug=%s)",
+                        row.get("id"), row.get("slug"),
+                    )
+
                 # Overlay the row's `sort_order` COLUMN unconditionally. The response carries only
                 # these `content` blobs, so without this the column — the thing this service sorts
                 # by — never reaches the client at all, and iOS re-sorts by `content.sortOrder ?? .max`
@@ -294,7 +367,7 @@ class MoneyMovesContentService:
             # iOS DTO, so a blob that lost it decodes to nothing and the article silently vanishes
             # client-side. The column is NOT NULL, so it is always a usable fallback.
             .select("id, slug, title, sort_order, audio_url, audio_duration_seconds, "
-                    "image_url, content")
+                    "image_url, published_at, content")
             .execute()
         )
         return result.data or []

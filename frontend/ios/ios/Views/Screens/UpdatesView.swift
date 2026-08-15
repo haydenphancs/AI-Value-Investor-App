@@ -165,7 +165,7 @@ struct UpdatesView: View {
             // takes. That one answers "you ran out of credits" with a one-tap top-up;
             // buying credits would not reveal a single extra ticker here.
             .sheet(isPresented: $viewModel.showPaywall) {
-                PaywallView()
+                PaywallView(context: .updatesTickers)
                     .environment(\.appState, appState)
             }
             .alert(

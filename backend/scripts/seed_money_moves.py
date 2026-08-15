@@ -156,6 +156,29 @@ def upload_art(sb, slug: str) -> dict:
     return out
 
 
+def upload_placeholder_art(sb) -> dict[str, str]:
+    """Publish plates for catalog topics that have no article row yet.
+
+    `MoneyMove.sampleData` carries a few "coming soon" teasers that are not in
+    money_moves.json, so there is no `content` blob to bake a URL into and nothing for the
+    endpoint to serve. Their plates still go to the same bucket at the same
+    `articles/<slug>.*` path — the slug is the one the article will have once written — and
+    the URL is compiled into the Swift static instead (the gen_book_covers_swift.py
+    precedent). When the article is finally authored, its row supersedes the static and the
+    plate is already at the right path.
+
+    Returns {slug: cardUrl} purely so the run can print what iOS should be pointing at.
+    """
+    import generate_money_moves_art as art_gen
+
+    out: dict[str, str] = {}
+    for slug in art_gen.PLACEHOLDER_TOPICS:
+        urls = upload_art(sb, slug)
+        if urls.get("imageCardUrl"):
+            out[slug] = urls["imageCardUrl"]
+    return out
+
+
 def build_row(sb, article: dict, sort_order: int) -> dict:
     slug = article["slug"]
     days_ago = article.get("publishedDaysAgo", 3)
@@ -256,6 +279,19 @@ def main():
                 stamped += 1
     if stamped:
         print(f"\nStamped {stamped} related-article tile(s) with artwork.")
+
+    # Teaser topics with no row yet. Printed so the Swift statics can be checked against
+    # what was actually published rather than assumed.
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        placeholders = upload_placeholder_art(sb)
+        if placeholders:
+            print(f"\n{len(placeholders)} placeholder topic(s) published "
+                  f"(URLs are compiled into MoneyMove.sampleData):")
+            for slug, url in placeholders.items():
+                print(f"    {slug}\n      {url}")
+    except Exception as exc:  # noqa: BLE001 — teasers must never break the real seed
+        print(f"\n(placeholder art skipped: {type(exc).__name__}: {exc})")
 
     if DRY:
         print(f"\n[dry-run] built {len(rows)} article row(s); no writes performed.")

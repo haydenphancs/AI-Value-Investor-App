@@ -11,7 +11,9 @@ invariant #4).
 import logging
 from typing import List, Optional
 
+from app.config import settings
 from app.database import get_supabase
+from app.services.plan_features import features_for_tier
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +60,30 @@ def price_label(price_cents: int) -> str:
     return f"${price_cents / 100:.2f}"
 
 
-def normalize_catalog(rows: List[dict]) -> List[dict]:
-    """Pure: sort a plan_credits result cheapest → most expensive and stamp each
-    row with a `price_label`. Tolerant of missing/None `price_cents` (treated as 0)
-    and unknown tiers (sorted last). Mutates copies, returns a fresh list."""
+def normalize_catalog(
+    rows: List[dict],
+    *,
+    report_cost: Optional[int] = None,
+    chat_cost: Optional[int] = None,
+) -> List[dict]:
+    """Pure: sort a plan_credits result cheapest → most expensive and stamp each row with
+    a `price_label` and its paywall `features`. Tolerant of missing/None `price_cents` and
+    `monthly_credits` (treated as 0) and unknown tiers (sorted last, no features). Mutates
+    copies, returns a fresh list.
+
+    Features are stamped HERE and not in the endpoint because both the Supabase path and
+    the `_FALLBACK_PLANS` path already funnel through this function — that is where
+    `price_label` is derived too. So the fallback catalog carries the same feature list
+    with no second copy to drift, and `_FALLBACK_PLANS` itself needs no feature data.
+
+    Costs default to `settings` when omitted so existing callers keep working; they are
+    parameters at all so the copy builder can stay pure and the tests can vary them.
+    """
+    if report_cost is None:
+        report_cost = settings.REPORT_CREDIT_COST
+    if chat_cost is None:
+        chat_cost = settings.CHAT_CREDIT_COST
+
     out = [dict(r) for r in rows]
     out.sort(
         key=lambda r: (
@@ -71,6 +93,17 @@ def normalize_catalog(rows: List[dict]) -> List[dict]:
     )
     for r in out:
         r["price_label"] = price_label(int(r.get("price_cents") or 0))
+        # Coerced BEFORE the copy builder reads it. A NULL in this column used to 500
+        # `PlanResponse` on validation; now it also feeds a division, so an uncoerced
+        # value would take down the one screen that must render for every caller.
+        credits = max(0, int(r.get("monthly_credits") or 0))
+        r["monthly_credits"] = credits
+        r["features"] = features_for_tier(
+            r.get("tier", ""),
+            monthly_credits=credits,
+            report_cost=report_cost,
+            chat_cost=chat_cost,
+        )
     return out
 
 

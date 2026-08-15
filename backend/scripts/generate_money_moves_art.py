@@ -368,6 +368,82 @@ ARTICLES = {
         "almost interleaving, both complete and clearly readable as heatsinks"),
 }
 
+# =============================================================================
+# PLACEHOLDER TOPICS — cards that exist in the iOS catalog but have no article yet.
+#
+# `MoneyMove.sampleData` carries a few "coming soon" teasers that are NOT in
+# money_moves.json, so they have no row, no slug and no artwork, and they sat as blank
+# tiles beside thirteen illustrated ones. These get the same treatment system and the same
+# bucket; the only difference is that their URL is compiled into the Swift static (the
+# `gen_book_covers_swift.py` precedent) because there is no `content` blob to bake it into.
+#
+# The slug is the one the article WILL have when it is authored — kebab-case of the title,
+# matching every existing entry. So when the content lands, its row takes over by slug and
+# the already-published plate is already at the right path. Nothing has to be re-uploaded.
+# =============================================================================
+PLACEHOLDER_TOPICS = {
+    "nvidias-ai-dominance": ("blueprints", "cutout_grid",
+        "a dense graphics accelerator board lying flat and seen from above, its finned "
+        "heatsink, twin fan shrouds and long gold edge connector all clearly readable, "
+        "completely blank with no printing or markings anywhere on the board"),
+    "the-rise-of-lvmh": ("blueprints", "colour_field",
+        "two rigid leather travel trunks stacked one on the other, their brass corner caps, "
+        "riveted edging and unmarked latches clearly readable, the leather grain visible"),
+    "microsofts-cloud-metamorphosis": ("blueprints", "duotone_press",
+        "a rack-mount server blade pulled halfway out on its rails, its rows of drive bays, "
+        "vent slots and handle clearly readable, every face completely blank and unlabelled"),
+    "tsmc-the-foundry-that-runs-the-world": ("blueprints", "tech_noir",
+        "a large polished silicon wafer standing on its edge, the fine concentric grid of "
+        "identical square dies covering its mirrored surface catching the light, its single "
+        "flat notch visible at the rim and no printing anywhere on it"),
+
+    # ---- BATTLES: two identical objects, the product both rivals actually sell ----
+    "amd-vs-intel-the-cpu-wars": ("battles", "macro_noir",
+        "two identical square computer processor chips lying flat side by side, their "
+        "polished metal heat spreaders and the dense grid of gold contact pads around the "
+        "edge of each clearly readable, both completely blank and unmarked"),
+    "the-home-depot-vs-lowes": ("battles", "cutout_grid",
+        "two identical open metal paint tins standing side by side, each filled to the rim "
+        "with smooth level paint and a clean stir stick resting across it, both tins "
+        "completely blank with no printing or labelling"),
+    "boeing-vs-airbus-the-aerospace-duopoly": ("battles", "duotone_press",
+        "two identical turbofan jet engines seen head on and side by side, the wide fan "
+        "blades, spinner cone and nacelle lip of each clearly readable, both completely "
+        "unmarked"),
+    "the-rise-of-tiktok-vs-instagram-reels": ("battles", "flat_deco",
+        "two identical smartphones standing upright side by side, seen straight on, their "
+        "screens completely blank and their bodies bare with no buttons marked and no "
+        "symbols anywhere"),
+
+    # ---- VALUE TRAPS: the thing that broke, emptied, or was faked ----
+    "metas-metaverse-pivot": ("valueTraps", "specimen_plate",
+        "a single virtual-reality headset lying on its side, its twin lens ports, foam face "
+        "seal and slack head strap all clearly readable, the whole thing completely blank "
+        "and unmarked"),
+    "the-fall-of-sears": ("valueTraps", "ledger_still",
+        "one very thick mail-order catalogue lying closed, its pages swollen and rippled "
+        "with old water damage and its cover worn blank, a few loose pages slipping out of "
+        "the block"),
+}
+
+# =============================================================================
+# PALETTE OVERRIDES — slug -> a palette brief that REPLACES the category's.
+#
+# The category palette is a default, not a law. Blueprints is cold steel-blue, which is
+# right for machinery and wrong for the two topics below: a luxury house rendered in
+# gunmetal reads as a hardware company, and the first Costco/Buffett renders came back cold
+# when the subject plainly wanted tungsten. This is the same content-driven override the
+# Journey art pipeline needed (crypto->ember, warnings->crimson).
+#
+# Keyed by slug so it can never change another article's prompt — and therefore its hash.
+# =============================================================================
+PALETTE_OVERRIDES = {
+    "the-rise-of-lvmh": (
+        "warm champagne gold, aged cognac leather and deep bronze over a soft ivory ground. "
+        "Rich and quiet — the colour of a boutique, never brassy and never yellow."
+    ),
+}
+
 # --compare renders one article across several treatments, so the "how much variation do we
 # want" question gets answered by looking rather than arguing.
 COMPARE_TREATMENTS = ["ledger_still", "specimen_plate", "duotone_press", "colour_field",
@@ -412,6 +488,8 @@ def resolve(slug: str) -> tuple[str, str, str] | None:
     """
     if slug in ARTICLES:
         return ARTICLES[slug]
+    if slug in PLACEHOLDER_TOPICS:
+        return PLACEHOLDER_TOPICS[slug]
     meta = article_meta().get(slug)
     if meta is None:
         return None
@@ -432,6 +510,19 @@ def _check_article_table() -> None:
     orphan = set(ARTICLES) - authored
     if orphan:
         raise SystemExit(f"ARTICLES has key(s) not in {ARTICLES_JSON.name}: {sorted(orphan)}")
+    # The reverse for placeholders: once a topic IS authored it must move into ARTICLES, or
+    # the same slug would carry two different subjects and whichever table wins is luck.
+    promoted = set(PLACEHOLDER_TOPICS) & authored
+    if promoted:
+        raise SystemExit(
+            f"{sorted(promoted)} now exist in {ARTICLES_JSON.name} — move them from "
+            f"PLACEHOLDER_TOPICS into ARTICLES so one slug has exactly one subject")
+    dupe = set(PLACEHOLDER_TOPICS) & set(ARTICLES)
+    if dupe:
+        raise SystemExit(f"slug(s) in BOTH tables: {sorted(dupe)}")
+    bad_ph = {s: t for s, (_c, t, _sub) in PLACEHOLDER_TOPICS.items() if t not in TREATMENTS}
+    if bad_ph:
+        raise SystemExit(f"unknown treatment on placeholder(s) {bad_ph}")
     bad_cat = {s: c for s, (c, _t, _sub) in ARTICLES.items() if c not in PALETTES}
     if bad_cat:
         raise SystemExit(f"unknown category on {bad_cat} — expected {sorted(PALETTES)}")
@@ -447,9 +538,15 @@ def _check_article_table() -> None:
         raise SystemExit(f"category disagrees with money_moves.json: {mismatched}")
 
 
-def prompt_for(subject: str, category: str, treatment: str) -> str:
+def prompt_for(subject: str, category: str, treatment: str, palette: str = None) -> str:
+    """`palette` defaults to the CATEGORY's brief.
+
+    The parameter is optional rather than required specifically so that every prompt written
+    before overrides existed hashes identically — passing nothing reproduces the old string
+    byte for byte, and no approved plate re-rolls.
+    """
     return BASE.format(treatment=TREATMENTS[treatment][1], subject=subject,
-                       palette=PALETTES[category])
+                       palette=palette or PALETTES[category])
 
 
 def prompt_for_slug(slug: str, treatment: str = None) -> str:
@@ -459,7 +556,7 @@ def prompt_for_slug(slug: str, treatment: str = None) -> str:
             f"no subject for '{slug}'. Add an ARTICLES entry, or run with --auto to have "
             f"one written and cached to {subject_path(slug).name}.")
     category, tr, subject = resolved
-    return prompt_for(subject, category, treatment or tr)
+    return prompt_for(subject, category, treatment or tr, PALETTE_OVERRIDES.get(slug))
 
 
 # --------------------------------------------------------------------------
@@ -896,8 +993,15 @@ def main():
         run_compare(argv[i + 1], force)
         return
 
+    # Placeholders are not in money_moves.json, so they are opt-in: a bare run stays exactly
+    # the thirteen authored articles and cannot quietly start spending on teaser art.
+    if "--placeholders" in argv:
+        all_slugs = list(PLACEHOLDER_TOPICS)
+    elif "--all" in argv:
+        all_slugs = all_slugs + list(PLACEHOLDER_TOPICS)
+
     only = [argv[i + 1] for i, a in enumerate(argv) if a == "--only" and i + 1 < len(argv)]
-    unknown = [s for s in only if s not in all_slugs]
+    unknown = [s for s in only if s not in all_slugs and s not in PLACEHOLDER_TOPICS]
     if unknown:
         raise SystemExit(f"unknown article slug(s): {unknown}")
 
@@ -907,7 +1011,9 @@ def main():
         raise SystemExit(f"unknown category/ies: {bad} — expected {sorted(PALETTES)}")
 
     meta = article_meta()
-    slugs = only or [s for s in all_slugs if not cats or meta[s].get("category") in cats]
+    slugs = only or [s for s in all_slugs
+                     if not cats or (meta[s].get("category") if s in meta
+                                     else PLACEHOLDER_TOPICS[s][0]) in cats]
 
     if "--auto" in argv:
         run_auto(slugs)

@@ -1,0 +1,48 @@
+{
+  "slug": "the-rise-of-lvmh",
+  "category": "blueprints",
+  "treatment": "colour_field",
+  "subject": "two rigid leather travel trunks stacked one on the other, their brass corner caps, riveted edging and unmarked latches clearly readable, the leather grain visible",
+  "subject_source": "auto",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "One real photographed object resting exactly at the centre of a set of CONCENTRIC RECTANGLES of flat unmodulated colour, each band a different hue, nested inside one another and filling the whole frame edge to edge. A single sheet of heavy paper texture with one soft vertical fold crease runs across the entire image, colour bands and object alike, so the whole thing reads as one printed page. Flat even light, minimal shadow. Calm, graphic and abstract \u2014 a Rothko with one honest thing sitting on it.\n\nSUBJECT: two rigid leather travel trunks stacked one on the other, their brass corner caps, riveted edging and unmarked latches clearly readable, the leather grain visible\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: warm champagne gold, aged cognac leather and deep bronze over a soft ivory ground. Rich and quiet \u2014 the colour of a boutique, never brassy and never yellow. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "888e4b9823b8",
+  "art_file": "the-rise-of-lvmh.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "the-rise-of-lvmh.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "43cba93391d2b0ed867b30ca2cfce1fe77fc8addd1aaa79c016726d6dfdd399e",
+      "bytes": 47708,
+      "cropped": true
+    },
+    "card": {
+      "file": "the-rise-of-lvmh.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "313ae94a5b93a227823556a92b41ff82b57e0c63c884a0497a8c5cc38a0ed4e7",
+      "bytes": 17973,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.8906,
+    "ring_spread": 0.0551,
+    "inner_spread": 0.4473,
+    "edge_activity": 0.123,
+    "mean_luma": 0.4283,
+    "inner_mean_luma": 0.3657,
+    "needs_hairline": true
+  },
+  "uploaded": {
+    "hero": "43cba93391d2b0ed867b30ca2cfce1fe77fc8addd1aaa79c016726d6dfdd399e",
+    "card": "313ae94a5b93a227823556a92b41ff82b57e0c63c884a0497a8c5cc38a0ed4e7"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/the-rise-of-lvmh.hero.jpg"
+}

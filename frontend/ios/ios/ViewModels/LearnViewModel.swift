@@ -191,11 +191,27 @@ class LearnViewModel: ObservableObject {
         moneyMoves = sortedIncompleteFirst(moneyMoves)
     }
 
-    /// Unread moves on the left, completed ones at the end (stable within each group).
+    /// Unread moves on the left, completed ones at the end; NEWEST FIRST inside each group.
+    ///
+    /// The two keys compose rather than compete. Unread-first is the existing behaviour and
+    /// stays primary. Newest-first is nested under it so that a freshly seeded article — which
+    /// is unread by definition — lands at the very front of the row, which is the whole point
+    /// of carrying `createdAt`. Sorting purely by date would instead bury a brand new article
+    /// behind everything the reader has already finished.
+    ///
+    /// `sorted(by:)` is not stable in Swift, so the date comparison falls back to the title to
+    /// keep a deterministic order among same-day articles rather than letting them shuffle
+    /// between renders.
     private func sortedIncompleteFirst(_ cards: [MoneyMove]) -> [MoneyMove] {
         let store = MoneyMovesProgressStore.shared
-        return cards.filter { !store.isCompleted(slug: $0.slug) }
-            + cards.filter { store.isCompleted(slug: $0.slug) }
+        return Self.newestFirst(cards.filter { !store.isCompleted(slug: $0.slug) })
+            + Self.newestFirst(cards.filter { store.isCompleted(slug: $0.slug) })
+    }
+
+    static func newestFirst(_ cards: [MoneyMove]) -> [MoneyMove] {
+        cards.sorted {
+            $0.createdAt == $1.createdAt ? $0.title < $1.title : $0.createdAt > $1.createdAt
+        }
     }
 
     private func loadBooks() {

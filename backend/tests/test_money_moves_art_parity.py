@@ -143,6 +143,85 @@ def test_treatment_spread():
         f"{worst} is used {n}x of {len(art.ARTICLES)} — the set is collapsing to one look")
 
 
+def test_placeholder_topics_are_disjoint_from_authored_articles():
+    """A slug in both tables would carry two different subjects and whichever won would be
+    luck. And once a teaser IS authored it must move into ARTICLES, because from then on the
+    DB row is what iOS reads and the Swift static is dead."""
+    authored = _authored_slugs()
+    assert not (set(art.PLACEHOLDER_TOPICS) & set(art.ARTICLES))
+    promoted = set(art.PLACEHOLDER_TOPICS) & authored
+    assert not promoted, f"{sorted(promoted)} are authored now — promote them into ARTICLES"
+
+
+def test_placeholder_subjects_obey_the_same_rules():
+    for slug, (category, treatment, subject) in art.PLACEHOLDER_TOPICS.items():
+        assert category in art.PALETTES, f"{slug}: unknown category"
+        assert treatment in art.TREATMENTS, f"{slug}: unknown treatment"
+        hit = art._BANNED_SUBJECT.search(subject)
+        assert hit is None, f"{slug}: subject names {hit.group(0)!r}"
+        assert len(subject) > 40, f"{slug}: subject too thin"
+
+
+def test_every_placeholder_card_in_swift_has_a_generated_plate():
+    """The teaser URL is COMPILED into MoneyMove.sampleData rather than served, so nothing at
+    runtime can notice a typo — the image just silently 404s to the gradient. This is the
+    only thing standing between the two lists.
+
+    It also pins the slugs themselves. A placeholder's slug is the one its article will take
+    when written, so a mismatch here means the future row and the already-published plate end
+    up at different paths.
+    """
+    swift = _strip_swift_comments(
+        (REPO / "frontend/ios/ios/Models/LearnModels.swift").read_text())
+    sample = swift.split("static let sampleData: [MoneyMove]", 1)[1].split("\n    ]", 1)[0]
+    used = set(re.findall(r'placeholderArt\("([^"]+)"\)', sample))
+    assert used, "no placeholder cards reference artwork at all"
+
+    assert used == set(art.PLACEHOLDER_TOPICS), (
+        f"Swift and the generator disagree — only in Swift: "
+        f"{sorted(used - set(art.PLACEHOLDER_TOPICS))}, only in the generator: "
+        f"{sorted(set(art.PLACEHOLDER_TOPICS) - used)}")
+
+    # Each of those cards must also carry the matching slug, or completion tracking breaks:
+    # MoneyMovesProgressStore keys on slug, so cards sharing the default "" would all be
+    # marked complete together the first time any one of them was finished.
+    for slug in used:
+        assert f'slug: "{slug}"' in sample, f"{slug} has artwork but no slug on its card"
+
+
+def test_placeholder_art_url_points_at_the_public_bucket():
+    swift = (REPO / "frontend/ios/ios/Models/LearnModels.swift").read_text()
+    fn = swift.split("private static func placeholderArt", 1)[1].split("\n    }", 1)[0]
+    assert "/storage/v1/object/public" in fn, "teaser art must use the PUBLIC path"
+    assert BUCKET in fn
+    assert "/articles/" in fn and ".card.jpg" in fn
+    assert "?token" not in fn, "artwork is never signed — see migration 137"
+
+
+def test_palette_override_replaces_only_its_own_slug():
+    """The override exists because the category palette is a default, not a law — a luxury
+    house rendered in Blueprints' gunmetal reads as a hardware company. It must not touch any
+    other article's prompt, because that would change its hash and re-roll approved art."""
+    for slug in art.PALETTE_OVERRIDES:
+        assert slug in art.ARTICLES or slug in art.PLACEHOLDER_TOPICS, (
+            f"{slug} has a palette override but no subject anywhere")
+        assert art.PALETTE_OVERRIDES[slug] not in art.PALETTES.values()
+        assert art.PALETTE_OVERRIDES[slug] in art.prompt_for_slug(slug)
+    # An article WITHOUT an override still gets its category brief, byte for byte.
+    untouched = next(s for s in art.ARTICLES if s not in art.PALETTE_OVERRIDES)
+    cat = art.ARTICLES[untouched][0]
+    assert art.PALETTES[cat] in art.prompt_for_slug(untouched)
+
+
+def test_prompt_for_default_palette_is_byte_identical_to_the_old_signature():
+    """`palette` was added as an OPTIONAL parameter specifically so every prompt written
+    before overrides existed still hashes the same. If that ever stops being true, every
+    approved plate silently re-rolls on the next run."""
+    subject, cat, tr = "a thing", "battles", "cutout_grid"
+    assert art.prompt_for(subject, cat, tr) == art.prompt_for(subject, cat, tr, None)
+    assert art.PALETTES[cat] in art.prompt_for(subject, cat, tr)
+
+
 def test_auto_treatment_is_deterministic_and_safe():
     """A random treatment would change on every run, change the prompt hash with it, and
     re-roll the whole set at full cost. It must also never pick a treatment that cannot
@@ -286,6 +365,40 @@ def test_ios_card_art_is_not_gated_on_showIcon():
     assert len(tail) == 2, "MoneyMoveCard no longer renders MoneyMoveCoverImage"
     assert "showIcon" not in tail[1], (
         "artwork is gated on showIcon — See-All would render no plates")
+
+
+def test_ios_card_meta_row_carries_the_completion_mark_and_no_headphones():
+    """The completion mark moved down into the meta row and the headphones badge went
+    entirely — they cost a whole header band for two glyphs, and a headphones badge that is
+    present on all thirteen narrated articles distinguishes nothing."""
+    src = _strip_swift_comments(CARD_SWIFT.read_text())
+    assert "headphones" not in src, "the headphones badge is back on the card"
+    assert "checkmark.circle.fill" in src
+    meta = src.split("ReadTimeLabel", 1)[1]
+    assert "checkmark.circle.fill" in meta, (
+        "the completion mark must sit in the meta row, after ReadTimeLabel")
+
+
+def test_ios_card_ordering_is_newest_first_within_unread():
+    """`createdAt` exists only to order rows, so a newly seeded topic reaches the top of its
+    section with no app update. Unread-first stays PRIMARY — sorting purely by date would
+    bury a brand new article behind everything already finished."""
+    vm = _strip_swift_comments(
+        (REPO / "frontend/ios/ios/ViewModels/LearnViewModel.swift").read_text())
+    assert "static func newestFirst" in vm
+    body = vm.split("static func newestFirst", 1)[1].split("\n    }", 1)[0]
+    assert "createdAt >" in body, "newestFirst must sort DESCENDING by createdAt"
+    assert "$0.title <" in body, (
+        "needs a deterministic tiebreak — Swift's sorted(by:) is not stable")
+    sorter = vm.split("sortedIncompleteFirst(_ cards", 1)[1].split("\n    }", 1)[0]
+    assert sorter.count("newestFirst") == 2, (
+        "both the unread and the completed group must be date-ordered")
+    assert "isCompleted" in sorter, "unread-first must still be the primary key"
+
+    # And the See-All screen must share the very same sorter rather than reimplementing it.
+    detail = _strip_swift_comments(
+        (REPO / "frontend/ios/ios/Views/Screens/MoneyMovesDetailView.swift").read_text())
+    assert "LearnViewModel.newestFirst" in detail
 
 
 def test_ios_cover_atom_falls_back_to_the_gradient_on_error():

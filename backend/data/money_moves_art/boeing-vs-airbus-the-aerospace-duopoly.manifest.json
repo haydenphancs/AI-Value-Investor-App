@@ -1,0 +1,48 @@
+{
+  "slug": "boeing-vs-airbus-the-aerospace-duopoly",
+  "category": "battles",
+  "treatment": "duotone_press",
+  "subject": "two identical turbofan jet engines seen head on and side by side, the wide fan blades, spinner cone and nacelle lip of each clearly readable, both completely unmarked",
+  "subject_source": "auto",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "A photographic subject flattened into a hard two-colour DUOTONE screenprint and laid over a flat saturated background field, with a fine regular grid of hairlines ruled across the whole frame like graph paper. The object is a real photograph, not a drawing, but reduced to exactly two inks \u2014 one saturated field colour and one cool pale ink \u2014 with crisp edges, high contrast and no intermediate hues at all. Slight offset-print misregistration and a faint paper tooth. Confident, loud and modern: a financial magazine cover, not a photograph.\n\nSUBJECT: two identical turbofan jet engines seen head on and side by side, the wide fan blades, spinner cone and nacelle lip of each clearly readable, both completely unmarked\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue on one side against warm amber and old gold on the other, over a neutral ground. Exactly two hues plus neutrals, split so the two halves of the picture are plainly opposed \u2014 the rivalry is carried by the colour. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "cf0fc10f1e36",
+  "art_file": "boeing-vs-airbus-the-aerospace-duopoly.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "boeing-vs-airbus-the-aerospace-duopoly.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "e1b3b74905953e0da0db661113d3acf07e3a1fe129b5c541df71e76771851460",
+      "bytes": 142395,
+      "cropped": true
+    },
+    "card": {
+      "file": "boeing-vs-airbus-the-aerospace-duopoly.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "3e4c98382c1b0756ad6cb40be0aa55c32a4c15b1673117b5eb8ff2a2ead50803",
+      "bytes": 43972,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.3916,
+    "ring_spread": 0.091,
+    "inner_spread": 0.6083,
+    "edge_activity": 0.15,
+    "mean_luma": 0.3529,
+    "inner_mean_luma": 0.3472,
+    "needs_hairline": false
+  },
+  "uploaded": {
+    "hero": "e1b3b74905953e0da0db661113d3acf07e3a1fe129b5c541df71e76771851460",
+    "card": "3e4c98382c1b0756ad6cb40be0aa55c32a4c15b1673117b5eb8ff2a2ead50803"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/boeing-vs-airbus-the-aerospace-duopoly.hero.jpg"
+}

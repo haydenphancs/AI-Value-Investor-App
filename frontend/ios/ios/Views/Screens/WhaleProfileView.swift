@@ -223,7 +223,7 @@ struct WhaleProfileView: View {
         // environment automatically, so without it the sheet resolves that key's default
         // `AppState()` and highlights the wrong "current plan".
         .sheet(isPresented: $showPaywall) {
-            PaywallView()
+            PaywallView(context: .whaleDetail)
                 .environment(\.appState, appState)
         }
         // Refill the moment a purchase lands rather than at next visit. Keyed on the TIER

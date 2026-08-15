@@ -2,16 +2,35 @@
 //  PaywallView.swift
 //  ios
 //
-//  Screen: Upgrade / plan catalog. Renders the LIVE tier catalog (Free / Pro / Max
-//  from GET /billing/plans) with the user's current tier highlighted. The actual
-//  App Store purchase is deferred (no StoreKit yet) — the CTA surfaces an honest
-//  "coming soon" state. Apple requires functional Terms of Use + Privacy Policy
-//  links in any subscription purchase flow, so both are linked at the bottom.
+//  Screen: Upgrade / plan catalog. Renders the LIVE tier catalog (Free / Pro / Max from
+//  GET /billing/plans) with the user's current tier marked, and — for each plan — the
+//  feature rows the backend derives from `entitlements.py`, the same module that enforces
+//  the gates. Purchases go through StoreKit 2 (`StoreKitService`); Apple requires
+//  functional Terms of Use + Privacy Policy links and a restore mechanism in any
+//  subscription flow, so all three are at the bottom.
+//
+//  WHY THE FEATURE LIST COMES OVER THE WIRE
+//  ----------------------------------------
+//  This screen used to describe every plan with one line — "1,200 credits / month · ~60
+//  reports" — and nothing else, so nothing on it mentioned that a plan unlocks investor
+//  holdings, the signal tickers, the full Updates feed or Money Moves narration. The two
+//  sentences that did try to sell ("plus priority analysis") described a priority tier
+//  that has never existed: report scheduling is global and no code path reads `tier`.
+//  `entitlements.py`'s own docstring names the failure this fixes — "silent drift between
+//  the gate and the paywall" — so the numbers are read from there rather than typed here.
+//  `PlanFeature.bundled(...)` is the offline mirror for a backend that predates it.
+//
+//  The sheet also knows WHY it was opened (`PaywallContext`), because it is presented from
+//  eight different locks and used to look identical from all of them.
 //
 
 import SwiftUI
 
 struct PaywallView: View {
+    /// Why the sheet was opened. Drives the header, which feature row is highlighted, the
+    /// default plan selection, and the `reason` analytics dimension.
+    var context: PaywallContext = .general
+
     @Environment(\.appState) private var appState
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel = PaywallViewModel()
@@ -23,6 +42,10 @@ struct PaywallView: View {
     /// to. Loaded lazily; the sheet is offered only if they have not already consented.
     @StateObject private var personalizationConsent = PersonalizationConsentViewModel()
     @State private var showPersonalizationConsent = false
+
+    /// Which plan's feature list is on screen. `nil` until the catalog loads, then seeded
+    /// from `context` — see `defaultSelection`.
+    @State private var selectedTier: String?
 
     /// Alerts keyed off optional state, so dismissing clears the value rather than leaving
     /// a stale flag that re-presents.
@@ -51,8 +74,40 @@ struct PaywallView: View {
         )
     }
 
-    private var currentTier: UserTier {
-        appState.user.tier
+    private var currentTier: UserTier { appState.user.tier }
+
+    private var isSignedIn: Bool { appState.auth.isAuthenticated }
+
+    private var selectedPlan: PlanDTO? {
+        guard let catalog = viewModel.catalog else { return nil }
+        return catalog.plans.first { $0.tier == selectedTier } ?? catalog.plans.last
+    }
+
+    /// The plan to open on: the cheapest one ABOVE the user's current tier that actually
+    /// includes what they were locked out of; failing that, the cheapest paid plan.
+    ///
+    /// Derived rather than hardcoded, and that is what keeps it correct in both directions.
+    /// The backend's own helpers are a mix — `required_tier_for_signals/_whales/
+    /// _learn_audio` are FLOORS that always answer Pro, while `required_tier_for_more_
+    /// tickers` walks a real ladder — and this single rule reproduces both, because the
+    /// catalog arrives sorted cheapest → dearest. So a Free user hitting the signals lock
+    /// lands on Pro, and a Pro user who has run out of Updates chips lands on Max, with no
+    /// second copy of the ladder on the client.
+    private func defaultSelection(_ catalog: PlanCatalog) -> String? {
+        let paid = catalog.plans.filter { $0.priceCents > 0 }
+        guard !paid.isEmpty else { return catalog.plans.first?.tier }
+
+        let currentIndex = catalog.plans.firstIndex { $0.userTier == currentTier } ?? -1
+        let above = catalog.plans.enumerated()
+            .filter { $0.offset > currentIndex && $0.element.priceCents > 0 }
+            .map(\.element)
+
+        let unlocks = above.first { plan in
+            catalog.features(for: plan)
+                .first { $0.key == context.featureKey }?
+                .included ?? false
+        }
+        return (unlocks ?? above.first ?? paid.first)?.tier
     }
 
     var body: some View {
@@ -62,14 +117,20 @@ struct PaywallView: View {
 
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: AppSpacing.xl) {
-                        header
+                        PaywallHeaderView(context: context)
 
                         if let catalog = viewModel.catalog {
-                            VStack(spacing: AppSpacing.md) {
-                                ForEach(catalog.plans) { plan in
-                                    planCard(plan, reportCost: catalog.reportCost)
-                                }
+                            planSelector(catalog)
+
+                            if let plan = selectedPlan {
+                                PlanFeatureListSection(
+                                    planName: plan.displayName,
+                                    features: catalog.features(for: plan),
+                                    highlightedKey: context.featureKey
+                                )
+                                .animation(.easeInOut(duration: 0.2), value: plan.tier)
                             }
+
                             costNote(catalog)
                         } else if viewModel.isLoading {
                             ProgressView()
@@ -85,6 +146,10 @@ struct PaywallView: View {
                     .padding(.top, AppSpacing.lg)
                     .padding(.bottom, AppSpacing.xxxl)
                 }
+                // Pinned, not scrolled to. The feature list is eleven wrapping rows, and at
+                // the accessibility text sizes a CTA at the bottom of it is several screens
+                // below the plan the user just picked.
+                .safeAreaInset(edge: .bottom) { purchaseBar }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -154,95 +219,72 @@ struct PaywallView: View {
             }
         }
         .task {
-            Analytics.shared.track(.paywallShown)
+            // `reason` is what makes conversion readable PER LOCK. Without it a paywall
+            // impression carried no trace of what triggered it, so there was no way to
+            // tell which gate actually sells a plan.
+            Analytics.shared.track(.paywallShown, [
+                "reason": .string(context.rawValue),
+                "tier": .string(currentTier.rawValue),
+            ])
+            viewModel.context = context
             // Stamped onto the purchase as StoreKit's `appAccountToken`, so a transaction
             // redelivered into a different signed-in session can be refused server-side
             // rather than crediting whoever happens to be signed in when Apple retries.
             viewModel.accountID = appState.user.profile?.id
             await viewModel.load()
         }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        VStack(spacing: AppSpacing.sm) {
-            Image(systemName: "bolt.fill")
-                .font(.system(size: 32))
-                .foregroundColor(AppColors.alertOrange)
-            Text("Unlock more research")
-                .font(AppTypography.title)
-                .foregroundColor(AppColors.textPrimary)
-                .multilineTextAlignment(.center)
-            Text("More monthly credits for AI reports and Cay AI chat, plus priority analysis.")
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textSecondary)
-                .multilineTextAlignment(.center)
+        .onChange(of: viewModel.catalog) { _, catalog in
+            guard let catalog else { return }
+            selectedTier = defaultSelection(catalog)
         }
     }
 
-    // MARK: - Plan card
+    // MARK: - Plan selector
 
-    private func planCard(_ plan: PlanDTO, reportCost: Int) -> some View {
-        let isCurrent = plan.userTier == currentTier
-        let reports = reportCost > 0 ? plan.monthlyCredits / reportCost : 0
-        return VStack(alignment: .leading, spacing: AppSpacing.md) {
-            HStack(alignment: .firstTextBaseline) {
-                HStack(spacing: AppSpacing.sm) {
-                    Text(plan.displayName)
-                        .font(AppTypography.heading)
-                        .foregroundColor(AppColors.textPrimary)
-                    if isCurrent {
-                        Text("CURRENT")
-                            .font(AppTypography.captionEmphasis)
-                            .foregroundColor(AppColors.textOnAccent)
-                            .padding(.horizontal, AppSpacing.sm)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(AppColors.primaryFill))
+    private func planSelector(_ catalog: PlanCatalog) -> some View {
+        VStack(spacing: AppSpacing.sm) {
+            ForEach(catalog.plans) { plan in
+                PlanSelectorRow(
+                    plan: plan,
+                    // Apple's localized price wins when the product has loaded — the
+                    // catalog's `priceLabel` is USD from our own config.
+                    displayPrice: viewModel.displayPrice(forTier: plan.tier),
+                    isSelected: plan.tier == selectedPlan?.tier,
+                    isCurrent: plan.userTier == currentTier,
+                    action: { selectedTier = plan.tier }
+                )
+            }
+        }
+    }
+
+    // MARK: - Purchase bar (pinned)
+
+    @ViewBuilder
+    private var purchaseBar: some View {
+        if let plan = selectedPlan {
+            VStack(spacing: 0) {
+                Divider().overlay(AppColors.divider)
+                Group {
+                    if !isSignedIn {
+                        PaywallSignInGate(onSignIn: {
+                            dismiss()
+                            appState.requestSignIn(for: "subscribe")
+                        })
+                    } else {
+                        planCTA(plan)
                     }
                 }
-                Spacer()
-                Text(plan.priceLabel)
-                    .font(AppTypography.headingSmall)
-                    .foregroundColor(AppColors.textPrimary)
-                + Text(plan.priceCents > 0 ? " /mo" : "")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.md)
+                .padding(.bottom, AppSpacing.sm)
             }
-
-            HStack(spacing: AppSpacing.xs) {
-                Image(systemName: "creditcard.fill")
-                    .font(AppTypography.iconTiny)
-                    .foregroundColor(AppColors.alertOrange)
-                Text("\(plan.monthlyCredits) credits / month")
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textSecondary)
-                if reports > 0 {
-                    Text("· ~\(reports) reports")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                }
-            }
-
-            planCTA(plan, isCurrent: isCurrent)
+            .background(AppColors.background)
         }
-        .padding(AppSpacing.lg)
-        .background(
-            RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                .cardFill()
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppCornerRadius.large)
-                        .stroke(
-                            isCurrent ? AppColors.primaryBlue.opacity(0.5) : Color.clear,
-                            lineWidth: 1.5
-                        )
-                )
-        )
     }
 
     @ViewBuilder
-    private func planCTA(_ plan: PlanDTO, isCurrent: Bool) -> some View {
-        if isCurrent {
+    private func planCTA(_ plan: PlanDTO) -> some View {
+        if plan.userTier == currentTier {
             Text("Current Plan")
                 .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textMuted)
@@ -254,32 +296,31 @@ struct PaywallView: View {
                 )
         } else if plan.priceCents == 0 {
             // The free tier is never a purchasable "upgrade" target.
-            EmptyView()
+            Text("Included with every account")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textMuted)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, AppSpacing.md)
         } else {
             // Is THIS plan the one being bought? `isPurchasing` alone is global, so driving the
-            // label from it made every plan card read "Processing…" the moment any one of them
+            // label from it made every plan read "Processing…" the moment any one of them
             // was tapped. Compare the product id the store is actually working on.
-            let isThisPlan = viewModel.store.purchasingProductID != nil
-                && viewModel.store.purchasingProductID == viewModel.store.productID(for: plan.tier)
+            let isThisPlan = store.purchasingProductID != nil
+                && store.purchasingProductID == store.productID(for: plan.tier)
 
             Button {
                 Task { await viewModel.purchase(tier: plan.tier) }
             } label: {
                 HStack(spacing: AppSpacing.xs) {
-                    // A SPINNER, not just a word. The label alone was ambiguous: during a
-                    // purchase one card reads "Processing…" while the other merely dims, and
-                    // "dimmed" is easy to read as "busy too" — which is what made this look
-                    // like both plans were being bought at once. A moving indicator appears on
-                    // exactly one card and settles the question at a glance.
+                    // A SPINNER, not just a word — a moving indicator settles "is this the
+                    // one being bought?" at a glance where a dimmed label does not.
                     if isThisPlan {
                         ProgressView()
                             .progressViewStyle(.circular)
                             .tint(AppColors.textOnAccent)
                             .scaleEffect(0.8)
                     }
-                    Text(isThisPlan
-                         ? "Processing\u{2026}"
-                         : "Choose \(plan.displayName)")
+                    Text(isThisPlan ? "Processing\u{2026}" : "Choose \(plan.displayName)")
                 }
                 .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textOnAccent)
@@ -287,25 +328,15 @@ struct PaywallView: View {
                 .padding(.vertical, AppSpacing.md)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        .fill(
-                            // `alertOrangeFill`, not `alertOrange`: this button carries
-                            // constant-white `textOnAccent`, and the text token lightens to
-                            // #F97316 in dark where white on it is 2.80. 5.18 both modes now.
-                            LinearGradient(
-                                colors: [AppColors.alertOrangeFill, AppColors.alertOrangeFill],
-                                startPoint: .leading, endPoint: .trailing
-                            )
-                        )
+                        // `alertOrangeFill`, not `alertOrange`: this button carries
+                        // constant-white `textOnAccent`, and the text token lightens to
+                        // #F97316 in dark where white on it is 2.80. 5.18 both modes now.
+                        .fill(AppColors.alertOrangeFill)
                 )
             }
             .buttonStyle(PlainButtonStyle())
-            // Still disable EVERY plan during a purchase — two concurrent StoreKit sheets is
-            // not a supported state — but dim the ones that aren't the active purchase HARD, so
-            // they read as "unavailable right now" rather than "also working". 0.45 was light
-            // enough that a dimmed orange button still looked live.
-            .disabled(viewModel.store.isPurchasing)
-            .opacity(viewModel.store.isPurchasing && !isThisPlan ? 0.3 : 1)
-            .saturation(viewModel.store.isPurchasing && !isThisPlan ? 0 : 1)
+            .disabled(store.isPurchasing)
+            .opacity(store.isPurchasing && !isThisPlan ? 0.3 : 1)
         }
     }
 
@@ -319,6 +350,7 @@ struct PaywallView: View {
             .font(AppTypography.caption)
             .foregroundColor(AppColors.textMuted)
             .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func errorView(_ message: String) -> some View {
@@ -346,15 +378,22 @@ struct PaywallView: View {
             // Restore is REQUIRED by guideline 3.1.1 ("make sure you have a restore
             // mechanism for any restorable in-app purchases"), and it's what a user
             // reinstalling or switching devices reaches for first.
-            Button {
-                Task { await viewModel.restore() }
-            } label: {
-                Text("Restore Purchases")
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.primaryBlue)
+            //
+            // ⚠️ Gated on sign-in for the same reason the CTA is: restore submits the
+            // recovered transaction to `POST /billing/verify`, which is `.signInRequired`.
+            // A signed-out tap reported "no previous purchases found" to a paying
+            // subscriber — the request never left the client.
+            if isSignedIn {
+                Button {
+                    Task { await viewModel.restore() }
+                } label: {
+                    Text("Restore Purchases")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.primaryBlue)
+                }
+                .disabled(store.isPurchasing)
+                .padding(.bottom, AppSpacing.xs)
             }
-            .disabled(store.isPurchasing)
-            .padding(.bottom, AppSpacing.xs)
 
             HStack(spacing: AppSpacing.xs) {
                 NavigationLink {
@@ -384,6 +423,6 @@ struct PaywallView: View {
 }
 
 #Preview {
-    PaywallView()
+    PaywallView(context: .learnAudio)
         .environment(\.appState, AppState())
 }

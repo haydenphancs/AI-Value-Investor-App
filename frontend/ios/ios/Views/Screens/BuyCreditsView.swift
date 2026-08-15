@@ -148,7 +148,7 @@ struct BuyCreditsView: View {
                 // Presented ON TOP of this screen rather than dismiss-then-represent: the
                 // cross-presentation dance is where SwiftUI drops the second sheet.
                 // PaywallView dismisses itself on success, popping back here.
-                PaywallView()
+                PaywallView(context: .moreCredits)
                     .environment(\.appState, appState)
             }
         }

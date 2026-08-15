@@ -10,12 +10,41 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 
 
+class PlanFeatureResponse(BaseModel):
+    """One row on the paywall, built by `services/plan_features.py` from `entitlements.py`.
+
+    EVERY FIELD IS DEFAULTED, for the same reason spelled out on `VerifyPurchaseResponse`
+    below: a shipped iOS build decodes this shape, and the app and the backend deploy
+    independently. Adding, never changing, is the rule.
+
+    `icon` is an SF Symbol name and `accent` a SEMANTIC key ("credits", "whales", …) —
+    deliberately NOT a hex colour. iOS maps the accent to an audited text-role `AppColors`
+    token, so the launch contrast audit still covers every glyph; a colour on the wire
+    would be an unaudited value on a surface that audit cannot see.
+
+    `included=False` renders the row as a locked/paid capability rather than a quantity.
+    `group` is "plan" (a reason to pay — its value changes between tiers) or "always"
+    (free on every plan; rendered identically on all three cards).
+    """
+
+    key: str = ""             # stable machine id — the client's highlight + fallback join
+    title: str = ""           # one line; carries the number
+    detail: str = ""          # one or two sentences
+    icon: str = ""            # SF Symbol name; the client validates before rendering
+    accent: str = "neutral"   # semantic key, never a hex — see above
+    included: bool = True
+    group: str = "plan"       # "plan" | "always"
+
+
 class PlanResponse(BaseModel):
     tier: str                 # user_tier enum value: free | pro | premium
     display_name: str         # storefront label ("Free" | "Pro" | "Max")
     monthly_credits: int
     price_cents: int          # USD cents, storefront display only
     price_label: str          # precomputed ("Free" | "$14.99")
+    # Defaulted so a pre-features row (or a caller that predates plan_features) still
+    # validates; an empty list is the client's signal to use its bundled fallback table.
+    features: List[PlanFeatureResponse] = Field(default_factory=list)
 
 
 class PlanCatalogResponse(BaseModel):

@@ -218,7 +218,7 @@ struct HomeDashboardView: View {
         // this it silently resolves that key's default `AppState()` and highlights the
         // wrong "current plan". UpdatesView.swift does the same for the same reason.
         .sheet(isPresented: $showSignalsPaywall) {
-            PaywallView()
+            PaywallView(context: .signals)
                 .environment(\.appState, appState)
         }
         // Unlock the moment the purchase lands rather than at next launch. Keyed on the

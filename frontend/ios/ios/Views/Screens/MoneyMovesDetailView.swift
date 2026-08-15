@@ -123,12 +123,14 @@ struct MoneyMovesDetailView: View {
         battles = cards.filter { $0.category == .battles && !isHero($0) }
     }
 
-    /// Unread moves on the left, completed ones at the end (stable within each group). Recomputed
-    /// each render; `moneyMovesProgress` observation makes the row re-sort live on completion.
+    /// Recomputed each render; `moneyMovesProgress` observation makes the row re-sort live on
+    /// completion. Unread first, then newest first inside each group — the same composition
+    /// `LearnViewModel.sortedIncompleteFirst` uses, and it shares that sorter so the two
+    /// screens cannot drift into disagreeing about the order of the very same cards.
     private func incompleteFirst(_ moves: [MoneyMove]) -> [MoneyMove] {
         let store = MoneyMovesProgressStore.shared
-        return moves.filter { !store.isCompleted(slug: $0.slug) }
-            + moves.filter { store.isCompleted(slug: $0.slug) }
+        return LearnViewModel.newestFirst(moves.filter { !store.isCompleted(slug: $0.slug) })
+            + LearnViewModel.newestFirst(moves.filter { store.isCompleted(slug: $0.slug) })
     }
 
     private func handleMoveTap(_ move: MoneyMove) {
@@ -311,9 +313,10 @@ private struct FeaturedDeepDiveHeroCard: View {
                 // `heroGradientColors` entirely, so the hero disagreed with the article it
                 // opened — visible the moment you tapped it.
                 gradientColors: article.heroGradientColors,
-                cornerRadius: AppCornerRadius.extraLarge,
+                cornerRadius: AppCornerRadius.large,
                 aspectRatio: 16 / 9
             )
+            .padding(.horizontal, AppSpacing.md)
 
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 HStack(spacing: AppSpacing.sm) {
@@ -368,8 +371,18 @@ private struct FeaturedDeepDiveHeroCard: View {
                 .foregroundColor(AppColors.textSecondary)
                 .padding(.top, AppSpacing.xs)
             }
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.bottom, AppSpacing.md)
         }
-        .contentShape(Rectangle())
+        // The hero is a CARD, not loose page content. Once the headline moved off the artwork
+        // the block had nothing holding it together — the plate and its type just floated on
+        // the page background, indistinguishable from the category rows below. `.cardSurface()`
+        // is the app's standard container and does the right thing per appearance on its own:
+        // light gets `cardEdge` (a #FFFFFF card on the #F4F5F8 page is 1.09:1, so light cannot
+        // separate them by luminance), dark draws no border at all and separates by fill.
+        .padding(.top, AppSpacing.md)
+        .cardSurface(cornerRadius: AppCornerRadius.extraLarge)
+        .contentShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))
         .onTapGesture {
             onTap?()
         }
@@ -390,7 +403,7 @@ private struct MoneyMovesCategorySection: View {
 
             // Horizontal scroll of cards
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: AppSpacing.md) {
+                HStack(spacing: AppSpacing.sm) {
                     ForEach(moves) { move in
                         MoneyMoveCard(
                             moneyMove: move,

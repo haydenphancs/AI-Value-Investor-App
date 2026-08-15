@@ -126,7 +126,7 @@ struct ProfileView: View {
             Text("This is the name shown on your profile.")
         }
         .sheet(isPresented: $showPaywall) {
-            PaywallView()
+            PaywallView(context: .general)
                 .environment(\.appState, appState)
         }
         .sheet(isPresented: $showBuyCredits) {
@@ -853,10 +853,14 @@ struct UpgradeCard: View {
                             .foregroundColor(AppColors.textOnAccent)
                     }
 
-                    Text("Unlock your investing potential with priority AI and advanced analytics.")
+                    // Names things the app actually gates. The previous line promised
+                    // "priority AI and advanced analytics" — there is no priority tier
+                    // (report scheduling is global; no code path reads `tier`) and no
+                    // analytics surface is gated at all.
+                    Text("More credits each month, plus investor holdings, signal tickers and narrated lessons.")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textOnAccent)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer()

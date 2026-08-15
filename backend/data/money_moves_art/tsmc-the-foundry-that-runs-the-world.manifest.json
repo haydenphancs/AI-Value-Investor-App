@@ -1,0 +1,48 @@
+{
+  "slug": "tsmc-the-foundry-that-runs-the-world",
+  "category": "blueprints",
+  "treatment": "tech_noir",
+  "subject": "a large polished silicon wafer standing on its edge, the fine concentric grid of identical square dies covering its mirrored surface catching the light, its single flat notch visible at the rim and no printing anywhere on it",
+  "subject_source": "auto",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "Cinematic tech-noir still. The subject is carved out of darkness by a strong coloured rim light with a second opposing kicker on the far side, faint atmospheric haze holding visible shafts of that light, and a wet black glass surface beneath throwing a short soft mirrored reflection. Gentle anamorphic bloom on the brightest specular edges, deep crushed blacks. The saturated colour lives entirely in the LIGHT \u2014 every surface and material stays neutral and unpainted. Photoreal and razor sharp.\n\nSUBJECT: a large polished silicon wafer standing on its edge, the fine concentric grid of identical square dies covering its mirrored surface catching the light, its single flat notch visible at the rim and no printing anywhere on it\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue and pale cyan against deep slate and near-black, with clean bone white. One warm accent at most, and only if the object needs it. Precise and engineered. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "6bd361004b1a",
+  "art_file": "tsmc-the-foundry-that-runs-the-world.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "tsmc-the-foundry-that-runs-the-world.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "d99a788db5160bb535cb9e7ed7dc7ade204aecb14b46ce848b6f9866bdee9c72",
+      "bytes": 62292,
+      "cropped": true
+    },
+    "card": {
+      "file": "tsmc-the-foundry-that-runs-the-world.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "449c4047c2061614740f79f21b67746b9fd36a2e9212104bad243cb77e780283",
+      "bytes": 22234,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.0053,
+    "ring_spread": 0.2043,
+    "inner_spread": 0.4623,
+    "edge_activity": 0.442,
+    "mean_luma": 0.0738,
+    "inner_mean_luma": 0.08,
+    "needs_hairline": false
+  },
+  "uploaded": {
+    "hero": "d99a788db5160bb535cb9e7ed7dc7ade204aecb14b46ce848b6f9866bdee9c72",
+    "card": "449c4047c2061614740f79f21b67746b9fd36a2e9212104bad243cb77e780283"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/tsmc-the-foundry-that-runs-the-world.hero.jpg"
+}

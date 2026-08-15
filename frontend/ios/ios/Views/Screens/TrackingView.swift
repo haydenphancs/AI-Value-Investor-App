@@ -438,7 +438,7 @@ struct WhalesTabContent: View {
         // would not free a tracking slot. `.environment(\.appState, appState)` is REQUIRED:
         // PaywallView reads the custom `\.appState` key, which a sheet does not inherit.
         .sheet(isPresented: $viewModel.showWhalePaywall) {
-            PaywallView()
+            PaywallView(context: .whaleFollowLimit)
                 .environment(\.appState, appState)
         }
     }

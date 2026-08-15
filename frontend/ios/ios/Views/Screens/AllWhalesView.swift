@@ -241,7 +241,7 @@ struct AllWhalesView: View {
         // Same VM as the Tracking tab, so the same flag drives the sheet here — the whole
         // reason the locked-tap decision lives on the ViewModel rather than in a closure.
         .sheet(isPresented: $viewModel.showWhalePaywall) {
-            PaywallView()
+            PaywallView(context: .whaleFollowLimit)
                 .environment(\.appState, appState)
         }
     }

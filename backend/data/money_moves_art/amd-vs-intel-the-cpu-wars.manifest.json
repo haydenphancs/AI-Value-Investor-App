@@ -1,0 +1,48 @@
+{
+  "slug": "amd-vs-intel-the-cpu-wars",
+  "category": "battles",
+  "treatment": "macro_noir",
+  "subject": "two identical square computer processor chips lying flat side by side, their polished metal heat spreaders and the dense grid of gold contact pads around the edge of each clearly readable, both completely blank and unmarked",
+  "subject_source": "auto",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "Straight documentary macro photography. A single hard key light rakes across the subject from one side and everything outside its throw falls to genuine black \u2014 no fill, no bounce, no softbox wash. Shot on a fast macro prime with shallow depth of field. Real physical materials with visible microscopic texture \u2014 machined metal, oxidation, wear, dust suspended in the beam. Fine natural film grain, subtle lens vignette, slight halation on the brightest speculars. Restrained and near-monochrome. No digital gloss, no HDR, no plastic CGI look.\n\nSUBJECT: two identical square computer processor chips lying flat side by side, their polished metal heat spreaders and the dense grid of gold contact pads around the edge of each clearly readable, both completely blank and unmarked\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue on one side against warm amber and old gold on the other, over a neutral ground. Exactly two hues plus neutrals, split so the two halves of the picture are plainly opposed \u2014 the rivalry is carried by the colour. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "f7ce5bdf8997",
+  "art_file": "amd-vs-intel-the-cpu-wars.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "amd-vs-intel-the-cpu-wars.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "f7da30bb0aa7277bc4d865e1969338c9cadbf2e90c3e15be37f2d12982ea78ab",
+      "bytes": 108079,
+      "cropped": true
+    },
+    "card": {
+      "file": "amd-vs-intel-the-cpu-wars.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "3c32b55f5ebcd11fcf55fef46f5f2853a823de130b0a5d9d00f5b046b87a5cca",
+      "bytes": 37440,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.0084,
+    "ring_spread": 0.2955,
+    "inner_spread": 0.5469,
+    "edge_activity": 0.54,
+    "mean_luma": 0.1408,
+    "inner_mean_luma": 0.1501,
+    "needs_hairline": false
+  },
+  "uploaded": {
+    "hero": "f7da30bb0aa7277bc4d865e1969338c9cadbf2e90c3e15be37f2d12982ea78ab",
+    "card": "3c32b55f5ebcd11fcf55fef46f5f2853a823de130b0a5d9d00f5b046b87a5cca"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/amd-vs-intel-the-cpu-wars.hero.jpg"
+}

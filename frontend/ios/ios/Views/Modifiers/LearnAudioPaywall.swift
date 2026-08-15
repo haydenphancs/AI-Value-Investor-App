@@ -32,7 +32,7 @@ private struct LearnAudioPaywallModifier: ViewModifier {
             // it the sheet resolves that key's default `AppState()` and highlights the wrong
             // "current plan".
             .sheet(isPresented: $showPaywall) {
-                PaywallView()
+                PaywallView(context: .learnAudio)
                     .environment(\.appState, appState)
             }
     }

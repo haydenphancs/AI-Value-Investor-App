@@ -40,7 +40,7 @@ struct MoneyMovesSection: View {
 
             // Horizontal scroll of money move cards
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: AppSpacing.md) {
+                HStack(spacing: AppSpacing.sm) {
                     ForEach(concepts) { moneyMove in
                         MoneyMoveCard(
                             moneyMove: moneyMove,

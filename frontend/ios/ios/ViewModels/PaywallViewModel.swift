@@ -85,8 +85,16 @@ final class PaywallViewModel: ObservableObject {
     /// view from `AppState`; nil for a guest, who cannot reach a purchase anyway.
     var accountID: String?
 
+    /// Which lock opened the sheet. Carried onto the purchase events so conversion is a
+    /// single funnel join (`paywall_shown` → `paywall_purchase_started` → `purchase_completed`
+    /// on one `reason`) rather than a session-level correlation between three unrelated rows.
+    var context: PaywallContext = .general
+
     func purchase(tier: String) async {
-        Analytics.shared.track(.paywallPurchaseStarted, ["tier": .string(tier)])
+        Analytics.shared.track(.paywallPurchaseStarted, [
+            "tier": .string(tier),
+            "reason": .string(context.rawValue),
+        ])
         purchaseError = nil
         restoreMessage = nil
         isPendingApproval = false
@@ -102,7 +110,10 @@ final class PaywallViewModel: ObservableObject {
         do {
             switch try await store.purchase(product, accountID: accountID) {
             case .success(let applied):
-                Analytics.shared.track(.purchaseCompleted, ["tier": .string(applied.tier)])
+                Analytics.shared.track(.purchaseCompleted, [
+                    "tier": .string(applied.tier),
+                    "reason": .string(context.rawValue),
+                ])
                 purchasedTier = applied.tier
             case .cancelled:
                 break   // user dismissed the sheet — not an error

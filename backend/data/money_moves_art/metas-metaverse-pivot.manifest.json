@@ -1,0 +1,48 @@
+{
+  "slug": "metas-metaverse-pivot",
+  "category": "valueTraps",
+  "treatment": "specimen_plate",
+  "subject": "a single virtual-reality headset lying on its side, its twin lens ports, foam face seal and slack head strap all clearly readable, the whole thing completely blank and unmarked",
+  "subject_source": "auto",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "The object presented as a MUSEUM SPECIMEN, laid flat and perfectly centred on a soft off-white cotton-rag paper ground with a faint fibrous texture and one gentle fold crease. Flat, even, shadowless top light exactly as a collections photographer would use, with one very soft contact shadow directly beneath the object. Directly below the object sits one small COMPLETELY BLANK cream card with a thin printed rule across it and no writing on it whatsoever. Clinical, immaculate, reverent \u2014 the object is evidence, catalogued after the fact.\n\nSUBJECT: a single virtual-reality headset lying on its side, its twin lens ports, foam face seal and slack head strap all clearly readable, the whole thing completely blank and unmarked\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: oxblood, rust and burnished copper-red against warm charcoal and aged cream. Rich, dark and restrained \u2014 never bright, never scarlet, never a pure saturated red. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "3f667fcbce3d",
+  "art_file": "metas-metaverse-pivot.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "metas-metaverse-pivot.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "61702bc1e659a313eeadbbe912893559b974af03486c44c0a2a461de37468052",
+      "bytes": 43952,
+      "cropped": true
+    },
+    "card": {
+      "file": "metas-metaverse-pivot.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "35a17f5df5222b4aef308f64b0b423dae2dec09be94689d7a0c37d72b90ccc46",
+      "bytes": 15356,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.8808,
+    "ring_spread": 0.153,
+    "inner_spread": 0.7735,
+    "edge_activity": 0.198,
+    "mean_luma": 0.7475,
+    "inner_mean_luma": 0.7293,
+    "needs_hairline": true
+  },
+  "uploaded": {
+    "hero": "61702bc1e659a313eeadbbe912893559b974af03486c44c0a2a461de37468052",
+    "card": "35a17f5df5222b4aef308f64b0b423dae2dec09be94689d7a0c37d72b90ccc46"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/metas-metaverse-pivot.hero.jpg"
+}

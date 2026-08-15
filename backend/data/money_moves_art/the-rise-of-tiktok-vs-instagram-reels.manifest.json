@@ -1,0 +1,48 @@
+{
+  "slug": "the-rise-of-tiktok-vs-instagram-reels",
+  "category": "battles",
+  "treatment": "flat_deco",
+  "subject": "two identical smartphones standing upright side by side, seen straight on, their screens completely blank and their bodies bare with no buttons marked and no symbols anywhere",
+  "subject_source": "auto",
+  "art_model": "gemini-3-pro-image",
+  "art_aspect": "16:9",
+  "art_size": "2K",
+  "art_prompt": "A flat 2D VECTOR ILLUSTRATION of the object, drawn with clean confident linework, solid unmodulated colour fills and simple geometric decorative shapes behind it \u2014 soft rounded clouds, arcs or bands filling the background. A limited warm palette of four or five colours, gently retro, with fine engraved-looking detail lines on the object itself. Absolutely flat: no photographic texture, no 3D rendering, no bevels, no gradients, no drop shadows. Warm, approachable and designed.\n\nSUBJECT: two identical smartphones standing upright side by side, seen straight on, their screens completely blank and their bodies bare with no buttons marked and no symbols anywhere\n\nTHE OBJECT MUST BE IMMEDIATELY RECOGNISABLE. Frame it so its whole shape and identity read clearly at a glance \u2014 never cropped so tightly that it becomes an abstract texture or an unidentifiable piece of material. It must be correctly and plausibly formed, mechanically accurate, exactly as the real thing looks.\n\nPALETTE: cold steel-blue on one side against warm amber and old gold on the other, over a neutral ground. Exactly two hues plus neutrals, split so the two halves of the picture are plainly opposed \u2014 the rivalry is carried by the colour. Use three or four colours at most plus neutrals \u2014 restrained and harmonious, never rainbow.\n\nCOMPOSITION: horizontal landscape 16:9 frame. ONE single clear idea, calm and uncluttered, never a busy scene. The subject is complete and entirely inside the frame with a clear unbroken margin on all four sides \u2014 nothing touches or is cut by any edge, because this image is shown as a rounded card and anything against an edge reads as a mistake. The background treatment, however, runs fully edge to edge into all four corners with no border, no frame, no vignette and no second card drawn inside the picture.\n\nABSOLUTE REQUIREMENT: NO text, letters, numbers, digits, words, handwriting, engraving, embossed lettering, serial numbers, dial numerals, dimension labels, captions, brand names, logos, trademarks, signage or watermarks ANYWHERE in the image \u2014 every card, label, plaque, sheet, screen and printed surface in the picture is completely blank. No human faces, no hands, no people. No real company's product, packaging or identifying mark.",
+  "art_prompt_sha1": "e629d0eccabd",
+  "art_file": "the-rise-of-tiktok-vs-instagram-reels.art.jpg",
+  "art_native_width": 2752,
+  "art_native_height": 1536,
+  "masters": {
+    "hero": {
+      "file": "the-rise-of-tiktok-vs-instagram-reels.hero.jpg",
+      "width": 1206,
+      "height": 678,
+      "sha256": "5fb586aa7967356de3b0c5d3d4eba9c9eea229c865de727220abc9484d1760fe",
+      "bytes": 61351,
+      "cropped": true
+    },
+    "card": {
+      "file": "the-rise-of-tiktok-vs-instagram-reels.card.jpg",
+      "width": 640,
+      "height": 360,
+      "sha256": "e52009dd57f424002bb2f464b2892dd830c5aa8530a14d31c5608a366c151939",
+      "bytes": 25168,
+      "cropped": true
+    }
+  },
+  "plate": {
+    "margin_px_fraction": 0.04,
+    "ring_median_luma": 0.8729,
+    "ring_spread": 0.0131,
+    "inner_spread": 0.4117,
+    "edge_activity": 0.032,
+    "mean_luma": 0.5719,
+    "inner_mean_luma": 0.5306,
+    "needs_hairline": true
+  },
+  "uploaded": {
+    "hero": "5fb586aa7967356de3b0c5d3d4eba9c9eea229c865de727220abc9484d1760fe",
+    "card": "e52009dd57f424002bb2f464b2892dd830c5aa8530a14d31c5608a366c151939"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/the-rise-of-tiktok-vs-instagram-reels.hero.jpg"
+}

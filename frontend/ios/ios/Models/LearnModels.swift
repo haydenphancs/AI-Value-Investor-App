@@ -213,6 +213,13 @@ struct MoneyMove: Identifiable {
     /// 640x360 cover plate from the public money-moves-images bucket. Defaults to nil so the
     /// `sampleData` placeholders keep compiling and keep their SF Symbol badge.
     var imageUrl: String? = nil
+    /// When the article was published. NEVER RENDERED — it exists only to order the rows so a
+    /// newly seeded topic surfaces at the top of its section without an app update.
+    ///
+    /// Defaults to `.distantPast`, which is the honest value for a `sampleData` placeholder:
+    /// it has no publication date because it has not been written yet. That also sorts those
+    /// teasers below every real article, which is where they belong.
+    var createdAt: Date = .distantPast
 
     var iconName: String {
         category.iconName
@@ -580,6 +587,21 @@ extension NextLesson {
 }
 
 extension MoneyMove {
+    /// Cover plate for a catalog topic that has no article row yet.
+    ///
+    /// Every other surface gets its artwork URL from the served `content` JSONB, which is why
+    /// new art reaches installed apps with no App Store release. These teasers have no row to
+    /// carry one, so the URL is compiled in — the same trade `gen_book_covers_swift.py` makes
+    /// for book covers, and it is safe for the same reason: the path is a pure function of
+    /// (bucket, slug), and the slug here is the one the article WILL have once written. When
+    /// that happens the DB row supersedes this entirely and the plate is already in place.
+    ///
+    /// Public bucket, so no token and no expiry — see migration 137.
+    private static func placeholderArt(_ slug: String) -> String {
+        "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public"
+            + "/money-moves-images/articles/\(slug).card.jpg"
+    }
+
     static let sampleData: [MoneyMove] = [
         // Mix of categories for visual variety
         MoneyMove(
@@ -644,78 +666,98 @@ extension MoneyMove {
         
         // New Blueprints from brainstorm
         MoneyMove(
+            slug: "nvidias-ai-dominance",
             title: "NVIDIA's AI Dominance",
             subtitle: "How a gaming chip company became the engine of the AI revolution.",
             category: .blueprints,
             estimatedMinutes: 12,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("nvidias-ai-dominance")
         ),
         MoneyMove(
+            slug: "the-rise-of-lvmh",
             title: "The Rise of LVMH",
             subtitle: "The art of acquiring and cultivating timeless brands.",
             category: .blueprints,
             estimatedMinutes: 10,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("the-rise-of-lvmh")
         ),
         MoneyMove(
+            slug: "microsofts-cloud-metamorphosis",
             title: "Microsoft's Cloud Metamorphosis",
             subtitle: "How Satya Nadella saved a giant from irrelevance.",
             category: .blueprints,
             estimatedMinutes: 11,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("microsofts-cloud-metamorphosis")
         ),
         MoneyMove(
+            slug: "tsmc-the-foundry-that-runs-the-world",
             title: "TSMC: The Foundry That Runs the World",
             subtitle: "The story of the most important company you've never heard of.",
             category: .blueprints,
             estimatedMinutes: 13,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("tsmc-the-foundry-that-runs-the-world")
         ),
 
         // New Battles from brainstorm
         MoneyMove(
+            slug: "amd-vs-intel-the-cpu-wars",
             title: "AMD vs. Intel: The CPU Wars",
             subtitle: "A multi-decade battle for the heart of the computer.",
             category: .battles,
             estimatedMinutes: 14,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("amd-vs-intel-the-cpu-wars")
         ),
         MoneyMove(
+            slug: "the-home-depot-vs-lowes",
             title: "The Home Depot vs. Lowe's",
             subtitle: "A fight for the loyalty of contractors and DIY enthusiasts.",
             category: .battles,
             estimatedMinutes: 10,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("the-home-depot-vs-lowes")
         ),
         MoneyMove(
+            slug: "boeing-vs-airbus-the-aerospace-duopoly",
             title: "Boeing vs. Airbus: The Aerospace Duopoly",
             subtitle: "A global battle for the skies, defined by engineering and politics.",
             category: .battles,
             estimatedMinutes: 16,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("boeing-vs-airbus-the-aerospace-duopoly")
         ),
         MoneyMove(
+            slug: "the-rise-of-tiktok-vs-instagram-reels",
             title: "The Rise of TikTok vs. Instagram Reels",
             subtitle: "The war for short-form video and the future of attention.",
             category: .battles,
             estimatedMinutes: 12,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("the-rise-of-tiktok-vs-instagram-reels")
         ),
 
         // Value Traps
         MoneyMove(
+            slug: "metas-metaverse-pivot",
             title: "Meta's Metaverse Pivot",
             subtitle: "Betting the kingdom on a virtual dream.",
             category: .valueTraps,
             estimatedMinutes: 14,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("metas-metaverse-pivot")
         ),
         MoneyMove(
+            slug: "the-fall-of-sears",
             title: "The Fall of Sears",
             subtitle: "How a retail titan was hollowed out from the inside.",
             category: .valueTraps,
             estimatedMinutes: 15,
-            learnerCount: ""
+            learnerCount: "",
+            imageUrl: placeholderArt("the-fall-of-sears")
         ),
     ]
 }

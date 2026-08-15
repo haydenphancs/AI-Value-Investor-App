@@ -266,7 +266,12 @@ struct MoneyMoveArticleDTO: Decodable {
             hasAudio: audioUrl != nil,
             // The tile uses the SMALL derivative. Falling back to the hero would pull a
             // 1206px plate into a 600px slot for every card in a horizontal scroll row.
-            imageUrl: imageCardUrl ?? imageUrl
+            imageUrl: imageCardUrl ?? imageUrl,
+            // Same derivation as `toArticle`, so a card and the article it opens can never
+            // disagree about how old the piece is.
+            createdAt: Calendar.current.date(
+                byAdding: .day, value: -(publishedDaysAgo ?? 3), to: Date()
+            ) ?? Date()
         )
     }
 

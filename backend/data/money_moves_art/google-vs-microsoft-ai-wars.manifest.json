@@ -39,5 +39,10 @@
     "mean_luma": 0.0336,
     "inner_mean_luma": 0.0362,
     "needs_hairline": false
-  }
+  },
+  "uploaded": {
+    "hero": "5ff7545665ffc829d072992fbe7c47803a781d06fa7885efc0b53bb01be687b9",
+    "card": "94608bcf17bb7d0ddb59715b44ccda3ad522aa5e57e9c349508af0ece76fd071"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/google-vs-microsoft-ai-wars.hero.jpg"
 }

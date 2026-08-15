@@ -39,5 +39,10 @@
     "mean_luma": 0.7441,
     "inner_mean_luma": 0.7418,
     "needs_hairline": true
-  }
+  },
+  "uploaded": {
+    "hero": "9af991360fb6ad6a372cb0938c3ffce63bd9439c106adc2700850dc426261a9a",
+    "card": "58fb1e96452328d4f67e17c1ea95a36079dbf3f74233c30b0b05bbbfa2d9be27"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/theranos-blood-and-lies.hero.jpg"
 }

@@ -39,5 +39,10 @@
     "mean_luma": 0.2155,
     "inner_mean_luma": 0.1602,
     "needs_hairline": true
-  }
+  },
+  "uploaded": {
+    "hero": "fb1df8a2021264fb95e66218cd7bfa9f71772ce63910f764c449252af27ed74c",
+    "card": "2df91155640c254f9751bf5c13f8977a252bf356fd038e59706ece77d249cd0d"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/the-fall-of-enron.hero.jpg"
 }

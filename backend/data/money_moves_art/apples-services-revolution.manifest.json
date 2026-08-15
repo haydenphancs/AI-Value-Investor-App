@@ -39,5 +39,10 @@
     "mean_luma": 0.2032,
     "inner_mean_luma": 0.1256,
     "needs_hairline": true
-  }
+  },
+  "uploaded": {
+    "hero": "7e2bb680bc980acbad82a90a83fab9ce3c05fdb5fb9632ac4ed5094633b70bb3",
+    "card": "90307c321d01702a50632f9c765ac4d547aa31446dfe7d5e257c0f3be7a864a2"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/apples-services-revolution.hero.jpg"
 }

@@ -39,5 +39,10 @@
     "mean_luma": 0.2966,
     "inner_mean_luma": 0.3203,
     "needs_hairline": false
-  }
+  },
+  "uploaded": {
+    "hero": "e9225d540cfca0de1b719a976a6025cecfa4fd36cbf52c36333ecc8a282799be",
+    "card": "fc6571b2c93f40bc6c5bb84a108fa4fe3bc825addae473fccf2bab3cd8412f9b"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/warren-buffetts-early-days.hero.jpg"
 }

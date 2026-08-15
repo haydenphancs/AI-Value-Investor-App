@@ -39,5 +39,10 @@
     "mean_luma": 0.2029,
     "inner_mean_luma": 0.1414,
     "needs_hairline": true
-  }
+  },
+  "uploaded": {
+    "hero": "212d67d3049ddde867e63e1cd3e70885a0d9d8fb1ac5290819fc45b76734eff4",
+    "card": "38a2e17ffb1bc19e0357fcf83f2ec5fddff15f2fb0e0a9e5e0d9d83d51a447a3"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/how-amazon-built-its-moat.hero.jpg"
 }

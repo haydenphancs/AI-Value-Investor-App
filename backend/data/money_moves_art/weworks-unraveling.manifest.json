@@ -39,5 +39,10 @@
     "mean_luma": 0.3153,
     "inner_mean_luma": 0.3047,
     "needs_hairline": false
-  }
+  },
+  "uploaded": {
+    "hero": "dec1687a3ffadcf81cc422dea07e4169715e9866790bc5360f0e393ee89a48c4",
+    "card": "975b8192c25db722d437e699c636db96e1b02f3b09aaffdcd5cf46dea3455e0e"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/weworks-unraveling.hero.jpg"
 }

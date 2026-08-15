@@ -39,5 +39,10 @@
     "mean_luma": 0.0751,
     "inner_mean_luma": 0.084,
     "needs_hairline": false
-  }
+  },
+  "uploaded": {
+    "hero": "8b9d3eddeceb64de32957a404bedffee7b98a5da2933c3b637644b9d66cdc986",
+    "card": "5762037fc59d0466f08892d69b180be8650c3f2457dd401a899c2c896bae9c4a"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/the-ftx-collapse.hero.jpg"
 }

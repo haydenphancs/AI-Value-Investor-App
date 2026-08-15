@@ -39,5 +39,10 @@
     "mean_luma": 0.3613,
     "inner_mean_luma": 0.294,
     "needs_hairline": true
-  }
+  },
+  "uploaded": {
+    "hero": "50eb57a297cc364a69ccd1499f8d2bea9eacc4f9cb819e5047319a2b2cd20beb",
+    "card": "d65afd1aabde4d59842d9463774eee17c41d1b6bcafd198469c3c2dca973c7f6"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/tesla-vs-traditional-auto.hero.jpg"
 }

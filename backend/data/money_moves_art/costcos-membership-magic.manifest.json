@@ -39,5 +39,10 @@
     "mean_luma": 0.5981,
     "inner_mean_luma": 0.5476,
     "needs_hairline": true
-  }
+  },
+  "uploaded": {
+    "hero": "ffd279d383f831e60edb210a23014feb9f0dbd959f9d014e1757a5257fdbe353",
+    "card": "2eb578b2eec8dea62233bb4bc7780c002fdbacb012990d5ccda7bcca12ef6eb3"
+  },
+  "image_url": "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public/money-moves-images/articles/costcos-membership-magic.hero.jpg"
 }

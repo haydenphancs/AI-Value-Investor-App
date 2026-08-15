@@ -117,6 +117,12 @@ class ErrorCode(str, Enum):
     # credited. Finishing that one destroys a purchase the user paid for, with no redelivery
     # left to repair it — the client must keep it unfinished until the right account signs in.
     PURCHASE_ACCOUNT_MISMATCH = "PURCHASE_ACCOUNT_MISMATCH"
+    # Apple refunded or cancelled this purchase. Terminal AND finishable — the third distinct
+    # answer to "this purchase isn't grantable". It is separate from PURCHASE_ALREADY_LINKED
+    # (someone else was credited) and from INVALID_INPUT (which the client reads as a
+    # correctable caller error and never finishes, so a revoked transaction was redelivered on
+    # every launch forever). See PurchaseRevoked in iap_service.py.
+    PURCHASE_REVOKED = "PURCHASE_REVOKED"
     TOO_MANY_CONCURRENT_REPORTS = "TOO_MANY_CONCURRENT_REPORTS"
     # Global overload backstop — distinct from the per-user cap above. The
     # whole service is at capacity, not just this user. 409 (not 429) so iOS
@@ -268,6 +274,10 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
         "This purchase was made from a different Caydex account. Sign in with that account "
         "and it will be applied — nothing has been lost."
     ),
+    ErrorCode.PURCHASE_REVOKED: (
+        "This purchase was refunded, so its credits weren't added. If you think that's "
+        "wrong, contact support and we'll sort it out."
+    ),
     # Number-free default so the cap value never drifts here; the endpoint
     # overrides user_message with the live cap (e.g. "up to 4 at once").
     ErrorCode.TOO_MANY_CONCURRENT_REPORTS: (
@@ -331,6 +341,9 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     # `sign_in`, NOT `contact_support`: the purchase is intact and un-granted, and signing in
     # as the buying account is the action that claims it.
     ErrorCode.PURCHASE_ACCOUNT_MISMATCH: "sign_in",
+    # NOT "retry_later": a refund can never become grantable, and telling the client to wait
+    # is exactly what kept the transaction unfinished and redelivering.
+    ErrorCode.PURCHASE_REVOKED: "contact_support",
     ErrorCode.TOO_MANY_CONCURRENT_REPORTS: "retry_later",
     ErrorCode.SYSTEM_BUSY: "retry_later",
     ErrorCode.CHAT_MESSAGE_TOO_LONG: "fix_input",
@@ -394,6 +407,10 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # Also 409 and also terminal for THIS account — but the client must NOT finish the
     # transaction, because no account has been credited for it yet. See the ErrorCode comment.
     ErrorCode.PURCHASE_ACCOUNT_MISMATCH: 409,
+    # 409 like its two siblings: terminal, and the client SHOULD finish the transaction.
+    # Deliberately not 400 — `INVALID_INPUT` reads to the client as a correctable caller
+    # error, so a revoked purchase was redelivered on every launch forever.
+    ErrorCode.PURCHASE_REVOKED: 409,
     # 409 (NOT 429): iOS APIClient intercepts 429 before decoding the body and
     # shows a generic "wait 60s", discarding our user_message. 409 falls
     # through to the structured-body decode so the cap copy is surfaced.

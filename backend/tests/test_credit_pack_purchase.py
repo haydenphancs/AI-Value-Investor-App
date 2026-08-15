@@ -337,7 +337,7 @@ def test_an_already_revoked_consumable_is_never_granted(sb, revocation):
     The subscription path got this free via `status_for_transaction`; the consumable path never
     read revocation at all.
     """
-    with pytest.raises(svc.UnknownProduct):
+    with pytest.raises(svc.PurchaseRevoked):
         _service(sb).apply_verified_transaction(_USER, _pack_txn(**revocation))
 
     assert sb.purchased_total == 0
@@ -348,7 +348,7 @@ def test_revocation_is_checked_before_the_catalog_read(sb):
     """A revoked purchase must be refused without touching the DB — and must be diagnosed as
     REVOKED even for a product that is no longer in the catalog."""
     sb._fail.add("credit_packs")
-    with pytest.raises(svc.UnknownProduct) as exc:
+    with pytest.raises(svc.PurchaseRevoked) as exc:
         _service(sb).apply_verified_transaction(
             _USER, _pack_txn(revocationDate=1_700_000_000_000)
         )
@@ -569,16 +569,42 @@ def test_unrelated_pack_notification_is_ignored_cleanly(sb):
     assert sb.purchased_total == 250
 
 
-def test_revoke_rpc_failure_is_reported_not_raised(sb):
-    """Raising would return non-2xx and make Apple redeliver a notification we may already have
-    applied. Best-effort by design; the loss is logged."""
+def test_revoke_rpc_failure_raises_so_apple_redelivers(sb):
+    """The inverse of what this test used to assert, and the old contract was a money leak.
+
+    It previously swallowed the failure and answered Apple 200 "best-effort by design". Apple
+    only retries non-2xx, so a REFUND notification lost to a transient DB fault was consumed
+    PERMANENTLY — and there is no repair path: `revoke_purchased` has exactly one caller and
+    nothing sweeps `credit_purchases`. A refunded Mega buyer kept 1,300 never-expiring credits.
+
+    Raising is safe because the revoke is idempotent: `revoked_at` is the tombstone, so a
+    redelivery of an already-applied revoke short-circuits at `already_revoked`. Note `None`
+    from the RPC is strictly a round-trip fault — its own outcomes are
+    invalid/unknown/already_revoked/revoked — so this cannot swallow a real answer.
+    """
     service = _service(sb)
     service.apply_verified_transaction(_USER, _pack_txn(txn_id="TXN-R"))
     sb._fail.add("revoke_purchased_credits")
 
     notif, txn = _notification("REFUND", _pack_txn(txn_id="TXN-R"))
+    with pytest.raises(svc.IAPError):
+        service.apply_notification(notif, txn)
+
+
+def test_a_successful_revoke_still_answers_apple_200(sb):
+    """Only the RPC-fault path may raise. Every applied or terminal outcome must stay 2xx or
+    Apple retries it for days against a revoke that already landed."""
+    service = _service(sb)
+    service.apply_verified_transaction(_USER, _pack_txn(txn_id="TXN-OK"))
+
+    notif, txn = _notification("REFUND", _pack_txn(txn_id="TXN-OK"))
     outcome, _u = service.apply_notification(notif, txn)
-    assert outcome == "credit_pack_revoke_failed"
+    assert outcome.startswith("credit_pack_")
+    assert "failed" not in outcome
+
+    # Replay: the tombstone short-circuits, still 2xx.
+    outcome2, _u2 = service.apply_notification(*_notification("REFUND", _pack_txn(txn_id="TXN-OK")))
+    assert "failed" not in outcome2
 
 
 def test_user_lookup_falls_back_to_credit_purchases(sb):
@@ -588,3 +614,38 @@ def test_user_lookup_falls_back_to_credit_purchases(sb):
 
     assert service.user_id_for_transaction("TXN-L") == _USER
     assert service.user_id_for_transaction("NEVER-SEEN") is None
+
+
+# ── Migration-adjacent: the revoked arm must be TERMINAL, the unmapped arm must not ────
+
+
+def test_a_revoked_purchase_and_an_unmapped_one_are_different_exceptions(sb):
+    """The distinction is money, and collapsing it breaks one case or the other.
+
+    REVOKED: Apple took the money back. It can never become grantable, so the client must
+    FINISH it — otherwise it is redelivered on every launch forever with a visible error.
+
+    UNMAPPED: our `credit_packs` row or `IAP_PRODUCT_*` mapping is missing for a purchase the
+    user really paid for. It must stay UNFINISHED so the next redelivery grants it once we fix
+    the config. Finishing that one destroys a paid purchase.
+    """
+    revoked = _pack_txn(txn_id="TXN-REV", revocationDate=1_700_000_000_000)
+    with pytest.raises(svc.PurchaseRevoked):
+        _service(sb).apply_verified_transaction(_USER, revoked)
+
+    unmapped = _pack_txn(txn_id="TXN-UNMAPPED")
+    unmapped["productId"] = "com.phan.caydex.credits.doesnotexist"
+    with pytest.raises(svc.UnknownProduct) as exc:
+        _service(sb).apply_verified_transaction(_USER, unmapped)
+    assert not isinstance(exc.value, svc.PurchaseRevoked), (
+        "an unmapped product must NOT be terminal — the client would finish it and destroy "
+        "a purchase the user paid for"
+    )
+
+
+def test_purchase_revoked_is_not_a_subclass_of_unknown_product():
+    """Ordering in billing.py's except chain depends on these being siblings, and a 400 vs a
+    409 depends on them mapping to different ErrorCodes."""
+    assert issubclass(svc.PurchaseRevoked, svc.IAPError)
+    assert not issubclass(svc.PurchaseRevoked, svc.UnknownProduct)
+    assert not issubclass(svc.UnknownProduct, svc.PurchaseRevoked)

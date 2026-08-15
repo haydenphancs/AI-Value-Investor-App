@@ -81,16 +81,22 @@ final class PaywallViewModel: ObservableObject {
     }
 
     /// The signed-in user's id, stamped onto the purchase as StoreKit's `appAccountToken` so a
-    /// transaction redelivered into a different session can be refused server-side. Set by the
-    /// view from `AppState`; nil for a guest, who cannot reach a purchase anyway.
-    var accountID: String?
+    /// transaction redelivered into a different session can be refused server-side.
+    ///
+    /// ⚠️ Passed in at TAP time, never snapshotted. It used to be assigned once from `.task`,
+    /// so a sheet that stayed mounted across a `.restoring → .authenticated` transition — a
+    /// cold launch holding a Keychain token, a transient failure leaving `profile` nil, the
+    /// backoff healing seconds later — stamped a stale or nil token onto a real purchase. The
+    /// server-side cross-account guard then had nothing to check.
+    private var accountID: String?
 
     /// Which lock opened the sheet. Carried onto the purchase events so conversion is a
     /// single funnel join (`paywall_shown` → `paywall_purchase_started` → `purchase_completed`
     /// on one `reason`) rather than a session-level correlation between three unrelated rows.
     var context: PaywallContext = .general
 
-    func purchase(tier: String) async {
+    func purchase(tier: String, accountID: String?) async {
+        self.accountID = accountID
         Analytics.shared.track(.paywallPurchaseStarted, [
             "tier": .string(tier),
             "reason": .string(context.rawValue),
@@ -119,6 +125,11 @@ final class PaywallViewModel: ObservableObject {
                 break   // user dismissed the sheet — not an error
             case .pending:
                 isPendingApproval = true
+            case .unverified:
+                // Apple could not verify its own transaction, so it was never sent
+                // to the server. Nothing is pending and nothing will arrive.
+                purchaseError = "Apple couldn't verify that purchase, so no "
+                    + "subscription were added. If you were charged, contact support."
             }
         } catch {
             purchaseError = AppError.from(error).message

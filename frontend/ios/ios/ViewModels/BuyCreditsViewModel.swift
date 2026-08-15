@@ -49,8 +49,13 @@ final class BuyCreditsViewModel: ObservableObject {
     let store: StoreKitService
 
     /// The signed-in user's id, stamped onto the purchase as StoreKit's `appAccountToken`.
-    /// Set by the view from `AppState`. See `StoreKitService.purchase(_:accountID:)`.
-    var accountID: String?
+    /// Stamped onto the purchase as StoreKit's `appAccountToken`.
+    ///
+    /// ⚠️ Passed in at TAP time, never snapshotted. It used to be assigned once from `.task`,
+    /// so a sheet that stayed mounted across a `.restoring → .authenticated` transition
+    /// stamped a stale or nil token onto a real purchase, leaving the server-side
+    /// cross-account guard with nothing to check.
+    private var accountID: String?
 
     init(
         repository: AccountRepositoryProtocol = AccountRepository.shared,
@@ -172,7 +177,8 @@ final class BuyCreditsViewModel: ObservableObject {
         store.purchasingProductID == pack.productId
     }
 
-    func purchase(_ pack: CreditPackDTO) async {
+    func purchase(_ pack: CreditPackDTO, accountID: String?) async {
+        self.accountID = accountID
         Analytics.shared.track(
             .creditPackPurchaseStarted, ["product_id": .string(pack.productId)]
         )
@@ -210,6 +216,11 @@ final class BuyCreditsViewModel: ObservableObject {
                 break   // user dismissed the sheet — not an error
             case .pending:
                 isPendingApproval = true
+            case .unverified:
+                // Apple could not verify its own transaction, so it was never sent
+                // to the server. Nothing is pending and nothing will arrive.
+                purchaseError = "Apple couldn't verify that purchase, so no "
+                    + "credits were added. If you were charged, contact support."
             }
         } catch {
             purchaseError = AppError.from(error).message

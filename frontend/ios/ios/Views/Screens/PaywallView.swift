@@ -236,10 +236,6 @@ struct PaywallView: View {
                 "tier": .string(currentTier.rawValue),
             ])
             viewModel.context = context
-            // Stamped onto the purchase as StoreKit's `appAccountToken`, so a transaction
-            // redelivered into a different signed-in session can be refused server-side
-            // rather than crediting whoever happens to be signed in when Apple retries.
-            viewModel.accountID = appState.user.profile?.id
             await viewModel.load()
         }
     }
@@ -314,7 +310,8 @@ struct PaywallView: View {
                 && store.purchasingProductID == store.productID(for: plan.tier)
 
             Button {
-                Task { await viewModel.purchase(tier: plan.tier) }
+                Task { await viewModel.purchase(tier: plan.tier,
+                                                accountID: appState.user.profile?.id) }
             } label: {
                 HStack(spacing: AppSpacing.xs) {
                     // A SPINNER, not just a word — a moving indicator settles "is this the

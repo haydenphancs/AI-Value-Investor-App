@@ -87,6 +87,17 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// account signs in, at which point the same redelivery grants it.
     case purchaseAccountMismatch(message: String)
 
+    /// Apple refunded or cancelled this purchase, so no credits were granted.
+    ///
+    /// The THIRD distinct answer to "this purchase isn't grantable", and it must stay distinct:
+    /// `.purchaseAlreadyLinked` means somebody else was credited, `.purchaseAccountMismatch`
+    /// means nobody was and the transaction must be KEPT, and this one means it can never be
+    /// grantable by anyone. Terminal AND finishable — the backend used to answer a revoked
+    /// purchase with `INVALID_INPUT`, which maps to `.validationFailed`, which
+    /// `StoreKitService.handle` does not finish, so Apple redelivered it on every launch
+    /// forever with a user-visible error.
+    case purchaseRevoked(message: String)
+
     /// No installed app can handle a URL we tried to open — `mailto:` with no mail client,
     /// an App Store link on a device without the App Store, and so on.
     ///
@@ -127,6 +138,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .rateLimited: return "rate_limited"
         case .purchaseAlreadyLinked: return "purchase_already_linked"
         case .purchaseAccountMismatch: return "purchase_account_mismatch"
+        case .purchaseRevoked: return "purchase_revoked"
         case .noAppToOpenURL: return "no_app_to_open_url"
         case .apiError(let code, _): return "api_\(code)"
         case .unknown: return "unknown"
@@ -169,6 +181,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Purchase Linked Elsewhere"
         case .purchaseAccountMismatch:
             return "Different Account"
+        case .purchaseRevoked:
+            return "Purchase Refunded"
         case .noAppToOpenURL:
             return "Can’t Open That Here"
         case .apiError:
@@ -228,6 +242,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return message
         case .purchaseAccountMismatch(let message):
             return message
+        case .purchaseRevoked(let message):
+            return message
         case .noAppToOpenURL(let what):
             return "This device has no app set up to open \(what)."
         case .rateLimited(let seconds):
@@ -275,6 +291,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // in as the account that bought it is precisely the action that claims it.
         case .purchaseAccountMismatch:
             return .signIn
+        // Terminal: a refund can never become grantable, so `.retry` would be a lie and is
+        // exactly what left the transaction redelivering.
+        case .purchaseRevoked:
+            return .contactSupport
         // NOT .retry: nothing on the device can service the URL, so a retry is guaranteed to
         // fail. NOT .contactSupport either — the link that failed may BE contact support.
         case .noAppToOpenURL:
@@ -473,6 +493,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             // purchase the user paid for. See `AppError.purchaseAccountMismatch`.
             if code == "PURCHASE_ACCOUNT_MISMATCH" {
                 return .purchaseAccountMismatch(message: message)
+            }
+            // Apple refunded it. Terminal AND finishable — the backend used to answer this
+            // with INVALID_INPUT, which maps to `.validationFailed`, which `handle` does not
+            // finish, so the transaction was redelivered on every launch forever.
+            if code == "PURCHASE_REVOKED" {
+                return .purchaseRevoked(message: message)
             }
             // A theme card tapped after it was deleted → a typed .notFound rather
             // than a generic .apiError (per the "don't fall through" rule).
@@ -739,6 +765,7 @@ extension AppError {
         case .rateLimited:         return "rate_limited"
         case .purchaseAlreadyLinked: return "purchase_already_linked"
         case .purchaseAccountMismatch: return "purchase_account_mismatch"
+        case .purchaseRevoked:        return "purchase_revoked"
         case .noAppToOpenURL:      return "no_app_to_open_url"
         // The backend's ErrorCode enum is already a stable machine-readable
         // vocabulary, so it is safe as a dimension. The message is not.

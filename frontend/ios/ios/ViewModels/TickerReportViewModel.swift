@@ -97,9 +97,40 @@ class TickerReportViewModel: ObservableObject {
         }
     }
 
-    /// Async refresh that properly awaits completion (used by .refreshable)
+    /// True when a refresh found no cached report and the only way forward COSTS 20 CREDITS.
+    /// The view renders an explicit "Regenerate" affordance; nothing spends until it is tapped.
+    @Published var needsPaidRegeneration: Bool = false
+
+    /// Pull-to-refresh. **Never bills.**
+    ///
+    /// This used to call `_fetchReport()` directly, which skips `loadReport`'s sign-in gate and
+    /// falls through to the BILLABLE Path B on a cache miss. That is not a rare state: the
+    /// backend cache is close-ALIGNED, not a rolling TTL — `is_cache_fresh` compares against
+    /// the most recent weekday 6:00pm ET — so a report generated at 5:55pm ET is stale at
+    /// 6:00pm. Open the screen, wait ten minutes, pull down, and 20 credits are gone with no
+    /// dialog and no cost disclosure. Same session, no backgrounding needed.
+    ///
+    /// A pull gesture is a reflex. It must not be able to spend money, so a miss surfaces the
+    /// cost and waits for a deliberate tap instead. That removes the whole class rather than
+    /// putting a modal in front of a gesture people repeat.
     func refresh() async {
-        await _fetchReport()
+        guard AppActions.shared.isSignedIn else {
+            AppActions.shared.requestSignIn(for: "view AI analysis")
+            return
+        }
+        await _fetchReport(allowPaidGeneration: false)
+    }
+
+    /// The deliberate, disclosed spend. Only reachable from the "Regenerate · N credits"
+    /// button the view shows when `needsPaidRegeneration` is true.
+    func regenerateForCredits() async {
+        guard AppActions.shared.isSignedIn else {
+            AppActions.shared.requestSignIn(for: "generate AI analysis")
+            return
+        }
+        needsPaidRegeneration = false
+        isLoading = true
+        await _fetchReport(allowPaidGeneration: true)
     }
 
     /// The backend `ErrorCode`s that mean "this stored report isn't available", as opposed to
@@ -135,7 +166,7 @@ class TickerReportViewModel: ObservableObject {
     }
 
     /// Core fetch logic — shared by loadReport() and refresh()
-    private func _fetchReport() async {
+    private func _fetchReport(allowPaidGeneration: Bool = true) async {
         let attempt = self.loadAttempts
         print("📊 [TickerReport] Loading report for \(self.ticker) with persona \(self.persona) (attempt \(attempt))...")
 
@@ -172,6 +203,18 @@ class TickerReportViewModel: ObservableObject {
                 //
                 // The backend documents exactly three "not there" outcomes for this route
                 // (research.py `get_research_ticker_report`), and only those may fall through.
+                // A refresh may confirm the report is gone, but must never BUY a new one.
+                // Surface the cost instead and let the user decide.
+                if !allowPaidGeneration {
+                    if Self.reportIsGenuinelyUnavailable(error) {
+                        self.needsPaidRegeneration = true
+                        self.error = nil
+                    } else {
+                        self.error = AppError.from(error).message
+                    }
+                    self.isLoading = false
+                    return
+                }
                 if Self.reportIsGenuinelyUnavailable(error) {
                     print("⚠️ [TickerReport] Cached ticker_report_data unavailable for \(reportId): \(type(of: error)): \(error.localizedDescription). Falling back to live fetch.")
                 } else {
@@ -185,6 +228,17 @@ class TickerReportViewModel: ObservableObject {
 
         // Path B — generate (or hit the 24h ticker_report_data cache
         // by ticker+persona) via the public ticker-report endpoint.
+        //
+        // ⚠️ Guarded here too, not only in Path A's catch. When `reportId` is nil — the direct
+        // navigation from search or the watchlist — Path A is skipped ENTIRELY, so a refresh
+        // arrives straight here. Without this a pull-to-refresh on any ticker opened that way
+        // bills on the first stale close-cycle boundary.
+        if !allowPaidGeneration {
+            self.needsPaidRegeneration = true
+            self.isLoading = false
+            return
+        }
+
         do {
             let response: TickerReportAPIResponse = try await APIClient.shared.request(
                 endpoint: .getTickerReport(ticker: self.ticker, persona: self.persona),

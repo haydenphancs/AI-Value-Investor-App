@@ -64,6 +64,26 @@ class PurchaseBoundToAnotherAccount(IAPError):
     """
 
 
+class PurchaseRevoked(IAPError):
+    """Apple has already refunded or cancelled this purchase. TERMINAL, and finishable.
+
+    A sibling of `UnknownProduct`, deliberately NOT the same class, because the two demand
+    opposite client behaviour and conflating them cost users a working app:
+
+    `UnknownProduct` means we cannot MAP the product — a missing `credit_packs` row, an
+    unmapped `IAP_PRODUCT_*`. That is our configuration bug against a purchase the user really
+    paid for, so the transaction must stay UNFINISHED: once the row or mapping is fixed, the
+    next redelivery grants it. Finishing it would destroy a paid purchase.
+
+    This one means Apple took the money back. It can never become grantable, so leaving it
+    unfinished re-delivers it on every launch forever, and each attempt surfaces an error to a
+    user who did nothing wrong. It carries `ErrorCode.PURCHASE_REVOKED` so the client can
+    finish it and stop.
+
+    ⚠️ `billing.py` must catch this arm BEFORE the generic `IAPError`.
+    """
+
+
 class PurchaseAccountMismatch(PurchaseBoundToAnotherAccount):
     """The transaction's `appAccountToken` names a different account, and NOTHING was recorded.
 
@@ -468,7 +488,10 @@ class IAPService:
                 "refunded or cancelled this purchase",
                 payload.get("transactionId"), product_id, user_id,
             )
-            raise UnknownProduct(
+            # NOT `UnknownProduct`: that maps to a 400 the client treats as non-terminal, so
+            # this transaction was redelivered on every launch forever with a user-visible
+            # error. A revocation can never become grantable — the client must finish it.
+            raise PurchaseRevoked(
                 f"consumable transaction {payload.get('transactionId')!r} is revoked "
                 "(refunded or cancelled); refusing to grant credits for it"
             )
@@ -1128,11 +1151,19 @@ class IAPService:
                 transaction_id=transaction_id, environment=environment
             )
             if outcome is None:
-                # RPC failed. Best-effort by design (see `revoke_purchased`): the user keeps
-                # credits they were refunded for, which is a loss, not a correctness problem —
-                # and raising here would make Apple redeliver a notification we may already
-                # have applied.
-                return "credit_pack_revoke_failed", user_id
+                # The RPC round-trip FAILED (its own outcomes are invalid/unknown/
+                # already_revoked/revoked, so `None` is strictly a DB fault). Apple only
+                # retries non-2xx, so answering 200 here consumed the REFUND notification
+                # permanently and the refunded user kept up to 1,300 never-expiring credits —
+                # `revoke_purchased` has exactly one caller and nothing sweeps
+                # `credit_purchases`, so there was no repair path at all.
+                #
+                # Raising is safe precisely because the revoke is idempotent: `revoked_at` is
+                # the tombstone, so a redelivery of an already-applied revoke short-circuits.
+                raise IAPError(
+                    f"revoke_purchased_credits RPC failed for txn={transaction_id} — "
+                    "returning 503 so Apple redelivers"
+                )
             return f"credit_pack_{outcome.get('outcome', 'revoked')}", user_id
 
         if ntype == "CONSUMPTION_REQUEST":

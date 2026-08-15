@@ -189,3 +189,32 @@ def test_refund_returns_none_when_rpc_throws(service):
     service.supabase.rpc.return_value = rpc_call
 
     assert service.refund("user-123", 5) is None
+
+
+# ── stock_id is validated BEFORE the 20-credit precharge ──────────────────────────────
+
+
+def test_an_unusable_stock_id_is_rejected_before_any_charge():
+    """An empty/blank ticker used to be charged and then refunded with ref_id='' — and
+    `refund_credits` gates its entire split lookup on `p_ref_id <> ''`, so that refund could
+    never find the debit's recorded granted/purchased split and always took the granted-first
+    fallback, converting PERMANENT purchased credits into expiring ones (Guideline 3.1.1).
+    It also burned a MAX_CONCURRENT_REPORTS_PER_USER slot for the whole close cycle.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from app.schemas.research import GenerateResearchRequest
+
+    for bad in ["", "   ", "\t", "A" * 13, "AA PL", "AA;PL", "../../etc", "AA\nPL"]:
+        with pytest.raises(ValidationError):
+            GenerateResearchRequest(stock_id=bad, investor_persona="warren_buffett")
+
+
+def test_real_tickers_still_validate():
+    """Must not reject what the shipped client sends: dots and hyphens are real (BRK.B, RDS-A)."""
+    from app.schemas.research import GenerateResearchRequest
+
+    for good in ["AAPL", "aapl", "BRK.B", "RDS-A", "F", "GOOGL"]:
+        req = GenerateResearchRequest(stock_id=good, investor_persona="warren_buffett")
+        assert req.stock_id == good

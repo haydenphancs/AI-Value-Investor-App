@@ -284,3 +284,5 @@ dump.rdb
 
 # Sentry CLI configuration file for Xcode
 frontend/ios/ios/.sentryclirc
+
+xcuserdata/

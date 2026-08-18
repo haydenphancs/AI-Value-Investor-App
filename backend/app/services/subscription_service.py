@@ -36,8 +36,8 @@ _FALLBACK_PACKS: List[dict] = [
      "price_cents": 299, "display_name": "Starter", "sort_order": 1},
     {"product_id": "com.phan.caydex.credits.plus", "credits": 280,
      "price_cents": 599, "display_name": "Plus", "sort_order": 2},
-    {"product_id": "com.phan.caydex.credits.power", "credits": 600,
-     "price_cents": 1199, "display_name": "Power", "sort_order": 3},
+    {"product_id": "com.phan.caydex.credits.power", "credits": 650,
+     "price_cents": 1299, "display_name": "Power", "sort_order": 3},
     {"product_id": "com.phan.caydex.credits.mega", "credits": 1300,
      "price_cents": 2499, "display_name": "Mega", "sort_order": 4},
 ]

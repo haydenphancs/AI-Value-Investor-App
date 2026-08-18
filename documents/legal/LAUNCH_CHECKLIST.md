@@ -62,29 +62,44 @@ because it lives in a `.swift` file, and the constant name reads like the anon k
 Confirmed clean by that same scan: `SUPABASE_JWT_SECRET`, `SUPABASE_DB_PASSWORD`, `DATABASE_URL`,
 `ADMIN_TOKEN`, and the FMP and Gemini keys appear in **zero** history blobs.
 
-## ⚠️ PARTIALLY closed 2026-08-15 — DATABASE revoked, **STORAGE STILL EXPOSED**
+## ✅ CLOSED 2026-08-15 — verified on all five surfaces, each with a control
 
-Do not tick this off. Verified per-surface with a forged-key control (403), so the probe is sound:
+| Supabase surface | forged (control) | leaked key | new key |
+|---|---|---|---|
+| Storage `/storage/v1/*` | 403 | **403** ✅ | 200 |
+| PostgREST `/rest/v1/*` | 401 | **401** ✅ | 200 |
+| GoTrue `/auth/v1/admin/*` | 401 | **401** ✅ | 200 |
+| Realtime, GraphQL | 401 | **401** ✅ | — |
 
-| Supabase surface | Leaked key | |
-|---|---|---|
-| PostgREST `/rest/v1/*` | 401 | ✅ blocked |
-| GoTrue `/auth/v1/admin/*` | 401 | ✅ |
-| Realtime, GraphQL | 401 | ✅ |
-| **Storage `/storage/v1/*`** | **200** | 🔴 **full service_role access** |
+**TWO independent steps were required, and neither alone was sufficient:**
 
-It lists every bucket and the contents of the **private** ones — `research-pdfs`, `journey-media`,
-`money-moves-media`, `book-media`. Cause: Storage validates the JWT signature against the project's
-**legacy JWT secret**, which is untouched, so *Disable JWT-based API keys* never applied to it.
+- [x] **Disable JWT-based API keys** — kills it on PostgREST, GoTrue, Realtime, GraphQL.
+      **Does not touch Storage.**
+- [x] **JWT Keys → JWT Signing Keys → Rotate, then Revoke the previous (HS256) key** — kills it on
+      **Storage**, which checks the JWT *signature* against the project signing key and therefore
+      ignores the API-key setting entirely.
+- [x] Production re-verified after each step: `/health` healthy, endpoints 200, auth still returns
+      the `AUTH_TOKEN_INVALID` contract.
 
-- [ ] 🔴 **Settings → JWT Keys → JWT Signing Keys** — migrate to a new signing key, then revoke the
-      legacy secret. That is what finally kills the leaked JWT on Storage.
-- [ ] Re-verify all surfaces afterwards, forged-key control first.
+> ⚠️ **The lesson that cost a false "closed":** verifying PostgREST alone and generalising. Storage
+> still had full service_role access to the private buckets for another hour. **Probe every surface
+> separately, always run a forged-key control first** (a probe that 200s on everything proves
+> nothing), and **allow ~60–75 s propagation** — the leaked key returned 200 twice after each
+> dashboard change before flipping.
 
-> Plan for one side effect: Storage **signed URLs** are signed with that secret, so outstanding ones
-> die on rotation. Learn audio memoises them for 6h in a module dict (`learn_audio_urls.py:89-96`) —
-> the Railway restart is the only cache-bust. **App logins are unaffected**: sessions are signed with
-> `settings.SECRET_KEY`, not the Supabase secret.
+> **Prerequisite, or rotating breaks Google/Apple sign-in:** the backend must be able to verify
+> ES256 tokens via JWKS. `verify_supabase_token` was hardcoded to `algorithms=["HS256"]`; it now
+> branches on the token's `alg` and is async. Shipped in `40bb0e4b` — Railway must be running it
+> BEFORE you rotate.
+>
+> **Two things that turn out NOT to break, both measured rather than assumed:**
+> - **Storage signed URLs survive.** They carry `kid=storage-url-signing-key_<uuid>` — a dedicated
+>   URL-signing key independent of the project JWT secret (verified by decoding a live token). So
+>   there is no signed-URL outage to schedule around and no need to restart to flush the
+>   Learn-audio 6h memo (`learn_audio_urls.py:89-96`). An earlier draft of this section claimed the
+>   opposite.
+> - **App logins survive.** Sessions are signed with `settings.SECRET_KEY`, not any Supabase key.
+>   (⚠️ The mirror image: rotating `SECRET_KEY` WOULD log out every user instantly.)
 
 **Lesson worth keeping: verifying ONE API surface and generalising is how this was briefly, and
 wrongly, marked closed.** Probe PostgREST, GoTrue, Storage, Realtime and GraphQL separately.
@@ -806,7 +821,11 @@ shows the status as `New` until all of them are. In order, because each blocks t
       information prior to signing the Paid Apps Agreement"* → **Edit Legal Entity**. This
       blocks the signature; you cannot skip ahead. *(done 2026-08-15)*
 - [x] **2. Sign the Paid Apps Agreement** *(done 2026-08-15)*
-- [ ] **3. Bank account + W-9** — both, on the same Business page.
+- [x] **3. Bank account + W-9** — both, on the same Business page. *(done 2026-08-15: US Bank
+      …8195 USD Active; W-9 submitted and Active. Bank verification cleared same-day.)*
+
+**✅ Paid Apps Agreement is `Active` as of 2026-08-15** (Aug 15 2026 – Feb 17 2027). The
+"Price unavailable" degraded state below no longer applies — product creation is unblocked.
 
 **The status string tells you which gate you are on**, and it is the fastest way to see
 where you stand: `New` (not signed) → **`Pending User Info`** (signed; bank and/or tax
@@ -910,8 +929,16 @@ against real Apple infrastructure.
       |---|---|---|---|---|
       | `com.phan.caydex.credits.starter` | `Caydex Credits Starter (130)` | **$2.99** | `Starter` | `130 credits. Never expire.` |
       | `com.phan.caydex.credits.plus` | `Caydex Credits Plus (280)` | **$5.99** | `Plus` | `280 credits. Never expire.` |
-      | `com.phan.caydex.credits.power` | `Caydex Credits Power (600)` | **$11.99** | `Power` | `600 credits. Never expire.` |
+      | `com.phan.caydex.credits.power` | `Caydex Credits Power (650)` | **$12.99** | `Power` | `650 credits. Never expire.` |
       | `com.phan.caydex.credits.mega` | `Caydex Credits Mega (1300)` | **$24.99** | `Mega` | `1,300 credits. Never expire.` |
+
+      ⚠️ **Power is $12.99/650, not $11.99/600 (migration 141).** App Store Connect does
+      not offer an $11.99 price point for it. The credits moved WITH the price and that is
+      not cosmetic: $12.99 at 600 credits is $0.021650/credit, i.e. *worse* than the cheaper
+      Plus pack at $0.021393 — the ladder would invert and
+      `test_the_pack_ladder_is_strictly_monotonic` fails the build. At $12.99 the count must
+      land between 608 and 675; 650 holds the effective rate at $0.019985, unchanged from
+      138's $0.019983.
 
       ⚠️ The `com.phan.caydex.credits.` **prefix is load-bearing**: the backend routes a
       verified transaction to the credit path by prefix (`IAP_CREDIT_PACK_PREFIX`). A pack id

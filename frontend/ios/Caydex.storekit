@@ -26,16 +26,16 @@
     "referenceName" : "Caydex Credits Plus (280)",
     "type" : "Consumable"
   }, {
-    "displayPrice" : "11.99",
+    "displayPrice" : "12.99",
     "familyShareable" : false,
     "internalID" : "6740002003",
     "localizations" : [ {
-      "description" : "600 credits. Never expire.",
+      "description" : "650 credits. Never expire.",
       "displayName" : "Power",
       "locale" : "en_US"
     } ],
     "productID" : "com.phan.caydex.credits.power",
-    "referenceName" : "Caydex Credits Power (600)",
+    "referenceName" : "Caydex Credits Power (650)",
     "type" : "Consumable"
   }, {
     "displayPrice" : "24.99",

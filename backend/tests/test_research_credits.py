@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import logging
+
 import pytest
 
 from app.services.credit_service import CreditService, CreditServiceUnavailable
@@ -154,9 +156,10 @@ def test_precharge_raises_unavailable_on_rpc_error(service):
 
 
 def test_refund_ledgered_calls_refund_credits(service):
-    _stub_rpc(service, 60)
+    # migration 142: the RPC returns {outcome, refunded, spendable}, not a bare spendable.
+    _stub_rpc(service, {"outcome": "refunded", "refunded": 20, "spendable": 60})
     result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
-    assert result == 60
+    assert result == {"outcome": "refunded", "refunded": 20, "spendable": 60}
     service.supabase.rpc.assert_called_once_with(
         "refund_credits",
         {"p_user_id": "u", "p_amount": 20,
@@ -171,6 +174,61 @@ def test_refund_ledgered_never_raises_on_rpc_error(service):
     rpc_call.execute.side_effect = RuntimeError("supabase down")
     service.supabase.rpc.return_value = rpc_call
     assert service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL") is None
+
+
+# ── migration 142: a refund that moved nothing must be distinguishable ─────────────────
+#
+# Before 142 every branch of `refund_credits` returned `spendable`, so a refund that moved ZERO
+# looked exactly like one that worked and `refund_ledgered` logged "Refunded 20 credits ..."
+# regardless. All three report sites burn the one-shot `is_refunded` CAS BEFORE refunding, so
+# the user permanently loses the credits — and iOS then shows a "[Refunded]" chip off that same
+# flag. The only signal was a Postgres RAISE WARNING that PostgREST never surfaces.
+
+
+def test_a_refund_that_moved_nothing_is_reported_as_an_error(service, caplog):
+    """THE regression guard. `no_matching_debit` means the user is owed credits and the
+    one-shot guard is spent — it must reach Sentry, which means logger.ERROR."""
+    _stub_rpc(service, {"outcome": "no_matching_debit", "refunded": 0, "spendable": 140})
+    with caplog.at_level(logging.ERROR):
+        service.refund_ledgered("u", 20, reason="report_refund", ref_id="MISMATCH")
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "a refund that moved nothing logged no ERROR — it cannot reach Sentry"
+    msg = errors[0].getMessage()
+    assert "REFUND LEAK" in msg, f"missing the greppable marker: {msg!r}"
+    assert "MISMATCH" in msg and "20" in msg, f"missing ids for a manual correction: {msg!r}"
+
+
+def test_an_already_refunded_charge_does_NOT_page_anyone(service, caplog):
+    """The other half, and it matters as much. A replayed settlement is benign; escalating it
+    would trade a silent-money bug for alert fatigue, which is how the loud one gets ignored."""
+    _stub_rpc(service, {"outcome": "already_refunded", "refunded": 0, "spendable": 140})
+    with caplog.at_level(logging.DEBUG):
+        service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "an idempotent replay raised an ERROR — Sentry captures at event_level=ERROR, so this "
+        "would page on every double-settled report"
+    )
+    assert any("already" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_a_partial_refund_does_not_claim_the_full_amount(service, caplog):
+    """The LEAST() caps can move less than requested; the old log printed the REQUESTED amount
+    and read as a clean refund."""
+    _stub_rpc(service, {"outcome": "refunded", "refunded": 5, "spendable": 105})
+    with caplog.at_level(logging.DEBUG):
+        service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "PARTIAL REFUND" in joined, f"a 5-of-20 refund was not flagged partial: {joined!r}"
+
+
+def test_the_pre_142_integer_contract_still_works(service):
+    """Deploy order is code-then-migration, so this method MUST tolerate the old bare-integer
+    return. Without it, `int(dict)`'s mirror — a dict-expecting parse of an int — would break
+    every refund in the gap."""
+    _stub_rpc(service, 60)
+    result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    assert result["spendable"] == 60 and result["outcome"] == "refunded"
+    assert result["refunded"] is None, "an unknown moved-amount must not be guessed at"
 
 
 def test_try_charge_returns_none_only_for_genuine_insufficiency(service):

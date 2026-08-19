@@ -47,7 +47,7 @@ from app.services.agents.persona_config import PERSONA_KEYS
 from app.services.agents.ticker_report_data_collector import (
     patch_wall_street_consensus_live,
 )
-from app.services.credit_service import CreditService, CreditServiceUnavailable
+from app.services.credit_service import refund_did_not_happen, CreditService, CreditServiceUnavailable
 from app.services.research_reconciliation_service import claim_and_mark_failed
 from app.services.ticker_report_cache import (
     current_close_cycle_start,
@@ -61,6 +61,13 @@ logger = logging.getLogger(__name__)
 # answer different questions (that one is "can the sweep claim this?", this one is "does
 # deleting this owe a refund?") and coupling them would tie a UI action to a sweeper detail.
 _REFUNDABLE_ON_DELETE = ("pending", "processing", "failed")
+
+
+def _outcome_name(refunded) -> str:
+    """Label for a `refund_ledgered` result in a log line, whatever shape it arrived in."""
+    if refunded is None:
+        return "rpc_failed"
+    return refunded.get("outcome", "unknown") if isinstance(refunded, dict) else "legacy_int"
 
 router = APIRouter()
 
@@ -322,12 +329,16 @@ async def generate_research_report(
             user["id"], CreditService.DEEP_RESEARCH_COST,
             reason="report_refund", ref_id=ticker,
         )
-        if refunded is None:
+        # `None` is a transport fault; a business no-op arrives as an outcome. Both leave the
+        # user charged, so both belong on this line — checking only `is None` missed the
+        # no-op entirely, which is the case migration 142 exists to surface.
+        if refund_did_not_happen(refunded):
             logger.error(
                 "REFUND LEAK: charged %s credits to user=%s for %s but the "
-                "research_reports insert AND the refund both failed — no row for "
-                "the reconciliation sweep to catch; manual credit correction needed",
+                "research_reports insert AND the refund both failed (outcome=%s) — no row "
+                "for the reconciliation sweep to catch; manual credit correction needed",
                 CreditService.DEEP_RESEARCH_COST, user["id"], ticker,
+                _outcome_name(refunded),
             )
         return make_error_response(
             ErrorCode.REPORT_GENERATION_FAILED,
@@ -791,17 +802,19 @@ async def delete_report(
         refunded = CreditService().refund_ledgered(
             user["id"], amount, reason="report_refund_deleted", ref_id=ticker,
         )
-        if refunded is None:
+        if refund_did_not_happen(refunded):
             logger.error(
                 "REFUND LEAK: user=%s deleted in-flight report=%s (%s) charged %s credits; "
-                "the row is now 'deleted' and unreachable by the sweep, and the refund RPC "
-                "failed — manual credit correction needed",
+                "the row is now 'deleted' and unreachable by the sweep, and the refund did "
+                "not happen (outcome=%s) — manual credit correction needed",
                 user["id"], report_id, ticker, amount,
+                _outcome_name(refunded),
             )
         else:
             logger.info(
                 "Refunded %s credits for deleted in-flight report %s (user %s)",
-                amount, report_id, user["id"],
+                refunded.get("refunded", amount) if isinstance(refunded, dict) else amount,
+                report_id, user["id"],
             )
     else:
         # Terminal (ready), already refunded, or not ours — plain soft-delete. Unconditional

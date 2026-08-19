@@ -51,7 +51,7 @@ from app.utils.supabase_errors import (
     is_transient_supabase_error,
     retry_idempotent_async,
 )
-from app.services.credit_service import CreditService
+from app.services.credit_service import CreditService, refund_did_not_happen
 
 logger = logging.getLogger(__name__)
 
@@ -176,22 +176,42 @@ async def claim_and_mark_failed(
             "claim_and_mark_failed: report %s has no ticker — refunding %s credits without a "
             "split lookup (granted-first fallback)", report_id, amount,
         )
+    # Inspected, not wrapped in try/except. `refund_ledgered` NEVER raises — it catches and
+    # returns None — so the `except Exception` that used to guard this call was dead code, and
+    # this is the ONLY log line carrying `report_id` for a manual correction. It could not fire.
+    #
+    # We already won the claim (is_refunded=True), so we never retry — biased to under-refund
+    # (safe) over double-refund. That bias is deliberate; what was wrong is that it was silent.
     try:
-        CreditService().refund_ledgered(
+        outcome = CreditService().refund_ledgered(
             user_id, amount, reason="report_refund_reconciled", ref_id=ticker,
         )
-        logger.info(
-            "Refunded %s credits for failed report %s (user %s)",
-            amount, report_id, user_id,
-        )
     except Exception as e:
-        # We already won the claim (is_refunded=True), so we never retry —
-        # biased to under-refund (safe) over double-refund. Log loudly with
-        # everything needed for a manual credit correction.
+        # `refund_ledgered` does not raise, but CreditService() construction could, and this
+        # runs inside a background sweep where an escape kills the whole pass. Normalised to
+        # the same "did not happen" shape so there is ONE reporting path below.
+        logger.warning(
+            "claim_and_mark_failed: refund call raised for report %s (%s: %s)",
+            report_id, type(e).__name__, e,
+        )
+        outcome = None
+    # None = transport fault; the business no-ops carry their own outcome. Both mean the user
+    # keeps neither the report nor the credits, and the CAS is spent.
+    failed = refund_did_not_happen(outcome)
+    if failed:
         logger.error(
-            "REFUND LEAK: report %s claimed (is_refunded=True) but refund of "
-            "%s credits to user %s FAILED: %s: %s — manual correction needed",
-            report_id, amount, user_id, type(e).__name__, e,
+            "REFUND LEAK: report %s claimed (is_refunded=True) but the refund of %s credits "
+            "to user %s did not happen (outcome=%s, ref_id=%s) — the claim is spent so nothing "
+            "will retry; manual correction needed. The client will still show '[Refunded]'.",
+            report_id, amount, user_id,
+            "rpc_failed" if outcome is None else outcome.get("outcome"), ticker,
+        )
+    else:
+        logger.info(
+            "Refunded %s credits for failed report %s (user %s, outcome=%s)",
+            outcome.get("refunded", amount) if isinstance(outcome, dict) else amount,
+            report_id, user_id,
+            outcome.get("outcome") if isinstance(outcome, dict) else "legacy_int",
         )
     return True
 

@@ -166,12 +166,21 @@ class _Credits:
         self._ledger(-amount, -granted_taken, -purchased_taken, reason, ref_id)
         return self.spendable
 
-    def refund_credits(self, amount: int, reason="report_refund", ref_id=None) -> Optional[int]:
-        """Reverse the RECORDED split of the spend this refunds."""
+    def refund_credits(self, amount: int, reason="report_refund", ref_id=None) -> dict:
+        """Reverse the RECORDED split of the spend this refunds.
+
+        migration 142: returns {outcome, refunded, spendable} instead of a bare `spendable`.
+        Every branch of the SQL used to return the same integer, so a refund that moved ZERO
+        was indistinguishable from one that worked — and the caller logged success either way.
+        """
         if amount is None or amount <= 0:
-            return self.spendable
+            return {"outcome": "invalid", "reason": "non_positive_amount",
+                    "refunded": 0, "spendable": self.spendable}
         debit_id = None
         spent_granted = spent_purch = None
+        # Mirrors the SQL's `v_outcome TEXT := 'refunded'`: only the no-match branch overrides
+        # it, so a genuine zero-cap refund still reports success-that-moved-nothing.
+        outcome = "refunded"
         if ref_id:
             # migration 124: newest debit of this amount on this ref_id that NOTHING has
             # reversed yet. The un-reversed filter is the whole fix — without it two refunds
@@ -208,14 +217,25 @@ class _Credits:
             # user's CURRENT spend rather than by the debit, so a second refund of the same
             # charge MINTED credits out of unrelated activity.
             back_granted = back_purch = 0
+            # migration 142: say WHICH of the two it was. Re-scan WITHOUT the un-reversed
+            # filter: a hit means the debit exists but was already given back (benign replay);
+            # a miss means the ref_id/amount matches no charge at all and the user is OWED.
+            outcome = "no_matching_debit"
+            for row in reversed(self.ledger):
+                if row["reason"] in ("pack_revoked", "tier_revoked"):
+                    continue
+                if row["ref_id"] == ref_id and row["delta"] == -amount:
+                    outcome = "already_refunded"
+                    break
         if back_granted + back_purch == 0:
-            return self.spendable
+            return {"outcome": outcome, "refunded": 0, "spendable": self.spendable}
         self.used -= back_granted
         self.purchased_used -= back_purch
         self._check()
         self._ledger(back_granted + back_purch, back_granted, back_purch, reason, ref_id,
                      reverses_id=debit_id)
-        return self.spendable
+        return {"outcome": "refunded", "refunded": back_granted + back_purch,
+                "spendable": self.spendable}
 
     # ── migration 117 ───────────────────────────────────────────────────────
     def add_purchased_credits(self, txn: str, credits: int, environment="Production",
@@ -953,3 +973,44 @@ def test_a_total_inflated_by_anything_but_an_allocation_cannot_block_a_grant():
 
     assert c.tier_alloc == 1200, "the grant did not record the allocation it issued"
     assert c.remaining >= 1200, "a paid grant was blocked by a total it did not set"
+
+
+# ── migration 142: a refund that moved nothing must say WHY ───────────────────────────
+
+
+def test_a_replayed_refund_reports_already_refunded_not_a_failure():
+    """The benign half. A second settlement of the same charge is idempotent, not a fault —
+    reporting it as one would page on every double-settled report, and alert fatigue is how
+    the genuine `no_matching_debit` ends up ignored."""
+    c = _Credits(total=50, used=0)
+    c.spend_credits(20, ref_id="AAPL")
+    first = c.refund_credits(20, ref_id="AAPL")
+    assert first["outcome"] == "refunded" and first["refunded"] == 20
+
+    second = c.refund_credits(20, ref_id="AAPL")
+    assert second["outcome"] == "already_refunded", (
+        "a replayed refund must be distinguishable from one that found no charge at all"
+    )
+    assert second["refunded"] == 0
+    assert c.used == 0, "the replay must not move credits a second time"
+
+
+def test_a_mismatched_ref_id_reports_no_matching_debit():
+    """The loud half, and the reason this outcome exists. A refund keyed differently from its
+    charge refunds nothing (139 stopped it MINTING), and the one-shot is_refunded CAS is
+    already spent — so the user is permanently short and nobody finds out unless this says so.
+    """
+    c = _Credits(total=50, used=0)
+    c.spend_credits(20, ref_id="NVDA")
+    out = c.refund_credits(20, ref_id="r1-report-id")   # the historical bug's wrong key
+
+    assert out["outcome"] == "no_matching_debit"
+    assert out["refunded"] == 0
+    assert c.used == 20, "nothing was refunded — the user is still owed"
+
+
+def test_a_refund_whose_caps_resolve_to_zero_is_still_a_success():
+    """Not every zero is a failure: with nothing recorded as spent there is nothing to give
+    back. That must stay `refunded`, or the loud outcome loses its meaning."""
+    out = _Credits(total=50, used=0).refund_credits(20, ref_id=None)
+    assert out["outcome"] == "refunded" and out["refunded"] == 0

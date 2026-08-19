@@ -115,13 +115,16 @@ class FakeCreditService:
     calls = []  # class-level so every instance records to the same log
     ref_ids = []  # recorded separately so the (user, amount) assertions above stay readable
     raise_on_refund = False
+    # migration 142: the real method returns {outcome, refunded, spendable}, or None strictly
+    # for a transport fault. Override per-test to exercise the no-op outcomes.
+    outcome = {"outcome": "refunded", "refunded": 20, "spendable": 999}
 
     def refund_ledgered(self, user_id, amount, *, reason=None, ref_id=None):
         if FakeCreditService.raise_on_refund:
             raise RuntimeError("refund RPC down")
         FakeCreditService.calls.append((user_id, amount))
         FakeCreditService.ref_ids.append(ref_id)
-        return 999
+        return FakeCreditService.outcome
 
 
 @pytest.fixture(autouse=True)
@@ -129,6 +132,8 @@ def _patch_credit_service(monkeypatch):
     FakeCreditService.calls = []
     FakeCreditService.ref_ids = []
     FakeCreditService.raise_on_refund = False
+    FakeCreditService.outcome = {
+        "outcome": "refunded", "refunded": 20, "spendable": 999}
     monkeypatch.setattr(recon, "CreditService", FakeCreditService)
     yield
 
@@ -617,3 +622,40 @@ async def test_a_claimed_orphan_is_invisible_to_the_sweep():
 
     assert won is False, "the sweep re-claimed a row the endpoint had already refunded"
     assert FakeCreditService.calls == [], "a second refund was issued for one charge"
+
+
+# ── migration 142: the reconciliation site must SEE a refund that moved nothing ────────
+
+
+@pytest.mark.asyncio
+async def test_a_no_op_refund_is_logged_with_the_report_id(caplog):
+    """The site's `except Exception` was dead code — `refund_ledgered` never raises, it catches
+    and returns None — so this, the ONLY leak log carrying `report_id` for a manual correction,
+    could never fire. The claim (is_refunded=True) is already spent by the time it matters."""
+    import logging
+
+    FakeCreditService.outcome = {
+        "outcome": "no_matching_debit", "refunded": 0, "spendable": 140}
+    sb = FakeSupabase([_row()])
+    with caplog.at_level(logging.ERROR):
+        await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "a refund that moved nothing produced no ERROR at the reconciliation site"
+    msg = errors[0].getMessage()
+    assert "REFUND LEAK" in msg and "r1" in msg, (
+        f"the leak line must carry the report_id a human needs to correct it: {msg!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_successful_reconciled_refund_does_not_log_a_leak(caplog):
+    """The success log used to fire unconditionally — including when the refund did nothing."""
+    import logging
+
+    FakeCreditService.outcome = {"outcome": "refunded", "refunded": 5, "spendable": 140}
+    sb = FakeSupabase([_row()])
+    with caplog.at_level(logging.DEBUG):
+        await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]

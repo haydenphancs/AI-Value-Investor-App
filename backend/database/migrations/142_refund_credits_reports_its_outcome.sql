@@ -47,15 +47,40 @@
 --     recreated function comes back with PUBLIC EXECUTE — a credit-MOVING function reachable
 --     by anyone holding the shipped anon key.
 --   * DROP + CREATE are in the same BEGIN;/COMMIT; so no window exists where the function is
---     absent. A concurrent call blocks on the lock and then sees the new definition.
+--     absent. The safety comes from transactional ATOMICITY, not from blocking: executing a
+--     function takes no lock on it, so a call that starts mid-migration neither blocks nor
+--     waits — it plans against the pre-drop catalog snapshot and runs the OLD integer-returning
+--     body to completion. That is precisely why the deploy order below is load-bearing: during
+--     the apply, some calls still answer with a bare INTEGER.
 --
 -- ⚠️ DEPLOY ORDER IS NOT OPTIONAL. `refund_ledgered` did `int(result.data)`, and `int(dict)`
 -- raises TypeError OUTSIDE its try — so applying this before the matching backend deploy 500s
 -- every refund. Ship the int-tolerant Python FIRST, then apply this. The tolerance is marked
 -- for removal in credit_service.py.
 
+-- ── Outcomes, and two things they deliberately do NOT prove ──────────────────────────────
+--
+--   refunded          moved `refunded` credits (0 only when there was genuinely nothing to
+--                     give back and no debit was matched)
+--   capped_to_zero    a debit WAS matched but the pools absorbed none of it -> user is OWED
+--   already_refunded  the debit exists and was already reversed -> benign replay
+--   no_matching_debit no charge matches this ref_id/amount -> user is OWED
+--   guest / invalid / no_credits_row   degenerate no-ops
+--
+-- ⚠️ `already_refunded` is inferred from "the paired debit carries a reverses_id row", and
+-- migration 124 stamps that even when the earlier refund moved LESS than the full amount. So a
+-- replay after a PARTIAL refund is reported benign while a shortfall stands. Inherited from
+-- 124; recorded here because 142 is what attaches the "do not page" meaning to that label.
+--
+-- ⚠️ A `refunded: 0` with no matched debit (no ref_id supplied) stays a success. There is no
+-- debit to point at, so "owed" is unprovable — claiming it would be a false alarm.
+
 BEGIN;
 
+-- hook note: `.claude/hooks/post-tool-use-sql.sh` warns "CREATE FUNCTION without OR REPLACE".
+-- That warning is wrong here and non-blocking: changing a return type REQUIRES DROP + CREATE
+-- (CREATE OR REPLACE fails with 42P13), and function identity is name + argument types, so the
+-- IF EXISTS below matches both the pre-142 INTEGER and post-142 JSONB versions.
 DROP FUNCTION IF EXISTS public.refund_credits(UUID, INTEGER, TEXT, TEXT);
 
 CREATE FUNCTION public.refund_credits(
@@ -182,12 +207,30 @@ BEGIN
     END IF;
 
     IF v_back_granted + v_back_purch = 0 THEN
+        -- A MATCHED debit whose caps collapsed to zero is NOT a success. The reachable path is
+        -- the month boundary: `ensure_credit_period` resets `used` to 0, so a report charged in
+        -- month M and refunded in M+1 (the reconciliation sweep crosses that boundary on its
+        -- own schedule) reads v_old_used = 0 and both LEAST() caps go to zero. The user was
+        -- charged, is owed, and `research_reports.is_refunded` is already burned.
+        --
+        -- Labelling that 'refunded' would hand the caller a success for the exact silent-money
+        -- case this migration exists to surface. `v_debit_id IS NOT NULL` is already known here,
+        -- so it costs nothing to say so.
+        --
+        -- Deliberately NOT applied when `NOT v_searched` (no ref_id to search by): there is no
+        -- debit to point at, so "owed" is unprovable and claiming it would be a false alarm.
+        IF v_outcome = 'refunded' AND v_debit_id IS NOT NULL THEN
+            v_outcome := 'capped_to_zero';
+            RAISE WARNING 'refund_credits: matched debit % for user=% ref_id=% but the pools '
+                          'could absorb none of the % credits (used=%, purchased_used=%) '
+                          '— refunding nothing',
+                          v_debit_id, p_user_id, p_ref_id, p_amount, v_old_used, v_old_pused;
+        END IF;
+
         SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
-        -- `v_outcome` is still 'refunded' when the caps genuinely resolved to zero (nothing
-        -- left to give back) — that is a success that moved 0, exactly as
-        -- revoke_purchased_credits reports `reclaimed: 0`. The two diagnostic outcomes above
-        -- are what distinguish it from a refund that should have moved something.
+        -- `refunded` with 0 survives only for the genuinely-nothing-to-give-back case, exactly
+        -- as revoke_purchased_credits reports `reclaimed: 0`.
         RETURN jsonb_build_object(
             'outcome', v_outcome, 'refunded', 0, 'spendable', v_spendable);
     END IF;
@@ -225,6 +268,15 @@ COMMENT ON FUNCTION public.refund_credits(UUID, INTEGER, TEXT, TEXT) IS
 -- CREATE OR REPLACE, which preserves privileges; this one was DROPPED, which discards them. Omit
 -- this and a credit-MOVING function comes back with PUBLIC EXECUTE, reachable by anyone holding
 -- the shipped anon key.
+-- ⚠️ APPLY AS THE ROLE THAT OWNS public.user_credits (Supabase Studio's `postgres`).
+-- CREATE OR REPLACE preserves `proowner`; DROP + CREATE RE-OWNS the function to whoever applies
+-- it. This function is SECURITY DEFINER with `SET row_security = off`, and row_security=off
+-- ERRORS rather than silently filtering unless the executing role owns the table or has
+-- BYPASSRLS — so applying as the wrong role makes every refund fail at runtime.
+--
+-- Verify after applying:
+--   SELECT proacl, proowner::regrole FROM pg_proc
+--    WHERE oid = 'public.refund_credits(uuid,integer,text,text)'::regprocedure;
 REVOKE ALL ON FUNCTION public.refund_credits(UUID, INTEGER, TEXT, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.refund_credits(UUID, INTEGER, TEXT, TEXT) TO service_role;
 

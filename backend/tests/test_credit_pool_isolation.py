@@ -228,6 +228,11 @@ class _Credits:
                     outcome = "already_refunded"
                     break
         if back_granted + back_purch == 0:
+            # migration 142: a MATCHED debit whose caps collapsed to zero is not a success —
+            # the reachable path is a charge and a refund straddling ensure_credit_period's
+            # monthly reset of `used`. Not applied without a matched debit: unprovable.
+            if outcome == "refunded" and debit_id is not None:
+                outcome = "capped_to_zero"
             return {"outcome": outcome, "refunded": 0, "spendable": self.spendable}
         self.used -= back_granted
         self.purchased_used -= back_purch
@@ -1014,3 +1019,27 @@ def test_a_refund_whose_caps_resolve_to_zero_is_still_a_success():
     back. That must stay `refunded`, or the loud outcome loses its meaning."""
     out = _Credits(total=50, used=0).refund_credits(20, ref_id=None)
     assert out["outcome"] == "refunded" and out["refunded"] == 0
+
+
+def test_a_matched_debit_that_refunds_nothing_is_not_reported_as_success():
+    """migration 142. `ensure_credit_period` zeroes `used` at the month boundary, so a report
+    charged in month M and refunded in M+1 — which the reconciliation sweep does on its own
+    schedule — matches its debit but can absorb none of it. The user is owed and the one-shot
+    is_refunded guard is already spent, so labelling this `refunded` hides the exact
+    silent-money case this migration exists to surface."""
+    c = _Credits(total=50, used=0)
+    c.spend_credits(20, ref_id="AAPL")
+    assert c.used == 20
+
+    c.period_due = True            # the monthly reset lands between charge and refund
+    c.ensure_credit_period()
+    assert c.used == 0, "precondition: the reset zeroed the granted pool"
+
+    out = c.refund_credits(20, ref_id="AAPL")
+    assert out["refunded"] == 0
+    assert out["outcome"] == "capped_to_zero", (
+        "a matched debit that moved nothing was reported as a successful refund"
+    )
+
+    from app.services.credit_service import refund_did_not_happen
+    assert refund_did_not_happen(out), "the call sites would not log a REFUND LEAK for this"

@@ -74,3 +74,57 @@ async def test_completion_delivers_when_row_still_live(monkeypatch):
     await svc.generate_report("rid", "AAPL", "warren_buffett", "u1")
 
     upsert.assert_awaited_once()
+
+
+# ── Terminal statuses are owned by someone else ──────────────────────────────
+#
+# `_update_status` was an unconditional `UPDATE ... WHERE id = ?`, so it wrote over
+# whatever terminal state a row had reached. Two live resurrections came out of that:
+#
+#   * the user DELETED an in-flight report (status='deleted', already refunded) and a
+#     later worker failure rewrote it to 'failed' — the card reappeared in the Reports
+#     list, complete with a Retry button, for a report they had already been refunded;
+#   * the reconciliation sweep claimed an orphan ('failed' + is_refunded=True) and the
+#     still-running worker's next progress tick wrote 'processing' back over it,
+#     making a fully-settled row look live again.
+
+
+def _status_recorder() -> tuple[MagicMock, dict]:
+    seen: dict = {}
+    q = MagicMock()
+    for m in ("table", "update", "eq"):
+        getattr(q, m).return_value = q
+
+    def _in(col, vals):
+        seen.setdefault("in_", []).append((col, list(vals)))
+        return q
+
+    q.in_.side_effect = _in
+    q.execute.return_value = MagicMock(data=[])
+    return q, seen
+
+
+@pytest.mark.parametrize(
+    "status,progress",
+    [("processing", 5), ("failed", 0), ("completed", 100)],
+)
+def test_every_status_write_is_scoped_to_an_active_row(status, progress):
+    svc = ResearchService.__new__(ResearchService)
+    q, seen = _status_recorder()
+    svc.supabase = q
+
+    svc._update_status("rid", status, progress, current_step="x")
+
+    assert seen.get("in_"), (
+        f"_update_status({status!r}) issued an UNSCOPED update — it can overwrite a "
+        "'deleted' row the user already had refunded, or revive one the sweep settled"
+    )
+    assert ("status", ["pending", "processing"]) in seen["in_"]
+
+
+def test_status_writes_never_admit_a_terminal_state_to_the_filter():
+    """The filter is the guard; widening it to include a terminal status would
+    reintroduce the resurrection while leaving this file's other tests green."""
+    assert rs._ACTIVE_STATUSES == ["pending", "processing"]
+    for terminal in ("completed", "failed", "deleted"):
+        assert terminal not in rs._ACTIVE_STATUSES

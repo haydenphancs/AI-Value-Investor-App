@@ -191,8 +191,14 @@ async def _fetch_jwks() -> dict[str, Any]:
             logger.info("Supabase JWKS refreshed: %d key(s)", len(keys))
             return keys
     except Exception as e:
-        # Non-fatal by design: a JWKS outage must degrade to the legacy HS256 path rather
-        # than locking every Supabase-authenticated user out.
+        # Non-fatal by design: return {} and let the caller fall through rather than raise.
+        #
+        # ⚠️ No longer a real fallback for CURRENT tokens. The project's legacy HS256 signing
+        # key was REVOKED on 2026-08-15, so Supabase issues ES256 only — a JWKS outage means
+        # Supabase-issued tokens cannot be verified until it recovers. Survivable because this
+        # is not the primary path: `_user_id_from_token` tries the app's OWN `SECRET_KEY`
+        # access token first, and only social sign-in's session-exchange depends on this.
+        # Raising here would turn a transient JWKS blip into a 500 rather than a clean 401.
         logger.warning("Supabase JWKS fetch failed (%s: %s)", type(e).__name__, e)
         return {}
 

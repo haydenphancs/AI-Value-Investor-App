@@ -329,7 +329,29 @@ class ResearchAgent:
                     return await self._fallback_text_analysis(out, evidence)
                 break
 
-            return final_text or "Research analysis complete."
+            if final_text:
+                return final_text
+
+            # Every round ended in a tool call and the budget ran out before the model
+            # ever called `research_complete` — so there IS no synthesis. This used to
+            # return the literal string "Research analysis complete.", which is not a
+            # sentinel anything checks: it flows into `build_stage_a_prompt` as
+            # `deep_findings` and becomes the entire deep-research premium the user paid
+            # 20 credits for, on a report that is otherwise indistinguishable from a
+            # good one (not degraded, delivered, cached, and re-sold to the next buyer
+            # through the shared cross-user lookup). The agentic loop is the ONLY thing
+            # this path has over the free direct path, so silently shipping nothing from
+            # it is the most expensive no-op in the product.
+            #
+            # Do the synthesis the loop never got to instead. The single-pass fallback
+            # already exists for the "loop blew up" case and sees the same evidence.
+            logger.warning(
+                "Agent %s exhausted all %d rounds without calling research_complete — "
+                "running the single-pass synthesis so Stage A gets real findings "
+                "instead of a placeholder",
+                self.persona.key, MAX_AGENTIC_ROUNDS,
+            )
+            return await self._fallback_text_analysis(out, evidence)
 
         except Exception as e:
             logger.error(

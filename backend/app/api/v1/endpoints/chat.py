@@ -731,6 +731,9 @@ async def send_chat_message(
             reference_id=ref_id,
             context_is_replayed=context_is_replayed,
             reader_lens=reader_lens,
+            # Owner-scoped grounding: lets TICKER_REPORT read THIS user's frozen
+            # report row instead of only the close-aligned shared cache.
+            user_id=user["id"],
         )
 
         # Output enforcement (OWASP LLM02/LLM07): redact high-confidence provider /
@@ -999,6 +1002,7 @@ async def stream_chat_message(
                 reference_id=ref_id,
                 context_is_replayed=context_is_replayed,
                 reader_lens=reader_lens,
+                user_id=user["id"],
             )
             if settings.CHAT_MULTI_AGENT_ENABLED:
                 prep, route = await asyncio.gather(
@@ -1112,6 +1116,7 @@ async def stream_chat_message(
                     # Same lens the aborted stream used — a fallback that answered
                     # differently would be visible to the user as a personality change.
                     reader_lens=reader_lens,
+                    user_id=user["id"],
                 )
                 content = ai_result.get("content")
                 citations = ai_result.get("citations")

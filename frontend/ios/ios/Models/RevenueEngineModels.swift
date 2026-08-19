@@ -63,7 +63,19 @@ struct RevenueSegment: Identifiable {
 
     // MARK: - Computed Properties
 
-    /// Growth rate as decimal (e.g., 0.80 = 80% growth)
+    /// Is there a prior-year figure to compute YoY against?
+    ///
+    /// FMP's product segmentation re-keys segments between fiscal years — a line
+    /// broken out for the first time, or simply renamed, has no match in the prior
+    /// year, and the backend's `prior_lookup.get(name, 0.0)` then hands us a 0.
+    /// `growth` collapses that to 0.0, which the card rendered as a confident
+    /// "Stable (+0.0% YoY)" — a fabricated flat for a segment we have no history for.
+    /// The role heuristics still need a number, so `growth` keeps returning 0; the
+    /// UI asks THIS before printing a percentage.
+    var hasPriorAnchor: Bool { previousRevenue > 0 }
+
+    /// Growth rate as decimal (e.g., 0.80 = 80% growth). 0 when there is no prior
+    /// anchor — check `hasPriorAnchor` before showing it as a rate.
     var growth: Double {
         guard previousRevenue > 0 else { return 0 }
         return (currentRevenue - previousRevenue) / previousRevenue
@@ -95,6 +107,7 @@ struct RevenueSegment: Identifiable {
     /// Auto-formatted growth text based on growth rate
     /// Examples: "Hyper-growth (+80% YoY)", "Stable (+2% YoY)", "Declining (-15% YoY)"
     var formattedGrowth: String {
+        guard hasPriorAnchor else { return "No prior-year figure" }
         let percentage = growth * 100
         let sign = growth >= 0 ? "+" : ""
         let percentString = String(format: "%@%.1f%%", sign, percentage)
@@ -116,6 +129,7 @@ struct RevenueSegment: Identifiable {
 
     /// Growth trend color
     var growthColor: Color {
+        guard hasPriorAnchor else { return AppColors.textMuted }
         if growth >= 0.05 {
             return AppColors.bullish
         } else if growth >= -0.05 {
@@ -141,18 +155,21 @@ struct ReportRevenueEngineData {
     func roleForSegment(_ segment: RevenueSegment) -> RevenueSegmentRole {
         guard !segments.isEmpty else { return .diversified }
 
-        // Find segment with highest growth
-        let maxGrowth = segments.map { $0.growth }.max() ?? 0
-        let minGrowth = segments.map { $0.growth }.min() ?? 0
+        // Growth-based roles are computed over segments that actually HAVE a prior
+        // year. A segment with no anchor reports growth 0, which would otherwise let
+        // it win "most negative growth" against a field of real decliners.
+        let anchored = segments.filter { $0.hasPriorAnchor }
+        let maxGrowth = anchored.map { $0.growth }.max() ?? 0
+        let minGrowth = anchored.map { $0.growth }.min() ?? 0
         let maxRevenue = segments.map { $0.currentRevenue }.max() ?? 0
 
         // Rule 1: Rising Segment - highest growth (and growth > 10%)
-        if segment.growth == maxGrowth && segment.growth > 0.10 {
+        if segment.hasPriorAnchor && segment.growth == maxGrowth && segment.growth > 0.10 {
             return .risingSegment
         }
 
         // Rule 2: Headwind - most negative growth (and growth < -5%)
-        if segment.growth == minGrowth && segment.growth < -0.05 {
+        if segment.hasPriorAnchor && segment.growth == minGrowth && segment.growth < -0.05 {
             return .headwind
         }
 

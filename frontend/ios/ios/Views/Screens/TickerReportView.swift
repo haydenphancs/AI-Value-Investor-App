@@ -104,6 +104,16 @@ struct TickerReportView: View {
             headerSection(report)
 
             ZStack(alignment: .bottom) {
+                // A failed pull-to-refresh, shown OVER the report rather than instead of
+                // it. `body` renders `reportData` before `error`, so the ViewModel's
+                // `error` field is unreachable once a report is loaded — this is the only
+                // surface a refresh failure has.
+                if let message = viewModel.transientError {
+                    refreshErrorBanner(message)
+                        .zIndex(1)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: AppSpacing.xxl) {
                         // Agent Badge + Score
@@ -157,6 +167,42 @@ struct TickerReportView: View {
                 )
             }
         }
+    }
+
+    /// Dismissible banner for a refresh that failed while a report is on screen.
+    private func refreshErrorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: AppSpacing.sm) {
+            Image(systemName: "wifi.exclamationmark")
+                .foregroundColor(AppColors.caution)
+                .font(AppTypography.iconSmall)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Couldn't refresh")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                Text(message)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Button {
+                withAnimation { viewModel.transientError = nil }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(AppTypography.iconTiny)
+                    .foregroundColor(AppColors.textMuted)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(AppSpacing.md)
+        .background(
+            RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                .cardFill(AppColors.cardBackgroundNested)
+        )
+        .padding(.horizontal, AppSpacing.lg)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Header Section
@@ -430,15 +476,30 @@ struct TickerReportView: View {
         guard !text.isEmpty else { return }
         viewModel.aiInputText = ""
 
-        // Context is fetched server-side by reference_id ("TICKER|persona") — no
-        // more shipping the executive summary from the client on every chat.
+        // Context is fetched server-side by reference_id — no more shipping the
+        // executive summary from the client on every chat.
+        //
+        // The report id is the THIRD segment, and it is what makes the answer match
+        // the screen. Without it the backend can only look in `ticker_report_cache`,
+        // which is CLOSE-ALIGNED: it holds nothing written before the most recent
+        // weekday 18:00 ET. So opening a saved report the day after generating it and
+        // tapping this bar resolved to no report context, and the assistant answered
+        // from live market data under a placeholder that says "Chat with the report".
+        // The backend scopes the lookup to the signed-in user, so sending the id
+        // grants no access the caller did not already have.
         let symbol = viewModel.reportData?.symbol ?? ""
+        let reference: String? = {
+            guard !symbol.isEmpty else { return nil }
+            let base = "\(symbol)|\(viewModel.personaKey)"
+            guard let rid = viewModel.backendReportId, !rid.isEmpty else { return base }
+            return "\(base)|\(rid)"
+        }()
 
         chatViewModel.startNewConversation(
             firstMessage: text,
             stockId: viewModel.reportData?.symbol,
             contextType: .tickerReport,
-            referenceId: symbol.isEmpty ? nil : "\(symbol)|\(viewModel.personaKey)"
+            referenceId: reference
         )
         showAIChat = true
     }

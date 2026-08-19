@@ -267,3 +267,117 @@ def test_hedge_fund_smart_money_passthrough_is_byte_identical():
     # Sub-share precision must survive the dump the collector persists.
     dumped = holders.hedge_funds_data.model_dump()
     assert dumped["flow_data"][0]["sell_volume"] == 0.000002
+
+
+# ── Key Management: 13G stakes belong to the person who FILED them ───────────
+#
+# `get_insider_roster` is derived from the last ~100 Form 4 TRANSACTIONS, so a
+# holder who does not trade — exactly the holder a 13G exists to surface — is
+# absent from it. Pairing filings to roster rows by POSITION therefore credited a
+# nine-figure stake to whichever other person happened to be tagged
+# "10 percent owner". Identity matching is the whole point of these tests.
+
+
+def _filing(name: str, shares: float, pct: float, cik: str = "0000001") -> dict:
+    return {
+        "cik": cik,
+        "typeOfReportingPerson": "IN",
+        "soleVotingPower": shares,
+        "percentOfClass": pct,
+        "filingDate": "2022-01-01",
+        "nameOfReportingPerson": name,
+    }
+
+
+def test_13g_stake_is_never_credited_to_a_different_person():
+    """The filer is absent from the Form 4 roster; another insider is tagged
+    "10 percent owner". That insider must keep their OWN share count."""
+    from app.services.agents.ticker_report_data_collector import _build_key_management
+
+    out = _build_key_management(
+        [
+            {"owner": "CATZ SAFRA A", "title": "10 percent owner", "numberOfShares": 5_000_000},
+            {"owner": "SMITH JANE", "title": "CFO", "numberOfShares": 100_000},
+        ],
+        {"ceo": "Safra Catz"},
+        current_price=100.0,
+        beneficial_owners=[_filing("ELLISON LAWRENCE J", 1_157_000_000, 43.0)],
+        shares_outstanding=2_700_000_000,
+    )
+    rows = out["top_holders"] + out["officers"]
+    catz = next(r for r in rows if "Catz" in r["name"])
+    assert catz["ownership"] == "5.0M", "Catz must keep her own Form 4 balance"
+    assert catz["percent_ownership"] is None, "and must NOT wear another filer's chip"
+
+
+def test_an_unmatched_13g_filer_is_surfaced_under_their_own_name():
+    """Dropping the positional pop must not drop the holder — the founder who
+    never files a Form 4 is the single most important row on names like ORCL."""
+    from app.services.agents.ticker_report_data_collector import _build_key_management
+
+    out = _build_key_management(
+        [{"owner": "CATZ SAFRA A", "title": "10 percent owner", "numberOfShares": 5_000_000}],
+        {},
+        current_price=100.0,
+        beneficial_owners=[_filing("ELLISON LAWRENCE J", 1_157_000_000, 43.0)],
+        shares_outstanding=2_700_000_000,
+    )
+    top = out["top_holders"]
+    assert any("Ellison" in r["name"] and r["percent_ownership"] == 43.0 for r in top)
+
+
+def test_13g_upgrade_applies_when_the_filer_IS_on_the_roster():
+    """The positive control: same human, differently formatted, must still match —
+    otherwise the identity fix would have disabled the feature outright."""
+    from app.services.agents.ticker_report_data_collector import _build_key_management
+
+    out = _build_key_management(
+        [{"owner": "ELLISON LAWRENCE J", "title": "10 percent owner", "numberOfShares": 3_000}],
+        {},
+        current_price=100.0,
+        beneficial_owners=[_filing("Lawrence J. Ellison", 1_157_000_000, 43.0)],
+        shares_outstanding=2_700_000_000,
+    )
+    top = out["top_holders"]
+    assert len(top) == 1, "one human, one row — not one upgraded and one appended"
+    assert top[0]["percent_ownership"] == 43.0
+    assert top[0]["ownership"] == "1157.0M"
+
+
+def test_a_roster_insider_with_no_filing_gets_no_ownership_chip():
+    """No 13G at all → nobody is upgraded and nobody is invented."""
+    from app.services.agents.ticker_report_data_collector import _build_key_management
+
+    out = _build_key_management(
+        [{"owner": "CATZ SAFRA A", "title": "10 percent owner", "numberOfShares": 5_000_000}],
+        {},
+        current_price=100.0,
+        beneficial_owners=[],
+        shares_outstanding=2_700_000_000,
+    )
+    rows = out["top_holders"] + out["officers"]
+    assert all(r["percent_ownership"] is None for r in rows)
+
+
+def test_co_type_filers_are_still_ignored():
+    """Only individual (IN) filers are insiders — a corporate 13G must not become
+    a named 'person' now that unmatched filers are surfaced."""
+    from app.services.agents.ticker_report_data_collector import _build_key_management
+
+    out = _build_key_management(
+        [{"owner": "SMITH JANE", "title": "CFO", "numberOfShares": 100_000}],
+        {},
+        current_price=100.0,
+        beneficial_owners=[
+            {
+                "cik": "0000009",
+                "typeOfReportingPerson": "CO",
+                "soleVotingPower": 900_000_000,
+                "percentOfClass": 33.0,
+                "filingDate": "2022-01-01",
+                "nameOfReportingPerson": "SOME HOLDINGS LLC",
+            }
+        ],
+        shares_outstanding=2_700_000_000,
+    )
+    assert out["top_holders"] == []

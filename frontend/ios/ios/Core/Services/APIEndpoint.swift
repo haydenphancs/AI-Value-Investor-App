@@ -23,6 +23,27 @@ enum HTTPMethod: String, Sendable {
     case PUT
     case PATCH
     case DELETE
+
+    /// May `APIClient` silently re-send this request after a bare 5xx?
+    ///
+    /// ONLY `GET`. A 5xx says nothing about whether the origin committed — a Railway
+    /// or Cloudflare edge that drops the response *after* the handler ran looks
+    /// identical to one that never reached it. Re-sending a write in that state
+    /// repeats its side effects.
+    ///
+    /// This is a MONEY rule, not a style preference. `POST /research/generate`
+    /// precharges 20 credits, inserts a `research_reports` row and spawns a worker
+    /// before it returns; with `retryCount = 2` a single dropped response billed the
+    /// user 60 credits for one tap — the entire monthly allocation of a free account,
+    /// which is seeded 50. The agent-run dedup collapses the three pipelines into one
+    /// Gemini run, so the COMPUTE was deduplicated and only the BILLING multiplied,
+    /// which is exactly why nothing upstream noticed.
+    ///
+    /// `PUT`/`PATCH`/`DELETE` are idempotent in HTTP's own terms, but that is a
+    /// property of each handler rather than of the verb, so they are excluded too:
+    /// a surfaced transient error is always recoverable, a silent duplicate write is
+    /// not. Pinned by `tests/test_ios_paid_path_guards.py`.
+    var isSafeToRetryAfterServerError: Bool { self == .GET }
 }
 
 // MARK: - Auth Policy

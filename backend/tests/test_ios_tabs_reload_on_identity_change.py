@@ -280,28 +280,35 @@ def test_the_reconnecting_state_offers_no_sign_in_button():
     assert "Reconnecting" in block, "reconnectingState does not say what it is doing"
 
 
-def test_both_call_sites_pass_the_reconnecting_flag():
-    """The preview-only ResearchView.swift is kept in step deliberately: it drifting AHEAD of the
-    live screen is how the missing lifecycle hooks stayed invisible."""
-    for path in (_CONTENT_VIEW, _REPO / "frontend/ios/ios/Views/Screens/ResearchView.swift"):
-        src = _strip_comments(_read(path))
-        assert "isReconnecting: viewModel.isReconnectingReports" in src, (
-            f"{path.name} constructs ReportsListSection without the reconnecting flag"
-        )
+def test_the_live_call_site_passes_the_reconnecting_flag():
+    """There is now exactly ONE call site.
+
+    This used to loop over `ContentView.swift` AND `Views/Screens/ResearchView.swift`,
+    keeping a preview-only duplicate of the whole screen in step on the theory that
+    letting it drift was what hid the missing lifecycle hooks. The duplicate has been
+    deleted instead — it was also the only place `startReportsPolling()` was ever wired,
+    so the live app never polled the Reports list at all. A second implementation is
+    where fixes go to die; `test_the_dead_duplicate_research_screen_is_gone` in
+    test_ios_paid_path_guards.py pins that it stays deleted."""
+    src = _strip_comments(_read(_CONTENT_VIEW))
+    assert "isReconnecting: viewModel.isReconnectingReports" in src, (
+        "ContentView.swift constructs ReportsListSection without the reconnecting flag"
+    )
 
 
 # ── Anti-vacuity ───────────────────────────────────────────────────────────────
 
 
-def test_the_scan_reads_the_live_view_not_the_preview_one():
+def test_the_scan_reads_the_live_view_block_only():
     block = _live_view()
     assert len(block) > 800, f"ResearchViewWithBinding block is only {len(block)} chars — drifted"
     assert "ReportsListSection" in block or "reportsTabContent" in block
 
-    # The preview-only view must NOT be what we measured.
-    research_view = _read(_REPO / "frontend/ios/ios/Views/Screens/ResearchView.swift")
-    assert "ResearchContentView" in research_view
-    assert "ResearchContentView" not in block
+    # Brace-bounding must still be real: the block is a SLICE of the file, not the file.
+    assert len(block) < len(_read(_CONTENT_VIEW)), (
+        "the declaration block is the whole file — `_decl_block` stopped bounding, so "
+        "every assertion scoped to the live view is now satisfiable from anywhere in it"
+    )
 
 
 def test_comment_only_mentions_do_not_satisfy_the_assertions():

@@ -212,8 +212,16 @@ actor APIClient {
             } else if error.isSignInRequired, allowAuthRetry {
                 _ = await handleUnrecoverableAuthFailure(error, endpoint: endpoint)
             }
-            // Retry on server errors
-            if retryCount > 0, case .serverError = error {
+            // Retry on server errors — GET ONLY.
+            //
+            // `endpoint.method.isSafeToRetryAfterServerError` is load-bearing: a 5xx does
+            // not tell us whether the origin committed, so re-sending a write repeats its
+            // side effects. This used to be unconditional, which meant a dropped response
+            // on `POST /research/generate` re-precharged 20 credits per retry — up to 60
+            // for one tap. See the doc comment on `HTTPMethod`.
+            if retryCount > 0,
+               case .serverError = error,
+               endpoint.method.isSafeToRetryAfterServerError {
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 return try await self.request(endpoint: endpoint, responseType: responseType, retryCount: retryCount - 1, allowAuthRetry: allowAuthRetry)
             }
@@ -335,7 +343,10 @@ actor APIClient {
             } else if error.isSignInRequired, allowAuthRetry {
                 _ = await handleUnrecoverableAuthFailure(error, endpoint: endpoint)
             }
-            if retryCount > 0, case .serverError = error {
+            // GET only — same rule as `request<T>` above (see `HTTPMethod`).
+            if retryCount > 0,
+               case .serverError = error,
+               endpoint.method.isSafeToRetryAfterServerError {
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 return try await downloadData(endpoint: endpoint, retryCount: retryCount - 1, allowAuthRetry: allowAuthRetry)
             }

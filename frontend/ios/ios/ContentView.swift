@@ -302,6 +302,25 @@ struct ResearchViewWithBinding: View {
         .onAppear {
             viewModel.selectedTab = initialSubTab
         }
+        // Live-poll the Reports list while anything is generating.
+        //
+        // This was wired ONLY in `Views/Screens/ResearchView.swift`, the preview-only
+        // copy of this screen that is never presented — so in the shipping app nothing
+        // ever armed it. The generation stream refreshes the list at 25% boundaries,
+        // which hid the gap while a stream was alive, but a report started in a
+        // previous app run, or one whose stream ended on a network error, left its
+        // card frozen at whatever percentage the last load returned until the user
+        // pulled to refresh. `startReportsPolling` self-terminates once nothing is
+        // `.processing`, so arming it on tab entry costs one Supabase query per 5s
+        // only while work is genuinely in flight.
+        .task(id: isActiveTab) {
+            guard isActiveTab else { return }
+            viewModel.startReportsPolling()
+        }
+        .onChange(of: viewModel.selectedTab) { _, tab in
+            if tab == .reports { viewModel.startReportsPolling() }
+        }
+        .onDisappear { viewModel.stopReportsPolling() }
         // Heals a load that raced session restore. The ViewModel's only unconditional load is
         // in `init`, and all five tabs mount eagerly in one ZStack — so it runs at launch, while
         // auth is still `.restoring`, and `requiresSignInForReports` latched `true` with nothing

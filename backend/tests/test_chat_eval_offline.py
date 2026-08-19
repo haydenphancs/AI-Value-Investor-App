@@ -71,15 +71,42 @@ def _make_service(*, chunks=None, profit=None, snapshot=None, profile=None,
     return svc
 
 
-def _patch_resolver(monkeypatch, block):
-    """Make the lazily-imported resolver return `block` (else the client context)."""
+def _patch_resolver(monkeypatch, block, seen=None):
+    """Make the lazily-imported resolver return `block` (else the client context).
+
+    `user_id` is accepted (and recorded into `seen` when given) because the
+    TICKER_REPORT branch grounds on the CALLER'S OWN frozen `research_reports` row
+    and therefore needs an identity — see `_resolve_ticker_report`. A fake that did
+    not take it would let chat_service stop forwarding it without a test noticing.
+    """
     import app.services.chat_context_resolver as ccr
 
     class _FakeResolver:
-        async def resolve(self, context_type, reference_id, client_context=None):
+        async def resolve(self, context_type, reference_id, client_context=None,
+                          user_id=None):
+            if seen is not None:
+                seen["user_id"] = user_id
             return block if block is not None else client_context
 
     monkeypatch.setattr(ccr, "get_chat_context_resolver", lambda: _FakeResolver())
+
+
+@pytest.mark.asyncio
+async def test_caller_identity_is_forwarded_to_the_context_resolver(monkeypatch):
+    """The report chat can only read the user's OWN stored report if chat_service
+    passes the identity down. Without it the resolver silently falls back to the
+    close-aligned shared cache, which holds nothing after the next 18:00 ET close —
+    so a saved report answers from live market data instead of from itself."""
+    seen = {}
+    _patch_resolver(monkeypatch, None, seen=seen)
+    svc = _make_service()
+    await svc.prepare_stream_generation(
+        session_id="s1", user_message="what is the bear case?",
+        stock_id="AAPL", context_type="TICKER_REPORT",
+        reference_id="AAPL|warren_buffett|report-abc",
+        user_id="user-42",
+    )
+    assert seen["user_id"] == "user-42"
 
 
 # ── prepare_stream_generation: grounding + prompt assembly (the SSE path) ────

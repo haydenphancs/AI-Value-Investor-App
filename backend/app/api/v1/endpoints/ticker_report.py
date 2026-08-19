@@ -51,6 +51,7 @@ from app.services.agents.ticker_report_data_collector import (
 from app.services.ticker_report_cache import (
     CACHE_SCHEMA_FLOOR,
     _short_interest_payload_stale,
+    current_close_cycle_start,
     get_cached_report,
     patch_legacy_price_action,
 )
@@ -139,7 +140,27 @@ async def get_ticker_report(
             # what `/stocks/{ticker}/analyst-analysis` and
             # `/stocks/{ticker}/holders` are showing right now.
             cached = await patch_wall_street_consensus_live(cached, ticker)
-            return patch_legacy_price_action(cached)
+            patched = patch_legacy_price_action(cached)
+            # VALIDATE, like every other return on this endpoint. This row came out of
+            # another user's `research_reports.ticker_report_data`, which the DEEP
+            # pipeline writes WITHOUT ever checking it against TickerReportResponse —
+            # so this was the one path that could hand iOS a payload nothing had
+            # type-checked. Swift's synthesized decoder is all-or-nothing, so a single
+            # bad field (a null `moat_competition.dimensions[].score`, say) would fail
+            # the whole screen with "Received unexpected data from the server".
+            #
+            # A row that fails is treated as a MISS, not as an error: the request falls
+            # through to the close-aligned cache and, failing that, to a fresh
+            # generation — the same handling `_short_interest_payload_stale` already
+            # gives a legacy row it doesn't trust, a few lines below.
+            result, err = _validate_report(patched, ticker, persona)
+            if err is None:
+                return result
+            logger.warning(
+                "Legacy cached report for %s/%s failed schema validation — treating as "
+                "a MISS rather than serving a payload iOS cannot decode",
+                ticker, persona,
+            )
     except Exception as e:
         # Cache lookup failures must never break the request — log and fall through.
         logger.warning(
@@ -330,10 +351,21 @@ async def _check_legacy_report_cache(ticker: str, persona: str):
     # Honor the same schema floor as `ticker_report_cache`: when the floor
     # is more recent than the 24h TTL cutoff, use it instead so legacy rows
     # generated under an older payload shape don't get served.
+    #
+    # AND the close-cycle boundary. This path is FREE PATH 1 — it runs BEFORE the
+    # close-aligned `get_cached_report`, so a rolling 24h TTL here silently overrode
+    # the freshness rule the whole report design is built on: a report completed at
+    # 09:45 ET Monday is pinned to FRIDAY's close, yet this served it to every viewer
+    # until 09:45 Tuesday — a full day past the Monday 18:00 boundary at which the
+    # dedicated cache would have regenerated. The result was a report whose header
+    # says "Previous Close · <Friday>" being handed out on Tuesday morning, with the
+    # newer, correct row sitting unused one branch below.
     ttl_cutoff = (
         datetime.now(timezone.utc) - timedelta(hours=LEGACY_CACHE_TTL_HOURS)
     )
-    cutoff = max(ttl_cutoff, CACHE_SCHEMA_FLOOR).isoformat()
+    cutoff = max(
+        ttl_cutoff, CACHE_SCHEMA_FLOOR, current_close_cycle_start()
+    ).isoformat()
 
     def _query():
         supabase = get_supabase()

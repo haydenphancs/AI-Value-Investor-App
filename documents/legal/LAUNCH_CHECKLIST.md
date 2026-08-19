@@ -124,7 +124,9 @@ Steps completed so far (necessary, not sufficient):
 > 3. **~60 s propagation.** The leaked key returned 200 twice after Disable, then flipped to 401.
 >    And always run a **forged-key control** first — a probe that 200s on everything proves nothing.
 
-Still open from this finding: the copyrighted book PDFs in history (§4), and the ed25519 key below.
+Still open from this finding: **only** the copyrighted book PDFs in history (§4).
+
+The ed25519 private key in history was re-audited 2026-08-15 and is an orphan: it matches neither key in `~/.ssh`, is not in `ssh-agent` or local `authorized_keys`, is **not** among the GitHub account's public keys, and this repo has **no deploy keys at all**. Unencrypted and public, but it opens nothing.
 
 Also in history, lower severity: an OpenSSH **ed25519 private key** committed under the filename
 `eval "$(ssh-agent -s)"` (commit `3f784c89`). Its fingerprint does **not** match the key on the
@@ -948,7 +950,14 @@ against real Apple infrastructure.
       hand-set price is a number nobody reviews and everybody pays.
       ⚠️ **Once these exist, a reprice must change ASC and `credit_packs` in the SAME
       session.** A repriced row against an old ASC price means the app quotes $5.99 while
-      Apple charges $4.99. (Today this is safe only because nothing is purchasable yet.)
+      Apple charges $4.99.
+
+      🔴 **Now live, not hypothetical.** All six products exist in ASC and the Paid
+      Applications Agreement is Active as of 2026-08-15, so the precondition above is met. It
+      was exercised the same day: migration 141 repriced Power to $12.99/650 and the ASC
+      product had to be edited in the same session. Nothing in-repo can detect drift here
+      (`test_iap_product_and_privacy_parity` pins `Caydex.storekit` to the seed; ASC is out of
+      its reach), so this table is the only control.
 - [ ] **Review screenshot** for the IAPs — required before submission. One screenshot of the
       Add Credits screen showing all four cards satisfies all four products.
 - [ ] **Review notes** for the IAPs, one line: *"Consumable credit packs. Credits are spent
@@ -973,7 +982,20 @@ against real Apple infrastructure.
 Verification **fails closed** without these: with `IAP_ENVIRONMENT=Sandbox` or `Production`
 and no certificates, the endpoint returns 503 rather than accepting anything. That is
 deliberate — no trust anchor must never silently mean "trust everything" on a payment path.
-`backend/certs/` does not exist today (checked 2026-08-14), so this is genuinely open.
+- [x] **Done 2026-08-15**: `backend/certs/apple/AppleRootCA-G3.der` is committed and
+      deployed, verified by SHA-256 fingerprint against Apple's published G3 root.
+
+> 🔴 **It must be DER, not PEM — and this bit us.** A PEM copy was committed first (only
+> because `.gitignore` carries a blanket `*.cer` rule), and Apple's library loads trust
+> anchors with `load_certificate(FILETYPE_ASN1, ...)` — DER. The PEM raised inside the loop
+> that builds the trust store, which would have failed **every real purchase**. Nothing caught
+> it: the file existed so the "no certificates" 503 never fired, the verifier still
+> *constructed* (roots are parsed per-verification, not at build), and the readiness probe
+> below returned **400** — precisely what a garbage payload returns against a HEALTHY
+> verifier, so the probe cannot tell the two apart. `_load_root_certificates` now normalises
+> PEM→DER and drops unparseable files rather than letting one poison the store;
+> `tests/test_apple_root_certificates_are_der.py` asserts on the bytes, which is the only
+> check that can see this.
 
 **Three traps this section did not mention until 2026-08-14, each of which looks like success:**
 

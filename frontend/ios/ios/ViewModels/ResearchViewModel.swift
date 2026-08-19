@@ -829,6 +829,16 @@ class ResearchViewModel: ObservableObject {
             guard let bid = report.backendId else { return false }
             return ids.contains(bid)
         }
+        // Release the client-side concurrency slots too. `inFlightReportIds` gates the
+        // Generate button (`isAtConcurrencyCap`), and deleting four still-generating
+        // cards used to leave all four ids in it — so the button stayed spinning and
+        // refused new work until the app was relaunched, for reports that no longer
+        // existed. The monitoring stream stops on its own now that the poll loop has a
+        // terminal branch for `deleted`.
+        for id in ids {
+            inFlightReportIds.remove(id)
+            liveProgress[id] = nil
+        }
         exitSelectionMode()
 
         // Parallel fan-out. Return (rid, success) — a Sendable tuple, so no
@@ -858,6 +868,26 @@ class ResearchViewModel: ObservableObject {
         }
     }
 
+    /// Regenerate a report the user was shown as failed.
+    ///
+    /// ⚠️ THE DELETE IS NOT COSMETIC — it is what stops a double charge.
+    ///
+    /// A card reaches `.failed` two ways. The backend may genuinely have failed it
+    /// (already refunded, via the `is_refunded` CAS). Or `applyClientSideTimeoutPass`
+    /// flipped it locally after `processingTimeoutSeconds` (600s) — and that fires on
+    /// reports the server is still happily working on: a queued report waits behind
+    /// the 8-slot agent semaphore, and the reconciliation sweep does not consider a
+    /// never-started row abandoned until `RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS`,
+    /// which is DERIVED from the caps and is ~11,400s at current settings — 19× the
+    /// client's patience. Retrying in that window charged a second 20 credits for a
+    /// report that was still coming, and the original was added to
+    /// `dismissedReportIds`, so it completed into a list the user never saw it in.
+    ///
+    /// `DELETE /research/reports/{id}` resolves that: it claims the row through the
+    /// same at-most-once `is_refunded` compare-and-set the sweep uses and refunds an
+    /// in-flight report, while a genuinely-failed (already refunded) row is a plain
+    /// soft-delete. Either way the user is made whole BEFORE being charged again, and
+    /// the abandoned row cannot later complete unseen.
     func retryReport(_ report: AnalysisReport) {
         guard report.status == .failed else { return }
         // Same cap as generateAnalysis() — only block the retry (and the
@@ -873,13 +903,38 @@ class ResearchViewModel: ObservableObject {
         // and from the dismiss-set so the next loadReports() doesn't
         // re-surface it. The new processing card will appear when
         // generateAnalysis() spawns the next report.
-        if let backendId = report.backendId {
+        let ticker = report.ticker
+        let persona = report.persona
+        let backendId = report.backendId
+        if let backendId {
             dismissedReportIds.insert(backendId)
             reports.removeAll { $0.backendId == backendId }
         }
-        searchText = report.ticker
-        selectedPersona = report.persona
-        generateAnalysis()
+
+        Task { [weak self] in
+            guard let self else { return }
+            if let backendId {
+                do {
+                    try await self.apiClient.request(endpoint: .deleteReport(reportId: backendId))
+                    print("🔄 ResearchVM: released prior report \(backendId) before retrying")
+                } catch {
+                    // Surface and STOP. Charging again while the original may still be
+                    // live is the exact outcome this method exists to prevent, and a
+                    // silent revert is banned on a user-initiated mutation.
+                    let appError = AppError.from(error)
+                    print("❌ ResearchVM: retry aborted — could not release \(backendId): \(appError.message)")
+                    self.dismissedReportIds.remove(backendId)
+                    self.error = "Couldn't retry that analysis just yet. Please try again in a moment."
+                    await self.loadReports()   // put the card back
+                    return
+                }
+            }
+            // Set the target as late as possible so an await above cannot let the
+            // user's own selection be overwritten by a stale one.
+            self.searchText = ticker
+            self.selectedPersona = persona
+            self.generateAnalysis()
+        }
     }
 
     func joinDiscussion() {

@@ -16,7 +16,7 @@ import asyncio
 
 import pytest
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from app.services.agents.ticker_report_data_collector import (
     _INDUSTRY_PEERS_CACHE,
@@ -39,7 +39,9 @@ from app.services.agents.ticker_report_data_collector import (
     _build_valuation_vital,
     _build_wall_street_sections,
     _classify_news_catalyst,
+    _derive_macro_vital,
     _extract_tam_relevant_excerpt,
+    _index_for_date,
     _industry_universe_peers,
     _merge_macro_risk_factors,
     _overlay_ai_guidance,
@@ -3140,3 +3142,168 @@ async def test_collect_deepcopies_shared_base_across_personas(monkeypatch):
     a.moat_grounded_pillars["Brand"]["source"] = "grounded"
     assert "source" not in shared_base.moat_grounded_pillars["Brand"]
     assert "source" not in b.moat_grounded_pillars["Brand"]
+
+
+# ── Price-action event index: trading days, not calendar days ────────────────
+# `recent_prices` is an EOD series, so it has no weekend/holiday bars. Stepping
+# back by calendar days lands ~30% too far into the past, and that index is the
+# reference price behind the "% since <event>" headline.
+
+
+def _trading_days(end: date, n: int) -> list[date]:
+    """`n` weekdays ending at `end` (inclusive), oldest-first — the shape
+    `_compute_metrics` builds for `recent_price_dates`."""
+    out: list[date] = []
+    d = end
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d)
+        d -= timedelta(days=1)
+    out.reverse()
+    return out
+
+
+def test_index_for_date_uses_the_trading_day_series_not_calendar_arithmetic():
+    """An event 42 calendar days back is ~30 sessions back — not 42 bars back."""
+    end = date(2026, 8, 14)              # a Friday
+    dates = _trading_days(end, 60)
+    prices = [100.0 + i for i in range(60)]
+    target = date(2026, 7, 6)            # 39 calendar days before `end`
+
+    idx = _index_for_date(target, end, prices, dates)
+
+    assert dates[idx] <= target, "must land at or before the event date"
+    assert idx + 1 >= len(dates) or dates[idx + 1] > target, "must be the LAST such bar"
+    # The calendar fallback would have said 60 - 39 - 1 = 20; the true session is later.
+    assert idx > 20
+
+
+def test_index_for_date_lands_on_the_last_close_at_or_before_a_weekend_event():
+    """News published on a Saturday resolves to Friday's bar, not Monday's."""
+    end = date(2026, 8, 14)
+    dates = _trading_days(end, 30)
+    prices = [10.0] * 30
+    saturday = date(2026, 8, 8)
+
+    idx = _index_for_date(saturday, end, prices, dates)
+
+    assert dates[idx] == date(2026, 8, 7)   # the Friday before
+
+
+def test_index_for_date_clamps_below_the_first_bar():
+    """An event older than the whole series clamps to index 0, never negative."""
+    end = date(2026, 8, 14)
+    dates = _trading_days(end, 10)
+    prices = [1.0] * 10
+
+    assert _index_for_date(date(2020, 1, 1), end, prices, dates) == 0
+
+
+def test_index_for_date_on_todays_bar_is_the_last_index():
+    end = date(2026, 8, 14)
+    dates = _trading_days(end, 10)
+    prices = [1.0] * 10
+
+    assert _index_for_date(end, end, prices, dates) == 9
+
+
+def test_index_for_date_falls_back_to_calendar_math_without_dates():
+    """No date series (legacy callers / older cached collections) → prior behaviour."""
+    prices = [1.0] * 30
+    end = date(2026, 8, 14)
+
+    assert _index_for_date(end - timedelta(days=5), end, prices, None) == 24
+    assert _index_for_date(end - timedelta(days=5), end, prices, []) == 24
+
+
+def test_index_for_date_ignores_a_misaligned_date_series():
+    """A dates array that does not match `recent_prices` 1:1 must NOT be indexed
+    into — a mismatch means one of them was rebuilt and the pairing is unknown."""
+    prices = [1.0] * 30
+    dates = _trading_days(date(2026, 8, 14), 12)   # wrong length on purpose
+
+    idx = _index_for_date(date(2026, 8, 10), date(2026, 8, 14), prices, dates)
+
+    assert idx == 25            # calendar fallback, and still in range
+    assert 0 <= idx < len(prices)
+
+
+# ── An unread macro tier must not vote a good score ──────────────────────────
+# With FRED_API_KEY unset and the FMP snapshot empty, `risk_factors` is [] and the
+# composite bottoms out at its BENIGN end — so the old unconditional formula scored
+# "nothing was measured" as 8.0/10 "good" and fed that into every persona's weighted
+# rating, while the Macro module directly above it rendered "data unavailable".
+
+
+def test_unmeasured_macro_emits_no_score_rather_than_a_benign_one():
+    v = _derive_macro_vital([], "low", 1.0, measured=False)
+    assert v["score"]["value"] is None
+    assert v["score"]["status"] == "unmeasured"
+
+
+def test_measured_benign_macro_still_scores():
+    """The positive control — the fix must not mute a real reading."""
+    v = _derive_macro_vital([], "low", 1.0, measured=True)
+    assert v["score"]["value"] == 8.0
+    assert v["score"]["status"] == "good"
+
+
+def test_an_absent_macro_reading_never_outscores_a_real_one():
+    """The property that actually matters: missing data must not be rewarded."""
+    from app.services.agents.persona_scoring import compute_quality_score
+
+    base = {
+        "valuation": {"score": {"value": 5.0}},
+        "financial_health": {"score": {"value": 5.0}},
+    }
+    unmeasured = compute_quality_score("warren_buffett", {"_scoring_inputs": dict(
+        base, macro=_derive_macro_vital([], "low", 1.0, measured=False))})
+    measured = compute_quality_score("warren_buffett", {"_scoring_inputs": dict(
+        base, macro=_derive_macro_vital([], "low", 1.0, measured=True))})
+    assert unmeasured <= measured
+
+
+# ── Stage-A moat pillars are free-form Gemini JSON ───────────────────────────
+# `score` and `name` reach iOS verbatim on the deep path, which never validates
+# against TickerReportResponse. Swift declares both non-optionally, and its decode is
+# all-or-nothing — one null score failed the ENTIRE 20-credit report screen, forever.
+
+
+def test_moat_dimensions_with_unusable_scores_are_dropped_not_shipped():
+    from app.services.agents.ticker_report_data_collector import _apply_peer_score_baseline
+
+    out = _apply_peer_score_baseline([
+        {"name": "Brand Power", "score": None, "peer_score": 0.0},
+        {"name": "Network Effects", "score": "7", "peer_score": 4.0},
+        {"name": "Cost Advantage", "peer_score": 3.0},          # no score key
+        {"name": "Switching Costs", "score": float("nan"), "peer_score": 2.0},
+        {"name": "  ", "score": 5.0, "peer_score": 5.0},        # blank name
+        {"name": "Scale", "score": 8.5, "peer_score": 6.0},
+    ])
+    names = [d["name"] for d in out]
+    assert names == ["Network Effects", "Scale"], (
+        "a pillar with no usable score must be DROPPED — shipping it as 0.0 fabricates "
+        "a rating, and shipping it as null/NaN/str breaks the whole iOS decode"
+    )
+    for d in out:
+        assert isinstance(d["score"], float) and 0.0 <= d["score"] <= 10.0
+        assert isinstance(d["peer_score"], float) and 0.0 < d["peer_score"] <= 10.0
+        assert isinstance(d["name"], str) and d["name"].strip()
+
+
+def test_moat_dimension_scores_are_clamped_to_the_declared_range():
+    from app.services.agents.ticker_report_data_collector import _apply_peer_score_baseline
+
+    out = _apply_peer_score_baseline([
+        {"name": "A", "score": 42.0, "peer_score": 99.0},
+        {"name": "B", "score": -3.0, "peer_score": -1.0},
+    ])
+    assert [d["score"] for d in out] == [10.0, 0.0]
+    assert [d["peer_score"] for d in out] == [10.0, 5.0]   # <=0 falls to the 5.0 baseline
+
+
+def test_moat_dimension_normalizer_survives_malformed_rows():
+    from app.services.agents.ticker_report_data_collector import _apply_peer_score_baseline
+
+    assert _apply_peer_score_baseline([]) == []
+    assert _apply_peer_score_baseline([None, "x", 7]) == []   # type: ignore[list-item]

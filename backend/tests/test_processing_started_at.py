@@ -98,7 +98,12 @@ def test_mark_processing_started_stamps_with_isnull_guard():
         seen["isnull"] = (col, val)
         return q
 
+    def _in(col, vals):
+        seen["in_"] = (col, list(vals))
+        return q
+
     q.is_.side_effect = _is
+    q.in_.side_effect = _in
     q.execute.return_value = MagicMock(data=[])
     svc.supabase = q
 
@@ -106,6 +111,11 @@ def test_mark_processing_started_stamps_with_isnull_guard():
 
     assert "processing_started_at" in seen["payload"]
     assert seen["isnull"] == ("processing_started_at", "null")  # only stamps once
+    # ...and only on a row still IN the pipeline. Without this the stamp lands on a
+    # row the user already deleted (terminal, already refunded) or one the
+    # reconciliation sweep already claimed, re-arming the sweep's own age check
+    # against a report nobody owes anything for.
+    assert seen["in_"] == ("status", ["pending", "processing"])
 
 
 def test_mark_processing_started_swallows_errors():

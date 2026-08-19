@@ -986,7 +986,8 @@ final class ResearchViewModel {
 > Guideline 3.1.1). `spend_credits` drains granted first; `refund_credits` reverses the
 > **recorded split** of the original spend, so **a refund must pass the same `ref_id` its
 > charge used**. (Before migration 139 a mismatch silently destroyed paid credits; it is now a
-> no-op that refunds nothing and `RAISE WARNING`s — still a bug, but no longer theft. §9b.2.) The 402's `action="upgrade"` now opens
+> no-op that refunds nothing, and since 142 it reports `outcome='no_matching_debit'` so the
+   > caller can log a REFUND LEAK — still a bug, but neither theft nor silent. §9b.2.) The 402's `action="upgrade"` now opens
 > **Buy Credits**, not the subscription paywall. Full model in **[§9b](#9b-monetization--credits-entitlements--in-app-purchase)**.
 
 > **Auth errors — IMPLEMENTED 2026-08-02.** The `AUTH_*` codes and the central exception
@@ -1750,9 +1751,28 @@ Both simple orderings are wrong, and both are tempting:
 > through to the granted-first fallback, and destroy paid credits. The fallback now fires only
 > when a debit was *found* carrying an unknown split, or when there was no `ref_id` to search by
 > at all — so a **mismatched `ref_id` is a no-op**: nothing minted, nothing destroyed, the user
-> still owed. The SQL `RAISE WARNING`s, which is the only signal there is, since by definition
-> there is no row to point at. Passing the right `ref_id` is still mandatory; the failure is now
-> a silent non-refund rather than a silent theft.
+> still owed. Passing the right `ref_id` is still mandatory; 139 turned a silent theft into a
+> silent non-refund.
+>
+> **Migration 142 removed the silence.** `refund_credits` now returns
+> `{outcome, refunded, spendable}` instead of a bare `spendable`, so a refund that moved ZERO is
+> no longer byte-identical to one that worked. Crucially it separates two cases that 139 merged:
+>
+> | `outcome` | Meaning | Treatment |
+> |---|---|---|
+> | `refunded` | moved `refunded` credits (may legitimately be 0 if the caps resolve to zero) | INFO |
+> | `already_refunded` | the debit exists but was already reversed — an idempotent replay | INFO — **must not page** |
+> | `no_matching_debit` | no charge matches this `ref_id`/amount — **the user is OWED** | **ERROR → Sentry → Discord** |
+> | `no_credits_row` / `invalid` / `guest` | degenerate no-ops | ERROR / INFO |
+>
+> Escalating *both* zero cases would trade a silent-money bug for alert fatigue, which is how the
+> genuine one ends up ignored — hence the split. `credit_service.refund_did_not_happen()` is the
+> single predicate all three report call sites use, because each burns the one-shot
+> `research_reports.is_refunded` CAS **before** refunding: there is no retry, so "did it actually
+> happen" is the only question that decides whether a human must intervene.
+>
+> ⚠️ `None` from `refund_ledgered` still means **strictly** a transport fault, never a business
+> outcome — the same contract as `revoke_purchased`.
 >
 > The pre-139 fallback was itself a **credit mint**: it fired whenever no un-reversed debit was
 > found and paid out `LEAST(amount, used)` — bounded by the caller's *current* spend rather than

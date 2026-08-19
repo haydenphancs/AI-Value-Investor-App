@@ -37,6 +37,34 @@ class CreditServiceUnavailable(Exception):
     """
 
 
+# Outcomes of `refund_credits` (migration 142) that mean the user is STILL OWED credits.
+# `refunded` with a zero amount is NOT here: that is a success whose caps resolved to zero,
+# the same way `revoke_purchased_credits` reports `reclaimed: 0`.
+REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row")
+
+
+def refund_did_not_happen(outcome) -> bool:
+    """True when a `refund_ledgered` result means the credits were not returned.
+
+    One predicate for all three report call sites, because each of them burns the one-shot
+    `research_reports.is_refunded` CAS BEFORE refunding — so "did it actually happen" is the
+    only question that decides whether a human has to intervene, and it must be asked the same
+    way everywhere.
+
+    Handles three shapes on purpose:
+      * `None`   -> transport fault (the round trip failed).
+      * `dict`   -> the migration-142 outcome envelope.
+      * anything else -> the PRE-142 bare integer. Treated as "it happened", which is exactly
+        the assumption the old contract forced; this keeps the deploy window (code first, then
+        migration) from reporting false leaks on every refund.
+    """
+    if outcome is None:
+        return True
+    if isinstance(outcome, dict):
+        return outcome.get("outcome") in REFUND_FAILURE_OUTCOMES
+    return False
+
+
 class CreditService:
     # Report cost in credits on the unified pricing scale (1 chat = 1 credit; a
     # report is ~20x a chat turn by token/$ weight). Sourced from settings so the
@@ -411,14 +439,29 @@ class CreditService:
         *,
         reason: str,
         ref_id: Optional[str] = None,
-    ) -> Optional[int]:
+    ) -> Optional[dict]:
         """Best-effort refund + ledger for a non-delivered metered action.
 
-        Calls `refund_credits` (migration 101). Never raises — a refund failure
-        must not affect the (already-failed) action's response — but logs a
-        greppable "REFUND LEAK" marker so a stranded charge is diagnosable.
-        NOT idempotent: callers guarantee at-most-once (chat: a once-only
-        settlement flag; reports: the research_reports.is_refunded CAS).
+        Calls `refund_credits`. Never raises — a refund failure must not affect the
+        (already-failed) action's response — but logs a greppable "REFUND LEAK" marker so a
+        stranded charge is diagnosable. NOT idempotent: callers guarantee at-most-once (chat:
+        a once-only settlement flag; reports: the research_reports.is_refunded CAS).
+
+        Returns the RPC's outcome payload, or **None strictly for a transport fault** — the
+        same contract as `revoke_purchased`, so `None` can never be confused with a business
+        outcome. `outcome` is one of: refunded | already_refunded | no_matching_debit | guest |
+        invalid | no_credits_row, with `refunded` carrying the amount ACTUALLY moved.
+
+        ⚠️ Why this reports outcomes at all (migration 142). Before it, every branch returned
+        `spendable`, so a refund that moved ZERO was byte-identical to one that worked, and
+        this method logged "Refunded 20 credits ..." either way. That mattered because all
+        three report sites burn the `is_refunded` CAS BEFORE calling: there is no retry, the
+        user silently loses 20 credits, and iOS then shows a "[Refunded]" chip off that flag.
+        The only signal was a Postgres RAISE WARNING that PostgREST never surfaces.
+
+        The split between `already_refunded` (benign replay) and `no_matching_debit` (the user
+        is owed) is deliberate: escalating both would trade a silent-money bug for alert
+        fatigue, which is how the loud one ends up ignored.
 
         PRECONDITION: authenticated users only (guest is a no-op both here via
         the RPC guard and at the endpoint branch).
@@ -440,9 +483,65 @@ class CreditService:
                 user_id, amount, reason, type(e).__name__, e,
             )
             return None
-        remaining = result.data
-        logger.info(
-            f"Refunded {amount} credits to user={user_id} (reason={reason}), "
-            f"remaining={remaining}"
-        )
-        return int(remaining) if remaining is not None else None
+        data = result.data
+
+        # TRANSITIONAL — remove once migration 142 is applied everywhere.
+        # Pre-142 the RPC returned a bare INTEGER (`spendable`). Deploying this method before
+        # the migration is the REQUIRED order, so it must not choke on the old shape: `int` is
+        # normalised into the new envelope with `refunded=None` ("moved an unknown amount"),
+        # which suppresses the amount-comparison logging below rather than guessing.
+        if isinstance(data, (int, float)) and not isinstance(data, bool):
+            logger.info(
+                "refund_credits answered with the pre-142 INTEGER contract "
+                "(user=%s reason=%s) — apply migration 142", user_id, reason,
+            )
+            return {"outcome": "refunded", "refunded": None, "spendable": int(data)}
+
+        payload = data if isinstance(data, dict) else {}
+        outcome = payload.get("outcome")
+        refunded = payload.get("refunded")
+
+        if outcome == "no_matching_debit":
+            # THE one that must page. `logger.error` is the alert: Sentry's LoggingIntegration
+            # captures at event_level=ERROR and its rule pings Discord. Every id a manual
+            # correction needs is on this line, and no PII (send_default_pii=False).
+            logger.error(
+                "REFUND LEAK: refund_credits found no matching debit for user=%s ref_id=%s "
+                "amount=%s reason=%s — the user is OWED %s credits and the one-shot refund "
+                "guard is already burned; manual credit correction needed",
+                user_id, ref_id, amount, reason, amount,
+            )
+        elif outcome == "no_credits_row":
+            logger.error(
+                "REFUND LEAK: refund_credits found no user_credits row for user=%s "
+                "amount=%s reason=%s — nothing was refunded",
+                user_id, amount, reason,
+            )
+        elif outcome == "already_refunded":
+            # Benign: the charge was given back already. Deliberately INFO, not ERROR — this
+            # is the expected shape of a replayed settlement and must not create an issue.
+            logger.info(
+                "refund_credits: charge for user=%s ref_id=%s amount=%s was already "
+                "refunded — no double refund",
+                user_id, ref_id, amount,
+            )
+        elif outcome in ("guest", "invalid"):
+            logger.info(
+                "refund_credits no-op (outcome=%s) for user=%s amount=%s reason=%s",
+                outcome, user_id, amount, reason,
+            )
+        elif isinstance(refunded, int) and refunded < amount:
+            # The LEAST() caps can move less than requested. Previously this logged the full
+            # amount and looked like a clean refund.
+            logger.warning(
+                "PARTIAL REFUND: refund_credits moved %s of %s credits for user=%s "
+                "ref_id=%s reason=%s — the pools could not absorb the rest",
+                refunded, amount, user_id, ref_id, reason,
+            )
+        else:
+            logger.info(
+                "Refunded %s credits to user=%s (reason=%s), spendable=%s",
+                refunded, user_id, reason, payload.get("spendable"),
+            )
+
+        return payload

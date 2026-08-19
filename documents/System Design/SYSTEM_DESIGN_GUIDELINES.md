@@ -1763,9 +1763,15 @@ Both simple orderings are wrong, and both are tempting:
 > | `refunded` | moved `refunded` credits (may legitimately be 0 if the caps resolve to zero) | INFO |
 > | `already_refunded` | the debit exists but was already reversed — an idempotent replay | INFO — **must not page** |
 > | `no_matching_debit` | no charge matches this `ref_id`/amount — **the user is OWED** | **ERROR → Sentry → Discord** |
+> | `capped_to_zero` | the debit matched but the pools absorbed none of it — **the user is OWED** | **ERROR → Sentry → Discord** |
 > | `no_credits_row` / `invalid` / `guest` | degenerate no-ops | ERROR / INFO |
 >
-> Escalating *both* zero cases would trade a silent-money bug for alert fatigue, which is how the
+> `capped_to_zero` is the month-boundary case and is easy to miss: `ensure_credit_period` resets
+> `used` to 0, so a report charged in month M and refunded in M+1 — which the reconciliation
+> sweep does on its own schedule — matches its debit yet can give nothing back. Reporting that
+> as a success would hide exactly the silent-money shape 142 exists to surface.
+>
+> Escalating *benign* zero cases would trade a silent-money bug for alert fatigue, which is how the
 > genuine one ends up ignored — hence the split. `credit_service.refund_did_not_happen()` is the
 > single predicate all three report call sites use, because each burns the one-shot
 > `research_reports.is_refunded` CAS **before** refunding: there is no retry, so "did it actually

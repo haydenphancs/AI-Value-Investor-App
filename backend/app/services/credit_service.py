@@ -40,7 +40,7 @@ class CreditServiceUnavailable(Exception):
 # Outcomes of `refund_credits` (migration 142) that mean the user is STILL OWED credits.
 # `refunded` with a zero amount is NOT here: that is a success whose caps resolved to zero,
 # the same way `revoke_purchased_credits` reports `reclaimed: 0`.
-REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row")
+REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row", "capped_to_zero")
 
 
 def refund_did_not_happen(outcome) -> bool:
@@ -501,7 +501,20 @@ class CreditService:
         outcome = payload.get("outcome")
         refunded = payload.get("refunded")
 
-        if outcome == "no_matching_debit":
+        if outcome == "capped_to_zero":
+            # A debit WAS matched but the pools absorbed none of it. The reachable path is the
+            # month boundary: `ensure_credit_period` resets `used` to 0, so a report charged in
+            # month M and refunded in M+1 — which the reconciliation sweep does on its own
+            # schedule — finds nothing to give back. Same consequence as a missing debit: the
+            # user is owed and the one-shot guard is spent.
+            logger.error(
+                "REFUND LEAK: refund_credits matched the debit for user=%s ref_id=%s but the "
+                "credit pools absorbed none of the %s credits (reason=%s) — the user is OWED "
+                "and the one-shot refund guard is already burned; manual correction needed. "
+                "Most likely the charge and the refund straddled a monthly reset.",
+                user_id, ref_id, amount, reason,
+            )
+        elif outcome == "no_matching_debit":
             # THE one that must page. `logger.error` is the alert: Sentry's LoggingIntegration
             # captures at event_level=ERROR and its rule pings Discord. Every id a manual
             # correction needs is on this line, and no PII (send_default_pii=False).

@@ -48,6 +48,13 @@ logger = logging.getLogger(__name__)
 # (added in migration 039).
 SHARED_CACHE_TTL_HOURS = 6
 
+# The only statuses a running worker may still write to. 'completed', 'failed' and
+# 'deleted' are TERMINAL and owned by someone else (the completion write, the
+# reconciliation sweep, the user's delete) — writing over them resurrects a row that
+# has already been resolved and, in the 'deleted' case, already refunded. Mirrors the
+# same guard on the conditional completion write in `generate_report`.
+_ACTIVE_STATUSES = ["pending", "processing"]
+
 
 # ── Global bounded concurrency + same-(ticker,persona) agent-run dedup ──────
 # /research/generate fires reports fire-and-forget with only a per-user cap, so
@@ -115,6 +122,13 @@ async def _run_agent_deduped(
 
     inflight = _AGENT_INFLIGHT.get(key)
     if inflight is not None:
+        # Followers deliberately do NOT fire `on_started`. `processing_started_at` is
+        # the reconciliation sweep's STARTED clock, and a follower holds no semaphore
+        # slot of its own, so it ages on `created_at` against the long
+        # RECON_QUEUE_ABANDONED window instead. That is slower to refund after a
+        # worker death but provably never false-refunds a report that is still coming;
+        # the trade is deliberate and pinned by
+        # tests/test_processing_started_at.py::test_run_agent_deduped_followers_do_not_call_on_started.
         shared = await inflight
         return copy.deepcopy(shared)
 
@@ -482,6 +496,25 @@ class ResearchService:
         current_step: Optional[str] = None,
         error_message: Optional[str] = None,
     ):
+        """Advance a report that is STILL IN THE PIPELINE. Never resurrect a terminal one.
+
+        The `.in_(_ACTIVE_STATUSES)` filter is the whole point, and it closes two
+        distinct resurrections that an unconditional `UPDATE ... WHERE id = ?` caused:
+
+          1. **The user deleted an in-flight report.** `delete_report` sets
+             status='deleted' (a TERMINAL state no sweep can reach) and refunds. If the
+             worker then failed, this wrote status='failed' over it and the row came
+             BACK in the Reports list — as a failed card with a Retry button, for a
+             report the user had already deleted and been refunded for.
+          2. **The reconciliation sweep already refunded it.** The sweep marks an
+             orphan 'failed' + is_refunded=True. A still-running worker's next progress
+             callback then wrote status='processing' straight back over that terminal
+             state, so the row looked live again, re-entered the sweep's candidate set,
+             and its own completion write (guarded on is_refunded=False) could never
+             land — a permanently "processing" row that no longer owed anything.
+
+        Both are silent: no exception, no log, just a row in a state nothing owns.
+        """
         update: Dict[str, Any] = {"status": status, "progress": progress}
         if current_step:
             update["current_step"] = current_step
@@ -490,7 +523,7 @@ class ResearchService:
         try:
             self.supabase.table("research_reports").update(update).eq(
                 "id", report_id
-            ).execute()
+            ).in_("status", _ACTIVE_STATUSES).execute()
         except Exception as e:
             logger.error(f"Status update failed for {report_id}: {e}")
 
@@ -503,7 +536,9 @@ class ResearchService:
         try:
             self.supabase.table("research_reports").update(
                 {"processing_started_at": datetime.now(timezone.utc).isoformat()}
-            ).eq("id", report_id).is_("processing_started_at", "null").execute()
+            ).eq("id", report_id).in_(
+                "status", _ACTIVE_STATUSES
+            ).is_("processing_started_at", "null").execute()
         except Exception as e:
             logger.warning(
                 "mark_processing_started failed for %s: %s: %s",

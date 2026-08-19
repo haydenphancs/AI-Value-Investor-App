@@ -880,23 +880,28 @@ struct ReportWallStreetConsensus {
         return String(format: "$%.0f", lowTarget)
     }
 
-    var formattedHighTargetPercent: String {
-        guard let highTarget else { return "—" }
-        let percent = ((highTarget - currentPrice) / currentPrice) * 100
+    /// Upside vs the frozen close, or "—" when it cannot be expressed.
+    ///
+    /// `currentPrice` is guarded because these three are the only mirrors of this
+    /// math that are not: the backend computes the same ratio behind
+    /// `if target_price > 0 and current_price > 0` (ticker_report_data_collector),
+    /// while a frozen report whose price fell all the way through
+    /// `_latest_completed_close` → `previousClose` → `price` carries 0.0 here — and
+    /// `patch_wall_street_consensus_live` is a deliberate no-op, so a stored 0 is
+    /// never repaired on serve. Dividing by it yields `inf`, which `String(format:)`
+    /// renders literally as "+inf%".
+    private func targetPercent(_ target: Double?) -> String {
+        guard let target, currentPrice > 0 else { return "—" }
+        let percent = ((target - currentPrice) / currentPrice) * 100
+        guard percent.isFinite else { return "—" }
         return String(format: "%+.1f%%", percent)
     }
 
-    var formattedAvgTargetPercent: String {
-        guard let targetPrice else { return "—" }
-        let percent = ((targetPrice - currentPrice) / currentPrice) * 100
-        return String(format: "%+.1f%%", percent)
-    }
+    var formattedHighTargetPercent: String { targetPercent(highTarget) }
 
-    var formattedLowTargetPercent: String {
-        guard let lowTarget else { return "—" }
-        let percent = ((lowTarget - currentPrice) / currentPrice) * 100
-        return String(format: "%+.1f%%", percent)
-    }
+    var formattedAvgTargetPercent: String { targetPercent(targetPrice) }
+
+    var formattedLowTargetPercent: String { targetPercent(lowTarget) }
 
     var formattedDiscount: String {
         "Trading \(String(format: "%.1f", discountPercent))% below fair value estimate"

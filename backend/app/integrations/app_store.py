@@ -163,6 +163,42 @@ def _resolve_environment():
     return env, raw
 
 
+def _as_der(data: bytes, path: Path) -> bytes:
+    """Normalise a root certificate to DER, which is the only form the library accepts.
+
+    Apple's library loads trust anchors with
+    `crypto.load_certificate(crypto.FILETYPE_ASN1, ...)` — ASN.1/**DER**. Handing it a
+    PEM file raises, and the raise happens inside the loop that builds the trust store, so
+    ONE PEM disables every root in the directory.
+
+    This shipped: `AppleRootCA-G3.pem` was committed (converted from Apple's `.cer` only
+    because `.gitignore` has a blanket `*.cer` rule for signing material). The verifier still
+    CONSTRUCTED fine, so the readiness probe returned 400 "Invalid signature" — exactly what a
+    garbage payload returns against a *working* verifier. Nothing distinguished "trust anchor
+    unusable" from "payload rejected", and every real purchase would have 400'd.
+
+    Accepting both formats here is the fix: the on-disk encoding is now irrelevant, and a
+    file that is neither raises `ValueError` for the caller to skip and log loudly.
+    """
+    if data.lstrip().startswith(b"-----BEGIN"):
+        from OpenSSL import crypto  # noqa: PLC0415
+
+        try:
+            cert = crypto.load_certificate(crypto.FILETYPE_PEM, data)
+        except Exception as e:  # noqa: BLE001 — surface as a typed error to the caller
+            raise ValueError(f"{path.name} looks like PEM but does not parse: {e}") from e
+        logger.info("Converted PEM root certificate %s to DER", path.name)
+        return crypto.dump_certificate(crypto.FILETYPE_ASN1, cert)
+
+    from OpenSSL import crypto  # noqa: PLC0415
+
+    try:
+        crypto.load_certificate(crypto.FILETYPE_ASN1, data)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"{path.name} is neither valid DER nor PEM: {e}") from e
+    return data
+
+
 def _load_root_certificates(env_name: str) -> List[bytes]:
     """Read Apple's public root CAs from disk.
 
@@ -176,9 +212,15 @@ def _load_root_certificates(env_name: str) -> List[bytes]:
         for path in sorted(cert_dir.iterdir()):
             if path.suffix.lower() in {".cer", ".der", ".pem", ".crt"} and path.is_file():
                 try:
-                    certs.append(path.read_bytes())
+                    certs.append(_as_der(path.read_bytes(), path))
                 except OSError as e:
                     logger.error("Could not read Apple root cert %s: %s", path, e)
+                except ValueError as e:
+                    # Do NOT append an unparseable root. `_verify_chain_without_caching`
+                    # loads every trusted cert inside ONE try block, so a single bad entry
+                    # raises INVALID_CERTIFICATE for the whole store — one broken file
+                    # disables every good root beside it.
+                    logger.error("Ignoring unusable Apple root cert %s: %s", path, e)
 
     if not certs and env_name not in _LOCAL_ENVIRONMENTS:
         raise AppStoreNotConfigured(

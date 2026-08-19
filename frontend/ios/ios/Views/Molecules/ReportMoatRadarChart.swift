@@ -23,7 +23,44 @@ struct ReportMoatRadarChart: View {
     private let frameSize: CGFloat = 340
     private let rings = 5
 
+    /// A radar needs at least a triangle. Below that the geometry is undefined —
+    /// and `polygonPath`/`dataPolygonPath` reduce an empty array to `i % 0`, which
+    /// is a Swift runtime TRAP (integer remainder by zero), not a NaN. That is a
+    /// hard crash, and it is reachable: `MoatCompetitionResponse.dimensions` has
+    /// no minimum length, and `research_reports.ticker_report_data` rows are user
+    /// HISTORY that `CACHE_SCHEMA_FLOOR` never invalidates — so a report saved
+    /// before the deterministic moat scorer existed can still carry `[]` today.
+    /// Opening it and expanding "Industry & Competitive Moat" killed the app.
+    private var hasPlottableGeometry: Bool { dimensions.count >= 3 }
+
     var body: some View {
+        if hasPlottableGeometry {
+            chart
+        } else {
+            unavailableState
+        }
+    }
+
+    /// Honest empty state — the same principle as the "—" CAGR and the null
+    /// analyst targets: say the pillars are missing rather than draw a shape that
+    /// implies scores we do not have.
+    private var unavailableState: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Image(systemName: "chart.pie")
+                .font(.system(size: 28))
+                .foregroundColor(AppColors.textMuted)
+            Text("Moat pillar scores unavailable for this report")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, AppSpacing.xl)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Moat pillar scores unavailable for this report")
+    }
+
+    private var chart: some View {
         ZStack {
             // Grid rings + axis lines
             radarGrid
@@ -165,11 +202,15 @@ struct ReportMoatRadarChart: View {
     // MARK: - Geometry Helpers
 
     private func angleForIndex(_ index: Int, total: Int) -> CGFloat {
-        CGFloat(index) * (2 * .pi / CGFloat(total))
+        guard total > 0 else { return 0 }
+        return CGFloat(index) * (2 * .pi / CGFloat(total))
     }
 
     private func polygonPath(center: CGPoint, radius: CGFloat, sides: Int) -> Path {
         var path = Path()
+        // `i % sides` traps on sides == 0. `body` already gates on >= 3, but the
+        // helper must be safe on its own terms so a future caller cannot crash.
+        guard sides > 0 else { return path }
         for i in 0...sides {
             let angle = angleForIndex(i % sides, total: sides) - .pi / 2
             let point = CGPoint(
@@ -184,6 +225,8 @@ struct ReportMoatRadarChart: View {
 
     private func dataPolygonPath(center: CGPoint, radius: CGFloat, values: [Double]) -> Path {
         var path = Path()
+        // Same trap as `polygonPath`, plus `values[idx]` would be out of range.
+        guard !values.isEmpty else { return path }
         for i in 0...values.count {
             let idx = i % values.count
             let angle = angleForIndex(idx, total: values.count) - .pi / 2

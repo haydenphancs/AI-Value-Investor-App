@@ -265,3 +265,115 @@ def test_buy_credits_header_does_not_fabricate_a_zero_balance():
     assert "credits?.remaining ?? 0" not in src, (
         "Buy Credits renders a fabricated 0 when the balance is unknown — hide it instead"
     )
+
+
+# ── The 5xx retry must never re-send a WRITE ─────────────────────────────────
+#
+# `APIClient.request` retried on `.serverError` with `retryCount = 2` and no method
+# check. A 5xx says nothing about whether the origin committed, and an edge that drops
+# the response AFTER the handler ran is indistinguishable from one that never reached
+# it — so `POST /research/generate`, which precharges 20 credits and inserts a row
+# BEFORE returning, could be billed up to three times for one tap. A free account is
+# seeded 50 credits. The agent-run dedup collapses the duplicate pipelines into one
+# Gemini run, so the compute was deduplicated and only the BILLING multiplied, which
+# is why nothing upstream ever noticed.
+
+_API_CLIENT = _REPO / "frontend/ios/ios/Core/Services/APIClient.swift"
+_API_ENDPOINT = _REPO / "frontend/ios/ios/Core/Services/APIEndpoint.swift"
+
+
+def _strip_comments(src: str) -> str:
+    """Remove // and /* */ comments so a guard cannot be satisfied by prose.
+
+    Without this every assertion below passes on the DOC COMMENT that explains the
+    rule, which is exactly how a source-scan guard goes vacuous.
+    """
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return re.sub(r"^\s*//.*$", "", src, flags=re.M)
+
+
+def test_server_error_retry_is_gated_on_an_idempotent_method():
+    code = _strip_comments(_src(_API_CLIENT))
+    retries = re.findall(r"if retryCount > 0,\s*case \.serverError = (?:error|apiError)[^{]*\{", code)
+    assert retries, "the 5xx retry block moved or was renamed — re-point this guard"
+    for block in retries:
+        assert "isSafeToRetryAfterServerError" in block, (
+            "a 5xx retry is not gated on the HTTP method. Re-sending POST "
+            "/research/generate after a dropped response charges another 20 credits; "
+            "gate on `endpoint.method.isSafeToRetryAfterServerError`.\n"
+            f"offending block: {block!r}"
+        )
+
+
+def test_only_get_is_declared_safe_to_retry():
+    code = _strip_comments(_src(_API_ENDPOINT))
+    m = re.search(r"var isSafeToRetryAfterServerError:\s*Bool\s*\{([^}]*)\}", code)
+    assert m, "HTTPMethod.isSafeToRetryAfterServerError is missing"
+    body = m.group(1)
+    assert "self == .GET" in body, (
+        "only GET may be auto-retried after a 5xx; every other verb can carry a "
+        f"side effect. body was: {body!r}"
+    )
+    for verb in (".POST", ".PUT", ".PATCH", ".DELETE"):
+        assert verb not in body, f"{verb} must not be admitted to the 5xx retry"
+
+
+# ── The report cost shown to the user must be the cost the server charges ────
+
+
+def test_ios_analysis_cost_matches_the_backend_report_credit_cost():
+    from app.config import settings
+
+    src = _strip_comments(_src(_REPO / "frontend/ios/ios/Models/ResearchModels.swift"))
+    m = re.search(r"static let standard = AnalysisCost\(credits:\s*(\d+)\s*\)", src)
+    assert m, "AnalysisCost.standard moved — the Generate button's 'Uses N Credits' label"
+    assert int(m.group(1)) == settings.REPORT_CREDIT_COST, (
+        f"iOS advertises {m.group(1)} credits on the Generate button while the backend "
+        f"charges {settings.REPORT_CREDIT_COST}. The button label and the debit must "
+        "move together — a mismatch is a disclosure problem, not a cosmetic one."
+    )
+
+
+# ── The moat radar must not be handed geometry it traps on ───────────────────
+#
+# `polygonPath` reduces an empty `dimensions` array to `i % 0`, which is an integer
+# remainder by zero — a Swift TRAP, i.e. a hard crash, not a NaN. Reachable from a
+# saved report: `MoatCompetitionResponse.dimensions` has no minimum length and
+# `research_reports.ticker_report_data` is user history that CACHE_SCHEMA_FLOOR never
+# invalidates.
+
+
+def test_moat_radar_guards_against_degenerate_geometry():
+    code = _strip_comments(_src(_REPO / "frontend/ios/ios/Views/Molecules/ReportMoatRadarChart.swift"))
+    assert re.search(r"dimensions\.count >= 3", code), (
+        "ReportMoatRadarChart must refuse to plot fewer than 3 pillars — `i % sides` "
+        "traps when `sides` is 0"
+    )
+    for fn, guard in (("polygonPath", r"guard sides > 0"), ("dataPolygonPath", r"guard !values\.isEmpty")):
+        assert re.search(guard, code), (
+            f"{fn} must be safe on its own terms so a future caller cannot crash the app"
+        )
+
+
+# ── The Reports list must live-poll on the screen that is actually presented ──
+#
+# `startReportsPolling()` was wired only in `Views/Screens/ResearchView.swift`, a
+# preview-only copy that is never presented, so in the shipping app nothing armed it.
+
+
+def test_reports_polling_is_armed_from_the_live_screen():
+    code = _strip_comments(_src(_REPO / "frontend/ios/ios/ContentView.swift"))
+    assert "startReportsPolling()" in code, (
+        "ContentView (which hosts the LIVE ResearchViewWithBinding) must arm the "
+        "Reports live-poll; wiring it only in the preview-only screen ships nothing"
+    )
+    assert "stopReportsPolling()" in code, "…and must stop it when the screen goes away"
+
+
+def test_the_dead_duplicate_research_screen_is_gone():
+    """A second full implementation of a screen is where fixes go to die: the polling
+    wiring above lived there, correct and unreachable, for as long as it existed."""
+    assert not (_REPO / "frontend/ios/ios/Views/Screens/ResearchView.swift").exists(), (
+        "ResearchView.swift is back. The live Research screen is "
+        "`ResearchViewWithBinding` in ContentView.swift — do not re-create a second copy."
+    )

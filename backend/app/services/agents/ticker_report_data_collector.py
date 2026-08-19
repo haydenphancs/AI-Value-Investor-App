@@ -2128,7 +2128,9 @@ class TickerReportDataCollector:
             ),
             "last_updated": datetime.now(timezone.utc).strftime("Updated %b %d, %Y"),
         }
-        macro_vital = _derive_macro_vital(risk_factors, threat_level, composite)
+        macro_vital = _derive_macro_vital(
+            risk_factors, threat_level, composite, measured=macro_measured,
+        )
 
         # ── Key vitals (assembled) ────────────────────────────────────
         # INTERNAL scoring substrate only (see the NOTE at the top of this
@@ -4803,6 +4805,22 @@ def _role_rank(cleaned_title: str, raw_type: str) -> int:
     return 99
 
 
+def _filer_key(name: Any) -> str:
+    """Identity key for matching a 13G filer to a Form 4 roster entry.
+
+    Name is the ONLY identifier the two sources share — roster rows are derived from
+    `reportingName` and carry no CIK — so this normalizes away the formatting that
+    differs between them: case, punctuation, and "Last First" vs "First Last" (EDGAR
+    emits both). Sorting the tokens makes the comparison order-insensitive, which is
+    what lets "ELLISON LAWRENCE J" match "Lawrence J. Ellison".
+    """
+    text = normalize_insider_name(name) if name else ""
+    if not text:
+        return ""
+    tokens = [t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) > 1]
+    return " ".join(sorted(tokens))
+
+
 def _build_key_management(
     insider_roster: List[Dict[str, Any]],
     profile: Dict[str, Any],
@@ -4865,10 +4883,42 @@ def _build_key_management(
                 "shares": sole,
                 "pct": _safe_float(f, "percentOfClass"),
                 "date": filing_date,
+                # WHOSE stake this is. Load-bearing — see `_filer_key` below.
+                "name": (
+                    f.get("nameOfReportingPerson")
+                    or f.get("reportingPersonName")
+                    or f.get("name")
+                    or ""
+                ),
             }
-    ind_queue = sorted(
-        latest_by_cik.values(), key=lambda x: x["shares"], reverse=True,
-    )
+
+    # ⚠️ MATCH THE FILING TO THE PERSON BY NAME, NEVER BY POSITION.
+    #
+    # This used to be a queue: 13G filers sorted shares-desc, roster sorted
+    # shares-desc, and `ind_queue.pop(0)` grafted the largest filing onto the largest
+    # roster entry tagged "10 percent owner". Nothing checked they were the same human.
+    #
+    # The mismatch is the NORMAL case, not the exotic one, because the two sources have
+    # different populations: `get_insider_roster` is derived from the last 100 Form 4
+    # TRANSACTIONS (fmp.py), so a founder who has not traded recently — precisely the
+    # holder 13G exists to surface — is absent from it, while some other person tagged
+    # "10 percent owner" is present. The report then printed that other person's name
+    # next to the founder's 1.157B shares and a "43% owner" chip. Misattributing a
+    # nine-figure position to a named individual is the worst output this screen can
+    # produce, and nothing downstream could detect it.
+    #
+    # Name is the only identity available: roster rows carry `owner` and NO cik (they
+    # are built from `reportingName` alone), which is also why the `seen_top_ciks`
+    # dedup below never fires.
+    by_filer_name: Dict[str, Dict[str, Any]] = {}
+    for entry in latest_by_cik.values():
+        key = _filer_key(entry.get("name"))
+        if not key:
+            continue
+        prev = by_filer_name.get(key)
+        if prev is None or entry["shares"] > prev["shares"]:
+            by_filer_name[key] = entry
+    matched_filer_keys: Set[str] = set()
 
     top_holders: List[Dict[str, Any]] = []
     officers: List[Dict[str, Any]] = []
@@ -4895,11 +4945,17 @@ def _build_key_management(
             shares = _safe_float(r, "numberOfShares")
             pct: Optional[float] = None
             in_top = False
-            if is_major and ind_queue:
-                override = ind_queue.pop(0)
+            # Upgrade a Form 4 balance to the full beneficial stake ONLY for the
+            # person the 13G actually names. A 10%-tagged insider with no matching
+            # filing keeps their own Form 4 number and gets no ownership chip —
+            # honest, and never someone else's position.
+            filer_key = _filer_key(r.get("owner"))
+            override = by_filer_name.get(filer_key) if filer_key else None
+            if is_major and override is not None:
                 shares = override["shares"]
                 pct = override["pct"] or None
                 in_top = True
+                matched_filer_keys.add(filer_key)
 
             if shares > 0 and current_price > 0:
                 value_str = _format_currency_short(shares * current_price)
@@ -4938,6 +4994,33 @@ def _build_key_management(
                 )
                 row["_shares"] = shares
                 officers.append(row)
+
+    # A 13G filer the Form 4 roster never mentioned is a REAL top holder — the
+    # founder-who-does-not-trade case this data source exists for. Now that filings are
+    # matched by identity rather than popped off a queue, they no longer ride in on
+    # someone else's row, so add them under their OWN name. Without this the identity
+    # fix would have silently dropped the single most important holder on names like
+    # ORCL.
+    for key, entry in by_filer_name.items():
+        if key in matched_filer_keys:
+            continue
+        f_shares = entry["shares"]
+        top_holders.append({
+            "name": normalize_insider_name(entry.get("name")),
+            "title": "10% Owner",
+            "ownership": _format_shares_short(f_shares),
+            "ownership_value": (
+                _format_currency_short(f_shares * current_price)
+                if f_shares > 0 and current_price > 0 else "—"
+            ),
+            "percent_ownership": (
+                round(entry["pct"], 1) if entry.get("pct") else None
+            ),
+            "percent_owned": (
+                round(f_shares / shares_outstanding * 100, 6)
+                if shares_outstanding > 0 and f_shares > 0 else None
+            ),
+        })
 
     top_holders.sort(
         key=lambda r: r.get("percent_ownership") or 0, reverse=True,
@@ -4989,13 +5072,36 @@ def _price_change_at_index(
 
 def _index_for_date(
     target: date, today: date, recent_prices: List[float],
+    recent_price_dates: Optional[List[date]] = None,
 ) -> int:
     """Map a calendar date to a chart-array index.
 
-    The chart's right edge is "today", so days_ago=0 → last index, and
-    older dates step backwards. Clamps to the array bounds rather than
-    raising for off-by-one robustness.
+    ⚠️ `recent_prices` is a TRADING-DAY series (FMP /historical is EOD and skips
+    weekends and market holidays), so stepping back by CALENDAR days lands on the
+    wrong bar — roughly 30% too far into the past, since ~5 of every 7 calendar days
+    carry a bar. A catalyst 42 calendar days ago is ~29 sessions ago; the old
+    arithmetic put it 42 bars back, ~13 bars early.
+
+    That index is not cosmetic. It selects `ev_ref = recent_prices[ev_idx]`, the
+    reference price behind the "% since <event>" headline in the Recent Price
+    Movement module, and it feeds `_price_change_at_index`, which RANKS candidates —
+    so the wrong bar both mis-states the number and can pick the wrong catalyst.
+
+    When the parallel date series is available we binary-search it for the last bar
+    at or before `target`, which is exact. `recent_price_dates` is built alongside
+    `recent_prices` in `_compute_metrics` and is chronological, so `bisect` applies
+    directly (the same lookup this module already does for the chart's minimum span).
+    The calendar arithmetic stays as the fallback for callers that have no dates
+    (and for the legacy test path), and both clamp to the array bounds.
     """
+    if recent_price_dates and len(recent_price_dates) == len(recent_prices):
+        return max(
+            0,
+            min(
+                len(recent_prices) - 1,
+                bisect.bisect_right(recent_price_dates, target) - 1,
+            ),
+        )
     days_ago = (today - target).days
     return max(0, min(len(recent_prices) - 1, len(recent_prices) - days_ago - 1))
 
@@ -5005,6 +5111,7 @@ def _detect_news_catalysts(
     recent_prices: List[float],
     today: date,
     window_start: date,
+    recent_price_dates: Optional[List[date]] = None,
 ) -> List[Dict[str, Any]]:
     """Scan FMP news within the chart window and return scored candidates.
 
@@ -5032,7 +5139,7 @@ def _detect_news_catalysts(
             continue
         if not (window_start <= d <= today):
             continue
-        idx = _index_for_date(d, today, recent_prices)
+        idx = _index_for_date(d, today, recent_prices, recent_price_dates)
         move = _price_change_at_index(recent_prices, idx)
         candidates.append({
             "tag": tag,
@@ -5160,7 +5267,7 @@ def _build_price_action(
                     continue
                 if not (scan_start <= d <= today):
                     continue
-                idx = _index_for_date(d, today, recent_prices)
+                idx = _index_for_date(d, today, recent_prices, recent_price_dates)
                 change = _price_change_at_index(recent_prices, idx)
                 if change > 3:
                     tag_e = "Earnings Beat"
@@ -5178,7 +5285,7 @@ def _build_price_action(
                 break
 
         news_candidates = _detect_news_catalysts(
-            news or [], recent_prices, today, scan_start,
+            news or [], recent_prices, today, scan_start, recent_price_dates,
         )
 
         # Priority: largest absolute move wins. Ties → earnings (higher
@@ -5545,23 +5652,60 @@ def _apply_tam_source(
 def _apply_peer_score_baseline(
     dims: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Ensure every dimension has a visible peer_score baseline.
+    """Normalize every moat dimension into the shape iOS declares.
 
-    AI Stage A frequently leaves `peer_score` at the 0.0 default from
-    the JSON template. A 0.0 collapses the gray "Peer Avg" polygon to
-    the radar chart center, making it invisible. Replace any `<= 0`
-    value with 5.0 (midpoint of the 0-10 scale) so the polygon is
-    always anchored at a sensible reference — AI is free to write
-    higher / lower values when it actually has signal.
+    `peer_score`: AI Stage A frequently leaves it at the 0.0 default from the JSON
+    template. A 0.0 collapses the gray "Peer Avg" polygon to the radar centre,
+    making it invisible. Replace any `<= 0` value with 5.0 (midpoint of the 0-10
+    scale) so the polygon is always anchored at a sensible reference — AI is free to
+    write higher / lower values when it actually has signal.
+
+    `score` and `name`: coerced HERE because on the `ai_legacy` tier these come
+    straight out of free-form Gemini JSON and were the ONLY dimension fields never
+    typed. Swift declares `MoatDimensionDTO.score: Double` and `name: String`
+    non-optionally, and the deep pipeline never validates its output against
+    `TickerReportResponse` before writing `research_reports.ticker_report_data` —
+    `GET /research/reports/{id}/ticker-report` serves that JSONB raw. So a single
+    `"score": null` (or `"7"`, or an omitted key) from one Stage-A call did not
+    degrade one pillar: it threw in Swift's synthesized `init(from:)`, collapsing the
+    ENTIRE report screen to "Received unexpected data from the server" — every time
+    that report is opened, forever, after the user paid 20 credits for it. A pillar
+    with no usable score is DROPPED instead, which the radar now renders as an honest
+    "scores unavailable" state rather than a fabricated 0.
     """
+    out: List[Dict[str, Any]] = []
     for d in dims:
-        peer = d.get("peer_score")
-        try:
-            if peer is None or float(peer) <= 0:
-                d["peer_score"] = 5.0
-        except (TypeError, ValueError):
-            d["peer_score"] = 5.0
-    return dims
+        if not isinstance(d, dict):
+            continue
+        name = d.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        score = _finite_or_none(d.get("score"))
+        if score is None:
+            continue
+        d["name"] = name.strip()
+        d["score"] = max(0.0, min(10.0, score))
+
+        peer = _finite_or_none(d.get("peer_score"))
+        d["peer_score"] = 5.0 if peer is None or peer <= 0 else max(0.0, min(10.0, peer))
+        out.append(d)
+    return out
+
+
+def _finite_or_none(v: Any) -> Optional[float]:
+    """`float(v)` when that yields a real number, else None.
+
+    NaN/±Inf are rejected as well as unparseable values: they survive `float()` but
+    are not representable in JSON, so FastAPI (`allow_nan=False`) 500s the whole
+    response rather than shipping them, and `jsonb` cannot store them at all.
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 # ── Moat coverage note ───────────────────────────────────────────────
@@ -7443,6 +7587,7 @@ def _derive_macro_vital(
     risk_factors: List[Dict[str, Any]],
     threat_level: str,
     composite: float,
+    measured: bool = True,
 ) -> Dict[str, Any]:
     """Derive the internal Macro vital (scoring substrate, not surfaced to clients).
 
@@ -7451,6 +7596,18 @@ def _derive_macro_vital(
     persona_scoring.compute_quality_score, on a 10-point scale:
       composite 1.0 (benign)   → score 8.0
       composite 5.0 (critical) → score 0.0
+
+    `measured=False` means NOTHING was read — no FRED series and no FMP
+    commodity/VIX snapshot — which is a real production state (an unset
+    `FRED_API_KEY` on the deploy target; see tests/test_macro_degradation_honesty.py).
+    With no factors, `composite` bottoms out at its benign end and the old
+    unconditional formula scored it **8.0/10 — "good"** and voted that into every
+    persona's weighted rating. The module directly above it renders "macro data
+    unavailable", so the score and the prose asserted opposite things about the same
+    absence, and the more data was missing the better the company scored. Emit
+    `value: None` instead: `compute_quality_score` renormalizes an unmeasured
+    dimension OUT rather than letting it vote, the same contract
+    `_build_profitability_vital` and the DCF-less `_build_valuation_vital` already use.
     """
     if threat_level in ("severe", "critical"):
         status = "critical"
@@ -7459,8 +7616,11 @@ def _derive_macro_vital(
     else:
         status = "good"
 
-    score_value = round(10.0 - 2.0 * composite, 1)
+    score_value: Optional[float] = round(10.0 - 2.0 * composite, 1)
     score_value = max(0.0, min(10.0, score_value))
+    if not measured:
+        score_value = None
+        status = "unmeasured"
 
     top_risk = risk_factors[0]["title"] if risk_factors else "No Major Risks"
 

@@ -45,6 +45,16 @@ struct ResearchStatusResponse: Sendable {
     let progress: Int
     let currentStep: String?
     let errorMessage: String?
+    /// Machine-readable failure code, split out of the DB's single `error_message`
+    /// TEXT column by `research.py::_split_structured_error`.
+    ///
+    /// The backend has emitted this since Phase 3 *specifically* so the client can
+    /// route a failure (out of credits → Buy Credits; quota → wait; bad ticker →
+    /// re-pick) instead of showing one generic retry. No Swift type declared it, so
+    /// every failure — `INSUFFICIENT_CREDITS` included — collapsed into a hardcoded
+    /// `RESEARCH_FAILED` whose only affordance is Retry, which for a 402 re-issues
+    /// the same request and fails again.
+    let errorCode: String?
     let estimatedTimeRemaining: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -52,12 +62,21 @@ struct ResearchStatusResponse: Sendable {
         case status, progress
         case currentStep = "current_step"
         case errorMessage = "error_message"
+        case errorCode = "error_code"
         case estimatedTimeRemaining = "estimated_time_remaining"
     }
 
     nonisolated var isCompleted: Bool { status == "completed" }
     nonisolated var isFailed: Bool { status == "failed" }
     nonisolated var isProcessing: Bool { status == "pending" || status == "processing" }
+    /// Anything that is neither in-flight nor one of the two known outcomes — today
+    /// that means `deleted`, which `delete_report` writes when the user removes a
+    /// still-generating card. The poll loop MUST stop on it: with no branch for an
+    /// unexpected status it fell through to the bottom of the `while` and kept
+    /// polling every 3s until the 300s ceiling — ~100 authenticated requests for a
+    /// report that no longer exists, while its id stayed in `inFlightReportIds` and
+    /// held one of the user's four concurrency slots.
+    nonisolated var isTerminalUnknown: Bool { !isProcessing && !isCompleted && !isFailed }
 }
 
 extension ResearchStatusResponse: Decodable {
@@ -68,6 +87,7 @@ extension ResearchStatusResponse: Decodable {
         self.progress = try container.decode(Int.self, forKey: .progress)
         self.currentStep = try container.decodeIfPresent(String.self, forKey: .currentStep)
         self.errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
+        self.errorCode = try container.decodeIfPresent(String.self, forKey: .errorCode)
         self.estimatedTimeRemaining = try container.decodeIfPresent(Int.self, forKey: .estimatedTimeRemaining)
     }
 }
@@ -176,8 +196,13 @@ actor TaskPollingManager {
                             continuation.finish()
                             return
                         } else if status.isFailed {
-                            let errorMessage = status.errorMessage ?? "Research generation failed"
-                            continuation.yield(.failed(.apiError(code: "RESEARCH_FAILED", message: errorMessage)))
+                            continuation.yield(.failed(Self.failure(from: status)))
+                            continuation.finish()
+                            return
+                        } else if status.isTerminalUnknown {
+                            // e.g. the user deleted the report while it was generating.
+                            // Terminal — stop polling instead of spinning to the timeout.
+                            continuation.yield(.failed(Self.terminalUnknown(status)))
                             continuation.finish()
                             return
                         }
@@ -224,8 +249,11 @@ actor TaskPollingManager {
                             continuation.finish()
                             return
                         } else if status.isFailed {
-                            let errorMessage = status.errorMessage ?? "Research generation failed"
-                            continuation.yield(.failed(.apiError(code: "RESEARCH_FAILED", message: errorMessage)))
+                            continuation.yield(.failed(Self.failure(from: status)))
+                            continuation.finish()
+                            return
+                        } else if status.isTerminalUnknown {
+                            continuation.yield(.failed(Self.terminalUnknown(status)))
                             continuation.finish()
                             return
                         }
@@ -241,6 +269,29 @@ actor TaskPollingManager {
                 }
             }
         }
+    }
+
+    // MARK: - Failure Mapping
+
+    /// Turn a failed `/status` poll into the same typed `AppError` the rest of the app
+    /// uses, preserving the backend's `error_code` so the UI can offer the action that
+    /// actually resolves it. `AppError.from(APIError.businessError(...))` owns the
+    /// code → case mapping (INSUFFICIENT_CREDITS → `.insufficientCredits`, whose
+    /// `suggestedAction` is `.upgrade`), so this adds no second mapping table.
+    nonisolated private static func failure(from status: ResearchStatusResponse) -> AppError {
+        let message = status.errorMessage ?? "Research generation failed"
+        guard let code = status.errorCode, !code.isEmpty else {
+            return .apiError(code: "RESEARCH_FAILED", message: message)
+        }
+        return AppError.from(APIError.businessError(code: code, message: message))
+    }
+
+    /// A status that is neither in-flight nor a known outcome. Today: `deleted`.
+    nonisolated private static func terminalUnknown(_ status: ResearchStatusResponse) -> AppError {
+        .apiError(
+            code: "RESEARCH_\(status.status.uppercased())",
+            message: "This analysis is no longer available."
+        )
     }
 
     // MARK: - Task Management

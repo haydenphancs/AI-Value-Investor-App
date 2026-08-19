@@ -55,8 +55,14 @@ struct ReportsListSection: View {
                 reconnectingState
             } else if sections.isEmpty && requiresSignIn {
                 signedOutState
-            } else if sections.isEmpty && !searchText.isEmpty {
-                emptySearchState
+            } else if sections.isEmpty && isFiltered {
+                // A FILTER matched nothing — the user has reports, just not these.
+                // `isFiltered` covers the persona chips as well as the search box:
+                // previously only `searchText` was checked, so tapping "Disruption" with
+                // no Cathie Wood analyses fell through to the FIRST-RUN state below and
+                // told someone with forty paid reports "No analyses yet", under a button
+                // offering to generate their first one.
+                emptyFilterState
             } else if sections.isEmpty {
                 // First run: no reports AND no active search. Without this branch a
                 // brand-new user's first visit to the paid feature was a completely
@@ -372,18 +378,53 @@ struct ReportsListSection: View {
         .padding(.top, AppSpacing.xxxl)
     }
 
-    private var emptySearchState: some View {
-        VStack(spacing: AppSpacing.sm) {
-            Image(systemName: "magnifyingglass")
+    /// True when the list is empty because of something the USER applied, not because
+    /// they have no reports. Either half of the filter counts.
+    private var isFiltered: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !selectedPersonaKeys.isEmpty
+    }
+
+    private var emptyFilterState: some View {
+        let personaNames = personaTags
+            .filter { selectedPersonaKeys.contains($0.key) }
+            .map(\.shortName)
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Name what is actually filtering, so the way out is obvious.
+        let message: String = {
+            if !query.isEmpty && !personaNames.isEmpty {
+                return "No \(personaNames.joined(separator: " / ")) reports match \"\(query)\""
+            }
+            if !query.isEmpty {
+                return "No reports match \"\(query)\""
+            }
+            if personaNames.count == 1 {
+                return "No \(personaNames[0]) analyses yet"
+            }
+            return "No analyses yet for the selected analysts"
+        }()
+
+        return VStack(spacing: AppSpacing.sm) {
+            Image(systemName: query.isEmpty ? "line.3.horizontal.decrease.circle" : "magnifyingglass")
                 .font(.system(size: 32))
                 .foregroundColor(AppColors.textMuted)
-            Text("No reports match \"\(searchText)\"")
+            Text(message)
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xl)
+            Text(query.isEmpty
+                 ? "Clear the analyst filter to see your other reports."
+                 : "Try a different ticker, company, or analyst.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xl)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, AppSpacing.xxxl)
+        .accessibilityElement(children: .combine)
     }
 }
 

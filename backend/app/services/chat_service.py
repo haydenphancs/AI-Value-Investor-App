@@ -151,6 +151,7 @@ class ChatService:
         reference_id: Optional[str] = None,
         context_is_replayed: bool = False,
         reader_lens: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate AI response with RAG context retrieval and optional
@@ -165,7 +166,7 @@ class ChatService:
         # Screen-aware grounding (never raises; degrades to client context/None).
         from app.services.chat_context_resolver import get_chat_context_resolver
         context = await get_chat_context_resolver().resolve(
-            context_type, reference_id, client_context=context,
+            context_type, reference_id, client_context=context, user_id=user_id,
         )
 
         # Step 1: Conversation history
@@ -319,6 +320,7 @@ class ChatService:
         reference_id: Optional[str] = None,
         context_is_replayed: bool = False,
         reader_lens: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build everything a STREAMED response needs, WITHOUT calling Gemini.
 
@@ -334,7 +336,7 @@ class ChatService:
         # Screen-aware grounding (never raises).
         from app.services.chat_context_resolver import get_chat_context_resolver
         context = await get_chat_context_resolver().resolve(
-            context_type, reference_id, client_context=context,
+            context_type, reference_id, client_context=context, user_id=user_id,
         )
 
         history = self._get_recent_messages(session_id, limit=20)

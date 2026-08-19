@@ -212,6 +212,7 @@ class ChatContextResolver:
         context_type: Optional[str],
         reference_id: Optional[str],
         client_context: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[str]:
         if not context_type:
             return client_context
@@ -231,9 +232,20 @@ class ChatContextResolver:
             )
             return client_context
 
+        # TICKER_REPORT is the only screen whose grounding is OWNER-SCOPED (it can read
+        # the caller's own frozen report row), so it is the only handler that takes an
+        # identity. Special-cased here rather than widening all eight signatures with a
+        # parameter seven of them would ignore.
+        if ctype == "TICKER_REPORT":
+            coro = self._resolve_ticker_report(
+                reference_id, client_context, user_id=user_id,
+            )
+        else:
+            coro = handler(self, reference_id, client_context)
+
         try:
             block = await asyncio.wait_for(
-                handler(self, reference_id, client_context),
+                coro,
                 timeout=_RESOLVE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
@@ -280,24 +292,54 @@ class ChatContextResolver:
 
     # ── TICKER_REPORT ────────────────────────────────────────────────
     async def _resolve_ticker_report(
-        self, reference_id: Optional[str], client_context: Optional[str]
+        self,
+        reference_id: Optional[str],
+        client_context: Optional[str],
+        user_id: Optional[str] = None,
     ) -> Optional[str]:
+        """Ground the chat in the report the user is ACTUALLY LOOKING AT.
+
+        `reference_id` is `"TICKER|persona"` or `"TICKER|persona|<report_id>"`.
+
+        The report id half matters because reports are FROZEN point-in-time
+        snapshots while `ticker_report_cache` is CLOSE-ALIGNED: `get_cached_report`
+        returns None for any row written before the most recent weekday 18:00 ET.
+        Grounding on that cache alone therefore had two failure modes, both silent:
+
+          * After the next close, a saved report from the Reports tab resolved to
+            None, and `chat_service` fell through to LIVE stock enrichment — so
+            "Chat with the report…" answered about today's quote while the user read
+            a three-week-old analysis.
+          * Before it, the cache could hold a NEWER regeneration of the same
+            (ticker, persona), so the answer cited numbers that are not on screen.
+
+        The user's own `research_reports` row is immutable history and is exactly
+        what Path A rendered, so it is preferred. The lookup is filtered by
+        `user_id` as well as `id`: a report id is a bare UUID with no other access
+        control, and an unscoped read here would turn the chat into an oracle for
+        anyone else's report.
+        """
         if not reference_id:
             return None
-        ticker, _, persona = reference_id.partition("|")
-        ticker = ticker.strip().upper()
-        persona = (persona or "").strip().lower()
+        parts = [p.strip() for p in reference_id.split("|")]
+        ticker = (parts[0] if parts else "").upper()
+        persona = (parts[1].lower() if len(parts) > 1 else "")
         persona = _AGENT_TAG_TO_KEY.get(persona, persona) or _DEFAULT_PERSONA
+        report_id = parts[2] if len(parts) > 2 and parts[2] else None
         if not ticker:
             return None
 
         from app.services import ticker_report_cache
 
-        report = await ticker_report_cache.get_cached_report(ticker, persona)
+        report = None
+        if report_id and user_id:
+            report = await self._stored_report_for_user(report_id, user_id)
+        if not report:
+            report = await ticker_report_cache.get_cached_report(ticker, persona)
         if not report:
             logger.info(
-                "chat_context: no cached report for %s/%s (chat proceeds ungrounded)",
-                ticker, persona,
+                "chat_context: no report for %s/%s (report_id=%s) — chat proceeds ungrounded",
+                ticker, persona, report_id,
             )
             return None
 
@@ -350,6 +392,41 @@ class ChatContextResolver:
             "rather than inventing figures."
         )
         return "\n".join(parts)
+
+    @staticmethod
+    async def _stored_report_for_user(
+        report_id: str, user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """The caller's OWN frozen `ticker_report_data`, or None.
+
+        Owner-scoped by `user_id` — see `_resolve_ticker_report`. Never raises: a
+        Supabase blip must degrade to the shared cache, not break the chat turn.
+        Runs the sync client in a thread so it cannot block the event loop.
+        """
+        def _query() -> Optional[Dict[str, Any]]:
+            try:
+                from app.database import get_supabase
+
+                row = (
+                    get_supabase()
+                    .table("research_reports")
+                    .select("ticker_report_data")
+                    .eq("id", report_id)
+                    .eq("user_id", user_id)
+                    .eq("status", "completed")
+                    .limit(1)
+                    .execute()
+                )
+                data = (row.data or [{}])[0].get("ticker_report_data")
+                return data if isinstance(data, dict) else None
+            except Exception as e:
+                logger.warning(
+                    "chat_context: stored report lookup failed for %s: %s: %s",
+                    report_id, type(e).__name__, e,
+                )
+                return None
+
+        return await asyncio.to_thread(_query)
 
     # ── STOCK (no-op — chat_service enriches via stock_id + iOS tab context) ──
     async def _resolve_stock(

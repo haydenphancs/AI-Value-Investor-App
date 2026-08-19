@@ -23,6 +23,16 @@ class TickerReportViewModel: ObservableObject {
     /// can actually resolve it.
     @Published var errorAction: ErrorAction = .retry
 
+    /// A failure that must NOT replace the report already on screen — chiefly a failed
+    /// pull-to-refresh.
+    ///
+    /// `body` renders `reportData` before `error`, so setting `error` while a report is
+    /// loaded produced NOTHING: the user pulled down, the request failed, the spinner
+    /// retracted, and the app said nothing at all. A silent failure on a user-initiated
+    /// action is exactly what the app-wide rule forbids. This drives a dismissible
+    /// banner over the existing content instead.
+    @Published var transientError: String?
+
     // AI chat input (bound directly to CaydexAIChatBar in the View). The bar's onSend now seeds
     // the unified full-screen chat (AIChatScreen) with report context — see TickerReportView.
     @Published var aiInputText: String = ""
@@ -96,6 +106,11 @@ class TickerReportViewModel: ObservableObject {
 
         isLoading = true
         error = nil
+        transientError = nil
+        // Reset the ACTION too. It is sticky state — a previous 402 leaves `.upgrade`
+        // behind, so the next unrelated failure (a timeout, say) offered "Get Credits"
+        // to a user with a full balance and no way to retry.
+        errorAction = .retry
         loadAttempts += 1
 
         Task { [weak self] in
@@ -125,6 +140,7 @@ class TickerReportViewModel: ObservableObject {
             AppActions.shared.requestSignIn(for: "view AI analysis")
             return
         }
+        transientError = nil
         await _fetchReport(allowPaidGeneration: false)
     }
 
@@ -216,8 +232,19 @@ class TickerReportViewModel: ObservableObject {
                     if Self.reportIsGenuinelyUnavailable(error) {
                         self.needsPaidRegeneration = true
                         self.error = nil
+                        self.transientError = nil
                     } else {
-                        self.error = AppError.from(error).message
+                        // A refresh that failed for TRANSPORT reasons. The report the
+                        // user is reading is still valid and still on screen, so this
+                        // goes to the banner — writing `error` here set a field the
+                        // view can never reach while `reportData` is non-nil.
+                        let appError = AppError.from(error)
+                        if self.reportData == nil {
+                            self.error = appError.message
+                            self.errorAction = appError.suggestedAction
+                        } else {
+                            self.transientError = appError.message
+                        }
                     }
                     self.isLoading = false
                     return
@@ -227,7 +254,14 @@ class TickerReportViewModel: ObservableObject {
                 } else {
                     print("❌ [TickerReport] Cached report \(reportId) failed to load (\(type(of: error)): \(error)) — NOT falling through to a billable regeneration.")
                     self.isLoading = false
-                    self.error = self.userFriendlyError(error)
+                    if self.reportData == nil {
+                        self.error = self.userFriendlyError(error)
+                        // Same routing as Path B below — this branch used to leave
+                        // `errorAction` at whatever a previous failure had set.
+                        self.errorAction = AppError.from(error).suggestedAction
+                    } else {
+                        self.transientError = AppError.from(error).message
+                    }
                     return
                 }
             }
@@ -303,6 +337,14 @@ class TickerReportViewModel: ObservableObject {
     /// with a backend id). Direct/ad-hoc fetches (reportId == nil) can't export.
     var canExportPDF: Bool { reportId != nil }
     var pdfReportId: String? { reportId }
+
+    /// The `research_reports` row this screen is rendering, when it has one.
+    ///
+    /// Sent to the chat so it can ground on the FROZEN report on screen rather than
+    /// on `ticker_report_cache`, which is close-aligned and goes stale at the next
+    /// weekday 18:00 ET — after which a saved report resolved to no context at all
+    /// and the assistant silently answered from live market data instead.
+    var backendReportId: String? { reportId }
 
     func shareTapped() {
         guard reportId != nil else { return }

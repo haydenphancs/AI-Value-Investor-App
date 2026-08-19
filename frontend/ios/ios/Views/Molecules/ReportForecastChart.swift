@@ -15,10 +15,23 @@ import Charts
 struct ReportForecastChart: View {
     let forecast: ReportRevenueForecast
 
-    /// Scale EPS values into the revenue axis range so dots sit inside the bars
+    /// Scale EPS values into the revenue axis range so dots sit inside the bars.
+    ///
+    /// Uses MAGNITUDES with a floor of 1, which the mainline `EarningsTimelineChart`
+    /// already does (`maxAbsRevenue` / `maxAbsEPS`). The plain `max()` here had two
+    /// failure modes on real companies, and this chart is still live for every saved
+    /// report that predates the `annual_timeline` payload:
+    ///
+    ///   * **max EPS == 0** (a company with no EPS estimates on any projected year):
+    ///     `max()` returns 0.0, not nil, so the fallback never fired and the divide
+    ///     produced `+inf`. Each point then plotted `0 * inf` = **NaN**, and NaN in a
+    ///     Swift Charts value is undefined behaviour — a blank or broken plot.
+    ///   * **max EPS < 0** (every projected year at a loss — routine for
+    ///     pre-profitability names): the factor went NEGATIVE, mirroring the entire
+    ///     EPS series so losses rendered as gains above the axis.
     private var epsScaleFactor: Double {
-        let maxRevenue = forecast.projections.map(\.revenue).max() ?? 1
-        let maxEPS = forecast.projections.map(\.eps).max() ?? 1
+        let maxRevenue = max(forecast.projections.map { abs($0.revenue) }.max() ?? 1, 1)
+        let maxEPS = max(forecast.projections.map { abs($0.eps) }.max() ?? 1, 1)
         // Place highest EPS dot at ~70% of max bar height
         return (maxRevenue * 0.70) / maxEPS
     }

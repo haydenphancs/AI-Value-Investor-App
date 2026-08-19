@@ -985,7 +985,8 @@ final class ResearchViewModel {
 > granted (monthly, expires) and purchased (consumable IAP, never expires per App Store
 > Guideline 3.1.1). `spend_credits` drains granted first; `refund_credits` reverses the
 > **recorded split** of the original spend, so **a refund must pass the same `ref_id` its
-> charge used** or it silently destroys paid credits. The 402's `action="upgrade"` now opens
+> charge used**. (Before migration 139 a mismatch silently destroyed paid credits; it is now a
+> no-op that refunds nothing and `RAISE WARNING`s — still a bug, but no longer theft. §9b.2.) The 402's `action="upgrade"` now opens
 > **Buy Credits**, not the subscription paywall. Full model in **[§9b](#9b-monetization--credits-entitlements--in-app-purchase)**.
 
 > **Auth errors — IMPLEMENTED 2026-08-02.** The `AUTH_*` codes and the central exception
@@ -1881,8 +1882,14 @@ either side re-arms the guard:
    Pro binds at $14.99/1,200 = $0.0124917/credit (Max at $0.0099975 is looser).
 2. **The ladder is strictly monotonic** — a dearer pack must be *better* per credit, never worse.
 
-Current ladder (migration **138**, superseding 117's): Starter $2.99/130 · Plus $5.99/280 ·
-Power $11.99/600 · Mega $24.99/1,300 — **1.84× → 1.54×** Pro's rate.
+Current ladder (migration **141**, superseding 138's): Starter $2.99/130 · Plus $5.99/280 ·
+Power **$12.99/650** · Mega $24.99/1,300 — **1.84× → 1.54×** Pro's rate.
+
+> Power moved off $11.99/600 in migration 141 because **App Store Connect offers no $11.99
+> price point** for it. The credits had to move with the price: $12.99 at 600 credits is
+> $0.021650/credit, *worse* than the cheaper Plus pack — inverting the ladder in the middle,
+> exactly as invariant 2 forbids at the top. At $12.99 the count must land between 608 and
+> 675; 650 holds the effective rate at $0.019985, unchanged from 138's $0.019983.
 
 Invariant 2 is why Mega is 1,300 and no longer mirrors Pro's 1,200 allowance. At $24.99, 1,200
 credits is $0.020825/credit — 4% *worse* than Power — so the ladder would invert at the top and the

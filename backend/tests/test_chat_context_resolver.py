@@ -762,3 +762,127 @@ async def test_journey_service_failure_never_raises(resolver, monkeypatch):
     import app.services.journey_content_service as jc
     monkeypatch.setattr(jc, "get_journey_content_service", lambda: _Svc())
     assert await resolver.resolve("JOURNEY_LESSON", "Risk 101", None) is None
+
+
+# ── TICKER_REPORT: ground on the report the user is LOOKING AT ──────────────
+#
+# Reports are FROZEN point-in-time snapshots; `ticker_report_cache` is CLOSE-ALIGNED
+# and returns None for anything written before the most recent weekday 18:00 ET. So
+# grounding on that cache alone meant that, from the next close onward, opening a
+# saved report and tapping "Chat with the report…" resolved to NO context — and
+# chat_service then fell through to LIVE stock enrichment, answering about today's
+# quote while the user read a three-week-old analysis. Before that boundary it could
+# be worse: the cache may hold a NEWER regeneration of the same (ticker, persona), so
+# the answer cited numbers that are not on screen.
+
+
+def _stub_frozen_row(monkeypatch, *, expect_id=None, expect_user=None, data=None):
+    """Stand in for the owner-scoped `research_reports` read."""
+    calls = {}
+
+    async def _fake(report_id, user_id):
+        calls["report_id"] = report_id
+        calls["user_id"] = user_id
+        if expect_id is not None and report_id != expect_id:
+            return None
+        if expect_user is not None and user_id != expect_user:
+            return None
+        return data
+
+    monkeypatch.setattr(
+        ChatContextResolver, "_stored_report_for_user", staticmethod(_fake)
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_report_chat_prefers_the_users_own_frozen_row(resolver, monkeypatch):
+    """The stored row wins even when the shared cache holds a DIFFERENT report."""
+    async def fake_cache(ticker, persona):
+        return {"company_name": "Wrong Co.", "executive_summary_text": "the newer regeneration"}
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    calls = _stub_frozen_row(
+        monkeypatch,
+        data={"company_name": "Oracle Corporation",
+              "executive_summary_text": "the snapshot on screen"},
+    )
+
+    block = await resolver.resolve(
+        "TICKER_REPORT", "ORCL|warren_buffett|rid-1", None, user_id="user-42",
+    )
+    assert "Oracle Corporation" in block and "the snapshot on screen" in block
+    assert "Wrong Co." not in block and "newer regeneration" not in block
+    assert calls == {"report_id": "rid-1", "user_id": "user-42"}
+
+
+@pytest.mark.asyncio
+async def test_report_chat_still_grounds_after_the_shared_cache_goes_stale(resolver, monkeypatch):
+    """The close-cycle boundary must no longer silently un-ground a saved report."""
+    async def empty_cache(ticker, persona):
+        return None            # exactly what get_cached_report does past 18:00 ET
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", empty_cache)
+    _stub_frozen_row(monkeypatch, data={"company_name": "Oracle Corporation",
+                                        "executive_summary_text": "frozen text"})
+
+    block = await resolver.resolve(
+        "TICKER_REPORT", "ORCL|warren_buffett|rid-1", None, user_id="user-42",
+    )
+    assert block and "frozen text" in block
+
+
+@pytest.mark.asyncio
+async def test_report_chat_never_reads_a_row_without_an_identity(resolver, monkeypatch):
+    """A report id is a bare UUID with no other access control. Without a user_id the
+    stored-row read must not be attempted at all, or the chat becomes an oracle for
+    anyone else's report."""
+    async def empty_cache(ticker, persona):
+        return None
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", empty_cache)
+    calls = _stub_frozen_row(monkeypatch, data={"company_name": "Someone Else Inc."})
+
+    block = await resolver.resolve("TICKER_REPORT", "ORCL|warren_buffett|rid-1", None)
+
+    assert calls == {}, "the owner-scoped read fired with no identity to scope it to"
+    assert block is None
+
+
+@pytest.mark.asyncio
+async def test_report_chat_falls_back_to_the_shared_cache_without_a_report_id(resolver, monkeypatch):
+    """Ticker-browse has no research_reports row — the two-segment form must keep
+    working exactly as before."""
+    async def fake_cache(ticker, persona):
+        assert (ticker, persona) == ("ORCL", "warren_buffett")
+        return {"company_name": "Oracle Corporation", "executive_summary_text": "cache text"}
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    calls = _stub_frozen_row(monkeypatch, data={"company_name": "Never Used"})
+
+    block = await resolver.resolve(
+        "TICKER_REPORT", "ORCL|warren_buffett", None, user_id="user-42",
+    )
+    assert "cache text" in block
+    assert calls == {}
+
+
+@pytest.mark.asyncio
+async def test_report_chat_falls_back_when_the_row_is_not_the_callers(resolver, monkeypatch):
+    """A mismatched owner yields None from the scoped read → shared cache, never a leak."""
+    async def fake_cache(ticker, persona):
+        return {"company_name": "Oracle Corporation", "executive_summary_text": "cache text"}
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_cache)
+    _stub_frozen_row(monkeypatch, expect_user="somebody-else",
+                     data={"company_name": "Not Yours Inc."})
+
+    block = await resolver.resolve(
+        "TICKER_REPORT", "ORCL|warren_buffett|rid-1", None, user_id="user-42",
+    )
+    assert "cache text" in block and "Not Yours" not in block

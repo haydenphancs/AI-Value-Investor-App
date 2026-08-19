@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import json
 import logging
+import uuid
 
 from app.api.error_response import (
     ErrorCode,
@@ -62,6 +63,10 @@ logger = logging.getLogger(__name__)
 _REFUNDABLE_ON_DELETE = ("pending", "processing", "failed")
 
 router = APIRouter()
+
+# Strong references to in-flight report workers. See the `create_task` call in
+# `generate_research_report` for why this is not optional.
+_RESEARCH_TASKS: set["asyncio.Task"] = set()
 
 
 # ── Trigger Endpoint ─────────────────────────────────────────────────────────
@@ -219,7 +224,15 @@ async def generate_research_report(
     # debited so a future tier change can't lose track of historical
     # billing; is_refunded starts False and is flipped by
     # _run_research_task on failure.
+    #
+    # The id is minted HERE rather than left to the column default. It is the only
+    # thing that makes the insert-failure claim below able to name the row THIS call
+    # tried to create; see the comment on that claim for what the alternative cost.
+    # `research_reports.id` is `uuid DEFAULT gen_random_uuid()`, so supplying it is
+    # a no-op for every other path.
+    new_report_id = str(uuid.uuid4())
     report_data = {
+        "id": new_report_id,
         "user_id": user["id"],
         "ticker": ticker,
         "company_name": company_name,
@@ -263,16 +276,27 @@ async def generate_research_report(
         # commit, this claim wins it (is_refunded=True) and the sweep can never touch it; if no
         # row exists the claim matches nothing and we refund directly, as before. Either branch
         # refunds exactly once.
+        #
+        # ⚠️ THE CLAIM MUST NAME THIS ROW BY ID. It used to select on
+        # (user_id, ticker, investor_persona, is_refunded=False, status∈pending/processing,
+        # created_at >= cycle_start) — which has no way to distinguish the row this call tried
+        # to create from any OTHER live report the same user already has for the same
+        # (ticker, persona). Nothing forbids that: the client caps only the NUMBER of
+        # concurrent generations (4) and there is no uniqueness constraint, so tapping Generate
+        # twice for ORCL/Quality — or the Retry path, which regenerates the same pair — leaves
+        # two in-flight rows. A failed second insert then claimed the FIRST, HEALTHY row:
+        # marked it failed + is_refunded, so its worker's conditional completion write became a
+        # no-op and the report was silently dropped. And because the refund below pays exactly
+        # one DEEP_RESEARCH_COST regardless of how many rows the UPDATE matched, a two-row match
+        # returned 20 of the 40 charged. Net: 40 spent, 20 back, zero reports.
         try:
             orphan = (
                 supabase.table("research_reports")
                 .update({"status": "failed", "is_refunded": True})
+                .eq("id", new_report_id)
                 .eq("user_id", user["id"])
-                .eq("ticker", ticker)
-                .eq("investor_persona", request.investor_persona)
                 .eq("is_refunded", False)
                 .in_("status", ["pending", "processing"])
-                .gte("created_at", cycle_start)
                 .execute()
             )
             claimed_orphan = bool(getattr(orphan, "data", None))
@@ -313,12 +337,23 @@ async def generate_research_report(
 
     report = result.data[0]
 
-    # Launch async background task (fire-and-forget)
-    asyncio.create_task(
+    # Launch the worker. The handle is RETAINED in a module-level set until the task
+    # finishes: `asyncio.create_task` keeps only a WEAK reference, so an untracked
+    # task can be garbage-collected mid-execution — the documented CPython caveat that
+    # `main.py` calls out for the lifespan loops and that `stocks.py` already solves
+    # this exact way for the pre-warm. It matters more here than anywhere else in the
+    # app: this task owns a report the user has ALREADY been charged 20 credits for,
+    # and if it vanishes before `_on_started` stamps `processing_started_at` the row
+    # sits `pending` with a NULL start time, which the reconciliation sweep will not
+    # touch until `RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS` (~3.2h) has passed.
+    task = asyncio.create_task(
         _run_research_task(
             report["id"], ticker, request.investor_persona, user["id"]
-        )
+        ),
+        name=f"research:{report['id']}",
     )
+    _RESEARCH_TASKS.add(task)
+    task.add_done_callback(_RESEARCH_TASKS.discard)
 
     return ResearchGenerationResponse(
         report_id=report["id"],
@@ -488,7 +523,43 @@ async def get_research_ticker_report(
         ticker_report = await patch_wall_street_consensus_live(
             ticker_report, ticker,
         )
-    return patch_legacy_price_action(ticker_report)
+    payload = patch_legacy_price_action(ticker_report)
+
+    # Type-check what we are about to serve, but DO NOT withhold it.
+    #
+    # This is the user's own paid report and the DEEP pipeline never validated it
+    # before storing, so a drift here is our bug, not theirs. Answering
+    # DATA_INCOMPLETE would be actively harmful: iOS lists that code among the three
+    # "the report genuinely isn't there" outcomes it is allowed to fall through on,
+    # and the fall-through is the BILLABLE regeneration — so a schema regression would
+    # quietly re-charge 20 credits every time an affected report was opened. Log it
+    # loudly instead (this is the only signal that deep-path output has drifted) and
+    # serve the payload, exactly as before.
+    _validation_probe(payload, ticker, report_id)
+    return payload
+
+
+def _validation_probe(payload: Any, ticker: str, report_id: str) -> None:
+    """Log (never raise, never withhold) when a stored report no longer matches the
+    response contract. Pure observability for the one path that serves raw JSONB."""
+    try:
+        from pydantic import ValidationError
+
+        from app.schemas.ticker_report import TickerReportResponse
+
+        try:
+            TickerReportResponse(**payload)
+        except ValidationError as ve:
+            logger.error(
+                "STORED REPORT SCHEMA DRIFT: report_id=%s ticker=%s has %d field(s) that "
+                "no longer satisfy TickerReportResponse — iOS decodes this shape "
+                "all-or-nothing, so the report screen will fail to render: %s",
+                report_id, ticker, ve.error_count(), ve,
+            )
+    except Exception as e:   # the probe must never affect the response
+        logger.debug(
+            "validation probe skipped for %s: %s: %s", report_id, type(e).__name__, e,
+        )
 
 
 # ── Detailed-Analysis PDF ────────────────────────────────────────────────────
@@ -590,7 +661,11 @@ async def regenerate_research_report_pdf(
 
 @router.get("/reports")
 async def get_my_reports(
-    limit: int = Query(20, le=100),
+    # `ge=1`, not just `le=100`: `?limit=0` returned an empty list, which the Reports
+    # tab renders as its first-run "No analyses yet · Generate your first analysis"
+    # zero state — to a user who owns twenty paid reports — and a negative value
+    # reached PostgREST as `LIMIT -1` and surfaced as an unhandled 500.
+    limit: int = Query(20, ge=1, le=100),
     user: dict = Depends(get_current_user),  # account-only: AI generation costs real money
     supabase: Client = Depends(get_supabase),
 ):
@@ -630,14 +705,29 @@ async def rate_report(
     user: dict = Depends(get_current_user),  # account-only: AI generation costs real money
     supabase: Client = Depends(get_supabase),
 ):
-    """Rate a research report (1-5 stars with optional feedback)."""
+    """Rate a research report (1-5 stars with optional feedback).
+
+    Reports 404 when the UPDATE matches nothing. It used to answer
+    "Report rated successfully" unconditionally, so rating a report that had been
+    deleted moments earlier — the Reports list reloads every few seconds and rows are
+    reminted on each load — or one belonging to a previous signed-in identity looked
+    like it worked and simply did not persist. Silent no-ops on a user-initiated
+    mutation are exactly what the client cannot detect.
+    """
     update = {"user_rating": request.rating}
     if request.feedback:
         update["user_feedback"] = request.feedback
 
-    supabase.table("research_reports").update(update).eq(
+    result = supabase.table("research_reports").update(update).eq(
         "id", report_id
     ).eq("user_id", user["id"]).execute()
+
+    if not getattr(result, "data", None):
+        return make_error_response(
+            ErrorCode.REPORT_NOT_FOUND,
+            message=f"No research_reports row for id={report_id} owned by this user",
+            details={"report_id": report_id},
+        )
 
     return {"message": "Report rated successfully"}
 

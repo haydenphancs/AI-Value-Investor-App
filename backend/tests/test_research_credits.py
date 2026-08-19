@@ -218,3 +218,61 @@ def test_real_tickers_still_validate():
     for good in ["AAPL", "aapl", "BRK.B", "RDS-A", "F", "GOOGL"]:
         req = GenerateResearchRequest(stock_id=good, investor_persona="warren_buffett")
         assert req.stock_id == good
+
+
+# ── The insert-failure orphan claim must name the row it created ─────────────
+#
+# When the `research_reports` insert reports failure AFTER the 20-credit precharge, we
+# cannot know whether Postgres committed (a Cloudflare 520 or a read timeout lands here
+# with the row PRESENT). The endpoint therefore claims the row before refunding, so the
+# reconciliation sweep can never refund it a second time.
+#
+# That claim used to select on (user_id, ticker, investor_persona, is_refunded=False,
+# status ∈ pending/processing, created_at >= cycle_start) — which cannot distinguish
+# the row THIS call tried to create from any OTHER live report the same user has for
+# the same pair. Nothing forbids two: the client caps only the NUMBER of concurrent
+# generations, and Retry regenerates the same (ticker, persona). So a failed second
+# insert claimed the FIRST, HEALTHY row, marked it failed + refunded — its worker's
+# conditional completion write then no-op'd and the report was dropped — while the
+# refund paid exactly ONE cost regardless of how many rows matched. Net on a two-row
+# match: 40 charged, 20 returned, zero reports.
+
+
+def test_the_orphan_claim_is_scoped_to_a_single_row_id():
+    import inspect
+    import re
+
+    from app.api.v1.endpoints import research
+
+    src = inspect.getsource(research.generate_research_report)
+    # The claim is the update that sets both status='failed' and is_refunded=True.
+    start = src.index('.update({"status": "failed", "is_refunded": True})')
+    claim = src[start:start + 600]
+
+    assert '.eq("id", new_report_id)' in claim, (
+        "the insert-failure claim must name the row this call minted, or it can seize "
+        "a different in-flight report for the same (user, ticker, persona)"
+    )
+    for broad in ('.eq("ticker"', '.eq("investor_persona"', '.gte("created_at"'):
+        assert broad not in claim, (
+            f"{broad} is a heuristic filter, not an identity — it is what let the claim "
+            "match somebody else's live row"
+        )
+    # And the id must actually be pre-minted rather than left to the column default.
+    assert re.search(r"new_report_id = str\(uuid\.uuid4\(\)\)", src)
+    assert '"id": new_report_id' in src
+
+
+def test_the_worker_task_handle_is_retained():
+    """`asyncio.create_task` keeps only a WEAK reference, so an untracked task can be
+    collected mid-execution. This one owns a report the user has already paid 20
+    credits for, and if it dies before `processing_started_at` is stamped the sweep
+    will not reconsider the row for ~3.2 hours."""
+    import inspect
+
+    from app.api.v1.endpoints import research
+
+    src = inspect.getsource(research.generate_research_report)
+    assert "_RESEARCH_TASKS.add(task)" in src
+    assert "add_done_callback(_RESEARCH_TASKS.discard)" in src
+    assert isinstance(research._RESEARCH_TASKS, set)

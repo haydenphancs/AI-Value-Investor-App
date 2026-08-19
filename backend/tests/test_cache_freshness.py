@@ -120,3 +120,43 @@ def test_latest_completed_close_skips_malformed_bars():
     ]
     d, px = _latest_completed_close(hist)
     assert d == date(2026, 6, 12) and px == 188.0
+
+
+# ── The legacy back-compat cache must respect the close cycle too ────────────
+#
+# `_check_legacy_report_cache` is FREE PATH 1 on `GET /stocks/{ticker}/report` — it
+# runs BEFORE the close-aligned `get_cached_report`. Its cutoff was a rolling 24h TTL,
+# so a report completed at 09:45 ET Monday (whose prices are pinned to FRIDAY's close)
+# was served to every viewer until 09:45 TUESDAY — a full day past the Monday 18:00 ET
+# boundary at which the dedicated cache regenerates. Being checked first, it shadowed
+# the freshness rule the whole report design rests on.
+
+
+def test_legacy_report_cache_cutoff_honours_the_close_cycle():
+    import inspect
+
+    from app.api.v1.endpoints import ticker_report as tr
+
+    src = inspect.getsource(tr._check_legacy_report_cache)
+    assert "current_close_cycle_start()" in src, (
+        "FREE PATH 1 must not out-live the close boundary — it is consulted before the "
+        "close-aligned cache and would otherwise serve a previous-cycle report for 24h"
+    )
+    # All three floors, so neither the schema floor nor the TTL is dropped.
+    assert "CACHE_SCHEMA_FLOOR" in src and "ttl_cutoff" in src
+
+
+def test_legacy_cached_report_is_schema_validated_before_serving():
+    """This was the one return on the endpoint that skipped `_validate_report`. The
+    row comes from another user's `research_reports.ticker_report_data`, which the deep
+    pipeline writes WITHOUT ever checking it against TickerReportResponse — so it could
+    hand iOS a payload nothing had type-checked, and Swift's decode is all-or-nothing."""
+    import inspect
+
+    from app.api.v1.endpoints import ticker_report as tr
+
+    src = inspect.getsource(tr.get_ticker_report)
+    head = src[: src.index("FREE PATH 2")]
+    assert "_validate_report(" in head, (
+        "the legacy cache hit must be validated like every other return on this endpoint"
+    )

@@ -14,21 +14,47 @@ struct ReportRevenueEngineSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Header: Total Revenue & Period
-            headerSection
+            if data.segments.isEmpty {
+                // No segmentation for this company. The backend emits
+                // `total_revenue: 0.0` in that case (`_build_revenue_engine` returns
+                // its empty shell), and the header rendered that as a confident
+                // "Total Revenue $0M · FY 2026" — a fabricated figure for the many
+                // tickers FMP has no product segmentation for: ADRs, banks, insurers
+                // and REITs among them. Say what is actually true instead, the same
+                // way the Moat CAGR renders "—" and analyst targets stay null.
+                unavailableSection
+            } else {
+                // Header: Total Revenue & Period
+                headerSection
 
-            // Segments List
-            VStack(spacing: AppSpacing.md) {
-                ForEach(data.segments) { segment in
-                    segmentCard(segment)
+                // Segments List
+                VStack(spacing: AppSpacing.md) {
+                    ForEach(data.segments) { segment in
+                        segmentCard(segment)
+                    }
+                }
+
+                // Analysis Note (if available)
+                if let note = data.analysisNote {
+                    analysisNoteSection(note)
                 }
             }
-
-            // Analysis Note (if available)
-            if let note = data.analysisNote {
-                analysisNoteSection(note)
-            }
         }
+    }
+
+    // MARK: - Empty State
+
+    private var unavailableSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            Text("Revenue breakdown unavailable")
+                .font(AppTypography.bodySmallEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+            Text("This company doesn't report a product or service segment split.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Header Section
@@ -103,11 +129,14 @@ struct ReportRevenueEngineSection: View {
                         .foregroundColor(AppColors.textMuted)
                 }
 
-                // Growth indicator
+                // Growth indicator. No prior-year figure → no arrow and no
+                // percentage; `formattedGrowth` says so in words instead.
                 HStack(spacing: AppSpacing.xs) {
-                    Image(systemName: segment.growth >= 0 ? "arrow.up.right" : "arrow.down.right")
-                        .font(.system(size: 7, weight: .semibold))
-                        .foregroundColor(segment.growthColor)
+                    if segment.hasPriorAnchor {
+                        Image(systemName: segment.growth >= 0 ? "arrow.up.right" : "arrow.down.right")
+                            .font(.system(size: 7, weight: .semibold))
+                            .foregroundColor(segment.growthColor)
+                    }
 
                     Text(segment.formattedGrowth)
                         .font(AppTypography.caption)

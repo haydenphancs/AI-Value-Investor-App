@@ -29,7 +29,9 @@
     "category": "investors",
     "cik": "0001649339",
     "data_source": "13f",
-    "fmp_name": null
+    "fmp_name": null,
+    "status": "inactive",
+    "status_note": "Scion Asset Management deregistered as an investment adviser in 2025. Its last Form 13F covers Q3 2025, so the positions shown here are that filing and will not be updated."
   },
   {
     "name": "Ray Dalio",

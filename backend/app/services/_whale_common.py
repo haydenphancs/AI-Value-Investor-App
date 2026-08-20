@@ -20,7 +20,18 @@ number, with the hydration copy being the one that actually runs in production.
 import math
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+# The 13F quarter helpers are the SINGLE source of truth for "which quarter should a
+# filer have filed by now" — `latest_filed_13f_quarter` already encodes the statutory
+# 45-day lag. Imported rather than re-derived: a second copy of that arithmetic is
+# exactly how the two 13F diff paths drifted apart before.
+from app.utils.period_labels import (
+    _FILING_PERIOD_RE,
+    filing_period_display,
+    latest_filed_13f_quarter,
+)
 
 
 # ── Snapshot persistence guard ──────────────────────────────────────
@@ -308,6 +319,157 @@ SOURCE_13F = "13f_avg"
 SOURCE_STOCK = "stock_cagr"
 
 _YEAR_END_RE = re.compile(r"^(\d{4})-12-31")
+
+
+# ── Activity / dormancy disclosure ───────────────────────────────────────────
+#
+# A tracked filer can stop producing data at any time: a fund deregisters or drops below
+# the $100M 13F threshold, a politician retires or simply stops trading. Without a signal
+# the app renders that as a BROKEN screen — Michael Burry's profile served a confident
+# $1.37B portfolio and +11.06% return next to zero holdings and zero trades, with the
+# only hint being a "Q3 2025" tile caption.
+#
+# ⚠️ TWO RULES THIS MODULE EXISTS TO ENFORCE.
+#
+# 1. 13F staleness is counted in MISSED FILING QUARTERS, never in days. A 13F is due 45
+#    days after quarter end, so EVERY healthy filer is ~51 days stale the moment a
+#    quarter closes — a day-based threshold flags all 45 of them. `latest_filed_13f_quarter`
+#    already encodes the lag; this reuses it rather than doing new date maths.
+#
+# 2. Congress is NOT 13F. A member who does not trade files nothing, so silence is not
+#    evidence of retirement. `ACTIVITY_DORMANT` is unreachable for a congressional filer
+#    by construction — the strongest thing we may say about a sitting senator is the DATE
+#    of their last disclosure.
+ACTIVITY_CURRENT = "current"      # filing on the expected cadence
+ACTIVITY_LATE = "late"            # 13F only: missed exactly 1 expected quarter
+ACTIVITY_DORMANT = "dormant"      # 13F only: missed >= 2 — has stopped filing
+ACTIVITY_QUIET = "quiet"          # congress only: nothing disclosed in >= QUIET_DAYS
+ACTIVITY_NONE = "none"            # nothing has ever been disclosed
+ACTIVITY_UNKNOWN = ""             # not computed / legacy row -> render nothing
+
+# A congressional filer is "quiet" only after ~6 months. Deliberately generous: the STOCK
+# Act requires a report within 30-45 days OF A TRADE, so a long gap is ordinary for a
+# member who does not trade much, and calling that "inactive" would be a false statement
+# about a real named person.
+CONGRESS_QUIET_DAYS = 180
+
+DATA_SOURCE_13F = "13f"
+
+
+@dataclass(frozen=True)
+class Activity:
+    """Whether a filer is still producing data, and the sentence that says so.
+
+    Mirrors `AnnualReturn`: the provenance travels with the claim so a caller cannot
+    render the status and the caption from two different computations.
+    """
+
+    status: str                     # one of the ACTIVITY_* constants
+    label: str                      # user-facing sentence; "" when nothing to say
+    as_of: Optional[str]            # the date/quarter the label refers to, or None
+
+    @property
+    def is_current(self) -> bool:
+        return self.status in (ACTIVITY_CURRENT, ACTIVITY_UNKNOWN)
+
+    @property
+    def needs_disclosure(self) -> bool:
+        """True when the UI should show a chip/notice at all."""
+        return self.status not in (ACTIVITY_CURRENT, ACTIVITY_UNKNOWN)
+
+
+def _quarters_between(newer: Tuple[int, int], older: Tuple[int, int]) -> int:
+    """Signed count of calendar quarters from `older` to `newer`. Handles year rollover."""
+    return (newer[0] - older[0]) * 4 + (newer[1] - older[1])
+
+
+def compute_activity(
+    data_source: Optional[str],
+    last_filing_period: Optional[str] = None,
+    last_activity_date: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Activity:
+    """Classify a filer's activity from PERSISTED data only.
+
+    ⚠️ Deliberately takes no live probe result. Every FMP method in `integrations/fmp.py`
+    swallows its exception and returns `[]`, so "empty" is indistinguishable from a 429,
+    a plan downgrade, a timeout, or an unknown CIK — and `_fetch_congress_pages` will even
+    return a partially truncated list with no error. A "N consecutive empty probes ⇒
+    dormant" rule would therefore mark real whales dormant during an FMP outage. What we
+    already HOLD cannot be corrupted by an outage, so that is what this reads.
+
+    ``last_filing_period`` is a 13F quarter (``"2026-Q2"``); congressional snapshots key on
+    a wall-clock month (``"2026-08"``) and must NOT parse as a quarter, or a politician
+    would be rendered as having filed a 13F they never file.
+    ``last_activity_date`` is ``MAX(whale_trade_groups.date)`` — the one field whose
+    meaning is consistent across both sources (13F filing date / congressional disclosure).
+    """
+    # `str(...)` before `.strip()`: this reads a Supabase row where a column could be any
+    # JSON scalar, and `(123 or "").strip()` is an AttributeError, not a fallback.
+    is_13f = str(data_source or "").strip().lower() == DATA_SOURCE_13F
+
+    if is_13f:
+        quarter = _parse_filing_period(last_filing_period)
+        if quarter is None:
+            # No usable quarter on file. Fall through to the date-based statement rather
+            # than claiming dormancy we cannot evidence.
+            return _activity_from_date(last_activity_date, now, is_13f=True)
+        expected = latest_filed_13f_quarter(now=now)
+        behind = _quarters_between(expected, quarter)
+        as_of = filing_period_display(last_filing_period or "") or None
+        if behind <= 0:
+            return Activity(ACTIVITY_CURRENT, "", as_of)
+        if behind == 1:
+            # One quarter can simply be a late filer or an NT 13F; it is not evidence
+            # that they have stopped.
+            return Activity(ACTIVITY_LATE, f"Last filed {as_of}" if as_of else "", as_of)
+        return Activity(ACTIVITY_DORMANT, f"Last filed {as_of}" if as_of else "", as_of)
+
+    return _activity_from_date(last_activity_date, now, is_13f=False)
+
+
+def _activity_from_date(
+    last_activity_date: Optional[str], now: Optional[datetime], *, is_13f: bool
+) -> Activity:
+    """Date-based classification, used for congress and as the 13F fallback."""
+    parsed = _parse_iso_date(last_activity_date)
+    if parsed is None:
+        return Activity(
+            ACTIVITY_NONE,
+            "No filings on record" if is_13f else "No trades disclosed yet",
+            None,
+        )
+    ref = (now or datetime.now(timezone.utc))
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    days = (ref - parsed).days
+    pretty = parsed.strftime("%b %Y")
+    if days < CONGRESS_QUIET_DAYS:
+        return Activity(ACTIVITY_CURRENT, "", pretty)
+    # NOT "dormant" and NOT "inactive": a member who does not trade files nothing, and
+    # this says nothing about whether they still hold office.
+    return Activity(ACTIVITY_QUIET, f"No trades disclosed since {pretty}", pretty)
+
+
+def _parse_filing_period(period: Optional[str]) -> Optional[Tuple[int, int]]:
+    """``"2026-Q2"`` -> ``(2026, 2)``. Anything else -> None (incl. congress's ``YYYY-MM``)."""
+    if not isinstance(period, str):
+        return None
+    m = _FILING_PERIOD_RE.match(period.strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _parse_iso_date(value: Optional[str]) -> Optional[datetime]:
+    """``"2026-06-30"`` -> an aware datetime, or None. Never raises."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip()[:10])
+    except (ValueError, TypeError):
+        return None
+    return dt.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)

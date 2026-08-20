@@ -44,6 +44,13 @@ struct WhaleProfile: Identifiable, Codable {
     /// (`risk_profile: ""` — Mark Kelly is one in production today) rendered a
     /// confident blue "Moderate" badge for a filer we know nothing about. Same honesty
     /// class as the green "+0.0%" a NULL return used to produce.
+    /// Activity disclosure (migration 145). Defaulted for the same memberwise-init
+    /// reason as the block above.
+    var activityStatus: String = ""
+    var activityLabel: String = ""
+    var lastActivityDate: String? = nil
+    /// CURATED prose, shown verbatim and preferred over `activityLabel`.
+    var lifecycleNote: String? = nil
     var riskProfileRaw: String = ""
     var returnSource: String = ""
     var returnStatus: String = ""
@@ -139,6 +146,40 @@ struct WhaleProfile: Identifiable, Codable {
     /// than asserting a default. `""` is what an unhydrated whale carries; a legacy row
     /// that predates `riskProfileRaw` also reads `""`, and hiding a badge is the safe
     /// direction to be wrong in.
+    // MARK: - Activity disclosure
+    //
+    // A filer can stop producing data at any time. Michael Burry's profile shipped a
+    // confident $1.37B portfolio and +11.06% return next to ZERO holdings and ZERO
+    // trades, and the only hint was a "Q3 2025" tile caption — which reads as a broken
+    // app rather than as a fund that stopped filing.
+    //
+    // Deliberately does NOT blank the numbers. Burry's $1.37B really was his Q3 2025
+    // book; the fix is disclosure, not deletion. Same posture as `returnStatus`, which
+    // qualifies a number rather than removing it.
+
+    /// Should the profile show an activity notice at all?
+    var hasActivityNotice: Bool { !activityNotice.isEmpty }
+
+    /// The sentence to render. A human-written note beats a derived label, because it
+    /// can say WHY — which no amount of filing data ever can.
+    var activityNotice: String {
+        if let note = lifecycleNote?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !note.isEmpty {
+            return note
+        }
+        return activityLabel
+    }
+
+    /// True for a filer that has missed two or more filing quarters, i.e. one that has
+    /// genuinely stopped. Drives the slightly warmer `caution` treatment; everything
+    /// else stays neutral `textMuted`.
+    ///
+    /// ⚠️ Never true for a congressional filer — a member who does not trade files
+    /// nothing, so silence there is not evidence of anything.
+    var hasStoppedFiling: Bool {
+        activityStatus == "dormant" || activityStatus == "inactive"
+    }
+
     var hasRiskProfile: Bool {
         !riskProfileRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }

@@ -1018,9 +1018,30 @@ struct WhaleCard: View {
                             .lineLimit(1)
                     }
 
-                    Text(whale.formattedFollowers)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                    // Follower count, plus an activity chip when the filer has stopped
+                    // producing data. The roster previously carried NO date signal of any
+                    // kind, so a fund that stopped filing in 2019 rendered identically to
+                    // one that filed last week — and its "0 trades" read as a bug.
+                    //
+                    // `TintedTagBadge` rather than a bespoke pill: it is the generic
+                    // capsule atom and already ships a muted variant. `textMuted` and
+                    // `caution` are both TEXT-role tokens; a `*Graphic` one here would
+                    // fail the launch contrast audit.
+                    HStack(spacing: AppSpacing.xs) {
+                        Text(whale.formattedFollowers)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+
+                        if whale.hasActivityNotice {
+                            TintedTagBadge(
+                                text: whale.activityLabel,
+                                color: whale.activityStatus == "dormant"
+                                    || whale.activityStatus == "inactive"
+                                    ? AppColors.caution
+                                    : AppColors.textMuted
+                            )
+                        }
+                    }
                 }
 
                 Spacer()

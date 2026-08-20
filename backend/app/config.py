@@ -544,6 +544,20 @@ class Settings(BaseSettings):
     # in-flight warms so a distinct-cold-ticker burst can't drain quota. Kill switch.
     REPORT_PREWARM_ON_VIEW_ENABLED: bool = True
     REPORT_PREWARM_DETAIL_CONCURRENCY: int = 3
+
+    # ── Whale profile pre-warm ───────────────────────────────────────────
+    # `whale_profile_cache` holds an ASSEMBLED profile and is written only by the request
+    # path, so after a restart all 56 whales are Tier-2 cold and the first visitor to
+    # each pays the rebuild. This warms them in the background instead.
+    #
+    # Cheap by construction: 55 of 56 whales are served from a stored
+    # `whale_filing_snapshots` row and make ZERO FMP calls; only a whale with no snapshot
+    # at all reaches the FMP path.
+    WHALE_PREWARM_ENABLED: bool = True
+    # Distinct-whale concurrency. The postgrest client is SYNCHRONOUS, so parallel builds
+    # serialize on the event loop anyway — this exists to stop them from also starving
+    # real user requests. Keep it low.
+    WHALE_PREWARM_CONCURRENCY: int = 3
     REPORT_PREWARM_MAX_INFLIGHT: int = 50
 
     # Rate limiting

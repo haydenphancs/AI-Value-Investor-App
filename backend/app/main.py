@@ -106,24 +106,16 @@ async def lifespan(app: FastAPI):
     healthy = await check_supabase_health()
     if healthy:
         logger.info("Supabase connection OK")
-        # Clear whale profile cache on deploy so code changes take effect
-        # immediately without needing manual force_refresh per whale.
-        # NOTE: whale_id is uuid — .neq("whale_id", "") used to throw 22P02
-        # here (PostgREST can't cast "" to uuid), so the wipe silently
-        # no-op'd on every deploy. IS NOT NULL matches every row and casts
-        # cleanly on a uuid column.
-        try:
-            sb = get_supabase()
-            sb.table("whale_profile_cache").delete().not_.is_(
-                "whale_id", "null"
-            ).execute()
-            logger.info("Cleared whale_profile_cache on startup")
-        except Exception as e:
-            logger.error(
-                "Startup whale_profile_cache wipe FAILED (stale cached "
-                "profiles will replay until TTL/hydration): %s: %s",
-                type(e).__name__, e,
-            )
+        # NOTE: this used to DELETE every `whale_profile_cache` row on startup, so that
+        # a code change to the assembled profile shape took effect without a manual
+        # force_refresh per whale. That goal is right; the blunt instrument was not — it
+        # also fired on an OOM, a health-check flap or an instance rotation, leaving all
+        # 56 whales Tier-2 cold for reasons unrelated to any deploy, and the first
+        # visitor to each then paid a full rebuild.
+        #
+        # Invalidation now runs through `WHALE_PROFILE_SCHEMA_FLOOR` in whale_service:
+        # a cached row older than the floor is treated as a miss. Bump the floor when
+        # the profile shape changes; every other restart keeps the cache warm.
     else:
         logger.warning("Supabase connection FAILED — check configuration")
 
@@ -235,6 +227,12 @@ async def lifespan(app: FastAPI):
 
         # Start background whale hydration jobs
         _spawn(_run_whale_hydration_job(), "run_whale_hydration_job")
+
+        # Warm whale_profile_cache after boot. The startup wipe is gone (invalidation
+        # now runs through WHALE_PROFILE_SCHEMA_FLOOR), but a restart still empties the
+        # in-process Tier-1 cache, and a schema-floor bump legitimately invalidates
+        # Tier-2 for everyone at once. This makes either case invisible to users.
+        _spawn(_run_whale_profile_pre_warmer(), "run_whale_profile_pre_warmer")
 
         # Refund safety net: reconcile research reports stranded in
         # pending/processing (killed worker) so charged-but-undelivered
@@ -962,6 +960,59 @@ async def _run_industry_dossier_job():
             logger.error(
                 f"Industry benchmark quarterly batch failed: {e}", exc_info=True,
             )
+
+
+async def _run_whale_profile_pre_warmer():
+    """Rebuild `whale_profile_cache` for every whale, once, shortly after boot.
+
+    Why this exists: `whale_profile_cache` is written in exactly ONE place — the request
+    path — so after a restart the first visitor to each whale pays a full rebuild.
+    Measured cost of warming the whole roster: 55 whales served from a stored
+    `whale_filing_snapshots` row with ZERO FMP calls, and one whale (no snapshot at all)
+    that reaches FMP. Bounded by `WHALE_PREWARM_CONCURRENCY`.
+
+    One-shot, not a loop: `whale_profile_cache` has a 24h TTL and a 13F snapshot changes
+    QUARTERLY, so there is nothing to re-warm on an interval. The hydration job already
+    owns refreshing the underlying data.
+    """
+    from app.config import settings
+
+    if not getattr(settings, "WHALE_PREWARM_ENABLED", True):
+        logger.info("Whale profile pre-warm disabled by config")
+        return
+
+    # After the hydration job's own 120s settle, so a whale being rewritten underneath us
+    # is warmed from its NEW snapshot rather than immediately invalidated.
+    await asyncio.sleep(180)
+
+    try:
+        from app.database import get_supabase
+        from app.services.whale_service import warm_whale_profile
+
+        sb = get_supabase()
+        rows = (
+            sb.table("whales").select("id,name").limit(500).execute()
+        ).data or []
+        if not rows:
+            logger.warning("Whale profile pre-warm: no whales to warm")
+            return
+
+        started = time.monotonic()
+        # `warm_whale_profile` never raises and takes the semaphore itself, so a plain
+        # gather is safe and the cap is honoured regardless of how many are queued.
+        await asyncio.gather(
+            *(warm_whale_profile(str(r["id"])) for r in rows),
+            return_exceptions=True,
+        )
+        logger.info(
+            "Whale profile pre-warm complete: %d whale(s) in %.1fs",
+            len(rows), time.monotonic() - started,
+        )
+    except Exception as e:
+        logger.error(
+            "Whale profile pre-warm failed: %s: %s",
+            type(e).__name__, e, exc_info=True,
+        )
 
 
 async def _run_whale_hydration_job():

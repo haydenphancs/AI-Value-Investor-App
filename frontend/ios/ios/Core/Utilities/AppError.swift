@@ -20,6 +20,17 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     case timeout
     case serverError(statusCode: Int)
 
+    /// The caller went away — a tab switch, a view teardown, or a superseding request — so
+    /// the task was cancelled before the response arrived. NOT a failure, and never shown.
+    ///
+    /// It needs its own case because `catch is CancellationError` does NOT catch it:
+    /// `APIClient` wraps an unrecognised transport error into `APIError.networkError`, so
+    /// cancellation arrives as a nested `URLError.cancelled` (-999). Without this it fell
+    /// through `from(_:)`'s `default:` to `.unknown(message: urlError.localizedDescription)`,
+    /// whose message is the bare word "cancelled" — so switching tabs mid-load could raise
+    /// "Something Went Wrong / cancelled" with a Retry button, for nothing having gone wrong.
+    case cancelled
+
     // Auth errors
     case unauthorized
     case tokenExpired
@@ -141,6 +152,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .noConnection: return "no_connection"
         case .timeout: return "timeout"
         case .serverError(let code): return "server_\(code)"
+        case .cancelled: return "cancelled"
         case .unauthorized: return "unauthorized"
         case .tokenExpired: return "token_expired"
         case .forbidden: return "forbidden"
@@ -209,6 +221,9 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Error"
         case .unknown:
             return "Something Went Wrong"
+        // Never rendered — `isCancellation` is filtered out before any sink displays it.
+        case .cancelled:
+            return ""
         }
     }
 
@@ -274,6 +289,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return msg
         case .unknown(let msg):
             return msg.isEmpty ? "An unexpected error occurred. Please try again." : msg
+        case .cancelled:
+            return ""
         }
     }
 
@@ -328,7 +345,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return .goBack
         case .apiError, .unknown:
             return .retry
+        // Never rendered — nothing surfaces a cancellation, so no action is ever offered.
+        case .cancelled:
+            return .goBack
         }
+    }
+
+    /// Nobody is waiting for this result any more, so it must never reach a toast, a banner or
+    /// an error state. The two shared sinks — `BaseViewModel.setError` and
+    /// `AppState.handleError` — drop it, which covers every call site at once.
+    var isCancellation: Bool {
+        if case .cancelled = self { return true }
+        return false
     }
 
     var isRetryable: Bool {
@@ -352,6 +380,9 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // routine offline blip — it is exactly the thing worth knowing about — so only genuine
         // connectivity failures qualify now.
         case .noConnection, .timeout:
+            return true
+        // Nobody asked for this result any more. Logging it would fire on every tab switch.
+        case .cancelled:
             return true
         default:
             return false
@@ -406,6 +437,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 return .timeout
             case .cannotConnectToHost, .cannotFindHost:
                 return .serverError(statusCode: 0)
+            case .cancelled:
+                return .cancelled
             default:
                 return .unknown(message: urlError.localizedDescription)
             }
@@ -510,6 +543,20 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             // Credits, this → the plan sheet. Buying credits never unlocks a follow slot.
             if code == "WHALE_FOLLOW_LOCKED" {
                 return .planUpgradeRequired(message: message)
+            }
+            // The whale profile build failed upstream (FMP outage / Supabase blip), HTTP
+            // 503. Retryable, and the roster row the user tapped is still legitimate, so
+            // it carries the backend's own user_message through `.apiError` (whose
+            // suggestedAction is .retry). Previously this arrived as a bare
+            // `{"detail": "..."}` string that `APIErrorResponse` could not decode at all,
+            // so the screen showed a generic failure with no retry affordance.
+            if code == "WHALE_PROFILE_UNAVAILABLE" {
+                return .apiError(code: code, message: message)
+            }
+            // TERMINAL — the whale row is gone (unregistered / merged by a registry
+            // sync). Retrying cannot succeed, so `.notFound` rather than `.apiError`.
+            if code == "WHALE_NOT_FOUND" {
+                return .notFound(resource: "investor")
             }
             // Capacity / back-pressure codes (HTTP 409). SYSTEM_BUSY = the whole
             // service is at capacity; TOO_MANY_CONCURRENT_REPORTS = this user's
@@ -791,6 +838,9 @@ extension AppError {
         case .noConnection:        return "no_connection"
         case .timeout:             return "timeout"
         case .serverError:         return "server_error"
+        // Tracked so a spike in superseded requests stays visible, even though the case
+        // is never rendered to the user.
+        case .cancelled:           return "cancelled"
         case .unauthorized:        return "unauthorized"
         case .tokenExpired:        return "token_expired"
         case .forbidden:           return "forbidden"

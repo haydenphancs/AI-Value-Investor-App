@@ -45,6 +45,49 @@ def snapshot_db_row(snapshot: dict) -> dict:
 # ── Congressional (range-based) ─────────────────────────────────────
 
 
+# FMP congressional `type` → our action. Lowercased, stripped keys.
+#
+# SINGLE SOURCE OF TRUTH. This table used to be duplicated in whale_service.py and
+# hydrate_whales.py, and BOTH resolved an unrecognised type to "BOUGHT" — so any
+# string FMP has not been seen to emit was silently booked as a PURCHASE, inflating
+# `total_bought` and able to flip a filing's whole `net_action` from SOLD to BOUGHT.
+CONGRESS_ACTION_BY_TYPE: dict = {
+    "purchase": "BOUGHT",
+    "purchase (partial)": "BOUGHT",
+    "sale_full": "SOLD",
+    "sale_partial": "SOLD",
+    "sale (full)": "SOLD",
+    "sale (partial)": "SOLD",
+    "sale": "SOLD",
+    "sale (full/partial)": "SOLD",
+    "exchange": "BOUGHT",
+}
+
+
+def resolve_congress_action(raw_type) -> Optional[str]:
+    """Map an FMP congressional trade `type` to BOUGHT / SOLD, or None if unknown.
+
+    Returns **None** rather than defaulting to a direction. The UI renders a hard
+    BOUGHT/SOLD badge and sums the trade into a net figure, so guessing here does not
+    degrade gracefully — it states something false. Callers skip an unresolvable trade
+    and log it, which loses one row rather than mis-stating every aggregate built on it.
+    """
+    if not isinstance(raw_type, str):
+        return None
+    key = raw_type.lower().strip()
+    if not key:
+        return None
+    if key in CONGRESS_ACTION_BY_TYPE:
+        return CONGRESS_ACTION_BY_TYPE[key]
+    # Tolerate unseen decorations ("Sale (Partial) - Spouse") without guessing a
+    # direction we have no evidence for: the words purchase/sale are unambiguous.
+    if "purchase" in key or key.startswith("buy"):
+        return "BOUGHT"
+    if "sale" in key or key.startswith("sell"):
+        return "SOLD"
+    return None
+
+
 def parse_congress_amount_dollars(amount_str: str) -> float:
     """Parse FMP's congressional amount range → midpoint in DOLLARS.
 

@@ -993,3 +993,95 @@ async def test_the_guest_bucket_never_lingers_after_a_merge():
     }
     await _claim(_SB(store), "install-A")
     assert not [r for r in store["user_investor_profile"] if r["user_id"] == bucket]
+
+
+# ── The launch-time short circuit (migration 144) ──────────────────────────────
+#
+# This endpoint runs on EVERY cold launch of EVERY signed-in user — the client's transition
+# key is process-scoped by design (AppState documents why a persisted latch would be wrong) —
+# and its steady-state answer is "nothing to claim". Reaching that answer used to cost six
+# sequential PostgREST round trips, all returning zero rows.
+
+
+class _ProbeSB(_SB):
+    """`_SB` plus the `guest_bucket_has_data` RPC from migration 144."""
+
+    def __init__(self, store, answer):
+        super().__init__(store)
+        self.answer = answer
+        self.rpc_calls = []
+
+    def rpc(self, name, params):
+        self.rpc_calls.append((name, params))
+        answer = self.answer
+        outer = self
+
+        class _R:
+            def execute(self_inner):
+                if isinstance(answer, Exception):
+                    raise answer
+                return type("R", (), {"data": answer})()
+
+        return _R()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_bucket_costs_one_round_trip_not_six():
+    """The whole point of the probe. With nothing to claim, not a single table is touched."""
+    bucket = guest_user_id_for("install-empty")
+    sb = _ProbeSB({"watchlist_items": [], "portfolios": []}, answer=False)
+
+    result = await _claim(sb, "install-empty")
+
+    assert sb.rpc_calls == [("guest_bucket_has_data", {"p_bucket": bucket})]
+    assert sb.log == [], (
+        f"the six-step scan ran despite an empty bucket: {sb.log}"
+    )
+    assert result["claimed"] == {
+        "watchlist_items": 0, "portfolios": 0, "portfolios_merged": 0,
+        "learn_progress": 0, "research_reports": 0, "chat_sessions": 0,
+        "investor_profile": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_non_empty_bucket_still_runs_the_full_claim():
+    """The probe must never become a way to LOSE data — a true answer runs every step."""
+    bucket = guest_user_id_for("install-B")
+    store = {"watchlist_items": [{"id": 1, "ticker": "AAPL", "user_id": bucket}], "portfolios": []}
+    sb = _ProbeSB(store, answer=True)
+
+    result = await _claim(sb, "install-B")
+
+    assert result["claimed"]["watchlist_items"] == 1
+    assert store["watchlist_items"][0]["user_id"] == _USER["id"]
+
+
+@pytest.mark.asyncio
+async def test_the_probe_fails_open_when_the_function_is_missing():
+    """Deploy-order safety. The backend may ship before migration 144 is applied by hand, and
+    a 404 from the RPC must fall back to the six-step scan — never silently claim nothing."""
+    bucket = guest_user_id_for("install-C")
+    store = {"watchlist_items": [{"id": 9, "ticker": "MSFT", "user_id": bucket}], "portfolios": []}
+    sb = _ProbeSB(store, answer=RuntimeError("function public.guest_bucket_has_data does not exist"))
+
+    result = await _claim(sb, "install-C")
+
+    assert result["claimed"]["watchlist_items"] == 1, (
+        "a missing RPC swallowed the claim instead of falling back — this would silently lose "
+        "every guest's data between deploy and migration"
+    )
+    assert store["watchlist_items"][0]["user_id"] == _USER["id"]
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_probe_answer_fails_open():
+    """Only an explicit `False` short-circuits. A None/absent payload means we could not tell,
+    and 'could not tell' must run the scan."""
+    bucket = guest_user_id_for("install-D")
+    store = {"watchlist_items": [{"id": 3, "ticker": "TSLA", "user_id": bucket}], "portfolios": []}
+    sb = _ProbeSB(store, answer=None)
+
+    result = await _claim(sb, "install-D")
+
+    assert result["claimed"]["watchlist_items"] == 1

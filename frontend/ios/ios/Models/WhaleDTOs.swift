@@ -383,6 +383,46 @@ struct FollowResponseDTO: Codable {
     }
 }
 
+// MARK: - Lenient Array Decoding
+
+/// Decodes an array, DROPPING elements that fail to decode instead of failing the
+/// whole array.
+///
+/// `Swift`'s synthesised `[T]` decode is all-or-nothing: one malformed row — a NULL in
+/// a non-Optional field, a renamed key, a type that drifted — throws, and the caller
+/// receives nothing. For the whale roster that meant a single bad `whales` row emptied
+/// the ENTIRE Whales tab, with `TrackingViewModel` then retrying three times and giving
+/// up. Losing one investor is strictly better than losing all 53.
+///
+/// Every drop is logged: a silent skip is how a contract drift survives unnoticed, and
+/// there is no XCTest target here to catch it.
+/// Consumes exactly one element of an unkeyed container without inspecting it, so a
+/// failed decode cannot desynchronise the cursor and cascade into the following rows.
+/// Declared at file scope because Swift forbids nesting a type inside a generic function.
+private struct _SkippedElement: Decodable {}
+
+struct LenientArray<Element: Decodable>: Decodable {
+    let elements: [Element]
+    let droppedCount: Int
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        var decoded: [Element] = []
+        var dropped = 0
+        while !container.isAtEnd {
+            do {
+                decoded.append(try container.decode(Element.self))
+            } catch {
+                dropped += 1
+                _ = try? container.decode(_SkippedElement.self)
+                print("[LenientArray] ⚠️ Dropped a malformed \(Element.self): \(error)")
+            }
+        }
+        self.elements = decoded
+        self.droppedCount = dropped
+    }
+}
+
 // MARK: - Date Parser
 
 enum DateParser {

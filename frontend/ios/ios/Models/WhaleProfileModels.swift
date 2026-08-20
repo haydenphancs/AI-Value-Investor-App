@@ -350,11 +350,13 @@ struct WhaleTradeGroup: Identifiable, Codable {
         let now = Date()
         let daysAgo = calendar.dateComponents([.day], from: date, to: now).day ?? 0
 
+        // `daysAgo > 0` guard: a filing dated in the future (a bad upstream row) gave a
+        // NEGATIVE count that rendered as "-3 days ago".
         if daysAgo == 0 {
             return "Today"
         } else if daysAgo == 1 {
             return "Yesterday"
-        } else if daysAgo <= 14 {
+        } else if daysAgo > 0 && daysAgo <= 14 {
             return "\(daysAgo) days ago"
         } else {
             return formattedDateFull
@@ -581,11 +583,32 @@ struct WhaleBehaviorSummary: Codable {
     let secondaryAction: String
     let secondaryFocus: String
 
+    /// Colour for the PRIMARY action verb.
+    ///
+    /// The backend emits exactly four values from `_generate_behavior_summary`:
+    /// Accumulating / Reducing / Rebalancing / Holding. This used to be hardcoded to
+    /// `AppColors.bullish`, so a net-selling whale rendered "is currently **Reducing**"
+    /// in green — the colour contradicting the word it was painting.
+    ///
+    /// Text-role tokens (`bullish`/`bearish` alias `gain`/`loss`), because this IS text.
+    private static func color(forAction action: String) -> Color {
+        switch action.lowercased() {
+        case let a where a.hasPrefix("accumulat") || a.hasPrefix("buy") || a.hasPrefix("add"):
+            return AppColors.bullish
+        case let a where a.hasPrefix("reduc") || a.hasPrefix("trim") || a.hasPrefix("sell") || a.hasPrefix("sold"):
+            return AppColors.bearish
+        default:
+            // Rebalancing / Holding / anything unrecognised is DIRECTIONLESS. Neutral
+            // rather than a coin-flip between green and red.
+            return AppColors.textPrimary
+        }
+    }
+
     var formattedSummary: AttributedString {
         var result = AttributedString("This whale is currently ")
 
         var actionPart = AttributedString(action)
-        actionPart.foregroundColor = AppColors.bullish
+        actionPart.foregroundColor = Self.color(forAction: action)
         result.append(actionPart)
 
         result.append(AttributedString(" \(primaryFocus) and "))

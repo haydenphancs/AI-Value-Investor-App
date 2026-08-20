@@ -106,6 +106,11 @@ class ErrorCode(str, Enum):
     # that code means "top up", routes iOS to BuyCredits, and buying credits would not let you
     # follow one more investor. This is a PLAN gate and must reach the plan sheet.
     WHALE_FOLLOW_LOCKED = "WHALE_FOLLOW_LOCKED"
+    # The whale exists in the roster but its profile could not be built (FMP outage,
+    # Supabase blip). Distinct from WHALE_NOT_FOUND: retryable, and the roster row the
+    # user tapped is still legitimate.
+    WHALE_PROFILE_UNAVAILABLE = "WHALE_PROFILE_UNAVAILABLE"
+    WHALE_NOT_FOUND = "WHALE_NOT_FOUND"
     # Terminal, NOT retryable. Ownership of an App Store transaction never moves, so this
     # condition can never clear — which is why it must not share a code with the retryable
     # billing failures. See PurchaseBoundToAnotherAccount in iap_service.py.
@@ -263,6 +268,12 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     # Number-free on purpose: the limit differs per plan, and hardcoding one here is how a
     # marketing string drifts from the table that actually enforces it. The endpoint sends
     # the real numbers in `details`.
+    ErrorCode.WHALE_PROFILE_UNAVAILABLE: (
+        "We couldn't load this investor right now. Please try again shortly."
+    ),
+    ErrorCode.WHALE_NOT_FOUND: (
+        "We couldn't find this investor. They may no longer be tracked."
+    ),
     ErrorCode.WHALE_FOLLOW_LOCKED: (
         "Your plan doesn't include tracking this investor. Upgrade to follow more."
     ),
@@ -334,6 +345,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.GEMINI_UNAVAILABLE: "retry_later",
     ErrorCode.REPORT_NOT_READY: "poll_again",
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
+    ErrorCode.WHALE_PROFILE_UNAVAILABLE: "retry",
     ErrorCode.WHALE_FOLLOW_LOCKED: "upgrade",
     # NOT "retry_later": retrying can never succeed, and telling the client to wait is what
     # left StoreKit redelivering the transaction on every launch forever.
@@ -400,6 +412,8 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # 403, not 402: the credential is fine and nothing needs paying off — the caller simply
     # isn't allowed this action on their plan (auth.md §2). 402 would also send iOS down the
     # top-up route, and no amount of credits unlocks a follow slot.
+    ErrorCode.WHALE_PROFILE_UNAVAILABLE: 503,
+    ErrorCode.WHALE_NOT_FOUND: 404,
     ErrorCode.WHALE_FOLLOW_LOCKED: 403,
     # 409 conflict — a terminal 4xx, so the client finishes the transaction instead of
     # treating it as a transient 5xx and retrying forever.

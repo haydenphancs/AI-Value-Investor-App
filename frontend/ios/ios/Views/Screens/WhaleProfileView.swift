@@ -118,6 +118,7 @@ struct WhaleProfileView: View {
                         } else {
                             WhaleRecentTradesSection(
                                 tradeGroups: viewModel.displayedTradeGroups,
+                                isCongressional: profile.isCongressional,
                                 onTradeGroupTapped: { viewModel.viewTradeGroup($0) },
                                 onInfoTapped: { viewModel.showRecentTradesInfo = true }
                             )
@@ -199,10 +200,32 @@ struct WhaleProfileView: View {
                     Button {
                         viewModel.toggleFollow()
                     } label: {
-                        Text(profile.isFollowing ? "Following" : "Follow")
-                            .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(AppColors.primaryBlue)
+                        // A locked whale shows the lock, so the control looks like what
+                        // it is before it is tapped. Following is never locked (the
+                        // server never gates an unfollow), so the glyph only appears on
+                        // the "Follow" state.
+                        HStack(spacing: AppSpacing.xs) {
+                            if profile.isLocked && !profile.isFollowing {
+                                // Text-role token — must clear 4.5:1 in both appearances.
+                                Image(systemName: "lock.fill")
+                                    .font(AppTypography.iconXS)
+                                    .fontWeight(.semibold)
+                            }
+                            Text(profile.isFollowing ? "Following" : "Follow")
+                                .font(AppTypography.bodyEmphasis)
+                        }
+                        .foregroundColor(AppColors.primaryBlue)
                     }
+                    .accessibilityLabel(
+                        profile.isFollowing
+                            ? "Following \(profile.name)"
+                            : (profile.isLocked
+                                ? "Follow \(profile.name), locked"
+                                : "Follow \(profile.name)")
+                    )
+                    .accessibilityHint(
+                        profile.isLocked && !profile.isFollowing ? "Shows upgrade options" : ""
+                    )
                 }
             }
         }
@@ -215,6 +238,10 @@ struct WhaleProfileView: View {
                     tradeGroup: group,
                     whaleName: viewModel.profile?.name ?? ""
                 )
+            } else {
+                // A miss used to fall through to an implicit EmptyView, which SwiftUI
+                // still pushes — a blank screen with a back button and no explanation.
+                WhaleTradeGroupMissingView()
             }
         }
         // A PLAN gate, so the plan sheet — not the BuyCredits route a 402 takes. No amount
@@ -226,10 +253,20 @@ struct WhaleProfileView: View {
             PaywallView(context: .whaleDetail)
                 .environment(\.appState, appState)
         }
+        // A locked FOLLOW tap. Separate context from `.whaleDetail` above: that one is
+        // "this section is paid", this one is "your plan has no tracking slot" — the
+        // same distinction the Tracking tab draws with `.whaleFollowLimit`.
+        .sheet(isPresented: $viewModel.showPaywall) {
+            PaywallView(context: .whaleFollowLimit)
+                .environment(\.appState, appState)
+        }
         // Refill the moment a purchase lands rather than at next visit. Keyed on the TIER
         // rather than on the sheet dismissing, so restore-purchases and a background
         // profile refresh cover it too, and dismissing without buying costs nothing.
-        .onChange(of: appState.user.tier) {
+        // `entitlementGeneration`, not `user.tier` — the same trap HomeDashboardView had.
+        // `user.tier` hydrates from its `.free` default during session restore, so observing
+        // it re-loaded this profile on every launch of a paid account for no change at all.
+        .onChange(of: appState.entitlementGeneration) {
             viewModel.loadProfile()
         }
     }
@@ -420,11 +457,7 @@ struct WhalePortfolioStats: View {
             HStack {
                 // ── Portfolio value ──────────────────────────────────
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    if profile.isCongressional && profile.currentHoldings.count <= 10 {
-                        Text("N/A")
-                            .font(AppTypography.titleLarge)
-                            .foregroundColor(AppColors.textMuted)
-                    } else if profile.hasDisplayablePortfolioValue {
+                    if profile.hasDisplayablePortfolioValue {
                         Text(profile.formattedPortfolioValue)
                             .font(AppTypography.titleLarge)
                             .foregroundColor(AppColors.textPrimary)
@@ -443,11 +476,7 @@ struct WhalePortfolioStats: View {
 
                 // ── Annual return ────────────────────────────────────
                 VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-                    if profile.isCongressional {
-                        Text("N/A")
-                            .font(AppTypography.titleLarge)
-                            .foregroundColor(AppColors.textMuted)
-                    } else if profile.hasDisplayableReturn {
+                    if profile.hasDisplayableReturn {
                         Text(profile.formattedYTDReturn)
                             .font(AppTypography.titleLarge)
                             .foregroundColor(
@@ -498,24 +527,16 @@ struct WhalePortfolioStats: View {
     }
 
     private var portfolioCaption: String {
-        if profile.isCongressional {
-            return profile.currentHoldings.count <= 10
-                ? "Limited Data" : "Est. from Trades"
-        }
         return profile.hasDisplayablePortfolioValue
             ? profile.portfolioCaption : "Not available"
     }
 
     private var returnCaption: String {
-        if profile.isCongressional { return "Avg. Annual Return" }
         return profile.hasDisplayableReturn
             ? profile.returnCaption : profile.returnUnavailableCaption
     }
 
     private var qualifierText: String {
-        if profile.isCongressional {
-            return "Estimated from disclosed trade ranges — not total wealth."
-        }
         if profile.isStockProxyReturn {
             // Naming the vehicle is the whole point: the left tile is a 13F
             // sleeve and the right one is a share price. Two different sources,
@@ -810,6 +831,46 @@ struct RecentTradesInfoSheet: View {
     }
 }
 
+// MARK: - Missing Trade Group
+
+/// Shown when a trade-group id no longer resolves in the loaded profile (the profile
+/// was refreshed underneath the navigation, or the group aged out of the snapshot).
+/// Replaces an implicit `EmptyView`, which SwiftUI still pushes as a blank screen.
+struct WhaleTradeGroupMissingView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            AppColors.background.ignoresSafeArea()
+            VStack(spacing: AppSpacing.md) {
+                Image(systemName: "tray")
+                    .font(AppTypography.iconJumbo)
+                    .foregroundColor(AppColors.textMuted)
+
+                Text("These trades are no longer available")
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textSecondary)
+                    .multilineTextAlignment(.center)
+
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Go Back")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textOnAccent)
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.vertical, AppSpacing.sm)
+                        .background(AppColors.primaryFill)
+                        .cornerRadius(AppCornerRadius.pill)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, AppSpacing.xl)
+        }
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 // MARK: - Whale Bullet Point
 struct WhaleBulletPoint: View {
     let icon: String
@@ -1017,6 +1078,10 @@ struct WhaleTickerIcon: View {
 // MARK: - Recent Trades Section
 struct WhaleRecentTradesSection: View {
     let tradeGroups: [WhaleTradeGroup]
+    /// Congressional whales title this section "Recently Traded" — the same wording the
+    /// LOCKED variant of this section already used, so an upgrade no longer renames the
+    /// section under the user.
+    var isCongressional: Bool = false
     var onTradeGroupTapped: ((WhaleTradeGroup) -> Void)?
     var onInfoTapped: (() -> Void)?
     @State private var showInfoSheet: Bool = false
@@ -1025,7 +1090,7 @@ struct WhaleRecentTradesSection: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Header
             HStack {
-                Text("Recent Trades")
+                Text(isCongressional ? "Recently Traded" : "Recent Trades")
                     .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 
@@ -1042,6 +1107,13 @@ struct WhaleRecentTradesSection: View {
             }
 
             // Trade Groups List
+            if tradeGroups.isEmpty {
+                Text("No recent trades disclosed")
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, AppSpacing.xl)
+            }
             VStack(spacing: 0) {
                 ForEach(tradeGroups) { group in
                     WhaleTradeGroupCard(
@@ -1144,10 +1216,20 @@ struct WhaleSentimentSummary: View {
                     .foregroundColor(AppColors.textPrimary)
             }
 
-            Text(summary)
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textSecondary)
-                .lineSpacing(4)
+            // An empty `sentiment_summary` is its BACKEND DEFAULT (`str = ""`), which a
+            // congressional whale with no retained disclosures hits routinely. The card
+            // used to render its title and gradient over nothing at all — a styled
+            // empty box that reads as a rendering fault rather than as missing data.
+            if summary.isEmpty {
+                Text("No sentiment summary available yet")
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textMuted)
+            } else {
+                Text(summary)
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textSecondary)
+                    .lineSpacing(4)
+            }
         }
         .padding(AppSpacing.lg)
         .background(

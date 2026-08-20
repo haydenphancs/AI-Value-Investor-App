@@ -93,6 +93,13 @@ class TrackingViewModel: ObservableObject {
     /// with no explanation and no retry affordance.
     @Published var assetsErrorMessage: String?
 
+    /// User-facing copy when the WHALE roster could not be loaded, mapped through
+    /// `AppError`. Without it a total failure left the Whales tab pixel-identical to
+    /// "there are no investors to follow" — no explanation, no retry affordance. The
+    /// assets tab has had `assetsErrorMessage` for exactly this reason; the whale half
+    /// of the same screen simply printed to the console and gave up.
+    @Published var whalesErrorMessage: String?
+
     // Sheet States
     @Published var showAddAssetSheet: Bool = false
     @Published var showSortSheet: Bool = false
@@ -465,7 +472,7 @@ class TrackingViewModel: ObservableObject {
 
     // MARK: - Data Loading (Real API)
 
-    /// Whether a genuine load has completed. Reset by `reloadForIdentityChange`.
+    /// Whether a genuine load has completed. Reset by `handleIdentityChange`.
     private var hasLoadedOnce = false
 
     /// The load currently in flight, if any. Concurrent callers JOIN it.
@@ -491,7 +498,7 @@ class TrackingViewModel: ObservableObject {
             // being resumed, a THIRD caller can run and observe a completed-but-still
             // -registered task: it would "join" something already done and return
             // instantly without ever loading. That is a silently skipped refresh —
-            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // and for `handleIdentityChange` it would mean adopting a load that
             // completed under the PREVIOUS identity.
             self.loadTask = nil
         }
@@ -612,13 +619,19 @@ class TrackingViewModel: ObservableObject {
     }
 
     private func loadWhaleList(retryCount: Int = 3) async {
+        var lastError: Error?
         for attempt in 1...retryCount {
             do {
-                let dtos = try await apiClient.request(
+                // Lenient: one malformed row must not empty the whole roster. See
+                // `LenientArray` — the synthesised `[T]` decode is all-or-nothing.
+                let decoded = try await apiClient.request(
                     endpoint: .getWhaleList(category: nil),
-                    responseType: [TrendingWhaleDTO].self
+                    responseType: LenientArray<TrendingWhaleDTO>.self
                 )
-                let allWhales = dtos.map { $0.toTrendingWhale() }
+                if decoded.droppedCount > 0 {
+                    print("[TrackingVM] ⚠️ Dropped \(decoded.droppedCount) malformed whale row(s)")
+                }
+                let allWhales = decoded.elements.map { $0.toTrendingWhale() }
 
                 // Sync follow state from API
                 WhaleService.shared.syncFromAPIResponse(allWhales)
@@ -639,28 +652,40 @@ class TrackingViewModel: ObservableObject {
                         .prefix(5)
                 )
 
+                self.whalesErrorMessage = nil
                 print("[TrackingVM] ✅ Loaded \(allWhales.count) whales from API (\(trackedWhales.count) followed)")
                 return // success — exit loop
             } catch {
+                lastError = error
                 print("[TrackingVM] ❌ Whale list attempt \(attempt)/\(retryCount) failed: \(error)")
                 if attempt < retryCount {
-                    let delay = UInt64(attempt) * 2_000_000_000 // 2s, 4s backoff
+                    // 1s then 2s. The old 2s+4s ran INSIDE the parallel load, so a whale
+                    // outage stalled the entire Assets tab for six seconds before it
+                    // rendered anything at all.
+                    let delay = UInt64(attempt) * 1_000_000_000
                     try? await Task.sleep(nanoseconds: delay)
                 }
             }
         }
         // All retries exhausted — leave lists empty so UI shows empty state.
         // Never fall back to sample data (sample UUIDs cause 404s on profile fetch).
+        // But SAY SO: an unexplained empty roster reads as "we track nobody".
+        if let lastError {
+            self.whalesErrorMessage = AppError.from(lastError).message
+        }
         print("[TrackingVM] ⚠️ Whale list unavailable after \(retryCount) attempts. Pull to refresh to retry.")
     }
 
     private func loadWhaleActivityFeed() async {
         do {
-            let dtos = try await apiClient.request(
+            let decoded = try await apiClient.request(
                 endpoint: .getWhaleActivity,
-                responseType: [WhaleTradeGroupActivityDTO].self
+                responseType: LenientArray<WhaleTradeGroupActivityDTO>.self
             )
-            let activities = dtos.map { $0.toWhaleTradeGroupActivity() }
+            if decoded.droppedCount > 0 {
+                print("[TrackingVM] ⚠️ Dropped \(decoded.droppedCount) malformed activity row(s)")
+            }
+            let activities = decoded.elements.map { $0.toWhaleTradeGroupActivity() }
 
             // See All keeps everything; the Tracking screen shows only the newest few.
             // The slice is taken on the FLAT list before bucketing on purpose —
@@ -753,12 +778,34 @@ class TrackingViewModel: ObservableObject {
     ///
     /// Cleared before the fetch so the previous account's positions are never on screen while
     /// the new load is in flight.
-    func reloadForIdentityChange() async {
+    func handleIdentityChange(isActiveTab: Bool) async {
+        // CLEAR FIRST, UNCONDITIONALLY — before the `isActiveTab` gate below. The reload is
+        // deferred for a hidden tab, but the previous account's data must not survive in this
+        // ViewModel waiting to be rendered (.claude/rules/auth.md §7).
         trackedAssets = []
         assetsErrorMessage = nil
+        // The whale surfaces are follow-derived and therefore IDENTITY-SCOPED. Nothing
+        // cleared them, so after A signed out and B signed in on the same device, B saw
+        // A's followed investors and A's Recent Trades timeline until the new load
+        // landed — and if that load failed, indefinitely. Same rule as
+        // `AppState.discardDataForEndedSession` applies to the Learn stores
+        // (.claude/rules/auth.md §7).
+        trackedWhales = []
+        allWhaleTrades = []
+        groupedWhaleTrades = []
+        whaleActivities = []
         // Cleared so a later tab activation re-loads for the NEW identity rather than
         // treating the previous account's completed load as this one's.
         hasLoadedOnce = false
+
+        // Fetch only if the user is actually looking at this tab. Clearing above resets
+        // `hasLoadedOnce`, so `.task(id: isActiveTab)` re-loads on the next activation.
+        //
+        // This tab is the reason the gate exists: `loadData()` fans out FIVE requests
+        // (/tracking/assets, /portfolios, /whales, /whales/activity, /portfolios/{id}/insights),
+        // and it fired all of them on every sign-in regardless of which tab was on screen.
+        guard isActiveTab else { return }
+
         await loadData()
         if !Task.isCancelled { hasLoadedOnce = true }
         // The timer is keyed to whoever is signed in now; restart it against their assets.
@@ -799,6 +846,12 @@ class TrackingViewModel: ObservableObject {
     /// Called when the Whales tab appears — retries loading if the list is still empty.
     func retryWhaleListIfNeeded() {
         guard allPopularWhales.isEmpty, !isLoading else { return }
+        retryWhaleList()
+    }
+
+    /// Explicit user-driven retry from the roster error state.
+    func retryWhaleList() {
+        whalesErrorMessage = nil
         Task { [weak self] in
             await self?.loadWhaleList()
         }

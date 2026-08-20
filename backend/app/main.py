@@ -967,72 +967,124 @@ async def _run_industry_dossier_job():
 async def _run_whale_hydration_job():
     """Background task: hydrate whale profiles.
 
-    - Runs full hydration daily at 2 AM UTC.
-    - Runs politician-only hydration every 6 hours.
+    - Full hydration daily at 02:00 **UTC**.
+    - Politician-only hydration every 6 hours.
+
+    Four scheduling defects this shape had to fix:
+
+    1. ``datetime.now()`` is LOCAL. The docstring, the design doc and the ops runbook
+       all say 02:00 UTC, but on any container whose TZ was not UTC the job ran at a
+       different wall-clock hour than everything else was reasoned about.
+    2. The clock was read ONCE at the top of the loop, before the politician sweep.
+       That sweep hits FMP + Gemini for 8 filers and can run for many minutes, so a
+       cycle that woke at 01:5x was still holding ``hour == 1`` when it reached the
+       daily check — and the full hydration was skipped for that whole day.
+    3. ``await asyncio.sleep(3600)`` ran AFTER the work, so every cycle was
+       3600s + runtime. The wake-up hour drifted forward and could step straight over
+       hour 02 (…01:58 → 03:04), silently skipping the daily run for days at a time.
+       Sleeping to the next wall-clock boundary keeps the schedule anchored.
+    4. ``await fmp.close()`` sat on the happy path only, so any exception before it
+       leaked an ``FMPClient`` — and a fresh one was constructed every hour.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timezone
 
     await asyncio.sleep(120)  # let app fully start
 
     politician_interval = 6 * 3600  # 6 hours
-    last_politician_run = 0.0
+    # `None`, not 0.0: `time.monotonic()` is time since BOOT on Linux, so a 0.0 seed
+    # made the first sweep wait until monotonic passed 21600 — up to 6 hours after a
+    # deploy on a freshly booted host. `None` means "never run", so it runs immediately.
+    last_politician_run: Optional[float] = None
+    # Seed with TODAY when today's 02:00 window has already passed, so a deploy at
+    # 14:00 waits for tomorrow instead of kicking off a full hydration of all 53 whales
+    # on every restart. A deploy before 02:00 leaves this None and still runs today.
+    _boot = datetime.now(timezone.utc)
+    last_full_run_date = _boot.date() if _boot.hour >= 2 else None
+
+    async def _with_hydrator(run):
+        """Build the clients, hand them to `run`, and ALWAYS close the FMP client."""
+        from scripts.hydrate_whales import WhaleHydrator
+        from app.integrations.fmp import FMPClient
+        from app.integrations.gemini import GeminiClient
+
+        fmp = FMPClient()
+        try:
+            hydrator = WhaleHydrator(fmp, GeminiClient())
+            await run(hydrator)
+        finally:
+            try:
+                await fmp.close()
+            except Exception as close_err:      # never mask the original failure
+                logger.warning(
+                    "FMP client close failed after whale hydration: %s: %s",
+                    type(close_err).__name__, close_err,
+                )
 
     while True:
-        now = datetime.now()
-        import time as _time
-        current_time = _time.monotonic()
+        current_time = time.monotonic()
 
-        # Politicians: every 6 hours
-        if current_time - last_politician_run >= politician_interval:
+        # ── Politicians: every 6 hours ──────────────────────────────────
+        if (
+            last_politician_run is None
+            or current_time - last_politician_run >= politician_interval
+        ):
             try:
-                from scripts.hydrate_whales import WhaleHydrator
-                from app.integrations.fmp import FMPClient
-                from app.integrations.gemini import GeminiClient
+                async def _politicians(hydrator):
+                    from app.database import get_supabase
+                    sb = get_supabase()
+                    politicians = (
+                        sb.table("whales")
+                        .select("*")
+                        .in_(
+                            "data_source",
+                            ["congressional_house", "congressional_senate"],
+                        )
+                        .limit(500)
+                        .execute()
+                    )
+                    for whale in (politicians.data or []):
+                        try:
+                            await hydrator._hydrate_one(whale)
+                        except Exception as e:
+                            logger.error(
+                                "Politician hydration failed for %s: %s: %s",
+                                whale.get("name"), type(e).__name__, e,
+                                exc_info=True,
+                            )
 
-                fmp = FMPClient()
-                gemini = GeminiClient()
-                hydrator = WhaleHydrator(fmp, gemini)
-
-                # Hydrate politicians only
-                from app.database import get_supabase
-                sb = get_supabase()
-                politicians = (
-                    sb.table("whales")
-                    .select("*")
-                    .in_("data_source", ["congressional_house", "congressional_senate"])
-                    .execute()
-                )
-                for whale in (politicians.data or []):
-                    try:
-                        await hydrator._hydrate_one(whale)
-                    except Exception as e:
-                        logger.error(f"Politician hydration failed for {whale['name']}: {e}")
-
-                await fmp.close()
+                await _with_hydrator(_politicians)
                 last_politician_run = current_time
                 logger.info("Politician whale hydration completed")
             except Exception as e:
-                logger.error(f"Politician whale hydration job failed: {e}", exc_info=True)
+                logger.error(
+                    "Politician whale hydration job failed: %s: %s",
+                    type(e).__name__, e, exc_info=True,
+                )
+                # Still stamp it: a hard failure must not turn into a retry every
+                # hour against an upstream that is already unhappy.
+                last_politician_run = current_time
 
-        # Full hydration: daily at 2 AM UTC
-        hours_until_2am = (26 - now.hour) % 24  # hours until next 2 AM
-        if hours_until_2am == 0:
+        # ── Full hydration: daily at 02:00 UTC ──────────────────────────
+        # Clock re-read HERE, after the sweep above, and guarded by the DATE it last
+        # ran rather than by an exact hour equality — so a cycle that overshoots 02:00
+        # still runs, once, instead of skipping the day.
+        now = datetime.now(timezone.utc)
+        if now.hour >= 2 and last_full_run_date != now.date():
+            last_full_run_date = now.date()
             try:
-                from scripts.hydrate_whales import WhaleHydrator
-                from app.integrations.fmp import FMPClient
-                from app.integrations.gemini import GeminiClient
-
-                fmp = FMPClient()
-                gemini = GeminiClient()
-                hydrator = WhaleHydrator(fmp, gemini)
-                await hydrator.run()
-                await fmp.close()
-                logger.info("Full whale hydration completed")
+                await _with_hydrator(lambda h: h.run())
+                logger.info("Full whale hydration completed (UTC %s)", now.date())
             except Exception as e:
-                logger.error(f"Full whale hydration job failed: {e}", exc_info=True)
+                logger.error(
+                    "Full whale hydration job failed: %s: %s",
+                    type(e).__name__, e, exc_info=True,
+                )
 
-        # Check every hour
-        await asyncio.sleep(3600)
+        # Sleep to the top of the next hour rather than a flat 3600s, so the wake-up
+        # time cannot drift forward past the 02:00 window.
+        now = datetime.now(timezone.utc)
+        seconds_past_hour = now.minute * 60 + now.second
+        await asyncio.sleep(max(60, 3600 - seconds_past_hour))
 
 
 app = FastAPI(

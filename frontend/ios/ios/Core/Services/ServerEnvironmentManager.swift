@@ -18,7 +18,30 @@
 
 import Foundation
 
+/// Single-flight coordinator for `resolve()`.
+///
+/// `resolve()` had no guard of any kind, and TWO launch triggers call it: the root `.task` in
+/// `iosApp` and the `didBecomeActive` observer — which also fires on a cold launch. Every
+/// launch therefore paid for two identical 1-second `health/live` probes, and a launch log
+/// showed the pair of `-1004`s to prove it.
+private actor ResolveCoordinator {
+    private var inFlight: Task<Void, Never>?
+
+    func run(_ body: @escaping @Sendable () async -> Void) async {
+        if let running = inFlight, !running.isCancelled {
+            await running.value
+            return
+        }
+        let task = Task { await body() }
+        inFlight = task
+        await task.value
+        inFlight = nil
+    }
+}
+
 final class ServerEnvironmentManager: @unchecked Sendable {
+
+    private let resolveCoordinator = ResolveCoordinator()
 
     // MARK: - Singleton
 
@@ -59,7 +82,16 @@ final class ServerEnvironmentManager: @unchecked Sendable {
 
     /// Probes the local backend and sets `resolvedBaseURL`.
     /// Called at app launch and on each foreground event.
+    ///
+    /// Single-flight: concurrent callers JOIN the running probe rather than starting another.
+    /// See `ResolveCoordinator`.
     func resolve() async {
+        await resolveCoordinator.run { [weak self] in
+            await self?.performResolve()
+        }
+    }
+
+    private func performResolve() async {
         #if DEBUG
         // ── Manual overrides ────────────────────────────────────────
         if ProcessInfo.processInfo.environment["USE_LOCAL"] == "1" {

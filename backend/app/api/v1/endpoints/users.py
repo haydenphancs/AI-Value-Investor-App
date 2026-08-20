@@ -766,6 +766,31 @@ async def claim_guest_data(
         # the per-install bucket does not linger unclaimable.
         supabase.table("user_investor_profile").delete().eq("user_id", bucket).execute()
 
+    def _bucket_has_anything() -> bool:
+        """One round trip that answers "is there anything to claim at all?".
+
+        This endpoint runs on EVERY cold launch of EVERY signed-in user — the client's
+        transition key is process-scoped by design (see `AppState.claimGuestDataIfNeeded`'s
+        note on why a persisted latch would be wrong) — and its steady-state answer is "no".
+        Reaching that answer used to cost six sequential PostgREST round trips.
+
+        Fails OPEN: any problem here falls through to the six-step path below, so the code is
+        safe to deploy before migration 144 is applied (the RPC simply 404s and we log it).
+        """
+        try:
+            result = supabase.rpc("guest_bucket_has_data", {"p_bucket": bucket}).execute()
+        except Exception as e:  # noqa: BLE001 — degradation must be loud, not fatal
+            logger.warning(
+                "Guest-data claim: probe RPC unavailable, falling back to the six-step scan "
+                "for user=%s bucket=%s: %s: %s (is migration 144 applied?)",
+                user_id, bucket, type(e).__name__, e,
+            )
+            return True
+        # `.data` is the scalar the function returned. Anything unexpected → fall through.
+        if result.data is False:
+            return False
+        return True
+
     def _claim() -> None:
         """Run every step, isolated.
 
@@ -779,6 +804,16 @@ async def claim_guest_data(
         recorded and reported; `claim-guest-data` is best-effort by design (the user is already
         signed in, so this must never 500), but best-effort has to mean "tried them all".
         """
+        if not _bucket_has_anything():
+            # Nothing in this install's guest bucket. Every step below would issue its own
+            # SELECT and short-circuit on an empty result, so skipping them all is exactly
+            # equivalent — six round trips lighter.
+            logger.debug(
+                "Guest-data claim: empty bucket for user=%s bucket=%s — nothing to do",
+                user_id, bucket,
+            )
+            return
+
         for name, step in (
             ("watchlist_items", _claim_watchlist),
             ("portfolios", _claim_portfolios),

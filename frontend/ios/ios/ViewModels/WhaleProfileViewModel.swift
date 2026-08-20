@@ -23,6 +23,8 @@ class WhaleProfileViewModel: ObservableObject {
     @Published var selectedTradeGroupId: String?
     @Published var showAllHoldings: Bool = false
     @Published var showRecentTradesInfo: Bool = false
+    /// A Follow tap the caller's plan does not allow → the plan sheet.
+    @Published var showPaywall: Bool = false
 
     // MARK: - Configuration
 
@@ -32,6 +34,9 @@ class WhaleProfileViewModel: ObservableObject {
     private let whaleService = WhaleService.shared
     private let apiClient: APIClient
     private var cancellables = Set<AnyCancellable>()
+    /// The profile fetch in flight, so a newer load can cancel an older one and
+    /// `refresh()` can await the real thing.
+    private var loadTask: Task<Void, Never>?
 
     // MARK: - Computed Properties
 
@@ -69,19 +74,31 @@ class WhaleProfileViewModel: ObservableObject {
     // MARK: - Observation
 
     private func observeFollowChanges() {
+        // ⚠️ Consume the EMITTED value, and hop off the publishing frame.
+        //
+        // `@Published` fires during `willSet`, so at the moment this sink runs the
+        // property still holds its PRE-mutation value. The old body threw the emitted
+        // set away and called `whaleService.isFollowing(whaleId)` — re-reading exactly
+        // that stale property — so every correction it made was computed from the state
+        // it was trying to correct. A failed unfollow reverted in the service and this
+        // screen kept showing the wrong pill until the next full profile load.
+        //
+        // `.receive(on: RunLoop.main)` matches what TrackingViewModel already does for
+        // the same publisher.
+        let id = whaleId
         whaleService.$followedWhaleIds
-            .sink { [weak self] _ in
-                self?.updateFollowStatus()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] ids in
+                self?.updateFollowStatus(isFollowing: ids.contains(id))
             }
             .store(in: &cancellables)
     }
 
-    private func updateFollowStatus() {
+    private func updateFollowStatus(isFollowing: Bool) {
         // Mutate isFollowing in place — a field-by-field WhaleProfile
         // reconstruction here silently dropped every defaulted field it
         // forgot (firmName vanished from the header on follow-state sync).
         guard var currentProfile = profile else { return }
-        let isFollowing = whaleService.isFollowing(whaleId)
 
         if currentProfile.isFollowing != isFollowing {
             currentProfile.isFollowing = isFollowing
@@ -92,10 +109,19 @@ class WhaleProfileViewModel: ObservableObject {
     // MARK: - Data Loading
 
     func loadProfile() {
-        isLoading = true
+        // Cancel any load already in flight. Retry, pull-to-refresh and the
+        // `.onChange(of: tier)` reload can all fire within a second of each other, and
+        // without this the SLOWER response wins — so a stale (or pre-upgrade, still
+        // locked) profile could overwrite the fresh one.
+        loadTask?.cancel()
+
+        // Only blank the screen when there is nothing to show. `isLoading` gates the
+        // whole view, so setting it unconditionally replaced a fully-rendered profile
+        // with a spinner on every refresh and on every tier change.
+        isLoading = (profile == nil)
         errorMessage = nil
 
-        Task { [weak self] in
+        loadTask = Task { [weak self] in
             guard let self = self else { return }
 
             do {
@@ -103,6 +129,7 @@ class WhaleProfileViewModel: ObservableObject {
                     endpoint: .getWhaleProfile(whaleId: self.whaleId),
                     responseType: WhaleProfileDTO.self
                 )
+                guard !Task.isCancelled else { return }
                 let loadedProfile = dto.toWhaleProfile()
 
                 // Trust the freshly-fetched server truth (dto.isFollowing) and
@@ -118,26 +145,32 @@ class WhaleProfileViewModel: ObservableObject {
                 self.isLoading = false
                 print("[WhaleProfileVM] ✅ Loaded profile for \(loadedProfile.name) from API")
             } catch {
-                print("[WhaleProfileVM] ❌ API profile load failed: \(error)")
-
-                // Fallback to sample data
-                self.loadSampleProfile()
+                guard !Task.isCancelled else { return }
+                // Routed through `AppError.from(_:)` as .claude/rules/ios-swiftui.md
+                // requires — this used to invent its own string and bypass the mapping
+                // entirely, so a 503 WHALE_PROFILE_UNAVAILABLE and a dead network read
+                // identically.
+                let appError = AppError.from(error)
                 self.isLoading = false
-                self.errorMessage = "Failed to load profile. Showing cached data."
+                // And it must not CLAIM cached data. The old copy was
+                // "Failed to load profile. Showing cached data." while
+                // `loadSampleProfile()` was a documented no-op that showed nothing —
+                // the sentence was false in every case it appeared.
+                self.errorMessage = self.profile == nil
+                    ? appError.message
+                    : "\(appError.message) Showing the last loaded data."
+                print("[WhaleProfileVM] ❌ Profile load failed: \(appError.title): \(error)")
             }
         }
     }
 
-    private func loadSampleProfile() {
-        // No sample fallback — real UUIDs won't match slug-based sample data.
-        // The error state is shown via errorMessage instead.
-        print("[WhaleProfileVM] ⚠️ No sample fallback available for whale \(whaleId)")
-    }
-
     func refresh() async {
         isRefreshing = true
+        // AWAIT the real load instead of sleeping 500ms and hoping. The old form
+        // dismissed the pull-to-refresh spinner on a timer that had nothing to do with
+        // whether the request had finished.
         loadProfile()
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        await loadTask?.value
         isRefreshing = false
     }
 
@@ -146,6 +179,20 @@ class WhaleProfileViewModel: ObservableObject {
     func toggleFollow() {
         guard var updatedProfile = profile else { return }
         let newFollowState = !updatedProfile.isFollowing
+
+        // PLAN gate BEFORE anything else — the same rung `TrackingViewModel
+        // .toggleFollowWhale` already checks, which this screen was missing entirely.
+        //
+        // Following (not unfollowing) a locked whale is refused server-side with 403
+        // WHALE_FOLLOW_LOCKED. That maps to `AppError.planUpgradeRequired`, which
+        // `reportMutationFailure` routes to its `default:` arm — a generic toast. So the
+        // pill filled in, the request went out, and the pill snapped back with a message
+        // that never mentioned the plan: exactly the "animates in, then reverts" symptom
+        // the roster path was fixed for. Unfollow is NEVER gated, here or on the server.
+        if newFollowState && updatedProfile.isLocked {
+            showPaywall = true
+            return
+        }
 
         // Ask the service first — it owns the sign-in gate and returns false when the mutation
         // was never started, so a signed-out tap creates no optimistic state and, critically,

@@ -106,10 +106,17 @@ final class HomeDashboardViewModel: ObservableObject {
     ///
     /// Clearing before the fetch is deliberate: the reload can be slow or fail, and stale
     /// account data must not sit on screen while it does.
-    func reloadForIdentityChange() async {
+    func handleIdentityChange(isActiveTab: Bool) async {
+        // CLEAR FIRST, UNCONDITIONALLY — before the `isActiveTab` gate below. The reload is
+        // deferred for a hidden tab, but the previous account's data must not survive in this
+        // ViewModel waiting to be rendered (.claude/rules/auth.md §7).
         data = nil
         lastLoadedAt = nil
         errorMessage = nil
+
+        // Fetch only if the user is actually looking at this tab. Clearing above nils the
+        // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
+        guard isActiveTab else { return }
         await load()
     }
 
@@ -137,7 +144,7 @@ final class HomeDashboardViewModel: ObservableObject {
             // being resumed, a THIRD caller can run and observe a completed-but-still
             // -registered task: it would "join" something already done and return
             // instantly without ever loading. That is a silently skipped refresh —
-            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // and for `handleIdentityChange` it would mean adopting a load that
             // completed under the PREVIOUS identity.
             self.loadTask = nil
         }

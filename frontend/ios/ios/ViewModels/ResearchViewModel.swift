@@ -218,7 +218,7 @@ class ResearchViewModel: ObservableObject {
             // being resumed, a THIRD caller can run and observe a completed-but-still
             // -registered task: it would "join" something already done and return
             // instantly without ever loading. That is a silently skipped refresh —
-            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // and for `handleIdentityChange` it would mean adopting a load that
             // completed under the PREVIOUS identity.
             self.loadTask = nil
         }
@@ -257,13 +257,20 @@ class ResearchViewModel: ObservableObject {
     /// `AppState.discardDataForEndedSession()` reaches into this ViewModel, so without it the
     /// previous account's analyses (ticker, score, fair value) stayed on screen for whoever
     /// used the device next.
-    func reloadForIdentityChange() async {
+    func handleIdentityChange(isActiveTab: Bool) async {
+        // CLEAR FIRST, UNCONDITIONALLY — before the `isActiveTab` gate below. The reload is
+        // deferred for a hidden tab, but the previous account's data must not survive in this
+        // ViewModel waiting to be rendered (.claude/rules/auth.md §7).
         reports = []
         selectedReportIds = []
         isSelectingReports = false
         creditBalance = nil
         lastLoadedAt = nil
         error = nil
+
+        // Fetch only if the user is actually looking at this tab. Clearing above nils the
+        // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
+        guard isActiveTab else { return }
         await loadBackendData()
     }
 

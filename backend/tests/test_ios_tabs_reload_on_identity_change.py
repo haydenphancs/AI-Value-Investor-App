@@ -150,16 +150,51 @@ def test_every_tab_root_reloads_when_the_identity_changes(tab):
     )
 
 
+_HANDLER = "func handleIdentityChange(isActiveTab: Bool)"
+
+
 @pytest.mark.parametrize("tab", sorted(_TAB_ROOTS))
 def test_every_tab_view_model_has_an_identity_reset(tab):
     """The handler must CLEAR before it reloads — the refetch can be slow or fail, and the
     previous account's data must not sit on screen while it does."""
     _, _, vm_file = _TAB_ROOTS[tab]
-    block = _decl_block(_read(vm_file), "func reloadForIdentityChange()")
-    assert block.strip(), f"{tab}'s ViewModel has an empty reloadForIdentityChange()"
+    block = _decl_block(_read(vm_file), _HANDLER)
+    assert block.strip(), f"{tab}'s ViewModel has an empty {_HANDLER}"
     assert re.search(r"=\s*(\[\]|nil|false)", block), (
-        f"{tab}'s reloadForIdentityChange() reloads without clearing identity-scoped state "
+        f"{tab}'s {_HANDLER} reloads without clearing identity-scoped state "
         "first, so the previous account's data stays on screen during the refetch."
+    )
+
+
+@pytest.mark.parametrize("tab", sorted(_TAB_ROOTS))
+def test_the_clear_happens_before_the_active_tab_gate(tab):
+    """THE invariant of the clear-eagerly / fetch-lazily split.
+
+    The FETCH is now deferred for a tab that is not on screen — a sign-in used to fan out
+    eleven requests across four hidden tabs (five for Tracking alone). The CLEAR must not be
+    deferred with it. All five tabs are opacity-mounted for the whole process, so a hidden
+    tab's ViewModel holds live data: leaving the previous account's watchlist and holdings in
+    it means the next person to use the device sees them the instant they tap that tab
+    (.claude/rules/auth.md §7).
+
+    Asserting on ORDER, not merely on presence — presence is satisfied by a clear that sits
+    after the early-return and therefore never runs for the tabs that actually matter.
+    """
+    _, _, vm_file = _TAB_ROOTS[tab]
+    block = _decl_block(_read(vm_file), _HANDLER)
+
+    gate = re.search(r"guard\s+isActiveTab\s+else\s*\{\s*return\s*\}", block)
+    assert gate, (
+        f"{tab}'s {_HANDLER} has no `guard isActiveTab else {{ return }}`. Without it the "
+        "identity-change reload fires for every mounted tab, which was most of a launch's "
+        "duplicate traffic."
+    )
+
+    clear = re.search(r"=\s*(\[\]|nil|false)", block)
+    assert clear, f"{tab}'s {_HANDLER} clears nothing"
+    assert clear.start() < gate.start(), (
+        f"{tab}'s {_HANDLER} gates on `isActiveTab` BEFORE clearing identity-scoped state. "
+        "A hidden tab would keep the previous account's data indefinitely."
     )
 
 
@@ -167,7 +202,7 @@ def test_updates_identity_reset_clears_the_hasLoadedOnce_latch():
     """`loadIfNeeded()` early-returns on `hasLoadedOnce`, which latches on first success and is
     never otherwise cleared — the hardest of the four latches. A reset that forgets it is a
     no-op for the whole process."""
-    block = _decl_block(_read(_TAB_ROOTS["Updates"][2]), "func reloadForIdentityChange()")
+    block = _decl_block(_read(_TAB_ROOTS["Updates"][2]), _HANDLER)
     assert "hasLoadedOnce = false" in block, (
         "UpdatesViewModel.reloadForIdentityChange() does not clear `hasLoadedOnce`, so "
         "`loadIfNeeded()` keeps early-returning and the feed is never refetched."

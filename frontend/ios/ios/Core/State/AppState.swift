@@ -234,7 +234,7 @@ final class AppState {
             // first on every cold launch — and being `.guestAllowed`, it did not fail, it
             // succeeded as the guest.
             WidgetRefreshService.shared.markCredentialReady()
-            WidgetRefreshService.shared.refresh()
+            WidgetRefreshService.shared.refresh(identity: identityGeneration)
 
             await restoreSession(trigger: "launch")
         }
@@ -347,6 +347,7 @@ final class AppState {
     /// session's progress into whoever signs in next.
     private func endSessionForDeadCredential() {
         authService?.clearToken()
+        invalidateIdentity(nil)
         user = UserState()
         // `signOut()` clears these two and this path did not, so a dead credential left the
         // ended account's tickers and reports rendered under the guest UI.
@@ -377,6 +378,7 @@ final class AppState {
         // is no longer the one this restore was validating.
         let generation = credentialGeneration
         guard let token = authService.getStoredToken() else {
+            resolveIdentity(nil)
             auth.status = .unauthenticated   // guest — app still shown
             cancelRestoreBackoff()
             return
@@ -441,6 +443,7 @@ final class AppState {
                 // token because the same user is expected back, and wiping there would throw away
                 // local progress that has not synced yet (an offline learner's work).
                 discardDataForEndedSession()
+                invalidateIdentity(nil)
                 auth.status = .unauthenticated
                 cancelRestoreBackoff()
                 return
@@ -483,6 +486,7 @@ final class AppState {
             return
         }
         await apiClient.setAuthToken(nil)
+        noteCredentialDisarmed()
         didWriteAsGuestWhileRestoring = true
         auth.status = .restoring
         scheduleRestoreBackoff()
@@ -503,7 +507,21 @@ final class AppState {
     /// paywall highlighting, and `canGenerateResearch`.
     func applyProfile(_ profile: UserProfile) {
         user.profile = profile
-        user.tier = UserTier(rawValue: profile.tier) ?? .free
+
+        let previousTier = user.tier
+        let incomingTier = UserTier(rawValue: profile.tier) ?? .free
+        user.tier = incomingTier
+        // A launch settling into the tier the user already had is not an unlock. See
+        // `entitlementGeneration`.
+        if hasHydratedProfileOnce, previousTier != incomingTier {
+            entitlementGeneration &+= 1
+        }
+        hasHydratedProfileOnce = true
+
+        // We now know whose credential we have been sending. On a cold launch this is a
+        // discovery and bumps nothing; on a sign-in or an account switch it bumps and every
+        // tab drops what it loaded for the previous identity.
+        resolveIdentity(profile.id)
         // Push the tier to the audio engines. They are services, not views, so they cannot
         // read `@Environment(AppState.self)` — and the gate has to live at the engines
         // because Journey narrates from `.onAppear` with no button to guard. One assignment
@@ -634,7 +652,10 @@ final class AppState {
         //
         // `force` skips the 60s throttle: an identity change is exactly the case where
         // the throttle is wrong, because the previous fetch answered for someone else.
-        WidgetRefreshService.shared.refresh(force: true)
+        // `identity:` is what keeps this from being two wasted requests on every launch:
+        // the seed refresh in `configure()` already ran under this same armed credential, so
+        // the force is only honoured when the identity actually moved (a real sign-in).
+        WidgetRefreshService.shared.refresh(force: true, identity: identityGeneration)
     }
 
     /// Pull the user's Learn progress down at the auth transition.
@@ -685,6 +706,73 @@ final class AppState {
     /// `restoreSessionIfNeeded`, whose guard is `auth.status != .authenticated`. Terminal for
     /// the app run, with every `.guestAllowed` write silently going to the guest partition.
     private var credentialGeneration: UInt64 = 0
+
+    // MARK: - Identity generation (what a loaded screen belongs to)
+
+    /// Bumped when the identity behind the wire CHANGES — sign-in, sign-out, account switch,
+    /// or the deliberate disarm during a transient restore. Surfaces stamp what they loaded
+    /// under and skip a reload when it still matches.
+    ///
+    /// The subtle half is what does NOT bump it: **discovering** whose credential we already
+    /// hold. A cold launch primes the stored token before any tab mounts, so the mount-time
+    /// load is already answered for the right user; the `.authenticated` that lands a moment
+    /// later is a STATUS change, not an identity change. Reloading for it fetched
+    /// `/home/dashboard` four times per launch and re-ran the whole Tracking fan-out for tabs
+    /// nobody was looking at.
+    ///
+    /// Distinct from `credentialGeneration` above, which is a restore-invalidation counter with
+    /// a different lifetime — do not merge them.
+    private(set) var identityGeneration: Int = 0
+
+    /// `"u:<id>"` / `"guest"`, or nil for "we have not been told yet".
+    private var resolvedIdentityKey: String?
+
+    /// Record who the wire currently answers as. See `identityGeneration`.
+    private func resolveIdentity(_ userId: String?) {
+        let key = userId.map { "u:\($0)" } ?? "guest"
+        defer { resolvedIdentityKey = key }
+        // FIRST resolution of the process is a discovery, not a change — see above.
+        guard let previous = resolvedIdentityKey, previous != key else { return }
+        identityGeneration &+= 1
+    }
+
+    /// The identity behind the wire ENDED or was replaced — always a change, even when it is
+    /// the first thing this process resolves.
+    ///
+    /// The distinction from `resolveIdentity` matters at exactly one moment, and getting it
+    /// wrong strands a screen: a cold launch that primes a DEAD credential sends the
+    /// mount-time loads with that token and has them rejected, then concludes "guest". Treated
+    /// as a discovery, nothing would reload and the active tab would hold its 401 error until
+    /// the user happened to switch tabs. It is a change: what we sent was not who we are.
+    private func invalidateIdentity(_ userId: String?) {
+        resolvedIdentityKey = userId.map { "u:\($0)" } ?? "guest"
+        identityGeneration &+= 1
+    }
+
+    /// The client token was deliberately stripped while a stored credential is still held
+    /// (`enterRestoringWindow`). Requests now answer as the per-install guest, so anything
+    /// loaded from here belongs to a different identity than what came before — even though
+    /// `auth.status` never reaches `.unauthenticated` and no observer fires. Without this bump
+    /// a 60s auto-refresh tick during a flaky-network restore could load guest data and stamp
+    /// it as the user's, and the heal would then decline to replace it.
+    private func noteCredentialDisarmed() {
+        guard resolvedIdentityKey != "guest" else { return }
+        resolvedIdentityKey = "guest"
+        identityGeneration &+= 1
+    }
+
+    /// Bumped ONLY by a tier change that happens after the profile has hydrated once.
+    ///
+    /// `user.tier` is declared `= .free` and `applyProfile` writes the real value during
+    /// restore, so the first write is HYDRATION, not an upgrade — and an observer watching
+    /// `user.tier` directly fired on every cold launch of every paying account. Views that
+    /// unlock content on a purchase must observe THIS.
+    private(set) var entitlementGeneration: Int = 0
+
+    /// Distinguishes the hydration write from a real change. Checked inside `applyProfile`
+    /// rather than from a view, because `onChange` delivery is deferred to the next update
+    /// pass — by which time a view-side "was this the first write?" flag already reads true.
+    private var hasHydratedProfileOnce = false
 
     /// Move this install's guest watchlist + portfolios + Learn progress onto the account that
     /// just signed in (Learn covers completions AND book bookmarks — one unified table).
@@ -795,7 +883,7 @@ final class AppState {
             // being resumed, a THIRD caller can run and observe a completed-but-still
             // -registered task: it would "join" something already done and return
             // instantly without ever loading. That is a silently skipped refresh —
-            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // and for `handleIdentityChange` it would mean adopting a load that
             // completed under the PREVIOUS identity.
             self.creditsTask = nil
         }
@@ -825,6 +913,7 @@ final class AppState {
     /// (they need the token to still be set, so they fire before it is cleared).
     func signOut() {
         Task { [authService] in await authService?.signOut() }
+        invalidateIdentity(nil)
         auth.status = .unauthenticated
         user = UserState()
         watchlist = WatchlistState()
@@ -1032,6 +1121,10 @@ final class AppState {
 
     func handleError(_ error: Error) {
         let appError = AppError.from(error)
+
+        // Nobody is waiting for this result any more (tab switch, view teardown, a
+        // superseding request). Not a failure — and never a banner. See `AppError.cancelled`.
+        guard !appError.isCancellation else { return }
 
         // Handle auth errors globally.
         //

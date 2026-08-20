@@ -985,10 +985,17 @@ struct TrendingWhale: Identifiable {
     }
 
     var formattedFollowers: String {
-        if followersCount >= 1000 {
-            return "\(followersCount / 1000)K followers"
+        // Singular matters: the roster shipped reading "1 followers" on every row a
+        // single user tracked. And the thousands branch used INTEGER division, so 1,999
+        // rendered "1K followers" — a 50% under-count presented as a fact.
+        if followersCount >= 1_000 {
+            let thousands = Double(followersCount) / 1_000
+            let text = thousands >= 10
+                ? String(format: "%.0fK", thousands)
+                : String(format: "%.1fK", thousands)
+            return "\(text) followers"
         }
-        return "\(followersCount) followers"
+        return followersCount == 1 ? "1 follower" : "\(followersCount) followers"
     }
 
     var formattedTradeCount: String {
@@ -1029,8 +1036,25 @@ struct WhaleTradeGroupActivity: Identifiable {
     }
 
     var formattedDate: String {
+        // `.distantPast` is DateParser's "unparseable" sentinel. Formatting it printed
+        // "Jan 01, 0001" as a timeline section header; the trade-group model already
+        // guards this and the activity model did not.
+        guard date.timeIntervalSince1970 > 946_684_800 else {  // 2000-01-01
+            return "Date unavailable"
+        }
+
         let calendar = Calendar.current
         let now = Date()
+
+        // Congressional rows are dated by DISCLOSURE, not by when the trade happened —
+        // the STOCK Act lag is 30-45 days. Saying "Today" over a filing about a trade
+        // from six weeks ago states something false, so politicians get an explicit,
+        // absolute "Disclosed …" label instead of any relative wording.
+        let formatter = DateFormatter()
+        if category == .politicians {
+            formatter.dateFormat = "MMM d, yyyy"
+            return "Disclosed \(formatter.string(from: date))"
+        }
 
         if calendar.isDateInToday(date) {
             return "Today"
@@ -1039,11 +1063,12 @@ struct WhaleTradeGroupActivity: Identifiable {
         }
 
         let components = calendar.dateComponents([.day], from: date, to: now)
-        if let days = components.day, days <= 7 {
-            return "\(days) days ago"
+        // `days > 0` guard: a future date produced a NEGATIVE count that rendered as
+        // "-3 days ago".
+        if let days = components.day, days > 0, days <= 7 {
+            return "\(days) day\(days == 1 ? "" : "s") ago"
         }
 
-        let formatter = DateFormatter()
         formatter.dateFormat = "MMM dd, yyyy"
         return formatter.string(from: date)
     }

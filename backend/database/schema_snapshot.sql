@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict ISKup6If2vrjUd4gShSTqbqNAtQcn7lEIh9ApyZbxhi6FQR7fUWegnkx1shOXbD
+\restrict R5Fn2WlXdjPwUkZ7WLl5CSvXGtfBicKDt9mETLyYKERcZQHOk1NSKQ5dLObyoeQ
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1727,6 +1727,30 @@ $$;
 
 
 --
+-- Name: guest_bucket_has_data(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guest_bucket_has_data(p_bucket uuid) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT EXISTS (SELECT 1 FROM watchlist_items       WHERE user_id = p_bucket)
+        OR EXISTS (SELECT 1 FROM portfolios            WHERE user_id = p_bucket)
+        OR EXISTS (SELECT 1 FROM user_learn_progress   WHERE user_id = p_bucket)
+        OR EXISTS (SELECT 1 FROM research_reports      WHERE user_id = p_bucket)
+        OR EXISTS (SELECT 1 FROM chat_sessions         WHERE user_id = p_bucket)
+        OR EXISTS (SELECT 1 FROM user_investor_profile WHERE user_id = p_bucket);
+$$;
+
+
+--
+-- Name: FUNCTION guest_bucket_has_data(p_bucket uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.guest_bucket_has_data(p_bucket uuid) IS 'True when the per-install guest bucket holds anything claimable. One round trip instead of six, for the launch-time no-op case of POST /users/me/claim-guest-data.';
+
+
+--
 -- Name: handle_new_auth_user(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1857,7 +1881,7 @@ $$;
 -- Name: refund_credits(uuid, integer, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) RETURNS integer
+CREATE FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public', 'pg_temp'
     SET row_security TO 'off'
@@ -1874,17 +1898,22 @@ DECLARE
     v_searched       BOOLEAN := FALSE;
     v_back_granted   INTEGER := 0;
     v_back_purch     INTEGER := 0;
+    v_reversed_id    BIGINT;
+    v_outcome        TEXT := 'refunded';
 BEGIN
     IF p_user_id = _GUEST THEN
         SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
-        RETURN COALESCE(v_spendable, 0);
+        RETURN jsonb_build_object(
+            'outcome', 'guest', 'refunded', 0, 'spendable', COALESCE(v_spendable, 0));
     END IF;
 
     IF p_amount IS NULL OR p_amount <= 0 THEN
         SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
-        RETURN v_spendable;
+        RETURN jsonb_build_object(
+            'outcome', 'invalid', 'reason', 'non_positive_amount',
+            'refunded', 0, 'spendable', v_spendable);
     END IF;
 
     SELECT used, purchased_used INTO v_old_used, v_old_pused
@@ -1893,7 +1922,11 @@ BEGIN
        FOR UPDATE;
 
     IF NOT FOUND THEN
-        RETURN NULL;
+        -- 139 returned a bare NULL here, which `refund_ledgered` could not tell apart from a
+        -- transport fault. It is now its own outcome; NULL is reserved for "the round trip
+        -- failed", matching revoke_purchased_credits.
+        RETURN jsonb_build_object(
+            'outcome', 'no_credits_row', 'refunded', 0, 'spendable', NULL);
     END IF;
 
     IF p_ref_id IS NOT NULL AND p_ref_id <> '' THEN
@@ -1934,32 +1967,63 @@ BEGIN
         v_back_granted := LEAST(p_amount, v_old_used);
         v_back_purch   := LEAST(p_amount - v_back_granted, v_old_pused);
     ELSE
-        -- THE FIX. We DID search on a ref_id and found no un-reversed debit: this charge was
-        -- already refunded, or never happened. Paying from the user's current `used` would
-        -- MINT credits — returning money for a debit that no longer exists. Fall through to
-        -- the zero branch below.
+        -- 139's fix: we DID search on a ref_id and found no UN-REVERSED debit, so paying from
+        -- the user's current `used` would MINT credits. Refund nothing.
         --
-        -- Note the `NOT v_searched` arm above: without it a refund called with no ref_id
-        -- would pay nothing and silently lose a legitimate refund, which is the same bug
-        -- pointing the other way.
-        --
-        -- ⚠️ This branch also catches a MISMATCHED ref_id — a refund keyed differently from
-        -- its charge (the shape of a real bug: the reconciliation sweep once refunded with
-        -- report_id while research.py charged with the ticker). Before 139 that silently
-        -- expired paid credits by refunding them into the granted pool; now it is a no-op,
-        -- which does not destroy or mint anything but DOES leave the user owed. Neither is
-        -- correct, so make it findable instead of silent — this is the only signal a
-        -- mismatched key produces.
-        RAISE WARNING 'refund_credits: no un-reversed debit for user=% ref_id=% amount=% '
-                      '(already refunded, or the refund ref_id does not match its charge) '
-                      '— refunding nothing',
-                      p_user_id, p_ref_id, p_amount;
+        -- 142 adds the half 139 could not express: WHY there was no match. Re-run the same
+        -- lookup without the reverses_id anti-join. If a debit turns up, this is a replayed
+        -- refund of a charge already given back — benign, and the caller must not page anyone.
+        -- If nothing turns up, the ref_id or the amount does not match any charge and the user
+        -- is owed credits nobody will notice they are owed.
+        SELECT t.id INTO v_reversed_id
+          FROM public.credit_transactions t
+         WHERE t.user_id = p_user_id
+           AND t.ref_id  = p_ref_id
+           AND t.delta   = -p_amount
+           AND t.reason NOT IN ('pack_revoked', 'tier_revoked')
+         ORDER BY t.id DESC
+         LIMIT 1;
+
+        IF v_reversed_id IS NOT NULL THEN
+            v_outcome := 'already_refunded';
+        ELSE
+            v_outcome := 'no_matching_debit';
+            -- Kept from 139. Redundant now that the outcome reaches the application, but free,
+            -- and the only signal visible when reading Postgres logs directly.
+            RAISE WARNING 'refund_credits: no un-reversed debit for user=% ref_id=% amount=% '
+                          '(the refund ref_id or amount does not match its charge) '
+                          '— refunding nothing',
+                          p_user_id, p_ref_id, p_amount;
+        END IF;
     END IF;
 
     IF v_back_granted + v_back_purch = 0 THEN
+        -- A MATCHED debit whose caps collapsed to zero is NOT a success. The reachable path is
+        -- the month boundary: `ensure_credit_period` resets `used` to 0, so a report charged in
+        -- month M and refunded in M+1 (the reconciliation sweep crosses that boundary on its
+        -- own schedule) reads v_old_used = 0 and both LEAST() caps go to zero. The user was
+        -- charged, is owed, and `research_reports.is_refunded` is already burned.
+        --
+        -- Labelling that 'refunded' would hand the caller a success for the exact silent-money
+        -- case this migration exists to surface. `v_debit_id IS NOT NULL` is already known here,
+        -- so it costs nothing to say so.
+        --
+        -- Deliberately NOT applied when `NOT v_searched` (no ref_id to search by): there is no
+        -- debit to point at, so "owed" is unprovable and claiming it would be a false alarm.
+        IF v_outcome = 'refunded' AND v_debit_id IS NOT NULL THEN
+            v_outcome := 'capped_to_zero';
+            RAISE WARNING 'refund_credits: matched debit % for user=% ref_id=% but the pools '
+                          'could absorb none of the % credits (used=%, purchased_used=%) '
+                          '— refunding nothing',
+                          v_debit_id, p_user_id, p_ref_id, p_amount, v_old_used, v_old_pused;
+        END IF;
+
         SELECT spendable INTO v_spendable
           FROM public.user_credits WHERE user_id = p_user_id;
-        RETURN v_spendable;
+        -- `refunded` with 0 survives only for the genuinely-nothing-to-give-back case, exactly
+        -- as revoke_purchased_credits reports `reclaimed: 0`.
+        RETURN jsonb_build_object(
+            'outcome', v_outcome, 'refunded', 0, 'spendable', v_spendable);
     END IF;
 
     UPDATE public.user_credits
@@ -1976,9 +2040,19 @@ BEGIN
         (p_user_id, v_back_granted + v_back_purch, v_back_granted, v_back_purch,
          p_reason, p_ref_id, v_spendable, v_debit_id);
 
-    RETURN v_spendable;
+    RETURN jsonb_build_object(
+        'outcome', 'refunded',
+        'refunded', v_back_granted + v_back_purch,
+        'spendable', v_spendable);
 END;
 $$;
+
+
+--
+-- Name: FUNCTION refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) IS 'Reverses the RECORDED split of a spend. Returns JSONB {outcome, refunded, spendable} as of migration 142 (was INTEGER spendable). outcome: refunded | already_refunded | no_matching_debit | guest | invalid | no_credits_row. `no_matching_debit` means the user is OWED credits — credit_service.refund_ledgered logs it as a REFUND LEAK at ERROR.';
 
 
 --
@@ -2532,6 +2606,21 @@ BEGIN
          p_reason, p_ref_id, v_spendable);
 
     RETURN v_spendable;
+END;
+$$;
+
+
+--
+-- Name: touch_whale_snapshot_processed_at(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.touch_whale_snapshot_processed_at() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    NEW.processed_at = NOW();
+    RETURN NEW;
 END;
 $$;
 
@@ -7680,6 +7769,10 @@ CREATE TABLE public.whales (
     firm_name text,
     return_window_years integer,
     return_status text DEFAULT ''::text NOT NULL,
+    lifecycle_status text DEFAULT ''::text NOT NULL,
+    lifecycle_note text,
+    last_filing_period text,
+    last_activity_date text,
     CONSTRAINT whales_followers_count_nonneg CHECK ((followers_count >= 0)),
     CONSTRAINT whales_portfolio_value_nonneg CHECK (((portfolio_value IS NULL) OR (portfolio_value >= (0)::numeric)))
 );
@@ -7746,6 +7839,34 @@ COMMENT ON COLUMN public.whales.return_window_years IS 'Calendar years compounde
 --
 
 COMMENT ON COLUMN public.whales.return_status IS 'ok | insufficient_history | unavailable. Drives whether the Whale Profile draws a percent or an em-dash. Empty string = a row written before migration 127; the serve path treats that as "trust the legacy value" so nothing blanks during rollout. insufficient_history and unavailable are deliberately distinct: only the former is a judgement about the whale, and only the former may clear a stored ytd_return — an upstream fetch failure must never blank good data. See migration 127.';
+
+
+--
+-- Name: COLUMN whales.lifecycle_status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.whales.lifecycle_status IS 'CURATED, from whale_registry.json: '''' (= active, the default) or ''inactive''. Never inferred — a fund closing or a member retiring is not visible in filing data. When not active, lifecycle_note is required and explains why.';
+
+
+--
+-- Name: COLUMN whales.lifecycle_note; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.whales.lifecycle_note IS 'CURATED prose shown verbatim to the user, e.g. "Scion Asset Management deregistered as an investment adviser in 2025 and no longer files 13F." Overrides the derived label on the profile: a real reason beats an inferred one.';
+
+
+--
+-- Name: COLUMN whales.last_filing_period; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.whales.last_filing_period IS 'DERIVED: newest 13F quarter held for this whale, as YYYY-Qn. NULL for congressional filers, whose snapshots key on a wall-clock month (YYYY-MM) and who never file a 13F. Compared against latest_filed_13f_quarter() to count MISSED QUARTERS.';
+
+
+--
+-- Name: COLUMN whales.last_activity_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.whales.last_activity_date IS 'DERIVED: MAX(whale_trade_groups.date) — the newest 13F filing date or congressional disclosure date. The one activity field whose meaning is consistent across both sources. Deliberately NOT last_hydrated_at: the congressional path re-stamps that every month at the snapshot period rollover even when zero trades were disclosed.';
 
 
 --
@@ -7823,7 +7944,11 @@ CREATE TABLE storage.buckets (
     file_size_limit bigint,
     allowed_mime_types text[],
     owner_id text,
-    type storage.buckettype DEFAULT 'STANDARD'::storage.buckettype NOT NULL
+    type storage.buckettype DEFAULT 'STANDARD'::storage.buckettype NOT NULL,
+    versioning_status text DEFAULT 'DISABLED'::text NOT NULL,
+    CONSTRAINT buckets_versioning_dark_check CHECK ((versioning_status = 'DISABLED'::text)),
+    CONSTRAINT buckets_versioning_standard_only_check CHECK (((type = 'STANDARD'::storage.buckettype) OR (versioning_status = 'DISABLED'::text))),
+    CONSTRAINT buckets_versioning_status_check CHECK ((versioning_status = ANY (ARRAY['DISABLED'::text, 'ENABLED'::text, 'SUSPENDED'::text])))
 );
 
 
@@ -7889,7 +8014,10 @@ CREATE TABLE storage.objects (
     path_tokens text[] GENERATED ALWAYS AS (string_to_array(name, '/'::text)) STORED,
     version text,
     owner_id text,
-    user_metadata jsonb
+    user_metadata jsonb,
+    archived_at timestamp with time zone,
+    is_delete_marker boolean DEFAULT false NOT NULL,
+    is_versioned boolean DEFAULT false NOT NULL
 );
 
 
@@ -11107,6 +11235,13 @@ CREATE INDEX idx_whales_category ON public.whales USING btree (category);
 
 
 --
+-- Name: idx_whales_last_activity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_whales_last_activity ON public.whales USING btree (last_activity_date NULLS FIRST);
+
+
+--
 -- Name: idx_whales_last_hydrated_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11125,6 +11260,20 @@ CREATE INDEX idx_whales_name ON public.whales USING btree (name);
 --
 
 CREATE UNIQUE INDEX uq_whale_trade_groups_whale_date ON public.whale_trade_groups USING btree (whale_id, date);
+
+
+--
+-- Name: uq_whale_trades_group_ticker_action_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_whale_trades_group_ticker_action_date ON public.whale_trades USING btree (trade_group_id, ticker, action, date);
+
+
+--
+-- Name: INDEX uq_whale_trades_group_ticker_action_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.uq_whale_trades_group_ticker_action_date IS 'Natural identity of a whale trade. Deliberately NOT partial: a partial unique index cannot be inferred by ON CONFLICT (cols), which is the only form PostgREST can emit.';
 
 
 --
@@ -11272,6 +11421,13 @@ CREATE TRIGGER trg_whale_follow_decrement AFTER DELETE ON public.whale_follows F
 --
 
 CREATE TRIGGER trg_whale_follow_increment AFTER INSERT ON public.whale_follows FOR EACH ROW EXECUTE FUNCTION public.update_whale_followers_count();
+
+
+--
+-- Name: whale_filing_snapshots trg_whale_snapshot_touch; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_whale_snapshot_touch BEFORE UPDATE ON public.whale_filing_snapshots FOR EACH ROW EXECUTE FUNCTION public.touch_whale_snapshot_processed_at();
 
 
 --
@@ -13966,5 +14122,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict ISKup6If2vrjUd4gShSTqbqNAtQcn7lEIh9ApyZbxhi6FQR7fUWegnkx1shOXbD
+\unrestrict R5Fn2WlXdjPwUkZ7WLl5CSvXGtfBicKDt9mETLyYKERcZQHOk1NSKQ5dLObyoeQ
 

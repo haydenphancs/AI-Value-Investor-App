@@ -288,6 +288,26 @@ _ACTIVITY_FEED_PAGE = 20
 _ROSTER_PAGE = 500
 _TRADE_COUNT_ROWS = 5000
 
+# ── Profile-cache schema floor ───────────────────────────────────────────────
+#
+# `whale_profile_cache` stores an ASSEMBLED `WhaleProfileResponse`, so a code change to
+# the assembly must invalidate it. That used to be done by DELETING EVERY ROW in the
+# `main.py` lifespan — which also fired on an OOM, a health-check flap or an instance
+# rotation, leaving all 56 whales Tier-2 cold for reasons that had nothing to do with a
+# deploy. The first visitor to each then paid a full rebuild.
+#
+# This is the app's own sanctioned idiom instead (see `project_report_caching_layers`):
+# a row is only fresh if it was written at or after the floor. Bump the floor when the
+# assembled shape changes; leave it alone for every other deploy.
+#
+# ⚠️ The literal must be <= the actual deploy wall-clock. A FUTURE-dated floor makes even
+# freshly-written rows fail freshness, turning the cache permanently cold — the exact
+# failure mode `CACHE_SCHEMA_FLOOR` documents for the report caches.
+#
+# 2026-08-20: activity disclosure added `activity_status` / `activity_label` /
+# `last_activity_date` / `lifecycle_note` to the profile shape.
+WHALE_PROFILE_SCHEMA_FLOOR = datetime(2026, 8, 20, 0, 0, tzinfo=timezone.utc)
+
 # How far a sector breakdown may sum from 100% before it is corrected. Wide enough to
 # absorb per-slice rounding to 1 dp across ~12 slices, narrow enough that a genuinely
 # wrong breakdown is caught.
@@ -756,6 +776,14 @@ class WhaleService:
                         raise ValueError(
                             f"unparseable cached_at {row.get('cached_at')!r}"
                         )
+                    if cached_at < WHALE_PROFILE_SCHEMA_FLOOR:
+                        # Written by an older profile shape — treat as a miss and rebuild
+                        # rather than replaying JSON the current model may not accept.
+                        logger.info(
+                            "Whale profile %s predates the schema floor — rebuilding",
+                            whale_id,
+                        )
+                        raise _SchemaFloorMiss
                     age_hours = (
                         datetime.now(timezone.utc) - cached_at
                     ).total_seconds() / 3600
@@ -772,6 +800,10 @@ class WhaleService:
                             "Whale profile cache expired for %s (%.1fh old)",
                             whale_id, age_hours,
                         )
+            except _SchemaFloorMiss:
+                # A normal, expected miss — not a read failure. Caught before the
+                # handler below so it does not log as one.
+                pass
             except Exception as e:
                 logger.warning(
                     "whale_profile_cache read failed for %s: %s", whale_id, e
@@ -900,6 +932,9 @@ class WhaleService:
 
         # Step 2: Route to data source → get snapshot
         snapshot: Optional[Dict[str, Any]] = None
+        # Did the routing actually run a sync that could have rewritten the `whales` row?
+        # Serving a stored snapshot does not, and that is the COMMON path (55 of 56).
+        _hydrated_before = whale.get("last_hydrated_at")
         try:
             snapshot = await self._get_or_process_latest(whale_id, whale)
         except Exception as e:
@@ -908,13 +943,23 @@ class WhaleService:
                 whale["name"], whale.get("data_source"), e,
             )
 
-        # Re-read whale record to pick up updates from _sync_to_whale_tables
-        try:
-            refreshed = sb.table("whales").select("*").eq("id", whale_id).execute()
-            if refreshed.data:
-                whale = refreshed.data[0]
-        except Exception:
-            pass
+        # Re-read the whale record ONLY when the routing above may have rewritten it.
+        #
+        # `_sync_to_whale_tables` updates `whales` (portfolio_value, the return columns,
+        # the activity signals), but it only runs when a snapshot was BUILT. When one was
+        # served from storage — the common path, 55 of 56 whales — nothing changed and
+        # this was a wasted blocking round-trip on every single cold profile build.
+        if not _hydrated_before or snapshot is None:
+            try:
+                refreshed = sb.table("whales").select("*").eq("id", whale_id).execute()
+                if refreshed.data:
+                    whale = refreshed.data[0]
+            except Exception as e:
+                logger.warning(
+                    "[whale_profile] Whale re-read failed for %s (%s: %s) — using the "
+                    "pre-sync row",
+                    whale_id, type(e).__name__, e,
+                )
 
         # Step 3: Fetch follow state
         is_following = False
@@ -2682,22 +2727,34 @@ class WhaleService:
                 fmp_profiles = await self.fmp.get_company_profiles_batch(
                     uncached_tickers[:30]
                 )
+                # ONE bulk upsert, not one per ticker. The postgrest client is
+                # SYNCHRONOUS, so each `.execute()` blocks the event loop — and this loop
+                # ran up to 30 of them back to back, ~30 x 150-250ms of serialized
+                # Railway->Supabase latency that also stalled every other in-flight
+                # request on the same loop.
+                now_iso = _now_iso()
+                rows = []
                 for p in fmp_profiles:
                     sym = (p.get("symbol") or "").upper()
-                    if sym:
-                        profile_map[sym] = p
-                        # Persist to cache for next time
-                        try:
-                            sb.table("company_profile_cache").upsert(
-                                {
-                                    "ticker": sym,
-                                    "profile_json": p,
-                                    "cached_at": datetime.now(timezone.utc).isoformat(),
-                                },
-                                on_conflict="ticker",
-                            ).execute()
-                        except Exception:
-                            pass
+                    if not sym:
+                        continue
+                    profile_map[sym] = p
+                    rows.append(
+                        {"ticker": sym, "profile_json": p, "cached_at": now_iso}
+                    )
+                if rows:
+                    # Best-effort: the cache write is an optimization, and failing it must
+                    # not lose the profiles we just fetched and already applied above.
+                    try:
+                        sb.table("company_profile_cache").upsert(
+                            rows, on_conflict="ticker"
+                        ).execute()
+                    except Exception as e:
+                        logger.warning(
+                            "company_profile_cache bulk upsert failed for %d ticker(s): "
+                            "%s: %s",
+                            len(rows), type(e).__name__, e,
+                        )
             except Exception as e:
                 logger.warning("FMP batch profiles failed: %s", e)
 
@@ -3265,15 +3322,24 @@ class WhaleService:
             sb.table("whale_holdings").delete().eq(
                 "whale_id", whale_id
             ).execute()
-            for h in holdings[:30]:
-                sb.table("whale_holdings").insert({
+            # ONE insert for all 30 rows. The DELETE-then-write shape is preserved
+            # deliberately: a partial failure must replay from the DELETE, never resume
+            # mid-loop, or it collides with `whale_holdings_whale_id_ticker_key`.
+            # Bulking makes that stronger, not weaker — the insert is now atomic, so
+            # there is no longer a partial state to resume into.
+            rows = [
+                {
                     "whale_id": whale_id,
                     "ticker": h["ticker"],
                     "company_name": h.get("company_name", h["ticker"]),
                     "logo_url": h.get("logo_url"),
                     "allocation": h.get("allocation", 0),
                     "change_percent": h.get("change_percent", 0),
-                }).execute()
+                }
+                for h in holdings[:30]
+            ]
+            if rows:
+                sb.table("whale_holdings").insert(rows).execute()
         except Exception as e:
             logger.error("[sync] holdings sync failed for %s: %s", whale_id, e)
 
@@ -3282,12 +3348,16 @@ class WhaleService:
             sb.table("whale_sector_allocations").delete().eq(
                 "whale_id", whale_id
             ).execute()
-            for s in sectors:
-                sb.table("whale_sector_allocations").insert({
+            rows = [
+                {
                     "whale_id": whale_id,
-                    "sector": s["name"],
-                    "allocation": s["allocation"],
-                }).execute()
+                    "sector": sec["name"],
+                    "allocation": sec["allocation"],
+                }
+                for sec in sectors
+            ]
+            if rows:
+                sb.table("whale_sector_allocations").insert(rows).execute()
         except Exception as e:
             logger.error("[sync] sector sync failed for %s: %s", whale_id, e)
 
@@ -3302,16 +3372,12 @@ class WhaleService:
             if not trade_group or not trade_group.get("date"):
                 continue
             try:
-                existing_tg = (
-                    sb.table("whale_trade_groups")
-                    .select("id")
-                    .eq("whale_id", whale_id)
-                    .eq("date", trade_group["date"])
-                    .execute()
-                )
-                if existing_tg.data:
-                    continue
-                tg_result = sb.table("whale_trade_groups").insert({
+                # UPSERT against `uq_whale_trade_groups_whale_date` (migration 077),
+                # matching `hydrate_whales._persist`. The old select-then-insert was
+                # check-then-act: a concurrent writer winning the race made this one
+                # `continue` AFTER its group row existed, stranding that filing's trades
+                # under nobody. It also cost an extra round-trip per group.
+                tg_result = sb.table("whale_trade_groups").upsert({
                     "whale_id": whale_id,
                     "date": trade_group["date"],
                     "trade_count": trade_group["trade_count"],
@@ -3319,13 +3385,35 @@ class WhaleService:
                     "net_amount": trade_group["net_amount"],
                     "summary": trade_group.get("summary"),
                     "insights": trade_group.get("insights", []),
-                }).execute()
+                }, on_conflict="whale_id,date").execute()
 
-                if not tg_result.data:
-                    continue
-                tg_id = tg_result.data[0]["id"]
-                for trade in trade_group.get("trades", [])[:50]:
-                    sb.table("whale_trades").insert({
+                if tg_result.data:
+                    tg_id = tg_result.data[0]["id"]
+                else:
+                    # Some PostgREST configs return no representation for an upsert that
+                    # changed nothing. Read the id back rather than `continue`-ing —
+                    # that is exactly how trades used to be stranded.
+                    lookup = (
+                        sb.table("whale_trade_groups")
+                        .select("id")
+                        .eq("whale_id", whale_id)
+                        .eq("date", trade_group["date"])
+                        .limit(1)
+                        .execute()
+                    )
+                    if not lookup.data:
+                        logger.warning(
+                            "[sync] Trade group upsert returned no id for whale=%s "
+                            "date=%s — skipping its trades this run",
+                            whale_id, trade_group["date"],
+                        )
+                        continue
+                    tg_id = lookup.data[0]["id"]
+                # ONE write for up to 50 trades. This loop was the single largest
+                # contributor to a cold build: 50 sequential blocking round-trips PER
+                # trade group, each one also stalling the shared event loop.
+                trade_rows = [
+                    {
                         "whale_id": whale_id,
                         "trade_group_id": tg_id,
                         "ticker": trade["ticker"],
@@ -3345,7 +3433,11 @@ class WhaleService:
                         ),
                         "new_allocation": trade.get("new_allocation"),
                         "date": trade.get("date", ""),
-                    }).execute()
+                    }
+                    for trade in trade_group.get("trades", [])[:50]
+                ]
+                if trade_rows:
+                    _bulk_write_trades(sb, trade_rows)
             except Exception as tg_err:
                 logger.warning(
                     "whale_trade_group sync skipped (likely concurrent "
@@ -3478,6 +3570,90 @@ def _normalize_sector_exposure(
             )
         )
     return out
+
+
+def _bulk_write_trades(sb, rows: List[Dict[str, Any]]) -> None:
+    """Write trades in ONE statement, repairing rather than duplicating on a replay.
+
+    Upserts against `uq_whale_trades_group_ticker_action_date` (migration 143) so a
+    partial replay tops the group up instead of duplicating it. If that index is not
+    present yet PostgREST answers 42P10, and we fall back to a plain bulk insert — the
+    same tolerance `hydrate_whales._upsert_trade` carries, so the two writers behave
+    identically and deploy order does not matter.
+    """
+    try:
+        sb.table("whale_trades").upsert(
+            rows, on_conflict="trade_group_id,ticker,action,date"
+        ).execute()
+    except Exception as e:
+        msg = str(e).lower()
+        if "42p10" in msg or "no unique or exclusion constraint" in msg:
+            logger.warning(
+                "whale_trades upsert unsupported (migration 143 not applied) — "
+                "falling back to a bulk insert for %d trade(s)",
+                len(rows),
+            )
+            sb.table("whale_trades").insert(rows).execute()
+        else:
+            raise
+
+
+# Distinct-whale concurrency cap. `_whale_profile_inflight` collapses concurrent
+# requests for the SAME whale, but nothing bounds DIFFERENT whales — and after a restart
+# all 56 are cold at once. Because the postgrest client is SYNCHRONOUS, each build's
+# `.execute()` calls block the shared event loop, so unbounded parallel builds serialize
+# anyway AND stall every other request behind them. Mirrors
+# `ticker_data_cache._WARM_SEMAPHORE`; lazily built so it binds to the running loop.
+_WHALE_WARM_SEMAPHORE: Optional["asyncio.Semaphore"] = None
+
+
+def _get_whale_warm_semaphore() -> "asyncio.Semaphore":
+    global _WHALE_WARM_SEMAPHORE
+    if _WHALE_WARM_SEMAPHORE is None:
+        from app.config import settings
+        _WHALE_WARM_SEMAPHORE = asyncio.Semaphore(
+            max(1, getattr(settings, "WHALE_PREWARM_CONCURRENCY", 3))
+        )
+    return _WHALE_WARM_SEMAPHORE
+
+
+async def warm_whale_profile(whale_id: str) -> None:
+    """Best-effort warm of `whale_profile_cache` for one whale. NEVER raises.
+
+    Modelled on `ticker_data_cache.warm_ticker_collection`, and deliberately keeps its
+    three load-bearing properties:
+
+      1. **Freshness pre-check BEFORE taking a slot**, so steady state costs nothing.
+      2. **Bounded across distinct whales** by `_WHALE_WARM_SEMAPHORE`.
+      3. **Never raises** — a failed warm just means the next real request rebuilds.
+         A lifespan task that dies takes the warmer with it for the process lifetime.
+
+    Built with `user_id=None` so the cached artifact is follow-state-free, exactly as the
+    request path caches it; each caller overlays its own follow state on read.
+    """
+    try:
+        if not whale_id:
+            return
+        mem_key = f"profile:{whale_id}"
+        if _cache_get(_whale_profile_cache, mem_key, WHALE_PROFILE_CACHE_TTL) is not None:
+            return
+
+        async with _get_whale_warm_semaphore():
+            svc = WhaleService()
+            # The ungated builder: the tier gate is applied per-request on read, so the
+            # cached artifact must stay UNREDACTED or a warm performed "as Free" would
+            # poison the cache for paying users.
+            await svc._get_whale_profile_ungated(whale_id=whale_id, user_id=None)
+        logger.info("whale_profile_cache WARMED for %s", whale_id)
+    except Exception as e:
+        logger.warning(
+            "whale profile warm failed for %s: %s: %s — will build on demand",
+            whale_id, type(e).__name__, e,
+        )
+
+
+class _SchemaFloorMiss(Exception):
+    """Internal sentinel: the cached row predates `WHALE_PROFILE_SCHEMA_FLOOR`."""
 
 
 def _now_iso() -> str:

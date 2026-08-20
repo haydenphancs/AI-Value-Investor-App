@@ -285,6 +285,11 @@ _ACTIVITY_FEED_PAGE = 20
 _ROSTER_PAGE = 500
 _TRADE_COUNT_ROWS = 5000
 
+# How far a sector breakdown may sum from 100% before it is corrected. Wide enough to
+# absorb per-slice rounding to 1 dp across ~12 slices, narrow enough that a genuinely
+# wrong breakdown is caught.
+_SECTOR_SUM_TOLERANCE = 1.5
+
 # Fixed namespace for `_snapshot_group_id`. Must never change: it is what makes a
 # snapshot-derived group keep one identity across requests and processes.
 _SNAPSHOT_GROUP_NS = uuid.UUID("6f9d1c2a-4b7e-5d38-9a10-c7f2e5b41d90")
@@ -945,15 +950,7 @@ class WhaleService:
                             or SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
                         )
                     )
-            if other_pct > 0:
-                sectors.append(
-                    WhaleSectorAllocationResponse(
-                        id=str(uuid.uuid4()),
-                        name="Other",
-                        percentage=round(other_pct, 1),
-                        color_hex=SECTOR_COLORS.get("Other", DEFAULT_SECTOR_COLOR),
-                    )
-                )
+            sectors = _normalize_sector_exposure(sectors, other_pct)
 
         # Holdings
         holdings: List[WhaleHoldingResponse] = []
@@ -3370,6 +3367,61 @@ def _snapshot_group_id(whale_id: str, filing_date: Any) -> str:
     `Identifiable` list on every profile refresh.
     """
     return str(uuid.uuid5(_SNAPSHOT_GROUP_NS, f"{whale_id}:{filing_date or ''}"))
+
+
+def _normalize_sector_exposure(
+    sectors: List[WhaleSectorAllocationResponse], other_pct: float
+) -> List[WhaleSectorAllocationResponse]:
+    """Make the sector donut sum to 100% — honestly, in whichever direction it is off.
+
+    ⚠️ These percentages were previously passed through untouched, and 20 of the 54
+    whales in production rendered a pie chart that did not sum to 100: from 47.7%
+    (Ray Dalio) to 123.4%. Seth Klarman's read 115.4%. A donut whose slices exceed the
+    circle is not a rounding artefact, it is a wrong statement about a portfolio.
+
+    Two DIFFERENT causes, so two different corrections:
+
+    * **Over 100%** — the upstream industry weights are over-counted (a filer's holdings
+      can be attributed to more than one industry line). Relative shape is still
+      meaningful, so scale proportionally. Scaling is the only correction that does not
+      invent or destroy a preference between sectors.
+
+    * **Under 100%** — the breakdown genuinely does not cover the whole book: it is
+      capped at 11 named sectors and any position FMP could not classify simply is not
+      there. The remainder is REAL and unclassified, so it goes into "Other". Scaling up
+      to 100 here would be a lie — it would claim coverage that was never reported.
+
+    `other_pct` arrives separately because the caller has already rolled sub-0.5% slices
+    and any explicit "Other" row into it.
+    """
+    named_total = sum(s.percentage for s in sectors)
+    total = named_total + max(0.0, other_pct)
+    if total <= 0:
+        return []
+
+    out = list(sectors)
+    if total > 100.0 + _SECTOR_SUM_TOLERANCE:
+        # Over-counted: scale everything, "Other" included, back onto the circle.
+        scale = 100.0 / total
+        out = [
+            s.model_copy(update={"percentage": round(s.percentage * scale, 1)})
+            for s in out
+        ]
+        other_pct = other_pct * scale
+    elif total < 100.0 - _SECTOR_SUM_TOLERANCE:
+        # Under-reported: the shortfall is unclassified book, not empty space.
+        other_pct += 100.0 - total
+
+    if other_pct > 0:
+        out.append(
+            WhaleSectorAllocationResponse(
+                id=str(uuid.uuid4()),
+                name="Other",
+                percentage=round(other_pct, 1),
+                color_hex=SECTOR_COLORS.get("Other", DEFAULT_SECTOR_COLOR),
+            )
+        )
+    return out
 
 
 def _now_iso() -> str:

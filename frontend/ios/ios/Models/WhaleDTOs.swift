@@ -195,6 +195,9 @@ struct WhaleProfileDTO: Codable {
             // stat tiles need it: for the five whales with an associated
             // ticker it is the only signal that the percent is a share-price
             // CAGR rather than a 13F figure.
+            // Raw string kept alongside the parsed enum so the badge can hide when the
+            // backend has no classification (see WhaleProfile.hasRiskProfile).
+            riskProfileRaw: riskProfile,
             returnSource: returnSource ?? "",
             returnStatus: returnStatus ?? "",
             returnWindowYears: returnWindowYears,

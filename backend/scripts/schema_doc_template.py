@@ -62,12 +62,6 @@ header.top{
 /* ---------- layout ---------- */
 .wrap{display:grid;grid-template-columns:224px minmax(0,1fr) 402px;gap:0 26px;
   padding:22px clamp(16px,3vw,34px) 60px; align-items:start; max-width:1780px;margin:0 auto}
-@media (max-width:1180px){
-  .wrap{grid-template-columns:1fr}
-  nav.side{position:static;border-right:none;border-bottom:1px solid var(--line);
-    max-height:none;padding-bottom:16px;margin-bottom:14px}
-  .detail-col{position:static !important;order:-1;margin-bottom:18px}
-}
 
 /* ---------- side nav ---------- */
 nav.side{position:sticky;top:82px;align-self:start;padding:4px 10px 40px;
@@ -200,6 +194,36 @@ footer.foot{max-width:1780px;margin:0 auto;padding:18px clamp(16px,3vw,34px) 40p
   color:var(--faint);font-size:11.8px;border-top:1px solid var(--line);
   display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between}
 .hidden{display:none !important}
+
+/* A sticky panel with a transparent background lets whatever scrolls behind it
+   bleed through. Give the nav an opaque ground of its own. */
+nav.side{background:var(--bg)}
+
+/* ---------- responsive — MUST STAY LAST ----------
+   These override `position:sticky` on nav.side / .detail-col, and those base
+   rules are declared further up this sheet. At equal specificity the LATER
+   rule wins, so a media block placed above them is silently inert.
+   That exact bug shipped once: below 1180px the layout collapsed to one
+   column but the nav kept sticking, and the full-width bands scrolled
+   straight underneath it. Guarded by
+   test_responsive_media_block_comes_after_the_sticky_base_rules. */
+@media (max-width:1180px){
+  .wrap{grid-template-columns:1fr}
+  .detail-col{position:static;order:-1;margin-bottom:18px}
+  .detail{max-height:none}
+  /* A 16-row vertical list costs a whole screen before you reach the first
+     band. Collapsed, the nav becomes a wrapping row of chips instead. */
+  nav.side{position:static;border-right:none;border-bottom:1px solid var(--line);
+    max-height:none;overflow:visible;padding:0 0 14px;margin-bottom:14px;
+    display:flex;flex-wrap:wrap;align-items:center;gap:0 10px}
+  nav.side > .navgroup{width:100%;margin:0 0 6px}
+  nav.side > .seg{width:min(320px,100%);margin:0 0 10px}
+  nav.side > div[id="nav"]{display:flex;flex-wrap:wrap;gap:6px;width:100%}
+  nav.side div[id="nav"] .navgroup{width:100%;margin:0 0 2px}
+  nav.side .navitem{width:auto;margin:0;border-color:var(--border);border-radius:999px;
+    padding:5px 11px;background:#fff}
+  nav.side .navitem .nl{overflow:visible;text-overflow:clip}
+}
 """
 
 BODY = r"""

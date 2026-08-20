@@ -33,6 +33,7 @@ if str(SCRIPTS) not in sys.path:
 
 import schema_doc_data as data  # noqa: E402
 import schema_doc_svg as svgmod  # noqa: E402
+import schema_doc_template as tpl  # noqa: E402
 from schema_parser import parse_dump  # noqa: E402
 
 HEADER = """--
@@ -553,6 +554,78 @@ def test_special_characters_are_escaped_into_the_svg():
                       ("child<>", "child&lt;&gt;")):
         assert raw not in svg, raw
         assert safe in svg, safe
+
+
+# ---------------------------------------------------------------------------
+# Stylesheet ordering — a CSS bug that a DOM test cannot see
+# ---------------------------------------------------------------------------
+
+
+def _css_block_at(css: str, start: int) -> str:
+    """The declaration block of the rule beginning at `start`."""
+    return css[start : css.index("}", start)]
+
+
+def test_responsive_media_block_comes_after_the_sticky_base_rules():
+    """REGRESSION. `nav.side` and `.detail-col` are `position:sticky` in the
+    desktop layout, and the <=1180px block resets them to `static`. Both
+    selectors have identical specificity, so the LATER rule wins — which means
+    a media block placed above the base rules is silently inert.
+
+    It shipped that way once: below 1180px the grid collapsed to one column but
+    the nav kept sticking, and since it had no background of its own the
+    full-width bands scrolled straight underneath it and the page turned to
+    soup. Nothing in the markup or the JS was wrong, so only a check on rule
+    ORDER can catch it."""
+    css = tpl.CSS
+    media_at = css.index("@media (max-width:1180px)")
+
+    for sel in ("nav.side{", ".detail-col{"):
+        i = 0
+        while True:
+            i = css.find(sel, i)
+            if i == -1:
+                break
+            if "position:sticky" in _css_block_at(css, i):
+                assert i < media_at, (
+                    f"`{sel}` sets position:sticky at offset {i}, AFTER the responsive "
+                    f"block at {media_at}. The media override is now dead — move the "
+                    f"@media block back to the end of the stylesheet."
+                )
+            i += 1
+
+    media_block = css[media_at : css.index("\n}", media_at)]
+    for sel in ("nav.side", ".detail-col"):
+        assert f"{sel}{{position:static" in media_block.replace("\n    ", "").replace(
+            "\n  ", ""
+        ) or f"{sel}{{position:static" in media_block, (
+            f"the responsive block no longer resets {sel} off sticky"
+        )
+
+
+def test_sticky_nav_has_an_opaque_background():
+    """A `position:sticky` panel with a transparent background lets whatever
+    scrolls behind it show through. The nav pins under the header on desktop,
+    so it needs a ground of its own."""
+    css = tpl.CSS
+    i = 0
+    found = False
+    while True:
+        i = css.find("nav.side{", i)
+        if i == -1:
+            break
+        if "background:" in _css_block_at(css, i):
+            found = True
+            break
+        i += 1
+    assert found, "nav.side never declares a background; a sticky panel must not be transparent"
+
+
+def test_generated_page_carries_the_responsive_rules():
+    """Cheap end-to-end: whatever tpl.CSS says must reach the page."""
+    html = tpl.page(tpl.CSS, tpl.BODY, "", "{}", "t", "m")
+    assert "@media (max-width:1180px)" in html
+    assert html.index("nav.side{position:sticky") < html.index("@media (max-width:1180px)")
 
 
 # ---------------------------------------------------------------------------

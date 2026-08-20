@@ -1809,9 +1809,29 @@ class WhaleHydrator:
         """
         if not trades:
             return
-        rows = [
-            WhaleHydrator._trade_row(whale_id, tg_id, t) for t in trades
-        ]
+        # ⚠️ DEDUPE ON THE CONFLICT KEY BEFORE THE BULK UPSERT.
+        #
+        # Postgres refuses a multi-row `ON CONFLICT DO UPDATE` whose payload touches the
+        # same row twice: SQLSTATE 21000, "ON CONFLICT DO UPDATE command cannot affect
+        # row a second time". That message contains neither "42p10" nor "no unique or
+        # exclusion constraint", so it would fall through the fallback below and raise —
+        # and the caller has ALREADY committed the `whale_trade_groups` row advertising
+        # `trade_count = N`. The filing card would claim N trades with zero rows behind
+        # it, and the 5b `raw_hash` reset guarantees the next run fails identically.
+        #
+        # One congressional filing routinely discloses the same symbol/direction/
+        # transaction-date more than once — spouse + self, two amount buckets, or an FMP
+        # page overlap. Measured against live FMP: ~16-45% of filings, including
+        # Josh Gottheimer (GOOGL x3 on 2026-08-11) and Ro Khanna.
+        #
+        # LAST-WINS, which is exactly what the per-row upsert this replaced produced:
+        # the second row simply took the DO UPDATE branch and overwrote the first. So
+        # this restores the previous behaviour rather than inventing a new one.
+        deduped: Dict[tuple, Dict[str, Any]] = {}
+        for t in trades:
+            row = WhaleHydrator._trade_row(whale_id, tg_id, t)
+            deduped[(row["ticker"], row["action"], row["date"])] = row
+        rows = list(deduped.values())
         try:
             sb.table("whale_trades").upsert(
                 rows, on_conflict="trade_group_id,ticker,action,date"

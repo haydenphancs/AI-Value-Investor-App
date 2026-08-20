@@ -962,6 +962,11 @@ async def _run_industry_dossier_job():
             )
 
 
+# Set once the hydration job's first politician sweep completes. The pre-warmer waits on
+# it so the two lifespan tasks are ordered explicitly rather than by hopeful sleeps.
+_politician_sweep_done = asyncio.Event()
+
+
 async def _run_whale_profile_pre_warmer():
     """Rebuild `whale_profile_cache` for every whale, once, shortly after boot.
 
@@ -981,9 +986,25 @@ async def _run_whale_profile_pre_warmer():
         logger.info("Whale profile pre-warm disabled by config")
         return
 
-    # After the hydration job's own 120s settle, so a whale being rewritten underneath us
-    # is warmed from its NEW snapshot rather than immediately invalidated.
-    await asyncio.sleep(180)
+    # Wait for the hydration job's first politician sweep to FINISH, so a whale being
+    # rewritten underneath us is warmed from its NEW snapshot rather than immediately
+    # invalidated (the sweep deletes each whale's whale_profile_cache row as it goes).
+    #
+    # ⚠️ An event, not a magic sleep. The previous `sleep(180)` claimed that guarantee and
+    # did not provide it: the sweep STARTS at t=120s and has no bounded duration, so the
+    # pre-warmer woke 60s INTO it and any whale swept after t=180 had its just-written
+    # warm thrown away.
+    #
+    # The timeout is load-bearing: a hung or failed sweep must never disable warming for
+    # the process lifetime, so we fall through and warm anyway.
+    try:
+        await asyncio.wait_for(_politician_sweep_done.wait(), timeout=600)
+        logger.info("Whale profile pre-warm: politician sweep finished, warming now")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Whale profile pre-warm: politician sweep did not finish within 600s — "
+            "warming anyway; whales it rewrites afterwards will simply be rebuilt on view"
+        )
 
     try:
         from app.database import get_supabase
@@ -998,15 +1019,29 @@ async def _run_whale_profile_pre_warmer():
             return
 
         started = time.monotonic()
-        # `warm_whale_profile` never raises and takes the semaphore itself, so a plain
-        # gather is safe and the cap is honoured regardless of how many are queued.
-        await asyncio.gather(
-            *(warm_whale_profile(str(r["id"])) for r in rows),
-            return_exceptions=True,
-        )
+        # ⚠️ SEQUENTIAL, with a real yield between whales. NOT asyncio.gather.
+        #
+        # The snapshot-served build path contains no genuine suspension point: its only
+        # `await` is on a coroutine that never yields, and every Supabase call underneath
+        # is SYNCHRONOUS. So a semaphore around it is inert — it is acquired and released
+        # inside one task step and never awaits. Measured with a heartbeat task, a
+        # gather over 56 whales produced an 18.2s CONTIGUOUS event-loop stall, and the
+        # figure was byte-for-byte identical at concurrency 1, 3 and 56.
+        #
+        # An 18s stall 180 seconds after every deploy is worse than the cold builds this
+        # pre-warm exists to remove. Running them one at a time with an explicit
+        # `sleep(0)` between bounds the stall to a SINGLE build (~0.3s) and lets any
+        # queued user request through in between. Total wall time is longer; nobody is
+        # waiting on it.
+        warmed = 0
+        for r in rows:
+            await warm_whale_profile(str(r["id"]))
+            warmed += 1
+            # A real yield: hands control back so pending I/O is polled between builds.
+            await asyncio.sleep(0)
         logger.info(
-            "Whale profile pre-warm complete: %d whale(s) in %.1fs",
-            len(rows), time.monotonic() - started,
+            "Whale profile pre-warm complete: %d/%d whale(s) in %.1fs",
+            warmed, len(rows), time.monotonic() - started,
         )
     except Exception as e:
         logger.error(
@@ -1037,7 +1072,7 @@ async def _run_whale_hydration_job():
     4. ``await fmp.close()`` sat on the happy path only, so any exception before it
        leaked an ``FMPClient`` — and a fresh one was constructed every hour.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     await asyncio.sleep(120)  # let app fully start
 
@@ -1051,6 +1086,21 @@ async def _run_whale_hydration_job():
     # on every restart. A deploy before 02:00 leaves this None and still runs today.
     _boot = datetime.now(timezone.utc)
     last_full_run_date = _boot.date() if _boot.hour >= 2 else None
+    if last_full_run_date is not None:
+        # SAY SO. This seed INFERS from the clock that today's run already happened, and
+        # it is sometimes wrong: a redeploy or OOM at 02:07 mid-run boots a process that
+        # skips the rest of the day, leaving the un-swept whales on yesterday's data with
+        # no way for a consumer to compensate (`_get_or_process_latest` prefers the
+        # stored snapshot whenever `last_hydrated_at` is set and never rebuilds on age).
+        # It self-heals the next day, so the fix is visibility, not a durable marker —
+        # an undiagnosable silent skip is the part that is unacceptable.
+        logger.info(
+            "Whale full hydration: boot at %s UTC is past 02:00 — assuming today's (%s) "
+            "run already happened. Next full run %s. If this boot was a mid-run restart, "
+            "today's remaining whales keep yesterday's data.",
+            _boot.isoformat(timespec="seconds"), _boot.date(),
+            _boot.date() + timedelta(days=1),
+        )
 
     async def _with_hydrator(run):
         """Build the clients, hand them to `run`, and ALWAYS close the FMP client."""
@@ -1114,6 +1164,11 @@ async def _run_whale_hydration_job():
                 # Still stamp it: a hard failure must not turn into a retry every
                 # hour against an upstream that is already unhappy.
                 last_politician_run = current_time
+            finally:
+                # Release the pre-warmer whether the sweep succeeded or not — it is an
+                # ORDERING signal, not a success signal. Gating it on success would let
+                # one bad sweep suppress warming for the whole process lifetime.
+                _politician_sweep_done.set()
 
         # ── Full hydration: daily at 02:00 UTC ──────────────────────────
         # Clock re-read HERE, after the sweep above, and guarded by the DATE it last

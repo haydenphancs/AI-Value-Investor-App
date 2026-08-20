@@ -833,7 +833,14 @@ class WhaleService:
             # Build follow-state-free (user_id=None); each caller overlays its
             # own follow state below, so the shared result is user-agnostic.
             profile_no_follow = await self._build_whale_profile(whale_id, None)
-            if profile_no_follow is not None:
+            # Never cache a DEGRADED build. `_build_whale_profile` returns a valid,
+            # fully-shaped object even when the snapshot read failed — the sections are
+            # simply empty — so "not None" is not evidence that it has data. Caching one
+            # pins an empty book for 24 hours; measured, it survives a restart and is
+            # served verbatim with no rebuild attempted. Serve it to THIS caller (better
+            # than an error), but let the next request try again.
+            _degraded = getattr(self, "_last_build_degraded", False)
+            if profile_no_follow is not None and not _degraded:
                 _cache_set(_whale_profile_cache, mem_key, profile_no_follow)
                 try:
                     sb.table("whale_profile_cache").upsert(
@@ -934,22 +941,37 @@ class WhaleService:
         snapshot: Optional[Dict[str, Any]] = None
         # Did the routing actually run a sync that could have rewritten the `whales` row?
         # Serving a stored snapshot does not, and that is the COMMON path (55 of 56).
+        # Used ONLY for the degraded-build test below: a whale the nightly job has
+        # hydrated is KNOWN to have a snapshot, so failing to read one means we lost it,
+        # not that the filer has no data. It is deliberately NOT used to decide whether
+        # to re-read the whales row — see `served_from_storage` for that.
         _hydrated_before = whale.get("last_hydrated_at")
+        # Tracks whether this build was backed by real data. A whale that HAS been
+        # hydrated but whose snapshot could not be read is DEGRADED — see the guard on
+        # the cache write in `_get_whale_profile_ungated`.
+        self._last_build_degraded = False
+        served_from_storage = False
         try:
-            snapshot = await self._get_or_process_latest(whale_id, whale)
+            snapshot, served_from_storage = await self._get_or_process_latest(
+                whale_id, whale
+            )
         except Exception as e:
             logger.error(
                 "[whale_profile] All data sources failed for %s (%s): %s",
                 whale["name"], whale.get("data_source"), e,
             )
 
-        # Re-read the whale record ONLY when the routing above may have rewritten it.
+        # Re-read the whale record ONLY when a BUILD ran, because only a build calls
+        # `_sync_to_whale_tables` (which rewrites portfolio_value, the return columns and
+        # the activity signals).
         #
-        # `_sync_to_whale_tables` updates `whales` (portfolio_value, the return columns,
-        # the activity signals), but it only runs when a snapshot was BUILT. When one was
-        # served from storage — the common path, 55 of 56 whales — nothing changed and
-        # this was a wasted blocking round-trip on every single cold profile build.
-        if not _hydrated_before or snapshot is None:
+        # ⚠️ Keyed on `served_from_storage`, NOT on `last_hydrated_at`. That column is
+        # written only by the nightly job, so it answers "has hydration ever run", not
+        # "did a sync just run" — and it was wrong for exactly the case this guard exists
+        # for: a hydrated whale whose snapshot read fails, rebuilds, syncs, and then had
+        # its fresh values discarded. Reachable today via `?force_refresh=true`, which
+        # deletes the snapshot rows first.
+        if not served_from_storage:
             try:
                 refreshed = sb.table("whales").select("*").eq("id", whale_id).execute()
                 if refreshed.data:
@@ -1072,6 +1094,23 @@ class WhaleService:
             logger.warning(
                 "[whale_profile] DB trade groups failed for %s: %s",
                 whale_id, e,
+            )
+
+        # ⚠️ A whale with `last_hydrated_at` set is KNOWN to have a snapshot. Reaching
+        # here with `snapshot is None` therefore means we failed to read it — an FMP 429,
+        # a Supabase blip — not that the filer has no data. The profile below is still
+        # assembled and still VALID (empty holdings/sectors/trades), which is exactly why
+        # it must never be cached: it would pin an empty book for 24h and, as measured,
+        # does not self-heal across a restart.
+        #
+        # A whale that was never hydrated (Mark Kelly) is NOT degraded — an empty profile
+        # is the truth for him, and caching it is correct.
+        if snapshot is None and _hydrated_before:
+            self._last_build_degraded = True
+            logger.warning(
+                "[whale_profile] DEGRADED build for %s (%s): hydrated at %s but no "
+                "snapshot could be read — serving empty sections and NOT caching",
+                whale.get("name"), whale_id, _hydrated_before,
             )
 
         # Combined timeline, most-recent filing first.
@@ -1685,31 +1724,49 @@ class WhaleService:
 
     async def _get_or_process_latest(
         self, whale_id: str, whale: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
         """Route to correct FMP source based on data_source column.
 
         Prefers pre-hydrated snapshots when available (set by
         scripts/hydrate_whales.py). Falls through to live FMP
         processing only if no snapshot exists.
+
+        Returns ``(snapshot, served_from_storage)``. The flag is what tells the caller
+        whether a BUILD ran — and therefore whether `_sync_to_whale_tables` may have
+        rewritten the `whales` row underneath it.
+
+        ⚠️ The caller cannot infer this from `last_hydrated_at`: that column is written
+        ONLY by `scripts/hydrate_whales.py`, never by `_sync_to_whale_tables`, so it
+        answers "has the nightly job ever run for this whale", not "did a sync just run".
+        Nor can it infer it from `snapshot is not None`, which is true on the
+        served-from-storage path too and would re-instate the round-trip on the common
+        55-of-56 route.
         """
         # Prefer pre-hydrated snapshot if the hydration engine has run
         if whale.get("last_hydrated_at"):
             snapshot = await self._read_from_supabase(whale_id)
             if snapshot:
-                return snapshot
+                return snapshot, True
 
         data_source = whale.get("data_source", "manual")
 
         try:
             if data_source == "13f":
-                return await self._process_13f_path(whale_id, whale["cik"], whale=whale)
+                return (
+                    await self._process_13f_path(whale_id, whale["cik"], whale=whale),
+                    False,
+                )
             elif data_source in ("congressional_house", "congressional_senate"):
                 chamber = "house" if "house" in data_source else "senate"
-                return await self._process_congressional_path(
-                    whale_id, whale["fmp_name"], chamber
+                return (
+                    await self._process_congressional_path(
+                        whale_id, whale["fmp_name"], chamber
+                    ),
+                    False,
                 )
             else:
-                return await self._read_from_supabase(whale_id)
+                # No build ran — this is a plain storage read.
+                return await self._read_from_supabase(whale_id), True
         except Exception as e:
             logger.error(
                 "Failed to process whale %s (source=%s): %s",
@@ -1718,14 +1775,16 @@ class WhaleService:
                 e,
             )
             try:
-                return await self._read_from_supabase(whale_id)
+                # A build was ATTEMPTED and may have partially synced before failing, so
+                # this is not "served from storage" for the caller's purposes.
+                return await self._read_from_supabase(whale_id), False
             except Exception as fallback_err:
                 logger.error(
                     "Supabase fallback also failed for whale %s: %s",
                     whale_id,
                     fallback_err,
                 )
-                return None
+                return None, False
 
     # ── 13F Processing Path ──────────────────────────────────────────
 
@@ -3578,9 +3637,30 @@ def _bulk_write_trades(sb, rows: List[Dict[str, Any]]) -> None:
     Upserts against `uq_whale_trades_group_ticker_action_date` (migration 143) so a
     partial replay tops the group up instead of duplicating it. If that index is not
     present yet PostgREST answers 42P10, and we fall back to a plain bulk insert — the
-    same tolerance `hydrate_whales._upsert_trade` carries, so the two writers behave
+    same tolerance `hydrate_whales._upsert_trades` carries, so the two writers behave
     identically and deploy order does not matter.
     """
+    if not rows:
+        return
+    # ⚠️ DEDUPE ON THE CONFLICT KEY FIRST — see the long note in
+    # `hydrate_whales._upsert_trades`.
+    #
+    # Postgres refuses a multi-row `ON CONFLICT DO UPDATE` whose payload touches the same
+    # row twice (SQLSTATE 21000). A single congressional filing routinely discloses the
+    # same symbol/direction/transaction-date more than once — spouse + self, two amount
+    # buckets, or an FMP page overlap; measured at 16-45% of live filings.
+    #
+    # This is the LIVE profile-build path, and the fallback below is a BULK insert that
+    # cannot degrade per-row, so without this a duplicate strands a whole filing's trades
+    # while its group row still advertises `trade_count = N`.
+    #
+    # Last-wins, exactly what the per-row upsert this replaced produced.
+    deduped: Dict[tuple, Dict[str, Any]] = {}
+    for r in rows:
+        deduped[
+            (r.get("trade_group_id"), r.get("ticker"), r.get("action"), r.get("date"))
+        ] = r
+    rows = list(deduped.values())
     try:
         sb.table("whale_trades").upsert(
             rows, on_conflict="trade_group_id,ticker,action,date"
@@ -3600,12 +3680,20 @@ def _bulk_write_trades(sb, rows: List[Dict[str, Any]]) -> None:
             raise
 
 
-# Distinct-whale concurrency cap. `_whale_profile_inflight` collapses concurrent
-# requests for the SAME whale, but nothing bounds DIFFERENT whales — and after a restart
-# all 56 are cold at once. Because the postgrest client is SYNCHRONOUS, each build's
-# `.execute()` calls block the shared event loop, so unbounded parallel builds serialize
-# anyway AND stall every other request behind them. Mirrors
-# `ticker_data_cache._WARM_SEMAPHORE`; lazily built so it binds to the running loop.
+# Distinct-whale concurrency cap.
+#
+# ⚠️ MEASURED TO BE INERT FOR LOOP-BLOCKING, and kept only as a guard against a future
+# caller that DOES await inside the critical section. The snapshot-served build path has
+# no genuine suspension point — its only `await` is on a coroutine that never yields, and
+# every Supabase call under it is synchronous — so this semaphore is acquired and
+# released within a single task step and never suspends. A heartbeat measurement showed
+# an identical 18.2s contiguous stall at concurrency 1, 3 and 56.
+#
+# What actually bounds the stall is the pre-warmer running whales SEQUENTIALLY with an
+# explicit `await asyncio.sleep(0)` between them (see `_run_whale_profile_pre_warmer`).
+# Do not "simplify" that back into an asyncio.gather.
+#
+# Mirrors `ticker_data_cache._WARM_SEMAPHORE`; lazily built so it binds to the running loop.
 _WHALE_WARM_SEMAPHORE: Optional["asyncio.Semaphore"] = None
 
 

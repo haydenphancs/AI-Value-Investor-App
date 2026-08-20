@@ -281,7 +281,7 @@ struct TrackingContentViewWithBinding: View {
         // trigger of any kind: it reads `isActiveTab` nowhere, and AppState's session-end
         // teardown does not reach into ViewModels. Signing in or out left the previous
         // identity's holdings on screen until the user happened to pull-to-refresh.
-        .reloadOnIdentityChange { await viewModel.reloadForIdentityChange() }
+        .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
         // The first-visit load, which used to happen in `TrackingViewModel.init` — i.e. at
         // app launch, for every user, whether or not they ever opened this tab, and while
         // auth was still restoring. Same `.task(id: isActiveTab)` idiom as HomeDashboardView,
@@ -419,6 +419,40 @@ struct WhalesTabContent: View {
                     )
                 }
 
+                // A roster load that failed outright. Rendered ABOVE Most Popular so it
+                // is visible without scrolling, and only when there is genuinely nothing
+                // to show — a stale-but-populated roster is better than an error banner
+                // over real content.
+                if let message = viewModel.whalesErrorMessage,
+                   viewModel.allPopularWhales.isEmpty {
+                    VStack(spacing: AppSpacing.md) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(AppTypography.iconJumbo)
+                            .foregroundColor(AppColors.alertOrange)
+
+                        Text(message)
+                            .font(AppTypography.body)
+                            .foregroundColor(AppColors.textSecondary)
+                            .multilineTextAlignment(.center)
+
+                        Button {
+                            viewModel.retryWhaleList()
+                        } label: {
+                            Text("Retry")
+                                .font(AppTypography.bodySmallEmphasis)
+                                .foregroundColor(AppColors.textOnAccent)
+                                .padding(.horizontal, AppSpacing.lg)
+                                .padding(.vertical, AppSpacing.sm)
+                                .background(AppColors.primaryFill)
+                                .cornerRadius(AppCornerRadius.pill)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.xxl)
+                }
+
                 // 3. Most Popular Whales
                 MostPopularWhalesSection(
                     heroWhales: viewModel.heroWhales,
@@ -461,6 +495,30 @@ struct FollowedWhalesRow: View {
     var onWhaleTapped: ((TrendingWhale) -> Void)?
     /// Tapped a follow the current plan doesn't surface. The caller presents the paywall.
     var onInactiveTapped: ((TrendingWhale) -> Void)?
+
+    /// Caption for a 72pt avatar cell.
+    ///
+    /// People go on last-name terms; an INSTITUTION's last word is noise. Taking
+    /// `.components(separatedBy: " ").last` unconditionally rendered "Tiger Global
+    /// Management" as "Management", "Gates Foundation Trust" as "Trust", and
+    /// "AQR Capital Management" as "Management" too — two different funds with the
+    /// same caption, sitting side by side in the followed row.
+    ///
+    /// Institutions keep their leading words (the distinctive part) and truncate with
+    /// an ellipsis; the 1-line limit on the label does the visual trimming.
+    static func shortName(for whale: TrendingWhale) -> String {
+        let full = whale.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !full.isEmpty else { return whale.name }
+        switch whale.category {
+        case .institutions:
+            // "Tiger Global Management" → "Tiger Global"; a two-word name is left whole.
+            let words = full.split(separator: " ")
+            guard words.count > 2 else { return full }
+            return words.prefix(2).joined(separator: " ")
+        case .investors, .politicians:
+            return full.split(separator: " ").last.map(String.init) ?? full
+        }
+    }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -508,7 +566,7 @@ struct FollowedWhalesRow: View {
                             )
 
                             // Name
-                            Text(whale.name.components(separatedBy: " ").last ?? whale.name)
+                            Text(Self.shortName(for: whale))
                                 .font(AppTypography.caption)
                                 .foregroundColor(whale.isFollowingInactive
                                                  ? AppColors.textMuted : AppColors.textPrimary)

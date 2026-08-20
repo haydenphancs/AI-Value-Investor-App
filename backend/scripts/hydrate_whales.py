@@ -47,13 +47,23 @@ from app.integrations.fmp import FMPClient  # noqa: E402
 from app.integrations.gemini import GeminiClient  # noqa: E402
 from app.services.whale_service import (  # noqa: E402
     SIC_TO_SECTOR, SECTOR_COLORS, DEFAULT_SECTOR_COLOR, _map_sic_to_sector,
+    # Split detection is IMPORTED, never re-implemented. A second copy of this logic
+    # is what let the two 13F diff paths drift apart in the first place.
+    _quarter_end_date, _split_ratio_in_window,
 )
+from app.services.whale_service import WhaleService as _WhaleService  # noqa: E402
+
+# `_suspicious_split_tickers` is a @staticmethod on WhaleService; bind it to a plain
+# name so the call sites below read the same as the service's.
+_suspicious_split_tickers = _WhaleService._suspicious_split_tickers
 from app.services._whale_common import (  # noqa: E402
     parse_congress_amount_dollars,
     parse_congress_amount_bounds,
     sum_amount_bounds,
     format_amount_range,
     snapshot_db_row,
+    calc_13f_trade_dollars,
+    resolve_congress_action,
     AnnualReturn,
     compute_13f_cagr,
     compute_ticker_cagr,
@@ -69,6 +79,10 @@ logger = logging.getLogger("hydrate_whales")
 # ── Rate-Limit Controls ──────────────────────────────────────────────
 
 FMP_SEMAPHORE = asyncio.Semaphore(5)
+
+# Cap on per-whale /splits lookups. A filer whose entire book was restated would
+# otherwise fan out one unthrottled call per suspect ticker.
+_MAX_SPLIT_LOOKUPS = 25
 GEMINI_SEMAPHORE = asyncio.Semaphore(3)
 FMP_BATCH_SIZE = 30
 
@@ -332,28 +346,34 @@ class WhaleHydrator:
         # Find previous quarter
         prev_entry = _find_previous_quarter(filing_dates, year, quarter)
 
-        # Fetch all data concurrently
-        async with FMP_SEMAPHORE:
-            current_task = self.fmp.get_institutional_holdings(
-                cik, year, quarter
-            )
-        async with FMP_SEMAPHORE:
-            if prev_entry:
-                prev_task = self.fmp.get_institutional_holdings(
-                    cik, int(prev_entry["year"]), int(prev_entry["quarter"])
-                )
-            else:
-                prev_task = _noop_list()
+        # Fetch all data concurrently, THROTTLED.
+        #
+        # ⚠️ `async with FMP_SEMAPHORE:` around `self.fmp.get_...(...)` was a NO-OP: that
+        # expression only CONSTRUCTS a coroutine, it does not await it. The semaphore was
+        # acquired and released before any HTTP request existed, and all four calls then
+        # ran unthrottled inside the gather below. `_throttled` puts the acquire inside
+        # the awaited coroutine, which is where it has to be.
+        async def _throttled(coro):
+            async with FMP_SEMAPHORE:
+                return await coro
 
-        async with FMP_SEMAPHORE:
-            industry_task = self.fmp.get_institutional_industry_breakdown(
-                cik, year=year, quarter=quarter
+        prev_coro = (
+            self.fmp.get_institutional_holdings(
+                cik, int(prev_entry["year"]), int(prev_entry["quarter"])
             )
-        async with FMP_SEMAPHORE:
-            perf_task = self.fmp.get_institutional_performance(cik)
+            if prev_entry
+            else _noop_list()
+        )
 
         results = await asyncio.gather(
-            current_task, prev_task, industry_task, perf_task,
+            _throttled(self.fmp.get_institutional_holdings(cik, year, quarter)),
+            _throttled(prev_coro),
+            _throttled(
+                self.fmp.get_institutional_industry_breakdown(
+                    cik, year=year, quarter=quarter
+                )
+            ),
+            _throttled(self.fmp.get_institutional_performance(cik)),
             return_exceptions=True,
         )
 
@@ -370,6 +390,24 @@ class WhaleHydrator:
         if not current_raw:
             return None
 
+        # ⚠️ Distinguish "there IS no prior quarter" from "the prior-quarter fetch
+        # FAILED". Both leave `prev_raw == []`, and an empty prior book makes
+        # `_diff_quarters` book EVERY position as New/BOUGHT — so a single 429 or 5xx on
+        # this one call rewrote a whale's entire history as "bought its whole book this
+        # quarter", with a net amount equal to the full AUM. That trivially clears the
+        # $500M alert threshold, so the transient error also pushed a fabricated alert.
+        #
+        # Abort the whale instead. The previous snapshot stays untouched and the next
+        # scheduled run retries; the `raw_hash` is left alone so nothing is skipped.
+        if prev_entry and not prev_raw:
+            logger.error(
+                "  13F previous-quarter fetch returned no rows for CIK %s "
+                "(%s-Q%s) although a prior filing EXISTS — aborting this whale rather "
+                "than booking its entire book as new positions",
+                cik, prev_entry.get("year"), prev_entry.get("quarter"),
+            )
+            return None
+
         # Build holdings
         holdings = self._build_13f_holdings(current_raw)
         prev_holdings = self._build_13f_holdings(prev_raw)
@@ -378,9 +416,46 @@ class WhaleHydrator:
         # Build sectors from industry breakdown
         sectors = self._build_sectors_from_industry(industry_data)
 
+        # Detect splits BEFORE diffing. A 10:1 split leaves the position value roughly
+        # unchanged while the share count jumps 10x; without restatement that reads as a
+        # ~9x share purchase. Best-effort — a failure here just leaves `split_ratios`
+        # empty, i.e. exactly the previous behaviour.
+        split_ratios: Dict[str, float] = {}
+        try:
+            suspects = _suspicious_split_tickers(current_raw, prev_raw)
+            if suspects:
+                prev_end = (
+                    _quarter_end_date(
+                        int(prev_entry["year"]), int(prev_entry["quarter"])
+                    )
+                    if prev_entry
+                    else None
+                )
+                curr_end = _quarter_end_date(year, quarter)
+                # Capped: an entire restated book would otherwise fan out one /splits
+                # call per suspect ticker with no bound at all.
+                suspects = suspects[:_MAX_SPLIT_LOOKUPS]
+                split_lists = await asyncio.gather(
+                    *[_throttled(self.fmp.get_stock_splits(t)) for t in suspects],
+                    return_exceptions=True,
+                )
+                for t, sl in zip(suspects, split_lists):
+                    if isinstance(sl, BaseException):
+                        logger.warning("  Split lookup failed for %s: %s", t, sl)
+                        continue
+                    r = _split_ratio_in_window(sl, prev_end, curr_end)
+                    if r and r != 1.0:
+                        split_ratios[t] = r
+        except Exception as e:
+            logger.warning(
+                "  Split detection failed for CIK %s (%s: %s) — using the raw diff",
+                cik, type(e).__name__, e,
+            )
+            split_ratios = {}
+
         # Diff quarters for trade group
         trade_group = self._diff_quarters(
-            current_raw, prev_raw, filing_date, total_value
+            current_raw, prev_raw, filing_date, total_value, split_ratios
         )
 
         raw_hash = hashlib.sha256(
@@ -522,10 +597,28 @@ class WhaleHydrator:
             if not symbol or symbol in ("--", "N/A"):
                 continue
 
-            raw_type = (t.get("type") or "").lower().strip()
-            action = CONGRESSIONAL_TYPE_MAP.get(raw_type, "BOUGHT")
+            # Unknown type → SKIP, never a defaulted "BOUGHT". See
+            # `_whale_common.resolve_congress_action`: the badge and the net sum are
+            # both hard directional claims, so guessing states something false rather
+            # than degrading.
+            action = resolve_congress_action(t.get("type"))
+            if action is None:
+                logger.warning(
+                    "  Skipping congressional trade with unrecognised type=%r "
+                    "(symbol=%s) — refusing to guess a direction",
+                    t.get("type"), symbol,
+                )
+                continue
             amount_str = t.get("amount") or "$1,001 - $15,000"
-            amount = parse_congress_amount_dollars(amount_str) or 8_000
+            # NO `or 8_000`. An unparseable bucket parses to 0.0, and `0.0 or 8_000`
+            # replaced a real "we don't know" with a fabricated $8,000 that was then
+            # persisted to `whale_trades.amount` and summed into the group net —
+            # understating a large disclosure by orders of magnitude and making
+            # `net_amount` contradict `net_amount_range`. The raw bucket string is kept
+            # on the trade, so the UI still shows the honest range.
+            # `whale_service._aggregate_congressional_trades` already does this; the two
+            # paths disagreeing is what made the same filing render two different totals.
+            amount = parse_congress_amount_dollars(amount_str)
             amount_low, amount_high = parse_congress_amount_bounds(amount_str)
             tx_date = (
                 t.get("transactionDate")
@@ -659,8 +752,18 @@ class WhaleHydrator:
         previous_raw: List[Dict],
         filing_date: str,
         total_current_value: float,
+        split_ratios: Optional[Dict[str, float]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Diff two 13F snapshots to compute trades."""
+        """Diff two 13F snapshots to compute trades.
+
+        ``split_ratios`` maps ticker → the product of stock-split ratios effective
+        between the two filing dates. Without it a 10:1 split reads as a 9x share
+        increase at a 1/10th price and fabricates a huge BOUGHT. Mirrors
+        `whale_service._diff_quarters`, which has carried this for a while — the two
+        implementations diverging is the exact reason this one was diffing dollar value
+        while the other diffed shares.
+        """
+        split_ratios = split_ratios or {}
         if not current_raw:
             return None
 
@@ -707,9 +810,47 @@ class WhaleHydrator:
             prev = prev_map.get(ticker)
             curr_val = curr["value"] if curr else 0
             prev_val = prev["value"] if prev else 0
-            diff = curr_val - prev_val
+            curr_shares = curr["shares"] if curr else 0
+            prev_shares = prev["shares"] if prev else 0
 
-            if abs(diff) < 1000:
+            # Restate the PRIOR share count into post-split terms before diffing, but
+            # only when the observed jump actually matches the split — a count that did
+            # not move toward the ratio is a spinoff / ADR-ratio change / an
+            # already-adjusted feed, and restating it there would invent a trade of its
+            # own. Same three-way test as whale_service.
+            ratio = split_ratios.get(ticker, 1.0)
+            if ratio and ratio != 1.0 and curr and prev and prev_shares > 0:
+                ratio_obs = curr_shares / prev_shares
+                if abs(ratio_obs - ratio) <= 0.15 * ratio:
+                    prev_shares = prev_shares * ratio
+                elif ratio_obs >= (1.0 + ratio) / 2.0:
+                    prev_shares = prev_shares * ratio
+
+            # ⚠️ SHARES at an implied price — NOT `curr_val - prev_val`.
+            #
+            # A 13F reports positions, not transactions, and the reported VALUE moves
+            # with the share price. Diffing value therefore books pure price
+            # appreciation as a trade: a holder who did nothing while a stock rose 20%
+            # was written to `whale_trades` as BOUGHT/Increased for the entire gain,
+            # and a holder who SOLD into a rally could come out looking like a buyer.
+            # `calc_13f_trade_dollars` exists precisely to strip that out, and
+            # `whale_service._diff_quarters` and `holders_service` already use it — so
+            # the same whale got a different answer depending on which path last wrote.
+            #
+            # It returns (None, 0.0) when the move is below the noise floor or when no
+            # implied price can be derived, which subsumes the old `abs(diff) < 1000`
+            # filter. New and Closed positions are handled below, where there is only
+            # one side and the position's own value IS the trade.
+            action_hint, amount_hint = calc_13f_trade_dollars(
+                curr_shares=curr_shares,
+                curr_value=curr_val,
+                prev_shares=prev_shares,
+                prev_value=prev_val,
+            )
+            both_sides = curr is not None and prev is not None
+            if both_sides and action_hint is None:
+                continue
+            if not both_sides and max(curr_val, prev_val) < 1000:
                 continue
 
             prev_alloc = (
@@ -744,26 +885,26 @@ class WhaleHydrator:
                     "date": filing_date,
                 }
                 total_sold += prev_val
-            elif diff > 0:
+            elif action_hint == "BOUGHT":
                 trade = {
                     "ticker": ticker, "company_name": name,
                     "action": "BOUGHT", "trade_type": "Increased",
-                    "amount": abs(diff),
+                    "amount": amount_hint,
                     "previous_allocation": round(prev_alloc, 2),
                     "new_allocation": round(new_alloc, 2),
                     "date": filing_date,
                 }
-                total_bought += abs(diff)
+                total_bought += amount_hint
             else:
                 trade = {
                     "ticker": ticker, "company_name": name,
                     "action": "SOLD", "trade_type": "Decreased",
-                    "amount": abs(diff),
+                    "amount": amount_hint,
                     "previous_allocation": round(prev_alloc, 2),
                     "new_allocation": round(new_alloc, 2),
                     "date": filing_date,
                 }
-                total_sold += abs(diff)
+                total_sold += amount_hint
 
             trades.append(trade)
 
@@ -1201,14 +1342,18 @@ class WhaleHydrator:
         # FMP provides `turnover` directly (0-1 range, 0 = buy-and-hold)
         turnover = perf.get("turnover", None)
         if turnover is not None:
-            if turnover < 0.10:
+            # ⚠️ Ordered MOST-EXTREME FIRST. The old order tested `> 0.50` before
+            # `> 0.75`, so the `+25` branch was unreachable dead code and the most
+            # aggressive traders in the registry scored identically to merely active
+            # ones — a risk badge shown to the user as fact.
+            if turnover > 0.75:
+                score += 25  # Very high turnover = very aggressive
+            elif turnover > 0.50:
+                score += 15  # High turnover = aggressive
+            elif turnover < 0.10:
                 score -= 20  # Very low turnover = conservative buy-and-hold
             elif turnover < 0.25:
                 score -= 10
-            elif turnover > 0.50:
-                score += 15  # High turnover = aggressive
-            elif turnover > 0.75:
-                score += 25
         elif trade_group:
             # Fallback: estimate turnover from trade count
             trade_count = trade_group.get("trade_count", 0)
@@ -1220,8 +1365,19 @@ class WhaleHydrator:
                 score -= 10
 
         # 2. Average holding period — long hold = conservative
-        avg_hold = perf.get("averageHoldingPeriod", 0)
-        if avg_hold > 20:
+        # `_finite_float(..., default=None)`-style handling: FMP frequently omits this
+        # field, and the old `perf.get("averageHoldingPeriod", 0)` turned ABSENT into
+        # 0 → `< 3` → "+10 short-term trader". Every whale with no holding-period data
+        # was therefore biased toward "aggressive" on the strength of a missing key.
+        # A present-but-null value additionally raised TypeError on `None > 20`.
+        raw_hold = perf.get("averageHoldingPeriod")
+        try:
+            avg_hold = float(raw_hold) if raw_hold is not None else None
+        except (TypeError, ValueError):
+            avg_hold = None
+        if avg_hold is None or not math.isfinite(avg_hold):
+            pass                      # no evidence → no adjustment, in either direction
+        elif avg_hold > 20:
             score -= 15  # Very long-term holder
         elif avg_hold > 10:
             score -= 5
@@ -1469,24 +1625,31 @@ class WhaleHydrator:
                 type(e).__name__, e, exc_info=not _transient,
             )
 
-        # 5. Insert trade groups + trades (one per filing; skip existing dates)
+        # 5. Upsert trade groups + their trades (one group per filing).
         #
-        # ⚠️ DO NOT RETRY THIS BLOCK. Two independent hazards, either of which turns a
-        # transient blip into permanent damage:
-        #   (a) `uq_whale_trade_groups_whale_date` UNIQUE(whale_id, date) — if the
-        #       group INSERT commits but the ack is lost, a replay hits the
-        #       select-exists guard below, `continue`s, and the trades are NEVER
-        #       written. Worse, every FUTURE run takes the same skip, so the loss is
-        #       permanent. The raw_hash reset in 5b cannot repair it: the guard
-        #       defeats it.
-        #   (b) `whale_trades` has NO unique key, so replaying a mid-loop trade insert
-        #       silently DUPLICATES the trade.
-        # Log-level demotion only. See app/utils/supabase_errors.py for the rule.
+        # The KNOWN GAP recorded here previously is now closed. The old shape was
+        # select-exists → INSERT → insert each trade, which had two failure modes that
+        # turned a transient blip into PERMANENT damage:
+        #   (a) If the group INSERT committed but its ack was lost, the replay hit the
+        #       select-exists guard, `continue`d, and the trades were never written —
+        #       and every FUTURE run took the same skip, so the loss was permanent.
+        #       The raw_hash reset in 5b could not repair it: the guard defeated it.
+        #   (b) `whale_trades` had no unique key, so replaying a mid-loop trade insert
+        #       silently DUPLICATED the trade.
         #
-        # KNOWN GAP (deliberately out of scope, tracked): hazard (a) can already
-        # strand trades today without any retry involved. The real fix is to make the
-        # group insert an upsert(on_conflict="whale_id,date") and derive the skip from
-        # a whale_trades COUNT rather than from group existence.
+        # Both are now upserts against real unique keys —
+        # `uq_whale_trade_groups_whale_date` (migration 077) and
+        # `uq_whale_trades_group_ticker_action_date` (migration 143) — so a replay
+        # REPAIRS the group instead of skipping or duplicating it, and the block is
+        # safely idempotent.
+        #
+        # ⚠️ Still NOT wrapped in a retry helper: `retry_idempotent_sync` replays from
+        # the top of the block it guards, and the enclosing per-group try/except already
+        # gives per-group isolation. Idempotency makes a replay SAFE, not free.
+        #
+        # Schema-tolerant on purpose: if migration 143 has not been applied yet, the
+        # trades upsert falls back to the previous insert path, so deploy order does not
+        # matter in either direction.
         groups = snapshot.get("trade_groups")
         if not groups:
             single = snapshot.get("trade_group")
@@ -1495,16 +1658,10 @@ class WhaleHydrator:
             if not tg or not tg.get("date"):
                 continue
             try:
-                existing = (
-                    sb.table("whale_trade_groups")
-                    .select("id")
-                    .eq("whale_id", whale_id)
-                    .eq("date", tg["date"])
-                    .execute()
-                )
-                if existing.data:
-                    continue
-                tg_result = sb.table("whale_trade_groups").insert({
+                # UPSERT, not select-then-insert. Concurrent writers (the hourly job and
+                # a live profile build, or two Railway replicas) converge instead of one
+                # of them stranding its trades under a losing group id.
+                tg_result = sb.table("whale_trade_groups").upsert({
                     "whale_id": whale_id,
                     "date": tg["date"],
                     "trade_count": tg["trade_count"],
@@ -1512,34 +1669,37 @@ class WhaleHydrator:
                     "net_amount": tg["net_amount"],
                     "summary": tg.get("summary"),
                     "insights": tg.get("insights", []),
-                }).execute()
+                }, on_conflict="whale_id,date").execute()
 
-                if not tg_result.data:
-                    continue
-                tg_id = tg_result.data[0]["id"]
+                if tg_result.data:
+                    tg_id = tg_result.data[0]["id"]
+                else:
+                    # Some PostgREST configurations return no representation on an
+                    # upsert that changed nothing. Read the id back rather than
+                    # `continue`-ing, which is precisely how trades used to be
+                    # stranded.
+                    lookup = (
+                        sb.table("whale_trade_groups")
+                        .select("id")
+                        .eq("whale_id", whale_id)
+                        .eq("date", tg["date"])
+                        .limit(1)
+                        .execute()
+                    )
+                    if not lookup.data:
+                        logger.warning(
+                            "  Trade group upsert returned no id for whale=%s date=%s "
+                            "— skipping its trades this run",
+                            whale_id, tg["date"],
+                        )
+                        continue
+                    tg_id = lookup.data[0]["id"]
+
+                # Existing trades for this group, so a REPAIR run tops up a partially
+                # written group instead of either skipping it or duplicating it.
                 for trade in tg.get("trades", [])[:50]:
-                    sb.table("whale_trades").insert({
-                        "whale_id": whale_id,
-                        "trade_group_id": tg_id,
-                        "ticker": trade["ticker"],
-                        "company_name": trade.get(
-                            "company_name", trade["ticker"]
-                        ),
-                        "action": trade["action"],
-                        "trade_type": trade["trade_type"],
-                        "amount": trade["amount"],
-                        # Congress STOCK Act range + disclosure date (None for
-                        # 13F). Requires migration #076 columns.
-                        "amount_range": trade.get("amount_range"),
-                        "disclosure_date": trade.get("disclosure_date"),
-                        "previous_allocation": trade.get(
-                            "previous_allocation"
-                        ),
-                        "new_allocation": trade.get(
-                            "new_allocation"
-                        ),
-                        "date": trade.get("date", ""),
-                    }).execute()
+                    self._upsert_trade(sb, whale_id, tg_id, trade)
+                continue
             except Exception as e:
                 denorm_ok = False
                 _transient = is_transient_supabase_error(e)
@@ -1586,6 +1746,48 @@ class WhaleHydrator:
 
         # 6. Generate alert if significant activity detected
         self._maybe_generate_alert(whale_id, snapshot)
+
+    @staticmethod
+    def _upsert_trade(sb, whale_id: str, tg_id: str, trade: Dict[str, Any]) -> None:
+        """Write one trade, REPAIRING rather than duplicating on a replay.
+
+        Uses `uq_whale_trades_group_ticker_action_date` (migration 143). If that index
+        is not present yet the upsert is rejected with 42P10, and we fall back to the
+        previous plain insert — so this ships safely BEFORE the migration is applied and
+        becomes idempotent the moment it is.
+        """
+        row = {
+            "whale_id": whale_id,
+            "trade_group_id": tg_id,
+            "ticker": trade["ticker"],
+            "company_name": trade.get("company_name", trade["ticker"]),
+            "action": trade["action"],
+            "trade_type": trade["trade_type"],
+            "amount": trade["amount"],
+            # Congress STOCK Act range + disclosure date (None for 13F).
+            # Requires migration #076 columns.
+            "amount_range": trade.get("amount_range"),
+            "disclosure_date": trade.get("disclosure_date"),
+            "previous_allocation": trade.get("previous_allocation"),
+            "new_allocation": trade.get("new_allocation"),
+            "date": trade.get("date", ""),
+        }
+        try:
+            sb.table("whale_trades").upsert(
+                row, on_conflict="trade_group_id,ticker,action,date"
+            ).execute()
+        except Exception as e:
+            # 42P10 = "no unique or exclusion constraint matching the ON CONFLICT
+            # specification", i.e. migration 143 is not applied on this database yet.
+            msg = str(e).lower()
+            if "42p10" in msg or "no unique or exclusion constraint" in msg:
+                logger.warning(
+                    "  whale_trades upsert unsupported (migration 143 not applied) — "
+                    "falling back to insert for %s", trade.get("ticker"),
+                )
+                sb.table("whale_trades").insert(row).execute()
+            else:
+                raise
 
     def _maybe_generate_alert(
         self, whale_id: str, snapshot: Dict[str, Any]
@@ -1698,16 +1900,31 @@ def _format_amount(value: float, action: str) -> str:
 def _generate_trade_summary(
     buys: List[Dict], sells: List[Dict], net_action: str
 ) -> str:
-    """One-line trade group summary."""
-    if len(buys) > len(sells) * 2:
-        return f"Heavy accumulation with {len(buys)} buys"
-    elif len(sells) > len(buys) * 2:
-        return f"Significant reduction with {len(sells)} sells"
-    elif not sells and buys:
-        return f"Pure buying activity with {len(buys)} positions"
-    elif not buys and sells:
-        return f"Pure selling activity with {len(sells)} positions"
+    """One-line trade group summary. Rendered verbatim under the trade-group card.
+
+    ⚠️ Order matters, and the old order made two branches unreachable: with
+    ``sells == []`` the first test is ``len(buys) > 0``, which any single buy satisfies,
+    so "Pure buying activity" could never be reached and a lone purchase was announced
+    as "Heavy accumulation with 1 buys" — wrong in register AND ungrammatical. The
+    one-sided cases are therefore checked FIRST, and the ratio tests now require enough
+    trades for "heavy" to mean something.
+    """
+    n_buys, n_sells = len(buys), len(sells)
+
+    if n_buys and not n_sells:
+        return f"Pure buying activity with {n_buys} {_positions(n_buys)}"
+    if n_sells and not n_buys:
+        return f"Pure selling activity with {n_sells} {_positions(n_sells)}"
+    if n_buys >= 3 and n_buys > n_sells * 2:
+        return f"Heavy accumulation with {n_buys} buys"
+    if n_sells >= 3 and n_sells > n_buys * 2:
+        return f"Significant reduction with {n_sells} sells"
     return "Portfolio rebalancing"
+
+
+def _positions(n: int) -> str:
+    """"position" / "positions" — a count of 1 must not read "1 positions"."""
+    return "position" if n == 1 else "positions"
 
 
 def _generate_trade_insights(

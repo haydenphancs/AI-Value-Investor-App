@@ -96,7 +96,7 @@ struct HomeDashboardView: View {
         // else". A load made as a guest stamps `lastLoadedAt` like any other, so signing in
         // left the guest's watchlist on screen for the full 5-minute window — and signing out
         // left the previous account's watchlist for the next person to open the app.
-        .reloadOnIdentityChange { await viewModel.reloadForIdentityChange() }
+        .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
         // Returning from the background is the other way a user arrives at hours
         // -old data. `scenePhase` is unused in this codebase; this is the
         // NotificationCenter idiom UpdatesView already uses.
@@ -226,12 +226,21 @@ struct HomeDashboardView: View {
         // background profile refresh re-fetches too — and so dismissing without buying
         // costs nothing.
         //
-        // `oldTier` is inspected rather than ignored: `user.tier` starts at the `.free`
-        // default and `applyProfile` writes the real value during session restore, so an
-        // unconditional refresh here fired on EVERY cold launch of a paid account — a third
-        // `/home/dashboard` on top of the tab-activation load and the identity-change
-        // reload. A launch settling into the tier the user already had is not an unlock.
-        .onChange(of: appState.user.tier) {
+        // Keyed on `entitlementGeneration`, NOT on `user.tier` — and that is the whole point.
+        //
+        // `user.tier` starts at the `.free` default and `applyProfile` writes the real value
+        // during session restore, so observing it directly fired on EVERY cold launch of a
+        // paid account: a third `/home/dashboard` on top of the tab-activation load and the
+        // identity-change reload. A launch settling into the tier the user already had is not
+        // an unlock. `AppState` bumps `entitlementGeneration` only for a tier change that
+        // happens AFTER the profile has hydrated once, so hydration is silent and a real
+        // purchase still unlocks immediately.
+        //
+        // ⚠️ The comment that used to sit here claimed `oldTier` "is inspected rather than
+        // ignored" — while the code below it used the zero-argument closure and inspected
+        // nothing. The fix existed only in prose for the life of the file. Pinned now by
+        // `tests/test_ios_launch_fanout_guards.py`.
+        .onChange(of: appState.entitlementGeneration) {
             guard appState.auth.status == .authenticated else { return }
             Task { await viewModel.refresh() }
         }

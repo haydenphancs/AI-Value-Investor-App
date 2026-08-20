@@ -43,7 +43,13 @@ enum HTTPMethod: String, Sendable {
     /// property of each handler rather than of the verb, so they are excluded too:
     /// a surfaced transient error is always recoverable, a silent duplicate write is
     /// not. Pinned by `tests/test_ios_paid_path_guards.py`.
-    var isSafeToRetryAfterServerError: Bool { self == .GET }
+    /// `nonisolated` because the callers are not on the main actor. This target builds with
+    /// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so a bare computed property here is
+    /// main-actor-isolated — while `APIClient` is a plain `actor`. Reading it from there is a
+    /// warning today and **an error in the Swift 6 language mode**, which would break the
+    /// retry AND failover money guards at exactly the moment the language mode is raised.
+    /// Safe to expose: a pure comparison on a `Sendable` enum, touching no shared state.
+    nonisolated var isSafeToRetryAfterServerError: Bool { self == .GET }
 }
 
 // MARK: - Auth Policy

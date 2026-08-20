@@ -227,8 +227,15 @@ final class UpdatesViewModel: ObservableObject {
     /// set on the first successful load and never cleared, and this screen is opacity-mounted,
     /// so `loadIfNeeded()` early-returns for the ENTIRE process. Without this reset, signing in
     /// left guest-era news and insight scopes on screen until the app was killed.
-    func reloadForIdentityChange() async {
+    func handleIdentityChange(isActiveTab: Bool) async {
+        // CLEAR FIRST, UNCONDITIONALLY — before the `isActiveTab` gate below. The reload is
+        // deferred for a hidden tab, but the previous account's data must not survive in this
+        // ViewModel waiting to be rendered (.claude/rules/auth.md §7).
         hasLoadedOnce = false
+
+        // Fetch only if the user is actually looking at this tab. Clearing above nils the
+        // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
+        guard isActiveTab else { return }
         await loadTabs()
         if let tab = selectedTab {
             // `force: true` — the per-scope article cache was populated under the previous

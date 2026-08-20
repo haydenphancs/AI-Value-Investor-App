@@ -108,6 +108,16 @@ class BaseViewModel: ObservableObject {
     /// Set error message and optionally report to AppState
     func setError(_ error: Error, reportGlobally: Bool = false) {
         let appError = AppError.from(error)
+
+        // A cancelled task is not a failure and must never become a message. This is the
+        // fix's real anchor, because the `catch is CancellationError` arms in `performTask`
+        // below DO NOT catch it: `APIClient` wraps an unrecognised transport error into
+        // `APIError.networkError`, so cancellation arrives as a nested `URLError.cancelled`
+        // and lands in the generic `catch`. `performTask` also cancels any task with the
+        // same name before starting a new one, so a plain double-load showed the user
+        // "cancelled" from the load they replaced.
+        guard !appError.isCancellation else { return }
+
         errorMessage = appError.message
 
         if reportGlobally {

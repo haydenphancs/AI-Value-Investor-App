@@ -25,9 +25,9 @@ struct ContentView: View {
             //
             // New Caydex Home dashboard — backend-connected via the live
             // `HomeRepository` (the ViewModel's default; `MockHomeRepository` is
-            // previews-only). All four sections fetch `GET /home/dashboard`. The
-            // legacy `HomeViewWithBinding` is kept below for reference/rollback —
-            // swap this line back to it to restore the previous Home.
+            // previews-only). All four sections fetch `GET /home/dashboard`.
+            // (The legacy `HomeViewWithBinding` that used to sit below has been deleted —
+            // see the header of Views/Screens/HomeView.swift for why.)
             HomeDashboardView(selectedTab: $selectedTab)
             .opacity(selectedTab == .home ? 1 : 0)
             .allowsHitTesting(selectedTab == .home)
@@ -79,169 +79,6 @@ struct ContentView: View {
                 researchSubTab = .research
             }
         }
-    }
-}
-
-// MARK: - HomeView with Binding Support
-struct HomeViewWithBinding: View {
-    @Environment(AppState.self) private var appState
-    @StateObject private var viewModel = HomeViewModel()
-    @Binding var selectedTab: HomeTab
-    @Binding var researchSubTab: ResearchTab
-    @Binding var researchTickerSymbol: String?
-    @State private var showSearch = false
-    @State private var showProfile = false
-    @State private var selectedNewsArticle: NewsArticle?
-    @State private var selectedReportTicker: ReportTickerNavigation?
-    @State private var selectedMarketTicker: MarketTicker?
-    @State private var selectedTrendingAnalysis: TrendingAnalysis?
-
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            AppColors.background
-                .ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                HomeHeader(
-                    onProfileTapped: {
-                        showProfile = true
-                    },
-                    onSearchTapped: {
-                        showSearch = true
-                    }
-                )
-
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.xl) {
-                        // Error banner — visible when backend is unreachable
-                        if let errorMessage = viewModel.error {
-                            HStack(spacing: 8) {
-                                Image(systemName: "wifi.exclamationmark")
-                                    .foregroundColor(AppColors.neutral)
-                                Text(errorMessage)
-                                    .font(AppTypography.bodySmall)
-                                    .foregroundColor(AppColors.textSecondary)
-                                Spacer()
-                            }
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.vertical, AppSpacing.sm)
-                            .background(AppColors.cardBackground.opacity(0.6))
-                            .cornerRadius(AppCornerRadius.medium)
-                            .padding(.horizontal, AppSpacing.lg)
-                            .padding(.top, AppSpacing.xs)
-                        }
-
-                        MarketTickersRow(
-                            tickers: viewModel.marketTickers,
-                            onTickerTap: { ticker in
-                                selectedMarketTicker = ticker
-                            }
-                        )
-                        .padding(.top, AppSpacing.sm)
-
-                        if let insight = viewModel.marketInsight {
-                            MarketInsightsCard(insight: insight) {
-                                selectedTab = .updates
-                            }
-                            .padding(.horizontal, AppSpacing.lg)
-                        }
-
-                        DailyBriefingSection(
-                            items: viewModel.dailyBriefings,
-                            onItemTapped: handleBriefingItemTapped
-                        )
-
-                        RecentResearchSection(
-                            reports: viewModel.recentResearch,
-                            onSeeAllTapped: {
-                                researchSubTab = .reports
-                                selectedTab = .research
-                            },
-                            onReportTapped: { _ in },
-                            onAskOrReadTapped: { report in
-                                selectedReportTicker = ReportTickerNavigation(ticker: report.stockTicker)
-                            }
-                        )
-
-                        NewAnalysisButton {
-                            selectedTab = .research
-                        }
-
-                        Spacer()
-                            .frame(height: 100)
-                    }
-                }
-                .refreshable {
-                    await viewModel.refresh()
-                }
-
-                CustomTabBar(
-                    selectedTab: $selectedTab,
-                    unreadNotifications: appState.unreadNotificationCount
-                )
-            }
-
-            if viewModel.isLoading {
-                LoadingOverlay()
-            }
-        }
-        .sheet(isPresented: $showSearch) {
-            SearchView()
-        }
-        .fullScreenCover(isPresented: $showProfile) {
-            ProfileView()
-                .environment(appState)
-                .environment(\.appState, appState)
-        }
-        .fullScreenCover(item: $selectedNewsArticle) { article in
-            NewsDetailView(article: article)
-        }
-        .fullScreenCover(item: $selectedReportTicker) { nav in
-            NavigationStack {
-                TickerReportView(ticker: nav.ticker)
-            }
-        }
-        .fullScreenCover(item: $selectedMarketTicker) { ticker in
-            NavigationStack {
-                Group {
-                    switch ticker.type {
-                    case .index:
-                        IndexDetailView(indexSymbol: ticker.symbol)
-                    case .stock:
-                        TickerDetailView(tickerSymbol: ticker.symbol)
-                    case .crypto:
-                        CryptoDetailView(cryptoSymbol: ticker.symbol)
-                    case .commodity:
-                        CommodityDetailView(commoditySymbol: ticker.symbol)
-                    case .etf:
-                        ETFDetailView(etfSymbol: ticker.symbol)
-                    }
-                }
-                .navigationBarHidden(true)
-            }
-        }
-        .fullScreenCover(item: $selectedTrendingAnalysis) { analysis in
-            NavigationStack {
-                TrendingAnalysisDetailView(analysis: analysis) { ticker in
-                    researchTickerSymbol = ticker
-                    selectedTab = .research
-                }
-            }
-        }
-    }
-
-    // MARK: - Action Handlers
-    private func handleBriefingItemTapped(_ item: DailyBriefingItem) {
-        // Convert DailyBriefingItem to NewsArticle for navigation
-        selectedNewsArticle = NewsArticle(
-            headline: item.title,
-            summary: item.subtitle,
-            source: NewsSource(name: "Market Alert", iconName: nil),
-            sentiment: .neutral,
-            publishedAt: item.date ?? Date(),
-            thumbnailName: nil,
-            relatedTickers: []
-        )
     }
 }
 
@@ -336,7 +173,7 @@ struct ResearchViewWithBinding: View {
         // `onAuthenticated()`'s fan-out hydrates credits, settings and the Learn stores but
         // nothing research-related — so without this the tab behind the sheet keeps rendering
         // "Sign in to see your analyses" to a user who just signed in.
-        .reloadOnIdentityChange { await viewModel.reloadForIdentityChange() }
+        .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
         .fullScreenCover(item: $selectedReport) { report in
             NavigationStack {
                 TickerReportView(report: report)

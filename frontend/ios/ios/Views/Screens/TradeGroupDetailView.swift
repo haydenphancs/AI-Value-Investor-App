@@ -67,6 +67,10 @@ struct TradeGroupDetailView: View {
                                 .foregroundColor(AppColors.textSecondary)
                                 .multilineTextAlignment(.center)
 
+                            // Suppressed for a PLAN refusal: the same request cannot
+                            // succeed on this plan, so offering Retry is offering a
+                            // button that is guaranteed to fail the same way.
+                            if !viewModel.isPlanLocked {
                             Button {
                                 Task { await viewModel.loadTradeGroup() }
                             } label: {
@@ -79,6 +83,7 @@ struct TradeGroupDetailView: View {
                                     .cornerRadius(AppCornerRadius.pill)
                             }
                             .buttonStyle(.plain)
+                            }
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.xxl)

@@ -18,6 +18,10 @@ class TradeGroupDetailViewModel: ObservableObject {
     @Published var selectedAssetNavigation: SearchSelection?
     @Published var isLoading: Bool = false
     @Published var loadError: String?
+    /// A PLAN refusal (403 WHALE_FOLLOW_LOCKED) — TERMINAL. The same request can never
+    /// succeed on this plan, so the retry affordance must be suppressed and the user
+    /// pointed at the upgrade instead of at a button that will fail identically.
+    @Published var isPlanLocked: Bool = false
 
     let whaleName: String
 
@@ -115,8 +119,14 @@ class TradeGroupDetailViewModel: ObservableObject {
             self.tradeGroup = dto.toWhaleTradeGroup()
             print("[TradeGroupDetailVM] ✅ Loaded \(dto.trades.count) trades for group \(groupId)")
         } catch {
-            print("[TradeGroupDetailVM] ❌ Failed to load trade group \(groupId): \(error)")
-            self.loadError = "Couldn't load these trades. Pull down to retry."
+            let appError = AppError.from(error)
+            print("[TradeGroupDetailVM] ❌ Failed to load trade group \(groupId): \(appError.title): \(error)")
+            if case .planUpgradeRequired = appError {
+                self.isPlanLocked = true
+                self.loadError = appError.message
+            } else {
+                self.loadError = appError.message
+            }
         }
     }
 

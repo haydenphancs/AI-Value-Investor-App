@@ -16,7 +16,7 @@ from typing import Optional, List
 import logging
 
 from app.dependencies import get_current_user, get_watchlist_identity
-from app.api.error_response import ErrorCode, make_error_response
+from app.api.error_response import ErrorCode, make_error_body, make_error_response
 from app.schemas.whale import (
     TrendingWhaleResponse,
     WhaleProfileResponse,
@@ -122,22 +122,49 @@ async def get_whale_profile(
             whale_id=whale_id, user_id=user_id,
             force_refresh=force_refresh,
             tier=user.get("tier"),
+            # `is_guest`, not `user_id is None`: this dependency ALWAYS yields an id
+            # (the shared guest sentinel, or a per-install uuid5 when the client sends
+            # X-Guest-Id), so the service's old `user_id is None` check for the
+            # destructive force_refresh lever could never fire. Defaults to True in the
+            # service, so a forgotten argument denies rather than allows.
+            is_guest=bool(user.get("is_guest", True)),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(
-            "[whale_profile] Unhandled error for whale_id=%s, user=%s: %s",
-            whale_id, user_id, e, exc_info=True,
+            "[whale_profile] Unhandled error for whale_id=%s, user=%s: %s: %s",
+            whale_id, user_id, type(e).__name__, e, exc_info=True,
         )
-        # Generic client-facing detail — never leak internal exception text
-        # (Python type / message, Postgres/PostgREST errors, field names) to the
-        # client. The full error + stack is captured in the log above
-        # (exc_info=True) for diagnosis. iOS surfaces a generic "unavailable".
+        # A STRUCTURED body, not a bare string. This used to raise
+        # `HTTPException(503, detail="...")`, which the StarletteHTTPException handler
+        # renders as `{"detail": "..."}` — a shape iOS's `APIErrorResponse` cannot
+        # decode, so `AppError` fell through to its generic "something went wrong"
+        # and the user got no actionable message and no retry affordance (invariant #3).
+        #
+        # The internal exception text is deliberately NOT echoed: the full type,
+        # message and stack are in the log above. Only the code and the user copy travel.
         raise HTTPException(
             status_code=503,
-            detail="Whale profile temporarily unavailable. Please try again shortly.",
+            detail=make_error_body(
+                ErrorCode.WHALE_PROFILE_UNAVAILABLE,
+                message=f"whale profile build failed: {type(e).__name__}",
+                user_message=(
+                    "We couldn't load this investor right now. Please try again shortly."
+                ),
+                action="retry",
+            ),
         )
     if not profile:
-        raise HTTPException(status_code=404, detail="Whale not found")
+        # Also structured — "no such whale" is a distinct, actionable state, and the
+        # previous bare-string 404 was indistinguishable from the 503 above on iOS.
+        raise HTTPException(
+            status_code=404,
+            detail=make_error_body(
+                ErrorCode.WHALE_NOT_FOUND,
+                message=f"no whale row for id={whale_id}",
+            ),
+        )
     return profile
 
 

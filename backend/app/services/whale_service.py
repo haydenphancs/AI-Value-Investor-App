@@ -30,6 +30,8 @@ from app.services._whale_common import (
     parse_congress_amount_bounds,
     sum_amount_bounds,
     format_amount_range,
+    format_amount_short,
+    resolve_congress_action,
     snapshot_db_row,
     calc_13f_trade_dollars,
     AnnualReturn,
@@ -270,6 +272,23 @@ CONGRESSIONAL_TYPE_MAP: Dict[str, str] = {
     "exchange": "BOUGHT",
 }
 
+# Sentinel for "this stored number could not be coerced to a finite float".
+# Distinct from 0.0 so `_stat_disclosure` can tell "genuinely flat" from "unusable"
+# and degrade to the honest em-dash tile instead of a confident green "+0.0%".
+_UNUSABLE_NUMBER = object()
+
+# Explicit row caps. PostgREST silently truncates any un-limited select at 1000 rows,
+# so an absent .limit() is not "no limit" — it is an invisible one.
+_TRADE_GROUPS_PAGE = 20
+_TRADES_PER_PAGE = 50
+_ACTIVITY_FEED_PAGE = 20
+_ROSTER_PAGE = 500
+_TRADE_COUNT_ROWS = 5000
+
+# Fixed namespace for `_snapshot_group_id`. Must never change: it is what makes a
+# snapshot-derived group keep one identity across requests and processes.
+_SNAPSHOT_GROUP_NS = uuid.UUID("6f9d1c2a-4b7e-5d38-9a10-c7f2e5b41d90")
+
 # ── In-Memory TTL Caches ────────────────────────────────────────────
 
 _whale_list_cache: Dict[str, Tuple[float, Any]] = {}
@@ -325,6 +344,19 @@ def _cache_set(cache: Dict, key: str, value: Any) -> None:
 # sync may not have run yet on a cold database, and caching that would make the free whale
 # permanently unavailable until the next deploy.
 _free_whale_id: Optional[str] = None
+
+
+def reset_free_whale_cache() -> None:
+    """Forget the memoized free-tier whale id.
+
+    `free_tier_whale_id` caches the uuid in a module global for the process lifetime,
+    and `is_free_tier_whale` matches on the MUTABLE display name "Bill Gates". A
+    registry sync resolves renames by CIK, so renaming that row silently strips every
+    Free account of its one followable whale until the next deploy. Called from the
+    registry-sync path and available to the app lifespan.
+    """
+    global _free_whale_id
+    _free_whale_id = None
 
 
 def whale_detail_allowed(tier: Optional[str], whale_id: str, sb) -> bool:
@@ -522,7 +554,7 @@ class WhaleService:
         query = sb.table("whales").select("*")
         if category:
             query = query.eq("category", category)
-        query = query.order("followers_count", desc=True)
+        query = query.order("followers_count", desc=True).limit(_ROSTER_PAGE)
         result = query.execute()
         whales = result.data or []
 
@@ -538,18 +570,32 @@ class WhaleService:
             followed_ids = {f["whale_id"] for f in (follows.data or [])}
 
         # Fetch recent trade counts (last 90 days)
-        cutoff = (datetime.now() - timedelta(days=90)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
         trade_counts: Dict[str, int] = {}
         try:
+            # Explicit cap. PostgREST silently truncates an un-limited select at 1000
+            # rows, so "no .limit()" is an INVISIBLE limit — and a silently truncated
+            # aggregate here under-reports `recent_trade_count` on the roster with no
+            # signal at all.
             tg_result = (
                 sb.table("whale_trade_groups")
                 .select("whale_id, trade_count")
                 .gte("created_at", cutoff)
+                .limit(_TRADE_COUNT_ROWS)
                 .execute()
             )
-            for tg in tg_result.data or []:
-                wid = tg["whale_id"]
-                trade_counts[wid] = trade_counts.get(wid, 0) + tg["trade_count"]
+            rows = tg_result.data or []
+            if len(rows) >= _TRADE_COUNT_ROWS:
+                logger.warning(
+                    "[whale_list] Recent-trade-count scan hit its %d-row cap — "
+                    "counts may under-report; raise _TRADE_COUNT_ROWS or aggregate in SQL",
+                    _TRADE_COUNT_ROWS,
+                )
+            for tg in rows:
+                wid = str(tg.get("whale_id") or "")
+                if not wid:
+                    continue
+                trade_counts[wid] = trade_counts.get(wid, 0) + (tg.get("trade_count") or 0)
         except Exception as e:
             logger.warning("Failed to fetch recent trade counts: %s", e)
 
@@ -590,8 +636,13 @@ class WhaleService:
         user_id: Optional[str] = None,
         force_refresh: bool = False,
         tier: Optional[str] = None,
+        is_guest: bool = True,
     ) -> Optional[WhaleProfileResponse]:
         """Get a whale profile, gated for this caller's plan.
+
+        ``is_guest`` DEFAULTS TO TRUE on purpose: it disarms the destructive
+        ``force_refresh`` lever below, so a call site that forgets to pass it fails
+        closed rather than handing an anonymous caller a delete.
 
         A THIN wrapper over `_get_whale_profile_ungated`, and the split is deliberate: the
         builder underneath has FOUR separate success returns (Tier-1 hit, Tier-2 hit,
@@ -601,7 +652,8 @@ class WhaleService:
         One exit point makes a missed branch impossible rather than merely unlikely.
         """
         profile = await self._get_whale_profile_ungated(
-            whale_id=whale_id, user_id=user_id, force_refresh=force_refresh
+            whale_id=whale_id, user_id=user_id,
+            force_refresh=force_refresh, is_guest=is_guest,
         )
         if profile is None:
             return None
@@ -620,6 +672,7 @@ class WhaleService:
         whale_id: str,
         user_id: Optional[str] = None,
         force_refresh: bool = False,
+        is_guest: bool = True,
     ) -> Optional[WhaleProfileResponse]:
         """Build/fetch the FULL profile — no tier gate. Callers must go through
         `get_whale_profile`; this is the cache machinery only.
@@ -638,13 +691,23 @@ class WhaleService:
 
         # force_refresh DESTRUCTIVELY deletes the durable Tier-2 snapshot store
         # (whale_filing_snapshots) and triggers an unbounded FMP rebuild. It is
-        # an authenticated operator/debug lever — iOS never sends it. Refuse it
-        # for anonymous callers so an unauthenticated GET can't wipe a whale's
-        # snapshots (emptying its holdings/sectors on an FMP outage) or drain the
-        # shared FMP quota by looping ?force_refresh=true over every whale_id.
-        if force_refresh and user_id is None:
+        # an authenticated operator/debug lever — iOS never sends it.
+        #
+        # ⚠️ The predicate is `is_guest`, NOT `user_id is None`. The old form was DEAD:
+        # this route resolves through `get_watchlist_identity`, which NEVER returns a
+        # None id — a signed-out caller gets the shared guest sentinel, and one sending
+        # any `X-Guest-Id` gets a per-install uuid5. Both are truthy, so the guard never
+        # fired and an unauthenticated GET could delete a whale's snapshot rows and then
+        # drive an unbounded, un-deduped FMP rebuild (force_refresh is excluded from the
+        # `_whale_profile_inflight` coalescing on purpose), looping over every whale id.
+        # Worse, once FMP was exhausted the degraded empty-holdings build was written
+        # back into the 24-hour cache — poisoning the profile for PAYING users too.
+        #
+        # Do NOT test `user_id == GUEST_USER_ID` instead: a per-install uuid5 never
+        # equals the sentinel. That is the documented trap in .claude/rules/auth.md §1a.
+        if force_refresh and is_guest:
             logger.warning(
-                "Ignoring force_refresh for whale %s — requires an authenticated user",
+                "Ignoring force_refresh for whale %s — requires an authenticated account",
                 whale_id,
             )
             force_refresh = False
@@ -674,11 +737,13 @@ class WhaleService:
                 )
                 if cache_row.data:
                     row = cache_row.data[0]
-                    cached_at = datetime.fromisoformat(
-                        row["cached_at"].replace("Z", "+00:00")
-                    )
+                    cached_at = _as_aware(row.get("cached_at"))
+                    if cached_at is None:
+                        raise ValueError(
+                            f"unparseable cached_at {row.get('cached_at')!r}"
+                        )
                     age_hours = (
-                        datetime.now(cached_at.tzinfo) - cached_at
+                        datetime.now(timezone.utc) - cached_at
                     ).total_seconds() / 3600
                     if age_hours < self.PROFILE_CACHE_TTL_HOURS:
                         profile = WhaleProfileResponse(**row["profile_json"])
@@ -729,7 +794,11 @@ class WhaleService:
                         {
                             "whale_id": whale_id,
                             "profile_json": profile_no_follow.model_dump(),
-                            "cached_at": datetime.now().isoformat(),
+                            # UTC-AWARE. A naive local stamp written into a `timestamptz`
+                            # is interpreted as UTC by Postgres, so on any non-UTC host
+                            # the row reads back in the future, `age_hours` goes negative
+                            # and the 24h TTL never expires.
+                            "cached_at": datetime.now(timezone.utc).isoformat(),
                         },
                         on_conflict="whale_id",
                     ).execute()
@@ -858,8 +927,12 @@ class WhaleService:
         other_pct = 0.0
         if snapshot and snapshot.get("sector_data"):
             for s in snapshot["sector_data"]:
-                pct = float(s.get("allocation", 0))
-                name = s.get("name", "Other")
+                # `or`-form + `_finite_float`, never `.get(k, default)`: this is
+                # untyped JSONB, so a key present with a JSON `null` returns None and
+                # the default never applies — `float(None)` is a TypeError that the
+                # endpoint turns into a 503 for the whole profile.
+                pct = _finite_float(s.get("allocation"))
+                name = s.get("name") or "Other"
                 if pct < 0.5 or name == "Other":
                     other_pct += pct
                 else:
@@ -868,10 +941,8 @@ class WhaleService:
                             id=str(uuid.uuid4()),
                             name=name,
                             percentage=round(pct, 1),
-                            color_hex=s.get(
-                                "color_hex",
-                                SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
-                            ),
+                            color_hex=s.get("color_hex")
+                            or SECTOR_COLORS.get(name, DEFAULT_SECTOR_COLOR),
                         )
                     )
             if other_pct > 0:
@@ -891,11 +962,11 @@ class WhaleService:
                 holdings.append(
                     WhaleHoldingResponse(
                         id=str(uuid.uuid4()),
-                        ticker=h.get("ticker", ""),
-                        company_name=h.get("company_name", ""),
+                        ticker=h.get("ticker") or "",
+                        company_name=h.get("company_name") or "",
                         logo_url=h.get("logo_url"),
-                        allocation=float(h.get("allocation", 0)),
-                        change_percent=float(h.get("change_percent", 0)),
+                        allocation=_finite_float(h.get("allocation")),
+                        change_percent=_finite_float(h.get("change_percent")),
                     )
                 )
 
@@ -913,9 +984,14 @@ class WhaleService:
             if not tg:
                 continue
             trades_for_group = self._build_trade_responses(tg.get("trades", []))
+            # A STABLE id, not `uuid.uuid4()`. These groups come from the snapshot
+            # rather than from `whale_trade_groups`, so there is no row id to use — but
+            # a fresh random one every request re-keyed SwiftUI's `Identifiable` list on
+            # every refresh, tearing down and rebuilding every card. Derived from
+            # (whale, filing date) so it is reproducible across requests and processes.
             trade_groups.append(
                 self._assemble_group_response(
-                    str(uuid.uuid4()), tg, trades_for_group
+                    _snapshot_group_id(whale_id, tg.get("date")), tg, trades_for_group
                 )
             )
             all_trades.extend(trades_for_group)
@@ -931,33 +1007,30 @@ class WhaleService:
                 .execute()
             )
             existing_dates = {g.date for g in trade_groups}
-            for tg in db_groups.data or []:
-                if tg.get("date", "") in existing_dates:
-                    continue
-                db_trades = (
-                    sb.table("whale_trades")
-                    .select("*")
-                    .eq("trade_group_id", tg["id"])
-                    .order("amount", desc=True)
-                    .execute()
-                )
-                trades_for_group = self._build_trade_responses_from_db(
-                    db_trades.data or []
-                )
-                trade_groups.append(
-                    self._assemble_group_response(
-                        str(tg["id"]), tg, trades_for_group
-                    )
-                )
-                all_trades.extend(trades_for_group)
+            fresh_rows = [
+                tg for tg in (db_groups.data or [])
+                if (tg.get("date") or "") not in existing_dates
+            ]
+            # ONE trades query for every remaining group. This was a per-group query
+            # inside the loop — up to 12 more sequential blocking round-trips on the
+            # single hottest path in the feature.
+            for group in self._assemble_groups_with_trades(sb, fresh_rows):
+                trade_groups.append(group)
+                all_trades.extend(group.trades)
         except Exception as e:
             logger.warning(
                 "[whale_profile] DB trade groups failed for %s: %s",
                 whale_id, e,
             )
 
-        # Combined timeline, most-recent filing first
+        # Combined timeline, most-recent filing first.
         trade_groups.sort(key=lambda g: g.date or "", reverse=True)
+        # `all_trades` accumulated in BUILD order (snapshot groups, then DB groups), so
+        # `all_trades[:20]` below was "the trades of whichever groups happened to be
+        # built first" — not the twenty most recent. When the snapshot group was older
+        # than the newest DB group, the profile's Recent Trades listed the wrong twenty.
+        # Sorted by trade date desc, then by size, so the tie-break is stable.
+        all_trades.sort(key=lambda t: ((t.date or ""), t.amount), reverse=True)
 
         # Behavior summary
         behavior_raw = (
@@ -1034,11 +1107,29 @@ class WhaleService:
 
         sb = get_supabase()
 
+        try:
+            return await self._build_activity_feed(sb, cache_key, user_id, tier)
+        except Exception as e:
+            # This method had NO error boundary at all, so a transient Supabase 520
+            # (a documented failure mode here) surfaced as an unhandled 500 on the
+            # Whales tab. Re-raised deliberately — the tab must not silently render an
+            # empty feed, which reads as "none of the investors you follow have traded".
+            logger.error(
+                "[whale_activity] Feed build failed for user=%s tier=%s: %s: %s",
+                user_id, normalize_tier(tier), type(e).__name__, e, exc_info=True,
+            )
+            raise
+
+    async def _build_activity_feed(
+        self, sb, cache_key: str, user_id: str, tier: Optional[str]
+    ) -> List[WhaleTradeGroupActivityResponse]:
+        """The uncached body of `get_whale_activity_feed`. See its docstring."""
         # Get followed whale IDs
         follows = (
             sb.table("whale_follows")
             .select("whale_id")
             .eq("user_id", user_id)
+            .limit(_ROSTER_PAGE)
             .execute()
         )
         whale_ids = [f["whale_id"] for f in (follows.data or [])]
@@ -1058,6 +1149,10 @@ class WhaleService:
                 whale_ids = sorted(str(w) for w in whale_ids)[:limit]
 
         if not whale_ids:
+            # Cached like any other answer. Without this a user who follows nobody
+            # re-queried `whale_follows` on EVERY request — the cheapest possible
+            # response was the only uncached one.
+            _cache_set(_whale_activity_cache, cache_key, [])
             return []
 
         # Fetch trade groups for followed whales, ordered by FILING date (not
@@ -1069,9 +1164,9 @@ class WhaleService:
         trade_groups = (
             sb.table("whale_trade_groups")
             .select("*")
-            .in_("whale_id", whale_ids)
+            .in_("whale_id", [str(w) for w in whale_ids])
             .order("date", desc=True)
-            .limit(20)
+            .limit(_ACTIVITY_FEED_PAGE)
             .execute()
         )
 
@@ -1079,7 +1174,8 @@ class WhaleService:
         whales = (
             sb.table("whales")
             .select("id, name, avatar_url, category, firm_name")
-            .in_("id", whale_ids)
+            .in_("id", [str(w) for w in whale_ids])
+            .limit(_ROSTER_PAGE)
             .execute()
         )
         whale_map = {
@@ -1102,14 +1198,18 @@ class WhaleService:
                     entity_avatar_name=whale.get("avatar_url") or "",
                     entity_firm_name=(whale.get("firm_name") or "").strip() or None,
                     category=whale.get("category"),
-                    action=tg.get("net_action", "BOUGHT"),
-                    trade_count=tg.get("trade_count", 0),
+                    # `or`-form for these three too. They are NOT NULL today, but the
+                    # comment above exists because exactly this shape 500'd the feed
+                    # once already; leaving three `.get(k, default)` calls beside it is
+                    # leaving the trap armed.
+                    action=tg.get("net_action") or "BOUGHT",
+                    trade_count=tg.get("trade_count") or 0,
                     total_amount=_format_amount(
-                        float(tg.get("net_amount", 0)),
-                        tg.get("net_action", "BOUGHT"),
+                        _finite_float(tg.get("net_amount")),
+                        tg.get("net_action") or "BOUGHT",
                     ),
                     summary=tg.get("summary"),
-                    date=tg.get("date", ""),
+                    date=tg.get("date") or "",
                 )
             )
 
@@ -1119,64 +1219,136 @@ class WhaleService:
     async def get_trade_groups(
         self, whale_id: str
     ) -> List[WhaleTradeGroupResponse]:
-        """Get all trade groups for a whale."""
-        sb = get_supabase()
-        result = (
-            sb.table("whale_trade_groups")
-            .select("*")
-            .eq("whale_id", whale_id)
-            .order("created_at", desc=True)
-            .limit(20)
-            .execute()
-        )
+        """Get all trade groups for a whale, newest FILING first.
 
-        groups = []
-        for tg in result.data or []:
-            db_trades = (
-                sb.table("whale_trades")
+        Ordered by ``date``, matching `_build_whale_profile` and
+        `get_whale_activity_feed`. It used to order by ``created_at`` — the row's
+        INGESTION time — so a backfill or a re-hydration reshuffled this list relative
+        to the very same groups on the profile screen: the same whale, two orders.
+
+        The trades are fetched in ONE query for all groups rather than one per group.
+        The old shape issued up to 21 SEQUENTIAL calls through the SYNCHRONOUS Supabase
+        client from inside an ``async def``, blocking the event loop for every one of
+        them (CLAUDE.md: never block the loop with sync I/O).
+        """
+        sb = get_supabase()
+        try:
+            result = (
+                sb.table("whale_trade_groups")
                 .select("*")
-                .eq("trade_group_id", tg["id"])
-                .order("amount", desc=True)
+                .eq("whale_id", whale_id)
+                .order("date", desc=True)
+                .limit(_TRADE_GROUPS_PAGE)
                 .execute()
             )
-            groups.append(
+            rows = result.data or []
+            if not rows:
+                return []
+            return self._assemble_groups_with_trades(sb, rows)
+        except Exception as e:
+            logger.error(
+                "[whale_trade_groups] Failed for whale_id=%s: %s: %s",
+                whale_id, type(e).__name__, e, exc_info=True,
+            )
+            raise
+
+    def _assemble_groups_with_trades(
+        self, sb, group_rows: List[Dict[str, Any]]
+    ) -> List[WhaleTradeGroupResponse]:
+        """Attach trades to ``group_rows`` using ONE ``in_`` query, preserving order.
+
+        Shared by `get_trade_groups` and `_build_whale_profile` so the N+1 cannot creep
+        back into one of them. Trades are re-sorted by amount IN PYTHON because a single
+        multi-group query can only carry one global ordering.
+        """
+        group_ids = [str(g["id"]) for g in group_rows]
+        by_group: Dict[str, List[Dict[str, Any]]] = {gid: [] for gid in group_ids}
+        try:
+            trades = (
+                sb.table("whale_trades")
+                .select("*")
+                .in_("trade_group_id", group_ids)
+                # Explicit cap: PostgREST silently truncates at 1000 rows, and a silent
+                # truncation here would drop trades with no signal at all.
+                .limit(_TRADES_PER_PAGE * max(1, len(group_ids)))
+                .execute()
+            ).data or []
+        except Exception as e:
+            logger.warning(
+                "[whale_trade_groups] Trade fetch failed for %d group(s): %s: %s",
+                len(group_ids), type(e).__name__, e,
+            )
+            trades = []
+        for t in trades:
+            bucket = by_group.get(str(t.get("trade_group_id")))
+            if bucket is not None:
+                bucket.append(t)
+
+        out: List[WhaleTradeGroupResponse] = []
+        for g in group_rows:
+            gid = str(g["id"])
+            rows = sorted(
+                by_group.get(gid, []),
+                key=lambda t: _finite_float(t.get("amount")),
+                reverse=True,
+            )[:_TRADES_PER_PAGE]
+            out.append(
                 self._assemble_group_response(
-                    str(tg["id"]),
-                    tg,
-                    self._build_trade_responses_from_db(db_trades.data or []),
+                    gid, g, self._build_trade_responses_from_db(rows)
                 )
             )
-        return groups
+        return out
 
     async def get_trade_group_detail(
         self, whale_id: str, group_id: str
     ) -> Optional[WhaleTradeGroupResponse]:
-        """Get a single trade group with all trades."""
+        """Get a single trade group with all trades.
+
+        Scoped by BOTH ``id`` and ``whale_id`` so a group id cannot be read against a
+        whale it does not belong to.
+
+        A non-uuid ``group_id`` makes PostgREST raise ``22P02``; that used to escape as
+        an unhandled 500. It is a bad path parameter, so it answers 404 like any other
+        unknown group.
+        """
         sb = get_supabase()
-        result = (
-            sb.table("whale_trade_groups")
-            .select("*")
-            .eq("id", group_id)
-            .eq("whale_id", whale_id)
-            .execute()
-        )
-        if not result.data:
+        if not _looks_like_uuid(group_id):
+            logger.info(
+                "[whale_trade_group] Malformed group_id=%r for whale=%s", group_id, whale_id
+            )
             return None
-        tg = result.data[0]
+        try:
+            result = (
+                sb.table("whale_trade_groups")
+                .select("*")
+                .eq("id", group_id)
+                .eq("whale_id", whale_id)
+                .execute()
+            )
+            if not result.data:
+                return None
+            tg = result.data[0]
 
-        db_trades = (
-            sb.table("whale_trades")
-            .select("*")
-            .eq("trade_group_id", group_id)
-            .order("amount", desc=True)
-            .execute()
-        )
+            db_trades = (
+                sb.table("whale_trades")
+                .select("*")
+                .eq("trade_group_id", group_id)
+                .order("amount", desc=True)
+                .limit(_TRADES_PER_PAGE)
+                .execute()
+            )
 
-        return self._assemble_group_response(
-            str(tg["id"]),
-            tg,
-            self._build_trade_responses_from_db(db_trades.data or []),
-        )
+            return self._assemble_group_response(
+                str(tg["id"]),
+                tg,
+                self._build_trade_responses_from_db(db_trades.data or []),
+            )
+        except Exception as e:
+            logger.error(
+                "[whale_trade_group] Failed for whale_id=%s group_id=%s: %s: %s",
+                whale_id, group_id, type(e).__name__, e, exc_info=True,
+            )
+            raise
 
     async def toggle_follow(
         self, user_id: str, whale_id: str, follow: bool, tier: Optional[str] = None
@@ -1189,46 +1361,88 @@ class WhaleService:
         """
         sb = get_supabase()
 
-        if follow:
-            self._assert_may_follow(sb, user_id, whale_id, tier)
-            sb.table("whale_follows").upsert(
-                {"user_id": user_id, "whale_id": whale_id},
-                on_conflict="user_id,whale_id",
-            ).execute()
-        else:
-            sb.table("whale_follows").delete().eq(
-                "user_id", user_id
-            ).eq("whale_id", whale_id).execute()
+        try:
+            if follow:
+                already_followed = self._assert_may_follow(sb, user_id, whale_id, tier)
+                sb.table("whale_follows").upsert(
+                    {"user_id": user_id, "whale_id": whale_id},
+                    on_conflict="user_id,whale_id",
+                ).execute()
+                if not already_followed:
+                    # `_assert_may_follow` is SELECT-then-count-then-INSERT — a textbook
+                    # TOCTOU. Two taps racing at 9/10 both read 9, both pass, and the user
+                    # ends at 11 follows on a 10-follow plan. There is no DB-level count
+                    # constraint to lean on, so the write is confirmed AFTER the fact and
+                    # compensated: whoever loses the race has their own row removed and
+                    # gets the same paywall they would have got serially.
+                    self._compensate_if_over_limit(sb, user_id, whale_id, tier)
+            else:
+                sb.table("whale_follows").delete().eq(
+                    "user_id", user_id
+                ).eq("whale_id", whale_id).execute()
+        except WhaleFollowLockedException:
+            raise                                  # the endpoint maps this to a paywall
+        except Exception as e:
+            # Had no boundary at all, so a transient Supabase failure reached the client
+            # as a bare 500 and iOS reverted the pill with a generic message.
+            logger.error(
+                "[whale_follow] %s failed for user=%s whale=%s: %s: %s",
+                "follow" if follow else "unfollow",
+                user_id, whale_id, type(e).__name__, e, exc_info=True,
+            )
+            raise
 
-        # Read updated followers count
-        whale = (
-            sb.table("whales")
-            .select("followers_count")
-            .eq("id", whale_id)
-            .execute()
-        )
-        count = (
-            whale.data[0]["followers_count"] if whale.data else 0
-        )
+        # OBSERVE the resulting state rather than asserting the intent. `is_following`
+        # used to echo the `follow` argument, so a write that RLS filtered out — or one
+        # the DB rejected without raising — told the client it had succeeded, and the
+        # client persisted that lie to disk.
+        is_following = follow
+        count = 0
+        try:
+            confirm = (
+                sb.table("whale_follows")
+                .select("whale_id")
+                .eq("user_id", user_id)
+                .eq("whale_id", whale_id)
+                .limit(1)
+                .execute()
+            )
+            is_following = bool(confirm.data)
+            whale = (
+                sb.table("whales")
+                .select("followers_count")
+                .eq("id", whale_id)
+                .limit(1)
+                .execute()
+            )
+            count = (whale.data[0].get("followers_count") or 0) if whale.data else 0
+        except Exception as e:
+            # Non-fatal: the write above already landed. Report the intent rather than
+            # failing the whole mutation, but say so loudly — a silent degradation here
+            # is how a wrong follower count becomes unexplainable later.
+            logger.warning(
+                "[whale_follow] Post-write read-back failed for user=%s whale=%s "
+                "(%s: %s) — reporting intent",
+                user_id, whale_id, type(e).__name__, e,
+            )
 
-        # Invalidate caches
-        _whale_list_cache.clear()
-        _whale_activity_cache.clear()
-        _whale_profile_cache.clear()
+        _invalidate_follow_caches(user_id, whale_id)
 
-        return FollowResponse(is_following=follow, followers_count=count)
+        return FollowResponse(is_following=is_following, followers_count=count)
 
     def _assert_may_follow(
         self, sb, user_id: str, whale_id: str, tier: Optional[str]
-    ) -> None:
+    ) -> bool:
         """Raise WhaleFollowLockedException unless this tier may track this whale.
 
-        Re-following a whale the caller ALREADY follows is always allowed — the upsert is
-        idempotent, so refusing it would turn a double-tap into a paywall.
+        Returns True when the caller ALREADY follows this whale, which is always allowed
+        — the upsert is idempotent, so refusing it would turn a double-tap into a
+        paywall. The caller uses the return value to skip the post-write limit check,
+        since an idempotent re-follow cannot push anyone over a cap.
         """
         limit = whale_follow_limit(tier)
         if limit is None:
-            return                                  # Max — unlimited
+            return False                            # Max — unlimited
 
         required = required_tier_for_whales(tier) or TIER_PRO
 
@@ -1242,22 +1456,97 @@ class WhaleService:
                     required, limit,
                     f"Free tier may only follow {FREE_TIER_WHALE_NAME}",
                 )
-            return
+            # Free's allowance is one SPECIFIC whale, so identity is the whole check and
+            # a count cannot be exceeded. Report whether the row already exists purely so
+            # the caller can skip a pointless post-write count.
+            return self._is_following(sb, user_id, whale_id)
 
         existing = (
             sb.table("whale_follows")
             .select("whale_id")
             .eq("user_id", user_id)
+            .limit(_ROSTER_PAGE)
             .execute()
         )
         followed = {str(row["whale_id"]) for row in (existing.data or [])}
         if str(whale_id) in followed:
-            return                                  # idempotent re-follow
+            return True                             # idempotent re-follow
         if len(followed) >= limit:
             raise WhaleFollowLockedException(
                 required, limit,
                 f"Follow limit reached ({len(followed)}/{limit})",
             )
+        return False
+
+    @staticmethod
+    def _is_following(sb, user_id: str, whale_id: str) -> bool:
+        """Does this row already exist? Read-only; never raises for a missing row."""
+        try:
+            existing = (
+                sb.table("whale_follows")
+                .select("whale_id")
+                .eq("user_id", user_id)
+                .eq("whale_id", whale_id)
+                .limit(1)
+                .execute()
+            )
+            return bool(existing.data)
+        except Exception as e:
+            logger.warning(
+                "[whale_follow] Existence check failed for user=%s whale=%s: %s: %s",
+                user_id, whale_id, type(e).__name__, e,
+            )
+            return False
+
+    def _compensate_if_over_limit(
+        self, sb, user_id: str, whale_id: str, tier: Optional[str]
+    ) -> None:
+        """Undo THIS follow if the post-write count exceeds the plan's allowance.
+
+        The compensation is deliberately scoped to the row we just wrote: it is the only
+        one this request is responsible for, and deleting somebody's older follow to make
+        room would destroy state the user never asked to lose ("truncate, never destroy").
+        """
+        limit = whale_follow_limit(tier)
+        if limit is None or normalize_tier(tier) == TIER_FREE:
+            return
+        try:
+            after = (
+                sb.table("whale_follows")
+                .select("whale_id")
+                .eq("user_id", user_id)
+                .limit(_ROSTER_PAGE)
+                .execute()
+            )
+            total = len(after.data or [])
+        except Exception as e:
+            logger.warning(
+                "[whale_follow] Post-write count failed for user=%s: %s: %s — "
+                "leaving the follow in place",
+                user_id, type(e).__name__, e,
+            )
+            return
+        if total <= limit:
+            return
+        logger.info(
+            "[whale_follow] Concurrent follow raced past the cap for user=%s "
+            "(%d/%d) — rolling back whale=%s",
+            user_id, total, limit, whale_id,
+        )
+        try:
+            sb.table("whale_follows").delete().eq(
+                "user_id", user_id
+            ).eq("whale_id", whale_id).execute()
+        except Exception as e:
+            logger.error(
+                "[whale_follow] Rollback FAILED for user=%s whale=%s: %s: %s — "
+                "the account is over its follow limit",
+                user_id, whale_id, type(e).__name__, e, exc_info=True,
+            )
+        raise WhaleFollowLockedException(
+            required_tier_for_whales(tier) or TIER_PRO, limit,
+            f"Follow limit reached ({limit}/{limit})",
+        )
 
     async def get_whale_alerts(
         self, user_id: Optional[str] = None
@@ -1296,6 +1585,12 @@ class WhaleService:
                     followed_result = (
                         sb.table("whale_alerts")
                         .select("*")
+                        # Expiry filtered IN THE QUERY. Taking the newest 5 and then
+                        # filtering in Python meant that if all 5 happened to be expired,
+                        # a perfectly valid 6th was invisible — a hard 5-row window
+                        # masquerading as an expiry check. `expires_at IS NULL` means
+                        # "never expires" and must still qualify.
+                        .or_(f"expires_at.is.null,expires_at.gt.{_now_iso()}")
                         .eq("is_active", True)
                         .in_("whale_id", whale_ids)
                         .order("created_at", desc=True)
@@ -1313,6 +1608,7 @@ class WhaleService:
             result = (
                 sb.table("whale_alerts")
                 .select("*")
+                .or_(f"expires_at.is.null,expires_at.gt.{_now_iso()}")
                 .eq("is_active", True)
                 .order("created_at", desc=True)
                 .limit(5)
@@ -1548,7 +1844,7 @@ class WhaleService:
         sb = get_supabase()
 
         # Use monthly periods for congressional data
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         period = now.strftime("%Y-%m")
 
         # Check cache
@@ -1911,7 +2207,14 @@ class WhaleService:
                 continue
 
             raw_type = (t.get("type") or "").lower().strip()
-            action = CONGRESSIONAL_TYPE_MAP.get(raw_type, "BOUGHT")
+            action = resolve_congress_action(t.get("type"))
+            if action is None:
+                logger.warning(
+                    "[whale_congress] Skipping trade with unrecognised type=%r "
+                    "(symbol=%s) — refusing to guess a direction",
+                    t.get("type"), symbol,
+                )
+                continue
             amount_range = t.get("amount") or "$1,001 - $15,000"
             # Keep the REAL parsed amount (0.0 when FMP's bucket is unparseable,
             # e.g. "$50,000,000+") — do NOT fabricate an $8,000 midpoint. A
@@ -2283,21 +2586,32 @@ class WhaleService:
         holdings: List[Dict],
         prev_raw: List[Dict],
     ) -> List[Dict]:
-        """Compute change_percent by comparing current vs previous quarter allocations."""
-        prev_total = sum(float(h.get("value") or 0) for h in prev_raw)
-        if prev_total <= 0:
+        """Compute change_percent by comparing current vs previous quarter allocations.
+
+        ⚠️ Every arithmetic input here goes through ``_finite_float``, NOT bare
+        ``float(x or 0)``. This was the one site in the 13F pipeline that did not, and
+        the omission was load-bearing: ``float("nan") or 0`` yields ``nan`` (NaN is
+        truthy), so ``prev_total`` became NaN, ``prev_total <= 0`` evaluated **False**
+        (every NaN comparison does), and the guard below was bypassed. Every
+        ``change_percent`` then became NaN, reached ``WhaleHoldingResponse`` — whose
+        ``JSONResponse`` renders with ``allow_nan=False`` — and 500'd the entire whale
+        profile from inside the renderer, where the endpoint's own try/except cannot
+        reach it. Same failure shape as the holders-tab NaN outage.
+        """
+        prev_total = sum(_finite_float(h.get("value")) for h in prev_raw)
+        if not math.isfinite(prev_total) or prev_total <= 0:
             return holdings
 
         prev_alloc: Dict[str, float] = {}
         for h in prev_raw:
             sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
             if sym and sym != "--":
-                val = float(h.get("value") or 0)
+                val = _finite_float(h.get("value"))
                 prev_alloc[sym] = val / prev_total * 100
 
         for h in holdings:
-            prev_pct = prev_alloc.get(h["ticker"], 0)
-            curr_pct = h.get("allocation", 0)
+            prev_pct = _finite_float(prev_alloc.get(h.get("ticker")))
+            curr_pct = _finite_float(h.get("allocation"))
             h["change_percent"] = round(curr_pct - prev_pct, 2)
 
         return holdings
@@ -2330,11 +2644,11 @@ class WhaleService:
                 .in_("ticker", tickers)
                 .execute()
             )
-            now = datetime.now(datetime.now().astimezone().tzinfo)
+            now = datetime.now(timezone.utc)
             for row in cache_result.data or []:
-                cached_at = datetime.fromisoformat(
-                    row["cached_at"].replace("Z", "+00:00")
-                )
+                cached_at = _as_aware(row.get("cached_at"))
+                if cached_at is None:
+                    continue          # unusable stamp → treat as a miss, refetch this one
                 age_hours = (now - cached_at).total_seconds() / 3600
                 if age_hours < 168:  # 7 days for static data like logos/names
                     profile_map[row["ticker"]] = row["profile_json"]
@@ -2364,7 +2678,7 @@ class WhaleService:
                                 {
                                     "ticker": sym,
                                     "profile_json": p,
-                                    "cached_at": datetime.now().isoformat(),
+                                    "cached_at": datetime.now(timezone.utc).isoformat(),
                                 },
                                 on_conflict="ticker",
                             ).execute()
@@ -2426,15 +2740,15 @@ class WhaleService:
         return [
             WhaleTradeResponse(
                 id=str(uuid.uuid4()),
-                ticker=t.get("ticker", ""),
-                company_name=t.get("company_name", ""),
-                action=t.get("action", "BOUGHT"),
-                trade_type=t.get("trade_type", "Increased"),
-                amount=float(t.get("amount", 0)),
+                ticker=t.get("ticker") or "",
+                company_name=t.get("company_name") or "",
+                action=t.get("action") or "BOUGHT",
+                trade_type=t.get("trade_type") or "Increased",
+                amount=_finite_float(t.get("amount")),
                 amount_range=t.get("amount_range"),
-                previous_allocation=float(t.get("previous_allocation", 0)),
-                new_allocation=float(t.get("new_allocation", 0)),
-                date=t.get("date", ""),
+                previous_allocation=_finite_float(t.get("previous_allocation")),
+                new_allocation=_finite_float(t.get("new_allocation")),
+                date=t.get("date") or "",
                 disclosure_date=t.get("disclosure_date"),
             )
             for t in trades
@@ -2447,15 +2761,15 @@ class WhaleService:
         return [
             WhaleTradeResponse(
                 id=str(t["id"]),
-                ticker=t.get("ticker", ""),
-                company_name=t.get("company_name", ""),
-                action=t.get("action", "BOUGHT"),
-                trade_type=t.get("trade_type", "Increased"),
-                amount=float(t.get("amount", 0)),
+                ticker=t.get("ticker") or "",
+                company_name=t.get("company_name") or "",
+                action=t.get("action") or "BOUGHT",
+                trade_type=t.get("trade_type") or "Increased",
+                amount=_finite_float(t.get("amount")),
                 amount_range=t.get("amount_range"),
-                previous_allocation=float(t.get("previous_allocation") or 0),
-                new_allocation=float(t.get("new_allocation") or 0),
-                date=t.get("date", ""),
+                previous_allocation=_finite_float(t.get("previous_allocation")),
+                new_allocation=_finite_float(t.get("new_allocation")),
+                date=t.get("date") or "",
                 disclosure_date=t.get("disclosure_date"),
             )
             for t in db_trades
@@ -2475,7 +2789,10 @@ class WhaleService:
         from the trades when absent (DB path, whose row has no such columns).
         13F groups leave them ``None`` and keep the precise ``net_amount``.
         """
-        net_action = tg.get("net_action", "BOUGHT")
+        # `or`-form: `net_action` is NOT NULL in the schema today, but this method also
+        # receives untyped SNAPSHOT dicts where it can genuinely be absent or null, and
+        # `.get(k, default)` does not defend against a present null.
+        net_action = tg.get("net_action") or "BOUGHT"
         disclosure_date = tg.get("disclosure_date")
         transaction_date = tg.get("transaction_date")
         net_amount_range = tg.get("net_amount_range")
@@ -2503,10 +2820,10 @@ class WhaleService:
 
         return WhaleTradeGroupResponse(
             id=group_id,
-            date=tg.get("date", ""),
-            trade_count=tg.get("trade_count", 0),
+            date=tg.get("date") or "",
+            trade_count=tg.get("trade_count") or 0,
             net_action=net_action,
-            net_amount=float(tg.get("net_amount", 0)),
+            net_amount=_finite_float(tg.get("net_amount")),
             net_amount_range=net_amount_range,
             disclosure_date=disclosure_date,
             transaction_date=transaction_date,
@@ -2712,8 +3029,13 @@ class WhaleService:
             if not ipo_date_str:
                 return AnnualReturn(None, None, "", RETURN_UNAVAILABLE)
 
-            ipo_date = datetime.strptime(ipo_date_str, "%Y-%m-%d")
-            years = (datetime.now() - ipo_date).days / 365.25
+            # `.replace(tzinfo=utc)`: strptime yields a NAIVE datetime, and subtracting
+            # it from an aware `now` raises TypeError — which the broad `except` below
+            # would swallow into "return data unavailable" for every proxy-ticker whale.
+            ipo_date = datetime.strptime(ipo_date_str, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc
+            )
+            years = (datetime.now(timezone.utc) - ipo_date).days / 365.25
             if years < 1:
                 # Less than a full year of trading — annualizing it would
                 # extrapolate a partial year into a "per year" claim.
@@ -2780,10 +3102,14 @@ class WhaleService:
         raw_value = (snapshot or {}).get("total_value")
         if raw_value is None:
             raw_value = whale.get("portfolio_value")
-        try:
-            portfolio_value = float(raw_value) if raw_value is not None else 0.0
-        except (TypeError, ValueError):
-            portfolio_value = 0.0
+        # `_finite_float`, not bare `float()`: `float("NaN")` SUCCEEDS, so a
+        # `try/except (TypeError, ValueError)` never fires for it. Postgres `numeric`
+        # accepts the value 'NaN' and the `portfolio_value >= 0` CHECK passes for it
+        # (Postgres orders NaN above every numeric), so a NaN can genuinely be stored
+        # and read back — and it 500s the whole profile at serialization time.
+        portfolio_value = (
+            _finite_float(raw_value) if raw_value is not None else 0.0
+        )
         portfolio_status = (
             RETURN_OK if portfolio_value > 0 else RETURN_UNAVAILABLE
         )
@@ -2796,10 +3122,18 @@ class WhaleService:
             # Row predates migration 127. Trust the legacy value if there is
             # one, so nothing blanks during the rollout window.
             return_status = RETURN_OK if raw_return is not None else RETURN_INSUFFICIENT
-        try:
-            ytd_return = float(raw_return) if raw_return is not None else 0.0
-        except (TypeError, ValueError):
+        # Same NaN reasoning as `portfolio_value` above. A sentinel is used rather
+        # than a silent 0.0 so an unusable stored value degrades to the honest
+        # "not enough history" tile instead of a confident flat "+0.0%".
+        _coerced = (
+            _finite_float(raw_return, default=_UNUSABLE_NUMBER)
+            if raw_return is not None
+            else 0.0
+        )
+        if _coerced is _UNUSABLE_NUMBER:
             ytd_return, return_status = 0.0, RETURN_INSUFFICIENT
+        else:
+            ytd_return = _coerced
 
         # A legacy row can be `ok` with no window; the client then omits the
         # "· N-yr" suffix rather than blanking an otherwise good number.
@@ -3001,6 +3335,83 @@ class WhaleService:
 # ── Module-Level Helpers ─────────────────────────────────────────────
 
 
+def _invalidate_follow_caches(user_id: str, whale_id: str) -> None:
+    """Drop only the cache entries a follow toggle actually invalidates.
+
+    This used to be three unconditional ``.clear()`` calls, so ONE user tapping Follow
+    wiped every other user's roster, activity feed and whale profile. On a busy instance
+    that made the 1-hour profile cache effectively inoperative and pushed the load onto
+    the expensive Tier-3 FMP rebuild.
+
+    What each cache actually depends on:
+      • ``_whale_activity_cache`` — keyed ``activity:{user_id}:{tier}``. Only THIS user's
+        entries change. Dropped across every tier key, because the caller's tier is not
+        known here and there are only a handful.
+      • ``_whale_list_cache`` — keyed ``whales:{category}:{user_id}``. Only THIS user's
+        entries carry the changed ``is_following``. Other users' rosters hold a
+        ``followers_count`` that is now off by one; that is a soft counter with a 5-minute
+        TTL, and staleness there is worth far less than a global stampede.
+      • ``_whale_profile_cache`` — deliberately NOT dropped. Profiles are built
+        follow-state-free and the per-user ``is_following`` is overlaid on read
+        (``_overlay_follow_state``), and the shape carries no follower count. Clearing it
+        on a follow was pure waste.
+    """
+    for key in [k for k in _whale_activity_cache if k.startswith(f"activity:{user_id}:")]:
+        _whale_activity_cache.pop(key, None)
+    for key in [k for k in _whale_list_cache if k.endswith(f":{user_id}")]:
+        _whale_list_cache.pop(key, None)
+
+
+def _snapshot_group_id(whale_id: str, filing_date: Any) -> str:
+    """A stable, reproducible id for a trade group that exists only in the snapshot.
+
+    Deterministic (uuid5 over whale + filing date) so the same group keeps the same id
+    across requests and across processes. A random id per request re-keyed the iOS
+    `Identifiable` list on every profile refresh.
+    """
+    return str(uuid.uuid5(_SNAPSHOT_GROUP_NS, f"{whale_id}:{filing_date or ''}"))
+
+
+def _now_iso() -> str:
+    """Current UTC instant as an ISO-8601 string, for PostgREST filter literals."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _as_aware(value: Any) -> Optional[datetime]:
+    """Parse a Postgres timestamp into a UTC-AWARE datetime, or None.
+
+    Rows written before the UTC fix carry a NAIVE local stamp. Subtracting a naive from
+    an aware datetime raises ``TypeError`` — which, at the one call site that catches
+    broadly, silently degraded into "refetch every ticker from FMP" on every build.
+    A naive value is therefore ASSUMED UTC, which is what Postgres did with it on the
+    way in.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _looks_like_uuid(value: Any) -> bool:
+    """True when ``value`` can be parsed as a uuid.
+
+    Used to reject a malformed path parameter BEFORE it reaches PostgREST, which
+    answers a bad uuid literal with ``22P02`` — an error that read as an unhandled 500
+    rather than as "no such group".
+    """
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def _finite_float(value: Any, default: float = 0.0) -> float:
     """Coerce to a FINITE float; NaN / Inf / None / garbage → ``default``.
 
@@ -3089,17 +3500,23 @@ async def _noop_list() -> List:
 
 
 def _format_amount(value: float, action: str) -> str:
-    """Format a dollar amount for display: +$4.34B, -$2.1M, etc."""
-    prefix = "+" if action == "BOUGHT" else "-"
-    abs_val = abs(value)
+    """Signed, human-scaled dollar string for the activity feed. iOS renders it VERBATIM.
 
-    if abs_val >= 1_000_000_000:
-        formatted = f"${abs_val / 1_000_000_000:.2f}B"
-    elif abs_val >= 1_000_000:
-        formatted = f"${abs_val / 1_000_000:.1f}M"
-    elif abs_val >= 1_000:
-        formatted = f"${abs_val / 1_000:.0f}K"
-    else:
-        formatted = f"${abs_val:,.0f}"
+    Delegates the magnitude to ``_whale_common.format_amount_short`` so the roll-up
+    rule lives in exactly one place. It used to have its own ladder with no roll-up at
+    the unit boundaries, which made $999,999,999 render "+$1000.0M" here while the very
+    same trade group rendered "$1.00B" on the whale profile card — the same figure,
+    two screens, two answers. ``format_amount_short`` also takes ``abs()``, so the sign
+    is ours to add.
 
-    return f"{prefix}{formatted}"
+    The sign is derived from an explicit SOLD test rather than ``== "BOUGHT"``: the old
+    form stamped a minus on ANY value that was not exactly "BOUGHT", so a blank or
+    lower-cased ``net_action`` turned a buy into a loss on the timeline.
+    """
+    amount = _finite_float(value)
+    # An exactly-zero group is a perfect wash, not a sale — "-$0" states a direction
+    # the data does not have.
+    if amount == 0:
+        return format_amount_short(0.0)
+    prefix = "-" if str(action).strip().upper() == "SOLD" else "+"
+    return f"{prefix}{format_amount_short(amount)}"

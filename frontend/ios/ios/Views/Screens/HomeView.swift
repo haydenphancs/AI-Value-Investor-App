@@ -2,164 +2,25 @@
 //  HomeView.swift
 //  ios
 //
-//  Main Home screen combining all organisms
+//  Now holds only `LoadingOverlay`, which many live screens use.
+//
+//  The three Home views that used to live here and in ContentView.swift —
+//  `HomeContentView`, `HomeView` and `HomeViewWithBinding` — were deleted. All three were
+//  unreferenced (`HomeDashboardView` has been the live Home for some time), and each was a
+//  loaded gun rather than a harmless rollback copy:
+//
+//  - `HomeView` was `var body: some View { ContentView() }`. Rendering it anywhere would have
+//    built a SECOND entire ContentView — a second copy of all five tabs and all five
+//    ViewModels, with none of the per-VM dedup spanning the two.
+//  - `HomeContentView` owned a `HomeViewModel`, whose `init` fired a network request. That is
+//    the one pattern `test_ios_tabs_reload_on_identity_change.py` explicitly pins against, and
+//    it was the last instance of it in the codebase (`HomeViewModel.swift` went with it).
+//
+//  Per the `project_research_screen_live_vs_preview` lesson: a duplicate of a live screen is
+//  where fixes go to die.
 //
 
 import SwiftUI
-
-// MARK: - HomeContentView (Used in TabView)
-struct HomeContentView: View {
-    @StateObject private var viewModel = HomeViewModel()
-    @State private var showingSearch = false
-    @State private var selectedNewsArticle: NewsArticle?
-    @State private var selectedMarketTicker: MarketTicker?
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                // Background
-                AppColors.background
-                    .ignoresSafeArea()
-
-                // Main Content
-                VStack(spacing: 0) {
-                    // Header
-                    HomeHeader(
-                        onProfileTapped: handleProfileTapped,
-                        onSearchTapped: handleSearchTapped
-                    )
-
-                    // Scrollable Content with proper bounce behavior
-                    ScrollView(showsIndicators: false) {
-                        LazyVStack(spacing: AppSpacing.xl) {
-                            // Market Tickers Row
-                            MarketTickersRow(
-                                tickers: viewModel.marketTickers,
-                                onTickerTap: handleMarketTickerTap
-                            )
-                            .padding(.top, AppSpacing.sm)
-
-                            // Market Insights Card
-                            if let insight = viewModel.marketInsight {
-                                MarketInsightsCard(insight: insight) {
-                                    handleSeeAllInsights()
-                                }
-                                .padding(.horizontal, AppSpacing.lg)
-                            }
-
-                            // Daily Briefing Section
-                            DailyBriefingSection(
-                                items: viewModel.dailyBriefings,
-                                onItemTapped: handleBriefingItemTapped
-                            )
-
-                            // Recent Research Section
-                            RecentResearchSection(
-                                reports: viewModel.recentResearch,
-                                onSeeAllTapped: handleSeeAllResearch,
-                                onReportTapped: handleReportTapped,
-                                onAskOrReadTapped: handleAskOrRead
-                            )
-
-                            // New Analysis Button
-                            NewAnalysisButton {
-                                handleNewAnalysis()
-                            }
-                            .padding(.bottom, AppSpacing.lg)
-                        }
-                    }
-                    .refreshable {
-                        await viewModel.refresh()
-                    }
-                }
-
-                // Loading overlay
-                if viewModel.isLoading {
-                    LoadingOverlay()
-                }
-            }
-            .navigationBarHidden(true)
-            .fullScreenCover(isPresented: $showingSearch) {
-                SearchView()
-            }
-            .fullScreenCover(item: $selectedNewsArticle) { article in
-                NewsDetailView(article: article)
-            }
-            .fullScreenCover(item: $selectedMarketTicker) { ticker in
-                NavigationStack {
-                    Group {
-                        switch ticker.type {
-                        case .index:
-                            IndexDetailView(indexSymbol: ticker.symbol)
-                        case .stock:
-                            TickerDetailView(tickerSymbol: ticker.symbol)
-                        case .crypto:
-                            CryptoDetailView(cryptoSymbol: ticker.symbol)
-                        case .commodity:
-                            CommodityDetailView(commoditySymbol: ticker.symbol)
-                        case .etf:
-                            ETFDetailView(etfSymbol: ticker.symbol)
-                        }
-                    }
-                    .navigationBarHidden(true)
-                }
-            }
-        }
-    }
-
-    // MARK: - Action Handlers
-    private func handleProfileTapped() {
-        print("Profile tapped")
-    }
-
-    private func handleSearchTapped() {
-        showingSearch = true
-    }
-
-    private func handleSeeAllInsights() {
-        print("See all insights tapped")
-    }
-
-    private func handleBriefingItemTapped(_ item: DailyBriefingItem) {
-        // Convert DailyBriefingItem to NewsArticle and show detail
-        selectedNewsArticle = NewsArticle(
-            headline: item.title,
-            summary: item.subtitle,
-            source: NewsSource(name: "Market Alert", iconName: nil),
-            sentiment: .neutral,
-            publishedAt: item.date ?? Date(),
-            thumbnailName: nil,
-            relatedTickers: []
-        )
-    }
-
-    private func handleSeeAllResearch() {
-        print("See all research tapped")
-    }
-
-    private func handleReportTapped(_ report: ResearchReport) {
-        print("Report tapped: \(report.headline)")
-    }
-
-    private func handleAskOrRead(_ report: ResearchReport) {
-        print("Ask or Read tapped for: \(report.stockTicker)")
-    }
-
-    private func handleNewAnalysis() {
-        print("New analysis tapped")
-    }
-
-    private func handleMarketTickerTap(_ ticker: MarketTicker) {
-        selectedMarketTicker = ticker
-    }
-}
-
-// MARK: - Legacy HomeView (for backward compatibility)
-struct HomeView: View {
-    var body: some View {
-        ContentView()
-    }
-}
 
 // MARK: - Loading Overlay
 struct LoadingOverlay: View {
@@ -175,8 +36,4 @@ struct LoadingOverlay: View {
                 .scaleEffect(1.5)
         }
     }
-}
-
-#Preview {
-    HomeView()
 }

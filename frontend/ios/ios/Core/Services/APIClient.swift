@@ -37,8 +37,9 @@ actor APIClient {
     /// storm. Followers await the in-flight refresh instead of starting their own.
     private var refreshInFlight: Task<TokenRefreshOutcome, Never>?
 
-    /// Enable debug logging
-    var isDebugLoggingEnabled: Bool = false
+    /// Enable debug logging. `private(set)`: it gates the body dumps below, so a caller
+    /// flipping it on in a Release build would start printing bearer tokens and signed URLs.
+    private(set) var isDebugLoggingEnabled: Bool = false
 
     // MARK: - Singleton
 
@@ -229,9 +230,12 @@ actor APIClient {
         } catch let error as DecodingError {
             throw APIError.decodingError(error)
         } catch {
-            // Connection failed — try failover to the other server
+            // Connection failed — try failover to the other server. NOT on a cancellation:
+            // the caller went away, the server is fine, and `attemptFailover` would spend a
+            // further 1s on a `health/live` probe before re-sending a request nobody wants.
             #if DEBUG
-            if let failoverResult: T = try? await attemptFailover(endpoint: endpoint, originalError: error) {
+            if !Self.isCancellation(error),
+               let failoverResult: T = try? await attemptFailover(endpoint: endpoint, originalError: error) {
                 return failoverResult
             }
             #endif
@@ -284,12 +288,14 @@ actor APIClient {
             }
             throw apiError
         } catch {
-            // Connection failed — try failover
+            // Connection failed — try failover. Not on a cancellation; see `request` above.
             #if DEBUG
-            do {
-                try await attemptFailoverVoid(endpoint: endpoint, originalError: error)
-                return
-            } catch {}
+            if !Self.isCancellation(error) {
+                do {
+                    try await attemptFailoverVoid(endpoint: endpoint, originalError: error)
+                    return
+                } catch {}
+            }
             #endif
             throw APIError.networkError(error)
         }
@@ -484,12 +490,28 @@ actor APIClient {
 
     // MARK: - Failover
 
+    /// A cancelled task, in either of the two shapes it arrives in. Deliberately NOT
+    /// `error is CancellationError`: `URLSession.data(for:)` reports cancellation as
+    /// `URLError.cancelled` (-999), not as `CancellationError`.
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        return (error as? URLError)?.code == .cancelled
+    }
+
     #if DEBUG
     /// When a connection error occurs (localhost died), switch to the other server and retry once.
     private func attemptFailover<T: Decodable>(
         endpoint: APIEndpoint,
         originalError: Error
     ) async throws -> T {
+        // A failover is a RE-SEND, so it is bound by the SAME money rule as the 5xx retry
+        // path above: only GET. `POST /research/generate` precharges 20 credits, inserts a
+        // row and spawns a worker before it returns, so re-issuing one whose response was
+        // merely lost bills the user twice for one tap. This guard was missing entirely —
+        // `attemptFailover` rebuilt and re-sent whatever it was handed, which made the
+        // careful GET-only rule on the retry path bypassable through the DEBUG failover.
+        guard endpoint.method.isSafeToRetryAfterServerError else { throw originalError }
+
         let env = ServerEnvironmentManager.shared
 
         // Don't failover if manual override is set
@@ -530,6 +552,14 @@ actor APIClient {
         endpoint: APIEndpoint,
         originalError: Error
     ) async throws {
+        // A failover is a RE-SEND, so it is bound by the SAME money rule as the 5xx retry
+        // path above: only GET. `POST /research/generate` precharges 20 credits, inserts a
+        // row and spawns a worker before it returns, so re-issuing one whose response was
+        // merely lost bills the user twice for one tap. This guard was missing entirely —
+        // `attemptFailover` rebuilt and re-sent whatever it was handed, which made the
+        // careful GET-only rule on the retry path bypassable through the DEBUG failover.
+        guard endpoint.method.isSafeToRetryAfterServerError else { throw originalError }
+
         let env = ServerEnvironmentManager.shared
         guard !env.isManualOverride else { throw originalError }
 
@@ -750,18 +780,56 @@ actor APIClient {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Keys whose VALUE must never be printed, even in a debug build.
+    ///
+    /// These are not hypothetical. A launch log routinely contained a Supabase Storage signed
+    /// URL complete with its `token=` query parameter (`/learn/books/audio`, `/learn/money-moves`)
+    /// and the account's email address (`/users/me`); a sign-in would have printed the
+    /// password in clear, since `SignInRequest` is `httpBody` like any other. Console output
+    /// gets pasted into bug reports and chat windows.
+    private static let redactedKeys = [
+        "password", "current_password", "new_password",
+        "token", "access_token", "refresh_token", "id_token", "identity_token",
+        "authorization", "api_key", "secret",
+        "email", "audio_url", "avatar_url", "url",
+    ]
+
+    /// Replace the value of any sensitive key with `***`, and defang a signed URL wherever it
+    /// appears. Deliberately a regex over the raw string rather than a JSON re-encode: the body
+    /// may not be JSON, and a logger must never be able to throw or mutate what it reports.
+    private static func redact(_ raw: String) -> String {
+        var out = raw
+        for key in redactedKeys {
+            out = out.replacingOccurrences(
+                of: "\"\(key)\"\\s*:\\s*\"[^\"]*\"",
+                with: "\"\(key)\":\"***\"",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        // Query-string credentials (`?token=…`, `&signature=…`) survive the JSON pass above
+        // when they are embedded inside a URL value that itself was not a redacted key.
+        out = out.replacingOccurrences(
+            of: "([?&](?:token|signature|sig|key|apikey)=)[^&\"\\s]+",
+            with: "$1***",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        return out
+    }
+
     private func logRequest(_ request: URLRequest, endpoint: APIEndpoint) {
         guard isDebugLoggingEnabled else { return }
 
-        print("🌐 [\(endpoint.method.rawValue)] \(request.url?.absoluteString ?? "nil")")
+        #if DEBUG
+        print("🌐 [\(endpoint.method.rawValue)] \(Self.redact(request.url?.absoluteString ?? "nil"))")
         if endpoint.requiresAuth {
             let hasToken = request.value(forHTTPHeaderField: "Authorization") != nil
             print("   🔑 Auth: \(hasToken ? "Bearer token attached" : "⚠️ NO TOKEN (endpoint requires auth)")")
         }
         if let body = request.httpBody,
            let bodyString = String(data: body, encoding: .utf8) {
-            print("   📦 Body: \(bodyString.prefix(500))")
+            print("   📦 Body: \(Self.redact(bodyString).prefix(500))")
         }
+        #endif
     }
 
     private func logResponse(_ response: HTTPURLResponse, data: Data) {
@@ -770,9 +838,14 @@ actor APIClient {
         let emoji = (200...299).contains(response.statusCode) ? "✅" : "❌"
         print("\(emoji) Response \(response.statusCode) from \(response.url?.path ?? "")")
 
+        // Body dumps are `#if DEBUG` in addition to the runtime flag. Two independent gates,
+        // because the flag is a stored property on a shared actor: compiling the dump out
+        // means no build can print a token even if the flag is somehow set.
+        #if DEBUG
         if let bodyString = String(data: data, encoding: .utf8) {
-            print("   📄 Body: \(bodyString.prefix(1000))")
+            print("   📄 Body: \(Self.redact(bodyString).prefix(1000))")
         }
+        #endif
 
         if !(200...299).contains(response.statusCode) {
             print("   ⚠️ HTTP error \(response.statusCode) — check backend logs for details")

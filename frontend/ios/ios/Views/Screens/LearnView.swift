@@ -10,6 +10,7 @@ import SwiftUI
 // MARK: - LearnContentView (Used in TabView)
 struct LearnContentView: View {
     @Environment(\.appState) private var appState
+    @Environment(\.isActiveTab) private var isActiveTab
     @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = LearnViewModel()
     @ObservedObject private var bookmarks = BookmarkStore.shared
@@ -92,7 +93,15 @@ struct LearnContentView: View {
             SearchView()
         }
         .navigationBarHidden(true)
-        .task {
+        // `.task(id: isActiveTab)`, matching the other four tab roots. This was a plain
+        // `.task { }` — the ONLY tab root with no activation gate — so all five hydrations
+        // below ran at cold launch on a tab nobody was looking at, staggered against
+        // `AppState.hydrateLearnStores()`. The stores' `hydrateTask` join only collapses
+        // OVERLAPPING calls, and these two chains never overlapped (each is a serial chain of
+        // different awaits), so `learn/progress/journey_lesson` and `learn/progress/money_move`
+        // were each fetched twice on every launch.
+        .task(id: isActiveTab) {
+            guard isActiveTab else { return }
             // Upgrade the Wiser-screen Money Moves row to fresh backend content so it matches
             // the See-All screen. Bundled content already painted synchronously from the store.
             await viewModel.prefetchMoneyMoves()

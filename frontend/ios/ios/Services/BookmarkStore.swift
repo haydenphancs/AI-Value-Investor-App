@@ -206,7 +206,7 @@ final class BookmarkStore: ObservableObject {
             // being resumed, a THIRD caller can run and observe a completed-but-still
             // -registered task: it would "join" something already done and return
             // instantly without ever loading. That is a silently skipped refresh —
-            // and for `reloadForIdentityChange` it would mean adopting a load that
+            // and for `handleIdentityChange` it would mean adopting a load that
             // completed under the PREVIOUS identity.
             self.hydrateTask = nil
         }

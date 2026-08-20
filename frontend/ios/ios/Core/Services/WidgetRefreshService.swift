@@ -29,6 +29,18 @@ final class WidgetRefreshService {
     private var lastRefresh: Date?
     private static let minimumInterval: TimeInterval = 60
 
+    /// `AppState.identityGeneration` the last completed refresh ran under.
+    ///
+    /// What makes `force: true` meaningful is that the previous fetch answered for SOMEBODY
+    /// ELSE. On a real sign-in that is true. On a cold launch it is not: `AppState` arms the
+    /// stored credential before it fires the seed refresh, so by the time `onAuthenticated`
+    /// forces one, the completed run already used the right bearer — and forcing it spent two
+    /// more requests re-fetching identical data on every single launch.
+    private var lastRefreshIdentity: Int?
+
+    /// The identity the run currently in flight is fetching under, stamped on completion.
+    private var inFlightIdentity: Int?
+
     private var inFlight: Task<Void, Never>?
 
     /// A `force: true` request that arrived while a refresh was already running.
@@ -69,7 +81,7 @@ final class WidgetRefreshService {
     /// Best-effort by design: this is a background nicety, and a failure must never
     /// surface to the user or block anything. A stale widget is fine; an error alert
     /// because a Home Screen tile could not update is not.
-    func refresh(force: Bool = false) {
+    func refresh(force: Bool = false, identity: Int? = nil) {
         // Nothing may go out before we know who we are — see `credentialReady`. Dropped
         // rather than queued: `AppState` fires the seed the moment it opens this gate, so a
         // queued copy would just be a duplicate of that.
@@ -101,14 +113,42 @@ final class WidgetRefreshService {
             // Remember it and re-run on completion rather than starting a second task, so
             // `inFlight` stays a single cancellable handle and `clearForEndedSession()`
             // can still stop everything in one call (auth.md §7).
-            if force { forcedRefreshPending = true }
+            if forceIsMeaningful(force, identity) {
+                forcedRefreshPending = true
+                // Carry the identity across to the drained run, or its completion would stamp
+                // `lastRefreshIdentity` with the identity of the run it was queued BEHIND —
+                // and the next force would then be suppressed against a stale answer.
+                inFlightIdentity = identity
+            }
             return
         }
 
-        if !force, let last = lastRefresh, Date().timeIntervalSince(last) < Self.minimumInterval {
+        if !forceIsMeaningful(force, identity),
+           let last = lastRefresh, Date().timeIntervalSince(last) < Self.minimumInterval {
             return
         }
+        inFlightIdentity = identity
         startRefresh()
+    }
+
+    /// A forced refresh only overrides the throttle when the run it would replace answered
+    /// for a DIFFERENT identity. See `lastRefreshIdentity`.
+    ///
+    /// Both the completed run and the one in flight have to be consulted. Checking only
+    /// `lastRefreshIdentity` fails open at exactly the moment that matters: at cold launch
+    /// `onAuthenticated` forces a refresh while the seed run is still in flight, so nothing has
+    /// been stamped yet, and the force was honoured every time — measured on the simulator as
+    /// two widget runs (four requests) per launch even after the identity check was added.
+    private func forceIsMeaningful(_ force: Bool, _ identity: Int?) -> Bool {
+        guard force else { return false }
+        // No identity supplied — the caller cannot vouch for the previous run, so honour it.
+        guard let identity else { return true }
+        // A run already COMPLETED under this identity; there is nothing to correct.
+        if lastRefreshIdentity == identity { return false }
+        // A run is IN FLIGHT under this identity; it will answer correctly on its own, so
+        // joining it is enough and re-running afterwards would just repeat the same fetch.
+        if inFlight != nil, inFlightIdentity == identity { return false }
+        return true
     }
 
     /// Runs a refresh unconditionally — throttling and joining are decided by `refresh(force:)`.
@@ -171,6 +211,7 @@ final class WidgetRefreshService {
         // Stamped on COMPLETION, not on entry. Stamping first means a run that is
         // cancelled or fails still burns the next minute's allowance.
         lastRefresh = Date()
+        lastRefreshIdentity = inFlightIdentity
     }
 
     private func fetch(_ endpoint: APIEndpoint, client: APIClient) async -> WidgetMoverSnapshot? {

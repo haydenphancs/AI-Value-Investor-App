@@ -12,9 +12,13 @@ when it converges to the same state:
   * holdings + sector allocations — safe ONLY as whole blocks, because each opens
     with a DELETE that wipes a partial commit. Retrying an individual insert would
     hit `whale_holdings_whale_id_ticker_key` and truncate the holdings.
-  * trade groups + trades — NEVER. A committed-but-unacked group insert makes the
-    select-exists guard skip the trades on every future run (permanent loss), and
-    `whale_trades` has no unique key so a replay duplicates.
+  * trade groups + trades — still never retried, but for a narrower reason now. Both
+    writes are UPSERTs against real unique keys (`uq_whale_trade_groups_whale_date`
+    from 077, `uq_whale_trades_group_ticker_action_date` from 143), so a replay
+    REPAIRS a partially-written group instead of skipping it forever or duplicating
+    every trade. Idempotency makes a replay safe, not free: `retry_idempotent_sync`
+    replays from the top of the block it guards, and the per-group try/except already
+    isolates failures.
 
 Also covers the latent `NameError` on the ticker-only path (Issue D).
 """
@@ -277,21 +281,26 @@ async def test_sector_allocations_also_replay_from_the_delete(monkeypatch):
 async def test_trade_groups_are_never_retried(monkeypatch):
     """The most important negative control in this file.
 
-    A committed-but-unacked group insert makes the select-exists guard skip the
-    trades on EVERY future run — permanent, unrepairable loss. So a 520 here must
-    be reported and dropped, never replayed.
+    The write is now an UPSERT against `uq_whale_trade_groups_whale_date` (077), so a
+    replay repairs rather than skips or duplicates — but it is still deliberately NOT
+    wrapped in a retry helper. `retry_idempotent_sync` replays from the top of the block
+    it guards, and the enclosing per-group try/except already provides isolation;
+    idempotency makes a replay SAFE, not free. So a 520 here is still reported and
+    dropped, never replayed.
     """
     groups = [{"date": "2026-08-01", "trade_count": 2, "net_action": "BUY",
                "net_amount": 100.0, "summary": "s", "insights": [], "trades": []}]
     sb = _FakeSupabase(
-        faults={("whale_trade_groups", "insert"): [_gateway_error(520)] * 5},
+        faults={("whale_trade_groups", "upsert"): [_gateway_error(520)] * 5},
         returns={("whale_trade_groups", "select"): []},
     )
     h = _hydrator(sb, monkeypatch)
 
     await h._persist("w1", _snapshot(trade_groups=groups), _OK_RETURN)
 
-    assert sb.count("whale_trade_groups", "insert") == 1  # exactly one attempt
+    assert sb.count("whale_trade_groups", "upsert") == 1  # exactly one attempt
+    # And it must NOT have fallen back to the old check-then-act insert.
+    assert sb.count("whale_trade_groups", "insert") == 0
 
 
 @pytest.mark.asyncio
@@ -299,7 +308,7 @@ async def test_trade_group_520_logs_warning_not_error(monkeypatch, caplog):
     groups = [{"date": "2026-08-01", "trade_count": 2, "net_action": "BUY",
                "net_amount": 100.0, "summary": "s", "insights": [], "trades": []}]
     sb = _FakeSupabase(
-        faults={("whale_trade_groups", "insert"): [_gateway_error(520)]},
+        faults={("whale_trade_groups", "upsert"): [_gateway_error(520)]},
         returns={("whale_trade_groups", "select"): []},
     )
     h = _hydrator(sb, monkeypatch)

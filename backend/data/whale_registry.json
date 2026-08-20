@@ -513,5 +513,32 @@
     "cik": null,
     "data_source": "congressional_house",
     "fmp_name": "Gilbert Cisneros"
+  },
+  {
+    "name": "Dan Crenshaw",
+    "title": "U.S. Representative (TX-2)",
+    "description": "U.S. Representative for Texas's 2nd district and a former Navy SEAL who served in Afghanistan and Iraq. He sits on the House Energy and Commerce Committee, and his disclosed household transactions range across energy, healthcare and technology names, filed under the STOCK Act on the usual 30-45 day reporting lag.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_house",
+    "fmp_name": "Dan Crenshaw"
+  },
+  {
+    "name": "Mark Kelly",
+    "title": "U.S. Senator (AZ)",
+    "description": "U.S. Senator for Arizona, a retired Navy captain and NASA astronaut who commanded two Space Shuttle missions. He serves on the Senate Armed Services Committee. His household's disclosed holdings are broadly diversified rather than concentrated, and are reported under the STOCK Act on a 30-45 day lag.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_senate",
+    "fmp_name": "Mark Kelly"
+  },
+  {
+    "name": "Ted Cruz",
+    "title": "U.S. Senator (TX)",
+    "description": "U.S. Senator for Texas and a member of the Senate Commerce, Science and Transportation and Judiciary Committees. His disclosed transactions have leaned toward energy and technology names, reported under the STOCK Act on a 30-45 day lag rather than in real time.",
+    "category": "politicians",
+    "cik": null,
+    "data_source": "congressional_senate",
+    "fmp_name": "Ted Cruz"
   }
 ]

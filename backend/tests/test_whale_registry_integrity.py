@@ -149,3 +149,34 @@ def test_bios_do_not_put_a_magnitude_claim_next_to_the_13f_tiles():
         "(e.g. 'one of the world's largest hedge funds by total assets'), or "
         "add the name to _ALLOWED with a reason:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_sync_reports_database_rows_missing_from_the_registry():
+    """The sync is ADDITIVE and never deletes, so a row inserted by hand — or one whose
+    registry entry was later removed — is served to users forever.
+
+    This file lints the JSON only; it cannot see the database. Dan Crenshaw, Mark Kelly
+    and Ted Cruz sat in production outside the registry until a manual audit compared the
+    two, so the sync itself has to say something. Pinned here because a silent sync is
+    exactly how the drift went unnoticed for months.
+
+    Comments are stripped first: the explanation next to that code names every token
+    this assertion looks for.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path("scripts/sync_whale_registry.py").read_text(encoding="utf-8")
+    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    src = re.sub(r"(?m)^\s*#.*$", "", src)
+    src = re.sub(r"(?m)\s+#.*$", "", src)
+
+    assert "registry_names" in src and "orphans" in src, (
+        "sync_whale_registry.py must compare the database against the registry"
+    )
+    assert "logger.warning" in src, "drift must be reported at WARNING, not swallowed"
+    # And it must NOT start deleting on its own: a registry typo would destroy a whale
+    # and cascade its follows.
+    assert '.delete()' not in src, (
+        "the sync must never delete whales — report drift and let a human decide"
+    )

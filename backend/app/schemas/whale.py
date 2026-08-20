@@ -59,6 +59,20 @@ class TrendingWhaleResponse(BaseModel):
     # questions. Defaulted for the same already-shipped-client reason.
     is_following_inactive: bool = False
 
+    # ── Activity disclosure ──────────────────────────────────────────
+    # Whether this filer is still producing data. A fund can deregister, a politician can
+    # retire or simply stop trading, and the roster previously had NO date signal of any
+    # kind — a filer that stopped in 2019 rendered identically to one that filed last week.
+    #
+    # `activity_status` is one of `_whale_common.ACTIVITY_*`; `""` means "not computed"
+    # (a legacy row) and the client renders nothing. Defaulted so an already-shipped
+    # client decodes this unchanged.
+    activity_status: str = ""
+    # The sentence the chip shows, e.g. "Last filed Q3 2025" or
+    # "No trades disclosed since Nov 2025". Empty whenever there is nothing to disclose,
+    # so the client never has to build copy from the status enum.
+    activity_label: str = ""
+
 
 # ── Whale profile sub-models ────────────────────────────────────────
 
@@ -194,6 +208,26 @@ class WhaleProfileResponse(BaseModel):
     # Defaulted for the same two reasons the provenance block above is: cached
     # profile JSON predating this field replays through the same model, and iOS
     # must not treat an absent key as fatal.
+    # ── Activity disclosure (migration 145) ──────────────────────────
+    #
+    # Same two fields as the roster, plus the raw date and the CURATED note.
+    #
+    # ⚠️ Defaulted for the same two reasons the provenance block above is: cached profile
+    # JSON predating these fields replays through this model, and iOS must not treat an
+    # absent key as fatal.
+    #
+    # Note the deliberate asymmetry with the stat tiles: `portfolio_value` and
+    # `ytd_return` stay honest NUMBERS even for a dormant filer — Burry's $1.37B really
+    # was his Q3 2025 book. The fix for a stale figure is disclosure, never deletion.
+    activity_status: str = ""
+    activity_label: str = ""
+    # MAX(whale_trade_groups.date): newest 13F filing date or congressional disclosure.
+    last_activity_date: Optional[str] = None
+    # CURATED prose from whale_registry.json, shown verbatim. Overrides `activity_label`
+    # on the profile — a stated reason beats an inferred one. None when the filer is
+    # active or when nobody has written a note.
+    lifecycle_note: Optional[str] = None
+
     is_locked: bool = False
     # "pro" when locked — the plan the server enforced, so the paywall never
     # carries a second copy of the tier ladder.

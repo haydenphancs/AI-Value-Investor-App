@@ -302,3 +302,85 @@ def test_whale_endpoint_has_no_bare_string_error_details():
         f"{len(bare)} bare-string HTTPException detail(s) in whales.py — "
         "use make_error_body(...) so iOS can decode the error"
     )
+
+
+# ── Activity disclosure (migration 145) ──────────────────────────────────────
+
+
+def test_activity_fields_reach_both_dtos():
+    dtos = _src("dtos")
+    roster = _braced(dtos, r"struct TrendingWhaleDTO\b")
+    profile = _braced(dtos, r"struct WhaleProfileDTO\b")
+    assert roster and profile
+    for key in ("activity_status", "activity_label"):
+        assert f'"{key}"' in roster, f"TrendingWhaleDTO does not decode {key}"
+        assert f'"{key}"' in profile, f"WhaleProfileDTO does not decode {key}"
+    for key in ("last_activity_date", "lifecycle_note"):
+        assert f'"{key}"' in profile, f"WhaleProfileDTO does not decode {key}"
+
+
+def test_activity_survives_a_follow_toggle():
+    """`withFollowing` rebuilds every field BY HAND, so a field missed there silently
+    defaults away — a dormant fund would look active the moment you followed it."""
+    body = _braced(_src("tracking_models"), r"struct TrendingWhale\b")
+    fn = _braced(body, r"func withFollowing")
+    assert fn, "withFollowing not found"
+    assert "activityStatus:" in fn and "activityLabel:" in fn, (
+        "activity is not threaded through withFollowing"
+    )
+
+
+def test_the_curated_note_wins_over_the_derived_label():
+    """A human can say WHY a filer went quiet; no amount of filing data can."""
+    body = _braced(_src("profile_models"), r"struct WhaleProfile\b")
+    fn = _braced(body, r"var activityNotice")
+    assert fn, "activityNotice not found"
+    assert fn.index("lifecycleNote") < fn.index("activityLabel"), (
+        "the curated note must be preferred over the derived label"
+    )
+
+
+def test_congress_can_never_be_rendered_as_stopped_filing():
+    """`hasStoppedFiling` drives the warmer treatment. It must key only on the two 13F /
+    curated statuses — a sitting senator who simply hasn't traded is `quiet`, and calling
+    that "stopped filing" would be a false statement about a real person."""
+    body = _braced(_src("profile_models"), r"struct WhaleProfile\b")
+    fn = _braced(body, r"var hasStoppedFiling")
+    assert fn, "hasStoppedFiling not found"
+    assert '"quiet"' not in fn and '"none"' not in fn, (
+        "a quiet or never-traded congressional filer must not read as 'stopped filing'"
+    )
+    assert '"dormant"' in fn
+
+
+def test_the_roster_actually_renders_the_chip():
+    body = _braced(_src("tracking_view"), r"struct WhaleCard\b")
+    assert body, "WhaleCard not found"
+    assert "hasActivityNotice" in body, "the roster row never checks for a notice"
+    assert "TintedTagBadge" in body, "the chip should reuse the generic capsule atom"
+
+
+def test_the_profile_actually_renders_the_notice():
+    body = _braced(_src("profile_view"), r"struct WhaleProfileHeader\b")
+    assert body, "WhaleProfileHeader not found"
+    assert "hasActivityNotice" in body and "WhaleActivityNotice" in body
+
+
+def test_the_notice_uses_text_role_tokens_only():
+    """A `*Graphic` token fails the DEBUG launch contrast audit."""
+    body = _braced(_src("profile_view"), r"struct WhaleActivityNotice\b")
+    assert body, "WhaleActivityNotice not found"
+    assert "Graphic" not in body, "graphic-role tokens must not escape the chart layer"
+    assert "AppColors.caution" in body or "AppColors.textMuted" in body
+
+
+def test_the_stat_tiles_are_not_blanked_by_dormancy():
+    """Burry's $1.37B really WAS his Q3 2025 book. The fix is disclosure, never deletion —
+    a dormant filer must not start rendering an em-dash where a real number belongs."""
+    body = _braced(_src("profile_view"), r"struct WhalePortfolioStats\b")
+    assert body, "WhalePortfolioStats not found"
+    for token in ("hasActivityNotice", "hasStoppedFiling", "activityStatus"):
+        assert token not in body, (
+            f"WhalePortfolioStats must not gate its value on {token} — "
+            "dormancy qualifies the number, it does not delete it"
+        )

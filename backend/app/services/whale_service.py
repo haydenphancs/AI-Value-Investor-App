@@ -32,6 +32,9 @@ from app.services._whale_common import (
     format_amount_range,
     format_amount_short,
     resolve_congress_action,
+    compute_activity,
+    Activity,
+    ACTIVITY_UNKNOWN,
     snapshot_db_row,
     calc_13f_trade_dollars,
     AnnualReturn,
@@ -575,17 +578,22 @@ class WhaleService:
             followed_ids = {f["whale_id"] for f in (follows.data or [])}
 
         # Fetch recent trade counts (last 90 days)
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
         trade_counts: Dict[str, int] = {}
         try:
             # Explicit cap. PostgREST silently truncates an un-limited select at 1000
             # rows, so "no .limit()" is an INVISIBLE limit — and a silently truncated
             # aggregate here under-reports `recent_trade_count` on the roster with no
             # signal at all.
+            # Cut on `date` — the FILING/DISCLOSURE date — not on `created_at`, which is
+            # when WE ingested the row. The old form made this count measure our own job:
+            # it read non-zero for a dormant whale that merely got re-ingested, and zero
+            # for an active one we had not re-hydrated lately. `date` is TEXT in
+            # `YYYY-MM-DD`, so a lexical `gte` is a chronological one.
             tg_result = (
                 sb.table("whale_trade_groups")
                 .select("whale_id, trade_count")
-                .gte("created_at", cutoff)
+                .gte("date", cutoff)
                 .limit(_TRADE_COUNT_ROWS)
                 .execute()
             )
@@ -619,6 +627,7 @@ class WhaleService:
                 title=w.get("title") or "",
                 description=w.get("description") or "",
                 recent_trade_count=trade_counts.get(str(w["id"]), 0),
+                **_activity_fields(w),
                 # Blank/whitespace firm (bad row edit) → None so iOS
                 # `!firm.isEmpty` guards keep the firm line hidden, not blank.
                 firm_name=(w.get("firm_name") or "").strip() or None,
@@ -1050,6 +1059,10 @@ class WhaleService:
             or ""
         )
 
+        # Classified from PERSISTED columns only — never from a live FMP probe, whose
+        # empty result is indistinguishable from a 429 or a plan downgrade.
+        activity = _activity_for(whale)
+
         disclosure = self._stat_disclosure(whale, snapshot)
         portfolio_value = disclosure["portfolio_value"]
         ytd_return = disclosure["ytd_return"]
@@ -1081,6 +1094,10 @@ class WhaleService:
             portfolio_status=disclosure["portfolio_status"],
             portfolio_as_of=disclosure["portfolio_as_of"],
             filing_date=disclosure["filing_date"],
+            activity_status=activity.status if activity.needs_disclosure else ACTIVITY_UNKNOWN,
+            activity_label=activity.label if activity.needs_disclosure else "",
+            last_activity_date=whale.get("last_activity_date") or None,
+            lifecycle_note=(whale.get("lifecycle_note") or "").strip() or None,
         )
 
         return profile
@@ -3154,7 +3171,17 @@ class WhaleService:
                 (snapshot or {}).get("filing_period") or ""
             )
             or None,
-            "filing_date": (snapshot or {}).get("filing_date") or None,
+            # ⚠️ 13F ONLY. The congressional path writes `filing_date` as
+            # `now.strftime("%Y-%m-%d")` at hydration time, so a retired member's profile
+            # showed a "filing date" that advanced every month forever — a hydration
+            # timestamp wearing a filing date's name. Same reasoning that already makes
+            # `portfolio_as_of` return None for them: a politician files no 13F, so there
+            # is no filing date to show.
+            "filing_date": (
+                (snapshot or {}).get("filing_date") or None
+                if (whale.get("data_source") or "").strip().lower() == "13f"
+                else None
+            ),
             "ytd_return": ytd_return,
             "return_status": return_status,
             "return_window_years": return_window_years,
@@ -3330,6 +3357,35 @@ class WhaleService:
 
 
 # ── Module-Level Helpers ─────────────────────────────────────────────
+
+
+def _activity_for(row: Dict[str, Any]) -> Activity:
+    """Classify one `whales` row. Curated status wins over the derived one."""
+    derived = compute_activity(
+        data_source=row.get("data_source"),
+        last_filing_period=row.get("last_filing_period"),
+        last_activity_date=row.get("last_activity_date"),
+    )
+    # A human-written note is a STATED reason; the derived label is an inferred one.
+    # "Nancy Pelosi retired" can never be derived — she still shows recent trades — so
+    # when somebody has written it down, it wins.
+    note = str(row.get("lifecycle_note") or "").strip()
+    status = str(row.get("lifecycle_status") or "").strip().lower()
+    if status and status != "active":
+        return Activity(status="inactive", label=note or derived.label, as_of=derived.as_of)
+    return derived
+
+
+def _activity_fields(row: Dict[str, Any]) -> Dict[str, str]:
+    """The two roster-facing activity keys for a `whales` row.
+
+    Returns `""` for both when the filer is current, so an active whale carries no chip
+    and the client needs no knowledge of the status vocabulary to stay quiet.
+    """
+    a = _activity_for(row)
+    if not a.needs_disclosure:
+        return {"activity_status": ACTIVITY_UNKNOWN, "activity_label": ""}
+    return {"activity_status": a.status, "activity_label": a.label}
 
 
 def _invalidate_follow_caches(user_id: str, whale_id: str) -> None:

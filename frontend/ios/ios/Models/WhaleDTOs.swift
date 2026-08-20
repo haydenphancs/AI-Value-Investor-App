@@ -32,6 +32,14 @@ struct TrendingWhaleDTO: Codable, Identifiable {
     /// truncates to the covered subset). Optional for the same reason as `isLocked`: an
     /// older backend reads as absent → `?? false` → today's behaviour, no phantom badge.
     let isFollowingInactive: Bool?
+    /// Whether this filer is still producing data — a fund can deregister, a politician
+    /// can retire or simply stop trading. `""`/nil means "not computed" and the row shows
+    /// no chip. Optional so an older backend reads as absent rather than as a decode
+    /// failure, the same reason `isLocked` is.
+    let activityStatus: String?
+    /// The sentence the chip renders, e.g. "Last filed Q3 2025". The client never builds
+    /// this copy from the status enum — the server owns the wording.
+    let activityLabel: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name, category, title, description
@@ -42,6 +50,8 @@ struct TrendingWhaleDTO: Codable, Identifiable {
         case firmName = "firm_name"
         case isLocked = "is_locked"
         case isFollowingInactive = "is_following_inactive"
+        case activityStatus = "activity_status"
+        case activityLabel = "activity_label"
     }
 
     func toTrendingWhale() -> TrendingWhale {
@@ -57,7 +67,9 @@ struct TrendingWhaleDTO: Codable, Identifiable {
             recentTradeCount: recentTradeCount,
             firmName: firmName,
             isLocked: isLocked ?? false,
-            isFollowingInactive: isFollowingInactive ?? false
+            isFollowingInactive: isFollowingInactive ?? false,
+            activityStatus: activityStatus ?? "",
+            activityLabel: activityLabel ?? ""
         )
     }
 }
@@ -140,6 +152,14 @@ struct WhaleProfileDTO: Codable {
     /// `sentimentSummary` blank and `behaviorSummary` neutral — while the header, stat
     /// tiles and `sectorExposure` are intact. Optional for the same reason as the
     /// provenance block above: absent must mean unlocked, not a decode failure.
+    /// Activity disclosure (migration 145). All Optional for the same reason as the
+    /// provenance block above: absent must mean "nothing to say", not a decode failure.
+    let activityStatus: String?
+    let activityLabel: String?
+    let lastActivityDate: String?
+    /// CURATED prose written by a human, shown verbatim. Overrides `activityLabel` — a
+    /// stated reason beats an inferred one. "Nancy Pelosi retired" can never be derived.
+    let lifecycleNote: String?
     let isLocked: Bool?
     /// The plan that unlocks ("pro"), echoed from the server so the client never carries a
     /// second copy of the tier ladder.
@@ -167,6 +187,10 @@ struct WhaleProfileDTO: Codable {
         case portfolioStatus = "portfolio_status"
         case portfolioAsOf = "portfolio_as_of"
         case filingDate = "filing_date"
+        case activityStatus = "activity_status"
+        case activityLabel = "activity_label"
+        case lastActivityDate = "last_activity_date"
+        case lifecycleNote = "lifecycle_note"
         case isLocked = "is_locked"
         case tierRequired = "tier_required"
     }
@@ -197,6 +221,10 @@ struct WhaleProfileDTO: Codable {
             // CAGR rather than a 13F figure.
             // Raw string kept alongside the parsed enum so the badge can hide when the
             // backend has no classification (see WhaleProfile.hasRiskProfile).
+            activityStatus: activityStatus ?? "",
+            activityLabel: activityLabel ?? "",
+            lastActivityDate: lastActivityDate,
+            lifecycleNote: lifecycleNote,
             riskProfileRaw: riskProfile,
             returnSource: returnSource ?? "",
             returnStatus: returnStatus ?? "",

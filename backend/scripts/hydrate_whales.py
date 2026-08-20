@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -80,6 +81,11 @@ logger = logging.getLogger("hydrate_whales")
 
 FMP_SEMAPHORE = asyncio.Semaphore(5)
 
+# `YYYY-MM-DD` and `YYYY-Qn`. The second is deliberately strict so a congressional
+# snapshot's `YYYY-MM` period can never be mistaken for a 13F quarter.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_QUARTER_PERIOD_RE = re.compile(r"^\d{4}-Q[1-4]$")
+
 # Cap on per-whale /splits lookups. A filer whose entire book was restated would
 # otherwise fan out one unthrottled call per suspect ticker.
 _MAX_SPLIT_LOOKUPS = 25
@@ -123,7 +129,10 @@ class WhaleHydrator:
         self.force = force
         self.dry_run = dry_run
         self.sb = get_supabase()
-        self.stats = {"processed": 0, "skipped": 0, "errors": 0}
+        # `no_data` is its own bucket. It used to fall into `skipped` alongside
+        # "unchanged since last run" and "manual whale", so the one counter that could
+        # reveal a filer going dormant was averaged into two benign ones.
+        self.stats = {"processed": 0, "skipped": 0, "errors": 0, "no_data": 0}
         # Cache profile data across whales to avoid duplicate FMP calls
         self._profile_cache: Dict[str, Dict] = {}
 
@@ -156,9 +165,10 @@ class WhaleHydrator:
                 self.stats["errors"] += 1
 
         logger.info(
-            "Hydration complete. processed=%d  skipped=%d  errors=%d",
+            "Hydration complete. processed=%d  skipped=%d  no_data=%d  errors=%d",
             self.stats["processed"],
             self.stats["skipped"],
+            self.stats["no_data"],
             self.stats["errors"],
         )
 
@@ -185,7 +195,20 @@ class WhaleHydrator:
             return
 
         if not raw:
-            logger.warning("  No data returned for %s", name)
+            # Structured, and counted. This is the only LIVE hint that a filer may have
+            # gone dormant, and it used to be an unstructured WARNING immediately
+            # followed by run()'s "done in %.1fs" success line.
+            #
+            # ⚠️ It is NOT proof of dormancy: every FMP method swallows its exception and
+            # returns [], so this fires identically for a 429, a plan downgrade and a
+            # timeout. Dormancy is classified from PERSISTED data in
+            # `_whale_common.compute_activity`; this counter is an operational hint only.
+            self.stats["no_data"] += 1
+            logger.warning(
+                "  No data returned for %s (whale_id=%s data_source=%s) — upstream empty "
+                "OR unavailable; NOT proof of dormancy",
+                name, whale_id, data_source,
+            )
             # Ticker-only fallback: if whale has an associated_ticker
             # (e.g. PSH.L, ARKK), we can still compute its Tier-1 CAGR
             # even without 13F holdings.
@@ -1508,6 +1531,13 @@ class WhaleHydrator:
                 "behavior_summary": snapshot["behavior_summary"],
                 "sentiment_summary": snapshot["sentiment_text"],
             }
+            # Denormalized activity signals (migration 145). The roster needs them on a
+            # single select and PostgREST has no GROUP BY, so they are written here
+            # rather than aggregated at read time. Derived from the SNAPSHOT's own
+            # filing/disclosure dates, never from the clock — otherwise the monthly
+            # congressional period rollover would look like fresh activity even when
+            # zero trades were disclosed.
+            whale_update.update(_activity_signals(snapshot))
             if snapshot_ok:
                 whale_update["last_hydrated_at"] = datetime.now().isoformat()
             # WRITE THE JUDGEMENT, INCLUDING A NEGATIVE ONE. The old code wrote
@@ -1776,18 +1806,42 @@ class WhaleHydrator:
             sb.table("whale_trades").upsert(
                 row, on_conflict="trade_group_id,ticker,action,date"
             ).execute()
+            return
         except Exception as e:
-            # 42P10 = "no unique or exclusion constraint matching the ON CONFLICT
-            # specification", i.e. migration 143 is not applied on this database yet.
             msg = str(e).lower()
-            if "42p10" in msg or "no unique or exclusion constraint" in msg:
-                logger.warning(
-                    "  whale_trades upsert unsupported (migration 143 not applied) — "
-                    "falling back to insert for %s", trade.get("ticker"),
-                )
-                sb.table("whale_trades").insert(row).execute()
-            else:
+            if not ("42p10" in msg or "no unique or exclusion constraint" in msg):
                 raise
+            # 42P10 = the conflict target matched no INFERABLE unique index. There are TWO
+            # causes and this message must not assert the wrong one:
+            #   (a) migration 143 has not been applied on this database, or
+            #   (b) the index exists but is PARTIAL — and a partial unique index cannot be
+            #       inferred from `ON CONFLICT (cols)`, which is the only form PostgREST can
+            #       emit (it has no way to supply the index predicate).
+            # (b) is what actually shipped: 143's index carried `WHERE trade_group_id IS NOT
+            # NULL`. Asserting (a) sent every reader looking for an unapplied migration that
+            # was in fact applied. Migration 146 drops the predicate.
+            logger.warning(
+                "  whale_trades: conflict target unusable for %s — no INFERABLE unique index "
+                "on (trade_group_id, ticker, action, date). Either migration 143 is unapplied "
+                "or its index is PARTIAL (fixed by 146). Falling back to insert.",
+                trade.get("ticker"),
+            )
+
+        try:
+            sb.table("whale_trades").insert(row).execute()
+        except Exception as e:
+            # 23505 means the row is ALREADY THERE, which is precisely the state the upsert
+            # was trying to reach — so this is the fallback succeeding, not failing.
+            #
+            # Raising here was the bug: `_upsert_trade` is called in a loop inside the
+            # caller's `try`, so one already-present trade aborted every REMAINING trade in
+            # that group and logged "Failed to sync trade group". A repair run could
+            # therefore never top up a partially written group — the exact behaviour
+            # migration 143 exists to provide. Measured in production: 12 fallbacks produced
+            # 24 aborted groups in a single hydration cycle.
+            if "23505" in str(e) or "duplicate key value" in str(e).lower():
+                return
+            raise
 
     def _maybe_generate_alert(
         self, whale_id: str, snapshot: Dict[str, Any]
@@ -1864,6 +1918,38 @@ class WhaleHydrator:
 
 
 # ── Module-Level Helpers ─────────────────────────────────────────────
+
+
+def _activity_signals(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Denormalized activity columns for `whales` (migration 145).
+
+    `last_activity_date` is MAX over the trade groups' OWN dates — the 13F filing date or
+    the congressional disclosure date — so it reflects the filer, not this job. Using
+    `datetime.now()` here (or leaning on `last_hydrated_at`) would make every monthly
+    congressional snapshot rollover look like fresh activity even when zero trades were
+    disclosed.
+
+    `last_filing_period` is 13F-only: congressional snapshots key on a wall-clock month
+    (`YYYY-MM`), and letting that through would render a politician as having filed a 13F
+    quarter they never file.
+    """
+    groups = snapshot.get("trade_groups") or []
+    if not groups:
+        single = snapshot.get("trade_group")
+        groups = [single] if single else []
+    dates = [
+        str(g.get("date"))
+        for g in groups
+        if g and g.get("date") and _ISO_DATE_RE.match(str(g.get("date")))
+    ]
+
+    out: Dict[str, Any] = {}
+    if dates:
+        out["last_activity_date"] = max(dates)
+    period = snapshot.get("filing_period")
+    if isinstance(period, str) and _QUARTER_PERIOD_RE.match(period.strip()):
+        out["last_filing_period"] = period.strip()
+    return out
 
 
 def _find_previous_quarter(

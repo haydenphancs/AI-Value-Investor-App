@@ -314,10 +314,63 @@ struct WhaleProfileHeader: View {
                 WhaleRiskBadge(riskProfile: profile.riskProfile)
             }
 
+            // Activity notice. Sits directly under the identity block and ABOVE the stat
+            // tiles on purpose: it qualifies every number below it. Without it, Michael
+            // Burry's profile showed a confident $1.37B and +11.06% next to three empty
+            // sections, and the reason (Scion stopped filing after Q3 2025) appeared
+            // nowhere at all.
+            if profile.hasActivityNotice {
+                WhaleActivityNotice(
+                    message: profile.activityNotice,
+                    hasStoppedFiling: profile.hasStoppedFiling
+                )
+            }
+
             // Description
             WhaleDescriptionSection(description: profile.description)
         }
         .padding(.top, AppSpacing.md)
+    }
+}
+
+// MARK: - Activity Notice
+
+/// "This filer has gone quiet, and here is what we actually know."
+///
+/// Muted by default — most of these are ordinary (a politician who has not traded), and
+/// an alarm-coloured banner would overstate them. Only a filer that has genuinely STOPPED
+/// filing gets the warmer `caution` treatment.
+///
+/// Both tokens are TEXT-role per `.claude/rules/ios-swiftui.md`; a `*Graphic` token would
+/// fail the DEBUG launch contrast audit.
+struct WhaleActivityNotice: View {
+    let message: String
+    var hasStoppedFiling: Bool = false
+
+    private var tint: Color { hasStoppedFiling ? AppColors.caution : AppColors.textMuted }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppSpacing.sm) {
+            Image(systemName: hasStoppedFiling
+                  ? "exclamationmark.circle" : "clock")
+                .font(AppTypography.iconSmall)
+                .foregroundColor(tint)
+
+            Text(message)
+                .font(AppTypography.caption)
+                .foregroundColor(tint)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.sm)
+        .background(tint.opacity(0.10))
+        .cornerRadius(AppCornerRadius.medium)
+        .padding(.horizontal, AppSpacing.lg)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(message)
     }
 }
 

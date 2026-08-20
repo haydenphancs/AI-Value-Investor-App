@@ -41,6 +41,11 @@ def test_trending_whale_response_keys_match_ios_dto():
         # this so it stops disagreeing with the truncated activity feed. Same
         # defaulted-here / Optional-there contract as `is_locked`.
         "is_following_inactive",
+        # Activity disclosure (migration 145) — the roster previously had NO date signal
+        # of any kind, so a filer that stopped in 2019 rendered identically to one that
+        # filed last week.
+        "activity_status",
+        "activity_label",
     }
 
 

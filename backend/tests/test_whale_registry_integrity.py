@@ -180,3 +180,62 @@ def test_sync_reports_database_rows_missing_from_the_registry():
     assert '.delete()' not in src, (
         "the sync must never delete whales — report drift and let a human decide"
     )
+
+
+# ── Curated lifecycle (migration 145) ────────────────────────────────────────
+
+
+_ALLOWED_STATUS = {"active", "inactive"}
+
+
+def test_lifecycle_status_uses_a_known_value():
+    for whale in _load():
+        st = whale.get("status")
+        if st is None:
+            continue
+        assert isinstance(st, str) and st.strip().lower() in _ALLOWED_STATUS, (
+            f"{whale['name']}: status={st!r} is not one of {sorted(_ALLOWED_STATUS)}"
+        )
+
+
+def test_a_non_active_whale_must_explain_why():
+    """A bare "Inactive" badge invites exactly the question it fails to answer.
+
+    The note is rendered VERBATIM to the user and overrides the derived label, so it has
+    to carry the reason a human knows and the filing data cannot show.
+    """
+    for whale in _load():
+        st = (whale.get("status") or "").strip().lower()
+        if not st or st == "active":
+            continue
+        note = (whale.get("status_note") or "").strip()
+        assert note, f"{whale['name']}: status={st!r} requires a status_note"
+        assert len(note) > 25, (
+            f"{whale['name']}: status_note is too short to be an explanation: {note!r}"
+        )
+
+
+def test_status_notes_carry_no_magnitude_claim():
+    """Same lint as the bios: the note renders near the 13F stat tiles, so a return or
+    AUM figure computed on a different basis would collide with them."""
+    import re
+
+    for whale in _load():
+        note = (whale.get("status_note") or "").strip()
+        if not note:
+            continue
+        for pattern in _MAGNITUDE_PATTERNS:
+            assert not re.search(pattern, note, re.I), (
+                f"{whale['name']}: status_note matches {pattern!r}: {note!r}"
+            )
+
+
+def test_an_active_whale_carries_no_stale_note():
+    """A note left behind after a filer resumed would keep telling users it is dormant."""
+    for whale in _load():
+        st = (whale.get("status") or "").strip().lower()
+        if st and st != "active":
+            continue
+        assert not (whale.get("status_note") or "").strip(), (
+            f"{whale['name']}: is active but still carries a status_note"
+        )

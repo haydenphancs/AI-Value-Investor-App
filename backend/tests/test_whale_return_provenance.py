@@ -104,6 +104,8 @@ IOS_PROFILE_KEYS = {
     # Stat-tile provenance (migration 127).
     "return_status", "return_window_years", "portfolio_status",
     "portfolio_as_of", "filing_date",
+    # Activity disclosure (migration 145).
+    "activity_status", "activity_label", "last_activity_date", "lifecycle_note",
     # Pro/Max gate (entitlements.whale_detail_unlocked). Both DEFAULTED and both
     # OPTIONAL in the Swift DTO, so the contract holds in either direction across a
     # staggered release: an old app decodes the new response, and a new app against an

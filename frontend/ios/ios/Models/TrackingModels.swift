@@ -941,8 +941,22 @@ struct TrendingWhale: Identifiable {
     /// downgraded account keeps rows it can't see. Distinct from `isLocked`, which is about
     /// whether a NEW follow is allowed.
     let isFollowingInactive: Bool
+    /// Whether this filer is still producing data (server-classified). `""` = nothing to
+    /// say. Distinct from `isFollowingInactive`, which is about the caller's PLAN, not
+    /// about the whale — a Max subscriber can still be following a fund that stopped
+    /// filing, and those two facts want different words.
+    let activityStatus: String
+    /// The sentence the chip renders, owned by the server so the client never has to
+    /// turn a status enum into copy.
+    let activityLabel: String
 
-    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0, firmName: String? = nil, isLocked: Bool = false, isFollowingInactive: Bool = false) {
+    /// True when this whale is no longer filing on cadence and has something to say
+    /// about it.
+    var hasActivityNotice: Bool {
+        !activityStatus.isEmpty && !activityLabel.isEmpty
+    }
+
+    init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0, firmName: String? = nil, isLocked: Bool = false, isFollowingInactive: Bool = false, activityStatus: String = "", activityLabel: String = "") {
         self.id = id
         self.name = name
         self.category = category
@@ -955,6 +969,8 @@ struct TrendingWhale: Identifiable {
         self.firmName = firmName
         self.isLocked = isLocked
         self.isFollowingInactive = isFollowingInactive
+        self.activityStatus = activityStatus
+        self.activityLabel = activityLabel
     }
 
     /// Returns a copy with `isFollowing` flipped, threading EVERY other field
@@ -980,7 +996,13 @@ struct TrendingWhale: Identifiable {
             // the optimistic case: whether the new follow lands inside the plan's allowance
             // is the server's call, so keep the current value until the next list refresh
             // rather than guessing here.
-            isFollowingInactive: following ? isFollowingInactive : false
+            isFollowingInactive: following ? isFollowingInactive : false,
+            // Activity is a property of the WHALE, not of the caller's follow state, so
+            // it passes through untouched. Omitting it here would make a dormant fund
+            // look active the moment you followed it — this rebuild is hand-written, so
+            // every field has to be threaded or it silently defaults away.
+            activityStatus: activityStatus,
+            activityLabel: activityLabel
         )
     }
 

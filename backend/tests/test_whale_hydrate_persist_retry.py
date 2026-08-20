@@ -149,7 +149,9 @@ def _snapshot(n_holdings=3, n_sectors=2, trade_groups=None):
 def _hydrator(sb, monkeypatch):
     h = hw.WhaleHydrator.__new__(hw.WhaleHydrator)  # skip get_supabase()
     h.sb = sb
-    h.stats = {"processed": 0, "skipped": 0, "failed": 0}
+    # Mirrors WhaleHydrator.__init__. `no_data` is its own bucket so a filer that has
+    # gone quiet is not averaged into "unchanged since last run".
+    h.stats = {"processed": 0, "skipped": 0, "failed": 0, "errors": 0, "no_data": 0}
     # _maybe_generate_alert is a separate concern (whale_alerts); stub it out.
     monkeypatch.setattr(hw.WhaleHydrator, "_maybe_generate_alert",
                         lambda self, *a, **k: None)
@@ -341,7 +343,9 @@ async def test_a_failed_denorm_write_still_resets_raw_hash(monkeypatch):
 
 def _ticker_only_hydrator(sb, monkeypatch, result=_OK_RETURN):
     h = _hydrator(sb, monkeypatch)
-    h.stats = {"processed": 0, "skipped": 0, "failed": 0}
+    # Mirrors WhaleHydrator.__init__. `no_data` is its own bucket so a filer that has
+    # gone quiet is not averaged into "unchanged since last run".
+    h.stats = {"processed": 0, "skipped": 0, "failed": 0, "errors": 0, "no_data": 0}
 
     async def _no_data(self, *a, **k):
         return None
@@ -420,3 +424,125 @@ async def test_ticker_only_skips_when_the_return_is_not_ok(monkeypatch):
 
     assert h.stats["skipped"] == 1
     assert sb.count("whales", "update") == 0
+
+# ── The partial-index trap (migrations 143 → 146) ─────────────────────────────
+#
+# MEASURED IN PRODUCTION, 2026-08-19, one hydration cycle on Railway: 12 × 42P10 fallback
+# warnings followed by 24 × 23505 "Failed to sync trade group".
+#
+# 143's unique index shipped PARTIAL (`WHERE trade_group_id IS NOT NULL`), and PostgreSQL
+# only infers a partial index when the statement also supplies the predicate — which
+# PostgREST's bare `on_conflict=` column list cannot express. So the upsert raised 42P10, the
+# fallback insert hit the very index that could not be inferred (23505), and the exception
+# propagated out of the caller's per-trade loop, aborting every REMAINING trade in the group.
+# Migration 146 drops the predicate; this code path is the belt to that braces.
+
+
+def _no_inferable_index() -> APIError:
+    return APIError({
+        "message": "there is no unique or exclusion constraint matching the "
+                   "ON CONFLICT specification",
+        "code": "42P10", "hint": None, "details": None,
+    })
+
+
+def test_a_42P10_falls_back_and_tolerates_a_row_that_is_already_there():
+    """23505 on the fallback means the row is ALREADY in the state the upsert wanted.
+    That is the fallback succeeding; raising turned a no-op into a failed group."""
+    sb = _FakeSupabase(faults={
+        ("whale_trades", "upsert"): [_no_inferable_index()],
+        ("whale_trades", "insert"): [_unique_violation()],
+    })
+
+    hw.WhaleHydrator._upsert_trade(sb, "w1", "tg1", {
+        "ticker": "IBM", "action": "SOLD", "trade_type": "Sell",
+        "amount": 1.0, "date": "2025-08-12",
+    })
+
+    assert sb.count("whale_trades", "upsert") == 1
+    assert sb.count("whale_trades", "insert") == 1
+
+
+def test_the_fallback_insert_still_raises_a_genuine_failure():
+    """Tolerating 23505 must not become tolerating everything."""
+    sb = _FakeSupabase(faults={
+        ("whale_trades", "upsert"): [_no_inferable_index()],
+        ("whale_trades", "insert"): [_gateway_error(520)],
+    })
+
+    with pytest.raises(APIError):
+        hw.WhaleHydrator._upsert_trade(sb, "w1", "tg1", {
+            "ticker": "IBM", "action": "SOLD", "trade_type": "Sell",
+            "amount": 1.0, "date": "2025-08-12",
+        })
+
+
+def test_a_non_42P10_upsert_error_is_not_downgraded_to_an_insert():
+    """Only an unusable conflict target justifies the fallback. A 520 must propagate, or a
+    transient edge failure would silently become a duplicate-prone plain insert."""
+    sb = _FakeSupabase(faults={("whale_trades", "upsert"): [_gateway_error(520)]})
+
+    with pytest.raises(APIError):
+        hw.WhaleHydrator._upsert_trade(sb, "w1", "tg1", {
+            "ticker": "IBM", "action": "SOLD", "trade_type": "Sell",
+            "amount": 1.0, "date": "2025-08-12",
+        })
+
+    assert sb.count("whale_trades", "insert") == 0
+
+
+@pytest.mark.asyncio
+async def test_one_duplicate_trade_does_not_abort_the_rest_of_the_group(monkeypatch, caplog):
+    """THE production symptom, end to end.
+
+    `_upsert_trade` is called in a loop inside the caller's `try`, so a raise on trade #1
+    skipped trades #2..N and logged "Failed to sync trade group". A repair run could
+    therefore never top up a partially written group — the exact behaviour migration 143
+    was written to deliver.
+    """
+    trades = [
+        {"ticker": "IBM", "action": "SOLD", "trade_type": "Sell", "amount": 1.0,
+         "date": "2025-08-12"},
+        {"ticker": "MSFT", "action": "BOUGHT", "trade_type": "Buy", "amount": 2.0,
+         "date": "2025-08-12"},
+    ]
+    groups = [{"date": "2026-08-01", "trade_count": 2, "net_action": "BUY",
+               "net_amount": 100.0, "summary": "s", "insights": [], "trades": trades}]
+    # Every trade takes the worst path: unusable conflict target, then already-present.
+    sb = _FakeSupabase(faults={
+        ("whale_trades", "upsert"): [_no_inferable_index()] * 2,
+        ("whale_trades", "insert"): [_unique_violation()] * 2,
+    })
+    h = _hydrator(sb, monkeypatch)
+
+    with caplog.at_level(logging.DEBUG, logger=hw.logger.name):
+        await h._persist("w1", _snapshot(trade_groups=groups), _OK_RETURN)
+
+    assert sb.count("whale_trades", "upsert") == 2, (
+        "the second trade was never attempted — one duplicate aborted the group"
+    )
+    assert not [r for r in caplog.records if "Failed to sync trade group" in r.getMessage()], (
+        "an already-present trade was reported as a failed group"
+    )
+
+
+def test_the_fallback_warning_does_not_misdiagnose_an_applied_migration(caplog):
+    """The original message asserted 'migration 143 not applied' — which was FALSE in
+    production and sent every reader hunting for an unapplied migration."""
+    sb = _FakeSupabase(faults={
+        ("whale_trades", "upsert"): [_no_inferable_index()],
+        ("whale_trades", "insert"): [_unique_violation()],
+    })
+
+    with caplog.at_level(logging.DEBUG, logger=hw.logger.name):
+        hw.WhaleHydrator._upsert_trade(sb, "w1", "tg1", {
+            "ticker": "IBM", "action": "SOLD", "trade_type": "Sell",
+            "amount": 1.0, "date": "2025-08-12",
+        })
+
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "PARTIAL" in msg or "partial" in msg, (
+        "the warning does not mention the partial-index cause, which is the one that "
+        "actually shipped"
+    )
+

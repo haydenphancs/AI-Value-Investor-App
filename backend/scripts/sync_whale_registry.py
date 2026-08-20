@@ -110,9 +110,34 @@ def main():
                 "  FAILED to sync %s: %s: %s", name, type(e).__name__, e
             )
 
+    # ── DRIFT REPORT ────────────────────────────────────────────────────────
+    #
+    # The sync is ADDITIVE — it never deletes — so a row that was inserted by hand,
+    # or whose registry entry was later removed, lives on in `whales` forever and is
+    # served to users like any other. `tests/test_whale_registry_integrity.py` only
+    # lints the JSON file, so it cannot see those rows at all.
+    #
+    # That is not hypothetical: Dan Crenshaw, Mark Kelly and Ted Cruz sat in production
+    # outside the registry until an audit compared the two by hand. Deleting them
+    # automatically would be wrong (a registry typo would silently destroy a whale and
+    # cascade its follows), so this REPORTS and leaves the decision to a human.
+    registry_names = {w.get("name") for w in registry}
+    orphans = sorted(
+        n for n in existing_names if n not in registry_names
+    )
+    if orphans:
+        logger.warning(
+            "DRIFT: %d whale(s) in the database are NOT in the registry and will keep "
+            "being served: %s. Add them to whale_registry.json, or delete the rows "
+            "deliberately (follows cascade).",
+            len(orphans), ", ".join(orphans),
+        )
+    else:
+        logger.info("No drift: every database whale is present in the registry.")
+
     logger.info(
-        "Done. created=%d  updated=%d  errors=%d  total=%d",
-        created, updated, errors, len(registry),
+        "Done. created=%d  updated=%d  errors=%d  orphans=%d  total=%d",
+        created, updated, errors, len(orphans), len(registry),
     )
     if errors:
         sys.exit(1)

@@ -563,3 +563,112 @@ def test_the_fallback_warning_does_not_misdiagnose_an_applied_migration(caplog):
         "actually shipped"
     )
 
+
+
+# ── duplicate conflict keys inside ONE bulk upsert ───────────────────────────
+#
+# Postgres refuses a multi-row `ON CONFLICT DO UPDATE` whose payload touches the same row
+# twice — SQLSTATE 21000, "ON CONFLICT DO UPDATE command cannot affect row a second
+# time". Verified directly against the production database on a temp table carrying the
+# same unique index.
+#
+# The per-row upsert this bulk write replaced was IMMUNE: the second row simply took the
+# DO UPDATE branch and overwrote the first. Bulking removed that immunity, so the dedup
+# below is what restores it — not a new behaviour, the old one.
+#
+# The input is real. One congressional filing routinely discloses the same
+# symbol/direction/transaction-date more than once (spouse + self, two amount buckets, or
+# an FMP page overlap). Measured against live FMP: 31 of 69 sampled filings, including
+# Josh Gottheimer's 2026-08-11 filing where GOOGL/BOUGHT/2026-07-24 appears three times.
+#
+# The failure was silent and self-repeating: the `whale_trade_groups` row is committed
+# BEFORE the trades, so the filing card advertised `trade_count = N` with zero rows
+# behind it, and the 5b `raw_hash` reset made the next run fail identically.
+
+
+def _dup_trades():
+    return [
+        {"ticker": "GOOGL", "action": "BOUGHT", "trade_type": "New",
+         "amount": 1.0, "date": "2026-07-24"},
+        {"ticker": "GOOGL", "action": "BOUGHT", "trade_type": "New",
+         "amount": 2.0, "date": "2026-07-24"},          # same conflict key
+        {"ticker": "MSFT", "action": "SOLD", "trade_type": "Closed",
+         "amount": 3.0, "date": "2026-07-24"},
+    ]
+
+
+def test_duplicate_conflict_keys_are_collapsed_before_the_upsert():
+    sb = _FakeSupabase()
+    hw.WhaleHydrator._upsert_trades(sb, "w1", "tg1", _dup_trades())
+
+    payload = [p for op, p in sb.payloads if op == ("whale_trades", "upsert")][0]
+    assert len(payload) == 2, (
+        f"payload still carries a duplicate conflict key ({len(payload)} rows) — "
+        "Postgres will reject the whole batch with 21000"
+    )
+    keys = [(r["ticker"], r["action"], r["date"]) for r in payload]
+    assert len(keys) == len(set(keys))
+
+
+def test_the_surviving_duplicate_is_the_LAST_one():
+    """Last-wins is what the per-row upsert produced: row 2 took DO UPDATE and overwrote
+    row 1. Collapsing to first-wins would silently change which figure is stored."""
+    sb = _FakeSupabase()
+    hw.WhaleHydrator._upsert_trades(sb, "w1", "tg1", _dup_trades())
+
+    payload = [p for op, p in sb.payloads if op == ("whale_trades", "upsert")][0]
+    googl = [r for r in payload if r["ticker"] == "GOOGL"]
+    assert len(googl) == 1 and googl[0]["amount"] == 2.0, googl
+
+
+def test_distinct_trades_are_never_collapsed():
+    """Negative control: the dedup must key on the FULL conflict key, not just ticker.
+    A filing can legitimately report the same symbol twice with different directions or
+    different transaction dates."""
+    sb = _FakeSupabase()
+    hw.WhaleHydrator._upsert_trades(sb, "w1", "tg1", [
+        {"ticker": "AAPL", "action": "BOUGHT", "trade_type": "New",
+         "amount": 1.0, "date": "2026-07-24"},
+        {"ticker": "AAPL", "action": "SOLD", "trade_type": "Closed",
+         "amount": 2.0, "date": "2026-07-24"},          # same ticker, other direction
+        {"ticker": "AAPL", "action": "BOUGHT", "trade_type": "New",
+         "amount": 3.0, "date": "2026-07-25"},          # same ticker, other date
+    ])
+    payload = [p for op, p in sb.payloads if op == ("whale_trades", "upsert")][0]
+    assert len(payload) == 3, "distinct trades were wrongly collapsed"
+
+
+def test_the_service_writer_dedupes_too():
+    """`whale_service._bulk_write_trades` is the LIVE profile-build path, and its 42P10
+    fallback is a BULK insert that cannot degrade per-row — so a duplicate there strands
+    a whole filing's trades on the user's screen."""
+    from app.services.whale_service import _bulk_write_trades
+
+    sb = _FakeSupabase()
+    _bulk_write_trades(sb, [
+        {"trade_group_id": "g1", "ticker": "GOOGL", "action": "BOUGHT",
+         "date": "2026-07-24", "amount": 1.0},
+        {"trade_group_id": "g1", "ticker": "GOOGL", "action": "BOUGHT",
+         "date": "2026-07-24", "amount": 2.0},
+    ])
+    payload = [p for op, p in sb.payloads if op == ("whale_trades", "upsert")][0]
+    assert len(payload) == 1 and payload[0]["amount"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_a_filing_with_duplicates_still_persists_its_trades(monkeypatch):
+    """End to end: the group row is committed before the trades, so a rejected batch left
+    a card claiming N trades with nothing behind it."""
+    groups = [{
+        "date": "2026-08-11", "trade_count": 3, "net_action": "BUY",
+        "net_amount": 100.0, "summary": "s", "insights": [],
+        "trades": _dup_trades(),
+    }]
+    sb = _FakeSupabase()
+    h = _hydrator(sb, monkeypatch)
+
+    await h._persist("w1", _snapshot(trade_groups=groups), _OK_RETURN)
+
+    assert sb.count("whale_trades", "upsert") == 1
+    payload = [p for op, p in sb.payloads if op == ("whale_trades", "upsert")][0]
+    assert len(payload) == 2, "the filing's trades were not written"

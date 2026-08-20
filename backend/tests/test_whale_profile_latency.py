@@ -18,6 +18,7 @@ count IS the cost on a 150-250ms link.
 """
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -281,3 +282,199 @@ def test_the_warmer_caches_the_UNREDACTED_profile(monkeypatch):
     src = inspect.getsource(warm_whale_profile)
     assert "_get_whale_profile_ungated" in src
     assert "user_id=None" in src, "the cached artifact must be follow-state-free"
+
+
+# ── a degraded build must never be cached ────────────────────────────────────
+#
+# `_build_whale_profile` returns a valid, fully-shaped object even when the snapshot read
+# FAILED — the sections are simply empty. So "not None" is not evidence that it has data.
+# Caching one pins an empty book for 24h; reproduced, it survives a restart and is served
+# verbatim with no rebuild attempted. This is the "degraded builds must not be pinned in
+# cache" rule from project_holders_parity_review.
+
+
+def test_a_failed_snapshot_read_on_a_hydrated_whale_is_not_cached(monkeypatch):
+    svc = WhaleService.__new__(WhaleService)
+    sb = _FakeSB(returns={
+        ("whales", "select"): [{
+            "id": "w1", "name": "Warren Buffett", "data_source": "13f",
+            "last_hydrated_at": "2026-08-19T02:00:00+00:00",   # HAS been hydrated
+        }],
+    })
+    monkeypatch.setattr(wsvc, "get_supabase", lambda: sb)
+
+    async def _no_snapshot(self, whale_id, whale):
+        return None            # FMP 429 / Supabase blip
+
+    monkeypatch.setattr(WhaleService, "_get_or_process_latest", _no_snapshot)
+    profile = asyncio.run(svc._build_whale_profile("w1", None))
+
+    assert profile is not None, "the caller should still get something to render"
+    assert svc._last_build_degraded is True, (
+        "a hydrated whale with no readable snapshot must be flagged degraded"
+    )
+
+
+def test_a_never_hydrated_whale_is_NOT_degraded(monkeypatch):
+    """Negative control. Mark Kelly has never traded, so an empty profile is the TRUTH
+    for him and caching it is correct — flagging it degraded would disable his cache
+    forever and rebuild on every single request."""
+    svc = WhaleService.__new__(WhaleService)
+    sb = _FakeSB(returns={
+        ("whales", "select"): [{
+            "id": "w2", "name": "Mark Kelly",
+            "data_source": "congressional_senate",
+            "last_hydrated_at": None,          # never hydrated
+        }],
+    })
+    monkeypatch.setattr(wsvc, "get_supabase", lambda: sb)
+
+    async def _no_snapshot(self, whale_id, whale):
+        return None
+
+    monkeypatch.setattr(WhaleService, "_get_or_process_latest", _no_snapshot)
+    asyncio.run(svc._build_whale_profile("w2", None))
+    assert svc._last_build_degraded is False
+
+
+def test_the_cache_write_is_gated_on_the_degraded_flag():
+    """Structural: the write site must consult the flag, not just `is not None`."""
+    import inspect
+    src = inspect.getsource(WhaleService._get_whale_profile_ungated)
+    assert "_last_build_degraded" in src, "the cache write does not check for a degraded build"
+    assert "not _degraded" in src or "not degraded" in src
+
+
+# ── the pre-warmer must not block the loop in one contiguous run ─────────────
+
+
+def test_the_prewarmer_is_sequential_not_gathered():
+    """MEASURED: a gather over 56 whales produced an 18.2s CONTIGUOUS event-loop stall,
+    identical at concurrency 1, 3 and 56 — the semaphore is inert because the build path
+    has no genuine suspension point. Sequential + an explicit yield bounds the stall to
+    one build."""
+    import inspect
+    import app.main as m
+
+    src = inspect.getsource(m._run_whale_profile_pre_warmer)
+    # Strip comments and docstrings FIRST. The explanation next to this code names
+    # `asyncio.gather` in prose, so an un-stripped scan matches the comment and passes
+    # even after the code is reverted — the exact vacuity trap this repo documents.
+    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    src = re.sub(r"(?m)^\s*#.*$", "", src)
+    src = re.sub(r"(?m)\s+#.*$", "", src)
+    assert "asyncio.gather" not in src, (
+        "the pre-warmer gathers all 56 warms — that is an ~18s contiguous loop stall "
+        "180s after every deploy, worse than the cold builds it exists to remove"
+    )
+    assert "await asyncio.sleep(0)" in src, (
+        "no explicit yield between builds; the loop never gets to poll I/O"
+    )
+    assert "for r in rows" in src
+
+
+# ── the whales re-read must key on "a build ran", not on last_hydrated_at ────
+#
+# `last_hydrated_at` is written ONLY by scripts/hydrate_whales.py, never by
+# `_sync_to_whale_tables`. So it answers "has the nightly job ever run for this whale",
+# not "did a sync just run" — and it was wrong for exactly the case the guard exists for:
+# a hydrated whale whose snapshot read fails, rebuilds, syncs, then has its fresh
+# portfolio_value / return columns discarded. Reachable via ?force_refresh=true, which
+# deletes the snapshot rows first.
+
+
+def test_get_or_process_latest_reports_whether_it_served_from_storage(monkeypatch):
+    svc = WhaleService.__new__(WhaleService)
+
+    async def _stored(self, whale_id):
+        return {"filing_period": "2026-Q2"}
+
+    monkeypatch.setattr(WhaleService, "_read_from_supabase", _stored)
+    snap, served = asyncio.run(
+        svc._get_or_process_latest("w1", {"last_hydrated_at": "2026-08-19", "data_source": "13f"})
+    )
+    assert snap is not None and served is True, "a stored snapshot must report served=True"
+
+
+def test_a_rebuild_reports_served_from_storage_false(monkeypatch):
+    """The case the old guard missed: hydrated whale, snapshot read returns nothing, so a
+    full rebuild + sync runs and the whales row IS rewritten."""
+    svc = WhaleService.__new__(WhaleService)
+
+    async def _none(self, whale_id):
+        return None
+
+    async def _built(self, whale_id, cik, whale=None):
+        return {"filing_period": "2026-Q2", "rebuilt": True}
+
+    monkeypatch.setattr(WhaleService, "_read_from_supabase", _none)
+    monkeypatch.setattr(WhaleService, "_process_13f_path", _built)
+    snap, served = asyncio.run(
+        svc._get_or_process_latest(
+            "w1", {"last_hydrated_at": "2026-08-19", "data_source": "13f", "cik": "1"}
+        )
+    )
+    assert snap is not None
+    assert served is False, (
+        "a rebuild must report served=False so the caller re-reads the synced whales row"
+    )
+
+
+def test_the_reread_guard_no_longer_keys_on_last_hydrated_at():
+    """Structural. `snapshot is not None` is ALSO wrong here — it is true on the
+    served-from-storage path and would undo the optimization entirely."""
+    import inspect
+    src = inspect.getsource(WhaleService._build_whale_profile)
+    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    src = re.sub(r"(?m)^\s*#.*$", "", src)
+    src = re.sub(r"(?m)\s+#.*$", "", src)
+    assert "if not served_from_storage:" in src, "the re-read guard is not keyed on a build"
+    assert "if not _hydrated_before" not in src, "the old last_hydrated_at proxy is back"
+
+
+# ── scheduler: visible skip, explicit ordering ──────────────────────────────
+
+
+def test_the_boot_seed_skip_is_logged():
+    """A process booting after 02:00 INFERS today's run already happened. That is
+    sometimes wrong (a mid-run redeploy), and an undiagnosable silent skip is the
+    unacceptable part — it self-heals the next day, so visibility is the fix."""
+    import inspect
+    import app.main as m
+
+    src = inspect.getsource(m._run_whale_hydration_job)
+    assert "last_full_run_date is not None" in src, "the boot seed is not checked"
+    body = src[src.index("last_full_run_date is not None"):]
+    assert "logger.info" in body[:900], "the inferred skip is still silent"
+
+
+def test_the_prewarmer_waits_on_an_event_not_a_magic_sleep():
+    """`sleep(180)` claimed to order the two lifespan tasks and did not: the politician
+    sweep STARTS at t=120s and is unbounded, so the pre-warmer woke 60s into it and any
+    whale swept afterwards had its just-written warm thrown away."""
+    import inspect
+    import app.main as m
+
+    src = inspect.getsource(m._run_whale_profile_pre_warmer)
+    src_nc = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    src_nc = re.sub(r"(?m)^\s*#.*$", "", src_nc)
+    src_nc = re.sub(r"(?m)\s+#.*$", "", src_nc)
+    assert "asyncio.sleep(180)" not in src_nc, "still ordering on a magic sleep"
+    assert "_politician_sweep_done" in src_nc and "wait_for" in src_nc
+    assert "TimeoutError" in src_nc, (
+        "no timeout fallback — a hung sweep would disable warming for the process lifetime"
+    )
+
+
+def test_the_sweep_event_is_set_even_when_the_sweep_fails():
+    """It is an ORDERING signal, not a success signal. Gating it on success would let one
+    bad sweep suppress warming forever."""
+    import inspect
+    import app.main as m
+
+    src = inspect.getsource(m._run_whale_hydration_job)
+    idx = src.index("_politician_sweep_done.set()")
+    preceding = src[:idx]
+    assert "finally:" in preceding[-400:], (
+        "the event is not set from a finally — a failed sweep would never release the warmer"
+    )

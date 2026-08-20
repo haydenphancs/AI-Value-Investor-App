@@ -224,7 +224,19 @@ async def get_trade_group_detail(
         whale_id=whale_id, group_id=group_id
     )
     if not group:
-        raise HTTPException(status_code=404, detail="Trade group not found")
+        # Structured, like the profile 404 above. A bare-string `detail` renders as
+        # `{"detail": "..."}`, which iOS `APIErrorResponse` cannot decode — so a real
+        # "this filing is gone" arrived as a generic failure with no user copy
+        # (invariant #3). Reuses WHALE_NOT_FOUND: from the client's side "no such
+        # investor" and "no such filing" both mean the thing you tapped is gone.
+        raise HTTPException(
+            status_code=404,
+            detail=make_error_body(
+                ErrorCode.WHALE_NOT_FOUND,
+                message=f"no trade group {group_id} for whale {whale_id}",
+                user_message="These trades are no longer available.",
+            ),
+        )
     return group
 
 

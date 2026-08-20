@@ -272,3 +272,33 @@ def test_congressional_activity_dates_are_not_relative():
     assert "politicians" in fn, "congressional rows still use relative wording"
     assert "Disclosed" in fn, "congressional rows must be labelled as disclosures"
     assert "days > 0" in fn, "a future date still renders a negative 'days ago'"
+
+
+def test_risk_badge_hides_when_the_backend_has_no_classification():
+    """`WhaleRiskProfile.fromBackend("")` defaults to `.moderate`, so a whale that has
+    never been hydrated (`risk_profile: ""` — Mark Kelly in production) rendered a
+    confident "Moderate" badge for a filer nothing is known about."""
+    models = _src("profile_models")
+    body = _braced(models, r"struct WhaleProfile\b")
+    assert body, "WhaleProfile not found"
+    assert "riskProfileRaw" in body, "the raw backend string must be preserved"
+    assert "hasRiskProfile" in body, "no predicate distinguishing 'no classification'"
+
+    view = _braced(_src("profile_view"), r"struct WhaleProfileHeader\b")
+    assert view, "WhaleProfileHeader not found"
+    assert "hasRiskProfile" in view, "the badge is still rendered unconditionally"
+
+
+def test_whale_endpoint_has_no_bare_string_error_details():
+    """A bare-string `detail` renders as `{"detail": "..."}`, which iOS
+    `APIErrorResponse` cannot decode — the user gets a generic failure with no copy
+    and no action (invariant #3)."""
+    src = Path("app/api/v1/endpoints/whales.py").read_text(encoding="utf-8")
+    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    src = re.sub(r"(?m)^\s*#.*$", "", src)
+    src = re.sub(r"(?m)\s+#.*$", "", src)
+    bare = re.findall(r"detail\s*=\s*[\"']", src)
+    assert not bare, (
+        f"{len(bare)} bare-string HTTPException detail(s) in whales.py — "
+        "use make_error_body(...) so iOS can decode the error"
+    )

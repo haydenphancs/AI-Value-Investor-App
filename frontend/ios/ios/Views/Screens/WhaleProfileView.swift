@@ -307,8 +307,12 @@ struct WhaleProfileHeader: View {
                     .foregroundColor(AppColors.textSecondary)
             }
 
-            // Risk Profile Badge
-            WhaleRiskBadge(riskProfile: profile.riskProfile)
+            // Risk Profile Badge — omitted entirely when the backend has no
+            // classification for this whale. An absent badge says nothing; a defaulted
+            // one asserts "Moderate" about a filer that has never been hydrated.
+            if profile.hasRiskProfile {
+                WhaleRiskBadge(riskProfile: profile.riskProfile)
+            }
 
             // Description
             WhaleDescriptionSection(description: profile.description)

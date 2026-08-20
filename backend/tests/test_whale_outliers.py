@@ -284,3 +284,78 @@ def test_redacted_profile_still_validates_and_hides_positions():
     # Non-mutating: the shared cached object must be untouched.
     assert full.current_holdings and full.current_holdings[0].ticker == "SECRET"
     WhaleProfileResponse.model_validate(locked.model_dump())
+
+
+# ── Sector exposure must sum to 100, corrected in the honest direction ───────
+#
+# 20 of 54 production whales had breakdowns summing between 47.7% and 123.4%.
+# NOTE ON SEVERITY: `DonutChartView` normalises internally (`value / total`), so the
+# rendered chart and its legend were already correct — this is an API-contract defect,
+# not a wrong pixel. A field named `percentage` that is not a percentage of the book is
+# still wrong, and any future consumer that trusts it would be.
+
+
+def _sectors(**kw):
+    from app.schemas.whale import WhaleSectorAllocationResponse
+    return [
+        WhaleSectorAllocationResponse(id=str(i), name=n, percentage=p)
+        for i, (n, p) in enumerate(kw.items())
+    ]
+
+
+def _sum(rows):
+    return round(sum(r.percentage for r in rows), 1)
+
+
+def test_over_counted_breakdown_is_scaled_back_onto_the_circle():
+    """Seth Klarman's real production numbers: 115.4%."""
+    from app.services.whale_service import _normalize_sector_exposure
+    out = _normalize_sector_exposure(
+        _sectors(**{"Technology": 20.0, "Consumer Cyclical": 16.5, "Healthcare": 15.1,
+                    "Industrials": 6.0, "Real Estate": 2.0, "Communication Services": 1.7}),
+        54.1,
+    )
+    assert _sum(out) == pytest.approx(100.0, abs=0.5)
+    # Scaling must preserve the ORDERING — it may not invent a preference.
+    named = [s for s in out if s.name != "Other"]
+    assert [s.name for s in named] == [s.name for s in sorted(named, key=lambda s: -s.percentage)]
+    assert named[0].name == "Technology"
+
+
+def test_under_reported_breakdown_becomes_Other_not_scaled_up():
+    """Ray Dalio's real shape: 47.7%. The shortfall is unclassified book that FMP never
+    reported — scaling it up to 100 would claim coverage that does not exist."""
+    from app.services.whale_service import _normalize_sector_exposure
+    out = _normalize_sector_exposure(
+        _sectors(**{"Technology": 20.0, "Healthcare": 15.0, "Energy": 12.7}), 0.0
+    )
+    assert _sum(out) == pytest.approx(100.0, abs=0.5)
+    tech = next(s for s in out if s.name == "Technology")
+    assert tech.percentage == 20.0, "a reported sector must NOT be inflated"
+    other = next(s for s in out if s.name == "Other")
+    assert other.percentage == pytest.approx(52.3, abs=0.5)
+
+
+def test_a_sane_breakdown_is_left_alone():
+    from app.services.whale_service import _normalize_sector_exposure
+    out = _normalize_sector_exposure(_sectors(Technology=60.0, Healthcare=40.0), 0.0)
+    assert [(s.name, s.percentage) for s in out] == [("Technology", 60.0), ("Healthcare", 40.0)]
+
+
+def test_rounding_noise_stays_inside_the_tolerance():
+    from app.services.whale_service import _normalize_sector_exposure
+    out = _normalize_sector_exposure(_sectors(Technology=60.0, Healthcare=39.4), 0.0)
+    assert _sum(out) == 99.4, "a 0.6pt rounding gap must not trigger a correction"
+
+
+@pytest.mark.parametrize("sectors,other", [([], 0.0), ([], -5.0)])
+def test_degenerate_breakdowns_return_empty(sectors, other):
+    from app.services.whale_service import _normalize_sector_exposure
+    assert _normalize_sector_exposure(sectors, other) == []
+
+
+def test_only_unclassified_book_is_a_single_Other_slice():
+    from app.services.whale_service import _normalize_sector_exposure
+    out = _normalize_sector_exposure([], 30.0)
+    assert len(out) == 1 and out[0].name == "Other"
+    assert out[0].percentage == pytest.approx(100.0, abs=0.5)

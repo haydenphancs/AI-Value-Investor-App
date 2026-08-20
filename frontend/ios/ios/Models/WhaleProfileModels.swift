@@ -38,6 +38,13 @@ struct WhaleProfile: Identifiable, Codable {
     /// `WhaleProfile` is never decoded from JSON (only built by
     /// `WhaleProfileDTO.toWhaleProfile()`), so the non-Optional-with-default
     /// Codable trap does not apply here. It very much does on the DTO.
+    /// The backend's RAW `risk_profile` string, kept so the badge can tell "we have no
+    /// classification" from a real one. `WhaleRiskProfile.fromBackend` defaults an
+    /// unrecognised value to `.moderate`, so a whale that has never been hydrated
+    /// (`risk_profile: ""` — Mark Kelly is one in production today) rendered a
+    /// confident blue "Moderate" badge for a filer we know nothing about. Same honesty
+    /// class as the green "+0.0%" a NULL return used to produce.
+    var riskProfileRaw: String = ""
     var returnSource: String = ""
     var returnStatus: String = ""
     var returnWindowYears: Int? = nil
@@ -127,6 +134,14 @@ struct WhaleProfile: Identifiable, Codable {
     /// a different data source from the 13F tile beside it, which the caption
     /// and the info sheet both have to say out loud.
     var isStockProxyReturn: Bool { returnSource == "stock_cagr" }
+
+    /// False when the backend sent no classification at all, so the badge hides rather
+    /// than asserting a default. `""` is what an unhydrated whale carries; a legacy row
+    /// that predates `riskProfileRaw` also reads `""`, and hiding a badge is the safe
+    /// direction to be wrong in.
+    var hasRiskProfile: Bool {
+        !riskProfileRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var isCongressional: Bool {
         if dataSource.contains("congressional") { return true }

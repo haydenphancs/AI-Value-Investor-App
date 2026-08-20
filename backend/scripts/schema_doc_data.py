@@ -25,6 +25,15 @@ _RE_RPC_CALL = re.compile(r"""\.rpc\(\s*["'](\w+)["']""")
 
 _SKIP_DIRS = {"venv", ".venv", "__pycache__", "node_modules", ".git", "site-packages"}
 
+# The atlas generator names every table in the database by definition. Scanning
+# its own source would report each table as "used" by the documentation that
+# describes it — a self-referential false positive that makes a genuinely dead
+# table look live.
+_SKIP_FILES = {
+    "schema_curation.py", "schema_parser.py", "schema_doc_data.py",
+    "schema_doc_svg.py", "schema_doc_template.py", "generate_schema_doc.py",
+}
+
 
 @dataclass
 class CodeUsage:
@@ -53,7 +62,7 @@ def scan_code(roots: list[Path], repo_root: Path, table_names: set[str]) -> Code
         if not root.exists():
             continue
         for path in sorted(root.rglob("*.py")):
-            if _SKIP_DIRS & set(path.parts):
+            if _SKIP_DIRS & set(path.parts) or path.name in _SKIP_FILES:
                 continue
             try:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -238,11 +247,17 @@ def build_payload(
         in_by[e["to"]].append(e)
 
     fns_by_table: dict[str, list[str]] = defaultdict(list)
+    rpc_by_table: dict[str, list[dict]] = defaultdict(list)
     for f in schema.functions:
         if f.schema != "public":
             continue
+        sites = sorted(usage.rpc.get(f.name, []))
         for tname in f.tables:
             fns_by_table[f"public.{tname}"].append(f.signature)
+            if sites:
+                rpc_by_table[f"public.{tname}"].append(
+                    {"fn": f.signature, "sites": sites}
+                )
 
     uncurated: list[str] = []
     tables: dict[str, dict] = {}
@@ -336,6 +351,7 @@ def build_payload(
             "in": in_by[t.qname],
             "enums": enums_used,
             "fns": sorted(set(fns_by_table.get(t.qname, []))),
+            "rpcVia": sorted(rpc_by_table.get(t.qname, []), key=lambda r: r["fn"]),
             "direct": sorted(usage.direct.get(t.name, [])),
             "named": sorted(usage.named.get(t.name, [])),
             "ddl": t.raw_ddl,

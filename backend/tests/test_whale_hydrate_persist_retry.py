@@ -237,21 +237,31 @@ async def test_a_genuine_bug_still_logs_error_with_a_stack(monkeypatch, caplog):
 async def test_holdings_retry_replays_from_the_delete_not_mid_loop(monkeypatch):
     """THE idempotency proof.
 
-    Fail the 3rd holdings insert. A correct retry re-runs the whole block, so the
-    op sequence must show a SECOND delete before the re-inserts. Resuming mid-loop
-    instead would hit whale_holdings_whale_id_ticker_key on the rows that already
-    committed and truncate the whale's holdings.
+    Fail the holdings write. A correct retry re-runs the WHOLE block, so the op sequence
+    must show a SECOND delete before the re-insert. Resuming mid-way instead would hit
+    `whale_holdings_whale_id_ticker_key` on rows that already committed and truncate the
+    whale's holdings.
+
+    The write is now a single BULK insert (it was one per holding, which cost 30
+    sequential blocking round-trips and — sharing an event loop with the live API —
+    stalled real requests during the nightly run). That makes this invariant STRONGER,
+    not weaker: an atomic statement has no partially-committed state for a replay to
+    collide with at all. The delete-first shape is still asserted because the retry
+    helper replays from the top of the block either way.
     """
-    sb = _FakeSupabase(faults={("whale_holdings", "insert"): [None, None, _gateway_error(520)]})
+    sb = _FakeSupabase(faults={("whale_holdings", "insert"): [_gateway_error(520)]})
     h = _hydrator(sb, monkeypatch)
 
     await h._persist("w1", _snapshot(n_holdings=3), _OK_RETURN)
 
     holdings_ops = [v for t, v in sb.ops if t == "whale_holdings"]
     assert holdings_ops == [
-        "delete", "insert", "insert", "insert",   # attempt 1 — blew up on #3
-        "delete", "insert", "insert", "insert",   # attempt 2 — full replay
+        "delete", "insert",   # attempt 1 — the bulk write failed
+        "delete", "insert",   # attempt 2 — FULL replay, from the delete
     ]
+    # And all three holdings travel in ONE statement, not three.
+    payload = [p for op, p in sb.payloads if op == ("whale_holdings", "insert")][0]
+    assert isinstance(payload, list) and len(payload) == 3
 
 
 @pytest.mark.asyncio
@@ -268,13 +278,15 @@ async def test_holdings_does_not_retry_a_23505(monkeypatch):
 @pytest.mark.asyncio
 async def test_sector_allocations_also_replay_from_the_delete(monkeypatch):
     # This table has NO unique key, so per-statement retry would silently duplicate.
-    sb = _FakeSupabase(faults={("whale_sector_allocations", "insert"): [None, _gateway_error(520)]})
+    sb = _FakeSupabase(faults={("whale_sector_allocations", "insert"): [_gateway_error(520)]})
     h = _hydrator(sb, monkeypatch)
 
     await h._persist("w1", _snapshot(n_sectors=2), _OK_RETURN)
 
     ops = [v for t, v in sb.ops if t == "whale_sector_allocations"]
-    assert ops == ["delete", "insert", "insert", "delete", "insert", "insert"]
+    assert ops == ["delete", "insert", "delete", "insert"]
+    payload = [p for op, p in sb.payloads if op == ("whale_sector_allocations", "insert")][0]
+    assert isinstance(payload, list) and len(payload) == 2
 
 
 # ── trade groups: the "unsafe site must NOT get retry" control ───────────────
@@ -454,10 +466,10 @@ def test_a_42P10_falls_back_and_tolerates_a_row_that_is_already_there():
         ("whale_trades", "insert"): [_unique_violation()],
     })
 
-    hw.WhaleHydrator._upsert_trade(sb, "w1", "tg1", {
+    hw.WhaleHydrator._upsert_trades(sb, "w1", "tg1", [{
         "ticker": "IBM", "action": "SOLD", "trade_type": "Sell",
         "amount": 1.0, "date": "2025-08-12",
-    })
+    }])
 
     assert sb.count("whale_trades", "upsert") == 1
     assert sb.count("whale_trades", "insert") == 1
@@ -471,10 +483,10 @@ def test_the_fallback_insert_still_raises_a_genuine_failure():
     })
 
     with pytest.raises(APIError):
-        hw.WhaleHydrator._upsert_trade(sb, "w1", "tg1", {
+        hw.WhaleHydrator._upsert_trades(sb, "w1", "tg1", [{
             "ticker": "IBM", "action": "SOLD", "trade_type": "Sell",
             "amount": 1.0, "date": "2025-08-12",
-        })
+        }])
 
 
 def test_a_non_42P10_upsert_error_is_not_downgraded_to_an_insert():
@@ -483,10 +495,10 @@ def test_a_non_42P10_upsert_error_is_not_downgraded_to_an_insert():
     sb = _FakeSupabase(faults={("whale_trades", "upsert"): [_gateway_error(520)]})
 
     with pytest.raises(APIError):
-        hw.WhaleHydrator._upsert_trade(sb, "w1", "tg1", {
+        hw.WhaleHydrator._upsert_trades(sb, "w1", "tg1", [{
             "ticker": "IBM", "action": "SOLD", "trade_type": "Sell",
             "amount": 1.0, "date": "2025-08-12",
-        })
+        }])
 
     assert sb.count("whale_trades", "insert") == 0
 
@@ -518,7 +530,12 @@ async def test_one_duplicate_trade_does_not_abort_the_rest_of_the_group(monkeypa
     with caplog.at_level(logging.DEBUG, logger=hw.logger.name):
         await h._persist("w1", _snapshot(trade_groups=groups), _OK_RETURN)
 
-    assert sb.count("whale_trades", "upsert") == 2, (
+    # The group's trades now travel in ONE upsert. When that cannot infer a conflict
+    # target it falls back to PER-ROW inserts precisely so a single already-present row
+    # cannot take the rest of the group with it — the production symptom this test was
+    # written for. So the proof moves from "2 upserts" to "2 insert attempts".
+    assert sb.count("whale_trades", "upsert") == 1
+    assert sb.count("whale_trades", "insert") == 2, (
         "the second trade was never attempted — one duplicate aborted the group"
     )
     assert not [r for r in caplog.records if "Failed to sync trade group" in r.getMessage()], (
@@ -535,10 +552,10 @@ def test_the_fallback_warning_does_not_misdiagnose_an_applied_migration(caplog):
     })
 
     with caplog.at_level(logging.DEBUG, logger=hw.logger.name):
-        hw.WhaleHydrator._upsert_trade(sb, "w1", "tg1", {
+        hw.WhaleHydrator._upsert_trades(sb, "w1", "tg1", [{
             "ticker": "IBM", "action": "SOLD", "trade_type": "Sell",
             "amount": 1.0, "date": "2025-08-12",
-        })
+        }])
 
     msg = " ".join(r.getMessage() for r in caplog.records)
     assert "PARTIAL" in msg or "partial" in msg, (

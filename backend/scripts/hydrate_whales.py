@@ -1600,15 +1600,27 @@ class WhaleHydrator:
             sb.table("whale_holdings").delete().eq(
                 "whale_id", whale_id
             ).execute()
-            for h in snapshot["holdings_data"][:30]:
-                sb.table("whale_holdings").insert({
+            # ONE insert, not 30. The postgrest client is SYNCHRONOUS, and this job
+            # shares an event loop with the live API — 30 sequential blocking round-trips
+            # here (x56 whales, plus the trades loop below) is what made API requests
+            # landing during the nightly run wait 40+ seconds.
+            #
+            # The delete-first, whole-block-only retry rule is UNCHANGED and is in fact
+            # strengthened: a single statement cannot partially commit, so there is no
+            # longer a mid-loop state for a replay to collide with.
+            rows = [
+                {
                     "whale_id": whale_id,
                     "ticker": h["ticker"],
                     "company_name": h.get("company_name", h["ticker"]),
                     "logo_url": h.get("logo_url"),
                     "allocation": h.get("allocation", 0),
                     "change_percent": h.get("change_percent", 0),
-                }).execute()
+                }
+                for h in snapshot["holdings_data"][:30]
+            ]
+            if rows:
+                sb.table("whale_holdings").insert(rows).execute()
 
         try:
             retry_idempotent_sync(
@@ -1634,12 +1646,16 @@ class WhaleHydrator:
             sb.table("whale_sector_allocations").delete().eq(
                 "whale_id", whale_id
             ).execute()
-            for s in snapshot["sector_data"]:
-                sb.table("whale_sector_allocations").insert({
+            rows = [
+                {
                     "whale_id": whale_id,
-                    "sector": s["name"],
-                    "allocation": s["allocation"],
-                }).execute()
+                    "sector": sec["name"],
+                    "allocation": sec["allocation"],
+                }
+                for sec in snapshot["sector_data"]
+            ]
+            if rows:
+                sb.table("whale_sector_allocations").insert(rows).execute()
 
         try:
             retry_idempotent_sync(
@@ -1727,8 +1743,9 @@ class WhaleHydrator:
 
                 # Existing trades for this group, so a REPAIR run tops up a partially
                 # written group instead of either skipping it or duplicating it.
-                for trade in tg.get("trades", [])[:50]:
-                    self._upsert_trade(sb, whale_id, tg_id, trade)
+                # ONE write for up to 50 trades, per group. This was the single largest
+                # blocking loop in the nightly job.
+                self._upsert_trades(sb, whale_id, tg_id, tg.get("trades", [])[:50])
                 continue
             except Exception as e:
                 denorm_ok = False
@@ -1778,15 +1795,68 @@ class WhaleHydrator:
         self._maybe_generate_alert(whale_id, snapshot)
 
     @staticmethod
-    def _upsert_trade(sb, whale_id: str, tg_id: str, trade: Dict[str, Any]) -> None:
-        """Write one trade, REPAIRING rather than duplicating on a replay.
+    def _upsert_trades(
+        sb, whale_id: str, tg_id: str, trades: List[Dict[str, Any]]
+    ) -> None:
+        """Write a group's trades in ONE statement, repairing rather than duplicating.
 
-        Uses `uq_whale_trades_group_ticker_action_date` (migration 143). If that index
-        is not present yet the upsert is rejected with 42P10, and we fall back to the
-        previous plain insert — so this ships safely BEFORE the migration is applied and
-        becomes idempotent the moment it is.
+        Bulk because this job shares an event loop with the live API and the postgrest
+        client is synchronous: 50 sequential blocking round-trips per group, across 56
+        whales, is what stalled API requests for 40+ seconds during the nightly run.
+
+        Same migration-143 upsert + 42P10 fallback as the single-row version it replaces,
+        so it still ships safely against a database without the unique index.
         """
-        row = {
+        if not trades:
+            return
+        rows = [
+            WhaleHydrator._trade_row(whale_id, tg_id, t) for t in trades
+        ]
+        try:
+            sb.table("whale_trades").upsert(
+                rows, on_conflict="trade_group_id,ticker,action,date"
+            ).execute()
+        except Exception as e:
+            msg = str(e).lower()
+            if "42p10" in msg or "no unique or exclusion constraint" in msg:
+                # ⚠️ Do NOT claim "migration 143 is not applied" here. That message was
+                # FALSE in production and sent readers hunting for an unapplied
+                # migration: 42P10 also fires when the unique index EXISTS but is
+                # PARTIAL, because PostgREST emits a bare `ON CONFLICT (cols)` and
+                # Postgres cannot infer a partial index without a matching WHERE clause.
+                logger.warning(
+                    "  whale_trades upsert could not infer a conflict target (42P10) — "
+                    "the unique index is missing, or it exists but is PARTIAL and so is "
+                    "not inferable. Falling back to per-row inserts for %d trade(s).",
+                    len(rows),
+                )
+                # PER-ROW, deliberately, and ONLY on this fallback path.
+                #
+                # A bulk insert is atomic: one already-present row raises 23505 and takes
+                # the whole group's trades with it. That is the exact failure this
+                # fallback exists to avoid — measured in production, 12 fallbacks aborted
+                # 24 groups in one cycle, so a repair run could never top up a partially
+                # written group.
+                #
+                # This path only runs on a database WITHOUT migration 143, so the slow
+                # shape is confined to a schema that no longer exists in production.
+                for row in rows:
+                    try:
+                        sb.table("whale_trades").insert(row).execute()
+                    except Exception as row_err:
+                        # 23505 = the row is already there, which is precisely the state
+                        # the upsert was trying to reach. That is the fallback SUCCEEDING.
+                        rmsg = str(row_err).lower()
+                        if "23505" in rmsg or "duplicate key value" in rmsg:
+                            continue
+                        raise
+            else:
+                raise
+
+    @staticmethod
+    def _trade_row(whale_id: str, tg_id: str, trade: Dict[str, Any]) -> Dict[str, Any]:
+        """One `whale_trades` row. Shared by the bulk writer and its fallback."""
+        return {
             "whale_id": whale_id,
             "trade_group_id": tg_id,
             "ticker": trade["ticker"],
@@ -1802,46 +1872,6 @@ class WhaleHydrator:
             "new_allocation": trade.get("new_allocation"),
             "date": trade.get("date", ""),
         }
-        try:
-            sb.table("whale_trades").upsert(
-                row, on_conflict="trade_group_id,ticker,action,date"
-            ).execute()
-            return
-        except Exception as e:
-            msg = str(e).lower()
-            if not ("42p10" in msg or "no unique or exclusion constraint" in msg):
-                raise
-            # 42P10 = the conflict target matched no INFERABLE unique index. There are TWO
-            # causes and this message must not assert the wrong one:
-            #   (a) migration 143 has not been applied on this database, or
-            #   (b) the index exists but is PARTIAL — and a partial unique index cannot be
-            #       inferred from `ON CONFLICT (cols)`, which is the only form PostgREST can
-            #       emit (it has no way to supply the index predicate).
-            # (b) is what actually shipped: 143's index carried `WHERE trade_group_id IS NOT
-            # NULL`. Asserting (a) sent every reader looking for an unapplied migration that
-            # was in fact applied. Migration 146 drops the predicate.
-            logger.warning(
-                "  whale_trades: conflict target unusable for %s — no INFERABLE unique index "
-                "on (trade_group_id, ticker, action, date). Either migration 143 is unapplied "
-                "or its index is PARTIAL (fixed by 146). Falling back to insert.",
-                trade.get("ticker"),
-            )
-
-        try:
-            sb.table("whale_trades").insert(row).execute()
-        except Exception as e:
-            # 23505 means the row is ALREADY THERE, which is precisely the state the upsert
-            # was trying to reach — so this is the fallback succeeding, not failing.
-            #
-            # Raising here was the bug: `_upsert_trade` is called in a loop inside the
-            # caller's `try`, so one already-present trade aborted every REMAINING trade in
-            # that group and logged "Failed to sync trade group". A repair run could
-            # therefore never top up a partially written group — the exact behaviour
-            # migration 143 exists to provide. Measured in production: 12 fallbacks produced
-            # 24 aborted groups in a single hydration cycle.
-            if "23505" in str(e) or "duplicate key value" in str(e).lower():
-                return
-            raise
 
     def _maybe_generate_alert(
         self, whale_id: str, snapshot: Dict[str, Any]

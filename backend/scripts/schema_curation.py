@@ -134,8 +134,17 @@ IMPLICIT_REFS: dict[tuple[str, str], tuple[str, str, str]] = {
         "public.book_chapters", "chapter_number", "joined with book_id, not a key on its own"),
 }
 
-# Column-name patterns that look like a foreign key but are not one, so the
-# inference pass does not invent an edge for them.
+# Columns that look like a foreign key but are not one.
+#
+# NOTE: as of the current schema this filters NOTHING — every entry below names a
+# `<base>_id` column for which no table `<base>`/`<base>s` exists, so the
+# inference pass already declines to draw an edge. It is kept as a forward
+# guard: the day someone adds a `stocks` or `transactions` table,
+# `chat_sessions.stock_id` and `credit_purchases.transaction_id` would silently
+# sprout false relationships in the map. A fabricated edge in a schema diagram
+# is worse than a missing one, so the guard is cheap insurance rather than dead
+# config. `test_not_a_ref_suppresses_an_edge_that_would_otherwise_be_inferred`
+# proves it still works.
 NOT_A_REF: frozenset[tuple[str, str]] = frozenset({
     ("public.ai_insight_cache", "inputset_id"),
     ("public.updates_insight_state", "last_inputset_id"),

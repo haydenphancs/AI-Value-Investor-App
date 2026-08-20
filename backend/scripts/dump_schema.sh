@@ -10,6 +10,11 @@
 #
 # Usage:
 #   ./backend/scripts/dump_schema.sh
+#
+# AFTERWARDS, regenerate the Database Atlas so the docs match the new snapshot:
+#   cd backend && ./venv/bin/python scripts/generate_schema_doc.py
+# It exits non-zero and names any table that has no entry in
+# backend/scripts/schema_curation.py, so a new table cannot land undocumented.
 # 
 # Password resolution order:
 #   1. $SUPABASE_DB_PASSWORD env var if already set

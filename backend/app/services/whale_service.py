@@ -3588,9 +3588,11 @@ def _bulk_write_trades(sb, rows: List[Dict[str, Any]]) -> None:
     except Exception as e:
         msg = str(e).lower()
         if "42p10" in msg or "no unique or exclusion constraint" in msg:
+            # Same wording rule as the hydrator twin: 42P10 also fires when the index
+            # EXISTS but is PARTIAL, so never assert that the migration is unapplied.
             logger.warning(
-                "whale_trades upsert unsupported (migration 143 not applied) — "
-                "falling back to a bulk insert for %d trade(s)",
+                "whale_trades upsert could not infer a conflict target (42P10) — index "
+                "missing, or present but PARTIAL. Falling back to insert for %d trade(s)",
                 len(rows),
             )
             sb.table("whale_trades").insert(rows).execute()

@@ -128,7 +128,7 @@ class _FakeThemesFMP:
         self.quotes_by_symbol = quotes_by_symbol
         self.batch_calls = []
 
-    async def get_batch_quotes(self, symbols):
+    async def get_batch_quotes_bulk(self, symbols):
         self.batch_calls.append(list(symbols))
         return [self.quotes_by_symbol[s] for s in symbols if s in self.quotes_by_symbol]
 

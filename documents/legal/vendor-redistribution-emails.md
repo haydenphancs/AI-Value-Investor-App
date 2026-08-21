@@ -68,62 +68,94 @@ require a visible *"Data provided by CoinGecko"* credit and a link.
 
 ## 1 — Financial Modeling Prep
 
-**To:** the address on your plan's billing/support page (or the in-app support widget on
-financialmodelingprep.com — use the account the API key belongs to, so they can see your plan)
-**Subject:** `Data Display & Licensing — commercial mobile app, current plan coverage`
+⚠️ **It is a FORM, not an email.** The commercial channel is the Enterprise card on
+<https://site.financialmodelingprep.com/developer/docs/pricing> → **Commercial Use** tab. There is
+no "contact sales" address; the form is the front door. (`info@financialmodelingprep.com` from
+ToS §2.7 is general support — use it only as the fallback described below.)
+
+### The exact fields it asks for
+
+| Field | What to put | Note |
+|---|---|---|
+| First Name / Last Name | your legal name | must match whatever you'd sign an agreement as |
+| **Corporate Email** | **whatever the form prefills — do not fight it** | The field is **locked to your FMP account address** (`haydenphancs@gmail.com`). That is *good*: it links the enquiry to your existing **paying Premium subscription**, so you arrive as a customer upgrading rather than an anonymous lead. A free-provider domain matters far less than that. Put `support@caydexinvest.com` in the use-case text as the preferred reply-to if you want correspondence on the domain. |
+| **Company Name** | `Caydex` | See the note below — this is the field that trips you up. |
+| Company Website | `https://caydexinvest.com` | You have this and it serves a real site — a genuine advantage; most tyre-kickers don't. |
+| Company Type | closest match in the dropdown | If there is no *Individual* / *Sole Proprietor* option, pick the nearest and say so explicitly in the use-case box. |
+| Your Job Title | `Founder` | |
+| **Country of Registration** | `United States` | |
+| Describe Your Use Case | the block below | This is the only field that does any work. |
+
+### ⚠️ "Company Name" when you have no company
+
+You are an **Individual** Apple developer with no LLC (§1). Do not invent an entity — you may end
+up signing a licensing agreement against that name, and a mismatch between the signer and the
+legal person is a real problem later.
+
+Put **`Caydex`** (your product/trading name) and then **say the true thing in the use-case box**:
+that you currently operate as an individual and can form a US LLC if the agreement requires a
+legal entity. That is accurate, it is not a red flag to a vendor, and it surfaces the entity
+question *before* you're mid-contract — which is exactly when you want it, because it is the same
+decision as §1.
+
+### Paste into "Describe Your Use Case"
+
+Keep it tight; it is a textarea, not a letter. This covers the three things they need to quote.
 
 ```
-Hello,
+I run Caydex (caydexinvest.com), a consumer iOS app for retail investors, not yet
+launched. I'm writing from the email on my existing FMP subscription so you can see the
+account; support@caydexinvest.com also reaches me if you prefer a domain address.
 
-I'm the developer of Caydex, an iOS app that presents company fundamentals and market
-data to retail users. I'm preparing to launch on the App Store and want to confirm my
-licensing position before I do.
+I'm currently on the Premium personal plan and I understand from your terms
+(2.2.1 / 2.2.2) that displaying data to end users needs a commercial plan plus a Data
+Display and Licensing Agreement. I want to be licensed correctly before I ship rather
+than after, so I'd like a quote.
 
-I currently subscribe to Premium (account: [YOUR ACCOUNT EMAIL]). My reading of your
-terms is that Starter/Premium/Ultimate are personal-use licences and do not cover
-displaying data to end users, and that a commercial plan plus a Data Display and
-Licensing Agreement is required for what I'm doing. I would like to correct that before
-I launch rather than after.
+Use case:
+- The app shows FMP-sourced data directly to end users: quotes, company profiles,
+  income statement / cash flow / ratios, analyst estimates, insider and institutional
+  (13F) filings, ETF data.
+- It is a commercial product: a paid subscription tier plus consumable in-app purchases.
+- Expected scale at launch is small - low thousands of users, US App Store only.
+- My backend caches responses in my own database on a TTL (minutes to 24h by endpoint)
+  to stay inside rate limits. Data is served only to my own app's users; I do not
+  re-expose it through any API of my own.
+- Generated research reports freeze the figures used into a point-in-time snapshot, so
+  some values persist past the cache TTL inside one user's saved report. Please tell me
+  if that needs to expire.
 
-Three specific questions:
+Two things I'd like in the reply: (1) which plan covers this and its cost, and (2)
+whether a separate Data Display and Licensing Agreement is required on top.
 
-1. Which plan do I need? The app shows FMP-sourced data (quotes, company profiles,
-   income statement / cash flow figures, ratios, analyst estimates, insider and
-   institutional filings) directly to end users inside a consumer mobile app. It has a
-   paid subscription tier and consumable in-app purchases, so it is a commercial
-   product. Please confirm which commercial plan covers this and what it costs, and
-   whether a separate Data Display and Licensing Agreement is also required.
+I currently attribute FMP as a data source in-app and on my support page, and will
+adjust the wording to whatever form you require.
 
-2. Server-side caching. My backend caches FMP responses in my own database to stay
-   within rate limits and to keep response times low. Cached values are refreshed on a
-   TTL (minutes to 24 hours depending on the endpoint) and are only ever served to my
-   own app's users. Is that within the terms of my plan?
-
-3. Point-in-time snapshots. When a user generates a research report, the app freezes the
-   figures used into that report so the document stays internally consistent when it is
-   re-opened later. That means some FMP-derived numbers persist beyond the cache TTL,
-   attached to that one user's report. Please confirm whether that is acceptable, or
-   whether you would require those values to expire.
-
-I attribute Financial Modeling Prep as a data source in-app and on my support page, and
-I'm happy to adjust the attribution wording to whatever form you require.
-
-If any of the above needs a different plan or a separate agreement, please let me know
-what that is and I'll get it in place before launch.
-
-Thank you,
-[YOUR NAME]
-Caydex — caydexinvest.com
-[YOUR EMAIL]
+Note on entity: I operate as an individual today (no LLC). If the agreement requires a
+registered legal entity I can form a US LLC - please tell me if that is a prerequisite.
 ```
+
+### If the form blocks you
+
+If a required field genuinely cannot be filled honestly, **do not fake it.** Send the same text
+to `info@financialmodelingprep.com` from `support@caydexinvest.com`, subject *"Commercial /
+Data Display licensing enquiry — Caydex (existing Premium customer)"*, and say the form's
+company fields don't fit an individual. Support routing is slower than the sales form, so try
+the form first.
 
 ---
 
 ## 2 — CoinGecko
 
-**To:** the support address for the Demo/free plan (support@coingecko.com, or the contact form
-at coingecko.com/en/api — again, use the account the key belongs to)
+CoinGecko *does* take email. Send from `support@caydexinvest.com`, using the account the API key
+belongs to.
+
+**To:** `support@coingecko.com` (or the contact form at coingecko.com/en/api)
 **Subject:** `Demo plan — commercial use and attribution for a paid iOS app`
+
+**Do this one second, and do not let it hold anything up.** It is far lower stakes than FMP: the
+paid tiers are published and affordable, crypto is one feature among many rather than the core of
+the app, and the worst case is "upgrade to Basic and add an attribution line" — not a negotiation.
 
 ```
 Hello,
@@ -163,12 +195,42 @@ Caydex — caydexinvest.com
 
 ---
 
-## When the replies land
+## After you send
 
-- **Both say yes** → answer ASC **Content Rights** as "contains third-party content, and I have
-  the rights to use it", and keep the emails.
-- **Either says you need a paid tier or a separate agreement** → do that first. Launching against
-  a "no" is a contract problem that an App Store approval does not cure.
-- **Either asks for specific attribution wording** → update the in-app credits and
-  `documents/legal/` support page to match verbatim, then re-verify
-  `tests/test_legal_pages.py::test_support_page_names_every_data_source` still passes.
+**Expect a sales conversation, not a yes/no.** Typical shape: auto-acknowledgement, then a rep
+within a few days asking about volume, endpoints and user count, then a quote plus an agreement
+to sign. Days to a couple of weeks, mostly waiting on them.
+
+**They are very unlikely to refuse you** — you are a paying customer volunteering to pay more.
+The risk is the *price*, not rejection. And asking now, pre-launch, is a materially different
+conversation from asking later: today you are a developer getting licensed before shipping;
+after launch the same message discloses an ongoing violation on a live product with paying users.
+
+### Keep building while you wait — only ONE thing is blocked
+
+Everything else in App Store Connect is independent: upload the build, listing copy, screenshots,
+pricing, availability, App Privacy, age rating, review notes, demo credentials, IAP metadata and
+subscription-group localization. Do all of it now.
+
+The single blocked field is **Content Rights**, and it is hard-required to reach Submit. So in
+practice FMP's reply gates *submission*, not *preparation* — get everything else done and you are
+one checkbox away when they answer.
+
+### When the replies land
+
+- **Yes / you're covered** → answer ASC Content Rights, and **keep the written reply** — it is the
+  evidence behind the declaration.
+- **You need a commercial plan** → decide with the §1 LLC question, not separately; their form
+  already asked for a country of registration.
+- **The quote is out of range** → three routes, cheapest first: (1) reduce FMP surface — you also
+  pull FRED, FINRA, EDGAR and CoinGecko, so work out how much of the app survives without FMP
+  before negotiating, because that is your leverage; (2) switch or split vendors — but read each
+  one's **display clause** specifically, not just its price, which is the exact trap that produced
+  this document; (3) form the LLC and negotiate as an entity.
+- **Attribution wording is specified** → update the in-app credits and the support page verbatim,
+  then re-run `tests/test_legal_pages.py::test_support_page_names_every_data_source`.
+
+⚠️ **Not legal advice.** Whether to ship before an answer is a business decision with real
+exposure — a Content Rights declaration you cannot support, and ToS §2.10 letting FMP terminate
+the key under a live user base. It sits next to the investment-adviser question on the
+"needs a real lawyer" list; one conversation could cover both.

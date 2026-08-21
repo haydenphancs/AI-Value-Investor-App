@@ -17,20 +17,40 @@ simulator (iPhone 11 Pro Max / XS Max) is installed on this machine, and none is
 | `6.9/01-home-dashboard.png` | Home | Live index strip, Daily Scanners, App-Exclusive Signals |
 | `6.9/02-ai-research-personas.png` | Research | The five **style-named** personas — no real investor names |
 | `6.9/03-ticker-detail-nvda.png` | Ticker detail | Live intraday chart + Key Statistics, fully loaded |
+| `6.9/06-tracking-watchlist.png` | Tracking | Populated watchlist (AAPL/CRM/ORCL/PLUG) with sparklines, plus Alerts & Upcoming Events. Whales cards here name **tickers only**, so it is 5.2.1-safe. |
+| `6.9/05-add-credits.png` | Add Credits | All four consumable packs, real StoreKit prices, 3.1.1 disclosure. **Required for the IAP submission.** |
 | `6.9/04-updates-ai-insights.png` | Updates | AI Insights card + live news timeline. ⚠️ The news rows below the card carry third-party headlines that can name real investors (this capture has "Ken Griffin says Citadel unwound…" partly visible at the fold). That is factual reporting by a news source, not the app naming a feature after a person — a materially weaker 5.2.1 exposure than a lesson title was — but if you want it airtight, crop to the Insights card or re-shoot when the feed rotates. |
 
 These are **raw device captures**, not marketed screenshots. Apple accepts them as-is; most apps
 add a caption band and a device frame. Do that pass before uploading if you want it.
 
-## Still to capture
+## ✅ Add Credits — captured 2026-08-21
 
-Two, and **both need data that a fresh signed-out install does not have**:
+`6.9/05-add-credits.png` shows all four consumable packs with real prices ($2.99 / $5.99 /
+$12.99 / $24.99), Buy buttons, and the Guideline 3.1.1 line *"Purchased credits never expire.
+Your monthly credits reset each month."* **One shot satisfies all four IAP products.**
 
-1. **Add Credits** — *required* for the four consumable IAPs (§6b); one shot showing all four
-   packs satisfies all four products. Needs a signed-in account, so shoot it with the App Review
-   demo account once that exists.
-2. **Tracking** — on a fresh install it renders the "No tickers yet" empty state, which is not
-   worth shipping. Add three or four tickers to the watchlist first, then re-shoot.
+How it was produced, because two earlier attempts were rejected on size:
+
+1. **Real prices need an Xcode-driven run.** `Caydex.storekit` is attached to the scheme's *Run*
+   action only; `simctl launch` ignores it and every pack renders "Price unavailable". The
+   automated equivalent of ⌘R (works, but takes ~2.5 min before the app appears — do not
+   conclude it failed early):
+   ```bash
+   osascript -e 'tell application "Xcode" to tell workspace document "ios.xcodeproj" to \
+     debug scheme "ios" run destination specifier "id=3C473C18-1FB5-417F-836B-3D0EFDFB7026"'
+   ```
+   Confirm it took: `xcrun simctl spawn <UDID> log show --last 10m --predicate 'process == "storekitd"' | grep -c XcodeTest`
+   must be **> 0**.
+2. **Capture with `xcrun simctl io <UDID> screenshot`**, which always writes true device
+   resolution. Simulator ⌘S also works. ⇧⌘4 does **not** — it grabs the scaled macOS window.
+
+## Complete — six shots, all 1320 x 2868
+
+Apple asks for 3-10 per size, so six is a shippable set. Nothing is outstanding.
+
+If you want more later, the obvious candidates are a Journey lesson card (the Strategies row now
+reads cleanly) and a generated AI report. Both need care about what is in frame — see below.
 
 A Learn/Journey card is also worth having now that the lesson titles are clean — the Strategies
 row reads "The Quality Compounder / The Everyday Growth Hunter / The Disruption Seeker".

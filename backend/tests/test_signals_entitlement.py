@@ -310,7 +310,7 @@ class _NoQuotesFMP:
     async def get_historical_prices(self, *_a, **_k):
         return []
 
-    async def get_batch_quotes(self, *_a, **_k):
+    async def get_batch_quotes_bulk(self, *_a, **_k):
         return []
 
 

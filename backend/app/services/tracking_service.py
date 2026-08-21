@@ -557,7 +557,7 @@ class TrackingService:
     ) -> Dict[str, Dict[str, Any]]:
         """Fetch real-time quotes for all tickers in a single FMP call."""
         try:
-            quotes = await self.fmp.get_batch_quotes(tickers)
+            quotes = await self.fmp.get_batch_quotes_bulk(tickers)
             return {q["symbol"]: q for q in quotes if q.get("symbol")}
         except Exception as exc:
             logger.warning("Batch quotes failed: %s", exc)

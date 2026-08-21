@@ -719,7 +719,7 @@ class SignalsService:
             return None
 
         symbols = [e.symbol for e in candidates.entries]
-        quotes = await self.fmp.get_batch_quotes(symbols)
+        quotes = await self.fmp.get_batch_quotes_bulk(symbols)
         qmap = {
             _canonical_symbol(q.get("symbol")): q
             for q in quotes

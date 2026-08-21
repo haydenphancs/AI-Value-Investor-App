@@ -751,9 +751,26 @@ class FMPClient:
             one_year_start = (datetime.utcnow() - timedelta(days=370)).strftime("%Y-%m-%d")
             one_year_end = (datetime.utcnow() - timedelta(days=360)).strftime("%Y-%m-%d")
 
+            # The 11 sector-ETF QUOTES come from a single `batch-quote` request; only the
+            # 1-year-ago history is genuinely per-symbol. Was 11 quote calls + 11 history
+            # calls; now 1 + 11.
+            try:
+                _rows = await self.get_batch_quotes_bulk(list(self._SECTOR_ETFS.values()))
+            except Exception:
+                _rows = []
+            _quote_by_symbol = {
+                str(r.get("symbol", "")).upper(): r
+                for r in (_rows or [])
+                if isinstance(r, dict) and r.get("symbol")
+            }
+
             async def _fetch_one(symbol: str):
                 try:
-                    quote = await self.get_stock_price_quote(symbol)
+                    quote = _quote_by_symbol.get(symbol.upper())
+                    if quote is None:
+                        # Missing from the batch — fall back so one absent row cannot
+                        # drop a whole sector from the performance table.
+                        quote = await self.get_stock_price_quote(symbol)
                     # Fetch prices around 1 year ago (10-day window for market holidays)
                     hist = await self.get_historical_prices(
                         symbol, from_date=one_year_start, to_date=one_year_end,
@@ -1147,7 +1164,21 @@ class FMPClient:
         previousClose, dayHigh, dayLow, yearHigh, yearLow, volume, marketCap,
         priceAvg50, priceAvg200, exchange, timestamp.
 
-        Prefer this over :meth:`get_batch_quotes` for any list longer than a
+        VERIFIED 2026-08-21 against live FMP: that field set is **identical** to
+        ``/stable/quote`` — same 17 keys, same values — across AAPL, SPY, ^GSPC,
+        BTCUSD, GCUSD and BRK-B. An earlier note here claimed `batch-quote` omitted
+        eps / pe / sharesOutstanding / beta / avgVolume / dividendYield; it does not,
+        and neither does ``/stable/quote`` (those fields are absent from BOTH on
+        /stable). That wrong note is why a `get_batch_quotes` fan-out existed
+        alongside this method and why the Home dashboard was issuing ~203 individual
+        quote requests on a cold build. There is no field-set reason to prefer a
+        per-symbol loop; this is a drop-in replacement.
+
+        Use this for ANY multi-symbol quote need. The former `get_batch_quotes`,
+        which fanned out to N individual ``/quote`` calls despite its name, has been
+        removed so the trap cannot be picked up again.
+
+        Historically the guidance was to prefer this for any list longer than a
         couple of symbols — it turns N HTTP calls into ``ceil(N/300)``.
 
         Returns whatever chunks succeeded; a failed chunk is logged and
@@ -1199,36 +1230,6 @@ class FMPClient:
                 len(out), len(uniq),
             )
         return out
-
-    async def get_batch_quotes(
-        self, symbols: List[str]
-    ) -> List[Dict[str, Any]]:
-        """Get quotes for multiple symbols via parallel individual ``/quote`` calls.
-
-        NOTE: ``/stable/batch-quote`` *does* support comma-separated symbols in a
-        single request — an earlier version of this docstring claimed otherwise.
-        For anything more than a handful of symbols use
-        :meth:`get_batch_quotes_bulk` instead; this method is kept for callers
-        that depend on its exact per-symbol ``/quote`` field set.
-
-        Concurrency is bounded at ``_QUOTE_FANOUT_LIMIT`` so a large symbol list
-        cannot exhaust the shared 20-connection httpx pool.
-        """
-        if not symbols:
-            return []
-
-        sem = asyncio.Semaphore(self._QUOTE_FANOUT_LIMIT)
-
-        async def _fetch_one(sym: str) -> Optional[Dict[str, Any]]:
-            async with sem:
-                try:
-                    return await self.get_stock_price_quote(sym)
-                except Exception as e:
-                    logger.warning("Quote fetch failed for %s: %s", sym, e)
-                    return None
-
-        results = await asyncio.gather(*[_fetch_one(s) for s in symbols])
-        return [r for r in results if r]
 
     # ── Search ──────────────────────────────────────────────────────
 

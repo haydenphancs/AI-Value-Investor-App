@@ -768,6 +768,40 @@ class IndexService:
         # The badge is a function of NOW, never of when the row was written.
         response.market_status = _get_market_status()
 
+        # ...and the QUOTE-DERIVED KEY STATISTICS, which this method used to leave alone.
+        #
+        # Open / Previous Close / Day High / Day Low / Volume all come from the SAME
+        # quote as the header, and 52-week high/low from the same call. Refreshing only
+        # the price meant a row up to 24h old served a live level above a day-old "Day
+        # High" — two numbers on one screen, from one quote, disagreeing about which day
+        # it is. Same defect the four fields above exist to prevent, applied to only part
+        # of its own surface.
+        #
+        # Values are rewritten BY LABEL rather than rebuilding the section, because the
+        # builder also needs `constituents`, `avg_50` and `avg_200`, none of which are
+        # quote-derived or recoverable here. An absent label is skipped.
+        fresh: Dict[str, str] = {}
+        for label, key, decimals in (
+            ("Open", "open", 2),
+            ("Previous Close", "previousClose", 2),
+            ("Day High", "dayHigh", 2),
+            ("Day Low", "dayLow", 2),
+            ("52-Week High", "yearHigh", 2),
+            ("52-Week Low", "yearLow", 2),
+            ("Volume", "volume", 0),
+        ):
+            val = _finite_or_none(quote.get(key))
+            if val is not None:
+                fresh[label] = _fmt(val, decimals)
+
+        if fresh:
+            # `getattr`: this runs against whatever the caller cached, so a payload
+            # without a key-stats section must degrade rather than raise mid-request.
+            for group in getattr(response, "key_statistics_groups", None) or []:
+                for item in getattr(group, "statistics", None) or []:
+                    if item.label in fresh:
+                        item.value = fresh[item.label]
+
     # ── Chart helpers ────────────────────────────────────────────
 
     def _chart_date_range(self, range_code: str) -> Tuple[Optional[str], str]:

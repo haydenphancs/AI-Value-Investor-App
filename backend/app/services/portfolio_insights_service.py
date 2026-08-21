@@ -31,6 +31,7 @@ rows never had a sector before).
 
 import asyncio
 import logging
+import math
 from typing import Dict, List, Optional, Tuple
 
 from app.database import get_supabase
@@ -511,16 +512,37 @@ class PortfolioInsightsService:
 
         fmp = get_fmp_client()
 
-        async def _one(t: str) -> Tuple[str, Optional[float]]:
-            try:
-                quote = await fmp.get_stock_price_quote(t)
-                price = quote.get("price") if quote else None
-                return t, float(price) if price else None
-            except Exception as e:
-                logger.warning(
-                    "[portfolio_insights] Quote fetch failed for %s: %s", t, e
-                )
-                return t, None
+        # ONE `batch-quote` request instead of one `/quote` per holding. The previous
+        # fan-out was an UNBOUNDED `asyncio.gather` — no semaphore, unlike
+        # `get_batch_quotes` — so a 100-holding portfolio opened 100 concurrent requests
+        # against a 20-connection pool. This is also a money path: the prices below
+        # become `market_value = shares x price`, so fewer moving parts is the point.
+        #
+        # A symbol missing from the response is simply absent from the returned map, and
+        # the caller falls back to the stored `market_value` for that row — exactly what
+        # a failed individual fetch did before.
+        try:
+            rows = await fmp.get_batch_quotes_bulk(list(tickers))
+        except Exception as e:
+            logger.warning(
+                "[portfolio_insights] Batch quote fetch failed for %d tickers: %s: %s",
+                len(tickers), type(e).__name__, e,
+            )
+            return {}
 
-        results = await asyncio.gather(*[_one(t) for t in tickers])
-        return {t: p for t, p in results if p is not None and p > 0}
+        prices: Dict[str, float] = {}
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            sym = row.get("symbol")
+            raw = row.get("price")
+            if not sym or raw is None:
+                continue
+            try:
+                price = float(raw)
+            except (TypeError, ValueError):
+                continue
+            # Guard non-finite: a NaN survives `> 0` and would become a NaN market value.
+            if price > 0 and math.isfinite(price):
+                prices[str(sym)] = price
+        return prices

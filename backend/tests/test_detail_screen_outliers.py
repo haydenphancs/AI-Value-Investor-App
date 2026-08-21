@@ -1684,3 +1684,135 @@ async def test_an_empty_history_is_not_persisted(monkeypatch):
     assert not [k for k in store if k.endswith(":derived")], (
         "a derived bundle built from an empty history was persisted"
     )
+
+
+# ── 23. A live header must not sit on day-old key statistics ─────────
+#
+# `_refresh_volatile` exists because an ETF/index row can be 24h old and there is no
+# dependable live socket on those screens to correct it. But it refreshed only FOUR
+# fields — price, change, change %, market status — while the SAME cached payload also
+# carries quote-derived key statistics: ETF's 52-week high/low and 50-day average,
+# index's Open / Previous Close / Day High / Day Low / Volume.
+#
+# So a 23-hour-old row served a LIVE price above YESTERDAY's day-high: two numbers on one
+# screen, from one quote, disagreeing about which day it is. Same class as everything else
+# in this series — a fix that never covered its own surface.
+
+
+def _stale_etf_response():
+    # Each detail schema declares its OWN KeyStatisticItem/Group — import the ETF pair,
+    # not another screen's, so the test builds exactly what the service will mutate.
+    from app.schemas.etf import (
+        ETFDetailResponse,
+        KeyStatisticItem,
+        KeyStatisticsGroupResponse,
+    )
+
+    return ETFDetailResponse.model_construct(
+        symbol="SPY", name="SPDR S&P 500", current_price=500.0,
+        price_change=1.0, price_change_percent=0.2,
+        market_status=None, chart_data=[],
+        key_statistics=[
+            KeyStatisticItem(label="52W High", value="$510.00"),
+            KeyStatisticItem(label="52W Low", value="$400.00"),
+            KeyStatisticItem(label="50-Day Avg", value="$480.00"),
+            KeyStatisticItem(label="Expense Ratio", value="0.09%"),
+        ],
+        key_statistics_groups=[
+            KeyStatisticsGroupResponse(statistics=[
+                KeyStatisticItem(label="52W High", value="$510.00"),
+                KeyStatisticItem(label="Expense Ratio", value="0.09%"),
+            ]),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_etf_requote_also_refreshes_the_quote_derived_key_stats():
+    from app.services import etf_service as M
+
+    svc = M.ETFService.__new__(M.ETFService)
+
+    class _FMP:
+        async def get_stock_price_quote(self, symbol):
+            # A NEW session: the 52-week high has moved since the row was cached.
+            return {"price": 620.0, "change": 4.0, "changePercentage": 0.65,
+                    "yearHigh": 625.0, "yearLow": 410.0, "priceAvg50": 590.0}
+
+    svc.fmp = _FMP()
+    resp = _stale_etf_response()
+    await svc._refresh_volatile(resp, "SPY")
+
+    assert resp.current_price == 620.0
+    flat = {i.label: i.value for i in resp.key_statistics}
+    assert flat["52W High"] == "$625.00", f"52W High stayed stale: {flat['52W High']}"
+    assert flat["52W Low"] == "$410.00"
+    assert flat["50-Day Avg"] == "$590.00"
+    # A NON-quote statistic must be left exactly as cached.
+    assert flat["Expense Ratio"] == "0.09%"
+    # ...and the grouped copy must move with the flat one, or the two disagree on screen.
+    grouped = {i.label: i.value for g in resp.key_statistics_groups for i in g.statistics}
+    assert grouped["52W High"] == "$625.00"
+    assert grouped["Expense Ratio"] == "0.09%"
+
+
+@pytest.mark.asyncio
+async def test_etf_requote_leaves_key_stats_alone_when_the_quote_is_unusable():
+    """Anti-vacuity control: a failed re-quote must not blank the cached statistics."""
+    from app.services import etf_service as M
+
+    svc = M.ETFService.__new__(M.ETFService)
+
+    class _FMP:
+        async def get_stock_price_quote(self, symbol):
+            raise RuntimeError("FMP down")
+
+    svc.fmp = _FMP()
+    resp = _stale_etf_response()
+    await svc._refresh_volatile(resp, "SPY")
+
+    flat = {i.label: i.value for i in resp.key_statistics}
+    assert flat["52W High"] == "$510.00", "a failed re-quote wiped the cached statistic"
+    assert resp.current_price == 500.0
+
+
+@pytest.mark.asyncio
+async def test_index_requote_also_refreshes_its_intraday_key_stats():
+    from app.schemas.index import (
+        IndexDetailResponse,
+        KeyStatisticItem,
+        KeyStatisticsGroupResponse,
+    )
+    from app.services import index_service as M
+
+    svc = M.IndexService.__new__(M.IndexService)
+
+    class _FMP:
+        async def get_stock_price_quote(self, symbol):
+            return {"price": 6100.0, "change": 25.0, "changePercentage": 0.41,
+                    "previousClose": 6075.0, "open": 6080.0,
+                    "dayHigh": 6110.0, "dayLow": 6070.0, "volume": 2500000000}
+
+    svc.fmp = _FMP()
+    resp = IndexDetailResponse.model_construct(
+        symbol="^GSPC", index_name="S&P 500", current_price=5000.0,
+        price_change=1.0, price_change_percent=0.02, market_status=None,
+        chart_data=[],
+        key_statistics_groups=[
+            KeyStatisticsGroupResponse(statistics=[
+                KeyStatisticItem(label="Open", value="4,990.00"),
+                KeyStatisticItem(label="Previous Close", value="4,980.00"),
+                KeyStatisticItem(label="Day High", value="5,010.00"),
+                KeyStatisticItem(label="Constituents", value="503"),
+            ]),
+        ],
+    )
+    await svc._refresh_volatile(resp, "^GSPC")
+
+    stats = {i.label: i.value for g in resp.key_statistics_groups for i in g.statistics}
+    assert resp.current_price == 6100.0
+    assert stats["Open"] == "6,080.00", f"Open stayed stale: {stats['Open']}"
+    assert stats["Previous Close"] == "6,075.00"
+    assert stats["Day High"] == "6,110.00"
+    # Not quote-derived — must survive untouched.
+    assert stats["Constituents"] == "503"

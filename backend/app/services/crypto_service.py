@@ -738,7 +738,7 @@ class CryptoService:
         coin_data_task = self._get_coin_fundamentals(symbol)
         hist_task = self.fmp.get_historical_prices(fmp_symbol, from_date, to_date)
         news_task = self.fmp.get_stock_news(fmp_symbol, limit=10)
-        related_task = self.fmp.get_batch_quotes(related_fmp_symbols)
+        related_task = self.fmp.get_batch_quotes_bulk(related_fmp_symbols)
 
         coin_data, hist_raw, news_raw, related_raw = await asyncio.gather(
             coin_data_task, hist_task, news_task, related_task,

@@ -310,6 +310,21 @@ class _FakeFMP:
         price = self._prices.get(ticker.upper())
         return {"price": price} if price is not None else {}
 
+    async def get_batch_quotes_bulk(self, symbols):
+        """Mirrors the real client: ONE call, one row per resolvable symbol.
+
+        `_fetch_prices` moved off a per-ticker fan-out (an unbounded `asyncio.gather`
+        with no semaphore) onto `/stable/batch-quote`. A symbol with no price is simply
+        ABSENT from the response rather than returning an empty dict — the caller then
+        falls back to the stored `market_value`, which is what keeps ZZZ excluded here.
+        """
+        out = []
+        for sym in symbols:
+            price = self._prices.get(str(sym).upper())
+            if price is not None:
+                out.append({"symbol": str(sym).upper(), "price": price})
+        return out
+
 
 def _install_fakes(monkeypatch, supabase, fmp):
     monkeypatch.setattr(svc, "get_supabase", lambda: supabase)

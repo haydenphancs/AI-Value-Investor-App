@@ -466,7 +466,7 @@ class _FakeEarningsFMP:
     async def get_earnings_calendar(self, from_date, to_date):
         return self._calendar
 
-    async def get_batch_quotes(self, symbols):
+    async def get_batch_quotes_bulk(self, symbols):
         return [self._quotes[s] for s in symbols if s in self._quotes]
 
 

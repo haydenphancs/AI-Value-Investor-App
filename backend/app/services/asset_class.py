@@ -28,9 +28,16 @@ from typing import Optional
 # FMP's USD-suffixed commodity codes. Checked BEFORE the crypto heuristic below:
 # the generic `endswith("USD")` test would otherwise swallow GCUSD/CLUSD/... and
 # label gold and crude oil as crypto. No symbol collides between the two sets.
+# PAUSD (palladium) and ZWUSD (wheat) were MISSING while both are live in
+# commodity_service._COMMODITY_PROFILES and commodities._COMMODITY_NEWS_TICKERS — so
+# every classifier built on this set fell through to the generic `endswith("USD")`
+# crypto rule and called them crypto. That is not cosmetic: it drives the
+# extended-hours fetch window and the technical-analysis TTL + weekly bucketing.
+# `ZUSD` looks like the typo that lost ZWUSD; it is kept because nothing serves it
+# either way, and removing a symbol is a behaviour change for no benefit.
 _COMMODITY_SYMBOLS = frozenset({
-    "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "HGUSD",
-    "ZSUSD", "ZCUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
+    "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "PAUSD", "HGUSD",
+    "ZSUSD", "ZCUSD", "ZWUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
     "SBUSD", "CTUSD", "CCUSD",
 })
 

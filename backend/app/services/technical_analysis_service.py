@@ -7,6 +7,7 @@ computation.  Follows the same service patterns as sentiment_service.py:
 stateless class, in-memory TTL cache, singleton getter.
 """
 
+import asyncio
 import logging
 import math
 import time
@@ -38,6 +39,7 @@ from app.schemas.technical_analysis import (
     VolumeAnalysisData,
     VolumeTrend,
 )
+from app.services.asset_class import detect_asset_class
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,17 @@ def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
 # container that is a slow leak whose only resolution is an OOM restart — which drops every
 # in-flight report with it. Bounded LRU-ish: evict from the head (least recently WRITTEN).
 _CACHE_MAX_ENTRIES = 1024
+
+
+# Thundering-herd guard. This service had NONE: a cold-start burst of N concurrent
+# viewers of the same ticker each ran its own 600-day fetch AND its own pandas indicator
+# pass. commodity_service has carried this guard for a while; this is the same pattern.
+_inflight: Dict[str, asyncio.Future] = {}
+
+# The 600-day OHLCV frame is shared between get_analysis and get_analysis_detail. They
+# cached their RESULTS under separate keys but each fetched its own copy of the identical
+# history, so opening the Analysis tab and then its detail sheet cost two 600-day calls.
+_OHLCV_TTL = 3600  # 1h — daily bars, so anything finer is wasted
 
 
 def _cache_set(key: str, value: Any) -> None:
@@ -146,6 +159,36 @@ def _count_summary(
 
 
 # ═══════════════════════════════════════════════════════════════════
+async def _deduped(key: str, build):
+    """Run `build()` once per key, sharing the result with concurrent callers.
+
+    Mirrors news_cache_service._deduped: the join is SHIELDED so a joiner that gives up
+    cannot cancel the future the leader is about to publish into, and the map entry is
+    cleared in a `finally` so a cancellation cannot strand every later caller.
+    """
+    inflight = _inflight.get(key)
+    if inflight is not None:
+        logger.info("Technical analysis already in flight for %s — joining", key)
+        return await asyncio.shield(inflight)
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    _inflight[key] = fut
+    try:
+        result = await build()
+        if not fut.done():
+            fut.set_result(result)
+        return result
+    except BaseException as e:
+        # BaseException, not Exception: a CancelledError must still resolve the future or
+        # every joiner hangs forever waiting on a dead build.
+        if not fut.done():
+            fut.set_exception(e)
+        raise
+    finally:
+        _inflight.pop(key, None)
+
+
 class TechnicalAnalysisService:
     """Stateless service for technical indicator computation."""
 
@@ -157,12 +200,26 @@ class TechnicalAnalysisService:
     async def get_analysis(self, ticker: str) -> TechnicalAnalysisResponse:
         """Gauge endpoint: daily + weekly signals, overall gauge value."""
         ticker = ticker.upper()
-        is_crypto = ticker.endswith("USD") and not ticker.startswith("$")
+        # `detect_asset_class`, NOT a bare `endswith("USD")`. Every FMP commodity code
+        # is exactly that shape — GCUSD, CLUSD, SIUSD, NGUSD, ZCUSD — so the suffix test
+        # classified all 15 commodities as CRYPTO: they got the 4h crypto TTL instead of
+        # 12h, and `_daily_to_weekly(..., is_crypto=True)` applied crypto weekly bucketing
+        # to futures bars. `asset_class` already owns the commodity set and documents this
+        # exact trap; this copy of the heuristic simply never got the fix.
+        is_crypto = detect_asset_class(ticker) == "crypto"
 
         ttl = _CACHE_TTL_CRYPTO if is_crypto else _CACHE_TTL
         cached = _cache_get(f"ta:{ticker}", ttl)
         if cached is not None:
             return cached
+
+        return await _deduped(
+            f"ta:build:{ticker}", lambda: self._build_analysis(ticker, is_crypto)
+        )
+
+    async def _build_analysis(
+        self, ticker: str, is_crypto: bool
+    ) -> TechnicalAnalysisResponse:
 
         df_daily = await self._fetch_daily_ohlcv(ticker)
         df_weekly = self._daily_to_weekly(df_daily, is_crypto=is_crypto)
@@ -190,7 +247,13 @@ class TechnicalAnalysisService:
     ) -> TechnicalAnalysisDetailResponse:
         """Detail endpoint: full indicator breakdown + extras."""
         ticker = ticker.upper()
-        is_crypto = ticker.endswith("USD") and not ticker.startswith("$")
+        # `detect_asset_class`, NOT a bare `endswith("USD")`. Every FMP commodity code
+        # is exactly that shape — GCUSD, CLUSD, SIUSD, NGUSD, ZCUSD — so the suffix test
+        # classified all 15 commodities as CRYPTO: they got the 4h crypto TTL instead of
+        # 12h, and `_daily_to_weekly(..., is_crypto=True)` applied crypto weekly bucketing
+        # to futures bars. `asset_class` already owns the commodity set and documents this
+        # exact trap; this copy of the heuristic simply never got the fix.
+        is_crypto = detect_asset_class(ticker) == "crypto"
 
         ttl = _CACHE_TTL_CRYPTO if is_crypto else _CACHE_TTL
         cached = _cache_get(f"ta_detail:{ticker}", ttl)
@@ -228,6 +291,23 @@ class TechnicalAnalysisService:
     # ── Data Fetching ──────────────────────────────────────────
 
     async def _fetch_daily_ohlcv(self, ticker: str) -> pd.DataFrame:
+        """~600 calendar days of daily OHLCV, cached and shared across both endpoints.
+
+        `get_analysis` and `get_analysis_detail` cache their RESULTS separately but were
+        each fetching their own copy of this identical frame, so a user who opened the
+        Analysis tab and then tapped through to the detail sheet paid for two 600-day
+        histories. One key, one fetch, 1h TTL (they are daily bars).
+        """
+        ohlcv_key = f"ta_ohlcv:{ticker}"
+        cached = _cache_get(ohlcv_key, _OHLCV_TTL)
+        if cached is not None:
+            return cached
+        df = await _deduped(ohlcv_key, lambda: self._fetch_daily_ohlcv_uncached(ticker))
+        if df is not None and not df.empty:
+            _cache_set(ohlcv_key, df)
+        return df
+
+    async def _fetch_daily_ohlcv_uncached(self, ticker: str) -> pd.DataFrame:
         """Fetch ~600 calendar days of daily OHLCV and return as DataFrame."""
         to_date = datetime.utcnow().strftime("%Y-%m-%d")
         from_date = (datetime.utcnow() - timedelta(days=600)).strftime("%Y-%m-%d")

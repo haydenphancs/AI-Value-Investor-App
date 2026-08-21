@@ -46,6 +46,9 @@ _INFLIGHT_MODULES = [
     "agents/ticker_report_data_collector.py",
     "geopolitical_macro_service.py",
     "commodity_service.py",
+    # Added 2026-08-21 with the commodity cache pass: N concurrent viewers of the same
+    # cold ticker each ran their own 600-day fetch AND their own pandas indicator pass.
+    "technical_analysis_service.py",
     # The 2026-08-07 audit named only the six above. The anti-vacuity check at the bottom of
     # this file found sixteen more already using the same shared-future dedup, which is the
     # whole reason that check exists.

@@ -100,9 +100,12 @@ enum MarketHoursUtil {
     /// equity portfolio. Mirrors backend `asset_class._COMMODITY_SYMBOLS`.
     /// `nonisolated` so `symbolTradesAroundTheClock` can be — an immutable Sendable
     /// literal set, safe to read from any isolation. Same lever as `APIConfig`'s constants.
+    /// Mirrors `asset_class._COMMODITY_SYMBOLS` on the backend — pinned by
+    /// `tests/test_asset_class.py`. PAUSD (palladium) and ZWUSD (wheat) were missing
+    /// from BOTH copies, so both fell through to the generic USD-suffix crypto rule.
     nonisolated private static let commoditySymbols: Set<String> = [
-        "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "HGUSD",
-        "ZSUSD", "ZCUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
+        "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "PAUSD", "HGUSD",
+        "ZSUSD", "ZCUSD", "ZWUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
         "SBUSD", "CTUSD", "CCUSD",
     ]
 

@@ -1371,3 +1371,212 @@ def test_the_schema_default_is_what_makes_the_stale_row_dangerous():
     from app.services.signal_of_confidence_service import SignalOfConfidenceService
     svc = SignalOfConfidenceService.__new__(SignalOfConfidenceService)
     assert svc._classify_buyback(2.99, -2.17) == "High"
+
+
+# ── 21. Commodity: per-section caching ───────────────────────────────
+#
+# The service used ONE key and ONE 5-minute TTL for a nine-section payload, and because
+# the key carried range+interval, every range pill was a separate cold build that
+# re-fetched the SAME quote, the SAME 972 KB / 4,333-row daily history and the SAME
+# related quotes. Measured: 55 FMP calls and 6.6 MB of identical history to browse the
+# 7 ranges of one commodity.
+
+
+def _fake_fmp_counter():
+    """A stand-in FMP client that counts calls by kind and serves plausible data."""
+    import datetime as _dt
+
+    calls = {"quote": 0, "hist": 0, "news": 0, "intraday": 0}
+    today = _dt.date.today()
+
+    def _rows(n=4333):
+        return [
+            {
+                "date": (today - _dt.timedelta(days=n - 1 - i)).isoformat(),
+                "open": 100.0 + i * 0.01, "high": 101.0 + i * 0.01,
+                "low": 99.0 + i * 0.01, "close": 100.5 + i * 0.01, "volume": 1000,
+            }
+            for i in range(n)
+        ]
+
+    class _FMP:
+        async def get_stock_price_quote(self, sym):
+            calls["quote"] += 1
+            return {
+                "price": 4600.0, "change": 6.5, "changePercentage": 0.14,
+                "previousClose": 4593.5, "open": 4595.0, "dayHigh": 4610.0,
+                "dayLow": 4590.0, "volume": 18000, "yearHigh": 4700.0, "yearLow": 3000.0,
+            }
+
+        async def get_historical_prices(self, sym, f, t):
+            calls["hist"] += 1
+            return _rows()
+
+        async def get_stock_news(self, sym, limit=10):
+            calls["news"] += 1
+            return []
+
+        async def get_intraday_prices(self, *a, **k):
+            calls["intraday"] += 1
+            return [{"date": "2026-08-21 10:00:00", "open": 1, "high": 2,
+                     "low": 0.5, "close": 1.5, "volume": 10}]
+
+    return _FMP(), calls
+
+
+@pytest.mark.asyncio
+async def test_browsing_every_range_shares_one_history_fetch():
+    """The headline saving, measured rather than asserted.
+
+    The 972 KB history, the quote and the related quotes are all range-INDEPENDENT, so
+    they must be fetched once per symbol and shared by every range pill.
+    """
+    from app.services import commodity_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    svc = M.CommodityService.__new__(M.CommodityService)
+    svc.fmp, calls = _fake_fmp_counter()
+
+    for rng in ["1D", "1W", "3M", "6M", "1Y", "5Y", "ALL"]:
+        await svc.get_commodity_detail("GCUSD", chart_range=rng)
+
+    total = sum(calls.values())
+    assert calls["hist"] == 1, f"the 972 KB history was fetched {calls['hist']}x, not once"
+    assert calls["news"] == 0, "the dead news call is back — it always returns []"
+    # 1 root quote + 4 related (gold) + 1 history + 2 intraday (1D, 1W).
+    assert total <= 10, f"expected <=10 FMP calls for a 7-range browse, got {total}: {calls}"
+
+
+@pytest.mark.asyncio
+async def test_daily_and_aggregated_ranges_need_no_extra_fetch():
+    """3M/6M/1Y slice the shared history; 5Y/ALL aggregate it.
+
+    `chart_helper._aggregate_prices` already existed — `fetch_chart_data` was calling it
+    AFTER re-fetching the very history we are holding. Only 1D/1W are genuinely sub-daily.
+    """
+    from app.services import commodity_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    svc = M.CommodityService.__new__(M.CommodityService)
+    svc.fmp, calls = _fake_fmp_counter()
+
+    await svc.get_commodity_detail("GCUSD", chart_range="3M")
+    baseline = dict(calls)
+
+    for rng in ["6M", "1Y", "5Y", "ALL"]:
+        resp = await svc.get_commodity_detail("GCUSD", chart_range=rng)
+        assert resp.chart_data, f"{rng} produced no bars"
+
+    assert calls == baseline, f"a daily/aggregated range hit FMP again: {baseline} -> {calls}"
+
+
+@pytest.mark.asyncio
+async def test_sections_have_distinct_ttls_not_one_flat_300():
+    """A nine-section payload under one 5-minute TTL is the defect being fixed."""
+    from app.services import commodity_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    svc = M.CommodityService.__new__(M.CommodityService)
+    svc.fmp, _ = _fake_fmp_counter()
+    await svc.get_commodity_detail("GCUSD", chart_range="3M")
+
+    ttls = {k: entry[2] for k, entry in M._cache.items()}
+    assert ttls, "nothing was cached"
+    assert len(set(ttls.values())) > 1, f"every section shares one TTL: {ttls}"
+
+    # The history must outlive the quote by a wide margin — that asymmetry IS the fix.
+    hist = [v for k, v in ttls.items() if k.startswith("com:hist:")]
+    quote = [v for k, v in ttls.items() if k.startswith("com:quote:")]
+    assert hist and quote
+    assert hist[0] >= quote[0] * 100, (
+        f"history TTL {hist[0]}s vs quote TTL {quote[0]}s — the expensive, slow-moving "
+        "section is not being held longer than the volatile one"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_priceless_build_is_not_cached():
+    """Degradation gate: never pin a response with no usable price.
+
+    Previously the build was cached unconditionally, so a failed quote pinned a blank
+    price header for the whole TTL.
+    """
+    from app.services import commodity_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    svc = M.CommodityService.__new__(M.CommodityService)
+
+    class _Degraded:
+        current_price = 0.0
+
+    async def fake_build(symbol, chart_range="3M", interval=None):
+        return _Degraded()
+
+    svc._build_commodity_detail = fake_build
+    await svc.get_commodity_detail("GC", "3M", None)
+    assert not [k for k in M._cache if k.startswith("GC_")], (
+        "a build with no usable price was cached"
+    )
+
+
+# ── 22. Commodities are not crypto ───────────────────────────────────
+
+
+def test_every_served_commodity_classifies_as_a_commodity():
+    """`_COMMODITY_SYMBOLS` was missing PAUSD (palladium) and ZWUSD (wheat).
+
+    Both are live in `_COMMODITY_PROFILES`, so every classifier built on this set fell
+    through to the generic `endswith("USD")` crypto rule and called them crypto — which
+    drives the extended-hours fetch window AND the technical-analysis TTL + weekly
+    bucketing. Derived from the profiles so a new commodity cannot be added without
+    being classified.
+    """
+    import re as _re
+    from app.services.asset_class import detect_asset_class
+
+    src = (_Path(__file__).resolve().parents[1] / "app" / "services" /
+           "commodity_service.py").read_text()
+    roots = _re.findall(r'^    "([A-Z]{2})":\s*\{', src, _re.M)
+    assert len(roots) >= 14, f"expected the commodity profile table, found {roots}"
+
+    misclassified = [
+        f"{r}USD" for r in roots if detect_asset_class(f"{r}USD") != "commodity"
+    ]
+    assert not misclassified, f"served commodities classified as non-commodity: {misclassified}"
+
+
+def test_backend_and_ios_agree_on_the_commodity_set():
+    """`MarketHoursUtil.commoditySymbols` mirrors `asset_class._COMMODITY_SYMBOLS`.
+
+    Its own comment promises they match, and both copies were missing the same two
+    symbols — so the drift was invisible from either side alone. On iOS the set gates
+    the 30s around-the-clock refresh.
+    """
+    import re as _re
+    from app.services.asset_class import _COMMODITY_SYMBOLS
+
+    swift = (_IOS / "Core" / "Utilities" / "MarketHoursUtil.swift").read_text()
+    block = swift[swift.index("commoditySymbols: Set<String> = ["):]
+    block = block[: block.index("]")]
+    ios_set = set(_re.findall(r'"([A-Z]+)"', block))
+
+    assert ios_set == set(_COMMODITY_SYMBOLS), (
+        "backend and iOS commodity sets have drifted — "
+        f"backend-only={set(_COMMODITY_SYMBOLS) - ios_set}, ios-only={ios_set - set(_COMMODITY_SYMBOLS)}"
+    )
+
+
+def test_technical_analysis_uses_the_shared_classifier():
+    """It used a bare `endswith('USD')`, so all 15 commodities were treated as crypto."""
+    import inspect
+    from app.services import technical_analysis_service as ta
+
+    src = inspect.getsource(ta)
+    assert "detect_asset_class(ticker) == \"crypto\"" in src
+    assert 'ticker.endswith("USD") and not ticker.startswith("$")' not in src, (
+        "the bare suffix heuristic is still deciding the asset class"
+    )

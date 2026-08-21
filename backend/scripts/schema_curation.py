@@ -429,13 +429,33 @@ CURATION: dict[str, TableDoc] = {
         key=("cache_key", "data", "expires_at")),
     "public.etf_detail_cache": T("market-cache",
         purpose="Full ETF detail response — holdings, sectors, expense ratio.",
-        key=("symbol", "response_json")),
+        key=("cache_key", "symbol", "chart_range", "interval", "response_json"),
+        note="RETIRED and no longer read or written. etf_service was decomposed into "
+             "per-section caches (etf_snapshot_cache categories fundamentals / derived / "
+             "chart:*), because a 24h row of the WHOLE payload froze current_price — which "
+             "is the only reason `_refresh_volatile` ever existed. Left in place for one "
+             "release so a rollback is a code revert; drop it after that."),
     "public.etf_snapshot_cache": T("market-cache",
         purpose="Per-category ETF snapshot sections.",
         key=("symbol", "category", "response_json")),
     "public.index_detail_cache": T("market-cache",
         purpose="Index detail response, keyed by symbol AND chart range.",
-        key=("cache_key", "symbol", "chart_range", "response_json")),
+        key=("cache_key", "symbol", "chart_range", "response_json"),
+        note="RETIRED and no longer read or written — superseded by index_cache. Migration "
+             "150 also REVOKEd the GRANT ALL to `authenticated` that 032 shipped, which had "
+             "let any signed-in user read and write this cache through PostgREST. Left in "
+             "place for one release so a rollback is a code revert."),
+    "public.index_cache": T("market-cache",
+        key=("cache_key", "symbol", "category", "response_json", "cached_at"),
+        note="Migration 150. Per-section, 12h, enforced in app code via cached_at. Holds "
+             "only sections that CANNOT contain a live price (derived, constituents count, "
+             "non-intraday chart) — that is what let `_refresh_volatile` be deleted rather "
+             "than fixed. The raw daily history is deliberately excluded: reading ~1 MB "
+             "back is slower than re-fetching it from FMP."),
+    "public.commodity_cache": T("market-cache",
+        key=("cache_key", "symbol", "category", "response_json", "cached_at"),
+        note="Migration 149. Same per-section shape as index_cache, and the first of the "
+             "three. Quotes and the raw history are excluded by design."),
     "public.index_macro_forecast_cache": T("market-cache",
         purpose="FRED-derived macro indicators and the narrative template for an index.",
         key=("symbol", "story_template", "indicators_json")),

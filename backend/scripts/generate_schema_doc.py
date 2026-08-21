@@ -62,12 +62,18 @@ MAINTENANCE = """  Caydex — Database Atlas (standalone, offline, no external a
 # change that moves one of these is announced rather than silently reshaping the
 # page. Update deliberately, in the same change as the migration.
 EXPECTED: dict[str, int] = {
-    "tables": 130,
-    "public": 95,
+    # Refreshed 2026-08-21 after re-dumping a snapshot that was three migrations stale.
+    # Every delta is accounted for, which is the point of asserting these at all:
+    #   +2 tables / +2 policies / +2 rls  -> commodity_cache (149), index_cache (150)
+    #   +2 functions / +2 secdef          -> claim_scheduled_job + finish_scheduled_job,
+    #                                        from migration 147 — applied to Supabase before
+    #                                        the previous dump but never captured in it.
+    "tables": 132,
+    "public": 97,
     "fk": 28,
-    "policies": 195,
-    "rls": 95,
-    "functions": 38,
+    "policies": 197,
+    "rls": 97,
+    "functions": 40,
     "enums": 14,
     "views": 1,
 }

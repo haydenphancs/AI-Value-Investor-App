@@ -334,7 +334,10 @@ struct AIChatScreen: View {
                         showingHistory = false
                     }
                 },
-                searchQuery: historySearchText
+                searchQuery: historySearchText,
+                // A failed fetch must not masquerade as "no conversations yet".
+                loadFailed: viewModel.historyLoadFailed,
+                onRetry: { viewModel.loadHistory() }
             )
 
             // Transient error from a failed pin / rename / delete (dismissable).

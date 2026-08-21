@@ -37,6 +37,14 @@ class IndexDetailViewModel: ObservableObject {
 
     // Analysis tab state
     @Published var isTechnicalLoaded: Bool = false
+    /// Why the Analysis tab has no data, when it has none. Nil while loading or on
+    /// success. The tab used to render literally NOTHING on failure — an empty tab is
+    /// indistinguishable from a broken app, and `isTechnicalLoaded` was set to true on
+    /// the failure path, making the state terminal for the life of the screen.
+    @Published var technicalUnavailableMessage: String?
+    /// False when the asset genuinely has no price history (the backend 404s), so a
+    /// "Try Again" button would promise something that can never succeed.
+    @Published var technicalIsRetryable: Bool = false
     @Published var chartSettings = ChartSettings()
     @Published var chartDataVersion: Int = 0
     @Published var chartEventDates: ChartEventDates?
@@ -178,9 +186,34 @@ class IndexDetailViewModel: ObservableObject {
         // upstream cost; this only bypasses the on-device copy.
         StockRepository.shared.invalidate(symbol: indexSymbol)
         await fetchIndexDetail()
+        // Pull-to-refresh must also retry the Analysis tab. Its failure path sets
+        // `isTechnicalLoaded = true` with nil data, which is TERMINAL — without this
+        // line one failed fetch left the tab blank for the entire life of the screen
+        // and there was no gesture anywhere in the app that could recover it.
+        await retryTechnicalAnalysis()
     }
 
+    /// Re-run the technical fetch after a failure. Safe to call repeatedly.
+    func retryTechnicalAnalysis() async {
+        isTechnicalLoaded = false
+        technicalUnavailableMessage = nil
+        await fetchTechnicalAnalysis()
+    }
+
+    /// Bumped on every star tap. `checkWatchlistStatus()` captures it before its GET and
+    /// re-checks it after, so a snapshot that was already in flight when the user tapped
+    /// is discarded instead of reverting them. TickerDetailViewModel had this guard; all
+    /// four sibling screens shipped without it, so a slow watchlist GET landing after the
+    /// tap silently un-starred the asset with no error and no trace.
+    ///
+    /// A generation counter, NOT a sticky Bool: `checkWatchlistStatus()` re-runs from each
+    /// screen's error-state Retry, and a sticky flag would pin the local value forever and
+    /// ignore a genuine change made on another device.
+    private var favoriteToggleGeneration: Int = 0
+
     func toggleFavorite() {
+        // The user's intent now outranks any watchlist snapshot already in flight.
+        favoriteToggleGeneration &+= 1
         let wasInWatchlist = isFavorite
         isFavorite.toggle() // optimistic UI update
 
@@ -214,11 +247,18 @@ class IndexDetailViewModel: ObservableObject {
     }
 
     private func checkWatchlistStatus() async {
+        let generation = favoriteToggleGeneration
         do {
             let watchlist: [WatchlistItemDTO] = try await APIClient.shared.request(
                 endpoint: .getWatchlist,
                 responseType: [WatchlistItemDTO].self
             )
+            // Discard a snapshot that raced with a tap: it may predate the user's write
+            // and would revert their star with no error shown.
+            guard generation == self.favoriteToggleGeneration else {
+                print("⏭️ [IndexDetailVM] Watchlist snapshot discarded — user toggled during the fetch")
+                return
+            }
             self.isFavorite = watchlist.contains { $0.ticker.uppercased() == indexSymbol.uppercased() }
         } catch {
             print("⚠️ [IndexDetailVM] Watchlist check failed: \(error)")
@@ -335,6 +375,7 @@ class IndexDetailViewModel: ObservableObject {
             )
             self.technicalAnalysisData = dto.toDisplayModel()
             self.isTechnicalLoaded = true
+            self.technicalUnavailableMessage = nil
             print("✅ [IndexDetailVM] Got technical analysis for \(indexSymbol) — gauge: \(dto.gaugeValue)")
         } catch {
             print("⚠️ [IndexDetailVM] Technical analysis failed: \(error)")
@@ -343,6 +384,18 @@ class IndexDetailViewModel: ObservableObject {
             // context. Leave nil; the Analysis section renders its honest empty state.
             self.technicalAnalysisData = nil
             self.isTechnicalLoaded = true
+            // Distinguish "this asset has no history" (permanent — the service raises a
+            // 404 for a ticker with no OHLCV) from "the fetch failed" (retryable). The
+            // tab previously rendered nothing at all for BOTH, so a transient blip
+            // looked identical to an unsupported asset and neither offered a way back.
+            if case APIError.notFound = error {
+                self.technicalUnavailableMessage =
+                    "Technical analysis isn\u{2019}t available for this asset."
+                self.technicalIsRetryable = false
+            } else {
+                self.technicalUnavailableMessage = "Couldn\u{2019}t load technical analysis."
+                self.technicalIsRetryable = true
+            }
         }
     }
 

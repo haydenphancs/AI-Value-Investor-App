@@ -42,11 +42,21 @@ struct SignalOfConfidenceSectionCard: View {
                 .frame(maxWidth: .infinity)
                 .padding(.top, AppSpacing.sm)
 
-            // Dividend Info
+            // Dividend Info — or, for a non-payer, the buyback half on its own.
+            // `dividendInfo` is nil for every company that pays no dividend, so this
+            // branch used to render nothing at all and the buyback verdict (which
+            // never depended on dividends) was silently dropped.
             if let dividendInfo = signalData.dividendInfo {
                 DividendInfoCard(
                     dividendInfo: dividendInfo,
                     currentYield: signalData.summary.totalYield
+                )
+                    .padding(.top, AppSpacing.md)
+            } else {
+                BuybackOnlyInfoCard(
+                    buybackStatus: signalData.summary.buybackStatus,
+                    buybackYield: signalData.summary.buybackYield,
+                    shareCountChange: signalData.summary.shareCountChange
                 )
                     .padding(.top, AppSpacing.md)
             }

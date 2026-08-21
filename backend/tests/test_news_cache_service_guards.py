@@ -24,14 +24,30 @@ from app.services.news_cache_service import (
 # ── Pure helpers ──────────────────────────────────────────────────────
 
 
+# A NAIVE FMP stamp is a wall clock in America/New_York, not UTC — verified live:
+# at 09:17 ET (13:17 UTC) the newest publishedDate values read "09:09:00". Because
+# `published_at` is `timestamptz`, storing the raw string made Postgres apply the
+# SESSION zone (UTC on Railway) and backdate every row by the ET offset. So this
+# helper must now NORMALISE, not merely validate. The offset is seasonal — 4h in
+# EDT, 5h in EST — which is why these cases pin both.
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("2026-07-20 18:00:00", "2026-07-20 18:00:00"),  # FMP space form
-        ("2026-07-20T18:00:00+00:00", "2026-07-20T18:00:00+00:00"),  # ISO
-        ("2026-07-20T18:00:00Z", "2026-07-20T18:00:00Z"),  # ISO w/ Z
-        ("2026-07-20", "2026-07-20"),  # date-only
-        ("  2026-07-20 18:00:00  ", "2026-07-20 18:00:00"),  # trimmed
+        # Naive FMP space form, EDT (July): 18:00 ET == 22:00 UTC.
+        ("2026-07-20 18:00:00", "2026-07-20T22:00:00+00:00"),
+        # Naive, EST (January): the SAME wall clock is 23:00 UTC. A fixed offset
+        # would get exactly one of these two rows right.
+        ("2026-01-20 18:00:00", "2026-01-20T23:00:00+00:00"),
+        # Already offset-aware values are OUR OWN writes — converted, never
+        # re-interpreted, so the helper is idempotent over a mixed-provenance list.
+        ("2026-07-20T18:00:00+00:00", "2026-07-20T18:00:00+00:00"),
+        ("2026-07-20T18:00:00Z", "2026-07-20T18:00:00+00:00"),
+        ("2026-07-20T18:00:00-04:00", "2026-07-20T22:00:00+00:00"),
+        # Date-only is midnight ET, i.e. 04:00 UTC in EDT.
+        ("2026-07-20", "2026-07-20T04:00:00+00:00"),
+        ("  2026-07-20 18:00:00  ", "2026-07-20T22:00:00+00:00"),  # trimmed
+        # Unchanged intent: an unusable value must become None rather than abort
+        # the whole 50-row batch upsert.
         ("", None),  # empty → would abort a real upsert
         ("   ", None),  # whitespace only
         ("not-a-date", None),  # garbage
@@ -43,6 +59,26 @@ from app.services.news_cache_service import (
 )
 def test_sanitize_published_at(raw, expected):
     assert _sanitize_published_at(raw) == expected
+
+
+def test_sanitize_published_at_is_idempotent():
+    """Re-normalising an already-normalised value must be a no-op.
+
+    `_compute_news_score` sees a MIXED list — raw FMP rows and rows read back from
+    Supabase — so a helper that shifted an aware value by the ET offset on every
+    pass would walk timestamps backwards each refresh.
+    """
+    once = _sanitize_published_at("2026-07-20 18:00:00")
+    assert _sanitize_published_at(once) == once
+
+
+def test_naive_stamps_are_not_read_as_utc():
+    """The anti-vacuity control for the whole fix.
+
+    If someone reverts the normalisation to `return s`, this is the assertion that
+    fails: the stored instant would equal the ET wall clock read as UTC.
+    """
+    assert _sanitize_published_at("2026-07-20 18:00:00") != "2026-07-20T18:00:00+00:00"
 
 
 @pytest.mark.parametrize(
@@ -157,7 +193,8 @@ def test_bad_published_at_does_not_poison_the_batch():
 
     # Every upserted row carries a Postgres-valid timestamp or None.
     by_headline = {r["headline"]: r["published_at"] for r in svc.supabase.upserted}
-    assert by_headline["Good A"] == "2026-07-20 18:00:00"
+    # Normalised to a true UTC instant (18:00 EDT == 22:00 UTC), not echoed back.
+    assert by_headline["Good A"] == "2026-07-20T22:00:00+00:00"
     assert by_headline["Bad empty"] is None
     assert by_headline["Garbage"] is None
     assert by_headline["None date"] is None

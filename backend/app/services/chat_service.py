@@ -25,7 +25,7 @@ from app.config import settings
 from app.schemas.chat import StockChartWidget, HistoricalDataPoint
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
 from app.services.asset_class import detect_asset_class
-from app.services.chat_security import cap_prompt, neutralize_fences, sanitize_symbol
+from app.services.chat_security import normalize_text, cap_prompt, neutralize_fences, sanitize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +201,7 @@ class ChatService:
         cached_report = None
         is_deep_dive = self._is_deep_dive_request(is_stock, stock_id, user_message)
         if is_deep_dive and context:
-            cached_report = self._check_deep_dive_cache(stock_id, context)
+            cached_report = self._check_deep_dive_cache(stock_id, context, user_message)
 
         system_instruction = self._build_system_instruction(
             session_type, stock_id, profit_summary=profit_summary,
@@ -292,7 +292,7 @@ class ChatService:
 
         # Cache deep dive reports for 24 hours
         if is_deep_dive and context and stock_id and len(ai_text) > 100:
-            self._upsert_deep_dive_cache(stock_id, context, ai_text)
+            self._upsert_deep_dive_cache(stock_id, context, ai_text, user_message)
 
         # No tool widget (text-only question, or the FC round failed and degraded to plain text
         # above) → fall back to the deterministic screen-scoped widget, so an asset-detail chat
@@ -1219,9 +1219,35 @@ class ChatService:
         msg = user_message.lower()
         return any(kw in msg for kw in ("deep dive", "deep analysis", "market deep dive"))
 
-    def _check_deep_dive_cache(self, symbol: str, context: str) -> Optional[str]:
+    @staticmethod
+    def _deep_dive_cache_key(context: str, user_message: str) -> str:
+        """Cache key for a deep-dive answer: the context AND the question asked.
+
+        The key used to be `md5(context)` alone, on the assumption that this cache only
+        ever served ONE canned prompt per screen. It does not: all four non-stock detail
+        screens forward free user text through `pendingAIQuery` to the same entry point,
+        and `_is_deep_dive_request` is a bare substring test — so "deep dive on the risks
+        of gold" and "deep dive on gold's supply" share a key and the second question is
+        answered with the first one's report.
+
+        Normalised so trivial variations (case, NFKC forms, invisible characters, stray
+        whitespace) still share a cache entry — `normalize_text` is the same helper the
+        chat pipeline uses to persist a message, so the key matches what the user
+        actually sent.
+
+        NOTE: this changes the key, so pre-existing rows become unreachable. They are a
+        pure cache with a 24h TTL — they simply regenerate and age out.
+        """
+        normalized = " ".join(normalize_text(user_message or "").lower().split())
+        return hashlib.md5(
+            f"{context}\x00{normalized}".encode()
+        ).hexdigest()[:16]
+
+    def _check_deep_dive_cache(
+        self, symbol: str, context: str, user_message: str
+    ) -> Optional[str]:
         """Check Supabase market_deep_dive_cache (24h TTL)."""
-        ctx_hash = hashlib.md5(context.encode()).hexdigest()[:16]
+        ctx_hash = self._deep_dive_cache_key(context, user_message)
         try:
             row = (
                 self.supabase.table("market_deep_dive_cache")
@@ -1246,9 +1272,11 @@ class ChatService:
             logger.warning(f"Deep dive cache check failed: {e}")
             return None
 
-    def _upsert_deep_dive_cache(self, symbol: str, context: str, report: str) -> None:
+    def _upsert_deep_dive_cache(
+        self, symbol: str, context: str, report: str, user_message: str
+    ) -> None:
         """Cache deep dive report in Supabase (24h TTL)."""
-        ctx_hash = hashlib.md5(context.encode()).hexdigest()[:16]
+        ctx_hash = self._deep_dive_cache_key(context, user_message)
         try:
             self.supabase.table("market_deep_dive_cache").upsert(
                 {

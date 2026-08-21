@@ -220,6 +220,37 @@ def session_trading_date(now: datetime | None = None) -> date:
     return previous_trading_day(today)
 
 
+# ── FMP timestamp normalisation ───────────────────────────────────────
+
+
+def to_utc_instant(value: object) -> datetime | None:
+    """Parse an FMP / cached timestamp into an aware UTC datetime, or None.
+
+    FMP sends a NAIVE wall clock in America/New_York — verified live: at 09:17 ET
+    (13:17 UTC) the newest `publishedDate` values read "09:09:00" and "09:00:22".
+    Read as UTC they are hours in the past, which is exactly what happened: rows
+    landed in `timestamptz` columns backdated by the ET offset, and every window
+    built on them (the sentiment 24h bucket, the Updates freshness windows) shifted.
+
+    The offset is NOT a constant — 4h in EDT, 5h in EST — so this attaches the real
+    zone rather than subtracting a fixed number. A value that already carries an
+    offset is one of OUR writes and is only converted, never re-interpreted, which
+    makes the function idempotent and safe to apply to mixed-provenance lists.
+    """
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ET)
+    return dt.astimezone(timezone.utc)
+
+
 # ── Detail-screen market-status wire contract ─────────────────────────
 #
 # The stock / ETF / index detail services each shipped their OWN copy of the

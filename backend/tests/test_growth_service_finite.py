@@ -60,10 +60,35 @@ def test_compute_growth_points_skips_non_finite_value_annual():
     ]
     pts = _compute_growth_points(records, "revenue", is_quarterly=False)
     periods = [p["period"] for p in pts]
-    # 2023 has prior 2022 → real point; 2024 is NaN → skipped (not a NaN point).
-    assert periods == ["2023"]
+    # 2022 is the OLDEST year: charted with a null YoY (nothing to compare against),
+    # not dropped — the loop used to start at index 1 and silently lose it. 2023 has a
+    # prior year → real YoY. 2024 is NaN → skipped, because that is a missing VALUE
+    # rather than a missing predecessor.
+    assert periods == ["2022", "2023"]
     assert all(math.isfinite(p["value"]) for p in pts)
-    assert pts[0]["value"] == 100.0
+    by = {p["period"]: p for p in pts}
+    assert by["2022"]["value"] == 90.0
+    assert by["2022"]["yoy_change_percent"] is None
+    assert by["2023"]["value"] == 100.0
+    assert by["2023"]["yoy_change_percent"] is not None
+
+
+def test_compute_growth_points_annual_charts_a_single_filing():
+    """A company with ONE annual filing must still get its bar.
+
+    This is the case the old `range(1, ...)` turned into a completely EMPTY chart:
+    with a single record there is no index >= 1, so nothing was emitted at all. Recent
+    listings really do report a single annual year.
+    """
+    pts = _compute_growth_points(
+        [{"calendarYear": "2025", "date": "2025-12-31", "revenue": 42.0}],
+        "revenue",
+        is_quarterly=False,
+    )
+    assert len(pts) == 1
+    assert pts[0]["period"] == "2025"
+    assert pts[0]["value"] == 42.0
+    assert pts[0]["yoy_change_percent"] is None
 
 
 def test_compute_growth_points_annual_year_gap_keeps_bar_null_yoy():
@@ -78,8 +103,11 @@ def test_compute_growth_points_annual_year_gap_keeps_bar_null_yoy():
     ]
     pts = _compute_growth_points(records, "revenue", is_quarterly=False)
     by = {p["period"]: p for p in pts}
-    # 2020 = YoY baseline (not charted); 2021/2024/2025 all get bars.
-    assert set(by) == {"2021", "2024", "2025"}
+    # 2020 is the oldest year — it now charts too, with a null YoY. It used to be
+    # consumed as a silent "YoY baseline" and never drawn.
+    assert set(by) == {"2020", "2021", "2024", "2025"}
+    assert by["2020"]["value"] == 100.0
+    assert by["2020"]["yoy_change_percent"] is None   # oldest → no predecessor
     assert by["2021"]["yoy_change_percent"] == 20.0   # consecutive → YoY
     assert by["2024"]["value"] == 200.0               # gap year: bar PRESENT (was dropped)
     assert by["2024"]["yoy_change_percent"] is None   # gap → YoY null (line breaks)

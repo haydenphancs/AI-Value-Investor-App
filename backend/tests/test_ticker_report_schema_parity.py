@@ -620,6 +620,8 @@ def _make_signal_of_confidence(
             dividend_yield=0.93,
             buyback_yield=0.50,
             share_count_change=share_count_change,
+            # Source of truth for the buyback verdict — see SignalOfConfidenceSummarySchema.
+            buyback_status="Diluting",
         ),
         dividend_info=DividendInfoSchema(
             ex_dividend_date="2025-04-10",

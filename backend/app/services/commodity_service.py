@@ -29,6 +29,7 @@ from app.schemas.commodity import (
     PerformancePeriodResponse,
     RelatedCommodityResponse,
 )
+from app.utils.market_hours import to_utc_instant
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +325,22 @@ def _get_meta(symbol: str) -> Dict[str, Any]:
     return _COMMODITY_PROFILES.get(symbol, {})
 
 
+
+def _normalized_published_at(article: Dict[str, Any]) -> str:
+    """FMP's publishedDate as a true UTC instant, falling back to the raw string.
+
+    The wall clock FMP sends is naive America/New_York. The News tab now serves a
+    normalised UTC instant (news_cache_service._sanitize_published_at), and this
+    builder bypasses that path entirely, so without this the same article reads 4h
+    apart on the commodity screen and the News tab. The field is REQUIRED, so an
+    unparseable value degrades to the raw string rather than None (a None 500s the
+    whole commodity detail — see the guard note at the call site).
+    """
+    raw = article.get("publishedDate") or article.get("published_date") or ""
+    dt = to_utc_instant(raw)
+    return dt.isoformat() if dt is not None else raw
+
+
 class CommodityService:
     """Aggregates FMP data for the Commodity Detail screen."""
 
@@ -601,7 +618,7 @@ class CommodityService:
                     source_name=article.get("site") or article.get("publisher") or article.get("source") or "Unknown",
                     source_icon=None,
                     sentiment="neutral",
-                    published_at=article.get("publishedDate") or article.get("published_date") or "",
+                    published_at=_normalized_published_at(article),
                     thumbnail_url=article.get("image") or article.get("thumbnail_url"),
                     related_tickers=[s.strip() for s in (article.get("symbol") or "").split(",") if s.strip()],
                     summary_bullets=[],

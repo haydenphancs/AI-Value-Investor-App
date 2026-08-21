@@ -25,7 +25,11 @@ from app.schemas.analyst import (
     AnalystPriceTarget,
     AnalystRatingDistribution,
 )
-from app.services._analyst_common import normalize_fmp_action
+from app.services._analyst_common import (
+    RATING_CATEGORY_UNKNOWN,
+    classify_grade,
+    normalize_fmp_action,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,42 +86,14 @@ def _cache_set(key: str, value: Any):
 # ── FMP grade → category mapping ────────────────────────────────────
 # Maps the varied FMP grade strings to our 5-bucket system.
 
-_GRADE_TO_CATEGORY: Dict[str, str] = {
-    # Strong Buy
-    "strong buy": "Strong Buy",
-    "long term buy": "Strong Buy",
-    # Buy
-    "buy": "Buy",
-    "outperform": "Buy",
-    "overweight": "Buy",
-    "market outperform": "Buy",
-    "sector outperform": "Buy",
-    "positive": "Buy",
-    "accumulate": "Buy",
-    # Hold
-    "neutral": "Hold",
-    "hold": "Hold",
-    "market perform": "Hold",
-    "equal weight": "Hold",
-    "perform": "Hold",
-    "sector weight": "Hold",
-    "sector perform": "Hold",
-    "peer perform": "Hold",
-    "in line": "Hold",
-    # Sell
-    "sell": "Sell",
-    "underweight": "Sell",
-    "underperform": "Sell",
-    "negative": "Sell",
-    "reduce": "Sell",
-    # Strong Sell
-    "strong sell": "Strong Sell",
-}
-
-
 def _classify_grade(grade: str) -> str:
-    """Map an FMP grade string to one of the 5 distribution buckets."""
-    return _GRADE_TO_CATEGORY.get(grade.lower().strip(), "Hold")
+    """Map an FMP grade string to one of the 5 distribution buckets.
+
+    Delegates to `_analyst_common.classify_grade` so this service and
+    `_infer_rating_direction` cannot disagree about what a label means — they used
+    to, in both directions (see the note on RANK_TO_CATEGORY).
+    """
+    return classify_grade(grade)
 
 
 # ── FMP action mapping ──────────────────────────────────────────────
@@ -167,7 +143,16 @@ def _compute_distribution(
             continue
         seen_firms.add(firm)
 
-        category = _classify_grade(g.get("newGrade", ""))
+        raw_grade = g.get("newGrade", "")
+        category = _classify_grade(raw_grade)
+        if category == RATING_CATEGORY_UNKNOWN:
+            # Not counted in any bucket — see RATING_CATEGORY_UNKNOWN. Logged so a
+            # label FMP starts emitting is discoverable instead of quietly shrinking
+            # the analyst total.
+            logger.warning(
+                "analyst distribution: unrecognised grade %r from firm %r — "
+                "excluded from the distribution", raw_grade, firm,
+            )
         counts[category] += 1
 
     distribution = {

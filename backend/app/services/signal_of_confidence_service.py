@@ -550,6 +550,9 @@ class SignalOfConfidenceService:
                 dividend_yield=0.0,
                 buyback_yield=0.0,
                 share_count_change=0.0,
+                # No data points at all: 0 yield / 0 change classifies as "Low", which
+                # is the honest reading of "we measured nothing".
+                buyback_status=self._classify_buyback(0.0, 0.0),
             )
 
         # Last 4 quarters (or fewer if not enough data)
@@ -596,7 +599,34 @@ class SignalOfConfidenceService:
             dividend_yield=t12m_div_yield,
             buyback_yield=t12m_bb_yield,
             share_count_change=share_count_change,
+            buyback_status=self._classify_buyback(t12m_bb_yield, share_count_change),
         )
+
+    # ── Buyback status ────────────────────────────────────────────
+
+    @staticmethod
+    def _classify_buyback(
+        t12m_buyback_yield: float, share_count_change: float
+    ) -> str:
+        """Buyback verdict from share-count change + buyback yield.
+
+        Lifted out of `_build_dividend_info` because it never depended on dividends
+        in the first place. That function returns None the moment `dividend_history`
+        is empty — which is every non-payer, including AMZN, BRK-B and NFLX, three of
+        the largest repurchasers on the market — so their buyback verdict was computed
+        and then thrown away. The report's fallback then asserted a flat "Low".
+        """
+        if share_count_change > 2.0:
+            return "Diluting"
+        if share_count_change > 0:
+            return "Diluting (Mild)"
+        if t12m_buyback_yield < 1.0:
+            return "Low"
+        if t12m_buyback_yield < 2.0:
+            return "Moderate"
+        if t12m_buyback_yield < 4.0:
+            return "High"
+        return "Very High"
 
     # ── Dividend info ─────────────────────────────────────────────
 
@@ -682,19 +712,9 @@ class SignalOfConfidenceService:
             else:
                 status = "Very High"
 
-        # Buyback status: check for dilution first, then classify by yield
-        if share_count_change > 2.0:
-            buyback_status = "Diluting"
-        elif share_count_change > 0:
-            buyback_status = "Diluting (Mild)"
-        elif t12m_buyback_yield < 1.0:
-            buyback_status = "Low"
-        elif t12m_buyback_yield < 2.0:
-            buyback_status = "Moderate"
-        elif t12m_buyback_yield < 4.0:
-            buyback_status = "High"
-        else:
-            buyback_status = "Very High"
+        # Same verdict the summary carries — kept on DividendInfo too so the existing
+        # iOS DividendInfoCard row is unchanged for dividend payers.
+        buyback_status = self._classify_buyback(t12m_buyback_yield, share_count_change)
 
         return DividendInfoSchema(
             ex_dividend_date=ex_date,

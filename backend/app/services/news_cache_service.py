@@ -13,6 +13,8 @@ import json
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
+
+from app.utils.market_hours import to_utc_instant
 from typing import List, Dict, Any, Optional
 
 from app.database import get_supabase
@@ -104,16 +106,12 @@ def _sanitize_published_at(value: Any) -> Optional[str]:
     batch. FMP sends ``"YYYY-MM-DD HH:MM:SS"``; our own writes are ISO-8601 —
     ``datetime.fromisoformat`` accepts both (space or ``T`` separator) on 3.11.
     """
-    if not isinstance(value, str):
-        return None
-    s = value.strip()
-    if not s:
-        return None
-    try:
-        datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return s
+    # Delegated so the two writers to this table (here and
+    # SentimentService._persist_articles) cannot drift on how an FMP wall clock is
+    # interpreted — they share a conflict key, so a disagreement would make the same
+    # article's timestamp depend on which writer happened to touch it last.
+    dt = to_utc_instant(value)
+    return dt.isoformat() if dt is not None else None
 
 
 def _clamp_confidence(value: Any) -> int:
@@ -169,6 +167,52 @@ class NewsCacheService:
 
     # ── Public: Get raw/cached news ───────────────────────────────────
 
+    async def _deduped(self, key: str, build):
+        """Run ``build()`` once per ``key``, sharing the result with concurrent callers.
+
+        This logic previously existed only inline inside :meth:`get_market_news`, so the
+        far hotter ticker and index paths had NO dedup at all: N users opening a cold
+        ticker fired N identical FMP fetches. Extracted rather than copied twice more —
+        every subtlety below was learned the hard way and must not diverge between the
+        three call sites.
+
+        ``build`` is a zero-arg callable returning a coroutine (not a coroutine object),
+        so nothing is created when we end up joining an existing leader.
+        """
+        inflight = self._inflight.get(key)
+        if inflight is not None:
+            logger.info("News fetch already in flight for %s — joining", key)
+            # SHIELDED: awaiting the shared future unshielded means a cancelled JOINER
+            # cancels the future the LEADER is about to publish into, killing the fetch
+            # for everyone waiting on it.
+            return await asyncio.shield(inflight)
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._inflight[key] = fut
+        try:
+            result = await build()
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except BaseException as e:
+            # BaseException, not Exception: a CancelledError must still resolve
+            # the future, or every joiner hangs forever waiting on a dead fetch.
+            if not fut.done():
+                # Only hand the exception to the future when someone is actually
+                # waiting on it. With no joiner, an unretrieved future exception
+                # produces a "Future exception was never retrieved" traceback on
+                # GC for every single failure — pure log/Sentry noise.
+                if _has_waiters(fut):
+                    fut.set_exception(e)
+                else:
+                    fut.cancel()
+            raise
+        finally:
+            # In a `finally` so a cancellation cannot strand the key and permanently
+            # wedge every later caller onto a dead future.
+            self._inflight.pop(key, None)
+
     async def get_ticker_news(
         self, ticker: str, limit: int = 50, is_crypto: bool = False,
         offset: int = 0,
@@ -209,7 +253,13 @@ class NewsCacheService:
         # ── 2. Cache miss → fetch from FMP, store raw (no Gemini) ──
         logger.info(f"News cache MISS for {ticker}: fetching from FMP")
         try:
-            articles = await self._fetch_and_cache_raw(ticker, limit, is_crypto=is_crypto)
+            # Deduped on the cache key: an earnings-day herd on one cold ticker used to
+            # fire N identical FMP fetches, one per viewer. `get_market_news` had this
+            # guard from the start; the far hotter ticker path never got it.
+            articles = await self._deduped(
+                ticker,
+                lambda: self._fetch_and_cache_raw(ticker, limit, is_crypto=is_crypto),
+            )
             return {
                 "articles": articles,
                 "ticker": ticker,
@@ -260,8 +310,12 @@ class NewsCacheService:
         # 2. Cache miss → fetch from FMP using constituent tickers
         logger.info(f"Index news cache MISS for {symbol}: fetching via tickers={news_tickers}")
         try:
-            articles = await self._fetch_and_cache_index_news(
-                symbol, news_tickers, limit
+            # Deduped on the index symbol — the same herd guard the ticker and market
+            # paths use. An index miss fans out to its CONSTITUENTS, so an undeduped
+            # herd here is the most expensive of the three.
+            articles = await self._deduped(
+                symbol,
+                lambda: self._fetch_and_cache_index_news(symbol, news_tickers, limit),
             )
             return {
                 "articles": articles,
@@ -337,34 +391,7 @@ class NewsCacheService:
             }
 
         # Dedup concurrent misses: one FMP fetch, N awaiters.
-        inflight = self._inflight.get(MARKET_SCOPE)
-        if inflight is not None:
-            logger.info("Market news fetch already in flight — joining")
-            return await asyncio.shield(inflight)
-
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-        self._inflight[MARKET_SCOPE] = fut
-        try:
-            result = await self._fetch_market_news(limit)
-            if not fut.done():
-                fut.set_result(result)
-            return result
-        except BaseException as e:
-            # BaseException, not Exception: a CancelledError must still resolve
-            # the future, or every joiner hangs forever waiting on a dead fetch.
-            if not fut.done():
-                # Only hand the exception to the future when someone is actually
-                # waiting on it. With no joiner, an unretrieved future exception
-                # produces a "Future exception was never retrieved" traceback on
-                # GC for every single failure — pure log/Sentry noise.
-                if _has_waiters(fut):
-                    fut.set_exception(e)
-                else:
-                    fut.cancel()
-            raise
-        finally:
-            self._inflight.pop(MARKET_SCOPE, None)
+        return await self._deduped(MARKET_SCOPE, lambda: self._fetch_market_news(limit))
 
     async def _market_trending_tickers(self) -> frozenset:
         """Top Reddit-mentioned symbols (best-effort) for the market news quality
@@ -535,6 +562,8 @@ class NewsCacheService:
         expires = now + timedelta(hours=CACHE_TTL_HOURS)
 
         cache_rows: List[Dict[str, Any]] = []
+        # Ingest path only: complete rows used for a create-only pre-pass (see below).
+        insert_only_rows: List[Dict[str, Any]] = []
         response_articles: List[Dict[str, Any]] = []
         ext_ids: List[str] = []
         seen_external_ids: set = set()
@@ -597,6 +626,27 @@ class NewsCacheService:
                     "ai_processed": False,
                     "ai_model": None,
                 })
+            else:
+                # On the ingest/refresh path the block above is deliberately skipped so a
+                # refresh cannot clobber enrichment. But "don't overwrite" is only correct
+                # for a row that ALREADY EXISTS — for a brand-new article this upsert is an
+                # INSERT, and the columns then take their table defaults, so
+                # `related_tickers` lands as `[]` FOREVER (nothing re-enriches, because
+                # `ai_processed` is what gates that). Every article the background sweeper
+                # happened to discover first therefore had no related-ticker chips.
+                #
+                # Carry a complete row alongside, inserted with ON CONFLICT DO NOTHING
+                # below so it can only ever create, never overwrite.
+                insert_only_rows.append({
+                    **row,
+                    "related_tickers": related,
+                    "cached_at": now.isoformat(),
+                    "summary_bullets": json.dumps([]),
+                    "sentiment": None,
+                    "sentiment_confidence": 0,
+                    "ai_processed": False,
+                    "ai_model": None,
+                })
             cache_rows.append(row)
 
             response_articles.append({
@@ -618,6 +668,29 @@ class NewsCacheService:
         if not cache_rows:
             logger.info("No usable FMP news rows for %s", label)
             return []
+
+        # Create-only pre-pass: gives a NEW row its `related_tickers` (and the other
+        # first-write columns) at INSERT time. `ignore_duplicates=True` is
+        # ON CONFLICT DO NOTHING, so an existing row is untouched and the enrichment
+        # -preservation contract above is intact. Best-effort: the merge upsert below is
+        # what the caller depends on, so a failure here is logged, never fatal.
+        if insert_only_rows:
+            try:
+                (
+                    self.supabase.table("ticker_news_cache")
+                    .upsert(
+                        insert_only_rows,
+                        on_conflict="ticker,external_id",
+                        ignore_duplicates=True,
+                    )
+                    .execute()
+                )
+            except Exception as e:
+                logger.warning(
+                    "Create-only news pre-pass failed for %s: %s: %s — new rows may "
+                    "have empty related_tickers",
+                    label, type(e).__name__, e,
+                )
 
         try:
             result = (

@@ -56,6 +56,45 @@ class FMPUnavailableException(FMPException):
     """
 
 
+class FMPPartialPageException(FMPUnavailableException):
+    """Raised when a PAGINATED fetch lost at least one page.
+
+    A paginated fetch that drops a failed page returns a list that is
+    indistinguishable from a complete one — the caller cannot tell 900 rows
+    "because that is all there is" from 900 rows "because page 3 timed out".
+    That ambiguity is destructive in the whale hydration path: the truncated set
+    is aggregated and `_persist`-ed OVER the good stored set, and because
+    `_congressional_raw_hash` hashes the member's own disclosures, the missing
+    page also changes the hash and forces the full write path again next sweep.
+
+    So a partial page set FAILS CLOSED: this is raised instead of returning the
+    truncation, and each caller decides (skip the whale this sweep / omit the
+    card / refuse to pin the 24h cache). Skipping one sweep is far cheaper than
+    overwriting good data with incomplete data.
+
+    Subclasses `FMPUnavailableException` because that is what it is — transient
+    upstream flakiness, WARNING-level, not a bug in our code.
+
+    ``partial`` carries the rows that DID arrive, for a caller that can honestly
+    present incomplete data. Nobody may use it to write a cache or a snapshot.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        endpoint: str,
+        pages_total: int,
+        pages_failed: int,
+        partial: Optional[List[Dict[str, Any]]] = None,
+    ):
+        super().__init__(message)
+        self.endpoint = endpoint
+        self.pages_total = pages_total
+        self.pages_failed = pages_failed
+        self.partial = partial if partial is not None else []
+
+
 class FMPClient:
     """
     Client for Financial Modeling Prep API (stable endpoints).
@@ -1718,6 +1757,27 @@ class FMPClient:
         FMP caps results at 250 per page.  Paginating captures older
         trades that would otherwise be lost (e.g. Pelosi's large AAPL
         sales on later pages).
+
+        ⚠️ FAILS CLOSED on a lost page. This used to log a failed page and drop
+        it, handing back a truncated list the caller could not distinguish from
+        a complete one — which the whale hydrator then persisted OVER the good
+        stored set (and, since the hash covers the member's own disclosures, the
+        gap forced a full rewrite again on the next sweep).
+
+        Contract:
+          * every page OK              → the merged list
+          * some pages OK, some failed → ``FMPPartialPageException`` (the rows
+            that arrived ride on ``.partial``; a caller may DISPLAY them, never
+            persist them)
+          * every page failed with 403/404 → ``[]``. That is the documented
+            "endpoint not on this plan" case the public getters already treat as
+            an honest empty; raising for it would put every congressional
+            surface into a permanent degraded loop.
+          * every page failed for any other reason → ``FMPPartialPageException``
+            with an empty ``.partial`` — an outage, not an empty filer.
+
+        Business decisions (skip the whale / omit the card / refuse to pin a
+        cache) belong to the callers; this only reports what happened.
         """
         PAGE_SIZE = 250
         max_pages = min((limit + PAGE_SIZE - 1) // PAGE_SIZE, 30)
@@ -1733,12 +1793,58 @@ class FMPClient:
         )
 
         all_trades: List[Dict[str, Any]] = []
-        for r in results:
+        failures: List[BaseException] = []
+        for page_no, r in enumerate(results):
             if isinstance(r, list):
                 all_trades.extend(r)
-            elif isinstance(r, Exception):
-                logger.warning(f"{endpoint} page fetch error: {r}")
-        return all_trades
+            elif isinstance(r, BaseException):
+                failures.append(r)
+                logger.warning(
+                    "%s page %d/%d fetch error: %s: %s",
+                    endpoint, page_no, max_pages, type(r).__name__, r,
+                )
+            else:
+                # A non-list, non-exception body (FMP occasionally answers an
+                # error as a dict). Not usable rows, and NOT a silent skip.
+                failures.append(
+                    FMPException(
+                        f"{endpoint} page {page_no} returned "
+                        f"{type(r).__name__}, expected list"
+                    )
+                )
+                logger.warning(
+                    "%s page %d/%d returned %s, expected list — counted as a "
+                    "lost page",
+                    endpoint, page_no, max_pages, type(r).__name__,
+                )
+
+        if not failures:
+            return all_trades
+
+        if len(failures) == max_pages and all(
+            isinstance(f, httpx.HTTPStatusError)
+            and getattr(getattr(f, "response", None), "status_code", None)
+            in (403, 404)
+            for f in failures
+        ):
+            # Endpoint unavailable on this plan — every page said so. Honest
+            # empty, exactly as before; the public getters' 403/404 branch means
+            # the same thing.
+            logger.warning(
+                "%s unavailable (403/404 on all %d pages) — returning empty",
+                endpoint, max_pages,
+            )
+            return []
+
+        raise FMPPartialPageException(
+            f"{endpoint}: {len(failures)}/{max_pages} pages failed; "
+            f"{len(all_trades)} row(s) arrived but the set is INCOMPLETE "
+            f"(first failure: {type(failures[0]).__name__}: {failures[0]})",
+            endpoint=endpoint,
+            pages_total=max_pages,
+            pages_failed=len(failures),
+            partial=all_trades,
+        )
 
     async def get_senate_latest(
         self, limit: int = 1000
@@ -1750,6 +1856,11 @@ class FMPClient:
             if e.response.status_code in (403, 404):
                 logger.warning("Senate latest endpoint unavailable")
                 return []
+            raise
+        except FMPPartialPageException:
+            # Fail closed. `[]` here would read to the caller as "no
+            # disclosures", so a partly-down feed would omit a card / pin an
+            # empty 24h cache while claiming the data is complete.
             raise
         except Exception as e:
             logger.warning(f"Senate latest request failed: {e}")
@@ -1765,6 +1876,11 @@ class FMPClient:
             if e.response.status_code in (403, 404):
                 logger.warning("House latest endpoint unavailable")
                 return []
+            raise
+        except FMPPartialPageException:
+            # Fail closed. `[]` here would read to the caller as "no
+            # disclosures", so a partly-down feed would omit a card / pin an
+            # empty 24h cache while claiming the data is complete.
             raise
         except Exception as e:
             logger.warning(f"House latest request failed: {e}")
@@ -1847,6 +1963,11 @@ class FMPClient:
                 if (t.get("office") or "").lower() == name_lower
                 or f"{t.get('firstName', '')} {t.get('lastName', '')}".lower() == name_lower
             ]
+        except FMPPartialPageException:
+            # Fail closed. `[]` here would read to the caller as "no
+            # disclosures", so a partly-down feed would omit a card / pin an
+            # empty 24h cache while claiming the data is complete.
+            raise
         except Exception as e:
             logger.warning(f"Senate trades failed for '{name}': {e}")
             return []
@@ -1870,6 +1991,11 @@ class FMPClient:
                 if (t.get("office") or "").lower() == name_lower
                 or f"{t.get('firstName', '')} {t.get('lastName', '')}".lower() == name_lower
             ]
+        except FMPPartialPageException:
+            # Fail closed. `[]` here would read to the caller as "no
+            # disclosures", so a partly-down feed would omit a card / pin an
+            # empty 24h cache while claiming the data is complete.
+            raise
         except Exception as e:
             logger.warning(f"House trades failed for '{name}': {e}")
             return []

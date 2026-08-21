@@ -14,7 +14,8 @@ member correctly logged "Skipping — data unchanged". Ted Cruz's stored hash wa
 byte-identical across 2026-07 and 2026-08; no House member's ever matched a fresh fetch.
 
 Cause: the hash was `sha256(json.dumps(raw_trades[:50], sort_keys=True))`, and
-`house-latest` is a GLOBAL 1000-row feed of every member that the client filters by name.
+`house-latest` is a GLOBAL feed of every member (the by-name path pulls 7500 rows)
+that the client then filters by name.
 
   * `sort_keys=True` sorts keys INSIDE each dict. It does NOT order the LIST — the name is
     a trap. Any reshuffle changed the hash.
@@ -154,11 +155,38 @@ def test_malformed_rows_are_tolerated():
     _congressional_raw_hash([{"symbol": None}, {}, {"type": "Purchase"}])
 
 
-def test_duplicate_rows_are_deterministic():
+def test_byte_identical_duplicates_are_collapsed():
+    """Duplicates are DELIBERATELY ignored — this reverses an earlier assertion here.
+
+    `house-latest` is fetched 30 pages at a time from a feed that is being written to,
+    and it genuinely returns the same disclosure more than once: measured 2026-08-21,
+    Gilbert Cisneros came back as 1082 rows but only 1020 DISTINCT ones. Counting the
+    duplicates made his hash move whenever the pagination boundary shifted — the same
+    class of false "change" this function exists to eliminate, and the reason he was the
+    one member of ten still rewriting after the first fix.
+
+    Two byte-identical disclosures carry no additional information about what was filed,
+    so collapsing them is also the more correct reading.
+    """
     t = _trade("2026-01-01", "AAPL")
+    assert _congressional_raw_hash([t, dict(t)]) == _congressional_raw_hash([t])
+    assert _congressional_raw_hash([t, dict(t), dict(t)]) == _congressional_raw_hash([t])
+    # Order still cannot matter.
     assert _congressional_raw_hash([t, dict(t)]) == _congressional_raw_hash([dict(t), t])
-    # ...and a duplicate is not silently collapsed into a single entry.
-    assert _congressional_raw_hash([t, dict(t)]) != _congressional_raw_hash([t])
+    # But two trades differing in ANY hashed field remain distinct.
+    other = _trade("2026-01-01", "AAPL", amount="$50,001 - $100,000")
+    assert _congressional_raw_hash([t, other]) != _congressional_raw_hash([t])
+
+
+def test_duplicate_churn_does_not_move_the_hash():
+    """The Cisneros case in miniature: the same filings, a different duplicate count."""
+    trades = _many(70)
+    base = _congressional_raw_hash(trades)
+    for extra in (1, 5, 40):
+        padded = trades + [dict(x) for x in trades[:extra]]
+        assert _congressional_raw_hash(padded) == base, (
+            f"{extra} duplicated rows changed the hash"
+        )
 
 
 def test_is_deterministic_across_calls():

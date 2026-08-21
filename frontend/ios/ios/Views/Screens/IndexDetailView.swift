@@ -335,6 +335,20 @@ struct IndexDetailView: View {
                         .cardFill()
                         .frame(height: 180)
                         .shimmer()
+                } else if let message = viewModel.technicalUnavailableMessage {
+                    // Loaded, but there is nothing to show. This branch did not exist:
+                    // the tab rendered an entirely BLANK screen, which reads as a broken
+                    // app rather than as absent data, and offered no way to recover.
+                    if viewModel.technicalIsRetryable {
+                        InlineRetryNotice(message: message) {
+                            Task { await viewModel.retryTechnicalAnalysis() }
+                        }
+                    } else {
+                        // Permanent for this asset — a Try Again button would promise
+                        // something that can never succeed.
+                        ChartUnavailableView(message: message)
+                            .frame(height: 180)
+                    }
                 }
 
                 Spacer()

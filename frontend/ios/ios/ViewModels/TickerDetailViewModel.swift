@@ -54,9 +54,15 @@ class TickerDetailViewModel: ObservableObject {
     @Published var selectedTab: TickerDetailTab = .overview
     @Published var selectedChartRange: ChartTimeRange = .oneDay
     @Published var isFavorite: Bool = false
-    /// Set once the user taps the star. The initial (async) watchlist check must not
-    /// clobber a user toggle with a snapshot taken before the add/remove landed.
-    private var userToggledFavorite = false
+    /// Bumped on every star tap. `checkWatchlistStatus()` captures it before its GET and
+    /// re-checks it after, so a snapshot already in flight when the user tapped is
+    /// discarded instead of reverting them.
+    ///
+    /// A generation counter, NOT the sticky Bool this used to be: `checkWatchlistStatus()`
+    /// re-runs from the error-state Retry, and a sticky flag pinned the local value for
+    /// the life of the screen — ignoring a genuine change made on another device. The four
+    /// sibling detail screens now use the identical guard.
+    private var favoriteToggleGeneration: Int = 0
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
     @Published var pendingTickerNavigation: String?
@@ -960,7 +966,8 @@ class TickerDetailViewModel: ObservableObject {
 
     func toggleFavorite() {
         print("⭐ TickerDetailVM: toggleFavorite called — isFavorite was \(isFavorite)")
-        userToggledFavorite = true // the user's intent now wins over the initial check
+        // The user's intent now outranks any watchlist snapshot already in flight.
+        favoriteToggleGeneration &+= 1
         let wasInWatchlist = isFavorite
         isFavorite.toggle() // optimistic UI update
         print("⭐ TickerDetailVM: isFavorite is now \(isFavorite)")
@@ -996,16 +1003,17 @@ class TickerDetailViewModel: ObservableObject {
     }
 
     private func checkWatchlistStatus() async {
+        let generation = favoriteToggleGeneration
         do {
             let watchlist: [WatchlistItemDTO] = try await APIClient.shared.request(
                 endpoint: .getWatchlist,
                 responseType: [WatchlistItemDTO].self
             )
-            // If the user already toggled the star, their optimistic state + write is
-            // authoritative — this snapshot may predate that write and would wrongly
-            // revert it. Only apply the server snapshot when the user hasn't acted.
-            guard !self.userToggledFavorite else {
-                print("⏭️ TickerDetailVM: Watchlist check skipped — user already toggled favorite")
+            // Discard a snapshot that raced with a tap: it may predate the user's write
+            // and would revert their star with no error shown. A snapshot issued AFTER
+            // the tap already reflects it, so it is applied normally.
+            guard generation == self.favoriteToggleGeneration else {
+                print("⏭️ TickerDetailVM: Watchlist snapshot discarded — user toggled during the fetch")
                 return
             }
             self.isFavorite = watchlist.contains { $0.ticker.uppercased() == tickerSymbol.uppercased() }

@@ -86,6 +86,10 @@ struct SignalOfConfidenceSummary {
     let dividendYield: Double             // Dividend portion
     let buybackYield: Double              // Buyback portion
     let shareCountChange: Double          // Percentage change (negative = buybacks reducing count)
+    // Always present, unlike `DividendInfo.buybackStatus`, which is nil for every
+    // company that pays no dividend. Defaulted so existing call sites and previews
+    // keep compiling.
+    var buybackStatus: BuybackStatus = .low
 
     var shareCountDescription: String {
         if shareCountChange < 0 {

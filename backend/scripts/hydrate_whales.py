@@ -44,7 +44,10 @@ from app.utils.supabase_errors import (  # noqa: E402
     is_transient_supabase_error,
     retry_idempotent_sync,
 )
-from app.integrations.fmp import FMPClient  # noqa: E402
+from app.integrations.fmp import (  # noqa: E402
+    FMPClient,
+    FMPPartialPageException,
+)
 from app.integrations.gemini import GeminiClient  # noqa: E402
 from app.services.whale_service import (  # noqa: E402
     SIC_TO_SECTOR, SECTOR_COLORS, DEFAULT_SECTOR_COLOR, _map_sic_to_sector,
@@ -101,13 +104,50 @@ _CONGRESS_HASH_FIELDS = (
 _CONGRESS_HASH_MAX = 50
 
 
+def _congress_trade_identity(t: Dict[str, Any]) -> str:
+    """What makes two congressional disclosures THE SAME filing.
+
+    One definition, shared by the idempotency hash and the aggregation, so the two can
+    never disagree about whether a row is a duplicate.
+    """
+    return "|".join(str(t.get(k) or "") for k in _CONGRESS_HASH_FIELDS)
+
+
+def _dedupe_congress_trades(raw_trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop byte-identical repeats, preserving first-seen order.
+
+    ⚠️ NOT cosmetic. `house-latest` is pulled 30 pages at a time from a feed that is being
+    written to, and it really does return the same disclosure twice — measured 2026-08-21:
+    Gilbert Cisneros 1091 rows / 1032 distinct, Josh Gottheimer 138 / 136.
+
+    Counting a repeat twice corrupts the portfolio, and not only by inflating it. Every
+    row is summed into `holdings_accum[symbol]["value"]`, and holdings are then filtered by
+    `if h["value"] > 0` — so a SALE disclosed twice can drive a real position to zero and
+    DELETE it from what the user sees. Measured on Gottheimer: one duplicated IFNNY sale
+    cancelled a genuine $8,000 position, and the ticker vanished from his portfolio
+    entirely (25 positions served where 26 were real).
+    """
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for t in raw_trades:
+        if not isinstance(t, dict):
+            continue
+        key = _congress_trade_identity(t)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
 def _congressional_raw_hash(raw_trades: List[Dict[str, Any]]) -> str:
     """Stable idempotency hash for one member's disclosures.
 
     ⚠️ Why this is not `sha256(json.dumps(raw_trades[:50], sort_keys=True))`.
 
     `house-latest` / `senate-latest` return a GLOBAL, continuously-updating feed of every
-    member, capped at 1000 rows, which the client then filters by name. Two consequences
+    member (the by-name path pulls 7500 rows), which the client then filters by name.
+    Two consequences
     broke the old hash:
 
     1. `sort_keys=True` sorts keys *inside* each dict — it does NOT order the LIST. Any
@@ -123,16 +163,20 @@ def _congressional_raw_hash(raw_trades: List[Dict[str, Any]]) -> str:
     The fix is threefold: hash a per-trade identity built from content fields only, SORT
     those identities so order cannot matter, and take the most recent
     `_CONGRESS_HASH_MAX` *after* sorting — so an old trade ageing out of the shared
-    1000-row window does not read as a change either.
+    fetch window does not read as a change either.
 
     Sorting is lexical on a string that starts with `transactionDate` (ISO `YYYY-MM-DD`),
     so it is chronological, and `[-N:]` is the newest N.
     """
-    ids = sorted(
-        "|".join(str(t.get(k) or "") for k in _CONGRESS_HASH_FIELDS)
-        for t in raw_trades
-        if isinstance(t, dict)
-    )
+    # DEDUPED. `house-latest` is paginated 30 pages at a time over a feed that is being
+    # written to, and it really does return the same disclosure more than once: measured
+    # 2026-08-21, Gilbert Cisneros came back as 1082 rows but only 1020 DISTINCT ones.
+    # Counting duplicates would make the hash move whenever the pagination boundary
+    # shifted, which is the same class of false change this function exists to remove.
+    # Two byte-identical disclosures carry no extra information about what was filed.
+    ids = sorted({
+        _congress_trade_identity(t) for t in raw_trades if isinstance(t, dict)
+    })
     return hashlib.sha256(
         json.dumps(ids[-_CONGRESS_HASH_MAX:]).encode()
     ).hexdigest()
@@ -593,11 +637,28 @@ class WhaleHydrator:
         now = datetime.now()
         period = now.strftime("%Y-%m")
 
-        async with FMP_SEMAPHORE:
-            if chamber == "senate":
-                raw_trades = await self.fmp.get_senate_trades_by_name(fmp_name)
-            else:
-                raw_trades = await self.fmp.get_house_trades_by_name(fmp_name)
+        try:
+            async with FMP_SEMAPHORE:
+                if chamber == "senate":
+                    raw_trades = await self.fmp.get_senate_trades_by_name(fmp_name)
+                else:
+                    raw_trades = await self.fmp.get_house_trades_by_name(fmp_name)
+        except FMPPartialPageException as e:
+            # SKIP THIS WHALE FOR THIS SWEEP. `e.partial` holds the rows that did
+            # arrive, and using them would be actively destructive: the truncated
+            # set is aggregated and `_persist`-ed OVER the good stored snapshot,
+            # and because `_congressional_raw_hash` covers this member's own
+            # disclosures, the missing page ALSO changes the hash and forces the
+            # full write path again on the next sweep. One skipped sweep is cheap;
+            # a snapshot overwritten with a gap is not.
+            logger.warning(
+                "  INCOMPLETE congressional feed for %s (whale_id=%s chamber=%s) — "
+                "%d/%d pages failed on %s, %d row(s) arrived. Skipping ALL writes "
+                "for this whale this sweep; the stored snapshot is left intact. %s",
+                fmp_name, whale_id, chamber,
+                e.pages_failed, e.pages_total, e.endpoint, len(e.partial), e,
+            )
+            return None
 
         if not raw_trades:
             return None
@@ -698,6 +759,11 @@ class WhaleHydrator:
         """
         trades = []
         holdings_accum: Dict[str, Dict] = {}
+
+        # Deduped HERE rather than at the call site: tests and any future caller hand
+        # this method a raw list straight from the feed, and a duplicate silently
+        # deletes a position (see `_dedupe_congress_trades`).
+        raw_trades = _dedupe_congress_trades(raw_trades)
 
         for t in raw_trades:
             symbol = (t.get("symbol") or "").upper().strip()

@@ -92,6 +92,82 @@ struct DividendInfoCard: View {
     }
 }
 
+// MARK: - Buyback-Only Info Card
+
+/// The buyback half of `DividendInfoCard`, for companies that pay no dividend.
+///
+/// `SignalOfConfidenceSectionCard` gates the dividend card on a non-nil
+/// `dividendInfo`, and the backend returns nil for every non-payer — so the buyback
+/// verdict, which depends only on buyback yield and share-count change, was computed
+/// and then never shown. That silently hid it for AMZN, BRK-B and NFLX, three of the
+/// largest repurchasers on the market.
+///
+/// Deliberately NOT solved by synthesising an empty `DividendInfo`: that would render
+/// "Ex-Dividend Date —" and "5Y Avg Yield 0.00%" for a company that has never paid a
+/// dividend, which reads as real data rather than absent data.
+struct BuybackOnlyInfoCard: View {
+    let buybackStatus: BuybackStatus
+    var buybackYield: Double = 0.0
+    var shareCountChange: Double = 0.0
+
+    private var formattedBuybackYield: String {
+        String(format: "%.1f%%", buybackYield)
+    }
+
+    private var formattedShareCountChange: String {
+        // Sign is meaningful here: negative == shrinking share count == buybacks.
+        String(format: "%+.1f%%", shareCountChange)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            DividendInfoRow(
+                label: "Dividend",
+                value: "None"
+            )
+
+            divider
+
+            DividendInfoRow(
+                label: "Buyback Yield",
+                value: formattedBuybackYield
+            )
+
+            divider
+
+            DividendInfoRow(
+                label: "Share Count Change",
+                value: formattedShareCountChange,
+                // A shrinking count is the shareholder-friendly direction.
+                valueColor: shareCountChange < 0 ? AppColors.gain
+                    : (shareCountChange > 0 ? AppColors.loss : AppColors.textPrimary)
+            )
+
+            divider
+
+            DividendInfoRow(
+                label: "Buyback Status",
+                value: buybackStatus.rawValue,
+                valueColor: buybackStatus.color
+            )
+        }
+        .padding(.vertical, AppSpacing.md)
+        .padding(.horizontal, AppSpacing.lg)
+        // Nested inside the Signal of Confidence card — MUST pass
+        // `cardBackgroundNested` or it shares its parent's fill and vanishes in dark.
+        .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)
+    }
+
+    private var divider: some View {
+        // Same reasoning as DividendInfoCard.divider — `divider` is alpha over
+        // whatever it sits on, so it separates on both appearance arms.
+        Rectangle()
+            .fill(AppColors.divider)
+            .frame(height: 1)
+            .padding(.vertical, AppSpacing.md)
+    }
+}
+
 // MARK: - Dividend Info Row
 
 private struct DividendInfoRow: View {

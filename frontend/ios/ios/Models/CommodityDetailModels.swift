@@ -106,9 +106,12 @@ struct CommodityDetailData: Identifiable {
     let id = UUID()
     let symbol: String
     let name: String
-    let currentPrice: Double
-    let priceChange: Double
-    let priceChangePercent: Double
+    // `var`, mirroring IndexDetailData: the live-price socket merges ticks into these
+    // three in place. They were `let`, which is why the commodity screen had no live
+    // price path at all — the quote was frozen for the life of the screen.
+    var currentPrice: Double
+    var priceChange: Double
+    var priceChangePercent: Double
     let marketStatus: CommodityMarketStatus
     let chartPricePoints: [StockPricePoint]
     let keyStatisticsGroups: [KeyStatisticsGroup]

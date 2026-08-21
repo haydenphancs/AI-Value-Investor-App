@@ -374,19 +374,10 @@ struct RevenueBreakdownChartView: View {
     // MARK: - Helper Functions
 
     private func formatLargeNumber(_ number: Double) -> String {
-        let absNumber = abs(number)
-        let sign = number < 0 ? "-" : ""
-
-        if absNumber >= 1_000_000_000_000 {
-            return sign + String(format: "%.0fT", absNumber / 1_000_000_000_000)
-        } else if absNumber >= 1_000_000_000 {
-            return sign + String(format: "%.0fB", absNumber / 1_000_000_000)
-        } else if absNumber >= 1_000_000 {
-            return sign + String(format: "%.0fM", absNumber / 1_000_000)
-        } else if absNumber >= 1_000 {
-            return sign + String(format: "%.0fK", absNumber / 1_000)
-        }
-        return String(format: "%.0f", number)
+        // Shared formatter. This copy used `%.0f` in EVERY tier, and the y-axis ticks are
+        // spaced at 0.25·max — so a $2B maximum rendered `0, 0B, 1B, 2B, 2B`, i.e. two
+        // pairs of duplicate labels on a chart that looked simply broken.
+        CompactNumberFormat.string(number)
     }
 }
 

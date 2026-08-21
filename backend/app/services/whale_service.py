@@ -22,7 +22,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
 import logging
 
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import (
+    get_fmp_client,
+    FMPClient,
+    FMPPartialPageException,
+)
 from app.database import get_supabase
 from app.utils.period_labels import filing_period_display
 from app.services._whale_common import (
@@ -1977,10 +1981,24 @@ class WhaleService:
             return existing.data[0]
 
         # Fetch trades from FMP
-        if chamber == "senate":
-            raw_trades = await self.fmp.get_senate_trades_by_name(fmp_name)
-        else:
-            raw_trades = await self.fmp.get_house_trades_by_name(fmp_name)
+        try:
+            if chamber == "senate":
+                raw_trades = await self.fmp.get_senate_trades_by_name(fmp_name)
+            else:
+                raw_trades = await self.fmp.get_house_trades_by_name(fmp_name)
+        except FMPPartialPageException as e:
+            # A lost page means the set is truncated, and everything below this
+            # point WRITES: the aggregate is persisted as this month's
+            # `whale_filing_snapshots` row. Serve what we already hold instead —
+            # stale-but-whole beats fresh-but-holed, and the next run re-fetches.
+            logger.warning(
+                "Incomplete congressional feed for %s (whale_id=%s chamber=%s) — "
+                "%d/%d pages failed on %s, %d row(s) arrived. NOT persisting a "
+                "truncated snapshot; falling back to stored data. %s",
+                fmp_name, whale_id, chamber,
+                e.pages_failed, e.pages_total, e.endpoint, len(e.partial), e,
+            )
+            return await self._read_from_supabase(whale_id)
 
         if not raw_trades:
             return await self._read_from_supabase(whale_id)

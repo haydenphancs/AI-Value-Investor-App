@@ -34,6 +34,19 @@ struct EarningsSurpriseBarChart: View {
         // at the same y reading "0%".
         let roundedMax = max(ceil(absMax), 1)
 
+        // One outlier used to set the domain for the whole chart: a single +45,000%
+        // quarter (a near-zero consensus estimate) flattened every ORDINARY quarter into
+        // an invisible sliver around the axis. Cap the domain at a readable ceiling when
+        // the outlier is more than ~10x the rest, so the normal quarters stay legible;
+        // the outlier's own bar simply pins to the top, and its caption still states the
+        // true magnitude (formatYValue no longer clamps).
+        let sorted = finite.map { abs($0) }.sorted()
+        let secondLargest = sorted.count > 1 ? sorted[sorted.count - 2] : absMax
+        if secondLargest > 0, absMax > secondLargest * 10 {
+            let cappedMax = max(ceil(secondLargest * 1.5), 1)
+            return (min: -cappedMax, max: cappedMax)
+        }
+
         return (min: -roundedMax, max: roundedMax)
     }
     
@@ -140,12 +153,16 @@ struct EarningsSurpriseBarChart: View {
     }
     
     private func formatYValue(_ value: Double) -> String {
-        // `Int(value)` TRAPS on a non-finite or out-of-Int-range Double. A
-        // surprise percent is unbounded off the wire (a near-zero consensus
-        // estimate produces an astronomically large one), so clamp first.
-        guard value.isFinite else { return "—" }
-        let clamped = min(max(value, -9_999), 9_999)
-        return "\(Int(clamped))%"
+        // `Int(value)` TRAPS on a non-finite or out-of-Int-range Double. A surprise
+        // percent is unbounded off the wire (a near-zero consensus estimate produces an
+        // astronomically large one), so this used to CLAMP to ±9,999 — but only the
+        // CAPTION. The plot domain below was left unclamped, so a +45,000% surprise drew
+        // a full-height bar under an axis label reading "9999%": the number and the
+        // geometry disagreed, and the label was simply false.
+        //
+        // Format compactly instead of clamping ("45k%"), so an extreme value stays
+        // honest AND still fits the 40pt axis gutter.
+        CompactNumberFormat.percentString(value)
     }
 }
 

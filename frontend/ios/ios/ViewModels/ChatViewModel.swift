@@ -50,6 +50,10 @@ class ChatViewModel: ObservableObject {
 
     /// Whether sessions are loading
     @Published var isLoadingHistory: Bool = false
+    /// The history fetch failed, as distinct from "this account has no chats".
+    /// Separate from `errorMessage`, which drives the MAIN chat's banner — a failure
+    /// in the history sheet must not paint an error over a healthy conversation.
+    @Published var historyLoadFailed: Bool = false
 
     /// Whether the initial session is loading
     @Published var isLoadingSession: Bool = false
@@ -332,8 +336,21 @@ class ChatViewModel: ObservableObject {
         guard !isAITyping else { return }
 
         guard let sessionId = currentSessionId else {
-            // No session yet — start a new conversation
-            startNewConversation(firstMessage: text)
+            // No session yet — start a new conversation.
+            //
+            // Re-pass the grounding we are still holding. `createChatSession` failing
+            // leaves `currentSessionId` nil but the grounding fields intact, so a bare
+            // `startNewConversation(firstMessage:)` did not merely omit them — it let
+            // their `nil` DEFAULTS overwrite the retained values and flipped
+            // `currentSessionType` to "NORMAL". Retrying a failed "Ask Cay AI" about a
+            // ticker therefore silently produced a generic chat about nothing.
+            startNewConversation(
+                firstMessage: text,
+                stockId: currentStockId,
+                context: currentContext,
+                contextType: currentContextType,
+                referenceId: currentReferenceId
+            )
             return
         }
         errorMessage = nil
@@ -364,6 +381,17 @@ class ChatViewModel: ObservableObject {
         // so a late-returning createChatSession must not adopt this screen.
         seedGeneration &+= 1
         currentSessionId = sessionId
+        // Clear the OUTGOING conversation's grounding here, not in the success branch.
+        // `currentSessionId` moves to the new session immediately, but these six fields
+        // were only ever rewritten on success — so a failed history load left session B
+        // selected while still carrying session A's stock/context/reference. The next
+        // message then went out grounded to the PREVIOUS conversation's ticker.
+        // Mirrors the reset in `resetConversation()`.
+        currentSessionType = "NORMAL"
+        currentStockId = nil
+        currentContext = nil
+        currentContextType = nil
+        currentReferenceId = nil
         messages = []
         isLoadingSession = true
         isAITyping = false
@@ -403,6 +431,8 @@ class ChatViewModel: ObservableObject {
     /// Load all user sessions for the history panel.
     func loadHistory() {
         isLoadingHistory = true
+        // Clear any previous failure so a retry can show the spinner, not the error.
+        historyLoadFailed = false
 
         Task {
             do {
@@ -421,7 +451,15 @@ class ChatViewModel: ObservableObject {
             } catch {
                 print("❌ [ChatVM] Failed to load history: \(error)")
                 isLoadingHistory = false
-                // Use empty state — don't set errorMessage so the main chat isn't affected
+                // A FAILED load is not an empty account. Leaving both flags false
+                // rendered the "No conversations yet" empty state, which is
+                // indistinguishable from a genuinely new user and offers no retry —
+                // the user simply believed their chat history was gone.
+                //
+                // Deliberately NOT `errorMessage`: that drives the main chat's error
+                // banner, and a history-sheet failure must not paint an error over an
+                // otherwise-healthy conversation. Hence a separate flag.
+                historyLoadFailed = true
             }
         }
     }

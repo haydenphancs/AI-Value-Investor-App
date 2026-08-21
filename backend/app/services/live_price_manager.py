@@ -19,6 +19,7 @@ import websockets
 from fastapi import WebSocket
 
 from app.config import settings
+from app.services.asset_class import detect_asset_class
 from app.integrations.fmp import get_fmp_client
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,14 @@ def _fmp_ws_target(ticker: str) -> tuple[str, bool, str]:
       URL query parameter and uses the uppercase ticker.
     """
     t = ticker.upper()
-    if t.endswith("USD") and len(t) >= 5:
+    # `detect_asset_class`, NOT a local `endswith("USD")`. Every FMP commodity code is
+    # exactly that shape — GCUSD (gold), CLUSD (crude), SIUSD (silver), NGUSD, ZCUSD …
+    # — so the bare suffix test sent gold futures to the CRYPTO socket, subscribed as
+    # "gcusd". That socket carries coin pairs; a commodity subscribed there is accepted
+    # and then never ticks, which is worse than an error because the screen looks live.
+    # `asset_class.py` already carries the commodity set and documents this exact trap;
+    # this copy of the heuristic simply never got the fix.
+    if detect_asset_class(t) == "crypto":
         return FMP_WS_URL_CRYPTO, True, ticker.lower()
     return f"{FMP_WS_URL_STOCK}?apikey={settings.FMP_API_KEY}", False, t
 

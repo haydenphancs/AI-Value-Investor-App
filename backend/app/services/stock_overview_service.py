@@ -1653,7 +1653,7 @@ class StockOverviewService:
             if not peers:
                 return []
 
-            peer_quotes = await self.fmp.get_batch_quotes(peers)
+            peer_quotes = await self.fmp.get_batch_quotes_bulk(peers)
             related = []
             for q in peer_quotes:
                 if not isinstance(q, dict):

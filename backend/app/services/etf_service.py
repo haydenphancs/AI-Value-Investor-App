@@ -281,10 +281,60 @@ class ETFService:
         change = _finite_num(quote.get("change"))
         pct = quote.get("changePercentage")
         pct = _finite_num(pct) if pct is not None else _finite_num(quote.get("changesPercentage"))
+        # Captured BEFORE the overwrite: the NAV row is only quote-derived when it was
+        # rendered from the price itself (no real navPrice), and that test has to compare
+        # against the price the row was BUILT from, not the one replacing it.
+        stale_price = response.current_price
+
         response.current_price = price
         response.price_change = change
         response.price_change_percent = pct
         response.market_status = _get_market_status()
+
+        # ...and the QUOTE-DERIVED KEY STATISTICS, which this method used to leave alone.
+        #
+        # The cached bundle is up to 24h old and carries more than a price: NAV (which
+        # falls back to `price`), 52-week high/low and the 50-day average all come from
+        # the SAME quote as the header. Refreshing only the four fields above meant a
+        # 23-hour-old row served a live header sitting on top of yesterday's 52-week high
+        # — the numbers disagreed with each other on one screen, which is exactly the
+        # staleness `_refresh_volatile` exists to prevent, applied to only part of its
+        # own surface.
+        #
+        # Rewrites values BY LABEL rather than rebuilding the section: the builder takes
+        # fifteen inputs, most of which (expense ratio, holdings count, turnover,
+        # inception) are not recoverable from the response and are not quote-derived
+        # anyway. A label absent from the payload is simply skipped.
+        fresh: Dict[str, str] = {}
+        year_high = _finite_num(quote.get("yearHigh"))
+        year_low = _finite_num(quote.get("yearLow"))
+        price_avg_50 = _finite_num(quote.get("priceAvg50"))
+        if year_high:
+            fresh["52W High"] = _fmt_dollar(year_high)
+        if year_low:
+            fresh["52W Low"] = _fmt_dollar(year_low)
+        if price_avg_50:
+            fresh["50-Day Avg"] = _fmt_dollar(price_avg_50)
+        # NAV is `navPrice` when the ETF info carries one, else the live price. Only the
+        # price-derived case moves here — a real NAV is not a quote field.
+        # `getattr`, not attribute access: this runs against whatever the caller cached,
+        # and a payload without a key-stats section must degrade, not raise mid-request.
+        _flat = getattr(response, "key_statistics", None) or []
+        _groups = getattr(response, "key_statistics_groups", None) or []
+        if _flat:
+            for item in _flat:
+                if item.label == "NAV" and item.value == _fmt_dollar(stale_price):
+                    fresh["NAV"] = _fmt_dollar(price)
+                    break
+
+        if fresh:
+            for item in _flat:
+                if item.label in fresh:
+                    item.value = fresh[item.label]
+            for group in _groups:
+                for item in getattr(group, "statistics", None) or []:
+                    if item.label in fresh:
+                        item.value = fresh[item.label]
 
     def _check_etf_db_cache(
         self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
@@ -1516,12 +1566,26 @@ class ETFService:
         if not related_symbols:
             return []
 
-        tasks = [self.fmp.get_stock_price_quote(s) for s in related_symbols]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # ONE `batch-quote` request for the peers instead of one `/quote` each. Same
+        # field set (verified live), so this is a pure call-count reduction.
+        try:
+            rows = await self.fmp.get_batch_quotes_bulk(related_symbols)
+        except Exception as e:
+            logger.warning(
+                "Related-ETF batch quote failed for %s: %s: %s",
+                symbol, type(e).__name__, e,
+            )
+            rows = []
+        by_symbol = {
+            str(r.get("symbol", "")).upper(): r
+            for r in (rows or [])
+            if isinstance(r, dict) and r.get("symbol")
+        }
 
         related = []
-        for sym, res in zip(related_symbols, results):
-            if isinstance(res, Exception) or not res:
+        for sym in related_symbols:
+            res = by_symbol.get(sym.upper())
+            if not res:
                 continue
             related.append(RelatedTickerResponse(
                 symbol=sym,

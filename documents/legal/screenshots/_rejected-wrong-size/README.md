@@ -14,3 +14,11 @@ Two separate problems produced it:
 Re-shoot: in Xcode set the run destination to **iPhone 17 Pro Max**, then **⌘R** (not ⌘B, and not
 `simctl launch` — only a scheme-driven run loads `Caydex.storekit`, and without it every pack
 renders "Price unavailable"). Navigate to Add Credits, then ⌘S.
+
+---
+
+`add-credits-1206x2622-WRONG-DEVICE.png` — **1206 × 2622**, captured 2026-08-21 10:03.
+This one used the *right* method (Simulator ⌘S gives true device resolution) but the **wrong
+device**: iPhone 17 **Pro** is 6.3". Only a **Pro Max** produces 1320 × 2868.
+
+Superseded by `6.9/05-add-credits.png`, captured on the Pro Max at the correct size.

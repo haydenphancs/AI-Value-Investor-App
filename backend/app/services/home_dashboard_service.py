@@ -999,8 +999,33 @@ class HomeDashboardService:
         return cached[1]
 
     async def _build_pulse(self) -> List[MarketPulseItemResponse]:
+        # ONE `batch-quote` request for every tile, instead of one `/quote` per tile.
+        # `/stable/batch-quote` takes a comma-separated list and returns the identical
+        # field set (verified live across ^GSPC / BTCUSD / GCUSD / BRK-B), and index
+        # symbols ride along for free — so this is the same data in 1 call, not 6.
+        #
+        # Best-effort: on failure every tile falls back to its own `/quote`, which is
+        # exactly the previous behaviour, so a batch outage degrades rather than blanks
+        # the strip.
+        quote_map: Dict[str, Dict[str, Any]] = {}
+        try:
+            rows = await self.fmp.get_batch_quotes_bulk(
+                [cfg["symbol"] for cfg in _PULSE_SYMBOLS]
+            )
+            for row in rows or []:
+                if isinstance(row, dict) and row.get("symbol"):
+                    quote_map[str(row["symbol"]).upper()] = row
+        except Exception as e:
+            logger.warning(
+                "Pulse batch quote failed (%s: %s) — falling back to per-tile quotes",
+                type(e).__name__, e,
+            )
+
         results = await asyncio.gather(
-            *[self._fetch_pulse_item(cfg) for cfg in _PULSE_SYMBOLS],
+            *[
+                self._fetch_pulse_item(cfg, quote_map.get(cfg["symbol"].upper()))
+                for cfg in _PULSE_SYMBOLS
+            ],
             return_exceptions=True,
         )
         pulse: List[MarketPulseItemResponse] = []
@@ -1274,7 +1299,7 @@ class HomeDashboardService:
         candidates = items[:_SHORT_QUOTE_CANDIDATES]
         candidate_symbols = [it["symbol"] for it in candidates]
 
-        quotes = await self.fmp.get_batch_quotes(candidate_symbols)
+        quotes = await self.fmp.get_batch_quotes_bulk(candidate_symbols)
         qmap = {
             (q.get("symbol") or "").upper(): q
             for q in quotes
@@ -1468,7 +1493,7 @@ class HomeDashboardService:
         change_map: Dict[str, float] = {}
         if union:
             # Fetch by the canonical (dash) form — FMP's /quote resolves BRK-B.
-            quotes = await self.fmp.get_batch_quotes(sorted(union))
+            quotes = await self.fmp.get_batch_quotes_bulk(sorted(union))
             for q in quotes:
                 if not isinstance(q, dict):
                     continue
@@ -1584,7 +1609,7 @@ class HomeDashboardService:
         if not union:
             return []
         try:
-            quotes = await self.fmp.get_batch_quotes(union)
+            quotes = await self.fmp.get_batch_quotes_bulk(union)
         except Exception as exc:  # noqa: BLE001 — degrade the list, never the screen
             logger.warning(
                 "Theme constituents quote fetch failed: %s: %s", type(exc).__name__, exc
@@ -1659,9 +1684,14 @@ class HomeDashboardService:
         return fl_f
 
     async def _fetch_pulse_item(
-        self, cfg: Dict[str, str]
+        self, cfg: Dict[str, str], quote: Optional[Dict[str, Any]] = None
     ) -> Optional[MarketPulseItemResponse]:
-        """Fetch one tile: a live quote + a daily-close sparkline, concurrently.
+        """Build one tile from a pre-fetched quote + a daily-close sparkline.
+
+        `quote` comes from the single `batch-quote` request in `_build_pulse`. When it
+        is None (batch failed, or this symbol was missing from the response) the tile
+        falls back to its own `/quote` — the pre-batch behaviour, kept so one bad batch
+        degrades a tile rather than the strip.
 
         A missing quote/price drops the tile (returns None). Sparkline failure is
         non-fatal — the tile still renders with an empty series.
@@ -1672,12 +1702,15 @@ class HomeDashboardService:
         # to the US equity session — that is what their own detail charts do
         # (crypto_service / commodity_service both pass extended_hours=True).
         # _PULSE_SYMBOLS already carries the class per tile.
-        quote, spark_result = await asyncio.gather(
-            self.fmp.get_stock_price_quote(symbol),
-            self._fetch_sparkline(
-                symbol, extended_hours=trades_extended_hours(cfg.get("type", ""))
-            ),
+        spark_task = self._fetch_sparkline(
+            symbol, extended_hours=trades_extended_hours(cfg.get("type", ""))
         )
+        if quote is None:
+            quote, spark_result = await asyncio.gather(
+                self.fmp.get_stock_price_quote(symbol), spark_task
+            )
+        else:
+            spark_result = await spark_task
         spark, spark_from, spark_to = spark_result
 
         if not quote:

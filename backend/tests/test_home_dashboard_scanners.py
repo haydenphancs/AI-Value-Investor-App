@@ -416,10 +416,10 @@ class _FakeFMP:
         }
         return [table[s] for s in symbols if s in table]
 
-    async def get_batch_quotes(self, symbols):
+    async def get_batch_quotes_bulk(self, symbols):
         await asyncio.sleep(0)
         # Known names + a default marketCap so every quoted symbol clears the
-        # $250M shorts floor unless a test overrides get_batch_quotes.
+        # $250M shorts floor unless a test overrides get_batch_quotes_bulk.
         known = {
             "BYND": {"name": "Beyond Meat", "price": 5.8, "changesPercentage": -1.2},
             "CVNA": {"name": "Carvana", "price": 244.1, "changesPercentage": 0.5},
@@ -787,7 +787,7 @@ async def test_shorts_applies_250m_floor_and_settlement_freshness(monkeypatch):
     stale = (now - timedelta(days=200)).strftime("%Y-%m-%d")
 
     class _FMP(_FakeFMP):
-        async def get_batch_quotes(self, symbols):
+        async def get_batch_quotes_bulk(self, symbols):
             await asyncio.sleep(0)
             table = {
                 "BIGSHORT": {"symbol": "BIGSHORT", "name": "Big Short Co", "price": 30.0,

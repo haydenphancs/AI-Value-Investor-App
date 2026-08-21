@@ -117,6 +117,16 @@ _QUARTER_PERIOD_RE = re.compile(r"^\d{4}-Q[1-4]$")
 # otherwise fan out one unthrottled call per suspect ticker.
 _MAX_SPLIT_LOOKUPS = 25
 
+# Restored: both of these were swept up by the block deletion that moved the congressional
+# hashing helpers into `app/services/_whale_common.py`. They sat on the two lines
+# immediately after the moved block, so the deletion range simply ran too far — and NOTHING
+# caught it, because both are used only inside functions, where an undefined global is a
+# RUNTIME NameError rather than an import-time failure. `FMP_BATCH_SIZE` reached production
+# and is in Sentry ("Politician hydration failed for Gilbert Cisneros"); `GEMINI_SEMAPHORE`
+# is the same bug on a path that had not run yet.
+GEMINI_SEMAPHORE = asyncio.Semaphore(3)
+FMP_BATCH_SIZE = 30
+
 # SECTOR_COLORS, DEFAULT_SECTOR_COLOR, SIC_TO_SECTOR, _map_sic_to_sector
 # are imported from app.services.whale_service (single source of truth).
 

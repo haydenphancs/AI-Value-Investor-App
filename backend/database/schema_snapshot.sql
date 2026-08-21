@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict R5Fn2WlXdjPwUkZ7WLl5CSvXGtfBicKDt9mETLyYKERcZQHOk1NSKQ5dLObyoeQ
+\restrict sWsOJ8aRR8rs0rP5TLa00e0YKAsELu9Vx6qZXYj0uhi49FjjXQPJddSoHEHwAdg
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1308,6 +1308,40 @@ $$;
 
 
 --
+-- Name: claim_scheduled_job(text, timestamp with time zone, integer, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_scheduled_job(p_job text, p_now timestamp with time zone, p_stale_seconds integer, p_timezone text) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_ok BOOLEAN;
+    v_today DATE := (p_now AT TIME ZONE p_timezone)::date;
+BEGIN
+    INSERT INTO notification_job_state (job, updated_at)
+    VALUES (p_job, p_now)
+    ON CONFLICT (job) DO NOTHING;
+
+    UPDATE notification_job_state s
+       SET claim_at   = p_now,
+           runs_today = CASE WHEN s.run_day IS DISTINCT FROM v_today
+                             THEN 1 ELSE s.runs_today + 1 END,
+           updated_at = p_now
+     WHERE s.job = p_job
+       AND s.enabled                              -- the kill switch
+       AND s.run_day IS DISTINCT FROM v_today     -- at most one successful run per day
+       AND (s.claim_at IS NULL
+            OR s.claim_at <= p_now - make_interval(secs => GREATEST(p_stale_seconds, 0)))
+    RETURNING TRUE INTO v_ok;
+
+    RETURN COALESCE(v_ok, FALSE);
+END;
+$$;
+
+
+--
 -- Name: claim_updates_insight_scope(text, timestamp with time zone, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1615,6 +1649,34 @@ BEGIN
                                  ELSE s.notified_today + COALESCE(p_notified, 0) END,
            last_error     = p_error,
            updated_at     = p_now
+     WHERE s.job = p_job;
+END;
+$$;
+
+
+--
+-- Name: finish_scheduled_job(text, timestamp with time zone, boolean, integer, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.finish_scheduled_job(p_job text, p_now timestamp with time zone, p_success boolean, p_items integer DEFAULT 0, p_error text DEFAULT NULL::text, p_timezone text DEFAULT 'UTC'::text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_today DATE := (p_now AT TIME ZONE p_timezone)::date;
+BEGIN
+    UPDATE notification_job_state s
+       SET claim_at      = NULL,
+           -- run_day advances ONLY on success, so a failed pass is retried on the next
+           -- wake instead of being recorded as this day's run.
+           run_day       = CASE WHEN p_success THEN v_today ELSE s.run_day END,
+           last_run_at   = p_now,
+           -- Overwritten, not accumulated: this is "what the LAST run wrote", which is
+           -- what a consumer polling mid-window needs to read.
+           items_written = COALESCE(p_items, 0),
+           last_error    = p_error,
+           updated_at    = p_now
      WHERE s.job = p_job;
 END;
 $$;
@@ -5518,6 +5580,27 @@ CREATE TABLE public.chat_usage_budget (
 
 
 --
+-- Name: commodity_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.commodity_cache (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    cache_key text NOT NULL,
+    symbol text NOT NULL,
+    category text NOT NULL,
+    response_json jsonb NOT NULL,
+    cached_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE commodity_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.commodity_cache IS 'Per-section commodity detail cache (12h TTL, enforced in application code via cached_at). cache_key = "{SYMBOL}:{category}" for category=derived, or "{SYMBOL}:chart:{range}:{interval}" for category=chart. Holds only sections that are expensive to rebuild AND slow to change; quotes and the raw daily history are deliberately excluded (a persisted price is a stale price, and the history is large enough that reading it back is slower than re-fetching it). Written by app/services/commodity_service.py.';
+
+
+--
 -- Name: company_filing_chunks; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5855,8 +5938,18 @@ CREATE TABLE public.etf_detail_cache (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     symbol text NOT NULL,
     response_json jsonb NOT NULL,
-    cached_at timestamp with time zone DEFAULT now()
+    cached_at timestamp with time zone DEFAULT now(),
+    cache_key text NOT NULL,
+    chart_range text,
+    "interval" text
 );
+
+
+--
+-- Name: TABLE etf_detail_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.etf_detail_cache IS 'Cached ETFDetailResponse payloads (24h TTL), keyed by cache_key = symbol_range_interval. The key must include the chart shape because chart_data is built from it; a symbol-only key made every chart range pill after the first a silent no-op. Written by app/services/etf_service.py.';
 
 
 --
@@ -6002,6 +6095,27 @@ CREATE TABLE public.holders_cache (
     response_json jsonb NOT NULL,
     cached_at timestamp with time zone DEFAULT now()
 );
+
+
+--
+-- Name: index_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.index_cache (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    cache_key text NOT NULL,
+    symbol text NOT NULL,
+    category text NOT NULL,
+    response_json jsonb NOT NULL,
+    cached_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE index_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.index_cache IS 'Per-section index detail cache (12h TTL, enforced in application code via cached_at). cache_key = "{SYMBOL}:{category}" for category=derived or constituents, or "{SYMBOL}:chart:{range}:{interval}" for category=chart. Holds only sections that are expensive to rebuild AND slow to change; the quote, every quote-derived key statistic and the raw daily history are deliberately excluded (a persisted price is a stale price, and the history is large enough that reading it back is slower than re-fetching it). Supersedes the whole-payload index_detail_cache from migration 032. Written by app/services/index_service.py.';
 
 
 --
@@ -6486,6 +6600,7 @@ CREATE TABLE public.notification_job_state (
     notified_today integer DEFAULT 0 NOT NULL,
     last_error text,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    items_written integer DEFAULT 0 NOT NULL,
     CONSTRAINT notification_job_state_counts_check CHECK (((runs_today >= 0) AND (notified_today >= 0)))
 );
 
@@ -6494,7 +6609,14 @@ CREATE TABLE public.notification_job_state (
 -- Name: TABLE notification_job_state; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.notification_job_state IS 'Cross-instance claim + daily budget for the scheduled notification senders (earnings, smart_money, ...). One row per job name. `enabled` is a no-deploy kill switch. Claim via claim_notification_job(), release via finish_notification_job().';
+COMMENT ON TABLE public.notification_job_state IS 'Cross-instance claim + daily budget for scheduled background jobs. Originally the notification senders (earnings, smart_money, profile_match), now also non-notification jobs such as whale_hydration_full. One row per job name. `enabled` is a no-deploy kill switch. Claim via claim_notification_job() (ET day boundary) or claim_scheduled_job() (caller-chosen timezone); release via the matching finish_*() function.';
+
+
+--
+-- Name: COLUMN notification_job_state.items_written; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.notification_job_state.items_written IS 'Rows the job actually WROTE on its last run (0 = it ran but had nothing to do). Distinct from notified_today, which counts notifications delivered and accumulates across a day. Lets a consumer tell "ran and wrote nothing" from "never ran" — the whale latency measurement depends on exactly that distinction.';
 
 
 --
@@ -8627,6 +8749,14 @@ ALTER TABLE ONLY public.chat_usage_budget
 
 
 --
+-- Name: commodity_cache commodity_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.commodity_cache
+    ADD CONSTRAINT commodity_cache_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: company_filing_chunks company_filing_chunks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8763,14 +8893,6 @@ ALTER TABLE ONLY public.etf_detail_cache
 
 
 --
--- Name: etf_detail_cache etf_detail_cache_symbol_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.etf_detail_cache
-    ADD CONSTRAINT etf_detail_cache_symbol_key UNIQUE (symbol);
-
-
---
 -- Name: etf_snapshot_cache etf_snapshot_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8864,6 +8986,14 @@ ALTER TABLE ONLY public.holders_cache
 
 ALTER TABLE ONLY public.holders_cache
     ADD CONSTRAINT holders_cache_ticker_key UNIQUE (ticker);
+
+
+--
+-- Name: index_cache index_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.index_cache
+    ADD CONSTRAINT index_cache_pkey PRIMARY KEY (id);
 
 
 --
@@ -10262,6 +10392,13 @@ CREATE INDEX idx_chat_usage_budget_day ON public.chat_usage_budget USING btree (
 
 
 --
+-- Name: idx_commodity_cache_symbol; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_commodity_cache_symbol ON public.commodity_cache USING btree (symbol);
+
+
+--
 -- Name: idx_competitor_intel_audit_computed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10483,6 +10620,13 @@ CREATE INDEX idx_hfq_ticker ON public.hedge_fund_quarters USING btree (ticker);
 --
 
 CREATE INDEX idx_holders_cache_ticker ON public.holders_cache USING btree (ticker);
+
+
+--
+-- Name: idx_index_cache_symbol; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_index_cache_symbol ON public.index_cache USING btree (symbol);
 
 
 --
@@ -11253,6 +11397,27 @@ CREATE INDEX idx_whales_last_hydrated_at ON public.whales USING btree (last_hydr
 --
 
 CREATE INDEX idx_whales_name ON public.whales USING btree (name);
+
+
+--
+-- Name: uq_commodity_cache_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_commodity_cache_key ON public.commodity_cache USING btree (cache_key);
+
+
+--
+-- Name: uq_etf_detail_cache_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_etf_detail_cache_key ON public.etf_detail_cache USING btree (cache_key);
+
+
+--
+-- Name: uq_index_cache_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_index_cache_key ON public.index_cache USING btree (cache_key);
 
 
 --
@@ -12316,6 +12481,19 @@ CREATE POLICY chat_usage_budget_service_all ON public.chat_usage_budget TO servi
 
 
 --
+-- Name: commodity_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.commodity_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: commodity_cache commodity_cache_service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY commodity_cache_service_role_all ON public.commodity_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: company_filing_chunks; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -12725,6 +12903,19 @@ ALTER TABLE public.holders_cache ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY holders_cache_service_all ON public.holders_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: index_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.index_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: index_cache index_cache_service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY index_cache_service_role_all ON public.index_cache TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -14122,5 +14313,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict R5Fn2WlXdjPwUkZ7WLl5CSvXGtfBicKDt9mETLyYKERcZQHOk1NSKQ5dLObyoeQ
+\unrestrict sWsOJ8aRR8rs0rP5TLa00e0YKAsELu9Vx6qZXYj0uhi49FjjXQPJddSoHEHwAdg
 

@@ -642,13 +642,17 @@ class WhaleHydrator:
         """
         by_ticker: Dict[str, Dict[str, Any]] = {}
         for h in raw_holdings:
-            val = float(h.get("value") or 0)
+            # `_finite_float`, not bare `float()` — this feeds `total_value` and then
+            # `whales.portfolio_value`, so a NaN here reaches a persisted column. The
+            # diff path was hardened; this one was missed in the same pass.
+            val = _finite_float(h.get("value"))
             if val <= 0:
                 continue
             sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
             if not sym or sym == "--":
                 continue
-            shares = int(float(h.get("sharesNumber") or h.get("shares") or 0))
+            # int(float("nan")) raises ValueError, which aborts the whole whale.
+            shares = int(_finite_float(h.get("sharesNumber") or h.get("shares")))
             name = h.get("securityName") or h.get("companyName") or sym
 
             existing = by_ticker.get(sym)
@@ -1154,12 +1158,12 @@ class WhaleHydrator:
         for h in previous:
             ticker = (h.get("ticker") or h.get("symbol") or "").upper()
             if ticker:
-                prev_map[ticker] = float(h.get("allocation", 0))
+                prev_map[ticker] = _finite_float(h.get("allocation"))
 
         for h in current:
             prev_alloc = prev_map.get(h["ticker"].upper(), 0.0)
             h["change_percent"] = round(
-                float(h.get("allocation", 0)) - prev_alloc, 2
+                _finite_float(h.get("allocation")) - prev_alloc, 2
             )
         return current
 

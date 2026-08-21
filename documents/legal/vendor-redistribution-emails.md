@@ -1,10 +1,68 @@
 # Data-redistribution licensing enquiries — FMP and CoinGecko
 
-Send both **today**. They are free, and the answers feed the App Store Connect **Content Rights**
-declaration (§7), which is on the submission path — you should not answer that question before
-these come back.
+Send both **today**. The answers feed the App Store Connect **Content Rights** declaration (§7),
+which is on the submission path — do not answer that question before these come back.
 
-Ask for the answer **in writing**. Keep the reply; it is the evidence behind the declaration.
+## ⚠️ Why this is not a formality — PRIMARY SOURCE, re-checked 2026-08-21
+
+Re-researched after a fair challenge ("I pay monthly, surely I can build my app with it"). That
+intuition is how most developer APIs work — Stripe, Firebase, OpenAI. **Market-data vendors are
+the exception**, because they are themselves licensees of the exchanges and filers whose data
+they resell; they cannot grant display rights they do not hold without a separate agreement. The
+same personal-vs-display split exists across the industry, not just at FMP.
+
+Read directly off FMP's own pages (not a summary site):
+
+**Their pricing page has two tabs, and Premium is on the wrong one.**
+
+| Personal Use tab | Commercial Use tab |
+|---|---|
+| Basic (free), Starter $19, **Premium $49**, Ultimate $99 | **Enterprise** — "Contact Us" |
+| Comparison table is headed *"Compare **Individual** Use Plans"* | Headed *"Commercial Use Plan"* |
+| `Usage` row = **"Individual"** on all four | `Usage` row = **"Commercial - Display and Redistribution"** |
+
+The Enterprise card's own description: *"Perfect if you're looking for **data display and
+redistribution**, unlimited volume, and priority support."* It is a sales contact form, not a
+checkout — it asks for Company Name, Company Website, Company Type and Country of Registration.
+
+**The two clauses that decide it**, quoted verbatim from the Terms of Service (last updated
+August 1, 2023):
+
+> **2.2.1 Personal Use:** "This license may only be used by a Customer who is an individual, and
+> strictly for their own personal, non-business and non-commercial purposes. … the Customer may
+> not … **integrate the Data or Services into any tools or applications accessible by any third
+> parties**, or use the Services to host, share, display, or provide content for others."
+
+> **2.2.2 Data Display:** "Without a specific agreement with FMP, customers are prohibited from
+> showcasing FMP Services or Data on platforms including but not limited to websites, blogs,
+> software products, or **applications designed for utilization by multiple individuals,
+> irrespective of whether such usage is complimentary or paid**…"
+
+A public App Store app is definitionally "accessible by third parties" and "designed for
+utilization by multiple individuals". The "complimentary or paid" wording also closes the
+obvious workaround — making the app free would not help.
+
+And the footnote repeated on **both** pricing tabs: *"Displaying or redistributing data sourced
+from FMP requires a specific Data Display and Licensing Agreement with FMP."*
+
+**The real risk is not Apple — it is §2.10.** FMP reserves the "Right to Monitor" and may
+"downgrade, suspend, or terminate Customer's access" on suspicion of a violation. If they pull
+the key after launch, the app's core data disappears for every paying user at once. That is a
+worse failure than a rejected submission.
+
+**CoinGecko** is the same shape and lower stakes: the free **Demo** plan is positioned for
+testing and exploration; commercial use begins at the paid tiers (Basic and up), which also
+require a visible *"Data provided by CoinGecko"* credit and a link.
+
+### What this realistically means
+
+- The FMP conversation is a **quote**, not a yes/no — and Enterprise pricing is not published.
+- Their form wants a **company name, website and country of registration**, which pushes on §1's
+  LLC question. Worth deciding those together rather than twice.
+- If the number comes back beyond an indie budget, the honest options are: form the entity and
+  negotiate; **look at vendors whose paid tiers permit display at indie scale** (worth pricing
+  before you commit — do not assume, check each one's display clause the same way); or narrow
+  what the app shows from FMP. Do that comparison *before* you sign anything.
 
 ---
 
@@ -21,16 +79,20 @@ I'm the developer of Caydex, an iOS app that presents company fundamentals and m
 data to retail users. I'm preparing to launch on the App Store and want to confirm my
 licensing position before I do.
 
-I currently subscribe to [YOUR PLAN NAME] (account: [YOUR ACCOUNT EMAIL]).
+I currently subscribe to Premium (account: [YOUR ACCOUNT EMAIL]). My reading of your
+terms is that Starter/Premium/Ultimate are personal-use licences and do not cover
+displaying data to end users, and that a commercial plan plus a Data Display and
+Licensing Agreement is required for what I'm doing. I would like to correct that before
+I launch rather than after.
 
 Three specific questions:
 
-1. Display to end users. The app shows FMP-sourced data (quotes, company profiles,
+1. Which plan do I need? The app shows FMP-sourced data (quotes, company profiles,
    income statement / cash flow figures, ratios, analyst estimates, insider and
-   institutional filings) directly to end users inside a consumer mobile app. The app
-   has a paid subscription tier and consumable in-app purchases, so it is a commercial
-   product. Does my current plan cover that display, or does it require a separate Data
-   Display and Licensing Agreement?
+   institutional filings) directly to end users inside a consumer mobile app. It has a
+   paid subscription tier and consumable in-app purchases, so it is a commercial
+   product. Please confirm which commercial plan covers this and what it costs, and
+   whether a separate Data Display and Licensing Agreement is also required.
 
 2. Server-side caching. My backend caches FMP responses in my own database to stay
    within rate limits and to keep response times low. Cached values are refreshed on a
@@ -75,9 +137,10 @@ I'm currently on the free Demo plan (account: [YOUR ACCOUNT EMAIL]).
 My questions:
 
 1. Commercial use. The app has a paid subscription tier and consumable in-app
-   purchases. Crypto data is one feature among many, not the product itself. Does the
-   Demo plan permit use inside a commercial app, or do I need a paid tier before I can
-   charge users?
+   purchases. Crypto data is one feature among many, not the product itself. My reading
+   is that the Demo plan is for testing and exploration and that commercial use begins
+   at the paid tiers — please confirm, and if so tell me the lowest tier that covers
+   this use and its price.
 
 2. Display and caching. The app shows CoinGecko-sourced values (price, market cap,
    circulating and total supply, FDV, 24h volume) to end users, and my backend caches

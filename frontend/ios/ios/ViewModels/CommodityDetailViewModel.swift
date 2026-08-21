@@ -105,7 +105,7 @@ class CommodityDetailViewModel: ObservableObject {
                 self.suppressIntervalReload = true
                 self.chartSettings.selectedInterval = range.defaultInterval
                 self.suppressIntervalReload = false
-                Task { await self.fetchChartForRange() }
+                Task { await self.refreshLiveSlice(includeChart: true) }
             }
             .store(in: &cancellables)
 
@@ -115,7 +115,7 @@ class CommodityDetailViewModel: ObservableObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 guard !self.suppressIntervalReload else { return }
-                Task { await self.fetchChartForRange() }
+                Task { await self.refreshLiveSlice(includeChart: true) }
             }
             .store(in: &cancellables)
 
@@ -151,7 +151,14 @@ class CommodityDetailViewModel: ObservableObject {
         // sentiment / technical 30 min, ETF profile + holdings-risk + dividends 24h
         // against a process-lifetime singleton). Backend caches still absorb the
         // upstream cost; this only bypasses the on-device copy.
-        StockRepository.shared.invalidate(symbol: commoditySymbol)
+        // Both spellings: Home's Market Pulse pushes "GCUSD" while a search selection can
+        // push the bare root, and `invalidate` matches whole `_`-separated key components.
+        StockRepository.shared.invalidate(
+            symbol: commoditySymbol,
+            aliases: [commoditySymbol.uppercased().hasSuffix("USD")
+                        ? String(commoditySymbol.dropLast(3))
+                        : commoditySymbol + "USD"]
+        )
         await fetchCommodityDetail()
         await fetchCommodityNews()
         // See IndexDetailViewModel.refresh — the technical failure path is terminal, so
@@ -168,13 +175,10 @@ class CommodityDetailViewModel: ObservableObject {
         let gen = detailRequestGen
 
         do {
-            let response = try await apiClient.request(
-                endpoint: .getCommodityDetail(
-                    symbol: commoditySymbol,
-                    range: range.rawValue,
-                    interval: chartSettings.selectedInterval.rawValue
-                ),
-                responseType: CommodityDetailResponseDTO.self
+            let response = try await StockRepository.shared.getCommodityDetail(
+                symbol: commoditySymbol,
+                range: range.rawValue,
+                interval: chartSettings.selectedInterval.rawValue
             )
 
             // Drop a stale response (a newer load/refresh/range-change superseded it).
@@ -273,11 +277,17 @@ class CommodityDetailViewModel: ObservableObject {
                 // that is the US EQUITY session, and these are continuously-quoted
                 // futures (~23h/day). Gating on equity hours would leave the commodity
                 // screen frozen for most of the day — the very bug being fixed.
-                guard self.chartSettings.selectedInterval.isIntraday else { continue }
+                // NO `isIntraday` gate any more. It used to skip the whole refresh on a
+                // daily chart, which froze the PRICE HEADER for the life of the screen —
+                // the light slice costs ~1.2 KB, so there is no reason to skip it. Bars
+                // are still only requested when the chart is actually intraday, because
+                // on a daily chart 30 seconds cannot move one.
                 guard MarketHoursUtil.symbolTradesAroundTheClock(self.commoditySymbol)
                         || MarketHoursUtil.isMarketActive() else { continue }
 
-                await self.fetchChartForRange()
+                await self.refreshLiveSlice(
+                    includeChart: self.chartSettings.selectedInterval.isIntraday
+                )
             }
         }
     }
@@ -289,26 +299,58 @@ class CommodityDetailViewModel: ObservableObject {
 
     // MARK: - Chart Range Change
 
-    private func fetchChartForRange() async {
-        let range = selectedChartRange
+    /// Light refresh: merge the volatile slice into `commodityData` IN PLACE.
+    ///
+    /// Replaces a `fetchChartForRange` that, despite its name, re-requested the entire
+    /// ~11.9 KB detail payload and then did `self.commodityData = response.toDisplayModel()`
+    /// — a wholesale replacement. Two consequences, both fixed here:
+    ///
+    ///  1. Every WebSocket tick that had landed since the last refresh was ERASED, on a
+    ///     30-second sawtooth, on a screen whose whole point is a live price.
+    ///  2. A range tap re-fetched news, profile, related quotes, performance and the
+    ///     benchmark — none of which depend on the range.
+    ///
+    /// The socket WINS over the REST snapshot: a tick is now, a snapshot is up to 45s old.
+    /// Falling back to the REST values keeps the screen alive for symbols whose upstream
+    /// feed never ticks, which is the reason this loop exists at all.
+    private func refreshLiveSlice(includeChart: Bool) async {
         detailRequestGen += 1
         let gen = detailRequestGen
+        let range = selectedChartRange
         do {
-            let response = try await apiClient.request(
-                endpoint: .getCommodityDetail(
-                    symbol: commoditySymbol,
-                    range: range.rawValue,
-                    interval: chartSettings.selectedInterval.rawValue
-                ),
-                responseType: CommodityDetailResponseDTO.self
+            let light = try await StockRepository.shared.getCommodityQuote(
+                symbol: commoditySymbol,
+                range: includeChart ? range.rawValue : nil,
+                interval: includeChart ? chartSettings.selectedInterval.rawValue : nil
             )
-            // Drop a stale range response so rapid switching can't clobber a newer range.
-            guard gen == self.detailRequestGen else { return }
-            self.commodityData = response.toDisplayModel()
-            self.chartDataVersion += 1
-            print("✅ [CommodityDetailVM] Chart updated — \(response.chartData.count) data points")
+            // Drop a stale response so rapid range switching can't clobber a newer range.
+            guard gen == self.detailRequestGen, var data = self.commodityData else { return }
+
+            data.currentPrice = livePriceManager.livePrice ?? light.currentPrice
+            data.priceChange = livePriceManager.livePriceChange ?? light.priceChange
+            data.priceChangePercent =
+                livePriceManager.livePriceChangePercent ?? light.priceChangePercent
+            data.marketStatus = CommodityMarketStatus(backend: light.marketStatus)
+            data.keyStatisticsGroups = light.keyStatisticsGroups.map { $0.toModel() }
+            // Keep the previous list when the refresh returns none — a 60s cache miss on
+            // the related quotes must not blank a populated "People Also Check" row.
+            if let related = light.relatedCommodities, !related.isEmpty {
+                data.relatedCommodities = related.map { $0.toModel() }
+            }
+            if includeChart, !light.chartData.isEmpty {
+                data.chartPricePoints = light.chartData.map {
+                    StockPricePoint(
+                        date: $0.date, close: $0.close, open: $0.open,
+                        high: $0.high, low: $0.low, volume: $0.volume
+                    )
+                }
+                self.chartDataVersion += 1
+            }
+            // performancePeriods / commodityProfile / benchmarkSummary are untouched:
+            // they are range-independent and cannot change between refreshes.
+            self.commodityData = data
         } catch {
-            print("⚠️ [CommodityDetailVM] Chart update failed: \(error)")
+            print("⚠️ [CommodityDetailVM] Live slice refresh failed: \(error)")
         }
     }
 

@@ -209,6 +209,10 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Commodities
     case getCommodityDetail(symbol: String, range: String, interval: String? = nil)
+    /// Light refresh slice — price, market status, key stats, related, optional chart.
+    /// `range` is optional on purpose: the 30s loop asks for bars only on an intraday
+    /// chart, where omitting them cuts the payload from ~11.9 KB to ~1.2 KB.
+    case getCommodityQuote(symbol: String, range: String?, interval: String?)
     case getCommodityNews(symbol: String, limit: Int)
     case enrichCommodityNews(symbol: String, articleIds: [String])
 
@@ -485,6 +489,8 @@ enum APIEndpoint: Sendable {
         // Commodities
         case .getCommodityDetail(let symbol, _, _):
             return "/api/v1/commodities/\(symbol)"
+        case .getCommodityQuote(let symbol, _, _):
+            return "/api/v1/commodities/\(symbol)/quote"
         case .getCommodityNews(let symbol, _):
             return "/api/v1/commodities/\(symbol)/news"
         case .enrichCommodityNews(let symbol, _):
@@ -753,6 +759,12 @@ enum APIEndpoint: Sendable {
             if let interval = interval { params["interval"] = interval }
             return params
 
+        case .getCommodityQuote(_, let range, let interval):
+            var params: [String: String] = [:]
+            if let range = range { params["range"] = range }
+            if let interval = interval { params["interval"] = interval }
+            return params
+
         case .getMyReports(let limit):
             return ["limit": String(limit)]
 
@@ -990,7 +1002,8 @@ enum APIEndpoint: Sendable {
              .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail,
              .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getETFNews,
              .enrichETFNews,
-             .getCommodityDetail, .getCommodityNews, .enrichCommodityNews:
+             .getCommodityDetail, .getCommodityQuote, .getCommodityNews,
+             .enrichCommodityNews:
             return .public
 
         // Updates: /feed and /news/enrich are plain market data (/tabs is not — see below).

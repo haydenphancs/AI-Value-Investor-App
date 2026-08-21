@@ -34,40 +34,53 @@ from app.utils.market_hours import to_utc_instant
 logger = logging.getLogger(__name__)
 
 
-# ── Tier 1 cache + in-flight dedup (CLAUDE.md invariant #4) ──────────
+# ── Per-section caches + in-flight dedup (CLAUDE.md invariant #4) ────
 #
-# This service had NO caching of ANY kind: every CommodityDetailView open ran the full
-# FMP fan-out (quote + 15 years of history + news + one quote per related commodity),
-# and N concurrent viewers of gold ran N of them.
+# This service used ONE key and ONE 5-minute TTL for a nine-section payload whose
+# sections range from "moves every second" to "hardcoded constant". Because the key
+# included range+interval, every range pill was a separate cold build that re-fetched
+# the SAME quote, the SAME 972 KB / 4,333-row daily history and the SAME related quotes.
+# Measured: browsing all 7 ranges of one commodity cost 55 FMP calls and pulled 6.6 MB
+# of byte-identical history.
 #
-# Tier 1 only — deliberately NO 24h Supabase tier, unlike the ETF/Index siblings. Their
-# 24-hour rows are what made those screens serve a day-old price, and a commodity screen
-# has no live-price WebSocket to correct one afterwards. A 5-minute in-process tier plus
-# in-flight dedup removes the herd and the repeat cost without ever showing a stale
-# quote; persisting this payload for a day would reintroduce the exact defect just fixed
-# next door.
+# Now each section is cached under its own key with a TTL matched to how fast that data
+# actually changes, and the expensive range-INDEPENDENT sections are shared by every
+# range. Same idea as index_service / stock_overview_service, which already run several
+# TTLs inside one service.
+#
+# The TTL travels WITH the entry (index_service's variant) rather than being passed by
+# the reader: the writer knows the section's volatility, and a reader cannot mismatch it.
 _cache: Dict[str, tuple] = {}
-_CACHE_TTL_SECONDS = 300  # 5 minutes — matches the sibling detail services
+_CACHE_TTL_SECONDS = 300  # default when a caller declares nothing
+
+# Per-section TTLs, ordered by how fast the underlying data really moves.
+_QUOTE_TTL = 45          # live price / intraday key-stat rows
+_RELATED_TTL = 60        # sibling commodity quotes — same data class, less prominent
+_INTRADAY_CHART_TTL = 60 # 1D/1W bars; the only genuinely per-range fetch
+_HISTORY_TTL = 43_200    # 12h — daily EOD bars only change at the close
+_DERIVED_TTL = 43_200    # 12h — performance / benchmark / daily key stats, all from history
+
 # Hard cap: `_cache_get` only evicts a key when that same key is read again after
 # expiry, so on a long-lived Railway process a symbol fetched once would sit resident
-# forever. Bounded, evicting least-recently-written.
-_CACHE_MAX_ENTRIES = 256
+# forever. Bounded, evicting least-recently-written. 1024 matches every sibling service
+# — 256 was below the ~294 keys this service can hold, so it evicted under normal use.
+_CACHE_MAX_ENTRIES = 1024
 
 
-def _cache_get(key: str, ttl: float = _CACHE_TTL_SECONDS) -> Optional[Any]:
+def _cache_get(key: str) -> Optional[Any]:
     entry = _cache.get(key)
     if entry is None:
         return None
-    ts, value = entry
-    if time.time() - ts > ttl:
+    ts, value, entry_ttl = entry
+    if time.time() - ts > entry_ttl:
         del _cache[key]
         return None
     return value
 
 
-def _cache_set(key: str, value: Any) -> None:
+def _cache_set(key: str, value: Any, ttl: Optional[float] = None) -> None:
     _cache.pop(key, None)
-    _cache[key] = (time.time(), value)
+    _cache[key] = (time.time(), value, ttl or _CACHE_TTL_SECONDS)
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
@@ -350,7 +363,14 @@ class CommodityService:
     async def get_commodity_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> CommodityDetailResponse:
-        """Cache-aside wrapper (Tier 1 + in-flight dedup) around the live build."""
+        """Cache-aside wrapper (per-section Tier 1 + in-flight dedup) around the build.
+
+        The ASSEMBLED response keeps a short TTL deliberately. Its slow sections are now
+        cached individually for 12h, so a rebuild here costs zero FMP calls when they are
+        warm — but the price header is part of this payload, and a 5-minute assembled TTL
+        would serve a 5-minute-old price on a screen whose whole point is a live quote.
+        Short outer TTL + long inner TTLs is the combination that gives both.
+        """
         cache_key = f"{symbol.upper().strip()}_{chart_range}_{interval or 'default'}"
 
         cached = _cache_get(cache_key)
@@ -371,7 +391,24 @@ class CommodityService:
             result = await self._build_commodity_detail(
                 symbol, chart_range=chart_range, interval=interval
             )
-            _cache_set(cache_key, result)
+            # Degradation gate. A build whose quote AND history both failed still returns
+            # (the price falls back to the last close), but caching it pins the hole for
+            # the whole TTL — the defect profit_power_service's gate exists to prevent.
+            # The per-section caches already refuse to store their own empty results, so
+            # this is the last line: never pin a priceless response.
+            # `getattr`, not attribute access: the gate must judge only what it can
+            # actually inspect. A build that is not a CommodityDetailResponse (test
+            # doubles, future shapes) has no price to assess, so it is cached normally
+            # rather than crashing the request on an AttributeError.
+            price = getattr(result, "current_price", None)
+            if price is None or price > 0:
+                _cache_set(cache_key, result, _QUOTE_TTL)
+            else:
+                logger.warning(
+                    "Commodity detail NOT cached for %s — no usable price "
+                    "(degraded build); will rebuild on the next request",
+                    cache_key,
+                )
             if not future.done():
                 future.set_result(result)
             return result
@@ -391,6 +428,171 @@ class CommodityService:
         finally:
             _inflight.pop(cache_key, None)
 
+    # ── Per-section fetchers ──────────────────────────────────────
+    #
+    # Each is cached under its OWN key with its OWN TTL, and the three below are keyed
+    # on the SYMBOL ALONE — deliberately, because none of them depends on the chart
+    # range. That is the whole saving: the 972 KB history and the quote used to be
+    # re-fetched once per range pill.
+
+    async def _get_quote(self, fmp_symbol: str) -> Dict[str, Any]:
+        """Live quote. Range-independent, so every range pill shares one fetch."""
+        key = f"com:quote:{fmp_symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            quote = await self.fmp.get_stock_price_quote(fmp_symbol)
+        except Exception as e:
+            logger.warning(
+                "Commodity quote fetch failed for %s: %s: %s",
+                fmp_symbol, type(e).__name__, e,
+            )
+            return {}
+        if not isinstance(quote, dict) or not quote:
+            return {}
+        # Only a usable quote is cached — caching {} would pin a blank price header for
+        # the whole TTL, which is the degradation gate this service never had.
+        _cache_set(key, quote, _QUOTE_TTL)
+        return quote
+
+    async def _get_history(self, fmp_symbol: str) -> List[Dict[str, Any]]:
+        """FULL daily history, oldest-first. Range-independent and 12h-cached.
+
+        The full history (not the old hardcoded 2010 floor) because every daily-or-coarser
+        chart is now DERIVED from this one list: 3M/6M/1Y by slicing, 5Y/ALL by
+        aggregating. GCUSD really starts 2007-05-29 and FMP pages at 5,000 rows, so a
+        2010-capped fetch would silently truncate the ALL range.
+
+        Costs 1-2 paged calls once per symbol per 12h, replacing one 972 KB call per
+        range per 5 minutes.
+        """
+        key = f"com:hist:{fmp_symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            from app.services.chart_helper import _fetch_all_daily
+            historical = await _fetch_all_daily(self.fmp, fmp_symbol)
+        except Exception as e:
+            logger.warning(
+                "Commodity history fetch failed for %s: %s: %s",
+                fmp_symbol, type(e).__name__, e,
+            )
+            return []
+        if not historical:
+            return []
+        # `date` may be an explicit JSON null (not just absent); `or ""` avoids a
+        # None<str TypeError when sorting a malformed FMP row.
+        historical.sort(key=lambda p: p.get("date") or "")
+        _cache_set(key, historical, _HISTORY_TTL)
+        return historical
+
+    async def _get_related(
+        self, root_symbol: str, related_symbols: List[str]
+    ) -> List[tuple]:
+        """Quotes for the sibling commodities. Range-independent.
+
+        Keyed on the ROOT symbol rather than per sibling: the set is a fixed property of
+        the root, and one key means one in-flight fan-out instead of N.
+        """
+        if not related_symbols:
+            return []
+        key = f"com:related:{root_symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        results = await asyncio.gather(
+            *[self.fmp.get_stock_price_quote(s) for s in related_symbols],
+            return_exceptions=True,
+        )
+        related_quotes = [
+            (sym, q)
+            for sym, q in zip(related_symbols, results)
+            if not isinstance(q, Exception) and q
+        ]
+        # Partial is fine to serve but NOT to cache: pinning a short list for the TTL is
+        # how "People Also Check" silently loses a row for everyone.
+        if len(related_quotes) == len(related_symbols):
+            _cache_set(key, related_quotes, _RELATED_TTL)
+        else:
+            logger.warning(
+                "Commodity related quotes partial for %s (%d/%d) — not cached",
+                root_symbol, len(related_quotes), len(related_symbols),
+            )
+        return related_quotes
+
+    async def _get_chart(
+        self,
+        fmp_symbol: str,
+        historical: List[Dict[str, Any]],
+        chart_range: str,
+        interval: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Chart bars for one range, derived from `historical` wherever possible.
+
+        Only 1D (5min) and 1W (1hour) are genuinely sub-daily and need their own FMP
+        call. Everything daily-or-coarser comes out of the shared history:
+          * 3M/6M/1Y  -> slice        (`_extract_chart_data`, as before)
+          * 5Y/ALL    -> aggregate    (`_aggregate_prices`, which `fetch_chart_data`
+                                       was already calling — after re-fetching the very
+                                       history we are holding)
+        """
+        from app.services.chart_helper import (
+            AGGREGATED_INTERVALS,
+            _aggregate_prices,
+            fetch_chart_data,
+            resolve_interval,
+        )
+
+        resolved = resolve_interval(chart_range, interval)
+
+        if resolved in AGGREGATED_INTERVALS and historical:
+            bars = _aggregate_prices(historical, resolved)
+            if chart_range != "ALL":
+                # ALL means the whole series; every other aggregated range is windowed.
+                bars = self._window_by_range(bars, chart_range)
+            return bars
+
+        if resolved == "daily":
+            return self._extract_chart_data(historical, chart_range)
+
+        # Genuinely intraday (1D/1W): its own short-lived key.
+        key = f"com:chart:{fmp_symbol}:{chart_range}:{resolved}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            # Commodities trade nearly 24h — do NOT apply the equity 09:30-16:00 ET
+            # regular-hours filter (it would gut a ~23h market to a 6.5h slice).
+            bars = await fetch_chart_data(
+                self.fmp, fmp_symbol, chart_range, interval, extended_hours=True
+            )
+        except Exception as e:
+            logger.warning(
+                "Commodity intraday chart failed for %s %s: %s: %s",
+                fmp_symbol, chart_range, type(e).__name__, e,
+            )
+            return []
+        if bars:
+            _cache_set(key, bars, _INTRADAY_CHART_TTL)
+        return bars
+
+    @staticmethod
+    def _window_by_range(bars: List[Dict[str, Any]], chart_range: str) -> List[Dict[str, Any]]:
+        """Trim aggregated bars to the requested window (ALL is handled by the caller)."""
+        from app.services.chart_helper import compute_date_range
+
+        try:
+            from_date, _to = compute_date_range(chart_range)
+        except Exception:
+            return bars
+        # `from_date` is Optional — a None means "no lower bound", and comparing a str
+        # against None raises. Return the full series rather than trimming to nothing.
+        if not from_date:
+            return bars
+        return [b for b in bars if (b.get("date") or "") >= from_date]
+
     async def _build_commodity_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> CommodityDetailResponse:
@@ -404,45 +606,26 @@ class CommodityService:
         commodity_name = _resolve_name(symbol)
         meta = _get_meta(symbol)
 
-        # ── Step 1: Parallel FMP fetches ──────────────────────────
-        today = datetime.now(tz=timezone.utc).date()
-        from_date = "2010-01-01"  # Fetch max history for performance & benchmark
-        to_date = today.isoformat()
-
-        quote_task = self.fmp.get_stock_price_quote(fmp_symbol)
-        hist_task = self.fmp.get_historical_prices(fmp_symbol, from_date, to_date)
-        news_task = self.fmp.get_stock_news(fmp_symbol, limit=10)
-
-        # Also fetch related commodity quotes
+        # ── Step 1: Parallel, per-section cached fetches ──────────
+        #
+        # All three are keyed on the SYMBOL alone and shared by every range pill. They
+        # used to be re-fetched per range: 7 quotes, 7 x 972 KB of history and 28 related
+        # quotes to browse one commodity. Still gathered concurrently, so a cold build is
+        # no slower than before.
+        #
+        # The news call that used to sit here is GONE. It cost one FMP call per build and
+        # returned `[]` every time — FMP publishes no news under a futures code like
+        # GCUSD. The screen's News tab reads `GET /commodities/{sym}/news`, which resolves
+        # proxy tickers and is already two-tier cached (6h). `news_articles` stays in the
+        # response as its schema default `[]` because the iOS DTO is non-optional.
         related_symbols = meta.get("related", [])
-        related_tasks = [
-            self.fmp.get_stock_price_quote(s) for s in related_symbols
-        ]
 
-        all_results = await asyncio.gather(
-            quote_task, hist_task, news_task, *related_tasks,
-            return_exceptions=True,
+        quote, historical, related_quotes = await asyncio.gather(
+            self._get_quote(fmp_symbol),
+            self._get_history(fmp_symbol),
+            self._get_related(symbol, related_symbols),
         )
-
-        quote = all_results[0] if not isinstance(all_results[0], Exception) else {}
-        hist_raw = all_results[1] if not isinstance(all_results[1], Exception) else {}
-        news_raw = all_results[2] if not isinstance(all_results[2], Exception) else []
-
-        related_quotes = []
-        for i, sym in enumerate(related_symbols):
-            q = all_results[3 + i]
-            if not isinstance(q, Exception) and q:
-                related_quotes.append((sym, q))
-
-        # Parse historical prices (sorted oldest-first)
-        historical = []
-        if isinstance(hist_raw, dict):
-            historical = hist_raw.get("historical", [])
-        elif isinstance(hist_raw, list):
-            historical = hist_raw
-        # `date` may be an explicit JSON null (not just absent); .get(k, "") only
-        # covers a MISSING key, so `or ""` is needed to avoid None<str TypeError.
-        historical.sort(key=lambda p: p.get("date") or "")
+        news_raw: List[Dict[str, Any]] = []
 
         # ── Step 2: Extract quote data ────────────────────────────
         # FMP quote numerics can be bare NaN/Inf JSON tokens; those are truthy so
@@ -509,16 +692,11 @@ class CommodityService:
                 change_pct = 0
 
         # ── Step 3: Build chart data ──────────────────────────────
-        from app.services.chart_helper import fetch_chart_data, resolve_interval
-        resolved = resolve_interval(chart_range, interval)
-        if resolved != "daily" or chart_range == "ALL":
-            # Commodities trade nearly 24h — do NOT apply the equity 09:30–16:00 ET
-            # regular-hours filter (it would gut a ~23h market to a 6.5h slice).
-            chart_points = await fetch_chart_data(
-                self.fmp, fmp_symbol, chart_range, interval, extended_hours=True
-            )
-        else:
-            chart_points = self._extract_chart_data(historical, chart_range)
+        # Derived from the shared history wherever the bars are daily-or-coarser; only
+        # 1D/1W issue their own (short-lived, separately keyed) intraday fetch.
+        chart_points = await self._get_chart(
+            fmp_symbol, historical, chart_range, interval
+        )
 
         chart_data = [
             CommodityChartPointResponse(
@@ -550,16 +728,11 @@ class CommodityService:
                 return f"{v / 1_000:.1f}K"
             return str(int(v))
 
-        # Compute moving averages from historical data
+        # Only `ma_200` is rendered. `ma_50` and a 52-week-change block used to be
+        # computed here and referenced nowhere — dropped rather than carried through the
+        # decomposition, since every survivor now has to justify its place in a section.
         closes = [p.get("close", 0) for p in historical if p.get("close")]
-        ma_50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
         ma_200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
-
-        # 52-week change
-        yr_ago_close = closes[-365] if len(closes) >= 365 else (closes[0] if closes else None)
-        yr_change = None
-        if yr_ago_close and yr_ago_close > 0 and price:
-            yr_change = ((price - yr_ago_close) / yr_ago_close) * 100
 
         # Price per unit (top-left, like Constituents in Index)
         _UNIT_ABBREV = {

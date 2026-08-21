@@ -196,7 +196,13 @@ async def get_commodity_detail(
     Returns price, chart data, key statistics, performance, and news.
     Supports symbols like GC (Gold), SI (Silver), CL (Crude Oil), NG (Natural Gas).
     """
-    symbol = symbol.upper().replace("USD", "")
+    # Trailing-only strip. A GLOBAL replace is the bug the crypto endpoint was already
+    # fixed for — it turns USDT into T and USDC into C. Harmless for today's two-letter
+    # futures roots, but this ran BEFORE commodity_service's own careful trailing-only
+    # version, so that guard was operating on already-mangled input and could never fire.
+    symbol = symbol.upper().strip()
+    if len(symbol) > 3 and symbol.endswith("USD"):
+        symbol = symbol[:-3]
 
     try:
         service = get_commodity_service()

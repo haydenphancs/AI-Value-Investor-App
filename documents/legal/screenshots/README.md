@@ -17,15 +17,25 @@ simulator (iPhone 11 Pro Max / XS Max) is installed on this machine, and none is
 | `6.9/01-home-dashboard.png` | Home | Live index strip, Daily Scanners, App-Exclusive Signals |
 | `6.9/02-ai-research-personas.png` | Research | The five **style-named** personas — no real investor names |
 | `6.9/03-ticker-detail-nvda.png` | Ticker detail | Live intraday chart + Key Statistics, fully loaded |
+| `6.9/04-updates-ai-insights.png` | Updates | AI Insights card + live news timeline. ⚠️ The news rows below the card carry third-party headlines that can name real investors (this capture has "Ken Griffin says Citadel unwound…" partly visible at the fold). That is factual reporting by a news source, not the app naming a feature after a person — a materially weaker 5.2.1 exposure than a lesson title was — but if you want it airtight, crop to the Insights card or re-shoot when the feed rotates. |
 
 These are **raw device captures**, not marketed screenshots. Apple accepts them as-is; most apps
 add a caption band and a device frame. Do that pass before uploading if you want it.
 
 ## Still to capture
 
-Tracking, Updates, a Learn/Journey card, and — required for the four consumable IAPs — one
-**Add Credits** screenshot showing all four packs (§6b). Add Credits needs a signed-in account,
-so shoot it with the App Review demo account once it exists.
+Two, and **both need data that a fresh signed-out install does not have**:
+
+1. **Add Credits** — *required* for the four consumable IAPs (§6b); one shot showing all four
+   packs satisfies all four products. Needs a signed-in account, so shoot it with the App Review
+   demo account once that exists.
+2. **Tracking** — on a fresh install it renders the "No tickers yet" empty state, which is not
+   worth shipping. Add three or four tickers to the watchlist first, then re-shoot.
+
+A Learn/Journey card is also worth having now that the lesson titles are clean — the Strategies
+row reads "The Quality Compounder / The Everyday Growth Hunter / The Disruption Seeker".
+`_verification/journey-renamed-lessons.png` shows that row, but it was shot as evidence rather
+than as marketing, and the Level 4 block beneath it contains the Buffett quote card.
 
 ## ⚠️ Screens to keep OUT of frame (Guideline 5.2.1)
 

@@ -299,3 +299,74 @@ def test_hydration_path_can_emit_all_four_trade_types():
     _, groups = _h()._aggregate_congressional(rows, "2026-08-21")
     kinds = {tr["trade_type"] for g in groups for tr in g["trades"]}
     assert {"New", "Increased", "Closed"} <= kinds, f"only got {kinds}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CROSS-PATH PARITY — the strongest guard, and one I initially believed was
+# unachievable.
+#
+# I had assumed the two aggregations were "legitimately different" and that only a
+# self-consistency property could be asserted. That was wrong, and dismissing the gap as
+# by-design nearly shipped a real bug: the divergence was TWO defects in the hydration
+# path — a flat signed accumulation that let a pre-baseline sale go negative (deleting
+# real positions), and a `[:30]` cap with no deterministic tie-break.
+#
+# With both fixed, the two writers produce IDENTICAL holdings for identical input. They
+# both upsert the same rows, so anything less than identical means the profile changes
+# depending on which job ran last.
+# ─────────────────────────────────────────────────────────────────────────────
+def _holdings(fn, rows):
+    out = fn(rows)
+    return {h["ticker"]: round(h["value"], 2) for h in (out[0] if isinstance(out, tuple) else out)}
+
+
+def test_both_writers_produce_identical_holdings():
+    rows = [
+        _t("GOOGL", "Sale",     txn="2025-12-30", amount="$1,000,001 - $5,000,000"),
+        _t("GOOGL", "Purchase", txn="2025-12-30", amount="$250,001 - $500,000"),
+        _t("GOOGL", "Purchase", txn="2026-01-16", amount="$500,001 - $1,000,000"),
+        _t("AAPL",  "Purchase", txn="2026-02-01"),
+        _t("MSFT",  "Purchase", txn="2026-02-02"),
+        _t("MSFT",  "Sale",     txn="2026-03-02"),
+    ]
+    hyd = _holdings(lambda r: _h()._aggregate_congressional(r, "2026-08-21"), rows)
+    svc = _holdings(lambda r: _service()._aggregate_congressional_trades(r, "2026-08-21"), rows)
+    assert hyd == svc, f"the two writers disagree:\n  hydrate={hyd}\n  service={svc}"
+
+
+def test_a_pre_baseline_sale_does_not_delete_a_reestablished_position():
+    """The Pelosi/GOOGL case, which was live in production.
+
+    The STOCK Act has no pre-disclosure baseline, so a member routinely sells a position
+    held before anything we can observe. Netted flat, that goes deeply negative and every
+    later re-purchase is cancelled — so `value > 0` dropped the position entirely.
+    Measured: Pelosi was served 6 positions and $7.0M where 10 and $9.98M were real,
+    with GOOGL, AMZN, NVDA and AAPL missing.
+    """
+    rows = [
+        _t("GOOGL", "Sale",     txn="2025-12-30", amount="$1,000,001 - $5,000,000"),
+        _t("GOOGL", "Purchase", txn="2026-01-16", amount="$500,001 - $1,000,000"),
+    ]
+    for label, fn in (
+        ("hydrate", lambda r: _h()._aggregate_congressional(r, "2026-08-21")),
+        ("service", lambda r: _service()._aggregate_congressional_trades(r, "2026-08-21")),
+    ):
+        held = _holdings(fn, rows)
+        assert "GOOGL" in held, (
+            f"{label}: a re-established position was deleted by a pre-baseline sale"
+        )
+        assert held["GOOGL"] > 0
+
+
+def test_the_position_cap_breaks_ties_deterministically():
+    """STOCK Act buckets collapse to a handful of midpoints, so many positions tie
+    exactly. Without a tie-break the `[:30]` cap kept an arbitrary subset and the two
+    writers chose different ones — 21 of Gottheimer's positions share $8,000.50."""
+    rows = [_t(f"TIC{i:02d}", "Purchase", txn="2026-01-01") for i in range(40)]
+    hyd = _holdings(lambda r: _h()._aggregate_congressional(r, "2026-08-21"), rows)
+    svc = _holdings(lambda r: _service()._aggregate_congressional_trades(r, "2026-08-21"), rows)
+    assert len(hyd) == 30 and len(svc) == 30
+    assert set(hyd) == set(svc), "the two writers kept different positions at the cap"
+    # ...and it is stable across repeated runs, not just equal by luck this once.
+    again = _holdings(lambda r: _h()._aggregate_congressional(r, "2026-08-21"), list(reversed(rows)))
+    assert set(again) == set(hyd), "cap selection depends on input order"

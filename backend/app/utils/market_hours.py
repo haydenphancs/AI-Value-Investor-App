@@ -220,6 +220,81 @@ def session_trading_date(now: datetime | None = None) -> date:
     return previous_trading_day(today)
 
 
+# ── Detail-screen market-status wire contract ─────────────────────────
+#
+# The stock / ETF / index detail services each shipped their OWN copy of the
+# session arithmetic, derived from weekday + hour only. All three therefore
+# reported "open" at 11:00 ET on Thanksgiving, and kept reporting "open" until
+# 16:00 on the half-days that shut at 13:00 — this module already knew both
+# facts, and `home_dashboard_service` already delegated here.
+#
+# The wire strings are a CONTRACT with three iOS switches and deliberately differ
+# from the SESSION_* constants above (`regular` -> `open`, `premarket` ->
+# `pre_market`, `afterhours` -> `after_hours`). Mapping them in exactly one place
+# is the point: a silent mismatch here degrades to an unrecognised status on the
+# client, which is the failure mode this indirection exists to prevent.
+_PHASE_TO_WIRE_STATUS: dict[str, str] = {
+    SESSION_PREMARKET: "pre_market",
+    SESSION_REGULAR: "open",
+    SESSION_AFTERHOURS: "after_hours",
+    SESSION_CLOSED: "closed",
+}
+
+# The four wire values, exported so a test can assert the mapping is total
+# without re-typing the strings it is meant to be checking.
+WIRE_STATUS_PRE_MARKET = "pre_market"
+WIRE_STATUS_OPEN = "open"
+WIRE_STATUS_AFTER_HOURS = "after_hours"
+WIRE_STATUS_CLOSED = "closed"
+
+
+def market_status_fields(now: datetime | None = None) -> dict[str, str | None]:
+    """The `{status, date, time, timezone}` payload the detail screens render.
+
+    Returned as a plain dict rather than a Pydantic model on purpose: `MarketStatusResponse`
+    is declared separately in `schemas/index.py` and `schemas/etf.py`, and a utils module
+    must not import the schema layer. Each service does `MarketStatusResponse(**fields)`.
+
+    When the market is CLOSED the payload names the **last real close**, not "today at
+    16:00". The old copies stamped `now.date()` at a hardcoded 16:00, so on a Saturday they
+    announced a Saturday close that never happened, and on the Friday after Thanksgiving
+    they reported 16:00 for a tape that shut at 13:00. `session_trading_date()` and
+    `_close_minute()` already answer both questions.
+
+    ``now`` is injectable so callers and tests stay clock-independent.
+    """
+    if now is None:
+        now = datetime.now(ET)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(ET)
+
+    phase = session_phase(now)
+    status = _PHASE_TO_WIRE_STATUS[phase]
+
+    if status != WIRE_STATUS_CLOSED:
+        # Live session: the client shows a live badge and never reads the other three.
+        return {"status": status, "date": None, "time": None, "timezone": None}
+
+    close_day = session_trading_date(now)
+    close_min = _close_minute(close_day)
+    # Build the instant ON the close date, not on `now` — the UTC offset and the
+    # EST/EDT abbreviation belong to THAT day. Stamping a November close with
+    # August's EDT is exactly the class of bug this replaces.
+    close_et = datetime(
+        close_day.year, close_day.month, close_day.day,
+        close_min // 60, close_min % 60, tzinfo=ET,
+    )
+    hour12 = close_et.hour % 12 or 12
+    meridiem = "AM" if close_et.hour < 12 else "PM"
+    return {
+        "status": WIRE_STATUS_CLOSED,
+        "date": close_et.isoformat(),
+        "time": f"{hour12}:{close_et.minute:02d} {meridiem}",
+        "timezone": close_et.tzname() or "ET",
+    }
+
+
 def session_label(now: datetime | None = None) -> str:
     """One short sentence naming the session, true at ``now``.
 

@@ -11,7 +11,6 @@ import logging
 import math
 import time
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import (
@@ -37,6 +36,7 @@ from app.schemas.stock_overview import (
     StockOverviewResponse,
 )
 from app.services.sector_benchmark_service import _FMP_SECTOR_MAP
+from app.utils.market_hours import market_status_fields
 
 logger = logging.getLogger(__name__)
 
@@ -295,38 +295,14 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
 
 
 def _get_market_status() -> MarketStatusResponse:
-    now = datetime.now(tz=ZoneInfo("America/New_York"))  # Handles EST/EDT automatically
-    hour = now.hour
-    minute = now.minute
-    weekday = now.weekday()
+    """Current session, delegated to the one holiday/half-day-aware implementation.
 
-    if weekday >= 5:
-        status = "closed"
-    elif hour < 4:
-        status = "closed"
-    elif hour < 9 or (hour == 9 and minute < 30):
-        status = "pre_market"
-    elif hour < 16:
-        status = "open"
-    elif hour < 20:
-        status = "after_hours"
-    else:
-        status = "closed"
-
-    if status == "closed":
-        # Use the actual UTC offset (handles EST vs EDT correctly)
-        utc_offset = now.strftime("%z")  # e.g. "-0500" or "-0400"
-        offset_formatted = f"{utc_offset[:3]}:{utc_offset[3:]}"  # "-05:00" or "-04:00"
-        tz_abbr = "EDT" if now.dst() else "EST"
-        return MarketStatusResponse(
-            status="closed",
-            date=now.strftime(f"%Y-%m-%dT16:00:00{offset_formatted}"),
-            time="4:00 PM",
-            timezone=tz_abbr,
-        )
-    return MarketStatusResponse(status=status)
-
-
+    This used to be a local copy of weekday+hour arithmetic — one of three — and it
+    knew nothing about market holidays or the 13:00 ET half-days, so it reported
+    "open" at 11:00 on Thanksgiving and until 16:00 the Friday after. `market_hours`
+    owns the calendar (and `home_dashboard_service` already delegated to it).
+    """
+    return MarketStatusResponse(**market_status_fields())
 def _parse_historical(hist_raw) -> List[Dict]:
     """Parse FMP historical prices into sorted list (oldest-first)."""
     historical: List[Dict] = []

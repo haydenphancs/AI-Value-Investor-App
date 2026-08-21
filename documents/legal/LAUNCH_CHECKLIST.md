@@ -5,7 +5,31 @@ Everything only you can do. Code-side work is tracked separately in the plan fil
 
 Ordered by **when to start**, not by importance.
 
-> ## 🔎 Whole-file audit 2026-08-14 — read this before anything else
+> ## 🔎 Re-verification 2026-08-20 — READ THIS FIRST, it supersedes the banner below
+>
+> Re-checked against the **live** systems, not against this file: production HTTP, the Supabase
+> database over psql, the **Railway environment** (`railway ssh`), the GitHub API, git history,
+> and the Xcode project. The 2026-08-14 audit was six days stale and had drifted in both
+> directions again.
+>
+> | | |
+> |---|---|
+> | **Was wrong: stale** | §5 stopped at migration **136**; the repo is at **148**. All twelve of 137–148 are **applied** — verified at *definition* level (146's index has no `WHERE`, `refund_credits` returns `jsonb`, `credit_packs.power` = 650/$12.99), not by filename. |
+> | **Was wrong: secretly DONE** | `IAP_APP_APPLE_ID` (**6759525689**, set on Railway) · `ENVIRONMENT=production` on Railway · `PUSH_DRY_RUN` correctly **absent** · iOS build number already bumped to **2** · Apple root cert deployed and the verifier healthy (readiness probe returns **400**, not 503) |
+> | **Confirmed still open** | demo account (live DB: **4 users, none a reviewer**; anonymous `/stocks/AAPL/report` → **401**) · `is_admin` matches **0 rows** · `ADMIN_TOKEN` still **set** on Railway · `IAP_ENVIRONMENT=Sandbox` · `APNS_ENV=sandbox` · zero screenshots · Release config **never compiled** · git purge (`.git` = **1.1 GB**, **23** remote `claude/*` branches, both PDFs still fetchable) |
+> | **FIXED this session** | The three Journey lesson titles + four card-visible descriptions that named real investors (§7 metadata rule). Renamed to the research screen's style names and reseeded to production. Pinned by `backend/tests/test_learn_titles_name_no_real_investor.py`. |
+>
+> **Two claims withdrawn — do not re-chase.** (1) "`IAP_APP_APPLE_ID` is unset, IAP is dead on
+> arrival" — that reads `backend/.env`, which is the **local dev box**; Railway has it set and
+> the live probe proves the verifier builds. (2) "`git filter-repo --path MarketPulse` would
+> delete live iOS source" — it would not; the live `MarketPulseCard.swift` sits under
+> `frontend/ios/`, and **nothing at HEAD** starts with that prefix. The runbook's path list is safe.
+>
+> **Personas are NOT a 5.2.1 risk**, despite two rows reading `Benjamin Graham` / `Charlie
+> Munger`: both are `is_active = false` and the live API serves only the five style-named ones
+> (checked against `GET /api/v1/research/personas`, not against the table).
+
+> ## 🔎 Whole-file audit 2026-08-14 — superseded by the banner above, kept for its reasoning
 >
 > Every section was re-checked against the repo and live HTTP (95 findings, 93 survived
 > adversarial verification). **The file was missing four launch blockers entirely** and three
@@ -134,22 +158,23 @@ GitHub account, but confirm it is not a deploy key or on any server before dismi
 
 ---
 
-## 👉 START HERE — next actions, re-ordered 2026-08-14 (evening)
+## 👉 START HERE — rebuilt 2026-08-20 against the live systems
 
-Ordered by **third-party lead time first**, because those are the only items you cannot
-compress by working harder.
+Ordered by **what blocks the Submit button**, with the third-party lead-time items called out
+inside it — that ordering matters more now that the agreements and products are done.
 
 | # | Do this | Why now | Where |
 |---|---|---|---|
-| **0** | 🔴 **Rotate the leaked `service_role` key** | A live production credential that bypasses all RLS is anonymously downloadable today. The repo stays public, so rotation is the only fix. | §0 |
-| **1** | **ASC → Business: Paid Applications Agreement, banking, W-9** | Gates *every* §6b item: until active, ASC returns **no products at all** and the paywall reads "not available on this device" — identical to a wrong product id, the most commonly misdiagnosed IAP failure. Bank verification takes days. | §6b |
-| **2** | Ask **FMP and CoinGecko** about commercial redistribution | Free to send, slow to answer — and the answer feeds the ASC **Content Rights** declaration (§7), so it is on the submission path, not beside it. | §6 |
-| **3** | **Create the App Review demo account** | The review notes you are told to paste promise credentials that do not exist. Live DB: 4 users, none of them a reviewer. Anonymous `GET /stocks/AAPL/report` → **401**, so a reviewer signed out cannot reach the headline feature. Cheapest self-inflicted rejection on the list. | §7 |
-| **4** | **SMTP** (Resend/Postmark/SES) → Supabase | Email/password signup is a dead end: Confirm email is ON and the built-in mailer does not deliver. ⚠️ **MERGE** the provider's `include:` into the existing SPF; replacing it breaks §2 inbound mail. Note this is **no longer a submission blocker** — create the demo account in Supabase Studio with "Auto Confirm" and SMTP drops off the critical path. | §5c |
-| **5** | Create **six** IAP products + subscription-group localization | Four **consumable** credit packs, not just the two subscriptions. Blocked on #1. | §6b |
-| **6** | **Decide the real-investor-name question**, then shoot screenshots | Five user-visible surfaces put a living investor's name in a capturable frame. This gates screenshots, not the reverse. | §7 |
-| **7** | Flag your own account `is_admin` | Matches **zero** rows, so every admin route 403s for every account including yours. One SQL `UPDATE` — and do it **before** clearing `ADMIN_TOKEN` or you lock yourself out. | §5 |
-| **8** | Publish the Google OAuth consent screen | Works only for allow-listed accounts; refresh tokens die at 7 days. ⚠️ **Not a lead-time item** — non-sensitive scopes need no verification review, so it is ~60 seconds. It was ranked #4 in a lead-time-ordered table by mistake. | §5e |
+| **1** | 🔴 **Create the App Review demo account** | The single cheapest self-inflicted rejection left. Your review notes already promise *"Credentials are in the App Review sign-in fields; the account is pre-loaded with credits."* Live DB 2026-08-20: **4 users, none of them a reviewer**, and anonymous `GET /stocks/AAPL/report` still returns **401** — a signed-out reviewer cannot reach the headline feature. Supabase Studio → Add user → tick **Auto Confirm User** (this also takes SMTP off the submission path). Then grant it credits. | §7 |
+| **2** | **Email FMP and CoinGecko** about commercial redistribution | Longest lead time on the list and it is *on* the submission path, not beside it: the answer feeds the ASC **Content Rights** declaration. Free to send. | §6 |
+| **3** | **Shoot the screenshots** | Zero exist, and there is no capture script. iPhone **6.9" and 6.5"** only (§8), plus one Add Credits shot covering all four consumable IAPs. ✅ The 5.2.1 blocker on this is now **cleared for the Journey titles** — but the Whales/13F tab, the book-cover shelf, the Journey quote card and two info sheets still name real people, so frame around them. | §7, §6b |
+| **4** | **Run the first Release archive** | The Release configuration has **never been compiled** — newest archive is 2026-06-06, so ~11 weeks of work has never been through archive/validate/sign. A missing App-ID capability appears here as a *signing failure* and nowhere earlier. Do it now, while there is time to fix what it finds. | §7 |
+| **5** | **Finish the ASC metadata** | Listing copy (ready, `app-store-listing.md`), Availability = **US only**, the 10-type privacy questionnaire, Category Finance + **17+**, Copyright, App Review contact, and the review-notes paragraph. Plus the IAP half: subscription-group localization and per-product display name/description/screenshot, without which subscriptions cannot be submitted. | §7, §6b |
+| **6** | Flag your own account `is_admin`, **then** clear `ADMIN_TOKEN` | Still **0 rows** (verified live 2026-08-20), and `ADMIN_TOKEN` is still **set** on Railway (25 chars) — so it is currently the *only* credential that can reach an admin route. Clearing it first leaves a direct SQL write as your sole recovery. | §5 |
+| **7** | Publish the Google OAuth consent screen | ~60 seconds, no verification review for these scopes. Skip it and Google sign-in works for you and fails for everyone else, 7 days after release, looking exactly like an app bug. | §5e |
+| **8** | **SMTP + the `{{ .Token }}` reset template** | No longer a *submission* blocker once #1 exists — but it ships broken: email/password signup and forgot-password are both dead ends today. Fix it, or hide email signup before launch. | §5b, §5c |
+| **9** | **Run the git-history purge** | The repo is public by decision, so this is the only fix for the two copyrighted PDFs still fetchable by commit SHA — and it couples to the Content Rights answer in #2. ⚠️ **Commit or stash first: 31 files are uncommitted right now** and `filter-repo --force` ends in `git reset --hard`. | §4 |
+| **10** | **At launch:** flip `IAP_ENVIRONMENT`→`Production` and `APNS_ENV`→`production` | Both still on their sandbox values on Railway. ~2 minutes. | §6b, §9 |
 
 **What changed on 2026-08-14 (evening).** A full re-verification against the **live** database,
 live HTTP, the anonymous GitHub API and the Xcode archives on disk. The old #3 ("flip the repo
@@ -358,6 +383,27 @@ before running (command in the runbook).
          re-verified 2026-08-14) for as long as the repo is public. The purge is now the
          actual fix for the copyright exposure, so it belongs on the pre-launch list rather
          than "after submission". Same for the ed25519 private key in §0.
+> **Measured live 2026-08-20 — nothing here has been done yet.** `.git` is **1.1 GB** (target
+> 60–120 MB). `git ls-remote --heads origin 'refs/heads/claude/*'` returns **23**. Both
+> copyrighted book PDFs are still in history, plus two unrelated academic PDFs under
+> `separate_project/` that this section never listed. The leaked `service_role` JWT blob is also
+> still there — but it is **revoked** (§0 closed 2026-08-15), so that half is now hygiene rather
+> than an active breach. **The PDFs are the live exposure**, and they couple to the ASC Content
+> Rights answer (§7): declaring "I have the rights" while the repo publicly serves the books is a
+> bad pairing.
+>
+> 🔴 **You have 31 uncommitted files (+1169/−140) in the working tree right now.**
+> `git filter-repo --force` ends in an unconditional `git reset --hard` and will destroy them.
+>
+> ✅ **Correction to a 2026-08-14 claim:** `--path MarketPulse` does **not** endanger live source.
+> The live `MarketPulseCard.swift` / `MarketPulseSection.swift` are at
+> `frontend/ios/ios/Views/…`, and **no file at HEAD** starts with `MarketPulse`. Only the two dead
+> historical trees match. Verified by `git ls-files | grep '^MarketPulse'` → empty.
+>
+> ➕ **Found 2026-08-20:** `MarketPulse-iOS/` is a **second** dead top-level tree in history (38
+> objects) that the runbook's path list does not name. No secrets in it — size only. Add it if
+> you want the full reduction.
+
 - [ ] ⚠️ **Add three paths the runbook's `--path` list is missing**, all found 2026-08-14:
       `--path MarketPulse` (the leaked `service_role` key),
       `--path 'eval "$(ssh-agent -s)"'` and `--path 'eval "$(ssh-agent -s)".pub'`.
@@ -380,7 +426,34 @@ work from a cached memory of it; re-read it.
 
 ---
 
-## 5. Migrations — ✅ 103–136 ALL APPLIED, NONE PENDING (re-verified 2026-08-14 evening)
+## 5. Migrations — ✅ 103–**148** ALL APPLIED, NONE PENDING (re-verified live 2026-08-20)
+
+> **2026-08-20:** this section said "103–136" and the repo is at **148**. All twelve of 137–148
+> are applied. Verified by querying the live database for each migration's **real DDL objects**,
+> and — where existence alone cannot distinguish two migrations — by *definition*:
+>
+> | Migration | What proves it, specifically |
+> |---|---|
+> | 137 money-moves images | `money_move_articles.image_url` present |
+> | 138 → **141** reprice | `credit_packs.power` = **650 credits / 1299¢**. 138 alone would read 600/1199. Schema-only dumps can *never* answer this — it is data. |
+> | 139 credit correctness | `user_credits.tier_alloc` present |
+> | 140 granted-pool invariant | CHECK constraint `user_credits_used_le_total` present |
+> | **142** refund outcome | `refund_credits` returns **`jsonb`** (139/118 returned integer) |
+> | 143 → **146** whale dedupe | the unique index exists **with no `WHERE` predicate** — 143 created it partial, 146 rebuilt it inferable |
+> | 144 guest bucket probe | function `guest_bucket_has_data` present |
+> | 145 whale disclosure | `whales.lifecycle_status` + `last_activity_date` present |
+> | 147 scheduled jobs | `claim_scheduled_job` + `finish_scheduled_job` + `notification_job_state.items_written` present |
+> | 148 ETF cache key | `etf_detail_cache.cache_key` + `uq_etf_detail_cache_key`, and the old `etf_detail_cache_symbol_key` **gone** |
+>
+> ⚠️ **`schema_snapshot.sql` was last regenerated 2026-08-19 and therefore predates 147 and 148.**
+> Their absence from the snapshot is what a stale dump looks like, **not** evidence they are
+> unapplied — that inference is the exact mistake this section has now made twice. Re-run
+> `backend/scripts/dump_schema.sh` to stop the next reader being blind past Aug 19.
+>
+> ⚠️ And note 138/141 as the general case: **a data-only migration is invisible to a schema-only
+> dump, forever.** Only a `SELECT` can answer those.
+
+### The older 103–136 record (still accurate)
 
 > **Re-verified 2026-08-14 (evening) by querying the LIVE database directly** — not the
 > snapshot, not this file's memory. Every migration from **103 to 136** is applied and
@@ -503,6 +576,8 @@ now answers for every one of these.
       ```sql
       select id, email, is_admin, created_at from public.users where is_admin;
       -- verified 2026-08-07: (0 rows)
+      -- RE-verified live 2026-08-20: still (0 rows), and ADMIN_TOKEN is still SET on Railway
+      -- (25 chars). So the escape hatch is currently your ONLY way into an admin route.
 
       update public.users set is_admin = true where email = '<your real address>';
       select id, email, is_admin from public.users where is_admin;   -- expect exactly 1 row
@@ -1047,11 +1122,29 @@ customer early is worse than carrying a lapsed one another day.
 
 ### Railway environment
 
-- [ ] `IAP_ENVIRONMENT=Sandbox` while testing, then `Production` at launch
-- [ ] `ENVIRONMENT=production` — **now load-bearing for payments**, not just for Sentry and the
-      background-job gate
-- [ ] `IAP_APP_APPLE_ID=<numeric app id>`
-- [ ] `IAP_ROOT_CERT_DIR=certs/apple` (default; set it if you put them elsewhere)
+> **Read live from Railway 2026-08-20 via `railway ssh`** — not assumed. Three of these four are
+> already correct; only the first still needs action.
+
+- [ ] ⚠️ **`IAP_ENVIRONMENT` is currently `Sandbox` → set `Production` at launch.**
+      *Nuance this file lacked:* leaving it will **not** break real purchases —
+      `_sibling_environments` (`integrations/app_store.py:289`) retries a Production-signed
+      payload on `INVALID_ENVIRONMENT`, which is the same mechanism that lets App Review buy in
+      Sandbox against a Production build. What it *does* cost: every real purchase burns a failed
+      primary verification (including an online OCSP/CRL round-trip) before the sibling succeeds,
+      and under a Sandbox primary Apple's library **skips the `appAppleId` comparison entirely**
+      on the notification path. Flip it — just don't expect a 400 storm if you forget.
+- [x] `ENVIRONMENT=production` — **verified set on Railway 2026-08-20.** (Your local
+      `backend/.env` says `development`; that is correct for local work and is *not* what
+      production runs. Reading `.env` and concluding production is misconfigured is a mistake
+      that has now been made once — check Railway.)
+- [x] `IAP_APP_APPLE_ID=6759525689` — **verified set on Railway 2026-08-20**, and it matches the
+      `adamId` in the 2026-06-06 Xcode archive, which independently confirms the ASC record.
+- [x] `IAP_ROOT_CERT_DIR` — unset, which is fine: the `certs/apple` default resolves correctly on
+      Railway (`AppleRootCA-G3.der`, 583 bytes, confirmed present in the running container).
+
+**Readiness confirmed, not assumed:** the probe below returned **400** on 2026-08-20, which means
+the verifier built — so the root certificate loads *and* `IAP_APP_APPLE_ID` is set. A 503 would
+have meant one of them was missing.
 
 > **You can no longer skip signature verification by accident on a deploy.** The default already
 > fails closed (`Production`, below), but nothing stopped an *explicit* `IAP_ENVIRONMENT=Xcode` on
@@ -1191,6 +1284,13 @@ No longer blocked — your existing Individual account can create this record (s
       password the reviewer types into the app; there is nothing to type for a Google account.
       **Best path:** Supabase Studio → Authentication → Add user with **Auto Confirm User**
       ticked. That bypasses the dead SMTP entirely and takes §5c off the submission path.
+      🔴 **Re-verified live 2026-08-20 — still not done.** `public.users` holds **4 rows**: two
+      guest identities, your own account, and one other. None is a review account. Anonymous
+      `GET /stocks/AAPL/report` still returns **401**. Both generation doors take
+      `Depends(get_current_user)` (`ticker_report.py:81`, `research.py:82`), so there is no
+      signed-out path to the headline feature and no way for a reviewer to improvise one.
+      **Remember to grant it credits** — the notes promise a pre-loaded account, and a report
+      costs 20.
 - [ ] 🔴 **Content Rights** declaration (ASC → App Information). **Substantive here, not
       clerical**: the Learn library ships original study guides for ten in-copyright books, the
       book cover art typesets real author names in a public bucket, and the app redistributes
@@ -1212,6 +1312,54 @@ No longer blocked — your existing Individual account can create this record (s
       surprises, and note that a missing App-ID capability shows up here as a *signing failure*,
       which is itself the cheapest way to verify the entitlements are really enabled.
 
+      ✅ **Half of that risk is now retired (2026-08-20).** The Release configuration **compiles
+      clean** — `** ARCHIVE SUCCEEDED **`, version `1.0 (2)`, arm64 — run as:
+      ```bash
+      xcodebuild archive -project frontend/ios/ios.xcodeproj -scheme ios \
+        -configuration Release -destination 'generic/platform=iOS' \
+        -archivePath /tmp/caydex-release.xcarchive \
+        CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+      ```
+      So `-O`, whole-module optimization and `VALIDATE_PRODUCT` produce **zero** errors across
+      ~11 weeks of never-Release-compiled code. **Signing was deliberately disabled**, because
+      that half cannot be tested here anyway — there is no Apple Distribution certificate on this
+      machine. What remains unproven is exactly and only the signing/entitlement step, which
+      Organizer → Distribute App performs while minting the cert.
+
+### ✅ 5.2.1 — the Journey titles are FIXED (2026-08-20)
+
+The three lesson titles this file flagged as "exactly the card that ends up in an App Store
+screenshot" are renamed, and adopt the **research screen's existing style names** so Learn and
+Research finally agree:
+
+| Was | Now |
+|---|---|
+| `The Buffett Way` | **`The Quality Compounder`** |
+| `The Lynch Way` | **`The Everyday Growth Hunter`** |
+| `The Cathie Wood Way` | **`The Disruption Seeker`** |
+
+Four card-visible **descriptions** went with them, including one this file never listed —
+`Inversion Thinking` opened with *"Charlie Munger's secret weapon…"*. The rendered label is now
+`LESSON 1: THE QUALITY COMPOUNDER`. Reseeded to production and verified: **0** rows in
+`public.lessons` where title, description or `lessonLabel` names a real investor, and still
+exactly 27 rows (no duplicate — the row id is `uuid5(NS, slug)` and no slug moved).
+
+**Deliberately NOT changed:** the narrated card `text`. Eleven cards name a real investor in
+prose, and that prose is the **forced-alignment transcript** — editing it desynchronises the
+word-level read-along highlighting and would need a TTS regeneration plus re-alignment. It is
+also the case the metadata rule permits: describing methodology in prose is fine.
+
+**Still capturable, so frame screenshots around them:** the Whales/13F feature (56 named real
+people incl. 11 politicians — factual filing data, the strongest position of the group), the
+book-cover shelf (covers typeset real author names, public bucket), the Journey investor quote
+card (`InvestorPathModels.swift:428`, attribution `"Warren Buffett"`), and two info sheets
+(`SmartMoneyInfoSheet.swift:60`, `ShareholderBreakdownInfoSheet.swift:250`).
+
+Regression-guarded by `backend/tests/test_learn_titles_name_no_real_investor.py` — six tests,
+brace-bounded and comment-stripped, and **mutation-tested by hand** (all five reverts caught).
+It scans only the fields a user *reads on a card*, so it cannot go vacuous and cannot go
+permanently red on the prose it is meant to allow.
+
 **Metadata rule:** no real investor names anywhere in the app name, subtitle, description,
 keywords, or screenshots (Guideline 5.2.1). The personas are now style names — keep the
 marketing copy consistent with that. Describing methodology in prose is fine
@@ -1230,8 +1378,19 @@ a common rejection. The app still runs on iPad in compatibility mode. Reversible
 one-line build setting if iPad is ever done properly.
 
 **Consequence for App Store Connect:** the listing will show iPhone only, and you only need
-**iPhone screenshots** (6.9" and 6.5" display sizes). No iPad screenshots required — that's
-a meaningful saving in item 9.
+**iPhone screenshots**. No iPad screenshots required — that's a meaningful saving in item 9.
+
+⚠️ **Corrected 2026-08-20: it is 6.9" ONLY, not "6.9" and 6.5".** Apple now accepts a single
+iPhone set at the largest size and scales it down to every smaller iPhone shelf, so
+**1320 × 2868** covers everything from the Pro Max to the SE. 6.5" (1242 × 2688) is optional.
+This matters practically: **no 6.5" simulator is installed on this machine** (iPhone 11 Pro Max /
+XS Max), and on the old reading you would have downloaded an extra runtime for nothing.
+
+✅ **Three are captured** — `documents/legal/screenshots/6.9/`, shot 2026-08-20 from iPhone 17
+Pro Max at 1320 × 2868 with the status bar overridden to 9:41: Home, AI Research (style-named
+personas), and a fully-loaded NVDA detail screen. They are raw device captures, not marketed
+ones. See that folder's `README.md` for what is still missing (Add Credits, which needs the demo
+account) and for **which screens to keep out of frame** under 5.2.1.
 
 ---
 
@@ -1271,6 +1430,11 @@ a meaningful saving in item 9.
         user is still a guest. Sign in, confirm a `device_tokens` row exists with
         `environment='production'`, *then* trigger.
   - [ ] Flip `APNS_ENV` from `sandbox` to `production` at launch.
+        ✅ *Read live from Railway 2026-08-20:* `APNS_ENV=sandbox` (still needs the flip),
+        `APNS_KEY_ID=7YPQRK276L`, `APNS_TEAM_ID=WG697LVCS9`, `APNS_BUNDLE_ID=com.phan.caydex`
+        and `APNS_AUTH_KEY` are all **set**, and `PUSH_DRY_RUN` is correctly **absent**. So the
+        "the variables are set is an assumption, not an observation" caveat above is now
+        discharged — it has been observed.
         ⚠️ *Correct instruction, wrong reason — fixed 2026-08-14.* `push_service` routes
         **per token** using each row's stored environment; `APNS_ENV` is only the fallback for
         NULL rows, and the client has always supplied one. Still flip it. And note a
@@ -1301,8 +1465,9 @@ Three items I can prepare materials for but shouldn't be the final word on:
    sufficiently transformative, even written in your own words
 3. **Whether an LLC is worth forming** — a liability question, not an Apple one (§1).
    Worth a CPA/attorney conversation on your own timeline, independent of launch
-4. **Real investor names in the Learn library** *(added 2026-08-14 — this list predates both
-   surfaces)*. Migration 103 removed real names from the personas for Guideline 5.2.1, but the
+4. **Real investor names in the Learn library** *(added 2026-08-14; partially resolved
+   2026-08-20 — the three Journey lesson titles are renamed, see §7. What remains below is the
+   book-cover art and the prose, which is the genuinely lawyer-shaped half.)*. Migration 103 removed real names from the personas for Guideline 5.2.1, but the
    same shape survives elsewhere: the generated **book cover art typesets real names**
    ("WARREN BUFFETT", "BENJAMIN GRAHAM") and the covers live in a **public** bucket with their
    URLs baked into the app, and three **Journey lesson titles** are named after living

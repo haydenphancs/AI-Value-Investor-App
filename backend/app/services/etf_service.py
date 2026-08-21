@@ -8,7 +8,6 @@ Serves the ETFDetailView screen on iOS.
 import asyncio
 import json
 import logging
-from zoneinfo import ZoneInfo
 import math
 import time
 from datetime import datetime, timedelta, timezone
@@ -38,6 +37,7 @@ from app.schemas.etf import (
     PerformancePeriodResponse,
     RelatedTickerResponse,
 )
+from app.utils.market_hours import market_status_fields
 
 logger = logging.getLogger(__name__)
 
@@ -217,44 +217,14 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
 
 
 def _get_market_status() -> MarketStatusResponse:
-    # America/New_York, NOT a fixed UTC-5. EDT (UTC-4) runs from the second Sunday in
-    # March to the first Sunday in November — roughly EIGHT months of the year — so a
-    # hardcoded -5 offset put every session boundary an hour late for most of the
-    # calendar: the badge still read "pre_market" at 09:45 ET and flipped to
-    # "after_hours" at 17:00 ET. index_service and commodity_service were both moved
-    # to ZoneInfo for exactly this; the ETF copy was missed.
-    now = datetime.now(tz=ZoneInfo("America/New_York"))
-    hour = now.hour
-    minute = now.minute
-    weekday = now.weekday()
+    """Current session, delegated to the one holiday/half-day-aware implementation.
 
-    if weekday >= 5:
-        status = "closed"
-    elif hour < 4:
-        status = "closed"
-    elif hour < 9 or (hour == 9 and minute < 30):
-        status = "pre_market"
-    elif hour < 16:
-        status = "open"
-    elif hour < 20:
-        status = "after_hours"
-    else:
-        status = "closed"
-
-    if status == "closed":
-        # The offset and the abbreviation must follow the SAME clock as the boundary
-        # tests above. Both were hardcoded to -05:00/"EST" year-round, so from March to
-        # November the payload stamped a close time an hour off and labelled EDT as EST.
-        close_et = now.replace(hour=16, minute=0, second=0, microsecond=0)
-        return MarketStatusResponse(
-            status="closed",
-            date=close_et.isoformat(),
-            time="4:00 PM",
-            timezone=close_et.tzname() or "ET",
-        )
-    return MarketStatusResponse(status=status)
-
-
+    This used to be a local copy of weekday+hour arithmetic — one of three — and it
+    knew nothing about market holidays or the 13:00 ET half-days, so it reported
+    "open" at 11:00 on Thanksgiving and until 16:00 the Friday after. `market_hours`
+    owns the calendar (and `home_dashboard_service` already delegated to it).
+    """
+    return MarketStatusResponse(**market_status_fields())
 def _format_date_readable(date_str: str) -> str:
     """Convert YYYY-MM-DD to human-readable format like 'Dec 20, 2025'."""
     try:

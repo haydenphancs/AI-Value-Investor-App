@@ -89,6 +89,53 @@ _QUARTER_PERIOD_RE = re.compile(r"^\d{4}-Q[1-4]$")
 # Cap on per-whale /splits lookups. A filer whose entire book was restated would
 # otherwise fan out one unthrottled call per suspect ticker.
 _MAX_SPLIT_LOOKUPS = 25
+
+# Fields that define a congressional disclosure. Deliberately CONTENT ONLY — no
+# feed-position metadata, no `link` (a PDF URL that can be re-issued).
+_CONGRESS_HASH_FIELDS = (
+    "transactionDate", "disclosureDate", "symbol", "type",
+    "amount", "owner", "assetDescription",
+)
+# Hash the N most RECENT disclosures, chosen deterministically by date — not the first
+# N as the upstream feed happened to order them.
+_CONGRESS_HASH_MAX = 50
+
+
+def _congressional_raw_hash(raw_trades: List[Dict[str, Any]]) -> str:
+    """Stable idempotency hash for one member's disclosures.
+
+    ⚠️ Why this is not `sha256(json.dumps(raw_trades[:50], sort_keys=True))`.
+
+    `house-latest` / `senate-latest` return a GLOBAL, continuously-updating feed of every
+    member, capped at 1000 rows, which the client then filters by name. Two consequences
+    broke the old hash:
+
+    1. `sort_keys=True` sorts keys *inside* each dict — it does NOT order the LIST. Any
+       reshuffle of the feed changed the hash.
+    2. `[:50]` took the first 50 *as the feed ordered them*, so a new disclosure by ANY
+       OTHER member shifted the window and changed this member's hash.
+
+    Measured 2026-08-21: the five House members re-ran the full `_persist` write path on
+    every sweep (01:46, 02:00 and 02:15 the same night, 7.6-14.8s each) while every Senate
+    member correctly skipped — the House feed simply churns faster. Ted Cruz's stored hash
+    was byte-identical across two months; no House member's ever matched a fresh fetch.
+
+    The fix is threefold: hash a per-trade identity built from content fields only, SORT
+    those identities so order cannot matter, and take the most recent
+    `_CONGRESS_HASH_MAX` *after* sorting — so an old trade ageing out of the shared
+    1000-row window does not read as a change either.
+
+    Sorting is lexical on a string that starts with `transactionDate` (ISO `YYYY-MM-DD`),
+    so it is chronological, and `[-N:]` is the newest N.
+    """
+    ids = sorted(
+        "|".join(str(t.get(k) or "") for k in _CONGRESS_HASH_FIELDS)
+        for t in raw_trades
+        if isinstance(t, dict)
+    )
+    return hashlib.sha256(
+        json.dumps(ids[-_CONGRESS_HASH_MAX:]).encode()
+    ).hexdigest()
 GEMINI_SEMAPHORE = asyncio.Semaphore(3)
 FMP_BATCH_SIZE = 30
 
@@ -574,9 +621,7 @@ class WhaleHydrator:
             prev_snap.data[0]["holdings_data"] if prev_snap.data else []
         )
 
-        raw_hash = hashlib.sha256(
-            json.dumps(raw_trades[:50], sort_keys=True, default=str).encode()
-        ).hexdigest()
+        raw_hash = _congressional_raw_hash(raw_trades)
 
         return {
             "holdings": holdings,

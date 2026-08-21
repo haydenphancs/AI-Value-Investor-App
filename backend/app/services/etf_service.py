@@ -41,34 +41,68 @@ from app.utils.market_hours import market_status_fields, to_utc_instant
 
 logger = logging.getLogger(__name__)
 
-# ── Simple in-memory cache ───────────────────────────────────────
+# ── Per-section in-memory cache ──────────────────────────────────
+#
+# This service used ONE key and ONE 5-minute TTL over a payload whose sections range from
+# "moves every second" (the quote) to "changes at a corporate action" (expense ratio,
+# inception date). Because the key carried range+interval, every range pill was a separate
+# cold build that re-fetched the SAME quote, the SAME 1.1 MB daily history and the SAME
+# profile / holdings / sector weights / dividends. Measured: ~104 FMP calls and ~10 MB of
+# byte-identical history to browse one ETF's 7 range pills, 84% of it duplicated.
+#
+# Now every section has its own key and a TTL matched to how fast that data really moves,
+# and every range-INDEPENDENT section is keyed on the SYMBOL ALONE — which is the whole
+# saving, since `chart_data` is the only field the range actually reaches. Same shape as
+# commodity_service (migration 149) and index_service.
+#
+# The TTL travels WITH the entry rather than being supplied by the reader: the writer knows
+# the section's volatility, so a reader cannot mismatch it. `_cache_get` still honours an
+# explicit ttl argument for the call sites that predate this.
 
-_cache: Dict[str, Tuple[float, Any]] = {}
-_CACHE_TTL_SECONDS = 300  # 5 minutes for market data
+_cache: Dict[str, Tuple] = {}
+_CACHE_TTL_SECONDS = 300  # default when a writer declares nothing
 _AI_CACHE_TTL_SECONDS = 3600  # 1 hour for AI-generated snapshots
-_SP_HIST_CACHE_TTL = 3600  # 1 hour for S&P 500 historical (shared across ETFs)
+# 12h, not 1h: the S&P history is daily EOD bars shared by every ETF on the platform, and
+# it only changes at a close. At 1h it was re-pulled ~11x a day for no new data.
+_SP_HIST_CACHE_TTL = 43_200
+
+# Per-section TTLs, ordered by how fast the underlying data actually moves.
+_QUOTE_TTL = 45             # live price + the quote-derived key-stat rows
+_RELATED_TTL = 60           # sibling ETF quotes — same data class, less prominent
+_INTRADAY_CHART_TTL = 60    # 1D/1W bars; the only genuinely per-range fetch
+_HISTORY_TTL = 43_200       # 12h — daily EOD bars only change at the close
+_DERIVED_TTL = 43_200       # 12h — performance periods + benchmark, both from history
+_FUNDAMENTALS_TTL = 43_200  # 12h — profile, etf-info, holdings, sectors, dividends
+
 # Hard cap on live entries — see stock_overview_service for rationale. Eviction
 # is least-recently-written; a miss just re-fetches (no correctness impact).
 _CACHE_MAX_ENTRIES = 1024
 
 
-def _cache_get(key: str, ttl: float = _CACHE_TTL_SECONDS) -> Optional[Any]:
+def _cache_get(key: str, ttl: Optional[float] = None) -> Optional[Any]:
     entry = _cache.get(key)
     if entry is None:
         return None
-    ts, value = entry
-    if time.time() - ts > ttl:
+    ts, value, entry_ttl = entry
+    # An explicit reader TTL still wins, for the sites that predate per-entry TTLs.
+    if time.time() - ts > (entry_ttl if ttl is None else ttl):
         del _cache[key]
         return None
     return value
 
 
-def _cache_set(key: str, value: Any):
+def _cache_set(key: str, value: Any, ttl: Optional[float] = None) -> None:
     _cache.pop(key, None)
-    _cache[key] = (time.time(), value)
+    _cache[key] = (time.time(), value, ttl or _CACHE_TTL_SECONDS)
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# Thundering-herd guard, keyed on the FULL request shape because the assembled response is
+# range-specific. This service had none: N concurrent viewers of a cold SPY each ran the
+# entire fan-out. The per-section fetchers dedup through their own keys within one build.
+_inflight: Dict[str, asyncio.Future] = {}
 
 
 # ── Related ETF mappings ─────────────────────────────────────────
@@ -216,6 +250,33 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
     return None
 
 
+def _revalidate_rows(model, rows: Any, symbol: str, label: str) -> List[Any]:
+    """Rebuild response models from a Tier-2 payload, dropping anything that no longer fits.
+
+    A persisted row is JSON that a PREVIOUS deploy's schema wrote, so it can be missing a
+    field this one requires. `Model(**row)` would then raise a ValidationError out of the
+    middle of the build and 500 the whole screen — for up to 12 hours, for every viewer of
+    that symbol, with no way to self-heal short of the TTL expiring.
+
+    Drop the bad rows and log loudly instead. An empty Performance card is a visible,
+    recoverable degradation; a 500 is not. (Related trap, from an earlier pass: an additive
+    field with a DEFAULT is worse still — it laundered stale rows into a confident wrong
+    value. Always ask what a cached row lacking the new key deserializes into.)
+    """
+    out = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            out.append(model(**row))
+        except Exception as e:
+            logger.warning(
+                "ETF tier-2 %s row for %s failed revalidation (stale schema?): %s: %s",
+                label, symbol, type(e).__name__, e,
+            )
+    return out
+
+
 def _get_market_status() -> MarketStatusResponse:
     """Current session, delegated to the one holiday/half-day-aware implementation.
 
@@ -237,7 +298,6 @@ def _format_date_readable(date_str: str) -> str:
 # ── Main service ─────────────────────────────────────────────────
 
 
-_ETF_DB_TTL_HOURS = 24  # 24 hours in Supabase for ETF fundamentals
 
 
 class ETFService:
@@ -256,261 +316,545 @@ class ETFService:
         built for. See the comment at the cache check in `get_etf_detail`."""
         return f"{symbol.upper()}_{chart_range}_{interval or 'default'}"
 
-    async def _refresh_volatile(
-        self, response: "ETFDetailResponse", symbol: str
-    ) -> None:
-        """Overwrite a CACHED response's price fields with a live quote, in place.
+    # ── Tier 2 (Supabase `etf_snapshot_cache`) ────────────────────
+    #
+    # The table already exists with UNIQUE(symbol, category) (migration 034) and already
+    # serves the three side-endpoints, so the decomposition needs NO new migration — only
+    # new category strings: `fundamentals`, `derived`, and `chart:{range}:{interval}`.
+    #
+    # Only sections that CANNOT contain a live price are persisted. That is what removes
+    # the whole class of bug `_refresh_volatile` existed to patch: the monolith froze
+    # `current_price` into a 24-hour row, so a cache hit served a day-old price and the
+    # quote-derived key stats alongside it. Here the quote and the related quotes are
+    # Tier-1 only, so a Tier-2 hit still renders a price fetched seconds ago.
+    #
+    # `get_supabase()` is imported inside rather than read off `self`: the tests build this
+    # service with `__new__`, so `__init__` never runs and `self.supabase` would not exist.
 
-        Best-effort: any failure leaves the cached values and logs. Only the volatile
-        fields move — the expensive cached bundle (holdings, sector weights, dividends,
-        AI snapshots) is untouched.
+    _TIER2_TTL_HOURS = 12
+
+    @staticmethod
+    def _tier2_get(symbol: str, category: str) -> Optional[Any]:
+        """Read one cached section, or None. Never raises.
+
+        Accepts a list OR a dict payload — `chart` persists a list of bars, and the older
+        `_check_snapshot_cache` rejects anything that is not a dict.
         """
         try:
-            quote = await self.fmp.get_stock_price_quote(symbol)
-        except Exception as e:
-            logger.warning(
-                "ETF volatile refresh failed for %s: %s: %s — serving cached price",
-                symbol, type(e).__name__, e,
-            )
-            return
-        if not isinstance(quote, dict) or not quote:
-            return
-        price = _finite_num(quote.get("price"))
-        if not price or price <= 0:
-            return
-        change = _finite_num(quote.get("change"))
-        pct = quote.get("changePercentage")
-        pct = _finite_num(pct) if pct is not None else _finite_num(quote.get("changesPercentage"))
-        # Captured BEFORE the overwrite: the NAV row is only quote-derived when it was
-        # rendered from the price itself (no real navPrice), and that test has to compare
-        # against the price the row was BUILT from, not the one replacing it.
-        stale_price = response.current_price
+            from app.database import get_supabase
 
-        response.current_price = price
-        response.price_change = change
-        response.price_change_percent = pct
-        response.market_status = _get_market_status()
-
-        # ...and the QUOTE-DERIVED KEY STATISTICS, which this method used to leave alone.
-        #
-        # The cached bundle is up to 24h old and carries more than a price: NAV (which
-        # falls back to `price`), 52-week high/low and the 50-day average all come from
-        # the SAME quote as the header. Refreshing only the four fields above meant a
-        # 23-hour-old row served a live header sitting on top of yesterday's 52-week high
-        # — the numbers disagreed with each other on one screen, which is exactly the
-        # staleness `_refresh_volatile` exists to prevent, applied to only part of its
-        # own surface.
-        #
-        # Rewrites values BY LABEL rather than rebuilding the section: the builder takes
-        # fifteen inputs, most of which (expense ratio, holdings count, turnover,
-        # inception) are not recoverable from the response and are not quote-derived
-        # anyway. A label absent from the payload is simply skipped.
-        fresh: Dict[str, str] = {}
-        year_high = _finite_num(quote.get("yearHigh"))
-        year_low = _finite_num(quote.get("yearLow"))
-        price_avg_50 = _finite_num(quote.get("priceAvg50"))
-        if year_high:
-            fresh["52W High"] = _fmt_dollar(year_high)
-        if year_low:
-            fresh["52W Low"] = _fmt_dollar(year_low)
-        if price_avg_50:
-            fresh["50-Day Avg"] = _fmt_dollar(price_avg_50)
-        # NAV is `navPrice` when the ETF info carries one, else the live price. Only the
-        # price-derived case moves here — a real NAV is not a quote field.
-        # `getattr`, not attribute access: this runs against whatever the caller cached,
-        # and a payload without a key-stats section must degrade, not raise mid-request.
-        _flat = getattr(response, "key_statistics", None) or []
-        _groups = getattr(response, "key_statistics_groups", None) or []
-        if _flat:
-            for item in _flat:
-                if item.label == "NAV" and item.value == _fmt_dollar(stale_price):
-                    fresh["NAV"] = _fmt_dollar(price)
-                    break
-
-        if fresh:
-            for item in _flat:
-                if item.label in fresh:
-                    item.value = fresh[item.label]
-            for group in _groups:
-                for item in getattr(group, "statistics", None) or []:
-                    if item.label in fresh:
-                        item.value = fresh[item.label]
-
-    def _check_etf_db_cache(
-        self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Check Supabase etf_detail_cache (24h TTL), scoped to the chart shape.
-
-        DEPLOY NOTE: the `cache_key` column arrives in migration 148. Until that is
-        applied this SELECT errors on the unknown column, the except below logs it, and
-        the method returns None — i.e. the Supabase tier is simply INACTIVE and every
-        request rebuilds. That is slower but CORRECT; the previous symbol-only key was
-        fast and wrong (it served whichever range was cached first). The 5-minute
-        in-memory tier still absorbs bursts in the meantime.
-        """
-        cache_id = self._cache_key(symbol, chart_range, interval)
-        try:
             row = (
-                self.supabase.table("etf_detail_cache")
+                get_supabase()
+                .table("etf_snapshot_cache")
                 .select("response_json, cached_at")
-                .eq("cache_key", cache_id)
+                .eq("symbol", symbol)
+                .eq("category", category)
                 .limit(1)
                 .execute()
             )
             if not row.data:
                 return None
-
             entry = row.data[0]
-            cached_at_str = entry.get("cached_at")
-            if not cached_at_str:
+            cached_at = datetime.fromisoformat(
+                (entry.get("cached_at") or "").replace("Z", "+00:00")
+            )
+            if datetime.now(timezone.utc) - cached_at > timedelta(
+                hours=ETFService._TIER2_TTL_HOURS
+            ):
                 return None
-
-            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
-            age = datetime.now(timezone.utc) - cached_at
-            if age > timedelta(hours=_ETF_DB_TTL_HOURS):
-                logger.info(f"ETF Supabase STALE (age={age}) for {cache_id}")
-                return None
-
-            data = entry.get("response_json")
-            if data and isinstance(data, dict):
-                logger.info(f"ETF Supabase HIT for {cache_id} (age={age})")
-                return data
-            return None
+            return entry.get("response_json")
         except Exception as e:
-            logger.warning(f"ETF Supabase check failed for {symbol}: {e}")
+            logger.warning(
+                "ETF tier-2 read failed for %s/%s: %s: %s",
+                symbol, category, type(e).__name__, e,
+            )
             return None
 
-    def _upsert_etf_db_cache(
-        self, symbol: str, data: Dict[str, Any],
-        chart_range: str = "3M", interval: Optional[str] = None,
-    ) -> None:
-        """Upsert ETF detail into Supabase cache, keyed by the chart shape.
-
-        DEPLOY NOTE: `cache_key` and its unique index arrive in migration 148; until
-        applied this upsert fails on the unknown column and is logged, leaving the
-        Supabase tier inactive. See `_check_etf_db_cache`.
-        """
-        cache_id = self._cache_key(symbol, chart_range, interval)
+    @staticmethod
+    def _tier2_put(symbol: str, category: str, payload: Any) -> None:
+        """Persist one section. Best-effort; a failure only costs a rebuild."""
         try:
-            self.supabase.table("etf_detail_cache").upsert(
+            from app.database import get_supabase
+
+            get_supabase().table("etf_snapshot_cache").upsert(
                 {
-                    "cache_key": cache_id,
                     "symbol": symbol,
-                    "chart_range": chart_range,
-                    "interval": interval,
-                    "response_json": data,
+                    "category": category,
+                    "response_json": payload,
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
-                on_conflict="cache_key",
+                on_conflict="symbol,category",
             ).execute()
-            logger.info(f"ETF detail cached in Supabase for {cache_id}")
         except Exception as e:
-            logger.warning(f"ETF Supabase upsert failed for {cache_id}: {e}")
+            logger.warning(
+                "ETF tier-2 write failed for %s/%s: %s: %s",
+                symbol, category, type(e).__name__, e,
+            )
+
+    # ── Per-section fetchers ──────────────────────────────────────
+    #
+    # Every one of these except `_get_chart` is keyed on the SYMBOL ALONE, deliberately:
+    # none of them depends on the chart range. That is the entire saving — the quote, the
+    # 1.1 MB history and the five fundamentals calls used to be re-issued once per pill.
+
+    async def _get_quote(self, symbol: str) -> Dict[str, Any]:
+        """Live quote. Range-independent, so every range pill shares one fetch."""
+        key = f"etf:quote:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            quote = await self.fmp.get_stock_price_quote(symbol)
+        except Exception as e:
+            logger.warning(
+                "ETF quote fetch failed for %s: %s: %s", symbol, type(e).__name__, e
+            )
+            return {}
+        if not isinstance(quote, dict) or not quote:
+            return {}
+        # Only a usable quote is cached — caching {} would pin a blank price header for
+        # the whole TTL.
+        _cache_set(key, quote, _QUOTE_TTL)
+        return quote
+
+    async def _get_fundamentals(self, symbol: str) -> Dict[str, Any]:
+        """Profile + etf-info + holders + sector weights + dividends, as one 12h section.
+
+        Five FMP calls that change at a corporate action, not at a tick, and that the old
+        code re-issued on every range pill. Persisted, because none of them carries a live
+        price — the `profile` payload does, so it is stored as an explicit PROJECTION of
+        the fields this service actually reads rather than raw.
+
+        Dividends are fetched at limit=100 (what `get_dividend_history` wants) rather than
+        the detail's 20, so the dividends endpoint can share this section without silently
+        losing 80 rows. The detail slices what it needs.
+        """
+        key = f"etf:fund:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
+        db = await asyncio.to_thread(self._tier2_get, symbol, "fundamentals")
+        if isinstance(db, dict) and db:
+            logger.info("ETF fundamentals tier-2 HIT for %s", symbol)
+            _cache_set(key, db, _FUNDAMENTALS_TTL)
+            return db
+
+        results = await asyncio.gather(
+            self.fmp.get_company_profile(symbol),
+            self.fmp.get_etf_info(symbol),
+            self.fmp.get_etf_holders(symbol, limit=20),
+            self.fmp.get_etf_sector_weightings(symbol),
+            self.fmp.get_dividend_history(symbol, limit=100),
+            return_exceptions=True,
+        )
+        names = ("profile", "etf_info", "holders", "sector_weights", "dividends")
+        for name, r in zip(names, results):
+            if isinstance(r, Exception):
+                logger.error(
+                    "ETF %s fetch failed for %s: %s: %s",
+                    name, symbol, type(r).__name__, r,
+                )
+
+        def _ok(i, default):
+            r = results[i]
+            return default if isinstance(r, Exception) or r is None else r
+
+        profile = _ok(0, {})
+        bundle = {
+            # A PROJECTION, not the raw profile: `get_company_profile` returns `price` and
+            # `changes`, and persisting those for 12h is exactly the stale-price bug this
+            # design refuses to have. Only the price-free fields this service reads.
+            "profile": {
+                k: profile.get(k)
+                for k in (
+                    "companyName", "beta", "averageVolume", "lastDividend", "lastDiv",
+                    "website", "description", "ipoDate", "marketCap",
+                )
+            } if isinstance(profile, dict) else {},
+            "etf_info": _ok(1, {}),
+            "holders": _ok(2, []),
+            "sector_weights": _ok(3, []),
+            "dividends": _ok(4, []),
+        }
+
+        # Degradation gate: a bundle where every call failed would pin an empty Holdings
+        # tab, a blank expense ratio and a dashed dividend row for 12 hours.
+        if not any([bundle["etf_info"], bundle["holders"], bundle["profile"]]):
+            logger.warning(
+                "ETF fundamentals NOT cached for %s — every upstream call failed; "
+                "will rebuild on the next request", symbol,
+            )
+            return bundle
+
+        _cache_set(key, bundle, _FUNDAMENTALS_TTL)
+        await asyncio.to_thread(self._tier2_put, symbol, "fundamentals", bundle)
+        return bundle
+
+    async def _get_history(self, symbol: str) -> List[Dict]:
+        """FULL daily history, oldest-first. Range-independent and 12h-cached.
+
+        `_fetch_all_daily` rather than a single `from_date="1900-01-01"` call: FMP caps a
+        response at 5,000 rows, so the old one-shot fetch silently TRUNCATED any ETF with
+        more than ~19.8 years of history — SPY starts in 1993. Every daily-or-coarser
+        chart is now derived from this one list, so a truncated tail would show up as a
+        short ALL range and a wrong since-inception CAGR.
+
+        Deliberately Tier-1 only: ~1 MB per symbol, and reading that back out of Supabase
+        is slower than the FMP call it would replace.
+        """
+        key = f"etf:hist:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        # Per-section dedup, separate from the detail-level one. Two callers inside a
+        # SINGLE build (`_get_chart` and `_get_derived`) can both miss this key at the same
+        # instant, and the detail guard cannot help because it is keyed on the range — as
+        # are two concurrent users on different range pills of the same cold symbol.
+        # Measured: a cold build fetched the history TWICE without this.
+        if key in _inflight:
+            return await asyncio.shield(_inflight[key])
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        _inflight[key] = fut
+        try:
+            try:
+                from app.services.chart_helper import _fetch_all_daily
+                historical = await _fetch_all_daily(self.fmp, symbol)
+            except Exception as e:
+                logger.warning(
+                    "ETF history fetch failed for %s: %s: %s", symbol, type(e).__name__, e
+                )
+                historical = []
+            if historical:
+                # `date` may be an explicit JSON null; `or ""` avoids a None<str TypeError.
+                historical.sort(key=lambda p: p.get("date") or "")
+                _cache_set(key, historical, _HISTORY_TTL)
+            if not fut.done():
+                fut.set_result(historical)
+            return historical
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException and would leave the future unresolved,
+            # hanging every joiner for the life of the process.
+            if not fut.done():
+                fut.set_exception(RuntimeError("ETF history fetch was cancelled"))
+            raise
+        except Exception as e:
+            if not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            _inflight.pop(key, None)
+
+    async def _get_spy_history(self) -> List[Dict]:
+        """The S&P 500 benchmark series, shared by every ETF on the platform.
+
+        Delegates to `_get_history("SPY")` rather than keeping a second body: both want
+        SPY's full daily series, and two functions writing the same key is how one of them
+        silently drifts. It also inherits the `_fetch_all_daily` paging — the benchmark
+        CAGR is computed from the FIRST available date, so a 5,000-row truncation would
+        move the "since" date and change the number on screen.
+        """
+        return await self._get_history("SPY")
+
+    async def _get_derived(self, symbol: str, index_tracked: str = "") -> Dict[str, Any]:
+        """Everything computed FROM the two histories: performance periods + benchmark.
+
+        This is the section that makes Tier 2 worth having — both are pure functions of a
+        multi-thousand-row history, so persisting them lets a cold process serve a full
+        screen without ever pulling the 1.1 MB. Neither reads the live quote, so nothing
+        stale can hide in here.
+        """
+        key = f"etf:derived:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
+        db = await asyncio.to_thread(self._tier2_get, symbol, "derived")
+        if isinstance(db, dict) and db:
+            logger.info("ETF derived tier-2 HIT for %s", symbol)
+            _cache_set(key, db, _DERIVED_TTL)
+            return db
+
+        if symbol == "SPY":
+            # The benchmark IS this ETF. Gathering both would run two concurrent misses on
+            # one cache key and fetch the identical series twice.
+            historical = await self._get_history(symbol)
+            spy_hist = historical
+        else:
+            historical, spy_hist = await asyncio.gather(
+                self._get_history(symbol), self._get_spy_history()
+            )
+        perf = self._build_performance_periods(historical, spy_hist)
+        bench = self._build_benchmark_summary(
+            historical, spy_hist, symbol=symbol, index_tracked=index_tracked
+        )
+        derived = {
+            "performance_periods": [p.model_dump() for p in perf],
+            "benchmark_summary": bench.model_dump() if bench else None,
+        }
+
+        # Degradation gate: a failed or empty history yields an empty Performance card.
+        # Persisting that pins it for 12 hours.
+        if not historical:
+            logger.warning(
+                "ETF derived NOT persisted for %s (empty/failed history) — will rebuild "
+                "on the next request", symbol,
+            )
+            return derived
+
+        _cache_set(key, derived, _DERIVED_TTL)
+        await asyncio.to_thread(self._tier2_put, symbol, "derived", derived)
+        return derived
+
+    async def _get_chart(
+        self, symbol: str, chart_range: str, interval: Optional[str]
+    ) -> List[Dict]:
+        """Chart bars for one range, derived from the shared history wherever possible.
+
+        Only 1D (5min) and 1W (1hour) are genuinely sub-daily and need their own FMP call.
+        Everything daily-or-coarser comes out of the history we already hold:
+          * 3M/6M/1Y -> slice     (`_extract_chart_data`, as before)
+          * 5Y/ALL   -> aggregate (`_aggregate_prices`, which `fetch_chart_data` was
+                                   already calling — after re-fetching the very history we
+                                   are holding, and for ALL that meant up to 5 paged calls
+                                   on every single request)
+        """
+        from app.services.chart_helper import (
+            AGGREGATED_INTERVALS,
+            INTRADAY_INTERVALS,
+            _aggregate_prices,
+            fetch_chart_data,
+            resolve_interval,
+            window_by_range,
+        )
+
+        resolved = resolve_interval(chart_range, interval)
+        category = f"chart:{chart_range}:{resolved}"
+        # Non-intraday bars move at a close, so they persist. An intraday series must NOT:
+        # a 12h-old 5-minute chart would paint yesterday's session under a live header.
+        persistable = resolved not in INTRADAY_INTERVALS
+
+        if persistable:
+            db = await asyncio.to_thread(self._tier2_get, symbol, category)
+            if isinstance(db, list) and db:
+                # Filter on the way OUT, not just on the way in. These rows were written by
+                # a previous deploy, and iOS declares `close` non-optional on every chart
+                # point — one row without a usable close fails the whole screen's decode.
+                bars = [
+                    r for r in db
+                    if isinstance(r, dict) and isinstance(r.get("close"), (int, float))
+                    and math.isfinite(r["close"]) and r["close"] > 0
+                ]
+                if bars:
+                    logger.info("ETF chart tier-2 HIT for %s/%s", symbol, category)
+                    return bars
+                logger.warning(
+                    "ETF chart tier-2 row for %s/%s had no usable bars — rebuilding",
+                    symbol, category,
+                )
+
+        historical = (
+            [] if resolved in INTRADAY_INTERVALS else await self._get_history(symbol)
+        )
+
+        if resolved in AGGREGATED_INTERVALS and historical:
+            bars = _aggregate_prices(historical, resolved)
+            if chart_range != "ALL":
+                # ALL means the whole series; every other aggregated range is windowed —
+                # with the interval's indicator warm-up kept.
+                bars = window_by_range(bars, chart_range, resolved)
+            if bars:
+                await asyncio.to_thread(self._tier2_put, symbol, category, bars)
+            return bars
+
+        if resolved == "daily":
+            bars = self._extract_chart_data(historical, chart_range)
+            if bars:
+                await asyncio.to_thread(self._tier2_put, symbol, category, bars)
+            return bars
+
+        # Genuinely intraday (1D/1W): its own short-lived key, never persisted.
+        key = f"etf:chart:{symbol}:{chart_range}:{resolved}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            bars = await fetch_chart_data(self.fmp, symbol, chart_range, interval)
+        except Exception as e:
+            logger.warning(
+                "ETF intraday chart failed for %s %s: %s: %s",
+                symbol, chart_range, type(e).__name__, e,
+            )
+            return []
+        if bars:
+            _cache_set(key, bars, _INTRADAY_CHART_TTL)
+        return bars
+
+    async def _get_related(self, symbol: str) -> List[RelatedTickerResponse]:
+        """Related-ETF quotes. Range-independent, and previously not cached AT ALL —
+        `_build_related_etfs` ran its peers lookup and batch quote on every single build,
+        i.e. once per range pill."""
+        key = f"etf:related:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        related = await self._build_related_etfs(symbol)
+        # Partial is fine to serve but not to cache: pinning a short list for the TTL is
+        # how a "Related ETFs" row silently disappears for everyone.
+        if related:
+            _cache_set(key, related, _RELATED_TTL)
+        return related
+
+    # ── Main entry point ──────────────────────────────────────────
 
     async def get_etf_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> ETFDetailResponse:
+        """Cache-aside wrapper (Tier-1 + in-flight dedup) around the build.
+
+        The ASSEMBLED response keeps a SHORT TTL deliberately. Its expensive sections are
+        cached individually for 12h, so a rebuild here costs zero FMP calls when they are
+        warm — but the price header is part of this payload, and a 5-minute assembled TTL
+        would serve a 5-minute-old price on a screen whose whole point is a live quote.
+        Short outer TTL + long inner TTLs gives both.
+
+        The old Supabase tier for the whole payload is gone: it was a 24-hour row carrying
+        `current_price`, which is why `_refresh_volatile` had to exist at all.
         """
-        Fetch and assemble complete ETF detail data.
+        symbol = symbol.upper()
+        cache_key = self._cache_key(symbol, chart_range, interval)
+
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.info("ETF detail in-memory HIT for %s", cache_key)
+            return cached
+
+        # SHIELDED join: a joiner that gives up must not cancel the shared future and take
+        # every other waiter down with it.
+        if cache_key in _inflight:
+            logger.info("ETF detail in-flight JOIN for %s", cache_key)
+            return await asyncio.shield(_inflight[cache_key])
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _inflight[cache_key] = future
+        try:
+            result = await self._build_etf_detail(
+                symbol, chart_range=chart_range, interval=interval
+            )
+            # Never cache a degraded build: with the quote failed every price field is 0,
+            # and pinning that shows "$0.00" to every viewer for the whole TTL.
+            # `getattr`, not attribute access — the gate must judge only what it can
+            # inspect, and a test double has no price to assess.
+            price = getattr(result, "current_price", None)
+            if price is None or price > 0:
+                _cache_set(cache_key, result, _QUOTE_TTL)
+            else:
+                logger.warning(
+                    "ETF detail NOT cached for %s — no usable price (degraded build); "
+                    "will rebuild on the next request", cache_key,
+                )
+            if not future.done():
+                future.set_result(result)
+            return result
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it skips the handler below and would
+            # leave the future unresolved — every joiner would hang for the life of the
+            # process. Hand them a normal exception, then honour our own cancellation.
+            if not future.done():
+                future.set_exception(RuntimeError("ETF detail fetch was cancelled"))
+            raise
+        except Exception as e:
+            if not future.done():
+                future.set_exception(e)
+            raise
+        finally:
+            _inflight.pop(cache_key, None)
+
+    async def get_etf_quote(
+        self,
+        symbol: str,
+        chart_range: Optional[str] = None,
+        interval: Optional[str] = None,
+    ) -> "ETFQuoteResponse":
+        """The light slice behind `GET /etfs/{symbol}/quote`.
+
+        PROJECTED from the full build rather than assembled from a second, parallel set of
+        section builders. That is deliberate: every section is already cached, so the full
+        assembly costs ZERO extra FMP calls here, and a second assembly path for the same
+        fields is exactly how two code paths drift into disagreeing about one number.
+
+        What the client gains is the WIRE payload — roughly a fifth of the monolith, and
+        no need to replace its whole view model on a 30-second tick. The sections dropped
+        here (performance, benchmark, profile, identity, strategy, net yield, holdings)
+        are all range-independent and cannot change between refreshes.
+        """
+        from app.schemas.etf import ETFQuoteResponse
+
+        full = await self.get_etf_detail(
+            symbol, chart_range=chart_range or "3M", interval=interval
+        )
+        return ETFQuoteResponse(
+            symbol=full.symbol,
+            current_price=full.current_price,
+            price_change=full.price_change,
+            price_change_percent=full.price_change_percent,
+            market_status=full.market_status,
+            # Bars only when the caller asked for a range — the 30s loop skips them on a
+            # daily chart, where nothing below the last candle can have moved.
+            chart_data=full.chart_data if chart_range else [],
+            key_statistics=full.key_statistics,
+            key_statistics_groups=full.key_statistics_groups,
+            related_etfs=full.related_etfs,
+        )
+
+    async def _build_etf_detail(
+        self, symbol: str, chart_range: str = "3M", interval: str = None
+    ) -> ETFDetailResponse:
+        """
+        Assemble complete ETF detail data from the per-section caches.
 
         Steps:
-          1. Parallel FMP fetches (quote, profile, etf-info, holdings, sectors, dividends, history, news)
-          2. Compute key statistics and performance periods
+          1. Parallel, per-section cached fetches
+          2. Compute key statistics; read performance periods from `derived`
           3. Generate AI snapshots via Gemini (identity, strategy, net yield, holdings risk)
           4. Build related ETFs
           5. Assemble and return the response
         """
         symbol = symbol.upper()
 
-        # ── Cache check: in-memory (5 min) then Supabase (24h) ──
+        # ── Step 1: Parallel, per-section cached fetches ──────────
         #
-        # The key MUST carry chart_range and interval. This response's `chart_data` is
-        # built from them below, but the key used to be `f"etf_detail_{symbol}"` — so
-        # after opening SPY on the default 3M, tapping "1Y" returned the cached 3-month
-        # series under the 1Y label. Every range pill after the first was a silent
-        # no-op, for 5 minutes in-process and up to 24 hours from the Supabase row (i.e.
-        # for every other user too). Whichever range happened to be fetched first won.
-        cache_id = self._cache_key(symbol, chart_range, interval)
-        mem_key = f"etf_detail_{cache_id}"
-        cached = _cache_get(mem_key, _CACHE_TTL_SECONDS)
-        if cached is not None:
-            logger.info(f"ETF in-memory HIT for {cache_id}")
-            return cached
+        # All of these except the chart are keyed on the SYMBOL alone and shared by every
+        # range pill. They used to be re-fetched per range: 7 quotes, 7 x 1.1 MB of
+        # history, 7 profiles, 7 holdings lists. Still gathered concurrently, so a cold
+        # build is no slower than before.
+        #
+        # The news call that used to sit here is GONE. It cost one FMP call per build for
+        # a field iOS never reads — `toNewsArticles()` is defined and called nowhere, and
+        # both ViewModels load news from `GET /etfs/{symbol}/news` instead.
+        # `news_articles` stays in the response as its schema default `[]`, because the
+        # Swift DTO is non-optional and omitting the key fails the WHOLE screen's decode.
+        quote, fundamentals, chart_data, related_etfs = await asyncio.gather(
+            self._get_quote(symbol),
+            self._get_fundamentals(symbol),
+            self._get_chart(symbol, chart_range, interval),
+            self._get_related(symbol),
+        )
 
-        db_data = self._check_etf_db_cache(symbol, chart_range, interval)
-        if db_data is not None:
-            try:
-                response = ETFDetailResponse(**db_data)
-                _cache_set(mem_key, response)
-                # A row up to 24h old carries a 24h-old price. The ETF screen does have
-                # a live-price socket, but it only runs during market hours and only
-                # after it connects — the first paint is whatever we return here.
-                await self._refresh_volatile(response, symbol)
-                return response
-            except Exception as e:
-                logger.warning(f"ETF Supabase data invalid for {symbol}: {e}")
+        profile = fundamentals.get("profile") or {}
+        etf_info = fundamentals.get("etf_info") or {}
+        holders = fundamentals.get("holders") or []
+        sector_weights = fundamentals.get("sector_weights") or []
+        # The detail card shows a short table; the dedicated endpoint wants all 100.
+        dividends = (fundamentals.get("dividends") or [])[:20]
+        news_raw: List[Dict[str, Any]] = []
 
-        # ── Step 1: Parallel FMP fetches ──────────────────────────
-        today = datetime.now(tz=timezone.utc).date()
-        from_date = "1900-01-01"  # Fetch full history — FMP returns from actual inception
-        to_date = today.isoformat()
-
-        # Check SPY historical cache (shared across all ETF requests, 1h TTL)
-        sp_cache_key = f"spy_hist_full:{to_date}"
-        cached_spy = _cache_get(sp_cache_key, _SP_HIST_CACHE_TTL)
-
-        # Build tasks — add SPY fetch only if not cached
-        tasks = [
-            self.fmp.get_stock_price_quote(symbol),        # 0
-            self.fmp.get_company_profile(symbol),           # 1
-            self.fmp.get_etf_info(symbol),                  # 2
-            self.fmp.get_etf_holders(symbol, limit=20),     # 3
-            self.fmp.get_etf_sector_weightings(symbol),     # 4
-            self.fmp.get_dividend_history(symbol, limit=20), # 5
-            self.fmp.get_historical_prices(symbol, from_date, to_date),  # 6
-            self.fmp.get_stock_news(symbol, limit=10),      # 7
-        ]
-        spy_task_idx = None
-        if cached_spy is None:
-            spy_task_idx = len(tasks)
-            tasks.append(self.fmp.get_historical_prices("SPY", from_date, to_date))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        def _safe(i, default={}):
-            r = results[i] if i < len(results) else default
-            return default if isinstance(r, Exception) else r
-
-        quote = _safe(0)
-        profile = _safe(1)
-        etf_info = _safe(2)
-        holders = _safe(3, [])
-        sector_weights = _safe(4, [])
-        dividends = _safe(5, [])
-        hist_raw = _safe(6)
-        news_raw = _safe(7, [])
-
-        for i, r in enumerate(results):
-            if isinstance(r, Exception):
-                logger.error(f"ETF FMP call {i} failed for {symbol}: {r}")
-
-        # Parse ETF historical prices (sorted oldest-first)
-        historical: List[Dict] = []
-        if isinstance(hist_raw, dict):
-            historical = hist_raw.get("historical", [])
-        elif isinstance(hist_raw, list):
-            historical = hist_raw
-        historical.sort(key=lambda p: p.get("date") or "")
-
-        # Parse SPY historical prices
-        if cached_spy is not None:
-            spy_hist = cached_spy
-        else:
-            spy_raw = _safe(spy_task_idx) if spy_task_idx is not None else {}
-            spy_hist_raw = spy_raw.get("historical", []) if isinstance(spy_raw, dict) else (spy_raw if isinstance(spy_raw, list) else [])
-            spy_hist = sorted(spy_hist_raw, key=lambda p: p.get("date") or "")
-            if spy_hist:
-                _cache_set(sp_cache_key, spy_hist)
+        # NOTE: the raw histories are deliberately NOT bound here. Everything that needed
+        # them (chart bars, performance periods, benchmark CAGR) now reads a cached
+        # section instead, and a local holding ~1 MB that nothing reads is the same dead
+        # assignment `index_service` carried for months.
 
         # ── Step 2: Extract quote data ────────────────────────────
         # _finite_num (not raw float) — FMP can emit a NaN/Infinity JSON token for
@@ -577,13 +921,10 @@ class ETFService:
         if not dividend_yield and last_div_dollar > 0 and price > 0:
             dividend_yield = round((last_div_dollar / price) * 100, 2)
 
-        # ── Step 3: Build chart data ──────────────────────────────
-        from app.services.chart_helper import fetch_chart_data, resolve_interval
-        resolved = resolve_interval(chart_range, interval)
-        if resolved != "daily" or chart_range == "ALL":
-            chart_data = await fetch_chart_data(self.fmp, symbol, chart_range, interval)
-        else:
-            chart_data = self._extract_chart_data(historical, chart_range)
+        # Step 3 (build chart data) is gone: `chart_data` now arrives from `_get_chart`
+        # in step 1, which derives 5Y/ALL from the shared history instead of re-fetching
+        # it. The old branch called `fetch_chart_data` for 1D/1W/5Y/ALL, and for ALL that
+        # was `_fetch_all_daily` — up to 5 paged calls — on EVERY request.
 
         # ── Step 4: Build key statistics ──────────────────────────
         key_statistics, key_statistics_groups = self._build_key_statistics(
@@ -604,8 +945,14 @@ class ETFService:
             index_tracked=index_tracked,
         )
 
-        # ── Step 5: Build performance periods (vs S&P 500) ─────────
-        perf_periods = self._build_performance_periods(historical, spy_hist)
+        # ── Step 5: Performance periods + benchmark (vs S&P 500) ───
+        # Both are pure functions of the two histories, so they live in the 12h `derived`
+        # section and survive a redeploy without re-pulling the 1.1 MB. Re-validated
+        # rather than trusted: a Tier-2 row is JSON that a previous schema wrote.
+        derived = await self._get_derived(symbol, index_tracked=index_tracked)
+        perf_periods = _revalidate_rows(
+            PerformancePeriodResponse, derived.get("performance_periods"), symbol, "performance"
+        )
 
         # ── Step 6: Build holdings & sector data ──────────────────
         top_holdings = self._build_top_holdings(holders)
@@ -682,10 +1029,13 @@ class ETFService:
             dividend_history=dividend_payments,
         )
 
-        # ── Step 10: Build related ETFs ───────────────────────────
-        related_etfs = await self._build_related_etfs(symbol)
+        # Step 10 (related ETFs) now arrives from `_get_related` in step 1 — it used to
+        # run its peers lookup and batch quote on every range pill.
 
-        # ── Step 11: Build news ───────────────────────────────────
+        # ── Step 11: News ─────────────────────────────────────────
+        # `news_raw` is permanently `[]`: the FMP news call was dropped from the fan-out
+        # because iOS never reads this field. The key still ships (schema default `[]`)
+        # because the Swift DTO is non-optional and omitting it fails the whole decode.
         news_articles = self._build_news(news_raw if isinstance(news_raw, list) else [])
 
         # ── Step 12: Build profile ────────────────────────────────
@@ -716,7 +1066,12 @@ class ETFService:
         )
 
         # ── Step 14: Benchmark summary (proper CAGR) ────────────────
-        benchmark = self._build_benchmark_summary(historical, spy_hist, symbol=symbol, index_tracked=index_tracked)
+        # Read from the same `derived` bundle built in step 5. It is a function of the two
+        # histories alone — no live price — which is why it is safe to persist.
+        _bench = _revalidate_rows(
+            BenchmarkSummaryResponse, [derived.get("benchmark_summary")], symbol, "benchmark"
+        )
+        benchmark = _bench[0] if _bench else None
 
         # ── Assemble response ─────────────────────────────────────
         response = ETFDetailResponse(
@@ -740,26 +1095,11 @@ class ETFService:
             news_articles=news_articles,
         )
 
-        # ── Cache in both tiers ──────────────────────────────────
-        # Never persist a degraded build: with the quote call failed every price field
-        # is 0, and a 24-hour row of `current_price: 0.0` shows "$0.00" to every viewer
-        # of this ETF until it expires. The 5-minute memory tier still absorbs a retry
-        # storm. Mirrors profit_power_service's degraded gate.
-        etf_degraded = not price or price <= 0
-        if etf_degraded:
-            logger.warning(
-                "ETF detail NOT persisted for %s (degraded: price<=0) — will rebuild "
-                "after the in-memory TTL", symbol,
-            )
-        else:
-            _cache_set(mem_key, response)
-            try:
-                self._upsert_etf_db_cache(
-                    symbol, response.model_dump(), chart_range, interval
-                )
-            except Exception as e:
-                logger.warning(f"ETF Supabase background cache failed for {symbol}: {e}")
-
+        # Caching of the ASSEMBLED response (and its degraded-build gate) belongs to
+        # `get_etf_detail`, which owns the in-flight future. The old Supabase upsert of the
+        # whole payload is gone: a 24-hour row carrying `current_price` is precisely what
+        # made `_refresh_volatile` necessary. Every expensive section is persisted
+        # individually now, and not one of them can contain a price.
         return response
 
     # ── Unified Snapshot Cache (etf_snapshot_cache) ────────────────
@@ -842,8 +1182,14 @@ class ETFService:
             except Exception as e:
                 logger.warning(f"Dividend snapshot data invalid for {symbol}: {e}")
 
-        # ── Fetch from FMP ──────────────────────────────────────
-        raw_dividends = await self.fmp.get_dividend_history(symbol, limit=100)
+        # ── Read the SHARED fundamentals section ────────────────
+        # These are the same FMP calls the detail fan-out makes. Going through
+        # `_get_fundamentals` means opening the ETF screen and then this endpoint costs
+        # ZERO extra FMP calls, instead of re-issuing the identical requests.
+        # The shared section fetches limit=100 precisely so THIS endpoint can use it —
+        # the detail card only renders 20, but truncating the section would silently cost
+        # this screen 80 rows.
+        raw_dividends = (await self._get_fundamentals(symbol)).get("dividends") or []
         if not raw_dividends:
             logger.warning(f"No dividend data from FMP for {symbol}")
             return ETFDividendHistoryResponse(
@@ -916,20 +1262,15 @@ class ETFService:
             except Exception as e:
                 logger.warning(f"Profile snapshot data invalid for {symbol}: {e}")
 
-        # ── Fetch from FMP (2 parallel calls) ───────────────────
-        results = await asyncio.gather(
-            self.fmp.get_etf_info(symbol),
-            self.fmp.get_company_profile(symbol),
-            return_exceptions=True,
-        )
-
-        etf_info = results[0] if not isinstance(results[0], Exception) else {}
-        profile = results[1] if not isinstance(results[1], Exception) else {}
-
-        if isinstance(results[0], Exception):
-            logger.error(f"Profile etf/info failed for {symbol}: {results[0]}")
-        if isinstance(results[1], Exception):
-            logger.error(f"Profile company/profile failed for {symbol}: {results[1]}")
+        # ── Read the SHARED fundamentals section ────────────────
+        # These are the same FMP calls the detail fan-out makes. Going through
+        # `_get_fundamentals` means opening the ETF screen and then this endpoint costs
+        # ZERO extra FMP calls, instead of re-issuing the identical requests.
+        # `profile` here is the price-free PROJECTION the section stores; every field this
+        # builder reads (description / companyName / ipoDate / website) is in it.
+        _fund = await self._get_fundamentals(symbol)
+        etf_info = _fund.get("etf_info") or {}
+        profile = _fund.get("profile") or {}
 
         # ── Build profile ───────────────────────────────────────
         description = etf_info.get("description") or profile.get("description") or ""
@@ -1006,21 +1347,13 @@ class ETFService:
             except Exception as e:
                 logger.warning(f"HoldingsRisk snapshot data invalid for {symbol}: {e}")
 
-        # ── Fetch from FMP (2 parallel calls) ───────────────────
-        etf_info_task = self.fmp.get_etf_info(symbol)
-        holders_task = self.fmp.get_etf_holders(symbol, limit=20)
-
-        results = await asyncio.gather(
-            etf_info_task, holders_task, return_exceptions=True
-        )
-
-        etf_info = results[0] if not isinstance(results[0], Exception) else {}
-        holders = results[1] if not isinstance(results[1], Exception) else []
-
-        if isinstance(results[0], Exception):
-            logger.error(f"HoldingsRisk etf/info failed for {symbol}: {results[0]}")
-        if isinstance(results[1], Exception):
-            logger.error(f"HoldingsRisk etf/holdings failed for {symbol}: {results[1]}")
+        # ── Read the SHARED fundamentals section ────────────────
+        # These are the same FMP calls the detail fan-out makes. Going through
+        # `_get_fundamentals` means opening the ETF screen and then this endpoint costs
+        # ZERO extra FMP calls, instead of re-issuing the identical requests.
+        _fund = await self._get_fundamentals(symbol)
+        etf_info = _fund.get("etf_info") or {}
+        holders = _fund.get("holders") or []
 
         # ── Build sectors from sectorsList ───────────────────────
         sectors_list = etf_info.get("sectorsList") or []
@@ -1174,15 +1507,15 @@ class ETFService:
         if not historical:
             return []
 
-        today = datetime.now(tz=timezone.utc).date()
-        range_days = {
-            "1D": 2, "1W": 7, "3M": 90, "6M": 180,
-            "1Y": 365, "5Y": 365 * 5, "ALL": 99999,
-        }
-        days = range_days.get(chart_range, 90)
-        cutoff = (today - timedelta(days=days)).isoformat()
+        from app.services.chart_helper import _finite_or_none, daily_range_days
 
-        from app.services.chart_helper import _finite_or_none
+        # The visible window PLUS the MA(200) warm-up, from the one shared definition.
+        # This service used to carry its own copy of the range map with NO warm-up in it,
+        # so the client's `TickerChartView.warmupCount` resolved to 0 and the moving
+        # average never drew on a daily chart. index_service and stock_overview_service
+        # always had the warm-up; these three never did.
+        today = datetime.now(tz=timezone.utc).date()
+        cutoff = (today - timedelta(days=daily_range_days(chart_range))).isoformat()
 
         result = []
         for p in historical:

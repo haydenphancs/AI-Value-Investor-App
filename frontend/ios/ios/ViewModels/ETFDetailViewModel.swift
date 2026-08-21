@@ -78,6 +78,20 @@ class ETFDetailViewModel: ObservableObject {
     init(etfSymbol: String) {
         self.etfSymbol = etfSymbol
 
+        // Seed the interval from the range's own default BEFORE the sinks are wired.
+        //
+        // `selectedChartRange` defaults to 3M (daily) while `ChartSettings.selectedInterval`
+        // defaults to `.fiveMin`, and the range sink is `.dropFirst()`-ed so it never fires
+        // for the initial value. Every cold open therefore requested `?range=3M&interval=5min`
+        // — a pair the picker cannot produce (`ChartTimeRange.allowedIntervals` excludes it),
+        // so the backend silently fell back to `daily` and cached the response under a key no
+        // later request would ever reuse. It also made `selectedInterval.isIntraday` true on a
+        // daily chart, which un-gated the 30-second refresh timer.
+        //
+        // Assigning here fires nothing: both sinks are registered below and drop their first
+        // value at subscribe time.
+        chartSettings.selectedInterval = selectedChartRange.defaultInterval
+
         // Observe chart range changes: auto-set default interval and manage timer
         $selectedChartRange
             .dropFirst()
@@ -264,6 +278,47 @@ class ETFDetailViewModel: ObservableObject {
         }
     }
 
+    /// Light refresh: merge the volatile slice into `etfData` IN PLACE.
+    ///
+    /// Replaces a `fetchChartForRange` call that, despite its name, re-requested the entire
+    /// detail payload and then did `self.etfData = response.toDisplayModel()` — a wholesale
+    /// replacement. Two consequences, both fixed here:
+    ///
+    ///  1. Every WebSocket tick that had landed since the last refresh was ERASED, on a
+    ///     30-second sawtooth, on a screen whose whole point is a live price. The
+    ///     live-patched last candle went with it.
+    ///  2. The poll re-fetched holdings, dividends, profile, strategy and performance —
+    ///     none of which can change in 30 seconds.
+    ///
+    /// The socket WINS over the REST snapshot: a tick is now, a snapshot is up to 45s old.
+    private func refreshLiveSlice(includeChart: Bool) async {
+        chartRequestToken += 1
+        let token = chartRequestToken
+        let range = selectedChartRange
+        do {
+            let light = try await repository.getETFQuote(
+                symbol: etfSymbol,
+                range: includeChart ? range.rawValue : nil,
+                interval: includeChart ? chartSettings.selectedInterval.rawValue : nil
+            )
+            // Drop a stale response so rapid range switching can't clobber a newer range.
+            guard token == self.chartRequestToken, let current = self.etfData else { return }
+
+            self.etfData = light.merged(
+                into: current,
+                livePrice: self.livePriceManager.livePrice,
+                liveChange: self.livePriceManager.livePriceChange,
+                liveChangePercent: self.livePriceManager.livePriceChangePercent,
+                includeChart: includeChart
+            )
+            if includeChart, !light.chartData.isEmpty {
+                self.chartDataVersion += 1
+            }
+        } catch {
+            print("⚠️ [ETFDetailVM] Live slice refresh failed: \(error)")
+        }
+    }
+
     /// Start live-price streaming + the chart-refresh timer if the market is active
     /// and we aren't already streaming. Idempotent, so any path that paints etfData
     /// (initial fetch OR a range change that supersedes it) can call it without
@@ -321,11 +376,15 @@ class ETFDetailViewModel: ObservableObject {
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
 
-                // Only refresh if market is active and we're on an intraday interval
-                guard self.chartSettings.selectedInterval.isIntraday,
-                      MarketHoursUtil.isMarketActive() else { continue }
+                guard MarketHoursUtil.isMarketActive() else { continue }
 
-                await self.fetchChartForRange(self.selectedChartRange)
+                // The LIGHT slice, not the whole detail payload. Bars only when the chart
+                // is intraday: on a daily chart a 30-second refresh cannot move a candle,
+                // so asking for them is pure payload. The price header refreshes either
+                // way — the old `isIntraday` guard froze it entirely on a daily chart.
+                await self.refreshLiveSlice(
+                    includeChart: self.chartSettings.selectedInterval.isIntraday
+                )
             }
         }
     }

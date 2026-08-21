@@ -741,6 +741,7 @@ class CommodityService:
             _aggregate_prices,
             fetch_chart_data,
             resolve_interval,
+            window_by_range,
         )
 
         resolved = resolve_interval(chart_range, interval)
@@ -764,8 +765,11 @@ class CommodityService:
         if resolved in AGGREGATED_INTERVALS and historical:
             bars = _aggregate_prices(historical, resolved)
             if chart_range != "ALL":
-                # ALL means the whole series; every other aggregated range is windowed.
-                bars = self._window_by_range(bars, chart_range)
+                # ALL means the whole series; every other aggregated range is windowed --
+                # with the interval's indicator warm-up kept, which the local copy of this
+                # trim silently dropped (5Y weekly lost ~210 leading bars, so MA(200) was
+                # blank across the whole chart).
+                bars = window_by_range(bars, chart_range, resolved)
             if bars:
                 await asyncio.to_thread(
                     self._tier2_put, tier2_key, fmp_symbol, "chart", bars
@@ -800,21 +804,6 @@ class CommodityService:
         if bars:
             _cache_set(key, bars, _INTRADAY_CHART_TTL)
         return bars
-
-    @staticmethod
-    def _window_by_range(bars: List[Dict[str, Any]], chart_range: str) -> List[Dict[str, Any]]:
-        """Trim aggregated bars to the requested window (ALL is handled by the caller)."""
-        from app.services.chart_helper import compute_date_range
-
-        try:
-            from_date, _to = compute_date_range(chart_range)
-        except Exception:
-            return bars
-        # `from_date` is Optional — a None means "no lower bound", and comparing a str
-        # against None raises. Return the full series rather than trimming to nothing.
-        if not from_date:
-            return bars
-        return [b for b in bars if (b.get("date") or "") >= from_date]
 
     async def _build_commodity_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
@@ -1112,15 +1101,15 @@ class CommodityService:
         if not historical:
             return []
 
-        today = datetime.now(tz=timezone.utc).date()
-        range_days = {
-            "1D": 2, "1W": 7, "3M": 90, "6M": 180,
-            "1Y": 365, "5Y": 365 * 5, "ALL": 99999,
-        }
-        days = range_days.get(chart_range, 90)
-        cutoff = (today - timedelta(days=days)).isoformat()
+        from app.services.chart_helper import _finite_or_none, daily_range_days
 
-        from app.services.chart_helper import _finite_or_none
+        # The visible window PLUS the MA(200) warm-up, from the one shared definition.
+        # This service used to carry its own copy of the range map with NO warm-up in it,
+        # so the client's `TickerChartView.warmupCount` resolved to 0 and the moving
+        # average never drew on a daily chart. index_service and stock_overview_service
+        # always had the warm-up; these three never did.
+        today = datetime.now(tz=timezone.utc).date()
+        cutoff = (today - timedelta(days=daily_range_days(chart_range))).isoformat()
 
         result = []
         for p in historical:

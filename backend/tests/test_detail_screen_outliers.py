@@ -422,72 +422,25 @@ def test_overview_insider_row_prints_the_unit_it_judged_on():
     assert "shares" in _fmt_share_flow(2.5, True)
 
 
-# ── 9. A cache hit must not serve a 24-hour-old price ────────────────────────
+# ── 9. RETIRED: the 24-hour-old price on a cache hit ─────────────────────────
 #
-# `etf_detail_cache` / `index_detail_cache` rows carry the REQUIRED price fields and live
-# for 24h, and both cache-hit paths returned them verbatim. The index screen has no
-# live-price WebSocket at all, so nothing corrected it afterwards. The fix re-quotes only
-# the volatile fields on a hit — and must degrade to the cached values, never to zero.
-
-class _StubFMP:
-    def __init__(self, quote):
-        self._quote = quote
-
-    async def get_stock_price_quote(self, _symbol):
-        if isinstance(self._quote, Exception):
-            raise self._quote
-        return self._quote
-
-
-def _stale_response():
-    import types
-
-    return types.SimpleNamespace(
-        current_price=100.0, price_change=1.0,
-        price_change_percent=1.0, market_status=None,
-    )
-
-
-def test_etf_cache_hit_is_requoted_in_place():
-    from app.services.etf_service import ETFService
-
-    svc = ETFService.__new__(ETFService)
-    svc.fmp = _StubFMP({"price": 212.5, "change": -3.5, "changePercentage": -1.62})
-    r = _stale_response()
-    asyncio.run(svc._refresh_volatile(r, "SPY"))
-    assert (r.current_price, r.price_change, r.price_change_percent) == (212.5, -3.5, -1.62)
-    assert r.market_status is not None, "the badge must be recomputed for NOW, not the row's age"
-
-
-@pytest.mark.parametrize("bad_quote", [
-    RuntimeError("FMP down"),
-    {},
-    {"price": float("nan")},
-    {"price": 0},
-    {"price": -1},
-])
-def test_a_failed_requote_keeps_the_cached_price_rather_than_zeroing_it(bad_quote):
-    """Degrading to 0 would be worse than the staleness it replaces."""
-    from app.services.etf_service import ETFService
-
-    svc = ETFService.__new__(ETFService)
-    svc.fmp = _StubFMP(bad_quote)
-    r = _stale_response()
-    asyncio.run(svc._refresh_volatile(r, "SPY"))
-    assert r.current_price == 100.0
-
-
-def test_index_requote_computes_the_percent_when_fmp_omits_it():
-    """FMP /stable sometimes sends neither spelling; commodity already falls back to
-    change/previousClose and the index path now does too."""
-    from app.services.index_service import IndexService
-
-    svc = IndexService.__new__(IndexService)
-    svc.fmp = _StubFMP({"price": 5000.0, "change": 25.0, "previousClose": 4975.0})
-    r = _stale_response()
-    asyncio.run(svc._refresh_volatile(r, "^GSPC"))
-    assert r.current_price == 5000.0
-    assert r.price_change_percent == pytest.approx(0.5025, abs=1e-3)
+# `etf_detail_cache` / `index_detail_cache` rows carried the REQUIRED price fields and
+# lived for 24h, and both cache-hit paths returned them verbatim; the index screen has no
+# live-price WebSocket to correct it afterwards. `_refresh_volatile` re-quoted the volatile
+# fields on every hit — first four of them, then (after the stale-key-statistics fix) the
+# quote-derived key statistics too.
+#
+# Both it and the whole-payload Supabase rows are GONE. The per-section decomposition
+# persists only sections that cannot contain a price, so a Tier-2 hit renders a quote
+# fetched seconds ago and there is nothing to re-quote. The tests that lived here are
+# superseded by a STRONGER invariant that would have caught the stale-key-statistics bug
+# before it shipped, rather than asserting the patch for it:
+#
+#     test_etf_tier2_never_persists_a_price     (section 24)
+#     test_index_tier2_never_persists_a_price   (section 25)
+#
+# Those drive a full 7-range build and assert that NO persisted payload contains a
+# live-quote field. Do not restore a re-quote helper without first deleting them.
 
 
 def test_etf_market_status_follows_the_real_new_york_clock():
@@ -1686,133 +1639,904 @@ async def test_an_empty_history_is_not_persisted(monkeypatch):
     )
 
 
-# ── 23. A live header must not sit on day-old key statistics ─────────
+# ── 24. ETF: per-section caching ─────────────────────────────────────
 #
-# `_refresh_volatile` exists because an ETF/index row can be 24h old and there is no
-# dependable live socket on those screens to correct it. But it refreshed only FOUR
-# fields — price, change, change %, market status — while the SAME cached payload also
-# carries quote-derived key statistics: ETF's 52-week high/low and 50-day average,
-# index's Open / Previous Close / Day High / Day Low / Volume.
-#
-# So a 23-hour-old row served a LIVE price above YESTERDAY's day-high: two numbers on one
-# screen, from one quote, disagreeing about which day it is. Same class as everything else
-# in this series — a fix that never covered its own surface.
+# Same defect commodity had, worse: ONE key carrying range+interval over a payload whose
+# only range-dependent field is `chart_data`. Measured in production: ~104 FMP calls and
+# ~10 MB of byte-identical daily history to browse one ETF's 7 range pills, 84% duplicated.
+# 5Y re-fetched nearly the whole history and ALL re-ran `_fetch_all_daily` (up to 5 paged
+# calls) on EVERY request.
 
 
-def _stale_etf_response():
-    # Each detail schema declares its OWN KeyStatisticItem/Group — import the ETF pair,
-    # not another screen's, so the test builds exactly what the service will mutate.
-    from app.schemas.etf import (
-        ETFDetailResponse,
-        KeyStatisticItem,
-        KeyStatisticsGroupResponse,
-    )
+def _isolate_etf_tier2(monkeypatch, store=None):
+    """Replace the Supabase tier with an in-process dict.
 
-    return ETFDetailResponse.model_construct(
-        symbol="SPY", name="SPDR S&P 500", current_price=500.0,
-        price_change=1.0, price_change_percent=0.2,
-        market_status=None, chart_data=[],
-        key_statistics=[
-            KeyStatisticItem(label="52W High", value="$510.00"),
-            KeyStatisticItem(label="52W Low", value="$400.00"),
-            KeyStatisticItem(label="50-Day Avg", value="$480.00"),
-            KeyStatisticItem(label="Expense Ratio", value="0.09%"),
-        ],
-        key_statistics_groups=[
-            KeyStatisticsGroupResponse(statistics=[
-                KeyStatisticItem(label="52W High", value="$510.00"),
-                KeyStatisticItem(label="Expense Ratio", value="0.09%"),
-            ]),
-        ],
-    )
-
-
-@pytest.mark.asyncio
-async def test_etf_requote_also_refreshes_the_quote_derived_key_stats():
+    Without this these tests do REAL Supabase I/O against `etf_snapshot_cache`, and a row
+    written there by the deployed backend makes a fetch disappear — so the test silently
+    measures production's cache state instead of the code under test.
+    """
     from app.services import etf_service as M
 
-    svc = M.ETFService.__new__(M.ETFService)
+    store = {} if store is None else store
+    monkeypatch.setattr(
+        M.ETFService, "_tier2_get",
+        staticmethod(lambda sym, cat: store.get(f"{sym}:{cat}")),
+    )
+    monkeypatch.setattr(
+        M.ETFService, "_tier2_put",
+        staticmethod(lambda sym, cat, payload: store.__setitem__(f"{sym}:{cat}", payload)),
+    )
+    return store
+
+
+def _fake_etf_fmp():
+    """A stand-in FMP client that counts calls by kind and serves plausible ETF data."""
+    import datetime as _dt
+
+    calls = {
+        "quote": 0, "profile": 0, "info": 0, "holders": 0, "sectors": 0,
+        "dividends": 0, "hist": 0, "intraday": 0, "news": 0, "peers": 0, "bulk": 0,
+    }
+    today = _dt.date.today()
+
+    def _rows(n=3000):
+        return [
+            {
+                "date": (today - _dt.timedelta(days=n - 1 - i)).isoformat(),
+                "open": 400.0 + i * 0.01, "high": 401.0 + i * 0.01,
+                "low": 399.0 + i * 0.01, "close": 400.5 + i * 0.01, "volume": 1000,
+            }
+            for i in range(n)
+        ]
 
     class _FMP:
-        async def get_stock_price_quote(self, symbol):
-            # A NEW session: the 52-week high has moved since the row was cached.
-            return {"price": 620.0, "change": 4.0, "changePercentage": 0.65,
-                    "yearHigh": 625.0, "yearLow": 410.0, "priceAvg50": 590.0}
+        # Every method yields once. Without a real suspension point the first coroutine in
+        # an `asyncio.gather` runs to COMPLETION before the second starts, so a "5
+        # concurrent viewers" test measures 5 sequential ones and passes with the dedup
+        # deleted. Verified by mutation: removing `_inflight` left that test green until
+        # this landed.
+        async def _yield(self):
+            await asyncio.sleep(0)
 
-    svc.fmp = _FMP()
-    resp = _stale_etf_response()
-    await svc._refresh_volatile(resp, "SPY")
+        async def get_stock_price_quote(self, sym):
+            await self._yield()
+            calls["quote"] += 1
+            return {
+                "price": 512.0, "change": 2.5, "changePercentage": 0.49,
+                "previousClose": 509.5, "yearHigh": 540.0, "yearLow": 410.0,
+                "priceAvg50": 500.0, "marketCap": 5.2e11, "volume": 70_000_000,
+                "avgVolume": 65_000_000,
+            }
 
-    assert resp.current_price == 620.0
-    flat = {i.label: i.value for i in resp.key_statistics}
-    assert flat["52W High"] == "$625.00", f"52W High stayed stale: {flat['52W High']}"
-    assert flat["52W Low"] == "$410.00"
-    assert flat["50-Day Avg"] == "$590.00"
-    # A NON-quote statistic must be left exactly as cached.
-    assert flat["Expense Ratio"] == "0.09%"
-    # ...and the grouped copy must move with the flat one, or the two disagree on screen.
-    grouped = {i.label: i.value for g in resp.key_statistics_groups for i in g.statistics}
-    assert grouped["52W High"] == "$625.00"
-    assert grouped["Expense Ratio"] == "0.09%"
+        async def get_company_profile(self, sym):
+            await self._yield()
+            calls["profile"] += 1
+            # NOTE: a real profile carries `price`/`changes`. The section must not persist
+            # them — `test_etf_tier2_never_persists_a_price` proves it does not.
+            return {
+                "companyName": "SPDR S&P 500 ETF Trust", "beta": 1.0,
+                "averageVolume": 65_000_000, "lastDividend": 6.7,
+                "website": "https://spdrs.com", "description": "Tracks the S&P 500.",
+                "ipoDate": "1993-01-22", "marketCap": 5.2e11,
+                "price": 512.0, "changes": 2.5,
+            }
+
+        async def get_etf_info(self, sym):
+            await self._yield()
+            calls["info"] += 1
+            return {
+                "expenseRatio": 0.0945, "nav": 511.9, "aum": 5.2e11,
+                "holdingsCount": 503, "etfCompany": "State Street",
+                "assetClass": "Equity", "inceptionDate": "1993-01-22",
+                "domicile": "US", "indexTracked": "S&P 500",
+                "sectorsList": [{"industry": "Technology", "exposure": 30.0}],
+            }
+
+        async def get_etf_holders(self, sym, limit=20):
+            await self._yield()
+            calls["holders"] += 1
+            return [{"asset": "AAPL", "name": "Apple", "weightPercentage": 7.1}]
+
+        async def get_etf_sector_weightings(self, sym):
+            await self._yield()
+            calls["sectors"] += 1
+            return [{"sector": "Technology", "weightPercentage": 30.0}]
+
+        async def get_dividend_history(self, sym, limit=20):
+            await self._yield()
+            calls["dividends"] += 1
+            # 100 rows so the truncation guard below has something to measure.
+            return [
+                {"date": f"20{20 + i // 12:02d}-{i % 12 + 1:02d}-01",
+                 "dividend": 1.5, "paymentDate": "2026-01-05", "frequency": "Quarterly"}
+                for i in range(100)
+            ]
+
+        async def get_historical_prices(self, sym, f, t):
+            await self._yield()
+            calls["hist"] += 1
+            return _rows()
+
+        async def get_intraday_prices(self, *a, **k):
+            await self._yield()
+            calls["intraday"] += 1
+            return [{"date": "2026-08-21 10:00:00", "open": 511, "high": 513,
+                     "low": 510, "close": 512, "volume": 10}]
+
+        async def get_stock_news(self, sym, limit=10):
+            await self._yield()
+            calls["news"] += 1
+            return []
+
+        async def get_stock_peers(self, sym):
+            await self._yield()
+            calls["peers"] += 1
+            return []
+
+        async def get_batch_quotes_bulk(self, syms):
+            await self._yield()
+            calls["bulk"] += 1
+            return [{"symbol": s, "price": 100.0, "change": 1.0,
+                     "changePercentage": 1.0} for s in syms]
+
+    return _FMP(), calls
 
 
-@pytest.mark.asyncio
-async def test_etf_requote_leaves_key_stats_alone_when_the_quote_is_unusable():
-    """Anti-vacuity control: a failed re-quote must not blank the cached statistics."""
+def _etf_svc(monkeypatch):
+    """An ETFService with no __init__ (no FMP/Supabase) and no Gemini."""
     from app.services import etf_service as M
 
+    M._cache.clear()
+    M._inflight.clear()
     svc = M.ETFService.__new__(M.ETFService)
+    svc.fmp, calls = _fake_etf_fmp()
 
-    class _FMP:
-        async def get_stock_price_quote(self, symbol):
-            raise RuntimeError("FMP down")
+    async def _hook(self, **kw):
+        return kw.get("fallback") or "A low-cost way to own the whole S&P 500."
 
-    svc.fmp = _FMP()
-    resp = _stale_etf_response()
-    await svc._refresh_volatile(resp, "SPY")
-
-    flat = {i.label: i.value for i in resp.key_statistics}
-    assert flat["52W High"] == "$510.00", "a failed re-quote wiped the cached statistic"
-    assert resp.current_price == 500.0
+    monkeypatch.setattr(M.ETFService, "_generate_hook_text", _hook)
+    return svc, calls
 
 
 @pytest.mark.asyncio
-async def test_index_requote_also_refreshes_its_intraday_key_stats():
-    from app.schemas.index import (
-        IndexDetailResponse,
-        KeyStatisticItem,
-        KeyStatisticsGroupResponse,
+async def test_etf_browsing_every_range_shares_one_history_fetch(monkeypatch):
+    """The headline saving, measured rather than asserted."""
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    for rng in ["1D", "1W", "3M", "6M", "1Y", "5Y", "ALL"]:
+        await svc.get_etf_detail("QQQ", chart_range=rng)
+
+    # The ETF's own history and the shared S&P series: one paged fetch each, not 7.
+    # `_fetch_all_daily` stops after one page here because the fake returns < 5000 rows.
+    assert calls["hist"] == 2, f"history fetched {calls['hist']}x, expected 2 (own + SPY)"
+    assert calls["news"] == 0, "the dead news call is back — iOS never reads that field"
+    for kind in ("profile", "info", "holders", "sectors", "dividends"):
+        assert calls[kind] == 1, f"{kind} fetched {calls[kind]}x, not once"
+    assert calls["quote"] == 1, f"quote fetched {calls['quote']}x, not once"
+    assert calls["intraday"] == 2, "only 1D and 1W are genuinely sub-daily"
+
+    total = sum(calls.values())
+    assert total <= 14, f"expected <=14 FMP calls for a 7-range browse, got {total}: {calls}"
+
+
+@pytest.mark.asyncio
+async def test_etf_daily_and_aggregated_ranges_need_no_extra_fetch(monkeypatch):
+    """3M/6M/1Y slice the shared history; 5Y/ALL aggregate it.
+
+    Pre-fix, 5Y re-fetched ~9 years of bars and ALL re-ran the paged `_fetch_all_daily`.
+    """
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    await svc.get_etf_detail("QQQ", chart_range="3M")
+    baseline = dict(calls)
+
+    for rng in ["6M", "1Y", "5Y", "ALL"]:
+        resp = await svc.get_etf_detail("QQQ", chart_range=rng)
+        assert resp.chart_data, f"{rng} produced no bars"
+
+    assert calls == baseline, f"a daily/aggregated range hit FMP again: {baseline} -> {calls}"
+
+
+@pytest.mark.asyncio
+async def test_etf_range_pills_still_return_DIFFERENT_charts(monkeypatch):
+    """The invariant migration 148 exists for, re-proved at the section level.
+
+    Sharing sections across ranges must not resurrect the bug where the first range
+    fetched won and every later pill silently returned it.
+    """
+    svc, _ = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    three_m = await svc.get_etf_detail("SPY", chart_range="3M")
+    one_y = await svc.get_etf_detail("SPY", chart_range="1Y")
+    five_y = await svc.get_etf_detail("SPY", chart_range="5Y")
+
+    assert len(three_m.chart_data) < len(one_y.chart_data), "3M and 1Y returned the same chart"
+    # 5Y is weekly-aggregated, so it has FEWER bars than 1Y daily but spans further back.
+    assert five_y.chart_data[0]["date"] < one_y.chart_data[0]["date"], (
+        "5Y does not reach further back than 1Y"
     )
+
+
+@pytest.mark.asyncio
+async def test_etf_tier2_survives_a_restart_without_refetching_the_history(monkeypatch):
+    """A redeploy must not re-pull the 1.1 MB — and must still serve a LIVE price."""
+    from app.services import etf_service as M
+
+    store: dict = {}
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch, store)
+    cold = await svc.get_etf_detail("QQQ", chart_range="3M")
+    assert calls["hist"] == 2
+    assert store, "nothing was persisted to tier 2"
+
+    # A deploy: the in-process tier is gone, Supabase survives.
+    M._cache.clear()
+    M._inflight.clear()
+    svc2, calls2 = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch, store)
+    warm = await svc2.get_etf_detail("QQQ", chart_range="3M")
+
+    assert calls2["hist"] == 0, "the history was re-fetched after a restart"
+    assert calls2["info"] == 0, "the fundamentals were re-fetched after a restart"
+    assert [p.model_dump() for p in warm.performance_periods] == \
+        [p.model_dump() for p in cold.performance_periods]
+    # ...and the price is still LIVE, because no persisted section carries one. This is
+    # what makes `_refresh_volatile` unnecessary rather than merely fixed.
+    assert calls2["quote"] >= 1
+    assert warm.current_price > 0
+
+
+@pytest.mark.asyncio
+async def test_etf_intraday_chart_is_never_persisted(monkeypatch):
+    """A 12h-old 5-minute series would paint yesterday's session under a live header."""
+    svc, _ = _etf_svc(monkeypatch)
+    store = _isolate_etf_tier2(monkeypatch)
+
+    await svc.get_etf_detail("SPY", chart_range="1D")
+    assert not [k for k in store if ":chart:1D:" in k], "an intraday chart was persisted"
+
+    # Control: a daily range MUST persist, or the guard above proves nothing.
+    await svc.get_etf_detail("SPY", chart_range="3M")
+    assert [k for k in store if ":chart:3M:" in k], "no daily chart was persisted"
+
+
+@pytest.mark.asyncio
+async def test_etf_tier2_never_persists_a_price(monkeypatch):
+    """The structural invariant that makes the whole design safe.
+
+    `get_company_profile` returns `price` and `changes`; the fundamentals section stores a
+    PROJECTION precisely so a 12-hour row cannot carry them. This is the guard that would
+    have caught the stale-key-statistics bug before it shipped.
+    """
+    svc, _ = _etf_svc(monkeypatch)
+    store = _isolate_etf_tier2(monkeypatch)
+
+    for rng in ["1D", "3M", "5Y", "ALL"]:
+        await svc.get_etf_detail("SPY", chart_range=rng)
+
+    banned = {"price", "changes", "change", "changePercentage", "previousClose",
+              "yearHigh", "yearLow", "priceAvg50", "dayHigh", "dayLow"}
+
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                assert k not in banned, f"tier-2 row {path} persists live-quote field {k!r}"
+                _walk(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            # Chart bars legitimately hold OHLC under their own key names; only the
+            # top-level chart payload is a list, and its rows are dated bars.
+            for item in node[:5]:
+                if isinstance(item, dict) and "date" in item:
+                    continue
+                _walk(item, f"{path}[]")
+
+    for key, payload in store.items():
+        if ":chart:" in key:
+            continue   # dated OHLC bars, not a live quote
+        _walk(payload, key)
+
+
+@pytest.mark.asyncio
+async def test_etf_a_priceless_build_is_not_cached(monkeypatch):
+    """A failed quote must not pin "$0.00" for the whole TTL."""
+    from app.services import etf_service as M
+
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    async def dead_quote(_sym):
+        raise RuntimeError("FMP 429")
+
+    svc.fmp.get_stock_price_quote = dead_quote
+    resp = await svc.get_etf_detail("SPY", chart_range="3M")
+    assert resp.current_price == 0
+    assert not [k for k in M._cache if k.startswith("SPY_3M")], (
+        "a priceless build was cached"
+    )
+    # ...but the sections it DID get are still cached, so the retry is cheap.
+    assert f"etf:fund:SPY" in M._cache
+
+
+@pytest.mark.asyncio
+async def test_etf_concurrent_viewers_share_one_build(monkeypatch):
+    """This service had no `_inflight` at all: N viewers of a cold SPY ran N fan-outs."""
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    await asyncio.gather(*[svc.get_etf_detail("QQQ", chart_range="3M") for _ in range(5)])
+    assert calls["hist"] == 2, f"five concurrent viewers produced {calls['hist']} history fetches"
+    assert calls["quote"] == 1
+
+
+@pytest.mark.asyncio
+async def test_etf_side_endpoints_reuse_the_detail_fundamentals(monkeypatch):
+    """Opening the ETF screen and then its dividends/profile/holdings endpoints must cost
+    ZERO extra FMP calls — they issue the identical requests the fan-out just made."""
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+    # These three also keep their own finished-response caches, which read `self.supabase`.
+    monkeypatch.setattr(type(svc), "_check_snapshot_cache", lambda self, s, c: None)
+    monkeypatch.setattr(type(svc), "_upsert_snapshot_cache", lambda self, s, c, d: None)
+
+    await svc.get_etf_detail("SPY", chart_range="3M")
+    baseline = dict(calls)
+
+    divs = await svc.get_dividend_history("SPY")
+    await svc.get_profile("SPY")
+    await svc.get_holdings_risk("SPY")
+
+    assert calls == baseline, f"a side endpoint re-fetched: {baseline} -> {calls}"
+    # ...and the dividends endpoint still gets all 100 rows, not the detail card's 20.
+    assert len(divs.dividends) == 100, (
+        f"the shared section truncated the dividends endpoint to {len(divs.dividends)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_spy_is_its_own_benchmark_and_fetches_one_history(monkeypatch):
+    """SPY's own history and the S&P benchmark series are the SAME series.
+
+    `_get_history(symbol)` and `_get_spy_history()` write one cache key, so gathering them
+    concurrently for SPY meant two simultaneous misses fetching identical data. Only
+    visible on an intraday range, where `_get_chart` does not warm the key first.
+    """
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    await svc.get_etf_detail("SPY", chart_range="1D")
+    assert calls["hist"] == 1, (
+        f"SPY fetched its own history {calls['hist']}x — the benchmark is the same series"
+    )
+
+    # Control: a normal ETF genuinely needs two distinct histories.
+    svc2, calls2 = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+    await svc2.get_etf_detail("QQQ", chart_range="1D")
+    assert calls2["hist"] == 2, "QQQ must fetch its own history AND the S&P benchmark"
+
+
+@pytest.mark.asyncio
+async def test_etf_inflight_leader_failure_does_not_strand_joiners():
+    """`except Exception` does not catch CancelledError, and an unresolved future hangs
+    every joiner for the life of the process. Same shape as the commodity guard."""
+    from app.services import etf_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    svc = M.ETFService.__new__(M.ETFService)
+
+    async def boom(symbol, chart_range="3M", interval=None):
+        await asyncio.sleep(0.01)
+        raise RuntimeError("upstream down")
+
+    svc._build_etf_detail = boom
+
+    results = await asyncio.gather(
+        svc.get_etf_detail("SPY", "3M", None),
+        svc.get_etf_detail("SPY", "3M", None),
+        return_exceptions=True,
+    )
+    assert all(isinstance(r, Exception) for r in results), results
+    # ...and the map is clean, so the next caller is not blocked by a dead entry.
+    assert not M._inflight
+
+
+@pytest.mark.asyncio
+async def test_etf_quote_slice_costs_nothing_and_agrees_with_the_detail(monkeypatch):
+    """The light slice is a PROJECTION of the cached build, not a second assembly path.
+
+    Two consequences it has to prove: a poll costs zero extra FMP calls, and the two paths
+    can never disagree about a number — which a parallel builder eventually would.
+    """
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    full = await svc.get_etf_detail("QQQ", chart_range="3M")
+    baseline = dict(calls)
+
+    light = await svc.get_etf_quote("QQQ")
+    assert calls == baseline, f"the quote slice hit FMP: {baseline} -> {calls}"
+
+    assert light.symbol == full.symbol
+    assert light.current_price == full.current_price
+    assert light.price_change == full.price_change
+    assert light.price_change_percent == full.price_change_percent
+    assert light.market_status == full.market_status
+    assert [g.model_dump() for g in light.key_statistics_groups] == \
+        [g.model_dump() for g in full.key_statistics_groups]
+
+
+@pytest.mark.asyncio
+async def test_etf_quote_omits_bars_unless_a_range_was_asked_for(monkeypatch):
+    """On a daily chart a 30-second refresh cannot move a bar, so the loop omits `range`
+    and the response must not carry the chart at all."""
+    svc, _ = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    assert await svc.get_etf_quote("QQQ") == await svc.get_etf_quote("QQQ")
+    assert (await svc.get_etf_quote("QQQ")).chart_data == []
+    # ...but an intraday caller that asks for one gets it.
+    assert (await svc.get_etf_quote("QQQ", chart_range="1D")).chart_data
+
+
+def test_etf_quote_response_is_a_strict_subset_of_the_detail_shape():
+    """Schema parity: the client decodes these with the DTOs it already has, so every
+    shared field must keep the same name AND the same annotation. A rename here is a
+    decode crash in production, not a test failure."""
+    from app.schemas.etf import ETFDetailResponse, ETFQuoteResponse
+
+    detail = ETFDetailResponse.model_fields
+    for name, field in ETFQuoteResponse.model_fields.items():
+        assert name in detail, f"{name} exists only on the quote slice"
+        assert field.annotation == detail[name].annotation, (
+            f"{name}: quote={field.annotation} but detail={detail[name].annotation}"
+        )
+
+
+# ── 25. Index: per-section caching ───────────────────────────────────
+#
+# Worst of the three by structure: the Supabase key carried range+interval over a payload
+# whose only range-dependent field is `chart_data`, AND there was no in-memory tier for the
+# assembled response at all — every request went to Supabase and then re-quoted FMP before
+# it could answer. `get_index_constituents` returned a 503-row list, per range pill, for a
+# single `len()`. Measured: ~32-36 FMP calls, ~10.5 MB of history, worst cold range 14.8 s.
+
+
+def _isolate_index_tier2(monkeypatch, store=None):
+    """Replace the Supabase tier with an in-process dict. See `_isolate_tier2`."""
     from app.services import index_service as M
 
-    svc = M.IndexService.__new__(M.IndexService)
+    store = {} if store is None else store
+    monkeypatch.setattr(
+        M.IndexService, "_tier2_get",
+        staticmethod(lambda sym, cat: store.get(f"{sym}:{cat}")),
+    )
+    monkeypatch.setattr(
+        M.IndexService, "_tier2_put",
+        staticmethod(lambda sym, cat, payload: store.__setitem__(f"{sym}:{cat}", payload)),
+    )
+    return store
+
+
+def _fake_index_fmp():
+    """A stand-in FMP client that counts calls by kind and serves plausible index data."""
+    import datetime as _dt
+
+    calls = {"quote": 0, "hist": 0, "sectors": 0, "constituents": 0, "intraday": 0}
+    today = _dt.date.today()
+
+    def _rows(n=4000):
+        return [
+            {
+                "date": (today - _dt.timedelta(days=n - 1 - i)).isoformat(),
+                "open": 4500.0 + i * 0.1, "high": 4510.0 + i * 0.1,
+                "low": 4490.0 + i * 0.1, "close": 4500.0 + i * 0.1, "volume": 1_000_000,
+            }
+            for i in range(n)
+        ]
 
     class _FMP:
-        async def get_stock_price_quote(self, symbol):
-            return {"price": 6100.0, "change": 25.0, "changePercentage": 0.41,
-                    "previousClose": 6075.0, "open": 6080.0,
-                    "dayHigh": 6110.0, "dayLow": 6070.0, "volume": 2500000000}
+        # See the ETF fake: without a real suspension point an `asyncio.gather` runs each
+        # coroutine to completion in turn, and a concurrency test measures nothing.
+        async def _yield(self):
+            await asyncio.sleep(0)
 
-    svc.fmp = _FMP()
-    resp = IndexDetailResponse.model_construct(
-        symbol="^GSPC", index_name="S&P 500", current_price=5000.0,
-        price_change=1.0, price_change_percent=0.02, market_status=None,
-        chart_data=[],
-        key_statistics_groups=[
-            KeyStatisticsGroupResponse(statistics=[
-                KeyStatisticItem(label="Open", value="4,990.00"),
-                KeyStatisticItem(label="Previous Close", value="4,980.00"),
-                KeyStatisticItem(label="Day High", value="5,010.00"),
-                KeyStatisticItem(label="Constituents", value="503"),
-            ]),
-        ],
+        async def get_stock_price_quote(self, sym):
+            await self._yield()
+            calls["quote"] += 1
+            return {
+                "price": 6100.0, "change": 25.0, "changePercentage": 0.41,
+                "previousClose": 6075.0, "open": 6080.0, "dayHigh": 6110.0,
+                "dayLow": 6070.0, "volume": 2_500_000_000,
+                "yearHigh": 6200.0, "yearLow": 4800.0,
+            }
+
+        async def get_historical_prices(self, sym, f, t):
+            await self._yield()
+            calls["hist"] += 1
+            return _rows()
+
+        async def get_sector_performance(self):
+            await self._yield()
+            calls["sectors"] += 1
+            return [{"sector": "Technology", "changesPercentage": 1.2}]
+
+        async def get_index_constituents(self, sym):
+            await self._yield()
+            calls["constituents"] += 1
+            return [{"symbol": f"T{i}"} for i in range(503)]
+
+        async def get_intraday_prices(self, *a, **k):
+            await self._yield()
+            calls["intraday"] += 1
+            return [{"date": "2026-08-21 10:00:00", "open": 6090, "high": 6100,
+                     "low": 6085, "close": 6095, "volume": 1000}]
+
+    return _FMP(), calls
+
+
+def _index_svc(monkeypatch):
+    """An IndexService with no __init__ (no FMP/Supabase) and no Gemini."""
+    from app.services import index_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    svc = M.IndexService.__new__(M.IndexService)
+    svc.fmp, calls = _fake_index_fmp()
+
+    # `_compute_index_pe_from_sectors` reads the shared `sector_benchmarks` table — real
+    # Supabase I/O on the cold path, so the test would measure production's data.
+    monkeypatch.setattr(M, "_compute_index_pe_from_sectors", lambda: 21.0)
+
+    async def _stories(self, **kw):
+        return ("valuation story", "sector story", "macro story", [])
+
+    monkeypatch.setattr(M.IndexService, "_generate_ai_stories", _stories)
+    return svc, calls
+
+
+@pytest.mark.asyncio
+async def test_index_browsing_every_range_shares_one_history_fetch(monkeypatch):
+    """The headline saving, measured rather than asserted."""
+    svc, calls = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch)
+
+    for rng in ["1D", "1W", "3M", "6M", "1Y", "5Y", "ALL"]:
+        await svc.get_index_detail("^GSPC", chart_range=rng)
+
+    assert calls["hist"] == 1, f"history fetched {calls['hist']}x, not once"
+    assert calls["quote"] == 1, f"quote fetched {calls['quote']}x, not once"
+    assert calls["sectors"] == 1, "the GLOBAL sector list was re-fetched per range"
+    assert calls["constituents"] == 1, "the 503-row constituent list was re-fetched per range"
+    assert calls["intraday"] == 2, "only 1D and 1W are genuinely sub-daily"
+
+    total = sum(calls.values())
+    assert total <= 7, f"expected <=7 FMP calls for a 7-range browse, got {total}: {calls}"
+
+
+@pytest.mark.asyncio
+async def test_index_daily_and_aggregated_ranges_need_no_extra_fetch(monkeypatch):
+    """3M/6M/1Y slice the shared history; 5Y/ALL aggregate it."""
+    svc, calls = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch)
+
+    await svc.get_index_detail("^GSPC", chart_range="3M")
+    baseline = dict(calls)
+
+    for rng in ["6M", "1Y", "5Y", "ALL"]:
+        resp = await svc.get_index_detail("^GSPC", chart_range=rng)
+        assert resp.chart_data, f"{rng} produced no bars"
+
+    assert calls == baseline, f"a daily/aggregated range hit FMP again: {baseline} -> {calls}"
+
+
+@pytest.mark.asyncio
+async def test_index_range_pills_still_return_DIFFERENT_charts(monkeypatch):
+    """Sharing sections across ranges must not resurrect the bug where the first range
+    fetched won and every later pill silently returned it."""
+    svc, _ = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch)
+
+    three_m = await svc.get_index_detail("^GSPC", chart_range="3M")
+    one_y = await svc.get_index_detail("^GSPC", chart_range="1Y")
+    five_y = await svc.get_index_detail("^GSPC", chart_range="5Y")
+
+    assert len(three_m.chart_data) < len(one_y.chart_data), "3M and 1Y returned the same chart"
+    assert five_y.chart_data[0].date < one_y.chart_data[0].date, "5Y does not reach further back"
+
+
+@pytest.mark.asyncio
+async def test_index_tier2_survives_a_restart_without_refetching_the_history(monkeypatch):
+    """A redeploy must not re-pull the history — and must still serve a LIVE level."""
+    from app.services import index_service as M
+
+    store: dict = {}
+    svc, calls = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch, store)
+    cold = await svc.get_index_detail("^GSPC", chart_range="3M")
+    assert calls["hist"] == 1
+    assert store, "nothing was persisted to tier 2"
+
+    M._cache.clear()
+    M._inflight.clear()
+    svc2, calls2 = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch, store)
+    warm = await svc2.get_index_detail("^GSPC", chart_range="3M")
+
+    assert calls2["hist"] == 0, "the history was re-fetched after a restart"
+    assert calls2["constituents"] == 0, "the constituent list was re-fetched after a restart"
+    assert [p.model_dump() for p in warm.performance_periods] == \
+        [p.model_dump() for p in cold.performance_periods]
+    assert calls2["quote"] >= 1
+    assert warm.current_price > 0
+
+
+@pytest.mark.asyncio
+async def test_index_intraday_chart_is_never_persisted(monkeypatch):
+    """A 12h-old 5-minute series would paint yesterday's session under a live header."""
+    svc, _ = _index_svc(monkeypatch)
+    store = _isolate_index_tier2(monkeypatch)
+
+    await svc.get_index_detail("^GSPC", chart_range="1D")
+    assert not [k for k in store if ":chart:1D:" in k], "an intraday chart was persisted"
+
+    await svc.get_index_detail("^GSPC", chart_range="3M")
+    assert [k for k in store if ":chart:3M:" in k], "no daily chart was persisted"
+
+
+@pytest.mark.asyncio
+async def test_index_tier2_never_persists_a_price(monkeypatch):
+    """The structural invariant. Open / Previous Close / Day High / Day Low / 52-Week
+    High-Low / Volume are quote-derived — exactly the rows `_refresh_volatile` had to
+    re-quote — and none of them may reach a 12-hour row."""
+    svc, _ = _index_svc(monkeypatch)
+    store = _isolate_index_tier2(monkeypatch)
+
+    for rng in ["1D", "3M", "5Y", "ALL"]:
+        await svc.get_index_detail("^GSPC", chart_range=rng)
+
+    banned = {"price", "change", "changePercentage", "previousClose", "open",
+              "dayHigh", "dayLow", "yearHigh", "yearLow"}
+
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                assert k not in banned, f"tier-2 row {path} persists live-quote field {k!r}"
+                _walk(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            for item in node[:5]:
+                if isinstance(item, dict) and "date" in item:
+                    continue
+                _walk(item, f"{path}[]")
+
+    for key, payload in store.items():
+        if ":chart:" in key:
+            continue   # dated OHLC bars, not a live quote
+        _walk(payload, key)
+
+
+@pytest.mark.asyncio
+async def test_index_constituent_count_is_stored_not_the_list(monkeypatch):
+    """503 rows are fetched for a single `len()`. Tier 2 must hold the integer."""
+    svc, _ = _index_svc(monkeypatch)
+    store = _isolate_index_tier2(monkeypatch)
+
+    resp = await svc.get_index_detail("^GSPC", chart_range="3M")
+    assert resp.index_profile.number_of_constituents == 503
+
+    row = store.get("^GSPC:constituents")
+    assert row == {"count": 503}, f"the whole membership list was persisted: {str(row)[:120]}"
+
+
+@pytest.mark.asyncio
+async def test_index_empty_constituents_falls_back_without_pinning_zero(monkeypatch):
+    """A failed constituents call must not pin "0 constituents" on the profile for 12h."""
+    svc, _ = _index_svc(monkeypatch)
+    store = _isolate_index_tier2(monkeypatch)
+
+    async def none_at_all(_sym):
+        return []
+
+    svc.fmp.get_index_constituents = none_at_all
+    count = await svc._get_constituent_count("^GSPC", fallback=500)
+    assert count == 500, "the static profile fallback was not used"
+    assert "^GSPC:constituents" not in store, "a zero count was persisted"
+
+
+@pytest.mark.asyncio
+async def test_index_concurrent_viewers_share_one_build(monkeypatch):
+    """This service had no `_inflight` at all: N viewers of a cold ^GSPC ran N fan-outs."""
+    svc, calls = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch)
+
+    await asyncio.gather(*[svc.get_index_detail("^GSPC", chart_range="3M") for _ in range(5)])
+    assert calls["hist"] == 1, f"five concurrent viewers produced {calls['hist']} history fetches"
+    assert calls["constituents"] == 1
+
+
+@pytest.mark.asyncio
+async def test_index_a_priceless_build_is_not_cached(monkeypatch):
+    """A failed quote must not pin "$0.00 (+0.00%)" for the whole TTL."""
+    from app.services import index_service as M
+
+    svc, _ = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch)
+
+    async def dead_quote(_sym):
+        raise RuntimeError("FMP 429")
+
+    svc.fmp.get_stock_price_quote = dead_quote
+    resp = await svc.get_index_detail("^GSPC", chart_range="3M")
+    assert resp.current_price == 0
+    assert not [k for k in M._cache if k.startswith("^GSPC_3M")], "a priceless build was cached"
+    # ...but the sections it DID get are still cached, so the retry is cheap.
+    assert "idx:derived:^GSPC" in M._cache
+
+
+@pytest.mark.asyncio
+async def test_index_sector_performance_is_shared_across_indices(monkeypatch):
+    """`get_sector_performance()` takes no symbol — the same global list serves all three
+    indices, so it must be keyed on NOTHING, not on the symbol.
+
+    Worth more than one call: when FMP's dedicated endpoint is unavailable the client falls
+    back to `_sector_perf_from_etfs`, which is one batch quote plus eleven historical calls.
+    """
+    svc, calls = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch)
+
+    for sym in ["^GSPC", "^IXIC", "^DJI"]:
+        await svc.get_index_detail(sym, chart_range="3M")
+
+    assert calls["sectors"] == 1, (
+        f"three indices produced {calls['sectors']} sector-performance fetches — "
+        f"the key is symbol-scoped again"
     )
-    await svc._refresh_volatile(resp, "^GSPC")
+    # Control: the per-symbol sections genuinely are per-symbol.
+    assert calls["hist"] == 3
+    assert calls["constituents"] == 3
 
-    stats = {i.label: i.value for g in resp.key_statistics_groups for i in g.statistics}
-    assert resp.current_price == 6100.0
-    assert stats["Open"] == "6,080.00", f"Open stayed stale: {stats['Open']}"
-    assert stats["Previous Close"] == "6,075.00"
-    assert stats["Day High"] == "6,110.00"
-    # Not quote-derived — must survive untouched.
-    assert stats["Constituents"] == "503"
+
+@pytest.mark.asyncio
+async def test_index_quote_slice_costs_nothing_and_agrees_with_the_detail(monkeypatch):
+    """The light slice is a PROJECTION of the cached build, not a second assembly path."""
+    svc, calls = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch)
+
+    full = await svc.get_index_detail("^GSPC", chart_range="3M")
+    baseline = dict(calls)
+
+    light = await svc.get_index_quote("^GSPC")
+    assert calls == baseline, f"the quote slice hit FMP: {baseline} -> {calls}"
+
+    assert light.symbol == full.symbol
+    assert light.current_price == full.current_price
+    assert light.price_change == full.price_change
+    assert light.price_change_percent == full.price_change_percent
+    assert light.market_status == full.market_status
+    assert [g.model_dump() for g in light.key_statistics_groups] == \
+        [g.model_dump() for g in full.key_statistics_groups]
+    # ...and no bars unless a range was asked for.
+    assert light.chart_data == []
+    assert (await svc.get_index_quote("^GSPC", chart_range="1D")).chart_data
+
+
+def test_index_quote_response_is_a_strict_subset_of_the_detail_shape():
+    """Schema parity: the client decodes these with DTOs it already has, so every shared
+    field must keep the same name AND annotation. A rename is a production decode crash."""
+    from app.schemas.index import IndexDetailResponse, IndexQuoteResponse
+
+    detail = IndexDetailResponse.model_fields
+    for name, field in IndexQuoteResponse.model_fields.items():
+        assert name in detail, f"{name} exists only on the quote slice"
+        assert field.annotation == detail[name].annotation, (
+            f"{name}: quote={field.annotation} but detail={detail[name].annotation}"
+        )
+
+
+# ── 26. Tier-2 rows written by a PREVIOUS schema ─────────────────────
+#
+# A persisted section is JSON the last deploy wrote. It can be missing a field this deploy
+# requires, and `Model(**row)` would then raise out of the middle of the build and 500 the
+# whole screen — for up to 12 hours, for every viewer of that symbol, with no self-heal
+# short of the TTL expiring. Degrade loudly instead.
+
+
+@pytest.mark.asyncio
+async def test_etf_a_stale_derived_row_degrades_instead_of_500ing(monkeypatch):
+    svc, _ = _etf_svc(monkeypatch)
+    store = _isolate_etf_tier2(monkeypatch)
+
+    # A row from an older schema: `performance_periods` entries missing required fields,
+    # and a benchmark summary that lost one too.
+    store["QQQ:derived"] = {
+        "performance_periods": [
+            {"label": "1Y"},                       # missing change_percent
+            "not-a-dict",                          # not even a row
+        ],
+        "benchmark_summary": {"benchmark_name": "S&P 500"},   # missing the numbers
+    }
+
+    resp = await svc.get_etf_detail("QQQ", chart_range="3M")
+    # The screen still renders, with the unusable sections dropped rather than fabricated.
+    assert resp.current_price > 0
+    assert resp.performance_periods == []
+    assert resp.benchmark_summary is None
+
+
+@pytest.mark.asyncio
+async def test_etf_a_valid_derived_row_is_still_used(monkeypatch):
+    """Anti-vacuity control for the test above: a well-formed row must survive."""
+    svc, _ = _etf_svc(monkeypatch)
+    store = _isolate_etf_tier2(monkeypatch)
+
+    cold = await svc.get_etf_detail("QQQ", chart_range="3M")
+    assert cold.performance_periods, "the control has nothing to prove"
+
+    from app.services import etf_service as M
+    M._cache.clear()
+    M._inflight.clear()
+    svc2, _ = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch, store)
+    warm = await svc2.get_etf_detail("QQQ", chart_range="3M")
+    assert [p.model_dump() for p in warm.performance_periods] == \
+        [p.model_dump() for p in cold.performance_periods]
+
+
+@pytest.mark.asyncio
+async def test_etf_a_tier2_chart_row_without_a_usable_close_is_rebuilt(monkeypatch):
+    """iOS declares `close` non-optional on every chart point, so ONE bad row fails the
+    whole screen's decode. Filter on the way out, not only on the way in."""
+    svc, calls = _etf_svc(monkeypatch)
+    store = _isolate_etf_tier2(monkeypatch)
+
+    store["QQQ:chart:3M:daily"] = [
+        {"date": "2026-01-01", "close": None},
+        {"date": "2026-01-02"},
+        {"date": "2026-01-03", "close": float("nan")},
+        {"date": "2026-01-04", "close": 0},
+    ]
+    resp = await svc.get_etf_detail("QQQ", chart_range="3M")
+    assert resp.chart_data, "the poisoned row was served instead of rebuilding"
+    for bar in resp.chart_data:
+        assert isinstance(bar["close"], (int, float)) and bar["close"] > 0
+
+    # Control: a well-formed persisted chart IS served, without touching FMP.
+    from app.services import etf_service as M
+    M._cache.clear()
+    M._inflight.clear()
+    svc2, calls2 = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch, store)
+    warm = await svc2.get_etf_detail("QQQ", chart_range="3M")
+    assert warm.chart_data
+    assert calls2["hist"] == 0, "a valid persisted chart still triggered a history fetch"
+
+
+@pytest.mark.asyncio
+async def test_index_a_stale_derived_row_degrades_instead_of_500ing(monkeypatch):
+    """Index reads its derived bundle with `.get()`, so a missing key must become a
+    missing value, never an exception."""
+    svc, _ = _index_svc(monkeypatch)
+    store = _isolate_index_tier2(monkeypatch)
+
+    store["^GSPC:derived"] = {"avg_50": 6000.0}   # every other key absent
+
+    resp = await svc.get_index_detail("^GSPC", chart_range="3M")
+    assert resp.current_price > 0
+    # The performance card degrades to empty rather than fabricating zeros.
+    assert all(p.change_percent is None for p in resp.performance_periods) or \
+        resp.performance_periods == []
+
+
+@pytest.mark.asyncio
+async def test_index_a_stale_constituents_row_does_not_break_the_profile(monkeypatch):
+    """A row from before the count-only change could hold anything."""
+    svc, _ = _index_svc(monkeypatch)
+    store = _isolate_index_tier2(monkeypatch)
+
+    store["^GSPC:constituents"] = {"rows": [{"symbol": "AAPL"}]}   # no `count`
+    resp = await svc.get_index_detail("^GSPC", chart_range="3M")
+    # Falls through to a live fetch rather than rendering "0 constituents".
+    assert resp.index_profile.number_of_constituents == 503

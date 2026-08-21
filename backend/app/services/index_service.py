@@ -95,15 +95,47 @@ _INDEX_PROFILES: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# ── Simple in-memory cache ───────────────────────────────────────
+# ── Per-section in-memory cache ──────────────────────────────────
+#
+# This service used to have NO in-memory tier for the assembled response at all: every
+# request went to Supabase and then re-quoted FMP before it could answer. The Supabase key
+# carried range+interval over a payload whose only range-dependent field is `chart_data`,
+# so each of the 7 range pills was a cold rebuild that re-fetched the same quote, the same
+# multi-year history, the same GLOBAL sector-performance list and the same 503-row
+# constituent list. Measured: ~32-36 FMP calls and ~10.5 MB of byte-identical history to
+# browse one index, worst cold range 14.8 s.
+#
+# Now every section has its own key and a TTL matched to how fast that data really moves,
+# and every range-INDEPENDENT section is keyed on the symbol alone (or on nothing at all,
+# for sector performance, which is not index-specific).
+#
+# The TTL travels WITH the entry — the writer knows the section's volatility, so a reader
+# cannot mismatch it.
 
-_cache: Dict[str, Tuple[float, Any]] = {}
-_CACHE_TTL_SECONDS = 300  # 5 minutes for market data
+_cache: Dict[str, Tuple] = {}
+_CACHE_TTL_SECONDS = 300  # default when a writer declares nothing
 _AI_CACHE_TTL_SECONDS = 3600  # 1 hour for AI-generated stories
+# A template fallback is cheap to regenerate but must not re-call Gemini on every request;
+# short enough that a transient quota failure does not pin prose for an hour.
+_AI_FALLBACK_TTL_SECONDS = 300
 _MACRO_CACHE_TTL_DAYS = 7  # 7 days for macro forecast (changes weekly)
+
+# Per-section TTLs, ordered by how fast the underlying data actually moves.
+_QUOTE_TTL = 45             # live level + the quote-derived key-stat rows
+_INTRADAY_CHART_TTL = 60    # 1D/1W bars; the only genuinely per-range fetch
+_SECTOR_PERF_TTL = 900      # 15 min — today's sector moves, shared by every index
+_HISTORY_TTL = 43_200       # 12h — daily EOD bars only change at the close
+_DERIVED_TTL = 43_200       # 12h — performance periods + the moving averages
+_CONSTITUENTS_TTL = 43_200  # 12h — index membership changes quarterly at most
+
 # Hard cap on live entries — see stock_overview_service for rationale. Eviction
 # is least-recently-written; a miss just re-fetches (no correctness impact).
 _CACHE_MAX_ENTRIES = 1024
+
+# Thundering-herd guard, keyed on the FULL request shape because the assembled response is
+# range-specific. This service had none: N concurrent viewers of a cold ^GSPC each ran the
+# entire fan-out, including the 503-row constituent list fetched for a single `len()`.
+_inflight: Dict[str, asyncio.Future] = {}
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -139,14 +171,6 @@ def _fmt(value: Optional[float], decimals: int = 2) -> str:
     if abs(value) >= 1_000_000:
         return f"{value / 1_000_000:.1f}M"
     return f"{value:,.{decimals}f}"
-
-
-def _pct(value: Optional[float]) -> str:
-    """Format a percentage with sign."""
-    if value is None:
-        return "—"
-    sign = "+" if value >= 0 else ""
-    return f"{sign}{value:.2f}%"
 
 
 def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
@@ -277,7 +301,6 @@ def _get_market_status() -> MarketStatusResponse:
 # ── Main service ─────────────────────────────────────────────────
 
 
-_INDEX_DB_TTL_HOURS = 24
 
 
 class IndexService:
@@ -300,68 +323,6 @@ class IndexService:
         for the full 24h TTL, and for every other user of that index.
         """
         return f"{symbol}_{chart_range}_{interval or 'default'}"
-
-    def _check_db_cache(
-        self, symbol: str, chart_range: str, interval: Optional[str] = None
-    ) -> Optional[Dict]:
-        """Check Supabase index_detail_cache (24h TTL)."""
-        cache_key = self._cache_key(symbol, chart_range, interval)
-        try:
-            row = (
-                self.supabase.table("index_detail_cache")
-                .select("response_json, cached_at")
-                .eq("cache_key", cache_key)
-                .limit(1)
-                .execute()
-            )
-            if not row.data:
-                logger.info(f"Index cache MISS for {cache_key}")
-                return None
-
-            entry = row.data[0]
-            cached_at_str = entry.get("cached_at")
-            if not cached_at_str:
-                return None
-
-            cached_at = datetime.fromisoformat(
-                cached_at_str.replace("Z", "+00:00")
-            )
-            age = datetime.now(timezone.utc) - cached_at
-            if age > timedelta(hours=_INDEX_DB_TTL_HOURS):
-                logger.info(
-                    f"Index cache STALE (age={age}) for {cache_key}"
-                )
-                return None
-
-            data = entry.get("response_json")
-            if data and isinstance(data, dict):
-                logger.info(f"Index cache HIT for {cache_key} (age={age})")
-                return data
-            return None
-        except Exception as e:
-            logger.warning(f"Index cache check failed for {cache_key}: {e}")
-            return None
-
-    def _upsert_db_cache(
-        self, symbol: str, chart_range: str, data: Dict,
-        interval: Optional[str] = None,
-    ) -> None:
-        """Upsert index detail response into Supabase cache."""
-        cache_key = self._cache_key(symbol, chart_range, interval)
-        try:
-            self.supabase.table("index_detail_cache").upsert(
-                {
-                    "cache_key": cache_key,
-                    "symbol": symbol,
-                    "chart_range": chart_range,
-                    "response_json": data,
-                    "cached_at": datetime.now(timezone.utc).isoformat(),
-                },
-                on_conflict="cache_key",
-            ).execute()
-            logger.info(f"Index detail cached in Supabase for {cache_key}")
-        except Exception as e:
-            logger.warning(f"Index cache upsert failed for {cache_key}: {e}")
 
     # ── Macro forecast Supabase cache (7-day TTL) ────────────────
 
@@ -435,91 +396,509 @@ class IndexService:
         except Exception as e:
             logger.warning(f"Macro cache upsert failed for {symbol}: {e}")
 
+    # ── Tier 2 (Supabase `index_cache`) ───────────────────────────
+    #
+    # Only sections that CANNOT contain a live price are persisted. That is what removes
+    # the class of bug `_refresh_volatile` existed to patch: the monolith froze
+    # `current_price` and every quote-derived key statistic into a 24-hour row, so a cache
+    # hit served a day-old level. Here the quote is Tier-1 only, so a Tier-2 hit still
+    # renders a level fetched seconds ago.
+    #
+    # `get_supabase()` is imported inside rather than read off `self`: the tests build this
+    # service with `__new__`, so `__init__` never runs and `self.supabase` would not exist.
+
+    _TIER2_TTL_HOURS = 12
+
+    @staticmethod
+    def _tier2_get(symbol: str, category: str) -> Optional[Any]:
+        """Read one cached section, or None. Never raises.
+
+        Accepts a list OR a dict payload — `chart` persists a list of bars.
+        """
+        try:
+            from app.database import get_supabase
+
+            row = (
+                get_supabase()
+                .table("index_cache")
+                .select("response_json, cached_at")
+                .eq("cache_key", f"{symbol}:{category}")
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+            entry = row.data[0]
+            cached_at = datetime.fromisoformat(
+                (entry.get("cached_at") or "").replace("Z", "+00:00")
+            )
+            if datetime.now(timezone.utc) - cached_at > timedelta(
+                hours=IndexService._TIER2_TTL_HOURS
+            ):
+                return None
+            return entry.get("response_json")
+        except Exception as e:
+            logger.warning(
+                "Index tier-2 read failed for %s/%s: %s: %s",
+                symbol, category, type(e).__name__, e,
+            )
+            return None
+
+    @staticmethod
+    def _tier2_put(symbol: str, category: str, payload: Any) -> None:
+        """Persist one section. Best-effort; a failure only costs a rebuild."""
+        try:
+            from app.database import get_supabase
+
+            get_supabase().table("index_cache").upsert(
+                {
+                    "cache_key": f"{symbol}:{category}",
+                    "symbol": symbol,
+                    "category": category,
+                    "response_json": payload,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="cache_key",
+            ).execute()
+        except Exception as e:
+            logger.warning(
+                "Index tier-2 write failed for %s/%s: %s: %s",
+                symbol, category, type(e).__name__, e,
+            )
+
+    # ── Per-section fetchers ──────────────────────────────────────
+
+    async def _get_quote(self, symbol: str) -> Dict[str, Any]:
+        """Live quote. Range-independent, so every range pill shares one fetch."""
+        key = f"idx:quote:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            quote = await self.fmp.get_stock_price_quote(symbol)
+        except Exception as e:
+            logger.warning(
+                "Index quote fetch failed for %s: %s: %s", symbol, type(e).__name__, e
+            )
+            return {}
+        if not isinstance(quote, dict) or not quote:
+            return {}
+        _cache_set(key, quote, _QUOTE_TTL)
+        return quote
+
+    async def _get_history(self, symbol: str) -> List[Dict]:
+        """FULL daily history, oldest-first. Range-independent and 12h-cached.
+
+        `_fetch_all_daily` rather than the old fixed 11-year window: every daily-or-coarser
+        chart is now DERIVED from this one list, and the windows it has to satisfy are
+        wider than 11 years — `_extract_chart_data` adds a 320-day warm-up, and a locally
+        aggregated 5Y-weekly chart needs 1,484 days of warm-up on top of its 5 years. It
+        also still has to cover the 10-year return.
+
+        Deliberately Tier-1 only: reading ~1 MB back from Supabase is slower than the FMP
+        call it would replace.
+        """
+        key = f"idx:hist:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        # Per-section dedup, separate from the detail-level one. Two callers inside a
+        # SINGLE build (`_get_chart` and `_get_derived`) can both miss this key at the same
+        # instant, and the detail guard cannot help because it is keyed on the range — as
+        # are two concurrent users on different range pills of the same cold symbol.
+        # Measured: a cold build fetched the history TWICE without this.
+        if key in _inflight:
+            return await asyncio.shield(_inflight[key])
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        _inflight[key] = fut
+        try:
+            try:
+                from app.services.chart_helper import _fetch_all_daily
+                historical = await _fetch_all_daily(self.fmp, symbol)
+            except Exception as e:
+                logger.warning(
+                    "Index history fetch failed for %s: %s: %s",
+                    symbol, type(e).__name__, e,
+                )
+                historical = []
+            if historical:
+                # `date` may be an explicit JSON null; `or ""` avoids a None<str TypeError.
+                historical.sort(key=lambda p: p.get("date") or "")
+                _cache_set(key, historical, _HISTORY_TTL)
+            if not fut.done():
+                fut.set_result(historical)
+            return historical
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException and would leave the future unresolved,
+            # hanging every joiner for the life of the process.
+            if not fut.done():
+                fut.set_exception(RuntimeError("Index history fetch was cancelled"))
+            raise
+        except Exception as e:
+            if not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            _inflight.pop(key, None)
+
+    async def _get_sector_performance(self) -> List[Dict]:
+        """Today's sector moves. NOT index-specific — one key serves every index.
+
+        Worth more than it looks: when FMP's dedicated endpoint is unavailable the client
+        falls back to `_sector_perf_from_etfs` (fmp.py), which is one batch quote plus
+        ELEVEN historical calls. That used to run once per range pill, per index.
+        """
+        key = "idx:sectorperf"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            sector_raw = await self.fmp.get_sector_performance()
+        except Exception as e:
+            logger.warning(
+                "Index sector performance fetch failed: %s: %s", type(e).__name__, e
+            )
+            return []
+        if not isinstance(sector_raw, list) or not sector_raw:
+            return []
+        _cache_set(key, sector_raw, _SECTOR_PERF_TTL)
+        return sector_raw
+
+    async def _get_constituent_count(self, symbol: str, fallback: int = 0) -> int:
+        """The number of constituents — and ONLY the number.
+
+        `get_index_constituents` returns the whole 503/3000-row membership list, and this
+        service uses it for a single `len()`. The list is reduced to that one integer
+        before anything is cached or persisted, so Tier 2 holds ~20 bytes instead of a
+        megabyte of ticker rows.
+        """
+        key = f"idx:constituents:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
+        db = await asyncio.to_thread(self._tier2_get, symbol, "constituents")
+        if isinstance(db, dict) and isinstance(db.get("count"), int) and db["count"] > 0:
+            _cache_set(key, db["count"], _CONSTITUENTS_TTL)
+            return db["count"]
+
+        try:
+            rows = await self.fmp.get_index_constituents(symbol)
+        except Exception as e:
+            logger.warning(
+                "Index constituents fetch failed for %s: %s: %s",
+                symbol, type(e).__name__, e,
+            )
+            return fallback
+        count = len(rows) if isinstance(rows, list) else 0
+        if count <= 0:
+            # Do NOT cache a zero — it would pin "0 constituents" on the profile card for
+            # 12 hours. Fall back to the static profile figure and retry next request.
+            logger.warning(
+                "Index constituents empty for %s — using the profile fallback (%s)",
+                symbol, fallback,
+            )
+            return fallback
+        _cache_set(key, count, _CONSTITUENTS_TTL)
+        await asyncio.to_thread(self._tier2_put, symbol, "constituents", {"count": count})
+        return count
+
+    async def _get_derived(self, symbol: str) -> Dict[str, Any]:
+        """Everything computed FROM the daily history: the moving averages, the 30-day
+        average volume and the six performance returns.
+
+        All are pure functions of a multi-thousand-row history and none reads the live
+        quote, so persisting them lets a cold process serve a full screen without ever
+        pulling the history — and nothing stale can hide in here.
+        """
+        key = f"idx:derived:{symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
+        db = await asyncio.to_thread(self._tier2_get, symbol, "derived")
+        if isinstance(db, dict) and db:
+            logger.info("Index derived tier-2 HIT for %s", symbol)
+            _cache_set(key, db, _DERIVED_TTL)
+            return db
+
+        historical = await self._get_history(symbol)
+        derived = self._derive_from_history(historical)
+
+        # Degradation gate: an empty history yields a bundle of zeros and Nones, which
+        # would pin an empty Performance card and a blank 200-day average for 12 hours.
+        if not historical:
+            logger.warning(
+                "Index derived NOT persisted for %s (empty/failed history) — will "
+                "rebuild on the next request", symbol,
+            )
+            return derived
+
+        _cache_set(key, derived, _DERIVED_TTL)
+        await asyncio.to_thread(self._tier2_put, symbol, "derived", derived)
+        return derived
+
+    @staticmethod
+    def _derive_from_history(historical: List[Dict]) -> Dict[str, Any]:
+        """Pure: daily history -> the JSON-serialisable scalars the sections need."""
+        vols = [d.get("volume", 0) for d in historical[-30:] if d.get("volume")]
+        return {
+            "avg_50": _compute_average(historical, 50),
+            "avg_200": _compute_average(historical, 200),
+            "avg_volume_30d": int(sum(vols) / len(vols)) if vols else 0,
+            "ytd_return": _compute_ytd_return(historical),
+            "one_month_return": _compute_return(historical, 21),
+            "one_year_return": _compute_return(historical, 252),
+            "three_year_return": (
+                _compute_return(historical, 252 * 3) if len(historical) > 252 * 3 else None
+            ),
+            "five_year_return": (
+                _compute_return(historical, 252 * 5) if len(historical) > 252 * 5 else None
+            ),
+            "ten_year_return": (
+                _compute_return(historical, 252 * 10) if len(historical) > 252 * 10 else None
+            ),
+        }
+
+    async def _get_pe(self) -> float:
+        """Index P/E from the shared `sector_benchmarks` table.
+
+        FMP returns no P/E for an index, so this is computed from sector rows. It was a
+        SYNCHRONOUS Supabase read on the cold path of an async handler — one blocking call
+        on the event loop per request, per range pill.
+        """
+        key = "idx:pe"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        pe = await asyncio.to_thread(_compute_index_pe_from_sectors)
+        if pe:
+            _cache_set(key, pe, _DERIVED_TTL)
+        return pe or 0
+
+    async def _get_chart(
+        self, symbol: str, chart_range: str, interval: Optional[str]
+    ) -> List[ChartDataPointResponse]:
+        """Chart bars for one range, derived from the shared history wherever possible.
+
+        Only 1D (5min) and 1W (1hour) are genuinely sub-daily. Everything daily-or-coarser
+        comes out of the history we already hold:
+          * 3M/6M/1Y -> slice     (`_extract_chart_data`, warm-up included)
+          * 5Y/ALL   -> aggregate (`_aggregate_prices` + `window_by_range`)
+        Pre-fix, ALL re-ran the paged `_fetch_all_daily` on every single request.
+        """
+        from app.services.chart_helper import (
+            AGGREGATED_INTERVALS,
+            INTRADAY_INTERVALS,
+            _aggregate_prices,
+            _finite_or_none,
+            fetch_chart_data,
+            resolve_interval,
+            window_by_range,
+        )
+
+        resolved = resolve_interval(chart_range, interval)
+        category = f"chart:{chart_range}:{resolved}"
+        persistable = resolved not in INTRADAY_INTERVALS
+
+        def _points(rows: List[Dict]) -> List[ChartDataPointResponse]:
+            """Raw bars -> response models, with the finite guards the schema needs.
+
+            A NaN close slips past a bare `> 0` and a NaN/Inf OHLCV serializes as an
+            invalid JSON token, which 500s the whole index screen from inside Starlette.
+            """
+            out = []
+            for p in rows:
+                if not isinstance(p, dict):
+                    continue
+                close = _finite_or_none(p.get("close") or p.get("adjClose"))
+                if close is None or close <= 0:
+                    continue
+                out.append(ChartDataPointResponse(
+                    date=p.get("date"),
+                    open=_finite_or_none(p.get("open")),
+                    high=_finite_or_none(p.get("high")),
+                    low=_finite_or_none(p.get("low")),
+                    close=round(close, 2),
+                    volume=_finite_or_none(p.get("volume")),
+                ))
+            return out
+
+        if persistable:
+            db = await asyncio.to_thread(self._tier2_get, symbol, category)
+            if isinstance(db, list) and db:
+                logger.info("Index chart tier-2 HIT for %s/%s", symbol, category)
+                return _points(db)
+
+        historical = (
+            [] if resolved in INTRADAY_INTERVALS else await self._get_history(symbol)
+        )
+
+        if resolved in AGGREGATED_INTERVALS and historical:
+            bars = _aggregate_prices(historical, resolved)
+            if chart_range != "ALL":
+                # ALL means the whole series; every other aggregated range is windowed —
+                # with the interval's indicator warm-up kept.
+                bars = window_by_range(bars, chart_range, resolved)
+            if bars:
+                await asyncio.to_thread(self._tier2_put, symbol, category, bars)
+            return _points(bars)
+
+        if resolved == "daily":
+            points = self._extract_chart_data(historical, chart_range)
+            if points:
+                # `_extract_chart_data` returns response MODELS here (index is the only
+                # service that does), so dump them before they reach JSONB.
+                await asyncio.to_thread(
+                    self._tier2_put, symbol, category, [p.model_dump() for p in points]
+                )
+            return points
+
+        # Genuinely intraday (1D/1W): its own short-lived key, never persisted.
+        key = f"idx:chart:{symbol}:{chart_range}:{resolved}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            raw_chart = await fetch_chart_data(self.fmp, symbol, chart_range, interval)
+        except Exception as e:
+            logger.warning(
+                "Index intraday chart failed for %s %s: %s: %s",
+                symbol, chart_range, type(e).__name__, e,
+            )
+            return []
+        points = _points(raw_chart if isinstance(raw_chart, list) else [])
+        if points:
+            _cache_set(key, points, _INTRADAY_CHART_TTL)
+        return points
+
     # ── Main entry point ────────────────────────────────────────
 
     async def get_index_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> IndexDetailResponse:
-        """
-        Fetch and assemble complete index detail data.
+        """Cache-aside wrapper (Tier-1 + in-flight dedup) around the build.
 
-        Cache-aside: Check Supabase first. If hit & fresh (< 24h), return
-        cached data. Otherwise fetch live, cache, and return.
+        The ASSEMBLED response keeps a SHORT TTL deliberately. Its expensive sections are
+        cached individually for 12h, so a rebuild here costs zero FMP calls when they are
+        warm — but the level header is part of this payload, and a long assembled TTL is
+        what made the old Supabase row serve a day-old level under a live badge.
+
+        This service previously had no in-memory tier at all: every request went to
+        Supabase and then re-quoted FMP before it could answer.
         """
-        # ── Step 0: Check Supabase cache ─────────────────────────
-        cached = self._check_db_cache(symbol, chart_range, interval)
-        if cached:
-            try:
-                response = IndexDetailResponse(**cached)
-                # The cached payload carries the REQUIRED price fields, and this row
-                # can be up to 24 HOURS old — so returning it verbatim painted a stale
-                # level, a stale daily move and a stale "Market Open/Closed" badge.
-                # Unlike the ETF and stock screens there is no live-price WebSocket on
-                # the index screen to correct it afterwards. Re-quote the volatile
-                # fields (one cheap FMP call) and keep the expensive cached bundle.
-                await self._refresh_volatile(response, symbol)
-                return response
-            except Exception as e:
+        cache_key = self._cache_key(symbol, chart_range, interval)
+
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.info("Index detail in-memory HIT for %s", cache_key)
+            return cached
+
+        # SHIELDED join: a joiner that gives up must not cancel the shared future and take
+        # every other waiter down with it.
+        if cache_key in _inflight:
+            logger.info("Index detail in-flight JOIN for %s", cache_key)
+            return await asyncio.shield(_inflight[cache_key])
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _inflight[cache_key] = future
+        try:
+            result = await self._build_index_detail(
+                symbol, chart_range=chart_range, interval=interval
+            )
+            # Never cache a degraded build: with the quote failed every numeric defaults to
+            # 0, and pinning that shows "$0.00 (+0.00%)" to every viewer for the whole TTL.
+            # `getattr`, not attribute access — a test double has no price to assess.
+            price = getattr(result, "current_price", None)
+            if price is None or price > 0:
+                _cache_set(cache_key, result, _QUOTE_TTL)
+            else:
                 logger.warning(
-                    f"Cached data deserialization failed for {symbol}: {e}"
+                    "Index detail NOT cached for %s — no usable price (degraded build); "
+                    "will rebuild on the next request", cache_key,
                 )
-                # Fall through to live fetch
+            if not future.done():
+                future.set_result(result)
+            return result
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it skips the handler below and would
+            # leave the future unresolved — every joiner would hang for the life of the
+            # process. Hand them a normal exception, then honour our own cancellation.
+            if not future.done():
+                future.set_exception(RuntimeError("index detail fetch was cancelled"))
+            raise
+        except Exception as e:
+            if not future.done():
+                future.set_exception(e)
+            raise
+        finally:
+            _inflight.pop(cache_key, None)
 
+    async def get_index_quote(
+        self,
+        symbol: str,
+        chart_range: Optional[str] = None,
+        interval: Optional[str] = None,
+    ) -> "IndexQuoteResponse":
+        """The light slice behind `GET /indices/{symbol}/quote`.
+
+        PROJECTED from the full build rather than assembled from a second, parallel set of
+        section builders. Every section is already cached, so the full assembly costs ZERO
+        extra FMP calls here, and a second assembly path for the same fields is exactly how
+        two code paths drift into disagreeing about one number.
+        """
+        from app.schemas.index import IndexQuoteResponse
+
+        full = await self.get_index_detail(
+            symbol, chart_range=chart_range or "3M", interval=interval
+        )
+        return IndexQuoteResponse(
+            symbol=full.symbol,
+            current_price=full.current_price,
+            price_change=full.price_change,
+            price_change_percent=full.price_change_percent,
+            market_status=full.market_status,
+            # Bars only when the caller asked for a range — the 30s loop skips them on a
+            # daily chart, where nothing below the last candle can have moved.
+            chart_data=full.chart_data if chart_range else [],
+            key_statistics_groups=full.key_statistics_groups,
+        )
+
+    async def _build_index_detail(
+        self, symbol: str, chart_range: str = "3M", interval: str = None
+    ) -> IndexDetailResponse:
+        """Assemble complete index detail data from the per-section caches."""
         profile_meta = _INDEX_PROFILES.get(
             symbol.upper(),
             _INDEX_PROFILES.get("^GSPC"),  # fallback to S&P 500
         )
         index_name = profile_meta.get("name", symbol)
 
-        # ── Step 1: Parallel FMP fetches ──────────────────────────
-        today = datetime.now(tz=timezone.utc).date()
-        # Fetch 11 years of history for computing up to 10-year returns
-        from_date = (today - timedelta(days=365 * 11)).isoformat()
-        to_date = today.isoformat()
-
-        # Chart-specific date range
-        chart_from, chart_to = self._chart_date_range(chart_range)
-
-        quote_task = self.fmp.get_stock_price_quote(symbol)
-        hist_task = self.fmp.get_historical_prices(symbol, from_date, to_date)
-        sector_task = self.fmp.get_sector_performance()
-        constituents_task = self.fmp.get_index_constituents(symbol)
-
-        quote, hist_raw, sector_raw, constituents_raw = await asyncio.gather(
-            quote_task, hist_task, sector_task, constituents_task,
-            return_exceptions=True,
+        # ── Step 1: Parallel, per-section cached fetches ──────────
+        #
+        # Everything except the chart is keyed on the symbol alone — and sector performance
+        # on nothing at all, since `get_sector_performance()` takes no symbol and the same
+        # global list serves all three indices. These used to be re-fetched once per range
+        # pill: 7 quotes, 7 multi-year histories, 7 sector lists and 7 constituent lists.
+        #
+        # `news_raw` stays `[]`: news comes from `GET /indices/{symbol}/news`. The key still
+        # ships (schema default `[]`) because the Swift DTO is non-optional and omitting it
+        # fails the whole screen's decode.
+        quote, chart_data, sector_raw, live_constituents, derived, pe_from_sectors = (
+            await asyncio.gather(
+                self._get_quote(symbol),
+                self._get_chart(symbol, chart_range, interval),
+                self._get_sector_performance(),
+                self._get_constituent_count(
+                    symbol, fallback=profile_meta.get("number_of_constituents", 0)
+                ),
+                self._get_derived(symbol),
+                self._get_pe(),
+            )
         )
-
-        # Handle exceptions gracefully
-        if isinstance(quote, Exception):
-            logger.error(f"Quote fetch failed for {symbol}: {quote}")
-            quote = {}
-        if isinstance(hist_raw, Exception):
-            logger.error(f"Historical fetch failed for {symbol}: {hist_raw}")
-            hist_raw = {}
-        if isinstance(sector_raw, Exception):
-            logger.error(f"Sector performance fetch failed: {sector_raw}")
-            sector_raw = []
-        if isinstance(constituents_raw, Exception):
-            logger.warning(f"Constituents fetch failed for {symbol}: {constituents_raw}")
-            constituents_raw = []
-
-        # News is now fetched via separate GET /indices/{symbol}/news endpoint
-        news_raw = []
-
-        # Live constituent count (fall back to profile metadata)
-        live_constituents = (
-            len(constituents_raw) if isinstance(constituents_raw, list) and constituents_raw
-            else profile_meta.get("number_of_constituents", 0)
-        )
-
-        # Parse historical prices (sorted oldest-first)
-        historical = []
-        if isinstance(hist_raw, dict):
-            historical = hist_raw.get("historical", [])
-        elif isinstance(hist_raw, list):
-            historical = hist_raw
-        historical.sort(key=lambda p: p.get("date") or "")
+        news_raw: List[Dict[str, Any]] = []
 
         # ── Step 2: Extract quote data ────────────────────────────
         if isinstance(quote, Exception) or not quote:
@@ -553,7 +932,7 @@ class IndexService:
         if change_pct is None:
             change_pct = _finite_or_none(quote.get("changesPercentage"))
         # FMP doesn't return PE for indices — compute from sector benchmarks
-        pe = _q("pe") or _compute_index_pe_from_sectors() or 0
+        pe = _q("pe") or pe_from_sectors or 0
         eps = _q("eps")
         prev_close = _q("previousClose")
         if change_pct is None and change and prev_close:
@@ -571,45 +950,31 @@ class IndexService:
         avg_volume = _q("avgVolume")
         market_cap = _q("marketCap")
 
-        # ── Step 3: Compute derived stats ─────────────────────────
-        avg_50 = _compute_average(historical, 50)
-        avg_200 = _compute_average(historical, 200)
-
-        # Compute avg volume from historical if FMP doesn't provide it for indices
-        if not avg_volume and historical:
-            recent = historical[-30:]  # most recent 30 trading days
-            vols = [d.get("volume", 0) for d in recent if d.get("volume")]
-            avg_volume = int(sum(vols) / len(vols)) if vols else 0
-        ytd_return = _compute_ytd_return(historical)
-        one_month_return = _compute_return(historical, 21)
-        one_year_return = _compute_return(historical, 252)
-        three_year_return = _compute_return(historical, 252 * 3) if len(historical) > 252 * 3 else None
-        five_year_return = _compute_return(historical, 252 * 5) if len(historical) > 252 * 5 else None
-        ten_year_return = _compute_return(historical, 252 * 10) if len(historical) > 252 * 10 else None
+        # ── Step 3: Read the history-derived stats ────────────────
+        # All six returns and both moving averages are pure functions of the daily history,
+        # so they live in the 12h `derived` section and survive a redeploy without
+        # re-pulling it. None of them reads the quote, which is why they are safe to
+        # persist while the rows just above (Open / Day High / 52-Week High …) are not.
+        avg_50 = derived.get("avg_50")
+        avg_200 = derived.get("avg_200")
+        # FMP does not return avgVolume for indices; fall back to the 30-day mean.
+        if not avg_volume:
+            avg_volume = derived.get("avg_volume_30d") or 0
+        ytd_return = derived.get("ytd_return")
+        one_month_return = derived.get("one_month_return")
+        one_year_return = derived.get("one_year_return")
+        three_year_return = derived.get("three_year_return")
+        five_year_return = derived.get("five_year_return")
+        ten_year_return = derived.get("ten_year_return")
 
         # Forward P/E estimate (simple: if PE is known, forward = PE * 0.85)
         forward_pe = pe * 0.85 if pe and pe > 0 else 0
         earnings_yield = (1 / pe * 100) if pe and pe > 0 else 0
 
-        # ── Step 4: Build chart data ──────────────────────────────
-        from app.services.chart_helper import fetch_chart_data, resolve_interval
-        resolved = resolve_interval(chart_range, interval)
-        if resolved != "daily" or chart_range == "ALL":
-            raw_chart = await fetch_chart_data(self.fmp, symbol, chart_range, interval)
-            chart_data = [
-                ChartDataPointResponse(
-                    date=p.get("date"),
-                    open=p.get("open"),
-                    high=p.get("high"),
-                    low=p.get("low"),
-                    close=round(float(p.get("close", 0)), 2),
-                    volume=p.get("volume"),
-                )
-                for p in raw_chart
-                if p.get("close") and float(p.get("close", 0)) > 0
-            ]
-        else:
-            chart_data = self._extract_chart_data(historical, chart_range)
+        # Step 4 (build chart data) is gone: `chart_data` arrives from `_get_chart` in
+        # step 1, which derives 5Y/ALL from the shared history instead of re-fetching it.
+        # The old branch called `fetch_chart_data` for 1D/1W/5Y/ALL, and for ALL that was
+        # `_fetch_all_daily` — up to 5 paged calls — on EVERY request.
 
         # ── Step 5: Build key statistics ──────────────────────────
         key_stats = self._build_key_statistics(
@@ -693,130 +1058,15 @@ class IndexService:
             news_articles=news_articles,
         )
 
-        # ── Step 11: Cache in Supabase ───────────────────────────
-        # NEVER persist a degraded build. When the quote call fails, every numeric
-        # above defaults to 0 — and a 24-hour row of `current_price: 0.0` pins
-        # "$0.00 (+0.00%)" onto the index screen for EVERY user until it expires. The
-        # in-memory tier still absorbs a retry storm, so the cost of skipping is one
-        # extra fan-out; the cost of persisting is a day of fabricated numbers.
-        # Mirrors profit_power_service's `if degraded: … else: upsert`.
-        degraded = (not quote) or isinstance(quote, Exception) or price <= 0
-        if degraded:
-            logger.warning(
-                "Index detail NOT persisted for %s (degraded: quote missing or "
-                "price<=0) — will rebuild on the next request",
-                symbol,
-            )
-        else:
-            try:
-                self._upsert_db_cache(
-                    symbol.upper(), chart_range, response.model_dump(),
-                    interval=interval,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to cache index detail for {symbol}: {e}")
-
+        # Caching of the ASSEMBLED response (and its degraded-build gate) belongs to
+        # `get_index_detail`, which owns the in-flight future. The old Supabase upsert of
+        # the whole payload is gone: a 24-hour row carrying `current_price` and every
+        # quote-derived key statistic is precisely what made `_refresh_volatile` necessary.
+        # Every expensive section is persisted individually now, and not one of them can
+        # contain a price.
         return response
 
-    async def _refresh_volatile(
-        self, response: "IndexDetailResponse", symbol: str
-    ) -> None:
-        """Overwrite the price fields of a CACHED response with a live quote.
-
-        Best-effort and in place: any failure leaves the cached values untouched and
-        logs, because a stale price is still better than no screen. Only the four
-        genuinely volatile fields move; everything expensive in the cached bundle
-        (history, constituents, sector performance, AI snapshots) is left alone.
-        """
-        try:
-            quote = await self.fmp.get_stock_price_quote(symbol)
-        except Exception as e:
-            logger.warning(
-                "Index volatile refresh failed for %s: %s: %s — serving cached price",
-                symbol, type(e).__name__, e,
-            )
-            return
-        if not isinstance(quote, dict) or not quote:
-            logger.warning(
-                "Index volatile refresh for %s returned no quote — serving cached price",
-                symbol,
-            )
-            return
-
-        from app.services.chart_helper import _finite_or_none
-
-        price = _finite_or_none(quote.get("price"))
-        if price is None or price <= 0:
-            return  # nothing trustworthy to overwrite with
-
-        change = _finite_or_none(quote.get("change"))
-        pct = _finite_or_none(quote.get("changePercentage"))
-        if pct is None:
-            pct = _finite_or_none(quote.get("changesPercentage"))
-        prev_close = _finite_or_none(quote.get("previousClose"))
-        if pct is None and change is not None and prev_close:
-            try:
-                pct = round((change / prev_close) * 100, 4)
-            except (TypeError, ValueError, ZeroDivisionError):
-                pct = None
-
-        response.current_price = price
-        if change is not None:
-            response.price_change = change
-        if pct is not None:
-            response.price_change_percent = pct
-        # The badge is a function of NOW, never of when the row was written.
-        response.market_status = _get_market_status()
-
-        # ...and the QUOTE-DERIVED KEY STATISTICS, which this method used to leave alone.
-        #
-        # Open / Previous Close / Day High / Day Low / Volume all come from the SAME
-        # quote as the header, and 52-week high/low from the same call. Refreshing only
-        # the price meant a row up to 24h old served a live level above a day-old "Day
-        # High" — two numbers on one screen, from one quote, disagreeing about which day
-        # it is. Same defect the four fields above exist to prevent, applied to only part
-        # of its own surface.
-        #
-        # Values are rewritten BY LABEL rather than rebuilding the section, because the
-        # builder also needs `constituents`, `avg_50` and `avg_200`, none of which are
-        # quote-derived or recoverable here. An absent label is skipped.
-        fresh: Dict[str, str] = {}
-        for label, key, decimals in (
-            ("Open", "open", 2),
-            ("Previous Close", "previousClose", 2),
-            ("Day High", "dayHigh", 2),
-            ("Day Low", "dayLow", 2),
-            ("52-Week High", "yearHigh", 2),
-            ("52-Week Low", "yearLow", 2),
-            ("Volume", "volume", 0),
-        ):
-            val = _finite_or_none(quote.get(key))
-            if val is not None:
-                fresh[label] = _fmt(val, decimals)
-
-        if fresh:
-            # `getattr`: this runs against whatever the caller cached, so a payload
-            # without a key-stats section must degrade rather than raise mid-request.
-            for group in getattr(response, "key_statistics_groups", None) or []:
-                for item in getattr(group, "statistics", None) or []:
-                    if item.label in fresh:
-                        item.value = fresh[item.label]
-
     # ── Chart helpers ────────────────────────────────────────────
-
-    def _chart_date_range(self, range_code: str) -> Tuple[Optional[str], str]:
-        today = datetime.now(tz=timezone.utc).date()
-        deltas = {
-            "1W": timedelta(weeks=1),
-            "3M": timedelta(days=90),
-            "6M": timedelta(days=180),
-            "1Y": timedelta(days=365),
-            "5Y": timedelta(days=365 * 5),
-        }
-        if range_code == "ALL" or range_code == "1D":
-            return None, today.isoformat()
-        delta = deltas.get(range_code, timedelta(days=90))
-        return (today - delta).isoformat(), today.isoformat()
 
     def _extract_chart_data(
         self, historical: List[Dict], chart_range: str
@@ -832,23 +1082,13 @@ class IndexService:
         if not historical:
             return []
 
-        # 320 calendar days ≈ 210 trading days — enough for MA(200)
-        _WARMUP_CALENDAR_DAYS = 320
+        from app.services.chart_helper import _finite_or_none, daily_range_days
 
+        # The visible window plus the MA(200) warm-up. This map lived here and only here;
+        # etf/crypto/commodity each carried a copy WITHOUT the warm-up, which is why their
+        # moving averages never drew. One definition now, in chart_helper.
         today = datetime.now(tz=timezone.utc).date()
-        range_days = {
-            "1D": 2 + 7,
-            "1W": 7 + 14,
-            "3M": 90 + _WARMUP_CALENDAR_DAYS,
-            "6M": 180 + _WARMUP_CALENDAR_DAYS,
-            "1Y": 365 + _WARMUP_CALENDAR_DAYS,
-            "5Y": 365 * 5 + _WARMUP_CALENDAR_DAYS,
-            "ALL": 99999,
-        }
-        days = range_days.get(chart_range, 90 + _WARMUP_CALENDAR_DAYS)
-        cutoff = (today - timedelta(days=days)).isoformat()
-
-        from app.services.chart_helper import _finite_or_none
+        cutoff = (today - timedelta(days=daily_range_days(chart_range))).isoformat()
 
         result = []
         for p in historical:
@@ -1234,6 +1474,15 @@ Write in a conversational, confident tone. Be specific and data-driven."""
 
         except Exception as e:
             logger.warning(f"Gemini story generation failed for {symbol}, using templates: {e}")
+
+        # Cache the TEMPLATE fallback too, on a short TTL.
+        #
+        # `_cache_set` above sits inside the Gemini-success branch, so every request that
+        # fell back re-called Gemini — during a quota outage that is one wasted call per
+        # request per index, and Gemini failures cluster. A short TTL means a transient
+        # failure costs 5 minutes of template prose, not an hour of it.
+        if _cache_get(cache_key) is None:
+            _cache_set(cache_key, result, _AI_FALLBACK_TTL_SECONDS)
 
         return result
 

@@ -23,7 +23,7 @@ from app.api.error_response import (
     upstream_error_response,
 )
 from app.services.index_service import get_index_service
-from app.schemas.index import IndexDetailResponse
+from app.schemas.index import IndexDetailResponse, IndexQuoteResponse
 from app.schemas.news import (
     MAX_ENRICH_ARTICLE_IDS,
     EnrichNewsResponse,
@@ -162,6 +162,52 @@ async def enrich_index_news(
 # ── Main detail endpoint (catch-all /{symbol} MUST be last) ──
 
 
+def _normalize_index_symbol(symbol: str) -> str:
+    """`GSPC` / `%5EGSPC` / `^gspc` -> `^GSPC`."""
+    if not symbol.startswith("^") and not symbol.startswith("%5E"):
+        symbol = f"^{symbol}"
+    return symbol.replace("%5E", "^").upper()
+
+
+@router.get("/{symbol}/quote", response_model=IndexQuoteResponse)
+async def get_index_quote(
+    symbol: str,
+    chart_range: Optional[str] = Query(
+        None, alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"
+    ),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
+):
+    """Light refresh slice — level, market status, key stats, optional chart.
+
+    Exists because the iOS 30-second loop and every range-pill tap were re-requesting the
+    whole detail payload — including `snapshots_data`, a deep required object graph of
+    AI-written stories — to move one number. Same fast-core pattern as
+    `GET /commodities/{symbol}/quote` and `GET /etfs/{symbol}/quote`.
+
+    Declared ABOVE the catch-all `/{symbol}`, which the comment above requires.
+
+    Omit `range` to skip chart work entirely: on a daily chart a 30-second refresh cannot
+    move a bar, so the loop asks for bars only when the chart is intraday.
+    """
+    symbol = _normalize_index_symbol(symbol)
+    try:
+        service = get_index_service()
+        return await service.get_index_quote(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Index quote failed for %s: %s: %s", symbol, type(e).__name__, e, exc_info=True
+        )
+        return error_response_from_exception(e, ticker=symbol, step="index_quote")
+
+
 @router.get("/{symbol}", response_model=IndexDetailResponse)
 async def get_index_detail(
     symbol: str,
@@ -178,10 +224,7 @@ async def get_index_detail(
     Cache-aside: Returns Supabase-cached data if fresh (< 24h),
     otherwise fetches live from FMP + Gemini and caches.
     """
-    # Normalize symbol
-    if not symbol.startswith("^") and not symbol.startswith("%5E"):
-        symbol = f"^{symbol}"
-    symbol = symbol.replace("%5E", "^").upper()
+    symbol = _normalize_index_symbol(symbol)
 
     try:
         service = get_index_service()

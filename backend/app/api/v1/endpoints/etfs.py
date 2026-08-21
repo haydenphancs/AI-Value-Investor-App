@@ -19,7 +19,13 @@ from app.api.error_response import (
     upstream_error_response,
 )
 from app.services.etf_service import get_etf_service
-from app.schemas.etf import ETFDetailResponse, ETFDividendHistoryResponse, ETFHoldingsRiskResponse, ETFProfileResponse
+from app.schemas.etf import (
+    ETFDetailResponse,
+    ETFDividendHistoryResponse,
+    ETFHoldingsRiskResponse,
+    ETFProfileResponse,
+    ETFQuoteResponse,
+)
 from app.schemas.news import (
     MAX_ENRICH_ARTICLE_IDS,
     EnrichNewsResponse,
@@ -45,6 +51,46 @@ def _invalid_news_symbol(raw: str) -> JSONResponse:
         user_message="That symbol isn't valid.",
         details={"symbol": raw[:32]},
     )
+
+
+@router.get("/{symbol}/quote", response_model=ETFQuoteResponse)
+async def get_etf_quote(
+    symbol: str,
+    chart_range: Optional[str] = Query(
+        None, alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"
+    ),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
+):
+    """Light refresh slice — price, market status, key stats, related, optional chart.
+
+    Exists because the iOS 30-second loop and every range-pill tap were re-requesting the
+    ~10 KB monolith to move a price and a chart. Same fast-core pattern as
+    `GET /commodities/{symbol}/quote` and `GET /stocks/{ticker}/overview/core`.
+
+    Declared ABOVE the catch-all `/{symbol}` to match the commodity router, so the two
+    files read the same way — the sub-path routes here are unambiguous either way, since a
+    path parameter never spans a `/`.
+
+    Omit `range` to skip chart work entirely: on a daily chart a 30-second refresh cannot
+    move a bar, so the loop asks for bars only when the chart is intraday.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        service = get_etf_service()
+        return await service.get_etf_quote(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "ETF quote failed for %s: %s: %s", symbol, type(e).__name__, e, exc_info=True
+        )
+        return error_response_from_exception(e, ticker=symbol, step="etf_quote")
 
 
 @router.get("/{symbol}", response_model=ETFDetailResponse)

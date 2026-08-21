@@ -126,6 +126,30 @@ class IndexNewsArticleResponse(BaseModel):
 # ── Top-level response ───────────────────────────────────────────
 
 
+class IndexQuoteResponse(BaseModel):
+    """Light refresh slice for the iOS 30-second loop and the range picker.
+
+    Every field name and type is identical to the same-named field on
+    `IndexDetailResponse`, so the client decodes them with DTOs it already has.
+
+    Deliberately EXCLUDES the close-cadence sections a 30-second refresh cannot change —
+    `performance_periods`, `snapshots_data`, `index_profile`, `benchmark_summary` — and
+    `news_articles`, which the client reads from `GET /indices/{symbol}/news` and never
+    took from this payload. `snapshots_data` alone is a deep required object graph
+    (valuation + sector performance + macro forecast, each with its own story template);
+    re-sending it every 30 seconds to move one number was most of the payload.
+    """
+
+    symbol: str
+    current_price: float
+    price_change: float
+    price_change_percent: float
+    market_status: MarketStatusResponse
+    # Empty unless `range` was supplied — the loop only needs bars on an intraday chart.
+    chart_data: List[ChartDataPointResponse] = []
+    key_statistics_groups: List[KeyStatisticsGroupResponse] = []
+
+
 class IndexDetailResponse(BaseModel):
     symbol: str
     index_name: str

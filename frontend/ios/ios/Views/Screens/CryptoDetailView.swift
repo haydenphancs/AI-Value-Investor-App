@@ -31,9 +31,11 @@ struct CryptoDetailView: View {
     var onNavigateToResearch: (() -> Void)?
 
     init(cryptoSymbol: String, onNavigateToResearch: (() -> Void)? = nil) {
-        self.cryptoSymbol = cryptoSymbol
+        // Bare form everywhere on screen; `CryptoSymbol.pair` builds the FMP
+        // pair where one is needed. Home passes "BTCUSD", search passes "BTC".
+        self.cryptoSymbol = CryptoSymbol.bare(cryptoSymbol)
         self.onNavigateToResearch = onNavigateToResearch
-        self._viewModel = StateObject(wrappedValue: CryptoDetailViewModel(cryptoSymbol: cryptoSymbol))
+        self._viewModel = StateObject(wrappedValue: CryptoDetailViewModel(cryptoSymbol: CryptoSymbol.bare(cryptoSymbol)))
     }
 
     // Share sheet items
@@ -248,7 +250,7 @@ struct CryptoDetailView: View {
             if let query = newValue {
                 chatViewModel.startNewConversation(
                     firstMessage: query,
-                    stockId: "\(cryptoSymbol)USD",
+                    stockId: CryptoSymbol.pair(cryptoSymbol),
                     context: viewModel.contextForCurrentTab,
                     contextType: .crypto,
                     referenceId: cryptoSymbol
@@ -281,6 +283,14 @@ struct CryptoDetailView: View {
                     onWhitepaperTap: viewModel.handleWhitepaperTap,
                     onRelatedCryptoTap: viewModel.handleRelatedCryptoTap
                 )
+            } else if let errorMessage = viewModel.errorMessage {
+                DetailLoadFailureCard(
+                    message: errorMessage,
+                    isRetrying: viewModel.isLoading,
+                    onRetry: { viewModel.loadCryptoData() }
+                )
+            } else {
+                DetailTabSkeleton()
             }
         case .news:
             TickerNewsContent(
@@ -348,7 +358,7 @@ struct CryptoDetailView: View {
     private func handleDeepResearchTap() {
         chatViewModel.startNewConversation(
             firstMessage: "Give me a comprehensive Deep Analysis of \(cryptoSymbol). Analyze the current price action, market position, key risks, and outlook.",
-            stockId: "\(cryptoSymbol)USD",
+            stockId: CryptoSymbol.pair(cryptoSymbol),
             context: viewModel.contextForCurrentTab,
             contextType: .crypto,
             referenceId: cryptoSymbol

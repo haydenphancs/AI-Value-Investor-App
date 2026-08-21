@@ -78,7 +78,12 @@ class CryptoDetailViewModel: ObservableObject {
     // MARK: - Initialization
 
     init(cryptoSymbol: String) {
-        self.cryptoSymbol = cryptoSymbol
+        // Normalise to the BARE coin symbol exactly once, here. Callers disagree
+        // about the form — the search router and notification routes pass "BTC",
+        // Home's Market Pulse passes the FMP pair form "BTCUSD" — and every
+        // `"\(cryptoSymbol)USD"` site below then built "BTCUSDUSD", a symbol that
+        // does not exist. See `CryptoSymbol`.
+        self.cryptoSymbol = CryptoSymbol.bare(cryptoSymbol)
 
         $selectedChartRange
             .dropFirst()
@@ -208,6 +213,16 @@ class CryptoDetailViewModel: ObservableObject {
     }
 
     func refresh() async {
+        // Drop this asset's CLIENT-side cache first — otherwise the gesture does no
+        // network work for anything served by StockRepository (news 60s, analyst /
+        // sentiment / technical 30 min, ETF profile + holdings-risk + dividends 24h
+        // against a process-lifetime singleton). Backend caches still absorb the
+        // upstream cost; this only bypasses the on-device copy.
+        // Crypto is cached under BOTH spellings: bare by the news/sentiment calls,
+        // the FMP pair by anything chart-related.
+        StockRepository.shared.invalidate(
+            symbol: cryptoSymbol, aliases: [CryptoSymbol.pair(cryptoSymbol)]
+        )
         isLoading = true
         errorMessage = nil
         detailRequestGen += 1
@@ -417,7 +432,7 @@ class CryptoDetailViewModel: ObservableObject {
 
     func connectLivePrice() {
         // See TickerDetailViewModel.connectLivePrice.
-        let fmpSymbol = "\(cryptoSymbol)USD"
+        let fmpSymbol = CryptoSymbol.pair(cryptoSymbol)
         Task { [weak self] in
             guard let self else { return }
             let token = await APIClient.shared.currentAuthToken()
@@ -455,7 +470,7 @@ class CryptoDetailViewModel: ObservableObject {
 
     /// Lightweight chart-only refresh — bypasses cache for fresh intraday data
     private func refreshChartOnly() async {
-        let fmpSymbol = "\(cryptoSymbol)USD"
+        let fmpSymbol = CryptoSymbol.pair(cryptoSymbol)
         // Capture the request generation so a range change during the await
         // invalidates this background refresh (last-write-wins), mirroring
         // fetchChartForRange. Do NOT bump the gen — this is a timer refresh, not a

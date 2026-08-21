@@ -242,6 +242,14 @@ struct ETFDetailView: View {
                     onWebsiteTap: viewModel.handleWebsiteTap,
                     onRelatedETFTap: viewModel.handleRelatedETFTap
                 )
+            } else if let errorMessage = viewModel.errorMessage {
+                DetailLoadFailureCard(
+                    message: errorMessage,
+                    isRetrying: viewModel.isLoading,
+                    onRetry: { viewModel.loadETFData() }
+                )
+            } else {
+                DetailTabSkeleton()
             }
         case .news:
             TickerNewsContent(

@@ -1275,7 +1275,14 @@ class HoldersService:
             return monthly
 
         for rec in historical:
-            date_str = rec.get("date", "")[:10]
+            # `.get("date", "")` returns None when the key is PRESENT and null — the
+            # default only covers a MISSING key — and `None[:10]` is a TypeError that
+            # escapes `_build_holders` and 502s the whole Holders tab. Neither of these
+            # two extractors is inside a try. `rec` can also be a non-dict when FMP
+            # returns an error payload, which is an AttributeError on `.get`.
+            if not isinstance(rec, dict):
+                continue
+            date_str = (rec.get("date") or "")[:10]
             price = _safe_float(rec, "close", _safe_float(rec, "price", 0.0))
             if not date_str or price <= 0:
                 continue
@@ -1301,7 +1308,10 @@ class HoldersService:
 
         points = []
         for rec in historical:
-            date_str = rec.get("date", "")[:10]
+            # Same null-date / non-dict guard as `_extract_monthly_prices` above.
+            if not isinstance(rec, dict):
+                continue
+            date_str = (rec.get("date") or "")[:10]
             price = _safe_float(rec, "close", _safe_float(rec, "price", 0.0))
             if date_str and price > 0:
                 points.append(DailyPricePointSchema(date=date_str, price=round(price, 2)))

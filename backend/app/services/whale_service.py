@@ -817,7 +817,7 @@ class WhaleService:
         if not force_refresh:
             inflight = _whale_profile_inflight.get(whale_id)
             if inflight is not None:
-                shared = await inflight
+                shared = await asyncio.shield(inflight)
                 if shared is None:
                     return None
                 return self._overlay_follow_state(shared, user_id, sb)

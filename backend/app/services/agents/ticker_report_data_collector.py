@@ -848,17 +848,29 @@ class TickerReportDataCollector:
 
         inflight = _macro_snapshot_inflight.get(key)
         if inflight is not None:
-            return await inflight
+            return await asyncio.shield(inflight)
 
-        task = asyncio.ensure_future(self._fetch_macro_indicators_uncached())
-        _macro_snapshot_inflight[key] = task
-        try:
-            snapshot = await task
+        async def _run() -> List[Dict[str, Any]]:
+            # The cache write lives INSIDE the shared task, not in the leader's frame.
+            # It used to run after the leader's `await task`, so a cancelled leader
+            # (shutdown, a client disconnect, a report hitting its pipeline timeout)
+            # threw the finished result away even though every joiner had already been
+            # served it — and the next caller re-ran the whole FMP fan-out.
+            snapshot = await self._fetch_macro_indicators_uncached()
             # Cache-write only on success; never cache an exception.
             _macro_snapshot_cache[key] = (time.time(), snapshot)
             return snapshot
-        finally:
-            _macro_snapshot_inflight.pop(key, None)
+
+        task = asyncio.ensure_future(_run())
+        _macro_snapshot_inflight[key] = task
+        # Pop from the done-callback rather than a `finally`: the entry must live as
+        # long as the TASK does, not as long as the leader's await does. A `finally`
+        # that fires on the leader's cancellation would drop a still-running task from
+        # the map, so the next caller would start a second identical fan-out.
+        task.add_done_callback(lambda _t: _macro_snapshot_inflight.pop(key, None))
+        # SHIELDED for the same reason every joiner is: this frame being cancelled must
+        # not cancel the work everyone else is waiting on.
+        return await asyncio.shield(task)
 
     async def _fetch_macro_indicators_uncached(self) -> List[Dict[str, Any]]:
         """Fetch the latest level + multi-period changes per macro symbol.

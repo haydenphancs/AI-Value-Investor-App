@@ -1074,6 +1074,11 @@ async def _run_whale_hydration_job():
     """
     from datetime import datetime, timedelta, timezone
 
+    from app.services.notification_jobs import (
+        JOB_WHALE_HYDRATION_FULL,
+        claimed_scheduled_job,
+    )
+
     await asyncio.sleep(120)  # let app fully start
 
     politician_interval = 6 * 3600  # 6 hours
@@ -1081,26 +1086,29 @@ async def _run_whale_hydration_job():
     # made the first sweep wait until monotonic passed 21600 — up to 6 hours after a
     # deploy on a freshly booted host. `None` means "never run", so it runs immediately.
     last_politician_run: Optional[float] = None
-    # Seed with TODAY when today's 02:00 window has already passed, so a deploy at
-    # 14:00 waits for tomorrow instead of kicking off a full hydration of all 53 whales
-    # on every restart. A deploy before 02:00 leaves this None and still runs today.
-    _boot = datetime.now(timezone.utc)
-    last_full_run_date = _boot.date() if _boot.hour >= 2 else None
-    if last_full_run_date is not None:
-        # SAY SO. This seed INFERS from the clock that today's run already happened, and
-        # it is sometimes wrong: a redeploy or OOM at 02:07 mid-run boots a process that
-        # skips the rest of the day, leaving the un-swept whales on yesterday's data with
-        # no way for a consumer to compensate (`_get_or_process_latest` prefers the
-        # stored snapshot whenever `last_hydrated_at` is set and never rebuilds on age).
-        # It self-heals the next day, so the fix is visibility, not a durable marker —
-        # an undiagnosable silent skip is the part that is unacceptable.
-        logger.info(
-            "Whale full hydration: boot at %s UTC is past 02:00 — assuming today's (%s) "
-            "run already happened. Next full run %s. If this boot was a mid-run restart, "
-            "today's remaining whales keep yesterday's data.",
-            _boot.isoformat(timespec="seconds"), _boot.date(),
-            _boot.date() + timedelta(days=1),
-        )
+    # "Has today's full sweep already run?" is answered by a DURABLE marker
+    # (`notification_job_state.whale_hydration_full`, migration 147), not by the boot
+    # clock. The old seed INFERRED it from the clock — `_boot.date() if _boot.hour >= 2`
+    # — and was wrong in exactly the case that hurts: a redeploy or OOM at 02:07, mid-run,
+    # booted a process that skipped the rest of the day, leaving the un-swept whales on
+    # yesterday's data with nothing downstream able to compensate
+    # (`_get_or_process_latest` prefers the stored snapshot whenever `last_hydrated_at`
+    # is set and never rebuilds on age).
+    #
+    # The claim RPC enforces at-most-one-successful-run-per-UTC-day atomically and across
+    # instances, so no local date is tracked here at all. A crashed run leaves `claim_at`
+    # set and is retried once the stale window (NOTIFICATION_JOB_STALE_SECONDS) expires;
+    # a graceful shutdown records failure immediately via the shielded release.
+    #
+    # ⚠️ `max(whales.last_hydrated_at)` is NOT usable as this marker: the 6-hourly
+    #    politician branch below re-stamps it, which would read as "already ran today"
+    #    every day and suppress the full sweep forever.
+    #
+    # Bounded per PROCESS, not per day: a persistently failing upstream would otherwise
+    # be retried on every hourly wake, and each attempt costs a full FMP sweep. Resetting
+    # on restart is deliberate — a restart is exactly when a retry SHOULD be allowed.
+    _MAX_FULL_ATTEMPTS_PER_DAY = 3
+    full_attempts: dict = {}
 
     async def _with_hydrator(run):
         """Build the clients, hand them to `run`, and ALWAYS close the FMP client."""
@@ -1171,16 +1179,48 @@ async def _run_whale_hydration_job():
                 _politician_sweep_done.set()
 
         # ── Full hydration: daily at 02:00 UTC ──────────────────────────
-        # Clock re-read HERE, after the sweep above, and guarded by the DATE it last
-        # ran rather than by an exact hour equality — so a cycle that overshoots 02:00
-        # still runs, once, instead of skipping the day.
+        # Clock re-read HERE, after the politician sweep above, which can run for many
+        # minutes — a cycle that woke at 01:5x would otherwise still be holding hour==1
+        # when it reached this check and would skip the whole day.
+        # "Already ran today" comes from the durable claim (migration 147), not from an
+        # hour equality and not from any in-process date, so a mid-run restart resumes
+        # instead of silently skipping the rest of the day.
         now = datetime.now(timezone.utc)
-        if now.hour >= 2 and last_full_run_date != now.date():
-            last_full_run_date = now.date()
+        attempts = full_attempts.get(now.date(), 0)
+        if now.hour >= 2 and attempts < _MAX_FULL_ATTEMPTS_PER_DAY:
             try:
-                await _with_hydrator(lambda h: h.run())
-                logger.info("Full whale hydration completed (UTC %s)", now.date())
+                async with claimed_scheduled_job(JOB_WHALE_HYDRATION_FULL) as run:
+                    if run is not None:
+                        full_attempts[now.date()] = attempts + 1
+                        # Prune by age, not by one specific key: popping only
+                        # `today - 2` leaks an entry for every day the sweep is skipped
+                        # in a long-lived process.
+                        for _d in [d for d in full_attempts
+                                   if d < now.date() - timedelta(days=1)]:
+                            full_attempts.pop(_d, None)
+                        stats: dict = {}
+
+                        async def _full(h):
+                            nonlocal stats
+                            stats = await h.run() or {}
+
+                        await _with_hydrator(_full)
+                        # `processed` is the count that actually took the WRITE path.
+                        # Recorded so a consumer can tell "ran, wrote nothing because
+                        # every payload was hash-stable" from "never ran" — they are
+                        # indistinguishable from latency or from last_hydrated_at alone.
+                        run.items = int(stats.get("processed", 0) or 0)
+                        run.success = True
+                        logger.info(
+                            "Full whale hydration completed (UTC %s) — "
+                            "processed=%d skipped=%d no_data=%d errors=%d",
+                            now.date(),
+                            stats.get("processed", 0), stats.get("skipped", 0),
+                            stats.get("no_data", 0), stats.get("errors", 0),
+                        )
             except Exception as e:
+                # The claim was already released as a FAILURE by the context manager, so
+                # `run_day` did not advance and the next wake retries (up to the cap).
                 logger.error(
                     "Full whale hydration job failed: %s: %s",
                     type(e).__name__, e, exc_info=True,

@@ -314,6 +314,16 @@ struct TickerDetailView: View {
                     onWebsiteTap: viewModel.handleWebsiteTap,
                     onRelatedTickerTap: viewModel.handleRelatedTickerTap
                 )
+            } else if let errorMessage = viewModel.errorMessage {
+                // Settled and failed. Without this the Overview tab body was blank —
+                // indistinguishable from "still loading" and from "no data exists".
+                DetailLoadFailureCard(
+                    message: errorMessage,
+                    isRetrying: viewModel.isLoading,
+                    onRetry: { viewModel.loadTickerData() }
+                )
+            } else {
+                DetailTabSkeleton()
             }
         case .news:
             TickerNewsContent(

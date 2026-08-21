@@ -251,7 +251,10 @@ async def compute_and_persist_all_sectors() -> int:
                 mkt_cap = float(profile.get("mktCap") or 0.0)
                 revenues: List = []
                 for row in income:
-                    yr = row.get("calendarYear") or row.get("date", "")[:4]
+                    # `.get("date", "")` is None for a present-but-null key, and the
+                    # `None[:4]` TypeError is swallowed by the outer `except Exception`
+                    # — so the ticker silently vanished from the sector aggregate.
+                    yr = row.get("calendarYear") or (row.get("date") or "")[:4]
                     rev = row.get("revenue")
                     try:
                         revenues.append((int(yr), float(rev or 0.0)))

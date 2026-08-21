@@ -71,6 +71,13 @@ class FMPClient:
         self.api_key = settings.FMP_API_KEY
         self.timeout = settings.HTTP_TIMEOUT_SECONDS
         self._client: Optional[httpx.AsyncClient] = None
+        # Monotonic count of requests that failed after retries. EVERY public method here
+        # swallows its exception and returns [] / {}, which makes "upstream returned
+        # nothing" indistinguishable from "upstream is down" at the call site — a 429, a
+        # plan downgrade and a genuinely empty result all look identical. Callers that
+        # need to tell them apart snapshot this before a fetch and compare after; a move
+        # means the empty result was a FAILURE. Never reset — callers diff it.
+        self.request_failures: int = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the persistent AsyncClient with connection pooling."""
@@ -103,6 +110,23 @@ class FMPClient:
     _RETRY_BASE_DELAY = 0.5     # seconds; exponential backoff (0.5s, 1.0s)
 
     async def _make_request(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Count failures, then delegate. See `_make_request_impl` for the contract.
+
+        Thin on purpose: this is the single point every public method funnels through,
+        so it is the only place a reliable "upstream failed" signal can be taken without
+        editing the ~20 methods that each swallow their own exception.
+        """
+        try:
+            return await self._make_request_impl(endpoint, params)
+        except Exception:
+            self.request_failures += 1
+            raise
+
+    async def _make_request_impl(
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,

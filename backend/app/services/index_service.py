@@ -321,9 +321,23 @@ class IndexService:
 
     # ── Supabase cache-aside ────────────────────────────────────
 
-    def _check_db_cache(self, symbol: str, chart_range: str) -> Optional[Dict]:
+    @staticmethod
+    def _cache_key(symbol: str, chart_range: str, interval: Optional[str]) -> str:
+        """Cache key for one index detail payload.
+
+        The INTERVAL is part of the key because the response's `chart_data` is built
+        from it (`resolve_interval(chart_range, interval)` → `fetch_chart_data`). While
+        the key was only `f"{symbol}_{chart_range}"`, opening 1D at 5-minute bars and
+        then switching the interval picker to 1-hour returned the 5-minute candles —
+        for the full 24h TTL, and for every other user of that index.
+        """
+        return f"{symbol}_{chart_range}_{interval or 'default'}"
+
+    def _check_db_cache(
+        self, symbol: str, chart_range: str, interval: Optional[str] = None
+    ) -> Optional[Dict]:
         """Check Supabase index_detail_cache (24h TTL)."""
-        cache_key = f"{symbol}_{chart_range}"
+        cache_key = self._cache_key(symbol, chart_range, interval)
         try:
             row = (
                 self.supabase.table("index_detail_cache")
@@ -361,10 +375,11 @@ class IndexService:
             return None
 
     def _upsert_db_cache(
-        self, symbol: str, chart_range: str, data: Dict
+        self, symbol: str, chart_range: str, data: Dict,
+        interval: Optional[str] = None,
     ) -> None:
         """Upsert index detail response into Supabase cache."""
-        cache_key = f"{symbol}_{chart_range}"
+        cache_key = self._cache_key(symbol, chart_range, interval)
         try:
             self.supabase.table("index_detail_cache").upsert(
                 {
@@ -464,10 +479,18 @@ class IndexService:
         cached data. Otherwise fetch live, cache, and return.
         """
         # ── Step 0: Check Supabase cache ─────────────────────────
-        cached = self._check_db_cache(symbol, chart_range)
+        cached = self._check_db_cache(symbol, chart_range, interval)
         if cached:
             try:
-                return IndexDetailResponse(**cached)
+                response = IndexDetailResponse(**cached)
+                # The cached payload carries the REQUIRED price fields, and this row
+                # can be up to 24 HOURS old — so returning it verbatim painted a stale
+                # level, a stale daily move and a stale "Market Open/Closed" badge.
+                # Unlike the ETF and stock screens there is no live-price WebSocket on
+                # the index screen to correct it afterwards. Re-quote the volatile
+                # fields (one cheap FMP call) and keep the expensive cached bundle.
+                await self._refresh_volatile(response, symbol)
+                return response
             except Exception as e:
                 logger.warning(
                     f"Cached data deserialization failed for {symbol}: {e}"
@@ -537,21 +560,47 @@ class IndexService:
                 f"FMP returned: {type(quote).__name__}={quote}. "
                 f"Check that FMP API key is valid and symbol '{symbol}' exists."
             )
-        price = quote.get("price") or 0
-        change = quote.get("change") or 0
-        change_pct = quote.get("changesPercentage") or 0
+        # `x or 0` is NOT a guard against a non-finite value: FMP emits bare NaN /
+        # Infinity JSON tokens, `json.loads` parses them, and a NaN is TRUTHY — so it
+        # sails through `or 0` and lands in the REQUIRED `current_price` /
+        # `price_change` / `price_change_percent` floats. Starlette then renders with
+        # `allow_nan=False` and 500s the whole index screen from INSIDE the renderer,
+        # where this method's caller cannot catch it. Route every numeric through
+        # `_finite_or_none` first, exactly as commodity_service already does.
+        from app.services.chart_helper import _finite_or_none
+
+        def _q(key: str, default: float = 0) -> float:
+            return _finite_or_none(quote.get(key)) if _finite_or_none(quote.get(key)) is not None else default
+
+        price = _q("price")
+        change = _q("change")
+        # FMP `/stable` renamed the daily move to the SINGULAR `changePercentage`;
+        # `changesPercentage` is the dead /api/v3 spelling. Reading only the plural made
+        # `price_change_percent` 0.0 on EVERY index response — the header badge showed
+        # "+0.00%" for the S&P 500 all day, every day. commodity_service, chat_service
+        # and the stock quote endpoint all read the singular first; this was the one
+        # site that never moved. Compute from change/previousClose as a last resort.
+        change_pct = _finite_or_none(quote.get("changePercentage"))
+        if change_pct is None:
+            change_pct = _finite_or_none(quote.get("changesPercentage"))
         # FMP doesn't return PE for indices — compute from sector benchmarks
-        pe = quote.get("pe") or _compute_index_pe_from_sectors() or 0
-        eps = quote.get("eps") or 0
-        prev_close = quote.get("previousClose") or 0
-        open_price = quote.get("open") or 0
-        day_high = quote.get("dayHigh") or 0
-        day_low = quote.get("dayLow") or 0
-        year_high = quote.get("yearHigh") or 0
-        year_low = quote.get("yearLow") or 0
-        volume = quote.get("volume") or 0
-        avg_volume = quote.get("avgVolume") or 0
-        market_cap = quote.get("marketCap") or 0
+        pe = _q("pe") or _compute_index_pe_from_sectors() or 0
+        eps = _q("eps")
+        prev_close = _q("previousClose")
+        if change_pct is None and change and prev_close:
+            try:
+                change_pct = round((change / prev_close) * 100, 4)
+            except (TypeError, ValueError, ZeroDivisionError):
+                change_pct = None
+        change_pct = change_pct if change_pct is not None else 0
+        open_price = _q("open")
+        day_high = _q("dayHigh")
+        day_low = _q("dayLow")
+        year_high = _q("yearHigh")
+        year_low = _q("yearLow")
+        volume = _q("volume")
+        avg_volume = _q("avgVolume")
+        market_cap = _q("marketCap")
 
         # ── Step 3: Compute derived stats ─────────────────────────
         avg_50 = _compute_average(historical, 50)
@@ -667,14 +716,79 @@ class IndexService:
         )
 
         # ── Step 11: Cache in Supabase ───────────────────────────
-        try:
-            self._upsert_db_cache(
-                symbol.upper(), chart_range, response.model_dump()
+        # NEVER persist a degraded build. When the quote call fails, every numeric
+        # above defaults to 0 — and a 24-hour row of `current_price: 0.0` pins
+        # "$0.00 (+0.00%)" onto the index screen for EVERY user until it expires. The
+        # in-memory tier still absorbs a retry storm, so the cost of skipping is one
+        # extra fan-out; the cost of persisting is a day of fabricated numbers.
+        # Mirrors profit_power_service's `if degraded: … else: upsert`.
+        degraded = (not quote) or isinstance(quote, Exception) or price <= 0
+        if degraded:
+            logger.warning(
+                "Index detail NOT persisted for %s (degraded: quote missing or "
+                "price<=0) — will rebuild on the next request",
+                symbol,
             )
-        except Exception as e:
-            logger.warning(f"Failed to cache index detail for {symbol}: {e}")
+        else:
+            try:
+                self._upsert_db_cache(
+                    symbol.upper(), chart_range, response.model_dump(),
+                    interval=interval,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to cache index detail for {symbol}: {e}")
 
         return response
+
+    async def _refresh_volatile(
+        self, response: "IndexDetailResponse", symbol: str
+    ) -> None:
+        """Overwrite the price fields of a CACHED response with a live quote.
+
+        Best-effort and in place: any failure leaves the cached values untouched and
+        logs, because a stale price is still better than no screen. Only the four
+        genuinely volatile fields move; everything expensive in the cached bundle
+        (history, constituents, sector performance, AI snapshots) is left alone.
+        """
+        try:
+            quote = await self.fmp.get_stock_price_quote(symbol)
+        except Exception as e:
+            logger.warning(
+                "Index volatile refresh failed for %s: %s: %s — serving cached price",
+                symbol, type(e).__name__, e,
+            )
+            return
+        if not isinstance(quote, dict) or not quote:
+            logger.warning(
+                "Index volatile refresh for %s returned no quote — serving cached price",
+                symbol,
+            )
+            return
+
+        from app.services.chart_helper import _finite_or_none
+
+        price = _finite_or_none(quote.get("price"))
+        if price is None or price <= 0:
+            return  # nothing trustworthy to overwrite with
+
+        change = _finite_or_none(quote.get("change"))
+        pct = _finite_or_none(quote.get("changePercentage"))
+        if pct is None:
+            pct = _finite_or_none(quote.get("changesPercentage"))
+        prev_close = _finite_or_none(quote.get("previousClose"))
+        if pct is None and change is not None and prev_close:
+            try:
+                pct = round((change / prev_close) * 100, 4)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pct = None
+
+        response.current_price = price
+        if change is not None:
+            response.price_change = change
+        if pct is not None:
+            response.price_change_percent = pct
+        # The badge is a function of NOW, never of when the row was written.
+        response.market_status = _get_market_status()
 
     # ── Chart helpers ────────────────────────────────────────────
 

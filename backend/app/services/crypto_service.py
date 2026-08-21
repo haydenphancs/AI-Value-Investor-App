@@ -1639,6 +1639,8 @@ Separate each category with "===CATEGORY===" followed by the category name.
         self, raw_quotes: List[Dict], expected_symbols: List[str],
     ) -> List[RelatedCryptoResponse]:
         """Build related crypto list from batch FMP quotes."""
+        from app.services.chart_helper import _finite_or_none
+
         # Create lookup by FMP symbol
         quote_map: Dict[str, Dict] = {}
         for q in raw_quotes:
@@ -1657,11 +1659,22 @@ Separate each category with "===CATEGORY===" followed by the category name.
                 from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
                 cg_id = SYMBOL_TO_COINGECKO_ID.get(sym, "")
                 name = cg_id.replace("-", " ").title() if cg_id else sym
+            # `x or 0` does NOT guard a non-finite: an FMP NaN token is truthy, so it
+            # sails through and lands in these REQUIRED response floats — Starlette then
+            # renders with allow_nan=False and 500s the WHOLE crypto detail screen from
+            # inside the renderer, past the endpoint's try/except. commodity_service's
+            # `related_commodities` was fixed for exactly this; the crypto twin was not.
+            # Note the singular `changePercentage` is FMP /stable's spelling and is read
+            # FIRST here; the plural is the dead /api/v3 fallback.
+            rel_price = _finite_or_none(q.get("price"))
+            rel_change = _finite_or_none(q.get("changePercentage"))
+            if rel_change is None:
+                rel_change = _finite_or_none(q.get("changesPercentage"))
             result.append(RelatedCryptoResponse(
                 symbol=sym,
                 name=name,
-                price=q.get("price") or 0,
-                change_percent=q.get("changesPercentage") or q.get("changePercentage") or 0,
+                price=rel_price if rel_price is not None else 0,
+                change_percent=rel_change if rel_change is not None else 0,
             ))
 
         return result

@@ -132,14 +132,28 @@ class WhaleHydrator:
         # `no_data` is its own bucket. It used to fall into `skipped` alongside
         # "unchanged since last run" and "manual whale", so the one counter that could
         # reveal a filer going dormant was averaged into two benign ones.
-        self.stats = {"processed": 0, "skipped": 0, "errors": 0, "no_data": 0}
+        self.stats = {
+            "processed": 0, "skipped": 0, "errors": 0, "no_data": 0,
+            # Empty result that was caused by an FMP FAILURE rather than by the filer
+            # genuinely having nothing. Separated because the two demand opposite
+            # responses: a real empty is a dormancy hint, an outage is an alert — and
+            # because only the real empty may take the ticker-only WRITE path.
+            "upstream_failed": 0,
+        }
         # Cache profile data across whales to avoid duplicate FMP calls
         self._profile_cache: Dict[str, Dict] = {}
 
     # ── Main Entry ───────────────────────────────────────────────────
 
-    async def run(self, whale_id: Optional[str] = None):
-        """Hydrate all whales or a single one by ID."""
+    async def run(self, whale_id: Optional[str] = None) -> Dict[str, int]:
+        """Hydrate all whales or a single one by ID.
+
+        Returns a copy of the run counters. `processed` is the number of whales that
+        actually took the WRITE path — the caller records it as the run's
+        `items_written`, which is the only way a consumer can distinguish "the sweep ran
+        and legitimately wrote nothing" (every payload hash-stable) from "the sweep never
+        ran". A returned copy, not the live dict, so a caller cannot mutate run state.
+        """
         if whale_id:
             result = (
                 self.sb.table("whales").select("*").eq("id", whale_id).execute()
@@ -165,12 +179,16 @@ class WhaleHydrator:
                 self.stats["errors"] += 1
 
         logger.info(
-            "Hydration complete. processed=%d  skipped=%d  no_data=%d  errors=%d",
+            "Hydration complete. processed=%d  skipped=%d  no_data=%d  errors=%d  "
+            "upstream_failed=%d",
             self.stats["processed"],
             self.stats["skipped"],
             self.stats["no_data"],
             self.stats["errors"],
+            self.stats["upstream_failed"],
         )
+
+        return dict(self.stats)
 
     # ── Single Whale Pipeline ────────────────────────────────────────
 
@@ -180,6 +198,11 @@ class WhaleHydrator:
         data_source = whale.get("data_source", "manual")
 
         logger.info("Processing: %s (source=%s)", name, data_source)
+
+        # Snapshot BEFORE the fetch. Every FMP method swallows its exception and returns
+        # [], so an empty `raw` below is ambiguous; a move in this counter is what makes
+        # "upstream is down" separable from "this filer disclosed nothing".
+        fmp_failures_before = getattr(self.fmp, "request_failures", 0)
 
         # Step 1: Route to data source
         if data_source == "13f":
@@ -203,10 +226,26 @@ class WhaleHydrator:
             # returns [], so this fires identically for a 429, a plan downgrade and a
             # timeout. Dormancy is classified from PERSISTED data in
             # `_whale_common.compute_activity`; this counter is an operational hint only.
+            if getattr(self.fmp, "request_failures", 0) > fmp_failures_before:
+                # An OUTAGE, not an empty filer. Return before the ticker-only fallback
+                # below: that path issues a blocking `whales` UPDATE, so on a 429 storm
+                # every ticker-backed whale wrote a return computed from degraded data,
+                # on every sweep, indefinitely. Counted separately from `no_data` so a
+                # dormancy review is never fed an outage.
+                self.stats["upstream_failed"] += 1
+                logger.error(
+                    "  FMP FAILED for %s (whale_id=%s data_source=%s) — %d request "
+                    "failure(s) during this whale's fetch. Skipping all writes; this is "
+                    "an upstream outage, NOT an empty filer and NOT dormancy.",
+                    name, whale_id, data_source,
+                    getattr(self.fmp, "request_failures", 0) - fmp_failures_before,
+                )
+                return
+
             self.stats["no_data"] += 1
             logger.warning(
-                "  No data returned for %s (whale_id=%s data_source=%s) — upstream empty "
-                "OR unavailable; NOT proof of dormancy",
+                "  No data returned for %s (whale_id=%s data_source=%s) — upstream "
+                "returned EMPTY with no request failure; NOT proof of dormancy",
                 name, whale_id, data_source,
             )
             # Ticker-only fallback: if whale has an associated_ticker

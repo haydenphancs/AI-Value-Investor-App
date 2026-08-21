@@ -227,20 +227,33 @@ struct CommodityDetailView: View {
         }
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
-                chatViewModel.startNewConversation(
+                // Only present the cover if the conversation was actually SEEDED.
+                // `startNewConversation` returns false when a previous turn is still
+                // streaming (`guard !isAITyping`), and the result was discarded — so the
+                // cover opened on the PREVIOUS conversation and the question the user
+                // just typed was silently thrown away. Put it back in the input box
+                // instead, so nothing is lost.
+                if chatViewModel.startNewConversation(
                     firstMessage: query,
                     stockId: commoditySymbol,
                     context: viewModel.contextForCurrentTab,
                     contextType: .commodity,
                     referenceId: commoditySymbol
-                )
-                viewModel.pendingAIQuery = nil
-                showAIChat = true
+                ) {
+                    viewModel.pendingAIQuery = nil
+                    showAIChat = true
+                } else {
+                    viewModel.aiInputText = query
+                    viewModel.pendingAIQuery = nil
+                }
             }
         }
         .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in
-            if let ticker = newValue {
-                selectedSearchResult = SearchSelection(symbol: ticker, type: "commodity")
+            if let selection = newValue {
+                // The type travels WITH the symbol now — hardcoding this
+                // screen's own "commodity" sent every news related-ticker chip
+                // (an equity symbol) to the wrong detail screen.
+                selectedSearchResult = selection
                 viewModel.pendingTickerNavigation = nil
             }
         }

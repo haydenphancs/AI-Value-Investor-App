@@ -951,7 +951,20 @@ async def stream_chat_message(
             if ctx_type and ctx_type.strip().upper() != "NONE"
             else ""
         )
-        yield _sse("meta", {"session_id": session_id, "grounded_on": grounded})
+        # `user_message` is the NORMALIZED text the server actually persists
+        # (`validate_message` → `normalize_text`: NFKC + invisible/bidi stripping +
+        # control stripping + blank-line collapse). The client reconciles a failed
+        # stream by matching its own RAW typed string against history, so any message
+        # normalisation touched — a smart quote from the iOS keyboard, an emoji
+        # variation selector, a full-width character, a zero-width joiner — never
+        # matched, and the reconcile concluded the turn had NOT persisted and re-sent
+        # it. That stores the turn twice AND charges a second credit. Sending the
+        # server's own copy lets the client compare like with like.
+        yield _sse("meta", {
+            "session_id": session_id,
+            "grounded_on": grounded,
+            "user_message": user_message,
+        })
 
         content: Optional[str] = None
         citations = None

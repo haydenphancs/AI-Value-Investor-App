@@ -381,3 +381,68 @@ def test_co_type_filers_are_still_ignored():
         shares_outstanding=2_700_000_000,
     )
     assert out["top_holders"] == []
+
+
+# ── Insider sentiment direction: the two screens must not contradict ─────────
+
+
+def test_holders_and_report_agree_on_insider_direction_for_the_same_trades():
+    """The contradiction this parity file exists to prevent, in its sharpest form.
+
+    One insider buys 1,000,000 shares at $1 (=$1M); another sells 100,000 at $50 (=$5M).
+    Counted in SHARES that is net BUYING (+900K); counted in DOLLARS it is net SELLING
+    (-$4M). The Holders badge used to say "Net Buy 900K shares" in green while
+    TickerReportView said "Net Selling / critical" in red for the same ticker on the same
+    day. Both were defensible in isolation; disagreeing on screen was not.
+
+    Resolved by making the VERDICT dollar-denominated on both (the Holders chart BARS
+    stay share-denominated — Form 4 reports exact share counts, and a price-less row
+    would silently vanish from a dollar chart).
+    """
+    from app.services.holders_service import HoldersService
+    from app.services.agents.ticker_report_data_collector import _build_insider_sections
+
+    trades = [
+        {
+            "transactionDate": _today_str(),
+            "transactionType": "P-Purchase",
+            "securityName": "Common Stock",
+            "securitiesTransacted": 1_000_000,
+            "price": 1.0,
+            "reportingName": "Buyer One",
+        },
+        {
+            "transactionDate": _today_str(),
+            "transactionType": "S-Sale",
+            "securityName": "Common Stock",
+            "securitiesTransacted": 100_000,
+            "price": 50.0,
+            "reportingName": "Seller Two",
+        },
+    ]
+
+    holders_tab = HoldersService._build_insider_smart_money(
+        HoldersService.__new__(HoldersService), trades, {}, []
+    )
+    report_side, _vital = _build_insider_sections(trades)
+
+    # The bars keep the share figure ...
+    assert holders_tab.summary.total_net_flow > 0, "bars are still share-denominated"
+    # ... but both screens' VERDICTS are bearish, together.
+    assert holders_tab.summary.net_flow_usd_millions == pytest.approx(-4.0)
+    assert holders_tab.summary.is_positive is False
+
+    report_sentiment = str(
+        report_side.get("sentiment") or report_side.get("net_activity") or ""
+    ).lower()
+    assert report_sentiment, f"report produced no sentiment: {report_side!r}"
+    assert not any(w in report_sentiment for w in ("buy", "bullish", "accumul")), (
+        f"report says {report_sentiment!r} while Holders says bearish — the two screens "
+        f"have diverged again"
+    )
+
+
+def _today_str() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")

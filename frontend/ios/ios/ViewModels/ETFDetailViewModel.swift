@@ -26,7 +26,14 @@ class ETFDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
-    @Published var pendingTickerNavigation: String?
+    /// Where a tap wants to navigate, WITH the asset type.
+    ///
+    /// This was a bare `String?` and the screen hardcoded its own asset type for every
+    /// value, so a related-ticker chip on a NEWS card — which carries US-listed EQUITY
+    /// symbols, put there by the shared enrichment prompt — opened the wrong screen
+    /// entirely: tapping "NVDA" on the BTC screen pushed CryptoDetailView("NVDA").
+    /// Carrying the type with the symbol makes that unrepresentable.
+    @Published var pendingTickerNavigation: SearchSelection?
 
     /// External link to show in the in-app browser. Set via `openExternal(_:into:)`
     /// and presented by the Screen's `.inAppBrowser(link:)` — a ViewModel cannot
@@ -387,7 +394,7 @@ class ETFDetailViewModel: ObservableObject {
     }
 
     func handleRelatedETFTap(_ ticker: RelatedTicker) {
-        pendingTickerNavigation = ticker.symbol
+        pendingTickerNavigation = SearchSelection(symbol: ticker.symbol, type: "etf")
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
@@ -401,7 +408,8 @@ class ETFDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        pendingTickerNavigation = ticker
+        // A news chip is an EQUITY symbol, not another fund.
+        pendingTickerNavigation = SearchSelection(symbol: ticker, type: "stock")
     }
 
     // MARK: - News fetch + enrichment (shared cache; mirrors the other detail VMs)

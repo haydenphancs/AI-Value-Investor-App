@@ -286,9 +286,19 @@ struct TickerDetailView: View {
         .inAppBrowser(link: $viewModel.browserLink)
         .onChange(of: viewModel.pendingAIQuery) { oldValue, newValue in
             if let query = newValue {
-                chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol, context: viewModel.contextForCurrentTab, contextType: .stock, referenceId: tickerSymbol)
-                viewModel.pendingAIQuery = nil
-                showAIChat = true
+                // Only present the cover if the conversation was actually SEEDED.
+                // `startNewConversation` returns false when a previous turn is still
+                // streaming (`guard !isAITyping`), and the result was discarded — so the
+                // cover opened on the PREVIOUS conversation and the question the user
+                // just typed was silently thrown away. Put it back in the input box
+                // instead, so nothing is lost.
+                if chatViewModel.startNewConversation(firstMessage: query, stockId: tickerSymbol, context: viewModel.contextForCurrentTab, contextType: .stock, referenceId: tickerSymbol) {
+                    viewModel.pendingAIQuery = nil
+                    showAIChat = true
+                } else {
+                    viewModel.aiInputText = query
+                    viewModel.pendingAIQuery = nil
+                }
             }
         }
         .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in

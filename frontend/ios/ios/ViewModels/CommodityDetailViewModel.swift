@@ -31,7 +31,14 @@ class CommodityDetailViewModel: ObservableObject {
     @Published var isFavorite: Bool = false
     @Published var aiInputText: String = ""
     @Published var pendingAIQuery: String?
-    @Published var pendingTickerNavigation: String?
+    /// Where a tap wants to navigate, WITH the asset type.
+    ///
+    /// This was a bare `String?` and the screen hardcoded its own asset type for every
+    /// value, so a related-ticker chip on a NEWS card — which carries US-listed EQUITY
+    /// symbols, put there by the shared enrichment prompt — opened the wrong screen
+    /// entirely: tapping "NVDA" on the BTC screen pushed CryptoDetailView("NVDA").
+    /// Carrying the type with the symbol makes that unrepresentable.
+    @Published var pendingTickerNavigation: SearchSelection?
 
     /// External link to show in the in-app browser. Set via `openExternal(_:into:)`
     /// and presented by the Screen's `.inAppBrowser(link:)` — a ViewModel cannot
@@ -437,7 +444,7 @@ class CommodityDetailViewModel: ObservableObject {
     // MARK: - User Actions
 
     func handleRelatedCommodityTap(_ commodity: RelatedTicker) {
-        pendingTickerNavigation = commodity.symbol
+        pendingTickerNavigation = SearchSelection(symbol: commodity.symbol, type: "commodity")
     }
 
     func handleNewsArticleTap(_ article: TickerNewsArticle) {
@@ -451,11 +458,17 @@ class CommodityDetailViewModel: ObservableObject {
     }
 
     func handleNewsTickerTap(_ ticker: String) {
-        pendingTickerNavigation = ticker
+        // A news chip is an EQUITY symbol, not another commodity.
+        pendingTickerNavigation = SearchSelection(symbol: ticker, type: "stock")
     }
 
     func handleSuggestionTap(_ suggestion: CommodityAISuggestion) {
         aiInputText = suggestion.text
+        // …and SEND it. Without this the chip was a dead control: the text
+        // appeared in the input box and nothing happened, while the same tap on
+        // the Ticker / ETF / Index screens opens the chat. Matches
+        // TickerDetailViewModel.handleSuggestionTap.
+        handleAISend()
     }
 
     func handleAISend() {

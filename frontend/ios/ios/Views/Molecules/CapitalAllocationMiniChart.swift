@@ -146,19 +146,22 @@ struct CapitalAllocationMiniChart: View {
 
     @ChartContentBuilder
     private var shareMarks: some ChartContent {
-        ForEach(dataPoints) { dp in
+        // Only quarters that actually REPORT a share count are plotted. An unreported
+        // one is nil and is skipped, leaving a gap — plotting it as 0 drew the line
+        // straight to the axis and read as the company retiring every share.
+        ForEach(dataPoints.filter { $0.sharesOutstanding != nil }) { dp in
             LineMark(
                 x: .value("Quarter", dp.period),
-                y: .value("Shares", normalizeShares(dp.sharesOutstanding))
+                y: .value("Shares", normalizeShares(dp.sharesOutstanding ?? 0))
             )
             .foregroundStyle(AppColors.confidenceSharesOutstanding)
             .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
             .interpolationMethod(.linear)
         }
-        ForEach(dataPoints) { dp in
+        ForEach(dataPoints.filter { $0.sharesOutstanding != nil }) { dp in
             PointMark(
                 x: .value("Quarter", dp.period),
-                y: .value("Shares", normalizeShares(dp.sharesOutstanding))
+                y: .value("Shares", normalizeShares(dp.sharesOutstanding ?? 0))
             )
             .foregroundStyle(AppColors.confidenceSharesOutstanding)
             .symbolSize(26)
@@ -171,10 +174,13 @@ struct CapitalAllocationMiniChart: View {
     /// at the emphasised "current" right-axis tick.
     @ViewBuilder
     private func currentSharesConnector(_ proxy: ChartProxy, _ geo: GeometryProxy) -> some View {
-        if let newest = dataPoints.last,
+        // The newest quarter that actually REPORTED a share count — the connector must
+        // point at a real data point, not at a zero the filing never stated.
+        if let newest = dataPoints.last(where: { $0.sharesOutstanding != nil }),
+           let newestShares = newest.sharesOutstanding,
            let plot = proxy.plotFrame.map({ geo[$0] }),
            let x = proxy.position(forX: newest.period),
-           let y = proxy.position(forY: normalizeShares(newest.sharesOutstanding)) {
+           let y = proxy.position(forY: normalizeShares(newestShares)) {
             Path { path in
                 path.move(to: CGPoint(x: plot.minX + x, y: plot.minY + y))
                 path.addLine(to: CGPoint(x: plot.maxX, y: plot.minY + y))
@@ -216,7 +222,9 @@ struct CapitalAllocationMiniChart: View {
                             viewType == .yield ? String(format: "%.2f%%", dp.dividendYield) : formatMoney(dp.dividendAmount))
                 popupMetric(AppColors.confidenceBuybacks,
                             viewType == .yield ? String(format: "%.2f%%", dp.buybackYield) : formatMoney(dp.buybackAmount))
-                popupMetric(AppColors.confidenceSharesOutstanding, formatShares(dp.sharesOutstanding))
+                // "—" rather than "0M": the filing did not report it.
+                popupMetric(AppColors.confidenceSharesOutstanding,
+                            dp.sharesOutstanding.map(formatShares) ?? "—")
             }
         }
         .padding(.horizontal, AppSpacing.sm)
@@ -281,7 +289,7 @@ struct CapitalAllocationMiniChart: View {
     /// Lightly padded shares range so the line doesn't touch the top/bottom
     /// edges; the slope still amplifies a tight series (e.g. 1000M→1037M).
     private var sharesBand: (min: Double, max: Double) {
-        let values = dataPoints.map { $0.sharesOutstanding }
+        let values = dataPoints.compactMap { $0.sharesOutstanding }
         let lo = values.min() ?? 0
         let hi = values.max() ?? 1
         let spread = hi - lo
@@ -303,9 +311,11 @@ struct CapitalAllocationMiniChart: View {
     /// positions, plus the CURRENT (newest) count emphasised. When current sits
     /// near a static tick it replaces it (so the labels never collide).
     private var sharesTicks: [(position: Double, label: String, isCurrent: Bool)] {
-        let values = dataPoints.map { $0.sharesOutstanding }
+        let values = dataPoints.compactMap { $0.sharesOutstanding }
         guard let lo = values.min(), let hi = values.max(),
-              let newest = dataPoints.last?.sharesOutstanding else { return [] }
+              // the newest quarter that actually reported one — not simply the last
+              let newest = dataPoints.compactMap({ $0.sharesOutstanding }).last
+        else { return [] }
         let mid = (lo + hi) / 2
         var ticks: [(position: Double, label: String, isCurrent: Bool)] = [
             (normalizeShares(lo), formatShares(lo), false),
@@ -340,7 +350,7 @@ struct CapitalAllocationMiniChart: View {
     /// Shares are in millions; pick ONE unit for the whole axis (off the max)
     /// so labels don't mix M and B.
     private func formatShares(_ value: Double) -> String {
-        let maxShares = dataPoints.map { $0.sharesOutstanding }.max() ?? 0
+        let maxShares = dataPoints.compactMap { $0.sharesOutstanding }.max() ?? 0
         if maxShares >= 1000 {
             return String(format: "%.2fB", value / 1000)
         }

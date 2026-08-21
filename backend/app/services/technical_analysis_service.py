@@ -77,6 +77,35 @@ def _cache_set(key: str, value: Any) -> None:
             _cache.pop(_old, None)
 
 
+def _round_price(v: Optional[float], default: float = 0.0) -> float:
+    """Round a PRICE with magnitude-aware precision.
+
+    Everything here used to be `round(x, 2)`, which is right for equities and destroys
+    sub-cent assets: SHIB trades near $0.00000495 (verified live on
+    /stable/historical-price-eod/full), so every pivot, every Fibonacci level, every
+    support/resistance band and the current price all serialised as `0.0`. The Technical
+    Analysis detail sheet then showed a full set of actionable price levels, all zero,
+    for SHIB / PEPE / BONK and any other sub-penny coin.
+
+    2 dp at/above $1, 6 dp down to $0.0001, 10 dp below that — enough to keep a
+    meme-coin's levels distinguishable without turning equity prices into noise.
+    """
+    if v is None:
+        return default
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(f):
+        return default
+    mag = abs(f)
+    if mag >= 1:
+        return round(f, 2)
+    if mag >= 0.0001:
+        return round(f, 6)
+    return round(f, 10)
+
+
 def _safe_float(v: Any) -> Optional[float]:
     """Convert a value to float, returning None for NaN / None / non-numeric."""
     if v is None:
@@ -563,13 +592,13 @@ class TechnicalAnalysisService:
         s3 = l_ - 2 * (h - pivot)
 
         levels = [
-            PivotPointLevel(name="R3", value=round(r3, 2), level_type=PivotLevelType.RESISTANCE),
-            PivotPointLevel(name="R2", value=round(r2, 2), level_type=PivotLevelType.RESISTANCE),
-            PivotPointLevel(name="R1", value=round(r1, 2), level_type=PivotLevelType.RESISTANCE),
-            PivotPointLevel(name="Pivot", value=round(pivot, 2), level_type=PivotLevelType.PIVOT),
-            PivotPointLevel(name="S1", value=round(s1, 2), level_type=PivotLevelType.SUPPORT),
-            PivotPointLevel(name="S2", value=round(s2, 2), level_type=PivotLevelType.SUPPORT),
-            PivotPointLevel(name="S3", value=round(s3, 2), level_type=PivotLevelType.SUPPORT),
+            PivotPointLevel(name="R3", value=_round_price(r3), level_type=PivotLevelType.RESISTANCE),
+            PivotPointLevel(name="R2", value=_round_price(r2), level_type=PivotLevelType.RESISTANCE),
+            PivotPointLevel(name="R1", value=_round_price(r1), level_type=PivotLevelType.RESISTANCE),
+            PivotPointLevel(name="Pivot", value=_round_price(pivot), level_type=PivotLevelType.PIVOT),
+            PivotPointLevel(name="S1", value=_round_price(s1), level_type=PivotLevelType.SUPPORT),
+            PivotPointLevel(name="S2", value=_round_price(s2), level_type=PivotLevelType.SUPPORT),
+            PivotPointLevel(name="S3", value=_round_price(s3), level_type=PivotLevelType.SUPPORT),
         ]
         return PivotPointsData(method="Classic Method", levels=levels)
 
@@ -653,7 +682,7 @@ class TechnicalAnalysisService:
         levels = [
             FibonacciLevel(
                 percentage=label,
-                value=round(high - diff * ratio, 2),
+                value=_round_price(high - diff * ratio),
                 is_key=(ratio in (0.0, 0.382, 0.5, 0.618, 1.0)),
             )
             for ratio, label in zip(fib_ratios, fib_labels)
@@ -696,7 +725,7 @@ class TechnicalAnalysisService:
                 )
 
         return SupportResistanceData(
-            current_price=round(current_price, 2),
+            current_price=_round_price(current_price),
             resistance_levels=resistance,
             support_levels=support,
         )

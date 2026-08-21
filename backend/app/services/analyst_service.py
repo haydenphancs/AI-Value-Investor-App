@@ -160,7 +160,9 @@ def _compute_distribution(
     counts: Counter = Counter()
 
     for g in grades:
-        firm = g.get("gradingCompany", "").strip()
+        # `.get(k, "")` yields None for a present-but-null key, and `None.strip()`
+        # is an AttributeError that would 502 the whole Analysis tab.
+        firm = (g.get("gradingCompany") or "").strip()
         if not firm or firm in seen_firms:
             continue
         seen_firms.add(firm)
@@ -408,8 +410,32 @@ class AnalystService:
         if not isinstance(grades, list):
             grades = []
 
-        # Rating distribution (most recent grade per firm)
-        dist_counts, total_analysts = _compute_distribution(grades)
+        # Rating distribution (most recent grade per firm) over a RECENCY WINDOW.
+        #
+        # FMP ignores the `limit` we pass to /stable/grades — verified live: limit=5 and
+        # limit=100 return byte-identical 1,787-row payloads for AAPL going back to
+        # 2012-02-08. `_compute_distribution` had no date filter at all, so "Analyst
+        # Consensus (N analysts)" counted every firm that had EVER rated the stock,
+        # including desks that stopped covering it a decade ago, and each at whatever
+        # its last opinion was. Its two siblings already window to 365 days
+        # (`_compute_actions_summary`, `_build_actions`); this path was the omission.
+        #
+        # 24 months rather than 12: a distribution needs enough firms to be meaningful,
+        # and many houses refresh a rating only annually. Falls back to the full history
+        # when the window is empty, so a thinly-covered name still shows what exists
+        # rather than dropping to "no coverage".
+        dist_cutoff = (datetime.utcnow() - timedelta(days=730)).strftime("%Y-%m-%d")
+        recent_grades = [
+            g for g in grades
+            if isinstance(g, dict) and str(g.get("date") or "")[:10] >= dist_cutoff
+        ]
+        if not recent_grades:
+            logger.info(
+                "Analyst distribution for %s: no grades inside the 24-month window "
+                "(%d total) — falling back to full history", ticker, len(grades),
+            )
+            recent_grades = grades
+        dist_counts, total_analysts = _compute_distribution(recent_grades)
         strong_buy = dist_counts["Strong Buy"]
         buy = dist_counts["Buy"]
         hold = dist_counts["Hold"]
@@ -433,6 +459,15 @@ class AnalystService:
         target_consensus_price = _num(pt_consensus.get("targetConsensus"))
         target_high = _num(pt_consensus.get("targetHigh"))
         target_low = _num(pt_consensus.get("targetLow"))
+
+        # No grades AND no price-target consensus ⇒ nobody covers this ticker. Say so
+        # rather than shipping the zero-defaults as if they were measurements.
+        has_coverage = bool(total_analysts > 0 or target_consensus_price > 0)
+        if not has_coverage:
+            logger.info(
+                "Analyst analysis for %s: no coverage (0 graded firms, no target "
+                "consensus) — flagging has_coverage=False", ticker,
+            )
 
         target_upside = 0.0
         if current_price > 0 and target_consensus_price > 0:
@@ -469,6 +504,7 @@ class AnalystService:
         response = AnalystAnalysisResponse(
             symbol=ticker,
             total_analysts=total_analysts,
+            has_coverage=has_coverage,
             updated_date=updated_date,
             consensus=consensus,
             target_price=target_consensus_price,

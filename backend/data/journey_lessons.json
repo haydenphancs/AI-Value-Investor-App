@@ -18553,13 +18553,13 @@
       ]
     },
     {
-      "title": "The Buffett Way",
+      "title": "The Quality Compounder",
       "slug": "buffett_way",
       "level": "strategies",
       "sortOrder": 1,
       "estimatedMinutes": 7,
       "category": "standard",
-      "description": "Value investing principles from the Oracle of Omaha himself.",
+      "description": "Buy wonderful businesses at a fair price, then let time do the work.",
       "cards": [
         {
           "type": "title",
@@ -19764,13 +19764,13 @@
       ]
     },
     {
-      "title": "The Lynch Way",
+      "title": "The Everyday Growth Hunter",
       "slug": "lynch_way",
       "level": "strategies",
       "sortOrder": 2,
       "estimatedMinutes": 6,
       "category": "standard",
-      "description": "Invest in what you know. Peter Lynch's common sense approach.",
+      "description": "Invest in what you know: spotting winners in everyday life.",
       "cards": [
         {
           "type": "title",
@@ -21025,7 +21025,7 @@
       ]
     },
     {
-      "title": "The Cathie Wood Way",
+      "title": "The Disruption Seeker",
       "slug": "cathie_wood_way",
       "level": "strategies",
       "sortOrder": 3,
@@ -31825,7 +31825,7 @@
       "sortOrder": 5,
       "estimatedMinutes": 5,
       "category": "standard",
-      "description": "Charlie Munger's secret weapon: solving problems backwards.",
+      "description": "A thinking tool that solves problems backwards.",
       "cards": [
         {
           "type": "title",

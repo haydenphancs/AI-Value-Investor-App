@@ -88,6 +88,30 @@ def _fmt_pct(val: Optional[float]) -> str:
     return f"{val:.1f}%"
 
 
+def _fmt_usd_flow(net_flow_millions: float, is_positive: bool) -> str:
+    """Format a net flow denominated in MILLIONS OF DOLLARS.
+
+    Used for the insider row, whose VERDICT is dollar-denominated so it agrees with
+    TickerReportView (see `SmartMoneyFlowSummarySchema.net_flow_usd_millions`). The
+    Holders chart BARS remain share-denominated; only this figure and the badge move.
+    """
+    if not math.isfinite(net_flow_millions):
+        return "—"
+    mag = abs(net_flow_millions)
+    if mag == 0:
+        return "Neutral"
+    if mag >= 1_000:
+        formatted = f"${mag / 1_000:.2f}B"
+    elif mag >= 1:
+        formatted = f"${mag:.2f}M"
+    elif mag >= 0.001:
+        formatted = f"${mag * 1_000:.0f}K"
+    else:
+        formatted = f"${mag * 1_000_000:.0f}"
+    label = "Net Buy" if is_positive else "Net Sell"
+    return f"{label} {formatted}"
+
+
 def _fmt_share_flow(net_flow_millions: float, is_positive: bool) -> str:
     """Format a smart-money net flow that is denominated in MILLIONS OF SHARES.
 
@@ -251,6 +275,13 @@ class OwnershipSnapshotService:
 
         insider_flow = insider_summary.total_net_flow
         insider_positive = insider_summary.is_positive
+        # The insider VERDICT is dollar-denominated when the Holders service supplies it
+        # (it does for the Insider tab), so that this card, the Holders badge and
+        # TickerReportView cannot state opposite conclusions for one ticker. `is_positive`
+        # upstream is already derived from this same dollar net. Falls back to the share
+        # figure when absent, so nothing breaks if the field is ever missing.
+        insider_usd = getattr(insider_summary, "net_flow_usd_millions", None)
+        insider_usd = insider_usd if isinstance(insider_usd, (int, float)) else None
         inst_flow = inst_summary.total_net_flow
         inst_positive = inst_summary.is_positive
 
@@ -266,7 +297,11 @@ class OwnershipSnapshotService:
             ),
             SnapshotMetricResponse(
                 name="Insider Activity (12M)",
-                value=_fmt_share_flow(insider_flow, insider_positive),
+                value=(
+                    _fmt_usd_flow(insider_usd, insider_positive)
+                    if insider_usd is not None
+                    else _fmt_share_flow(insider_flow, insider_positive)
+                ),
             ),
             SnapshotMetricResponse(
                 # Label the REAL window. `hedge_funds_data.summary` spans 8
@@ -287,6 +322,7 @@ class OwnershipSnapshotService:
             insider_pct, inst_pct,
             insider_flow, insider_positive,
             inst_flow, inst_positive,
+            insider_usd_millions=insider_usd,
         )
 
         return SnapshotItemResponse(
@@ -304,6 +340,7 @@ class OwnershipSnapshotService:
         insider_positive: bool,
         inst_flow: float,
         inst_positive: bool,
+        insider_usd_millions: Optional[float] = None,
     ) -> int:
         """
         Weighted rating across 4 factors:
@@ -351,23 +388,42 @@ class OwnershipSnapshotService:
         #    net sale arrived as 2.5 and could never clear them — the whole
         #    40%-weight factor was pinned to 4 (any buying) or 3 (any selling)
         #    on every ticker in the app. Tiers below are share counts.
-        abs_insider = abs(insider_flow)
-        if abs_insider == 0:
-            s_insider_act = 3  # no activity = neutral
-        elif insider_positive:
-            # Buying — scale by magnitude
-            if abs_insider >= 0.1:
-                s_insider_act = 5  # meaningful buying (100K+ shares)
+        #    Judged on DOLLARS when available, so the magnitude and the direction come
+        #    from the SAME unit. `insider_positive` is now dollar-derived upstream, so
+        #    pairing it with a share magnitude would score a company by one unit's
+        #    direction and another's size. Share tiers are kept as the fallback for a
+        #    payload without the dollar net.
+        if insider_usd_millions is not None:
+            abs_insider = abs(insider_usd_millions)
+            if abs_insider == 0:
+                s_insider_act = 3  # no activity = neutral
+            elif insider_positive:
+                s_insider_act = 5 if abs_insider >= 1.0 else 4   # $1M+ = meaningful
             else:
-                s_insider_act = 4  # token buying
+                if abs_insider >= 25.0:
+                    s_insider_act = 1  # heavy selling ($25M+)
+                elif abs_insider >= 2.0:
+                    s_insider_act = 2  # notable selling ($2M+)
+                else:
+                    s_insider_act = 3  # minor selling (likely routine)
         else:
-            # Selling — scale by magnitude
-            if abs_insider >= 5.0:
-                s_insider_act = 1  # heavy selling (5M+ shares)
-            elif abs_insider >= 0.5:
-                s_insider_act = 2  # notable selling (500K+ shares)
+            abs_insider = abs(insider_flow)
+            if abs_insider == 0:
+                s_insider_act = 3  # no activity = neutral
+            elif insider_positive:
+                # Buying — scale by magnitude
+                if abs_insider >= 0.1:
+                    s_insider_act = 5  # meaningful buying (100K+ shares)
+                else:
+                    s_insider_act = 4  # token buying
             else:
-                s_insider_act = 3  # minor selling (likely routine)
+                # Selling — scale by magnitude
+                if abs_insider >= 5.0:
+                    s_insider_act = 1  # heavy selling (5M+ shares)
+                elif abs_insider >= 0.5:
+                    s_insider_act = 2  # notable selling (500K+ shares)
+                else:
+                    s_insider_act = 3  # minor selling (likely routine)
 
         # 4. Institutional Activity score (20%) — also MILLIONS OF SHARES, over
         #    8 quarters. Same dead-threshold bug as above (1_000_000_000 could

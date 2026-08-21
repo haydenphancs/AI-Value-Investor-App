@@ -1083,6 +1083,14 @@ extension AnalystAction {
 
 // MARK: - Analyst Ratings Data (Combined)
 struct AnalystRatingsData {
+    /// False when no analyst covers this ticker at all.
+    ///
+    /// Without it the card could not tell "the street is neutral" from "nobody has an
+    /// opinion": FMP returns `[]` for both /grades and /price-target-consensus on a real
+    /// listing like AACT, and the zero-defaults rendered as a confident **HOLD** with a
+    /// $0.00 low / $0.00 average / $0.00 high target. Defaults true so nothing changes
+    /// for a covered stock or an older backend.
+    var hasCoverage: Bool = true
     let totalAnalysts: Int
     let updatedDate: Date
     let consensus: AnalystConsensus

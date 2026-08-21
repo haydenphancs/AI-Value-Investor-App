@@ -179,7 +179,15 @@ class SentimentService:
         ticker = ticker.upper()
         # For crypto: FMP uses "ETHUSD" but ApeWisdom uses "ETH"
         social_key = (social_ticker or ticker).upper()
-        self._is_crypto = is_crypto
+        # `is_crypto` is REQUEST state and is threaded down as a parameter. It used to be
+        # stashed on `self` — and `get_sentiment_service()` returns a process-wide
+        # SINGLETON, so a concurrent request overwrote it between the write here and the
+        # read in `_fetch_news`. There are real awaits in between (`_get_articles` does
+        # `await asyncio.to_thread(self._load_from_db, ...)`, a genuine thread hop), so
+        # the interleaving is ordinary, not exotic: a crypto request flips the flag and a
+        # stock request in flight then fetches `/news/crypto?symbols=AAPL`, which returns
+        # ZERO articles — the Analysis tab renders a price-only sentiment with all three
+        # bullish/bearish/neutral counts at 0.
 
         cached = _cache_get(f"sentiment:{ticker}")
         if cached is not None:
@@ -202,7 +210,7 @@ class SentimentService:
 
         # Parallel fetch: news + price + historical + social (24h + 7d)
         results = await asyncio.gather(
-            self._get_articles(ticker),
+            self._get_articles(ticker, is_crypto=is_crypto),
             self._fetch_price_data(ticker),
             self._fetch_historical_prices(ticker),
             _social_24h(),
@@ -315,7 +323,7 @@ class SentimentService:
     # ── Article pipeline (DB-backed) ─────────────────────────────
 
     async def _get_articles(
-        self, ticker: str
+        self, ticker: str, is_crypto: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Get articles from DB cache, refreshing from FMP if stale.
@@ -337,7 +345,7 @@ class SentimentService:
 
         # DB is stale or empty — fetch from FMP
         logger.info(f"Sentiment DB cache MISS for {ticker} — fetching FMP")
-        fmp_articles = await self._fetch_news(ticker)
+        fmp_articles = await self._fetch_news(ticker, is_crypto=is_crypto)
 
         if not fmp_articles:
             # Try loading stale DB data as fallback
@@ -512,7 +520,9 @@ class SentimentService:
 
     # ── Data fetching ─────────────────────────────────────────────
 
-    async def _fetch_news(self, ticker: str) -> List[Dict[str, Any]]:
+    async def _fetch_news(
+        self, ticker: str, is_crypto: bool = False
+    ) -> List[Dict[str, Any]]:
         """
         Fetch news articles from FMP for the last 14 days.
 
@@ -525,7 +535,7 @@ class SentimentService:
             from_date = (now - timedelta(days=14)).strftime("%Y-%m-%d")
             to_date = now.strftime("%Y-%m-%d")
 
-            if getattr(self, '_is_crypto', False):
+            if is_crypto:
                 articles = await self.fmp.get_crypto_news(
                     ticker=ticker, limit=1000,
                 )

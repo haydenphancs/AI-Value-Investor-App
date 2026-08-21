@@ -68,6 +68,13 @@ class AnalystAnalysisResponse(BaseModel):
     total_analysts: int
     updated_date: str                          # ISO date string
     consensus: AnalystConsensus
+    # False when NO analyst covers this ticker: FMP returns `[]` for both /grades and
+    # /price-target-consensus (verified live on AACT, a real NYSE listing). The numeric
+    # fields below then default to 0.0 / HOLD, which is indistinguishable from a real
+    # consensus of Hold at a $0.00 target — so the card presented a fabricated verdict
+    # for a company no analyst has an opinion on. Additive + defaulted, so an older
+    # client is unaffected; a current one renders an honest empty state instead.
+    has_coverage: bool = True
     target_price: float
     target_upside: float                       # percentage
     distributions: List[AnalystRatingDistribution]

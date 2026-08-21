@@ -53,7 +53,9 @@ struct SignalOfConfidenceChartView: View {
     private var maxBarValue: Double { barDomain.upperBound }
 
     private var sharesRange: (min: Double, max: Double) {
-        let shares = dataPoints.map { $0.sharesOutstanding }.filter { $0.isFinite }
+        // compactMap: an unreported quarter is nil, and must be absent from the
+        // range rather than dragging it to zero.
+        let shares = dataPoints.compactMap { $0.sharesOutstanding }.filter { $0.isFinite }
         guard let lo = shares.min(), let hi = shares.max(), hi > 0 else {
             return (0, 1)
         }
@@ -186,29 +188,32 @@ struct SignalOfConfidenceChartView: View {
                 .position(by: .value("Type", "Buybacks"))
             }
 
-            // Shares outstanding line
-            ForEach(dataPoints) { dataPoint in
+            // Shares outstanding line. Only quarters that actually REPORTED a share
+            // count are plotted; an unreported one is nil and leaves a gap, because
+            // drawing it at 0 read as the company retiring every share.
+            ForEach(dataPoints.filter { $0.sharesOutstanding != nil }) { dataPoint in
                 LineMark(
                     x: .value("Period", dataPoint.period),
-                    y: .value("Shares", normalizeShares(dataPoint.sharesOutstanding))
+                    y: .value("Shares", normalizeShares(dataPoint.sharesOutstanding ?? 0))
                 )
                 .foregroundStyle(AppColors.confidenceSharesOutstanding)
                 .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
                 .interpolationMethod(.linear)
             }
 
-            // Shares outstanding points
-            ForEach(dataPoints) { dataPoint in
+            // Shares outstanding points (reported quarters only — see the line above)
+            ForEach(dataPoints.filter { $0.sharesOutstanding != nil }) { dataPoint in
                 PointMark(
                     x: .value("Period", dataPoint.period),
-                    y: .value("Shares", normalizeShares(dataPoint.sharesOutstanding))
+                    y: .value("Shares", normalizeShares(dataPoint.sharesOutstanding ?? 0))
                 )
                 .foregroundStyle(AppColors.confidenceSharesOutstanding)
                 .symbolSize(50)
             }
 
             // Dashed connector line from newest shares outstanding to right Y-axis
-            if let lastShares = dataPoints.last?.sharesOutstanding {
+            // Anchor on the newest REPORTED quarter, not simply the last one.
+            if let lastShares = dataPoints.compactMap({ $0.sharesOutstanding }).last {
                 RuleMark(y: .value("SharesConnector", normalizeShares(lastShares)))
                     .foregroundStyle(AppColors.confidenceSharesOutstanding.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
@@ -394,7 +399,8 @@ struct SignalOfConfidenceChartView: View {
             let columnWidth = chartWidth / CGFloat(dataPoints.count)
 
             ForEach(Array(dataPoints.enumerated()), id: \.offset) { index, dataPoint in
-                Text(formatSharesValue(dataPoint.sharesOutstanding))
+                // "—" rather than "0M": the filing did not report it.
+                Text(dataPoint.sharesOutstanding.map(formatSharesValue) ?? "—")
                     .font(.system(size: 11, weight: .regular))
                     // Text-safe sibling of `confidenceSharesOutstanding` (3.57:1 light card).
                     .foregroundColor(AppColors.accentYellow)

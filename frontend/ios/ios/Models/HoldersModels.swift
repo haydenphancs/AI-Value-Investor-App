@@ -155,9 +155,14 @@ struct SmartMoneyFlowDataPoint: Identifiable {
     }
 }
 
-/// Unit a smart-money flow is denominated in. Hedge-fund (13F) flow is shown
-/// in SHARES — share counts are comparable across quarters, whereas dollars are
-/// distorted by price drift. Insider/Congress flow stays in dollars.
+/// Unit a smart-money flow's BARS are denominated in.
+///
+/// Hedge-fund (13F) and insider (Form 4) bars are SHARES — both report exact share
+/// counts, and share counts are comparable across periods where dollars are distorted by
+/// price drift. Congress is dollars (the STOCK Act discloses ranges, never share counts).
+/// (This comment previously claimed insider flow was dollars; the mapper has always set
+/// `.shares` for it, so the prose was simply wrong. The insider VERDICT is now dollars —
+/// see `SmartMoneyFlowSummary.netFlowUsdMillions` — but the bars are not.)
 enum SmartMoneyFlowUnit {
     case dollars
     case shares
@@ -172,6 +177,28 @@ struct SmartMoneyFlowSummary {
     let periodDescription: String  // e.g., "12-Month"
     var unit: SmartMoneyFlowUnit = .dollars
 
+    /// Dollar totals, sent for the INSIDER tab only.
+    ///
+    /// When present these are the VERDICT — the badge's value, sign, arrow and colour —
+    /// while the CHART BARS stay in `unit` (millions of shares). The split is deliberate:
+    /// Form 4 reports exact share counts, and a trade whose price FMP omits would
+    /// silently disappear from a dollar-denominated chart; but economic significance is
+    /// what the verdict should express, and `TickerReportView` has always judged insider
+    /// sentiment on net dollar value. While this card judged on shares the two screens
+    /// could state OPPOSITE conclusions for one ticker — buy 1M shares at $1, sell 100K
+    /// at $50 reads "Net Buy 900K shares" (green) here and "Net Selling / critical" (red)
+    /// there. Nil for the Institutions and Congress tabs, and from an older backend, in
+    /// which case everything below falls back to the share-denominated behaviour.
+    var netFlowUsdMillions: Double? = nil
+    var totalBuyUsdMillions: Double? = nil
+    var totalSellUsdMillions: Double? = nil
+
+    /// The number the badge actually PRINTS, and the unit it prints it in.
+    private var verdict: (value: Double, unit: SmartMoneyFlowUnit) {
+        if let usd = netFlowUsdMillions { return (usd, .dollars) }
+        return (totalNetFlow, unit)
+    }
+
     /// SINGLE source of truth for the badge's sign, arrow and colour.
     ///
     /// Previously the printed sign came from `totalNetFlow >= 0` while the arrow
@@ -183,19 +210,35 @@ struct SmartMoneyFlowSummary {
     /// PRINT makes that impossible. Exactly-flat is its own state — `isPositive`
     /// is `net >= 0`, so a genuinely flat series was being painted bullish green.
     private var direction: Int {
-        if totalNetFlow > 0 { return 1 }
-        if totalNetFlow < 0 { return -1 }
+        let v = verdict.value
+        if v > 0 { return 1 }
+        if v < 0 { return -1 }
         return 0
     }
 
     var formattedNetFlow: String {
         let sign = direction < 0 ? "-" : (direction > 0 ? "+" : "")
-        return sign + Self.formatMagnitude(totalNetFlow, unit: unit)
+        return sign + Self.formatMagnitude(verdict.value, unit: verdict.unit)
     }
 
-    var formattedBuy: String { Self.formatMagnitude(totalBuy, unit: unit) }
+    var formattedBuy: String {
+        Self.formatMagnitude(totalBuyUsdMillions ?? totalBuy,
+                             unit: totalBuyUsdMillions != nil ? .dollars : unit)
+    }
 
-    var formattedSell: String { Self.formatMagnitude(totalSell, unit: unit) }
+    var formattedSell: String {
+        Self.formatMagnitude(totalSellUsdMillions ?? totalSell,
+                             unit: totalSellUsdMillions != nil ? .dollars : unit)
+    }
+
+    /// The signed value the badge prints — dollars for Insider, the bars' unit
+    /// otherwise. Anything deriving a tone or a colour must use THIS, never
+    /// `totalNetFlow`, or it describes a different number than the one on screen.
+    var verdictValue: Double { verdict.value }
+
+    /// What the chart's own axis is denominated in — always the BARS' unit, never the
+    /// verdict's. Kept separate so a dollar verdict can never relabel a share axis.
+    var barUnit: SmartMoneyFlowUnit { unit }
 
     /// Unit-aware magnitude label — mirrors `formattedNetFlow`'s unit switch so a
     /// share-denominated total isn't mislabeled with a "$" (37.35B shares would

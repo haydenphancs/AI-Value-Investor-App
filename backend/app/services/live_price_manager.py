@@ -387,9 +387,18 @@ class LivePriceManager:
                 # change/change_percent would stay pinned at +0.00% forever.
                 await self._ensure_previous_close(room, data.get("t"))
 
-                # Compute change from previous close
-                change = 0.0
-                change_percent = 0.0
+                # Compute change from previous close. NULL — not 0.0 — when we do not
+                # know the previous close.
+                #
+                # `_ensure_previous_close` can legitimately fail (an FMP blip, a symbol
+                # with no prior close), and `room.previous_close` starts at 0.0. Sending
+                # 0.0 made "no reference price" indistinguishable from "unchanged on the
+                # day", and the iOS side coalesces with `??`, which only guards nil — so
+                # a non-nil 0.0 OVERWROTE the correct REST day-change and flipped the
+                # header to a flat +0.00%, in the app's most prominent number, for as
+                # long as the socket stayed up.
+                change = None
+                change_percent = None
                 if room.previous_close and room.previous_close > 0:
                     change = last_price - room.previous_close
                     change_percent = (change / room.previous_close) * 100
@@ -399,8 +408,10 @@ class LivePriceManager:
                     "type": "price_update",
                     "symbol": room.ticker,
                     "price": round(last_price, 4),
-                    "change": round(change, 4),
-                    "change_percent": round(change_percent, 4),
+                    "change": round(change, 4) if change is not None else None,
+                    "change_percent": (
+                        round(change_percent, 4) if change_percent is not None else None
+                    ),
                     "volume": data.get("v"),
                     "timestamp": data.get("t"),
                 }

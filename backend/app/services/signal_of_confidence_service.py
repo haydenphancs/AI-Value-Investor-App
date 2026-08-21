@@ -200,14 +200,30 @@ class SignalOfConfidenceService:
             logger.info(f"Signal of confidence cache MISS for {ticker} — fetching from FMP")
             result, next_earnings = await self._build_signal_of_confidence(ticker)
 
-            # Persist to Supabase in background
-            asyncio.get_running_loop().run_in_executor(
-                None,
-                self._upsert_supabase_cache_safe,
-                ticker,
-                result,
-                next_earnings,
-            )
+            # NEVER persist a degraded build. A single FMP 429 on the quarterly income
+            # call is turned into `[]` by `return_exceptions=True`, `_build_data_points`
+            # returns `[]`, and `_build_summary` takes its empty branch — producing a
+            # structurally valid response reading total_yield 0.0 / dividend 0.0 /
+            # buyback 0.0 / share change 0.0. Written to the 24-hour tier that is a
+            # FABRICATED "returns nothing to shareholders" verdict for a day, for every
+            # user, and it is frozen into the 20-credit report. The 5-minute in-memory
+            # tier still absorbs the retry storm. Mirrors profit_power_service's gate.
+            soc_degraded = not getattr(result, "data_points", None)
+            if soc_degraded:
+                logger.warning(
+                    "Signal of confidence NOT persisted for %s (degraded: no data "
+                    "points survived the build) — will rebuild after the in-memory TTL",
+                    ticker,
+                )
+            else:
+                # Persist to Supabase in background
+                asyncio.get_running_loop().run_in_executor(
+                    None,
+                    self._upsert_supabase_cache_safe,
+                    ticker,
+                    result,
+                    next_earnings,
+                )
 
             _cache_set(cache_key, result)
             if not future.done():
@@ -440,8 +456,19 @@ class SignalOfConfidenceService:
                 continue
 
             # Shares outstanding from income statement (weighted average)
+            # 0.0 is a SENTINEL here, not a share count — no listed company has zero
+            # weighted-average shares. FMP does return `weightedAverageShsOut: 0` on real
+            # rows (verified live: CD's newest quarter, 2026-06-30, while every older row
+            # is populated), and collapsing that to 0.0 made it indistinguishable from a
+            # measured value: the newest point read "0 shares outstanding" and the
+            # share-count change came out as a flat -100%, rendered as a spectacular
+            # buyback. Keep it as None so the summary can SKIP the point instead.
             shares_raw = _safe_float(rec, "weightedAverageShsOut")
-            shares_outstanding = round(shares_raw / 1_000_000, 2) if shares_raw else 0.0
+            shares_outstanding = (
+                round(shares_raw / 1_000_000, 2)
+                if (shares_raw is not None and shares_raw > 0)
+                else None
+            )
 
             # Cash flow data for this quarter
             cf_rec = cf_by_date.get(date, {})
@@ -546,9 +573,16 @@ class SignalOfConfidenceService:
 
         # Share count change: oldest → newest across all data points
         if len(data_points) >= 2:
-            oldest_shares = data_points[0].shares_outstanding
-            newest_shares = data_points[-1].shares_outstanding
-            if oldest_shares and oldest_shares > 0:
+            # Pick the oldest and newest points that actually REPORT a share count.
+            # Anchoring on `data_points[0]`/`[-1]` regardless meant one unreported
+            # quarter at either end produced a ±100% change out of nothing.
+            measured = [
+                dp for dp in data_points
+                if dp.shares_outstanding is not None and dp.shares_outstanding > 0
+            ]
+            oldest_shares = measured[0].shares_outstanding if measured else None
+            newest_shares = measured[-1].shares_outstanding if len(measured) > 1 else None
+            if oldest_shares and newest_shares and oldest_shares > 0:
                 share_count_change = round(
                     (newest_shares - oldest_shares) / oldest_shares * 100, 2
                 )

@@ -608,6 +608,21 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
     if not quarterly:
         return {}
     sorted_q = sorted(quarterly, key=lambda r: r.get("date") or "", reverse=True)[:4]
+    # A TTM total needs FOUR quarters. There was no length check, so a company with fewer
+    # filings — a recent IPO, or a symbol FMP has partial history for (verified live:
+    # GMRS returns exactly 2 quarterly records) — had its 2-quarter EBIT and revenue
+    # summed and published AS a trailing-twelve-month figure. Altman Z weights
+    # ebit/assets at 3.3 and revenue/assets at 1.0, so a half-year numerator roughly
+    # halves both terms and can move the verdict a whole band. `_compute_z_score` already
+    # OMITS the metric when a field is None — that is the honest degradation, and this
+    # makes it fire.
+    if len(sorted_q) < 4:
+        logger.warning(
+            "health_check TTM: need 4 quarters, got %d — omitting the TTM totals rather "
+            "than publishing a partial-period sum as trailing-twelve-month",
+            len(sorted_q),
+        )
+        return {}
     summed: Dict[str, float] = {}
     for field in ("operatingIncome", "interestExpense", "revenue", "netIncome", "ebitda"):
         vals: List[float] = []
@@ -906,14 +921,28 @@ class HealthCheckService:
             logger.info(f"Health check cache MISS for {ticker} — fetching from FMP")
             result, next_earnings = await self._build_health_check(ticker)
 
-            # Persist to Supabase in background (fire-and-forget)
-            asyncio.get_running_loop().run_in_executor(
-                None,
-                self._upsert_supabase_cache_safe,
-                ticker,
-                result,
-                next_earnings,
-            )
+            # NEVER persist a degraded build. Every FMP exception in the fan-out is
+            # converted to [] / {} by `return_exceptions=True`, so a single 429 on one
+            # call yields a structurally valid response full of zeros — and writing that
+            # to the 24-hour Supabase tier pins a FABRICATED verdict on this ticker for
+            # a day, for every user, and freezes it into the 20-credit report. The
+            # 5-minute in-memory tier still absorbs a retry storm, so the cost of
+            # skipping is one extra fan-out. Mirrors profit_power_service's gate.
+            hc_degraded = not getattr(result, "metrics", None)
+            if hc_degraded:
+                logger.warning(
+                    "Health check NOT persisted for %s (degraded: no metrics survived "
+                    "the build) — will rebuild after the in-memory TTL", ticker,
+                )
+            else:
+                # Persist to Supabase in background (fire-and-forget)
+                asyncio.get_running_loop().run_in_executor(
+                    None,
+                    self._upsert_supabase_cache_safe,
+                    ticker,
+                    result,
+                    next_earnings,
+                )
 
             _cache_set(cache_key, result)
             if not future.done():

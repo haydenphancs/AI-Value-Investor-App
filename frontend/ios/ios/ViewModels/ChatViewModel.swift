@@ -619,6 +619,10 @@ class ChatViewModel: ObservableObject {
     private func streamMessageToSession(sessionId: String, message: String) async {
         let liveTimestamp = Date()
         var liveId: UUID?
+        /// The server's NORMALIZED copy of this turn's user message, from the `meta`
+        /// frame. Used instead of the raw typed text when reconciling a failed stream —
+        /// see the `case "meta"` handler below.
+        var serverNormalizedMessage: String?
 
         // Fresh reveal buffer for this turn.
         cancelReveal()
@@ -757,8 +761,25 @@ class ChatViewModel: ObservableObject {
                 case "error":
                     throw ChatStreamError.serverError
 
+                case "meta":
+                    // Capture the server's own NORMALIZED copy of the message. The
+                    // backend persists `normalize_text(raw)` — NFKC, invisible/bidi and
+                    // control stripping — so reconciling a failed stream against the RAW
+                    // typed string never matched for anything normalisation touched (a
+                    // smart quote from the iOS keyboard, an emoji variation selector, a
+                    // full-width character). The reconcile then concluded the turn had
+                    // NOT persisted and re-sent it: a duplicated Q+A in history AND a
+                    // second credit charged for one message.
+                    if let data = event.data.data(using: .utf8),
+                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let serverMessage = obj["user_message"] as? String,
+                       !serverMessage.isEmpty {
+                        serverNormalizedMessage = serverMessage
+                    }
+                    continue
+
                 default:
-                    continue  // "meta"/"suggestions" and any unknown frames — final state lands on `done`
+                    continue  // "suggestions" and any unknown frames — final state lands on `done`
                 }
             }
             // Stream ended without a terminal `done` frame.
@@ -777,7 +798,12 @@ class ChatViewModel: ObservableObject {
             isStreaming = false
             // Show the thinking indicator again while we reconcile / regenerate.
             isAITyping = true
-            await reconcileAfterStreamFailure(sessionId: sessionId, message: message)
+            // Prefer the server's normalized copy when the meta frame arrived; fall back
+            // to the raw text when the stream failed before it (nothing was persisted
+            // then either, so a raw comparison is safe).
+            await reconcileAfterStreamFailure(
+                sessionId: sessionId, message: serverNormalizedMessage ?? message
+            )
         }
     }
 

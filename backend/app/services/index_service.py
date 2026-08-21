@@ -570,7 +570,8 @@ class IndexService:
         from app.services.chart_helper import _finite_or_none
 
         def _q(key: str, default: float = 0) -> float:
-            return _finite_or_none(quote.get(key)) if _finite_or_none(quote.get(key)) is not None else default
+            v = _finite_or_none(quote.get(key))
+            return v if v is not None else default
 
         price = _q("price")
         change = _q("change")

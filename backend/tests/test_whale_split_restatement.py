@@ -169,3 +169,37 @@ def test_neither_writer_still_computes_the_midpoint_inline():
         )
         assert "(1.0 + ratio) / 2.0" not in body, f"{rel} re-implements the midpoint test"
         assert "ratio_obs" not in body, f"{rel} re-implements the split classifier"
+
+
+# ── The empty-previous-quarter guard, on BOTH 13F writers ────────────────────────────
+def _strip(src: str) -> str:
+    import re
+    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    return "\n".join(
+        ln.split("#", 1)[0] for ln in src.splitlines() if ln.split("#", 1)[0].strip()
+    )
+
+
+def _fn_body(rel: str, name: str) -> str:
+    src = (Path(__file__).resolve().parents[1] / rel).read_text()
+    start = src.index(name)
+    nxt = src.find("\n    async def ", start + 1)
+    end = nxt if nxt != -1 else len(src)
+    return _strip(src[start:end])
+
+
+def test_both_13f_writers_refuse_an_empty_previous_quarter():
+    """`prev_raw == []` means either "no prior filing" or "the fetch just failed", and
+    the second one makes `_diff_quarters` book EVERY position as New/BOUGHT — a single
+    429 reports the whale as having bought its whole AUM, which also clears the $500M
+    alert threshold and pushes a fabricated notification.
+
+    `hydrate_whales` guarded this; `whale_service` — the USER-FACING path — did not.
+    """
+    hyd = _fn_body("scripts/hydrate_whales.py", "async def _process_13f(")
+    assert "prev_entry and not prev_raw" in hyd, "hydration guard removed"
+
+    svc = _fn_body("app/services/whale_service.py", "async def _process_13f_path(")
+    assert "prev and not prev_raw" in svc, (
+        "the serve path will book a whole book as new positions on a transient FMP error"
+    )

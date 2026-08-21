@@ -1837,6 +1837,20 @@ class WhaleService:
         perf_data_list = results[3] if not isinstance(results[3], BaseException) else []
         perf_data = perf_data_list[0] if perf_data_list else {}
 
+        # ⚠️ Distinguish "there IS no prior quarter" from "the prior-quarter fetch
+        # FAILED". Both leave `prev_raw == []`, and an empty prior book makes
+        # `_diff_quarters` book EVERY position as New/BOUGHT — a single 429 or 5xx on
+        # this one call reports a whale as having bought its entire AUM this quarter.
+        # `hydrate_whales` has aborted on this for a while; this path, which is the
+        # USER-FACING one, did not. Raising hands the caller its existing
+        # fall-back-to-stored-snapshot handler, which is the honest degradation: serve
+        # what we already have rather than build a fabricated book.
+        if prev and not prev_raw:
+            raise RuntimeError(
+                f"13F previous-quarter fetch returned empty for cik={cik} while a prior "
+                f"filing exists — refusing to book the whole book as new positions"
+            )
+
         for idx, r in enumerate(results):
             if isinstance(r, BaseException):
                 logger.error("13F fetch section %d failed: %s", idx, r)

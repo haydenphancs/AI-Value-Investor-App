@@ -9,14 +9,12 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.gemini import get_gemini_client
 from app.schemas.index import (
-    BenchmarkSummaryResponse,
     ChartDataPointResponse,
     IndexDetailResponse,
     IndexNewsArticleResponse,
@@ -33,6 +31,7 @@ from app.schemas.index import (
     ValuationSnapshotResponse,
 )
 from app.database import get_supabase
+from app.utils.market_hours import market_status_fields
 
 logger = logging.getLogger(__name__)
 
@@ -267,45 +266,14 @@ def _compute_index_pe_from_sectors() -> Optional[float]:
 
 
 def _get_market_status() -> MarketStatusResponse:
-    """Determine current market status based on time.
+    """Current session, delegated to the one holiday/half-day-aware implementation.
 
-    Uses the America/New_York zone (NOT a fixed UTC-5), so the open/pre-market/
-    after-hours boundaries are correct during Daylight Saving Time (~8 months/yr).
-    A fixed -5 offset shifted every boundary an hour during EDT and stamped the
-    wrong "EST"/"-05:00" onto closed timestamps. Mirrors stock_overview_service.
+    This used to be a local copy of weekday+hour arithmetic — one of three — and it
+    knew nothing about market holidays or the 13:00 ET half-days, so it reported
+    "open" at 11:00 on Thanksgiving and until 16:00 the Friday after. `market_hours`
+    owns the calendar (and `home_dashboard_service` already delegated to it).
     """
-    now = datetime.now(tz=ZoneInfo("America/New_York"))
-    hour = now.hour
-    minute = now.minute
-    weekday = now.weekday()  # 0=Monday, 6=Sunday
-
-    if weekday >= 5:  # Weekend
-        status = "closed"
-    elif hour < 4:
-        status = "closed"
-    elif hour < 9 or (hour == 9 and minute < 30):
-        status = "pre_market"
-    elif hour < 16:
-        status = "open"
-    elif hour < 20:
-        status = "after_hours"
-    else:
-        status = "closed"
-
-    if status == "closed":
-        # Use the actual UTC offset (handles EST vs EDT correctly).
-        utc_offset = now.strftime("%z")  # e.g. "-0500" or "-0400"
-        offset_formatted = f"{utc_offset[:3]}:{utc_offset[3:]}"  # "-05:00" / "-04:00"
-        tz_abbr = "EDT" if now.dst() else "EST"
-        return MarketStatusResponse(
-            status="closed",
-            date=now.strftime(f"%Y-%m-%dT16:00:00{offset_formatted}"),
-            time="4:00 PM",
-            timezone=tz_abbr,
-        )
-    return MarketStatusResponse(status=status)
-
-
+    return MarketStatusResponse(**market_status_fields())
 # ── Main service ─────────────────────────────────────────────────
 
 
@@ -695,10 +663,19 @@ class IndexService:
         news_articles = self._build_news(news_raw if isinstance(news_raw, list) else [])
 
         # ── Step 10: Build benchmark summary ──────────────────────
-        benchmark = BenchmarkSummaryResponse(
-            avg_annual_return=profile_meta.get("avg_annual_return", 10.5),
-            sp_benchmark=profile_meta.get("avg_annual_return", 10.5),
-        )
+        # An index IS the market, so there is no separate benchmark to compare it
+        # against. Both fields used to read the SAME per-index constant, which made
+        # the Nasdaq screen render "S&P 500 Benchmark 12.2%" — the Nasdaq's own
+        # long-run return wearing the S&P's label (the real S&P constant is 10.5).
+        # It also silently disabled the verdict badge on EVERY index, because the
+        # UI's `abs(avg - benchmark) > threshold` test can never be true when the
+        # two sides are the same number.
+        #
+        # Emit None and let the UI hide the row, exactly as _build_performance_periods
+        # already decided for `vs_market_percent` on the same screen. Both sides are
+        # Optional (schemas/index.py:141, IndexDetailModels.swift:312), and
+        # TickerDetailPerformanceSection gates the whole block on `if let`.
+        benchmark = None
 
         response = IndexDetailResponse(
             symbol=symbol.upper(),

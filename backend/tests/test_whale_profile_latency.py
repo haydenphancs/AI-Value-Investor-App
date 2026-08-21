@@ -435,17 +435,47 @@ def test_the_reread_guard_no_longer_keys_on_last_hydrated_at():
 # ── scheduler: visible skip, explicit ordering ──────────────────────────────
 
 
-def test_the_boot_seed_skip_is_logged():
-    """A process booting after 02:00 INFERS today's run already happened. That is
-    sometimes wrong (a mid-run redeploy), and an undiagnosable silent skip is the
-    unacceptable part — it self-heals the next day, so visibility is the fix."""
+def test_todays_run_is_tracked_durably_not_inferred_from_the_boot_clock():
+    """SUPERSEDES the old `test_the_boot_seed_skip_is_logged`.
+
+    That test pinned a VISIBILITY-only mitigation: a process booting after 02:00 INFERRED
+    that today's run had already happened (`last_full_run_date = _boot.date() if
+    _boot.hour >= 2`) and merely logged that the inference might be wrong. It is wrong in
+    exactly the case that hurts — a redeploy or OOM at 02:07, mid-run, boots a process
+    that skips the REST OF THE DAY, leaving un-swept whales on yesterday's data with
+    nothing downstream able to compensate (`_get_or_process_latest` prefers the stored
+    snapshot whenever `last_hydrated_at` is set and never rebuilds on age).
+
+    Migration 147 replaced the inference with a durable cross-instance claim, so the
+    inference must now be ABSENT rather than merely logged.
+
+    ⚠️ Comments are stripped first. The block explaining this change necessarily names
+    the very token the assertion greps for, so an un-stripped scan would pass on prose
+    after a revert.
+    """
     import inspect
     import app.main as m
 
     src = inspect.getsource(m._run_whale_hydration_job)
-    assert "last_full_run_date is not None" in src, "the boot seed is not checked"
-    body = src[src.index("last_full_run_date is not None"):]
-    assert "logger.info" in body[:900], "the inferred skip is still silent"
+    src_nc = re.sub(r'"""(?:.|\n)*?"""', "", src)
+    src_nc = re.sub(r"(?m)^\s*#.*$", "", src_nc)
+    src_nc = re.sub(r"(?m)\s+#.*$", "", src_nc)
+
+    assert "last_full_run_date" not in src_nc, (
+        "the clock-inferred boot seed is back — a mid-run restart will again silently "
+        "skip the rest of the day"
+    )
+    assert "claimed_scheduled_job(JOB_WHALE_HYDRATION_FULL)" in src_nc, (
+        "the full sweep no longer runs under the durable claim"
+    )
+    assert "run.success = True" in src_nc, (
+        "success is never recorded, so run_day never advances and the sweep would "
+        "re-run on every hourly wake"
+    )
+    assert "run.items" in src_nc, (
+        "the written-whale count is not recorded — 'ran and wrote nothing' becomes "
+        "indistinguishable from 'never ran'"
+    )
 
 
 def test_the_prewarmer_waits_on_an_event_not_a_magic_sleep():

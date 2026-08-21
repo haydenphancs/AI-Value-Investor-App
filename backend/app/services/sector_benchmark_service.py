@@ -185,7 +185,17 @@ def _extract_year(record: Dict[str, Any]) -> str:
     cal_year = record.get("calendarYear")
     if cal_year:
         return str(cal_year)
-    date_str = record.get("date", "")
+    # `.get("date", "")` yields None for a present-but-null key, and `len(None)` is a
+    # TypeError. Most callers here are NOT inside a try (`_compute_yoy_for_records`
+    # lines ~228/233, `_index_by_period`, the quarterly recompute), so one null date
+    # aborted a whole sector's benchmark recompute — and a missing sector row is what
+    # makes "vs Industry Avg" quietly disappear from the detail screens.
+    # `app/utils/period_labels.extract_year` is the null-safe twin that growth and
+    # profit-power were migrated to; this copy is kept (its labels are STORAGE keys on
+    # a calendar basis, not fiscal display strings) but now guards the same way.
+    date_str = record.get("date") or ""
+    if not isinstance(date_str, str):
+        return ""
     if len(date_str) >= 4:
         return date_str[:4]
     return ""
@@ -198,7 +208,7 @@ def _annual_period_label(record: Dict[str, Any]) -> str:
 
 def _quarterly_period_label(record: Dict[str, Any]) -> str:
     """Quarterly period label like \"Q1'24\"."""
-    period = record.get("period", "")  # "Q1", "Q2", etc.
+    period = record.get("period") or ""  # "Q1", "Q2", etc. (null-safe)
     year = _extract_year(record)
     if len(year) >= 4:
         return f"{period}'{year[-2:]}"

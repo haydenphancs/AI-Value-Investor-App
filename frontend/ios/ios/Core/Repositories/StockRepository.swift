@@ -252,9 +252,19 @@ final class StockRepository: StockRepositoryProtocol {
     // MARK: - Quote
 
     func getStockQuote(ticker: String) async throws -> StockQuote {
+        try await getStockQuote(ticker: ticker, maxAge: CacheTTL.volatile)
+    }
+
+    /// - Parameter maxAge: how stale a cached quote may be. The REST price poll passes
+    ///   a value below its own 15-second period: `CacheTTL.volatile` is 120s, so seven
+    ///   of every eight polls were answered from cache and the header price advanced at
+    ///   most once every two minutes while claiming to be live. That poll is the ONLY
+    ///   price source when the WebSocket cannot connect, which is exactly when accuracy
+    ///   matters most.
+    func getStockQuote(ticker: String, maxAge: TimeInterval) async throws -> StockQuote {
         let cacheKey = "quote_\(ticker)"
 
-        if let cached: StockQuote = getCached(cacheKey, maxAge: CacheTTL.volatile) {
+        if maxAge > 0, let cached: StockQuote = getCached(cacheKey, maxAge: maxAge) {
             return cached
         }
 
@@ -675,6 +685,37 @@ final class StockRepository: StockRepositoryProtocol {
     func clearCache() {
         cache.removeAll()
     }
+
+    /// Drop every cached entry belonging to `symbol`, so the next fetch really goes to
+    /// the network.
+    ///
+    /// Pull-to-refresh was doing no network work at all for most of a detail screen.
+    /// This repository is a process-lifetime `@MainActor` singleton and
+    /// `CacheTTL.fundamental` is 86_400s, so the six Financials cards, earnings,
+    /// chart-events and the ETF profile/holdings-risk/dividends could not be refreshed
+    /// for the life of the app; `CacheTTL.analysis` (1_800s) froze analyst/sentiment/
+    /// technical for half an hour. Only `getHolders` had an escape hatch. The gesture
+    /// bypasses the CLIENT cache only — the backend's own tiers still absorb the
+    /// upstream cost, so this is not an FMP amplifier.
+    ///
+    /// Matching is on whole, case-SENSITIVE key components: keys are built as
+    /// `"growth_AAPL"` / `"overview_AAPL_1D_5min_false"`, where the literal parts are
+    /// lower-case and the symbol is upper-case. Comparing upper-cased symbols against
+    /// raw components therefore cannot collide a ticker with a literal (a stock really
+    /// called CORE will not evict every `overview_core_*` entry).
+    ///
+    /// - Parameter aliases: other spellings the same asset is cached under — e.g. crypto
+    ///   is stored bare ("BTC") by some calls and as the FMP pair ("BTCUSD") by others.
+    func invalidate(symbol: String, aliases: [String] = []) {
+        var wanted = Set(aliases.map { $0.uppercased() })
+        wanted.insert(symbol.uppercased())
+        guard !wanted.isEmpty else { return }
+        let before = cache.count
+        cache = cache.filter { key, _ in
+            !key.split(separator: "_").contains { wanted.contains(String($0)) }
+        }
+        print("🗑️ StockRepository: invalidated \(before - cache.count) cached entries for \(symbol)")
+    }
 }
 
 // MARK: - Stock Models (DTO)
@@ -722,7 +763,10 @@ struct StockDetail: Codable, Identifiable {
     let beta: Double?
     let lastDiv: Double?
     let ceo: String?
-    let fullTimeEmployees: Int?
+    /// Decoded leniently: FMP `/stable` sends this as a STRING ("166000"), and a
+    /// plain `Int?` THROWS on that mismatch, failing the whole `StockDetail` decode.
+    private let fullTimeEmployeesRaw: LenientInt?
+    var fullTimeEmployees: Int? { fullTimeEmployeesRaw?.value }
     let country: String?
     let city: String?
     let state: String?
@@ -734,6 +778,55 @@ struct StockDetail: Codable, Identifiable {
     var floatShares: Double? = nil
     var percentInsiders: Double? = nil
     var percentInstitutional: Double? = nil
+
+    /// Explicit init so call sites keep passing a plain `Int?`. The lenient wrapper on
+    /// `fullTimeEmployeesRaw` is a decode-boundary concern, not part of this type's API,
+    /// and a `private` stored property would otherwise leave the synthesized memberwise
+    /// init unreachable from anything but this type.
+    init(
+        ticker: String, companyName: String, exchange: String? = nil, sector: String? = nil,
+        industry: String? = nil, description: String? = nil, website: String? = nil,
+        logoUrl: String? = nil, marketCap: Double? = nil, price: Double? = nil,
+        change: Double? = nil, changePercent: Double? = nil, volume: Double? = nil,
+        avgVolume: Double? = nil, high52Week: Double? = nil, low52Week: Double? = nil,
+        beta: Double? = nil, lastDiv: Double? = nil, ceo: String? = nil,
+        fullTimeEmployees: Int? = nil, country: String? = nil, city: String? = nil,
+        state: String? = nil, ipoDate: String? = nil, dcf: Double? = nil,
+        peForward: Double? = nil, shortPercentFloat: Double? = nil,
+        floatShares: Double? = nil, percentInsiders: Double? = nil,
+        percentInstitutional: Double? = nil
+    ) {
+        self.ticker = ticker
+        self.companyName = companyName
+        self.exchange = exchange
+        self.sector = sector
+        self.industry = industry
+        self.description = description
+        self.website = website
+        self.logoUrl = logoUrl
+        self.marketCap = marketCap
+        self.price = price
+        self.change = change
+        self.changePercent = changePercent
+        self.volume = volume
+        self.avgVolume = avgVolume
+        self.high52Week = high52Week
+        self.low52Week = low52Week
+        self.beta = beta
+        self.lastDiv = lastDiv
+        self.ceo = ceo
+        self.fullTimeEmployeesRaw = fullTimeEmployees.map(LenientInt.init)
+        self.country = country
+        self.city = city
+        self.state = state
+        self.ipoDate = ipoDate
+        self.dcf = dcf
+        self.peForward = peForward
+        self.shortPercentFloat = shortPercentFloat
+        self.floatShares = floatShares
+        self.percentInsiders = percentInsiders
+        self.percentInstitutional = percentInstitutional
+    }
 
     enum CodingKeys: String, CodingKey {
         case ticker = "symbol"
@@ -751,7 +844,7 @@ struct StockDetail: Codable, Identifiable {
         case beta
         case lastDiv = "last_div"
         case ceo
-        case fullTimeEmployees = "full_time_employees"
+        case fullTimeEmployeesRaw = "full_time_employees"
         case country, city, state
         case ipoDate = "ipo_date"
         case dcf

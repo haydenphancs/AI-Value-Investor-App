@@ -48,6 +48,19 @@ _CACHE_TTL = 900  # 15 minutes
 _DB_REFRESH_TTL = 14400  # 4 hours
 
 
+def _looks_like_timestamp(value: Any) -> bool:
+    """True when `value` is a string Postgres will accept for a `timestamptz`.
+
+    Deliberately permissive — it only has to reject the shapes that abort a batch
+    upsert (empty string, whitespace, a non-string). FMP dates arrive as
+    "2026-01-15 09:30:00" or ISO-8601; both start with a 4-digit year.
+    """
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    return len(v) >= 8 and v[:4].isdigit()
+
+
 def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
     entry = _cache.get(key)
     if entry is None:
@@ -431,6 +444,13 @@ class SentimentService:
         # Match NewsCacheService's 6-hour TTL. Anything longer freezes the News tab.
         expires = (now + _NEWS_CACHE_TTL).isoformat()
         rows = []
+        # In-batch dedup on the conflict key. FMP regularly returns the same article
+        # URL twice in one response, and `.upsert(rows, on_conflict="ticker,external_id")`
+        # then hits Postgres 21000 — "ON CONFLICT DO UPDATE command cannot affect row a
+        # second time" — which aborts the ENTIRE batch, not just the duplicate. The
+        # owner of this table (NewsCacheService) was given exactly this guard; this
+        # second writer never was, so its whole contribution was silently lost.
+        seen_external_ids: set = set()
 
         for a in articles:
             url = a.get("url") or ""
@@ -440,6 +460,14 @@ class SentimentService:
 
             if not url or not title:
                 continue
+            if url in seen_external_ids:
+                continue
+            seen_external_ids.add(url)
+            # `published_at` is timestamptz. An article with no/garbage publishedDate
+            # sent "" and Postgres rejected the whole batch with 22007 (invalid input
+            # syntax). Drop the value, keep the row — the column is nullable and the
+            # article is still worth caching.
+            published = published if _looks_like_timestamp(published) else None
 
             # Score sentiment using keyword classifier
             combined = f"{title} {text[:300]}"
@@ -458,7 +486,7 @@ class SentimentService:
                 # the enrichment and replaced it with something materially worse. The
                 # classification above is still used for THIS response.
                 "source_name": a.get("site") or a.get("source") or "",
-                "published_at": published,
+                "published_at": published,  # None when unparseable — see above
                 "thumbnail_url": a.get("image") or "",
                 "article_url": url,
                 "cached_at": now.isoformat(),

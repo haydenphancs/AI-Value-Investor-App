@@ -522,7 +522,7 @@ class SignalsService:
         inflight = self._inflight.get(_SIGNALS_CACHE_KEY)
         if inflight is not None:
             logger.debug("Signals joining in-flight build")
-            return await inflight
+            return await asyncio.shield(inflight)
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
@@ -812,7 +812,7 @@ class SignalsService:
 
         inflight = self._detail_inflight.get(key)
         if inflight is not None:
-            return await inflight
+            return await asyncio.shield(inflight)
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()

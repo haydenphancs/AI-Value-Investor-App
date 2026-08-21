@@ -27,6 +27,8 @@ from __future__ import annotations
 import logging
 
 import pytest
+
+from types import SimpleNamespace
 from postgrest.exceptions import APIError, generate_default_error_message
 
 import scripts.hydrate_whales as hw
@@ -149,9 +151,16 @@ def _snapshot(n_holdings=3, n_sectors=2, trade_groups=None):
 def _hydrator(sb, monkeypatch):
     h = hw.WhaleHydrator.__new__(hw.WhaleHydrator)  # skip get_supabase()
     h.sb = sb
+    # `fmp` is a required constructor arg in production. `_hydrate_one` snapshots
+    # `self.fmp.request_failures` to tell an FMP OUTAGE from a genuinely empty filer —
+    # the two are indistinguishable otherwise, because every FMP method swallows its
+    # exception and returns []. request_failures=0 here means "upstream healthy".
+    h.fmp = SimpleNamespace(request_failures=0)
     # Mirrors WhaleHydrator.__init__. `no_data` is its own bucket so a filer that has
-    # gone quiet is not averaged into "unchanged since last run".
-    h.stats = {"processed": 0, "skipped": 0, "failed": 0, "errors": 0, "no_data": 0}
+    # gone quiet is not averaged into "unchanged since last run"; `upstream_failed` is
+    # its own bucket so an outage is never fed to a dormancy review.
+    h.stats = {"processed": 0, "skipped": 0, "failed": 0, "errors": 0, "no_data": 0,
+               "upstream_failed": 0}
     # _maybe_generate_alert is a separate concern (whale_alerts); stub it out.
     monkeypatch.setattr(hw.WhaleHydrator, "_maybe_generate_alert",
                         lambda self, *a, **k: None)
@@ -357,7 +366,8 @@ def _ticker_only_hydrator(sb, monkeypatch, result=_OK_RETURN):
     h = _hydrator(sb, monkeypatch)
     # Mirrors WhaleHydrator.__init__. `no_data` is its own bucket so a filer that has
     # gone quiet is not averaged into "unchanged since last run".
-    h.stats = {"processed": 0, "skipped": 0, "failed": 0, "errors": 0, "no_data": 0}
+    h.stats = {"processed": 0, "skipped": 0, "failed": 0, "errors": 0, "no_data": 0,
+               "upstream_failed": 0}
 
     async def _no_data(self, *a, **k):
         return None

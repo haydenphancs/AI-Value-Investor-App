@@ -41,3 +41,48 @@ extension Optional where Wrapped == Double {
         self?.finiteOrNil
     }
 }
+
+
+// MARK: - Type-tolerant integer
+
+/// An `Int` that also decodes from a JSON **string** or a floating-point number.
+///
+/// A Swift optional does NOT absorb a type mismatch: `decodeIfPresent(Int.self, …)`
+/// returns nil only when the key is absent or explicitly null, and THROWS when the value
+/// is the right key but the wrong type. Because `Codable` is all-or-nothing, one such
+/// field fails the entire struct.
+///
+/// That is not hypothetical: FMP `/stable/profile` returns `fullTimeEmployees` as the
+/// string `"166000"` (verified live), while `StockDetail.fullTimeEmployees` is declared
+/// `Int?` — so the whole `StockDetail` decode threw on every ticker, silently gutting the
+/// fallback the `/overview` failure path depends on. The backend now coerces the field
+/// too; this is the other half, so neither side is a single point of failure.
+struct LenientInt: Codable, Equatable, Sendable {
+    let value: Int?
+
+    init(_ value: Int?) { self.value = value }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { value = nil; return }
+        if let i = try? c.decode(Int.self) { value = i; return }
+        if let d = try? c.decode(Double.self) {
+            // `Int(d)` TRAPS on NaN/±Infinity and on anything outside Int's range.
+            value = (d.isFinite && d >= -9.2e18 && d <= 9.2e18) ? Int(d) : nil
+            return
+        }
+        if let s = try? c.decode(String.self) {
+            value = Int(s.replacingOccurrences(of: ",", with: "")
+                         .trimmingCharacters(in: .whitespaces))
+            return
+        }
+        // Unknown shape (an object, an array): degrade to nil rather than throwing and
+        // taking the whole response down with it.
+        value = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        if let value { try c.encode(value) } else { try c.encodeNil() }
+    }
+}

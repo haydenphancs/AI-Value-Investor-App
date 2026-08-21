@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import asyncio
 import logging
+import math
 import re
 
 from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
@@ -80,6 +81,26 @@ def _validate_ticker(ticker: str) -> str:
     if not t or not _TICKER_RE.match(t):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
     return t
+
+
+def _parse_range_band(raw: Any) -> tuple:
+    """Split FMP /stable's ``"low-high"`` 52-week band into ``(low, high)`` floats.
+
+    Returns ``(None, None)`` for anything unparseable — a missing band must leave the
+    52-week fields absent rather than invent a number.
+    """
+    if not isinstance(raw, str):
+        return (None, None)
+    parts = raw.split("-")
+    if len(parts) != 2:
+        return (None, None)
+    try:
+        lo, hi = float(parts[0].strip()), float(parts[1].strip())
+    except (TypeError, ValueError):
+        return (None, None)
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return (None, None)
+    return (min(lo, hi), max(lo, hi))
 
 
 @router.post("/{ticker}/prewarm-report")
@@ -529,11 +550,43 @@ async def get_stock_details(ticker: str):
 
         response = normalize_fmp_response(profile)
 
-        # Ensure iOS-expected field names exist (stable API changed names)
+        # Ensure iOS-expected field names exist.
+        #
+        # `StockDetail` (iOS) was written against FMP's /api/v3 profile and keys on
+        # spellings /stable no longer emits. Verified live against /stable/profile for
+        # AAPL: it returns `change`, `changePercentage`, `lastDividend`,
+        # `averageVolume` and `range` — so after `camel_to_snake` the decoder's
+        # `changes`, `change_percent`, `year_high` and `year_low` were all ABSENT and
+        # decoded as nil on every request. Two of the six aliases already existed here;
+        # these are the other four, written in the same additive style (never clobber a
+        # key FMP did send).
         if "last_dividend" in response and "last_div" not in response:
             response["last_div"] = response["last_dividend"]
         if "average_volume" in response and "vol_avg" not in response:
             response["vol_avg"] = response["average_volume"]
+        if "change" in response and "changes" not in response:
+            response["changes"] = response["change"]
+        if "change_percentage" in response and "change_percent" not in response:
+            response["change_percent"] = response["change_percentage"]
+
+        # /stable folds the 52-week band into a single "low-high" string
+        # (e.g. "223.78-344.57") instead of the old yearHigh/yearLow numbers.
+        if "year_high" not in response or "year_low" not in response:
+            lo, hi = _parse_range_band(response.get("range"))
+            if lo is not None and hi is not None:
+                response.setdefault("year_low", lo)
+                response.setdefault("year_high", hi)
+
+        # FMP sends fullTimeEmployees as a STRING ("166000"). iOS declares
+        # `fullTimeEmployees: Int?`, and a Swift optional decodes a type mismatch by
+        # THROWING, not by yielding nil — so one string field failed the ENTIRE
+        # `StockDetail` decode, silently gutting the /overview-failure fallback that
+        # this endpoint exists to serve. Coerce to int here; the iOS decoder is also
+        # made tolerant, because either side alone is a single point of failure.
+        emp = response.get("full_time_employees")
+        if isinstance(emp, str):
+            digits = emp.replace(",", "").strip()
+            response["full_time_employees"] = int(digits) if digits.isdigit() else None
 
         # Float & insider % from shares-float endpoint
         if isinstance(shares_float, dict) and shares_float:

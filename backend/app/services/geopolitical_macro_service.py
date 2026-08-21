@@ -156,7 +156,13 @@ class GeopoliticalMacroService:
         # Cold (no usable row) or forced → await a shared refresh.
         previous = cached["factors"] if cached else []
         try:
-            return await self._get_or_start_refresh(run_id, previous)
+            # SHIELDED: `_get_or_start_refresh` hands back a Task that every concurrent
+            # caller shares. Awaiting it bare means one caller giving up (client
+            # disconnect, a report hitting its pipeline timeout, shutdown) CANCELS the
+            # shared Task — killing the refresh for everyone else, who then get a
+            # CancelledError that the `except Exception` below cannot even catch
+            # (CancelledError is BaseException).
+            return await asyncio.shield(self._get_or_start_refresh(run_id, previous))
         except Exception as exc:
             logger.warning("geopolitical_macro: refresh await failed: %s", exc)
             return previous  # keep-last-good

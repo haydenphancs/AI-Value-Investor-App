@@ -340,7 +340,7 @@ class NewsCacheService:
         inflight = self._inflight.get(MARKET_SCOPE)
         if inflight is not None:
             logger.info("Market news fetch already in flight — joining")
-            return await inflight
+            return await asyncio.shield(inflight)
 
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
@@ -694,7 +694,7 @@ class NewsCacheService:
             # Someone is already enriching this exact batch — await their result
             # rather than firing a second Gemini call.
             try:
-                return await inflight
+                return await asyncio.shield(inflight)
             except Exception:
                 # The leader failed; fall through and try once ourselves rather
                 # than propagating their error to every joiner.

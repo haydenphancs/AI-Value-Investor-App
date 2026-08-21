@@ -914,7 +914,7 @@ class HomeDashboardService:
         inflight = self._inflight.get(_CACHE_KEY)
         if inflight is not None:
             logger.debug("Market pulse joining in-flight fetch")
-            return await inflight
+            return await asyncio.shield(inflight)
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
@@ -1036,7 +1036,7 @@ class HomeDashboardService:
         inflight = self._scanner_inflight.get(_SCANNER_CACHE_KEY)
         if inflight is not None:
             logger.debug("Scanners joining in-flight build")
-            return await inflight
+            return await asyncio.shield(inflight)
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
@@ -1361,7 +1361,7 @@ class HomeDashboardService:
         inflight = self._themes_inflight.get(_THEMES_CACHE_KEY)
         if inflight is not None:
             logger.debug("Themes joining in-flight build")
-            return await inflight
+            return await asyncio.shield(inflight)
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
@@ -1533,7 +1533,7 @@ class HomeDashboardService:
         inflight = self._theme_detail_inflight.get(key)
         if inflight is not None:
             logger.debug("Theme detail %s joining in-flight build", key)
-            return await inflight
+            return await asyncio.shield(inflight)
 
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()

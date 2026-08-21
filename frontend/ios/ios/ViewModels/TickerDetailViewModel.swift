@@ -398,24 +398,31 @@ class TickerDetailViewModel: ObservableObject {
 
     // MARK: - REST Quote Polling Fallback
 
-    /// Starts REST polling as a fallback if WebSocket doesn't connect.
+    /// Starts REST polling as a standby price source alongside the WebSocket.
+    ///
+    /// The loop RUNS FOR THE LIFE OF THE SCREEN and idles while the socket is healthy —
+    /// it does not exit when the socket connects. It used to `return` at that point,
+    /// which made it a one-shot: `LivePriceWebSocketManager` gives up permanently after
+    /// `maxReconnectAttempts` (3) consecutive failed handshakes, and `reconnectAttempts`
+    /// is only reset by a `price_update` that can no longer arrive. So one outage longer
+    /// than ~7 seconds — a lift, a Wi-Fi→LTE handoff, a Railway redeploy — killed the
+    /// socket for the session, and the fallback had already returned. Nothing observes
+    /// `isConnected` going false, so the header price froze at the last tick while the
+    /// 30-second chart refresh kept drawing NEW candles: two contradicting prices for the
+    /// same stock on the same screen, with no error, no spinner and nothing in the UI to
+    /// suggest a stale number. Idling costs one `isConnected` check every 15s.
     private func startQuotePollFallback(hasToken: Bool) {
         quotePollTask?.cancel()
         quotePollTask = Task { [weak self] in
-            // If we had a token, give WebSocket 5 seconds to connect first
+            // If we had a token, give WebSocket 5 seconds to connect before polling.
+            // (Only a DELAY — never an exit. See the note above.)
             if hasToken {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard !Task.isCancelled else { return }
-                guard let self = self else { return }
-                if self.livePriceManager.isConnected {
-                    print("📡 TickerDetailVM: WebSocket connected, skipping REST polling")
-                    return
-                }
             }
 
-            print("📡 TickerDetailVM: WebSocket not connected — starting REST quote polling for \(self?.tickerSymbol ?? "")")
+            print("📡 TickerDetailVM: REST quote standby armed for \(self?.tickerSymbol ?? "")")
 
-            // Poll every 15 seconds
             while !Task.isCancelled {
                 guard let self = self else { break }
                 guard MarketHoursUtil.isMarketActive() else {
@@ -423,10 +430,11 @@ class TickerDetailViewModel: ObservableObject {
                     continue
                 }
 
-                // Stop polling if WebSocket connected in the meantime
+                // Socket healthy → stay armed but silent. `continue` (not `return`):
+                // this is the only thing left if the socket dies later.
                 if self.livePriceManager.isConnected {
-                    print("📡 TickerDetailVM: WebSocket connected, stopping REST polling")
-                    return
+                    try? await Task.sleep(nanoseconds: 15_000_000_000)
+                    continue
                 }
 
                 await self.pollQuotePrice()
@@ -443,7 +451,10 @@ class TickerDetailViewModel: ObservableObject {
     /// Fetches the latest quote via REST and updates tickerData.
     private func pollQuotePrice() async {
         do {
-            let quote = try await stockRepository.getStockQuote(ticker: tickerSymbol)
+            // maxAge 0 — this poll IS the freshness mechanism. Served from the default
+            // 120s quote cache it advanced the header price at most once every two
+            // minutes while presenting as a 15-second live feed.
+            let quote = try await stockRepository.getStockQuote(ticker: tickerSymbol, maxAge: 0)
             // The WebSocket may have connected DURING this fetch. It's the
             // authoritative + fresher source, so drop this (now-stale) REST quote
             // rather than clobbering the live price during the connect handoff.
@@ -926,6 +937,13 @@ class TickerDetailViewModel: ObservableObject {
     /// another full load, with the six Financials sections racing to write the
     /// same @Published properties in no defined order.
     func refresh() async {
+        // Drop this ticker's CLIENT-side cache first, or the gesture does no network
+        // work at all: the six Financials cards, earnings and chart-events are cached
+        // for 24h against a process-lifetime singleton, and analyst/sentiment/technical
+        // for 30 minutes. Pull-to-refresh looked like it worked (the spinner ran, the
+        // task awaited) and changed nothing. Backend caches still absorb the upstream
+        // cost — this only bypasses the on-device copy.
+        stockRepository.invalidate(symbol: tickerSymbol)
         loadTickerData()
         await loadTask?.value
     }

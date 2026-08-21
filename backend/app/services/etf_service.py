@@ -8,6 +8,7 @@ Serves the ETFDetailView screen on iOS.
 import asyncio
 import json
 import logging
+from zoneinfo import ZoneInfo
 import math
 import time
 from datetime import datetime, timedelta, timezone
@@ -216,7 +217,13 @@ def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
 
 
 def _get_market_status() -> MarketStatusResponse:
-    now = datetime.now(tz=timezone(timedelta(hours=-5)))  # EST
+    # America/New_York, NOT a fixed UTC-5. EDT (UTC-4) runs from the second Sunday in
+    # March to the first Sunday in November — roughly EIGHT months of the year — so a
+    # hardcoded -5 offset put every session boundary an hour late for most of the
+    # calendar: the badge still read "pre_market" at 09:45 ET and flipped to
+    # "after_hours" at 17:00 ET. index_service and commodity_service were both moved
+    # to ZoneInfo for exactly this; the ETF copy was missed.
+    now = datetime.now(tz=ZoneInfo("America/New_York"))
     hour = now.hour
     minute = now.minute
     weekday = now.weekday()
@@ -235,11 +242,15 @@ def _get_market_status() -> MarketStatusResponse:
         status = "closed"
 
     if status == "closed":
+        # The offset and the abbreviation must follow the SAME clock as the boundary
+        # tests above. Both were hardcoded to -05:00/"EST" year-round, so from March to
+        # November the payload stamped a close time an hour off and labelled EDT as EST.
+        close_et = now.replace(hour=16, minute=0, second=0, microsecond=0)
         return MarketStatusResponse(
             status="closed",
-            date=now.strftime("%Y-%m-%dT16:00:00-05:00"),
+            date=close_et.isoformat(),
             time="4:00 PM",
-            timezone="EST",
+            timezone=close_et.tzname() or "ET",
         )
     return MarketStatusResponse(status=status)
 
@@ -269,13 +280,60 @@ class ETFService:
 
     # ── Supabase cache-aside helpers ─────────────────────────────
 
-    def _check_etf_db_cache(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Check Supabase etf_detail_cache (24h TTL)."""
+    @staticmethod
+    def _cache_key(symbol: str, chart_range: str, interval: Optional[str]) -> str:
+        """Identity of one ETF detail payload: symbol AND the chart shape it was
+        built for. See the comment at the cache check in `get_etf_detail`."""
+        return f"{symbol.upper()}_{chart_range}_{interval or 'default'}"
+
+    async def _refresh_volatile(
+        self, response: "ETFDetailResponse", symbol: str
+    ) -> None:
+        """Overwrite a CACHED response's price fields with a live quote, in place.
+
+        Best-effort: any failure leaves the cached values and logs. Only the volatile
+        fields move — the expensive cached bundle (holdings, sector weights, dividends,
+        AI snapshots) is untouched.
+        """
+        try:
+            quote = await self.fmp.get_stock_price_quote(symbol)
+        except Exception as e:
+            logger.warning(
+                "ETF volatile refresh failed for %s: %s: %s — serving cached price",
+                symbol, type(e).__name__, e,
+            )
+            return
+        if not isinstance(quote, dict) or not quote:
+            return
+        price = _finite_num(quote.get("price"))
+        if not price or price <= 0:
+            return
+        change = _finite_num(quote.get("change"))
+        pct = quote.get("changePercentage")
+        pct = _finite_num(pct) if pct is not None else _finite_num(quote.get("changesPercentage"))
+        response.current_price = price
+        response.price_change = change
+        response.price_change_percent = pct
+        response.market_status = _get_market_status()
+
+    def _check_etf_db_cache(
+        self, symbol: str, chart_range: str = "3M", interval: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Check Supabase etf_detail_cache (24h TTL), scoped to the chart shape.
+
+        DEPLOY NOTE: the `cache_key` column arrives in migration 148. Until that is
+        applied this SELECT errors on the unknown column, the except below logs it, and
+        the method returns None — i.e. the Supabase tier is simply INACTIVE and every
+        request rebuilds. That is slower but CORRECT; the previous symbol-only key was
+        fast and wrong (it served whichever range was cached first). The 5-minute
+        in-memory tier still absorbs bursts in the meantime.
+        """
+        cache_id = self._cache_key(symbol, chart_range, interval)
         try:
             row = (
                 self.supabase.table("etf_detail_cache")
                 .select("response_json, cached_at")
-                .eq("symbol", symbol)
+                .eq("cache_key", cache_id)
                 .limit(1)
                 .execute()
             )
@@ -290,32 +348,44 @@ class ETFService:
             cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
             age = datetime.now(timezone.utc) - cached_at
             if age > timedelta(hours=_ETF_DB_TTL_HOURS):
-                logger.info(f"ETF Supabase STALE (age={age}) for {symbol}")
+                logger.info(f"ETF Supabase STALE (age={age}) for {cache_id}")
                 return None
 
             data = entry.get("response_json")
             if data and isinstance(data, dict):
-                logger.info(f"ETF Supabase HIT for {symbol} (age={age})")
+                logger.info(f"ETF Supabase HIT for {cache_id} (age={age})")
                 return data
             return None
         except Exception as e:
             logger.warning(f"ETF Supabase check failed for {symbol}: {e}")
             return None
 
-    def _upsert_etf_db_cache(self, symbol: str, data: Dict[str, Any]) -> None:
-        """Upsert ETF detail into Supabase cache."""
+    def _upsert_etf_db_cache(
+        self, symbol: str, data: Dict[str, Any],
+        chart_range: str = "3M", interval: Optional[str] = None,
+    ) -> None:
+        """Upsert ETF detail into Supabase cache, keyed by the chart shape.
+
+        DEPLOY NOTE: `cache_key` and its unique index arrive in migration 148; until
+        applied this upsert fails on the unknown column and is logged, leaving the
+        Supabase tier inactive. See `_check_etf_db_cache`.
+        """
+        cache_id = self._cache_key(symbol, chart_range, interval)
         try:
             self.supabase.table("etf_detail_cache").upsert(
                 {
+                    "cache_key": cache_id,
                     "symbol": symbol,
+                    "chart_range": chart_range,
+                    "interval": interval,
                     "response_json": data,
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
-                on_conflict="symbol",
+                on_conflict="cache_key",
             ).execute()
-            logger.info(f"ETF detail cached in Supabase for {symbol}")
+            logger.info(f"ETF detail cached in Supabase for {cache_id}")
         except Exception as e:
-            logger.warning(f"ETF Supabase upsert failed for {symbol}: {e}")
+            logger.warning(f"ETF Supabase upsert failed for {cache_id}: {e}")
 
     async def get_etf_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
@@ -333,17 +403,29 @@ class ETFService:
         symbol = symbol.upper()
 
         # ── Cache check: in-memory (5 min) then Supabase (24h) ──
-        mem_key = f"etf_detail_{symbol}"
+        #
+        # The key MUST carry chart_range and interval. This response's `chart_data` is
+        # built from them below, but the key used to be `f"etf_detail_{symbol}"` — so
+        # after opening SPY on the default 3M, tapping "1Y" returned the cached 3-month
+        # series under the 1Y label. Every range pill after the first was a silent
+        # no-op, for 5 minutes in-process and up to 24 hours from the Supabase row (i.e.
+        # for every other user too). Whichever range happened to be fetched first won.
+        cache_id = self._cache_key(symbol, chart_range, interval)
+        mem_key = f"etf_detail_{cache_id}"
         cached = _cache_get(mem_key, _CACHE_TTL_SECONDS)
         if cached is not None:
-            logger.info(f"ETF in-memory HIT for {symbol}")
+            logger.info(f"ETF in-memory HIT for {cache_id}")
             return cached
 
-        db_data = self._check_etf_db_cache(symbol)
+        db_data = self._check_etf_db_cache(symbol, chart_range, interval)
         if db_data is not None:
             try:
                 response = ETFDetailResponse(**db_data)
                 _cache_set(mem_key, response)
+                # A row up to 24h old carries a 24h-old price. The ETF screen does have
+                # a live-price socket, but it only runs during market hours and only
+                # after it connects — the first paint is whatever we return here.
+                await self._refresh_volatile(response, symbol)
                 return response
             except Exception as e:
                 logger.warning(f"ETF Supabase data invalid for {symbol}: {e}")
@@ -639,11 +721,24 @@ class ETFService:
         )
 
         # ── Cache in both tiers ──────────────────────────────────
-        _cache_set(mem_key, response)
-        try:
-            self._upsert_etf_db_cache(symbol, response.model_dump())
-        except Exception as e:
-            logger.warning(f"ETF Supabase background cache failed for {symbol}: {e}")
+        # Never persist a degraded build: with the quote call failed every price field
+        # is 0, and a 24-hour row of `current_price: 0.0` shows "$0.00" to every viewer
+        # of this ETF until it expires. The 5-minute memory tier still absorbs a retry
+        # storm. Mirrors profit_power_service's degraded gate.
+        etf_degraded = not price or price <= 0
+        if etf_degraded:
+            logger.warning(
+                "ETF detail NOT persisted for %s (degraded: price<=0) — will rebuild "
+                "after the in-memory TTL", symbol,
+            )
+        else:
+            _cache_set(mem_key, response)
+            try:
+                self._upsert_etf_db_cache(
+                    symbol, response.model_dump(), chart_range, interval
+                )
+            except Exception as e:
+                logger.warning(f"ETF Supabase background cache failed for {symbol}: {e}")
 
         return response
 

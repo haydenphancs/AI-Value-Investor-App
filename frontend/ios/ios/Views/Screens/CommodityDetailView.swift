@@ -257,6 +257,14 @@ struct CommodityDetailView: View {
                     commodityData: commodityData,
                     onRelatedCommodityTap: viewModel.handleRelatedCommodityTap
                 )
+            } else if let errorMessage = viewModel.errorMessage {
+                DetailLoadFailureCard(
+                    message: errorMessage,
+                    isRetrying: viewModel.isLoading,
+                    onRetry: { viewModel.loadCommodityData() }
+                )
+            } else {
+                DetailTabSkeleton()
             }
 
         case .news:

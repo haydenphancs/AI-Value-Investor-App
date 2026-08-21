@@ -95,11 +95,28 @@ actor APIClient {
             return await inFlight.value
         }
         guard let refresher = tokenRefresher else { return .credentialRejected }
-        let task = Task { await refresher() }
+        // The new token is applied INSIDE the task, not after `await task.value`.
+        //
+        // Both the leader and every follower await the same task, and when it finishes
+        // their continuations are resumed in an unspecified order. With the assignment
+        // in the leader's frame, a follower could resume FIRST, see `.refreshed`, and
+        // immediately retry with `allowAuthRetry: false` — using the OLD `authToken`,
+        // because the leader had not reached its assignment yet. That request 401s and
+        // has no retry left, so it fails hard while every other request succeeds.
+        //
+        // Reachable on any burst of concurrent 401s, which is the normal shape here: a
+        // detail screen fires ~11 requests in parallel, so an access token expiring
+        // mid-session produces exactly that burst. Assigning inside the task body makes
+        // the write happen-before any awaiter resumes. `Task {}` created in an
+        // actor-isolated method inherits this actor, so the write stays serialised.
+        let task = Task { () -> TokenRefreshOutcome in
+            let outcome = await refresher()
+            if case .refreshed(let newToken) = outcome { self.authToken = newToken }
+            return outcome
+        }
         refreshInFlight = task
         let outcome = await task.value
         refreshInFlight = nil
-        if case .refreshed(let newToken) = outcome { self.authToken = newToken }
         return outcome
     }
 

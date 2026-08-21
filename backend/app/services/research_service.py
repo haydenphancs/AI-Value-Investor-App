@@ -129,7 +129,7 @@ async def _run_agent_deduped(
         # worker death but provably never false-refunds a report that is still coming;
         # the trade is deliberate and pinned by
         # tests/test_processing_started_at.py::test_run_agent_deduped_followers_do_not_call_on_started.
-        shared = await inflight
+        shared = await asyncio.shield(inflight)
         return copy.deepcopy(shared)
 
     loop = asyncio.get_running_loop()

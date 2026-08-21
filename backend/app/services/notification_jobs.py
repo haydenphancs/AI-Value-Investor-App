@@ -210,3 +210,160 @@ async def claimed_job(job: str) -> AsyncIterator[Optional[NotificationJobResult]
                 error=result.error,
             )
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# Generic scheduled jobs (non-notification), added in migration 147.
+#
+# Same table, same claim discipline, two differences that matter:
+#
+#   * The day boundary is a PARAMETER, not hardcoded to America/New_York. The whale full
+#     hydration is specified in UTC and runs at 02:00 UTC; judged on an ET calendar that
+#     is 21:00/22:00 the PREVIOUS day, so the marker would misdate every run, and any
+#     future shift of the schedule past 04:00 UTC would put two consecutive daily runs on
+#     one ET day and silently suppress one of them.
+#   * It records `items_written` — how many rows the run actually wrote. A sweep that ran
+#     and legitimately wrote nothing is indistinguishable from one that never ran without
+#     it, and both the operator and the latency measurement need to tell them apart.
+#
+# The notification RPCs are deliberately NOT reused or modified here — see the migration
+# header for why (argument ambiguity, and a DROP would discard their GRANTs).
+# ─────────────────────────────────────────────────────────────────────────────────────
+
+JOB_WHALE_HYDRATION_FULL = "whale_hydration_full"
+
+
+class ScheduledJobResult:
+    """Mutable handle a claimed scheduled job fills in as it works.
+
+    Mirrors `NotificationJobResult`, but counts rows WRITTEN rather than notifications
+    sent. Passed to the body rather than returned from it so the `finally` in
+    `claimed_scheduled_job` can still record partial progress when the body raises — a
+    sweep that wrote 30 whales and then died must not record zero.
+    """
+
+    __slots__ = ("items", "success", "error")
+
+    def __init__(self) -> None:
+        self.items: int = 0
+        self.success: bool = False
+        self.error: Optional[str] = None
+
+
+def claim_scheduled(
+    job: str, *, timezone_name: str = "UTC", now: Optional[datetime] = None
+) -> bool:
+    """Try to take the daily claim for `job`. True = it's yours.
+
+    Returns False on ANY error, for the same fail-closed reason as `claim`: a skipped
+    wake is cheap, a duplicated sweep is not.
+    """
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    try:
+        result = _sb().rpc(
+            "claim_scheduled_job",
+            {
+                "p_job": job,
+                "p_now": stamp,
+                "p_stale_seconds": settings.NOTIFICATION_JOB_STALE_SECONDS,
+                "p_timezone": timezone_name,
+            },
+        ).execute()
+        return bool(result.data)
+    except Exception as e:
+        logger.warning(
+            "scheduled job %s: claim failed (%s: %s) — skipping this wake",
+            job, type(e).__name__, e,
+        )
+        return False
+
+
+def finish_scheduled(
+    job: str,
+    *,
+    success: bool,
+    items: int = 0,
+    error: Optional[str] = None,
+    timezone_name: str = "UTC",
+    now: Optional[datetime] = None,
+) -> None:
+    """Release the claim and record the outcome. Best-effort, never raises.
+
+    A failure here is non-fatal but LOUD: the claim then sits until the stale window
+    expires, which delays (never duplicates) the next run.
+    """
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    try:
+        _sb().rpc(
+            "finish_scheduled_job",
+            {
+                "p_job": job,
+                "p_now": stamp,
+                "p_success": success,
+                "p_items": int(items or 0),
+                "p_error": (error or None) and str(error)[:500],
+                "p_timezone": timezone_name,
+            },
+        ).execute()
+    except Exception as e:
+        logger.warning(
+            "scheduled job %s: finish failed (%s: %s) — the claim will free itself "
+            "after NOTIFICATION_JOB_STALE_SECONDS",
+            job, type(e).__name__, e,
+        )
+
+
+@contextlib.asynccontextmanager
+async def claimed_scheduled_job(
+    job: str, *, timezone_name: str = "UTC"
+) -> AsyncIterator[Optional[ScheduledJobResult]]:
+    """Hold the daily claim for the duration of the block.
+
+    Yields a `ScheduledJobResult` when the claim was granted, or ``None`` when it was
+    not::
+
+        async with claimed_scheduled_job(JOB_WHALE_HYDRATION_FULL) as run:
+            if run is None:
+                return
+            stats = await hydrator.run()
+            run.items = stats["processed"]
+            run.success = True
+
+    Marking `success` is an explicit act: the default is False, so a body that returns
+    early or raises leaves `run_day` unset and the next wake retries the same day.
+    """
+    granted = await asyncio.to_thread(
+        claim_scheduled, job, timezone_name=timezone_name
+    )
+    if not granted:
+        yield None
+        return
+
+    result = ScheduledJobResult()
+    try:
+        yield result
+    except asyncio.CancelledError:
+        # A redeploy mid-run. Record it honestly as a failure so the day is retried —
+        # this is the exact case the old clock-inferred seed got wrong, by assuming the
+        # run had completed and skipping the rest of the day.
+        result.success = False
+        result.error = "cancelled (shutdown)"
+        raise
+    except Exception as e:
+        result.success = False
+        result.error = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        # SHIELDED, for the same reason as `claimed_job`: `CancelledError` is a
+        # BaseException and would otherwise abort the release, parking the claim for the
+        # full stale window.
+        await asyncio.shield(
+            asyncio.to_thread(
+                finish_scheduled,
+                job,
+                success=result.success,
+                items=result.items,
+                error=result.error,
+                timezone_name=timezone_name,
+            )
+        )

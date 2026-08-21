@@ -8,11 +8,16 @@ CLUSD (Crude Oil WTI), NGUSD (Natural Gas), etc.
 import asyncio
 import logging
 import math
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional
 
-from app.integrations.fmp import FMPClient, get_fmp_client
+from app.integrations.fmp import (
+    FMPClient,
+    FMPUnavailableException,
+    get_fmp_client,
+)
 from app.schemas.commodity import (
     BenchmarkSummaryResponse,
     CommodityChartPointResponse,
@@ -26,6 +31,51 @@ from app.schemas.commodity import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── Tier 1 cache + in-flight dedup (CLAUDE.md invariant #4) ──────────
+#
+# This service had NO caching of ANY kind: every CommodityDetailView open ran the full
+# FMP fan-out (quote + 15 years of history + news + one quote per related commodity),
+# and N concurrent viewers of gold ran N of them.
+#
+# Tier 1 only — deliberately NO 24h Supabase tier, unlike the ETF/Index siblings. Their
+# 24-hour rows are what made those screens serve a day-old price, and a commodity screen
+# has no live-price WebSocket to correct one afterwards. A 5-minute in-process tier plus
+# in-flight dedup removes the herd and the repeat cost without ever showing a stale
+# quote; persisting this payload for a day would reintroduce the exact defect just fixed
+# next door.
+_cache: Dict[str, tuple] = {}
+_CACHE_TTL_SECONDS = 300  # 5 minutes — matches the sibling detail services
+# Hard cap: `_cache_get` only evicts a key when that same key is read again after
+# expiry, so on a long-lived Railway process a symbol fetched once would sit resident
+# forever. Bounded, evicting least-recently-written.
+_CACHE_MAX_ENTRIES = 256
+
+
+def _cache_get(key: str, ttl: float = _CACHE_TTL_SECONDS) -> Optional[Any]:
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    ts, value = entry
+    if time.time() - ts > ttl:
+        del _cache[key]
+        return None
+    return value
+
+
+def _cache_set(key: str, value: Any) -> None:
+    _cache.pop(key, None)
+    _cache[key] = (time.time(), value)
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
+            _cache.pop(_old, None)
+
+
+# Thundering-herd guard. Keyed on the FULL request shape, because `chart_data` is built
+# from range+interval — keying on the symbol alone is the bug that made the ETF range
+# picker a no-op (see etf_service._cache_key).
+_inflight: Dict[str, asyncio.Future] = {}
 
 
 def _commodity_market_status() -> str:
@@ -283,7 +333,56 @@ class CommodityService:
     async def get_commodity_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> CommodityDetailResponse:
-        symbol = symbol.upper().replace("USD", "")
+        """Cache-aside wrapper (Tier 1 + in-flight dedup) around the live build."""
+        cache_key = f"{symbol.upper().strip()}_{chart_range}_{interval or 'default'}"
+
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.info("Commodity detail in-memory HIT for %s", cache_key)
+            return cached
+
+        # SHIELDED join: a joiner that gives up must not cancel the shared future and
+        # take every other waiter down with it.
+        if cache_key in _inflight:
+            logger.info("Commodity detail in-flight JOIN for %s", cache_key)
+            return await asyncio.shield(_inflight[cache_key])
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _inflight[cache_key] = future
+        try:
+            result = await self._build_commodity_detail(
+                symbol, chart_range=chart_range, interval=interval
+            )
+            _cache_set(cache_key, result)
+            if not future.done():
+                future.set_result(result)
+            return result
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it skips the handler below and would
+            # leave the future unresolved — every joiner would hang for the life of the
+            # process. Hand them a normal exception, then honour our own cancellation.
+            if not future.done():
+                future.set_exception(
+                    RuntimeError("commodity detail fetch was cancelled")
+                )
+            raise
+        except Exception as e:
+            if not future.done():
+                future.set_exception(e)
+            raise
+        finally:
+            _inflight.pop(cache_key, None)
+
+    async def _build_commodity_detail(
+        self, symbol: str, chart_range: str = "3M", interval: str = None
+    ) -> CommodityDetailResponse:
+        # Strip only a TRAILING "USD" pair suffix. A global replace is the bug the
+        # crypto endpoint was fixed for (it turned USDT into T and USDC into C); harmless
+        # for today's futures roots, but the same trap one new symbol away.
+        symbol = symbol.upper().strip()
+        if len(symbol) > 3 and symbol.endswith("USD"):
+            symbol = symbol[:-3]
         fmp_symbol = _resolve_fmp_symbol(symbol)
         commodity_name = _resolve_name(symbol)
         meta = _get_meta(symbol)
@@ -336,6 +435,42 @@ class CommodityService:
         from app.services.chart_helper import _finite_or_none
         price = _finite_or_none(quote.get("price")) or 0
         change = _finite_or_none(quote.get("change")) or 0
+
+        # A failed quote must NOT become "$0.00". `quote` degrades to `{}` above when
+        # the FMP call raised, and every read below then defaults to 0 — so an FMP 429 or
+        # timeout rendered gold at $0.00 (+0.00%) under a chart that still had real data.
+        # Commodity is the worst place for that: it has no cache to fall back on and, unlike
+        # ETF/Index, no live-price WebSocket to correct it afterwards. Recover the last
+        # finite close from the history we already fetched (crypto_service does the same),
+        # and only if that is missing too, fail loudly so the endpoint can return a typed
+        # error the user can retry instead of a fabricated number.
+        if price <= 0:
+            last_close = None
+            prev_close_hist = None
+            for row in reversed(historical):
+                if not isinstance(row, dict):
+                    continue
+                c = _finite_or_none(row.get("close") or row.get("adjClose"))
+                if c is None or c <= 0:
+                    continue
+                if last_close is None:
+                    last_close = c
+                else:
+                    prev_close_hist = c
+                    break
+            if last_close is None:
+                raise FMPUnavailableException(
+                    f"No usable quote or price history for commodity {fmp_symbol}"
+                )
+            logger.warning(
+                "Commodity %s quote unavailable — falling back to last historical close "
+                "%.4f (chart data is still live)", fmp_symbol, last_close,
+            )
+            price = last_close
+            if prev_close_hist:
+                change = last_close - prev_close_hist
+                quote = dict(quote or {})
+                quote.setdefault("previousClose", prev_close_hist)
         # FMP /quote returns the daily move under `changesPercentage` (plural) for
         # most symbols; some feeds use `changePercentage`. Read both, then fall
         # back to computing it from change/previousClose so commodity screens

@@ -193,7 +193,7 @@ class NewsInsightService:
         inflight = self._inflight.get(key)
         if inflight is not None:
             try:
-                fetched = await inflight
+                fetched = await asyncio.shield(inflight)
             except Exception:
                 fetched = {}
         else:

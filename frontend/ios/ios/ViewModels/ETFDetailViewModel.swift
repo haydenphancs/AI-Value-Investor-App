@@ -153,6 +153,12 @@ class ETFDetailViewModel: ObservableObject {
     }
 
     func refresh() async {
+        // Drop this asset's CLIENT-side cache first — otherwise the gesture does no
+        // network work for anything served by StockRepository (news 60s, analyst /
+        // sentiment / technical 30 min, ETF profile + holdings-risk + dividends 24h
+        // against a process-lifetime singleton). Backend caches still absorb the
+        // upstream cost; this only bypasses the on-device copy.
+        StockRepository.shared.invalidate(symbol: etfSymbol)
         await fetchETFDetail()
         await fetchETFNews()
     }

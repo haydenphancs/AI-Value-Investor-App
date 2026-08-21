@@ -291,7 +291,7 @@ async def get_or_collect(ticker: str, fetch_fresh) -> Any:
 
     inflight = _INFLIGHT.get(ticker)
     if inflight is not None:
-        return await inflight  # a concurrent caller is already fetching this ticker
+        return await asyncio.shield(inflight)  # a concurrent caller is already fetching this ticker
 
     loop = asyncio.get_running_loop()
     fut: "asyncio.Future" = loop.create_future()

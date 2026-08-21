@@ -289,6 +289,14 @@ struct IndexDetailView: View {
                     },
                     onWebsiteTap: viewModel.handleWebsiteTap
                 )
+            } else if let errorMessage = viewModel.errorMessage {
+                DetailLoadFailureCard(
+                    message: errorMessage,
+                    isRetrying: viewModel.isLoading,
+                    onRetry: { viewModel.loadIndexData() }
+                )
+            } else {
+                DetailTabSkeleton()
             }
         case .news:
             TickerNewsContent(

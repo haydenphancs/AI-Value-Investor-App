@@ -68,10 +68,12 @@ EXPECTED: dict[str, int] = {
     #   +2 functions / +2 secdef          -> claim_scheduled_job + finish_scheduled_job,
     #                                        from migration 147 — applied to Supabase before
     #                                        the previous dump but never captured in it.
+    # Then 151 took policies 197 -> 195: it DROPped etf_snapshot_cache_public_read and
+    # etf_detail_cache_public_read, so those two caches are service_role-only like 149/150.
     "tables": 132,
     "public": 97,
     "fk": 28,
-    "policies": 197,
+    "policies": 195,
     "rls": 97,
     "functions": 40,
     "enums": 14,

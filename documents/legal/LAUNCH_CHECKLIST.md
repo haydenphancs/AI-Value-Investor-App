@@ -158,86 +158,98 @@ GitHub account, but confirm it is not a deploy key or on any server before dismi
 
 ---
 
-## 👉 START HERE — rebuilt 2026-08-20 against the live systems
+## 🚀 THE LAUNCH PLAN — decided 2026-08-21
 
-Ordered by **what blocks the Submit button**, with the third-party lead-time items called out
-inside it — that ordering matters more now that the agreements and products are done.
+**Target: live on the App Store in 8–12 days.** Everything below is scoped to that.
 
-| # | Do this | Why now | Where |
-|---|---|---|---|
-| **1** | 🔴 **Create the App Review demo account** | The single cheapest self-inflicted rejection left. Your review notes already promise *"Credentials are in the App Review sign-in fields; the account is pre-loaded with credits."* Live DB 2026-08-20: **4 users, none of them a reviewer**, and anonymous `GET /stocks/AAPL/report` still returns **401** — a signed-out reviewer cannot reach the headline feature. Supabase Studio → Add user → tick **Auto Confirm User** (this also takes SMTP off the submission path). Then grant it credits. | §7 |
-| **2** | **Email FMP and CoinGecko** about commercial redistribution | Longest lead time on the list and it is *on* the submission path, not beside it: the answer feeds the ASC **Content Rights** declaration. Free to send. | §6 |
-| **3** | **Shoot the screenshots** | Zero exist, and there is no capture script. iPhone **6.9" and 6.5"** only (§8), plus one Add Credits shot covering all four consumable IAPs. ✅ The 5.2.1 blocker on this is now **cleared for the Journey titles** — but the Whales/13F tab, the book-cover shelf, the Journey quote card and two info sheets still name real people, so frame around them. | §7, §6b |
-| **4** | **Run the first Release archive** | The Release configuration has **never been compiled** — newest archive is 2026-06-06, so ~11 weeks of work has never been through archive/validate/sign. A missing App-ID capability appears here as a *signing failure* and nowhere earlier. Do it now, while there is time to fix what it finds. | §7 |
-| **5** | **Finish the ASC metadata** | Listing copy (ready, `app-store-listing.md`), Availability = **US only**, the 10-type privacy questionnaire, Category Finance + **17+**, Copyright, App Review contact, and the review-notes paragraph. Plus the IAP half: subscription-group localization and per-product display name/description/screenshot, without which subscriptions cannot be submitted. | §7, §6b |
-| **6** | Flag your own account `is_admin`, **then** clear `ADMIN_TOKEN` | Still **0 rows** (verified live 2026-08-20), and `ADMIN_TOKEN` is still **set** on Railway (25 chars) — so it is currently the *only* credential that can reach an admin route. Clearing it first leaves a direct SQL write as your sole recovery. | §5 |
-| **7** | Publish the Google OAuth consent screen | ~60 seconds, no verification review for these scopes. Skip it and Google sign-in works for you and fails for everyone else, 7 days after release, looking exactly like an app bug. | §5e |
-| **8** | **SMTP + the `{{ .Token }}` reset template** | No longer a *submission* blocker once #1 exists — but it ships broken: email/password signup and forgot-password are both dead ends today. Fix it, or hide email signup before launch. | §5b, §5c |
-| **9** | **Run the git-history purge** | The repo is public by decision, so this is the only fix for the two copyrighted PDFs still fetchable by commit SHA — and it couples to the Content Rights answer in #2. ⚠️ **Commit or stash first: 31 files are uncommitted right now** and `filter-repo --force` ends in `git reset --hard`. | §4 |
-| **10** | **At launch:** flip `IAP_ENVIRONMENT`→`Production` and `APNS_ENV`→`production` | Both still on their sandbox values on Railway. ~2 minutes. | §6b, §9 |
+### The decision, recorded so it can't drift
 
-**What changed on 2026-08-14 (evening).** A full re-verification against the **live** database,
-live HTTP, the anonymous GitHub API and the Xcode archives on disk. The old #3 ("flip the repo
-private") is **withdrawn — the repo stays public by decision**; see §4 for the two consequences.
-Two genuine submission blockers were absent from this file entirely (the demo account, and the
-ASC Content Rights / Copyright / reviewer-contact fields), and several ticked items turned out to
-be either already done or never a problem — see the new **Corrections** section.
-
-### ✅ Corrections — verified 2026-08-14 evening, stop spending time on these
-
-Each was checked against the live system, not against this file's memory.
-
-| Claim in this file | Reality |
+| | |
 |---|---|
-| "Check the app icon for an **alpha channel** first" (§9), treated as a pre-screenshot gate | **Fixed 2026-06-06, twenty minutes after it broke.** The two archives are a complete forensic record: 12:23 upload fails 90717 → icon replaced 12:41 → 12:43 upload succeeds. Confirmed three ways — `sips` reports `hasAlpha:no`, the file is a baseline JPEG (which physically cannot carry alpha), and the built `Assets.car` rendition reports `Opaque: True`. **Zero work remains.** |
-| "**47** remote `origin/claude/*` branches" (§4 + runbook) | **23.** `git branch -r` reads 47 because 24 tracking refs are stale. The runbook's own check (`git branch -r \| grep … # expect 0`) will still read 47 after a *perfect* cleanup. Use `git ls-remote --heads origin 'refs/heads/claude/*'`, and `git fetch --prune` first. |
-| Export compliance — not mentioned anywhere | **Already handled.** `INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO` in **both** build configs and baked into the built plist. ASC will not ask. |
-| "The ASC record **probably** already exists" (§7) | **It does.** The 2026-06-06 archive records `uploadedBuildNumber="1", state="success"` for adamId **6759525689**. Do not create a second record — and note this makes the build-number bump a *hard* rejection rather than housekeeping. |
-| Migrations "103–134" | **103 through 136 are all applied; nothing is pending.** 135 (signup credit seed) and 136 (journey-images bucket) landed 2026-08-14 and were verified against the live database. |
-| App Store listing copy — §7 states a *constraint* on it (the no-real-names rule) but never assigns writing it | **Now written**: [`app-store-listing.md`](app-store-listing.md). Every field measured against Apple's limits — the description came in at 4,018 on the first pass and would have been silently truncated on paste; it is now 3,906 / 4,000. |
+| **Data** | Pay FMP. A Twelve Data migration was fully analysed and rejected — it kills 15 of 40 differentiators, has **no news API at all** (0 hits for "news" in 885k chars of their docs), no 13F, no congress, no transcripts, and is not cheaper. See [`fmp-vs-twelvedata-survival-analysis.md`](fmp-vs-twelvedata-survival-analysis.md). |
+| **Cost** | **~$754/mo** = FMP $650 + CoinGecko Basic $29 + infra ~$75 |
+| **Term** | 🔴 **Month-to-month or 3 months ONLY.** Never 12. |
+| **Payments** | **ON.** IAP work is ~done; shipping it dark forecloses the only path to revenue. |
+| **Exit** | **Remove from Sale** in ASC — one click, no engineering. Decided in advance. |
+| **Review date** | **30 days after approval.** Continue only on *traction* (installs + conversions), not on employment status. |
 
-**Verified clean, do not re-audit:** in-app account deletion (5.1.1(v)) is implemented and
-hardened; paywall 3.1.2 disclosure is complete in both `PaywallView` and `BuyCreditsView`; every
-linked SPM package ships a privacy manifest; required-reason APIs are correctly declared;
-`PrivacyInfo.xcprivacy` re-parsed and agrees with the answer sheet at exactly ten data types; §8
-device support is fully accurate.
+### 💡 Sequence FMP LAST — it saves a month's fee
 
-**Already done, stop re-reading these:** migrations 103–136 — ALL of them (§5, re-verified live 2026-08-14), Supabase Apple + Google
-providers and redirect URL (§5b d/e/f), the Apple capabilities — Sign in with Apple,
-Associated Domains, Push Notifications (§5b, §9), the native Google SDK and its iOS OAuth
-client (§5e), iPhone-only device support (§8), and **as of 2026-08-06** the whole domain
-sitting: `caydexinvest.com` live on Railway via Cloudflare, `/privacy` `/terms` `/support`
-serving 200 text/html, the AASA returning `application/json` with **zero** redirects, and
-`support@` / `copyright@` / `privacy@` receiving via Cloudflare Email Routing (§2, §3).
+The Premium key still works for development. Licensing only actually matters at the moment you
+answer **Content Rights**, which is the final field before Submit. So: finish all the free work,
+*then* sign FMP, answer Content Rights, and submit the same day. Signing first and spending a
+week on data entry burns $650 on paperwork.
 
-**Verified live 2026-08-14**, not assumed:
-```bash
-for p in privacy terms support .well-known/apple-app-site-association; do printf "%-46s " "$p"; curl -s -o /dev/null -w "%{http_code} %{content_type} redirects=%{num_redirects}\n" "https://caydexinvest.com/$p"; done
-```
+### 🔴 The one thing that could ruin this
 
-⚠️ **The old form of this command used `curl -sI` (HEAD) and now returns `405` on all four
-paths** — the routes are registered `@app.get` only (`main.py`), and FastAPI's `APIRoute` does
-not auto-add HEAD. The pages are healthy; GET returns `200 text/html` ×3 plus
-`200 application/json` for the AASA, zero redirects. Anyone re-running the old command before
-submission would read four 405s as an outage and un-tick §3 on a phantom. Apple fetches the
-AASA with GET, so nothing is actually broken.
+FMP Enterprise goes through an **Order Form**, and ToS §4.3 fixes pricing "for the initial term"
+while §1.4 says **all sales are final, no refunds**. A 12-month term at $650 is **$7,800 — more
+than the entire bank balance**, landing exactly as the part-time income stops. **Get the term in
+writing before agreeing to anything.** If they insist on 12 months, walk and launch without the
+FMP-dependent features.
 
-**Meanwhile:** use **Google sign-in** to test the app. It bypasses email confirmation entirely
-(Google addresses arrive pre-verified), so #1 does not block anything except email/password
-signup.
+### Day by day
 
-~~Code-side defects found in the 2026-08-05 audit — 11 lower-priority ones still open.~~
-✅ **All of them are now fixed** (spot-verified in source 2026-08-14: the auth-transition view
-rebuild, the empty-report cache poisoning, degraded-FMP persistence in two services, the
-ApeWisdom cache deadlock, the chat stock card's +0.00%, the literal "HTTP 400", the
-whitespace-padded bearer, APNs detach on sign-out, PDF deletion past 100 objects, the cache
-template's cancellation hang, and the sentiment TTL clobber — plus the P2 unbounded caches).
-Nothing is outstanding in `~/.claude/plans/everything-is-pushed-and-twinkly-jellyfish.md`.
+- [ ] **DAY 0 — today (free, ~1 hour total)**
+      - [ ] Reply to FMP: **minimum term? month-to-month?** Do not discuss price until the term is known
+      - [ ] Buy **CoinGecko Basic $29/mo** — published Commercial licence, no negotiation needed (Demo is attribution-only and NOT commercial)
+      - [ ] Publish the **Google OAuth consent screen** (Google Cloud → Google Auth Platform → **Audience** → Publish). ~60s
+      - [ ] Flag your own account `is_admin` (§5), verify it returns 1 row, hit one admin route, **then** clear `ADMIN_TOKEN` on Railway — that order
+      - [ ] **Start applying for jobs.** "Shipping to the App Store this month" is a fine line on a résumé. Do not sequence the job search behind the launch.
 
-**The 2026-08-14 audit replaced them with a new list**, fixed the same day: price alerts dead in
-production, `CFBundleDisplayName`, the tenth privacy data type, the false App Review note, the
-missing `match` notification category, an undisclaimered Buy/Sell verdict served by the API, 36
-fabricated view counts, and seven TTS prompts naming real investors.
+- [ ] **DAYS 1–2 — App Store Connect metadata (~4–6 h)**
+      - [ ] Paste name/subtitle/keywords/promo/description from [`app-store-listing.md`](app-store-listing.md) *(description is 3,906/4,000 — if you add a sentence, cut one)*
+      - [ ] Availability: **United States only**
+      - [ ] Privacy Policy URL `https://caydexinvest.com/privacy` · Support URL `https://caydexinvest.com/support`
+      - [ ] App Privacy questionnaire — **ten** data types from [`app-privacy-answers.md`](app-privacy-answers.md) §3, Tracking = No on all ten
+      - [ ] Category **Finance**, Age rating **17+** (set via the age-gate question — nothing derives it)
+      - [ ] **Copyright** `2026 Duc Hai Phan` · App Review Information contact (name, phone, email)
+      - [ ] App Review notes from `app-privacy-answers.md` §7 + the **demo credentials** in the Sign-In fields
+      - [ ] ⏸ **Leave Content Rights blank** — it is the only field gated on FMP
+
+- [ ] **DAYS 1–2 — IAP metadata (~3–4 h)**
+      - [ ] Subscription **group** localized display name *(currently `localizations: []` — subscriptions cannot be submitted without it)*
+      - [ ] Per-subscription localized display name + description + review screenshot
+      - [ ] IAP review notes (§6b) and attach `screenshots/6.9/05-add-credits.png` to the four consumables
+      - [ ] Tax category — leave default
+      - [ ] Create a **Sandbox tester** (Users and Access → Sandbox)
+
+- [ ] **DAYS 2–3 — Build (~2–4 h, budget for surprises)**
+      - [ ] Xcode → destination **Any iOS Device (arm64)** → **Product → Archive**
+      - [ ] Organizer → **Distribute App → App Store Connect → Upload**, let Xcode manage signing *(this is what mints your Apple Distribution cert — you only have Development certs today, so a headless `xcodebuild -exportArchive` will fail)*
+      - [ ] ⚠️ Do **not** reuse `/tmp/caydex-release.xcarchive` — that was built with signing disabled to prove the Release config compiles. It cannot be uploaded.
+      - [ ] Set **App Store Server Notifications** URLs (Production + Sandbox) to `https://caydexinvest.com/api/v1/billing/app-store-notifications`
+
+- [ ] **DAYS 4–6 — Close FMP**
+      - [ ] Formal quote → confirm term → sign → pay
+      - [ ] Flip `IAP_ENVIRONMENT` → `Production` and `APNS_ENV` → `production` on Railway *(both still read Sandbox/sandbox as of 2026-08-21 — an earlier attempt did not save)*
+
+- [ ] **DAY 6 — Submit**
+      - [ ] Answer **Content Rights** (now truthful for both FMP and CoinGecko)
+      - [ ] **Submit for Review**
+
+- [ ] **DAYS 7–9 — Review**, median ~24 h, most within 48 h. Finance + AI + IAP is higher-scrutiny; budget one rejection cycle (+2–5 days).
+
+- [ ] **ON APPROVAL — capture the asset within 24 h.** This is what you are actually paying for, and it is free to keep forever:
+      - [ ] App Store listing screenshots (the live page)
+      - [ ] 2–3 minute demo video
+      - [ ] Architecture writeup
+      - [ ] Repo tidied and public
+
+### Realistic range
+
+**Best ~8 days · Likely 12–16 · Worst 3–4 weeks** (contract drag or a rejection cycle).
+
+### Not blocking the launch — do after
+
+SMTP + the `{{ .Token }}` reset template (§5b/§5c — email signup is a dead end until then, but the
+demo account routes around it) · real-iPhone APNs test · DSA trader revisit · the §4 git purge.
+
+> ⚠️ **One item from §4 is now urgent for a NEW reason.** `backend/data/benchmark_universe.json`
+> (297 KB) and `industry_universe.json` (443 KB) are **FMP-derived, tracked in git, and the repo is
+> public** — verified 2026-08-21, anonymous `raw.githubusercontent` fetch returns **HTTP 200**. FMP
+> ToS §2.6.1 bars distributing "data or information contained in or **derived from** The Services",
+> so this is closer to *redistribution* than display. Get them out of the public repo.
 
 ---
 
@@ -869,14 +881,34 @@ Once (a)–(f) are done, from a simulator or device:
 
 ---
 
-## 6. Ask FMP and CoinGecko about commercial redistribution
+## 6. Data licensing — ✅ ANSWERED 2026-08-21
+
+> **FMP replied.** Quote: **$600–700/mo, Enterprise Custom.** Three concessions worth noting:
+> **no separate Data Display and Licensing Agreement is required** provided the quote endpoint is
+> removed; **EOD quotes cost less** than real-time; and **no LLC is needed** — operating as an
+> individual is fine. Contact: Laith Shawer. ⚠️ **The term is still unknown and is the one thing
+> that could ruin this — see the launch plan at the top.**
+>
+> **CoinGecko: solved for $29/mo, no email needed.** Their pricing page publishes the licence per
+> tier: **Demo is "Attribution required" and is NOT commercial**; **Basic $29/mo carries a
+> Commercial licence** (as do Analyst $103 and Lite $399). Just buy Basic.
+>
+> **Why this was never optional:** FMP ToS §2.2.1 restricts the Personal licence to an individual's
+> "personal, non-business and non-commercial purposes" and bars integrating the data "into any tools
+> or applications accessible by any third parties"; §2.2.2 bars showcasing it in "applications
+> designed for utilization by multiple individuals, **irrespective of whether such usage is
+> complimentary or paid**" — which is why making the app free did not fix it. Premium ($49/mo) sits
+> on FMP's **Personal Use** tab, whose comparison table is headed *"Compare Individual Use Plans"*.
+
+### The original questions (kept for the record)
 
 FMP's terms indicate that **"displaying or redistributing data sourced from FMP requires a
 specific Data Display and Licensing Agreement."** Caydex both displays FMP data to end users
 in a paid product and persists it in Supabase cache tables (14 tables store raw upstream
 `response_json`).
 
-- [ ] Email FMP: does my current plan cover displaying this data to end users in a
+- [x] Email FMP: does my current plan cover displaying this data to end users in a
+      ✅ **DONE 2026-08-21 — and answered.** Quote: **$600–700/mo Enterprise Custom.** No separate Data Display and Licensing Agreement required *provided the quote endpoint is removed*. EOD cheaper than real-time. **No LLC needed.** Contact: Laith Shawer.
       commercial mobile app, and is caching it server-side within terms?
 - [ ] Same question to CoinGecko — you're on the free Demo plan, and free tiers commonly bar
       commercial redistribution
@@ -976,7 +1008,8 @@ against real Apple infrastructure.
 
 ### App Store Connect — Business (do this FIRST, it has the longest lead time)
 
-- [ ] 🔴 **Accept the Paid Applications Agreement**, add **banking** details and complete the
+- [x] 🔴 **Accept the Paid Applications Agreement**, add **banking** details and complete the
+      ✅ **DONE 2026-08-15.** Paid Apps Agreement Active (Aug 15 2026 – Feb 17 2027); US Bank …8195 USD Active; W-9 Active. See §6a.
       **W-9 / tax forms** (Business → Agreements, Tax, and Banking).
       Until this is active ASC returns **no IAP products at all** — `Product.products(for:)`
       comes back empty, so Add Credits renders every pack with its credit count and
@@ -987,11 +1020,13 @@ against real Apple infrastructure.
 
 ### App Store Connect — products (all SIX, blocked on the agreement above)
 
-- [ ] Create two **auto-renewable subscriptions** in a subscription group. The product IDs
+- [x] Create two **auto-renewable subscriptions** in a subscription group. The product IDs
+      ✅ **DONE 2026-08-15** — both exist in ASC.
       must match exactly, or a real purchase verifies and then fails to map to a plan:
       - `com.phan.caydex.pro.monthly` — $14.99/month
       - `com.phan.caydex.max.monthly` — $39.99/month
-- [ ] Create four **consumable** in-app purchases. Type matters: *Consumable*, not
+- [x] Create four **consumable** in-app purchases. Type matters: *Consumable*, not
+      ✅ **DONE 2026-08-15** — all four exist in ASC; migration 141 repriced Power to $12.99/650 in the same session.
       Non-Consumable (which would let one purchase be restored forever) and not
       Non-Renewing Subscription. Each must be **Cleared for Sale**, and on the first
       submission all four must be **attached to the app version**.
@@ -1033,7 +1068,8 @@ against real Apple infrastructure.
       product had to be edited in the same session. Nothing in-repo can detect drift here
       (`test_iap_product_and_privacy_parity` pins `Caydex.storekit` to the seed; ASC is out of
       its reach), so this table is the only control.
-- [ ] **Review screenshot** for the IAPs — required before submission. One screenshot of the
+- [x] **Review screenshot** for the IAPs — required before submission. One screenshot of the
+      ✅ **DONE 2026-08-21** — `screenshots/6.9/05-add-credits.png`, 1320×2868, all four packs with real StoreKit prices and the 3.1.1 disclosure line.
       Add Credits screen showing all four cards satisfies all four products.
 - [ ] **Review notes** for the IAPs, one line: *"Consumable credit packs. Credits are spent
       in-app on AI-generated research reports and chat. Purchased credits never expire
@@ -1045,12 +1081,14 @@ against real Apple infrastructure.
       `localizations: []`, and subscriptions cannot be submitted for review without one
 - [ ] Fill in the localised display name, description, and a review screenshot for each
       (Apple rejects subscriptions with incomplete metadata)
-- [ ] Note the app's numeric **Apple ID** (App Information) → set `IAP_APP_APPLE_ID`
+- [x] Note the app's numeric **Apple ID** (App Information) → set `IAP_APP_APPLE_ID`
+      ✅ **DONE** — `IAP_APP_APPLE_ID=6759525689`, verified set on Railway 2026-08-21. Readiness probe returns 400 (= verifier healthy).
 - [ ] Create a **Sandbox tester** account (Users and Access → Sandbox)
 
 ### Apple root certificates
 
-- [ ] Download Apple's public root CAs from https://www.apple.com/certificateauthority/
+- [x] Download Apple's public root CAs from https://www.apple.com/certificateauthority/
+      ✅ **DONE 2026-08-15** — `AppleRootCA-G3.der` (583 B, DER not PEM) committed and confirmed present in the running Railway container 2026-08-21.
       (you want **AppleRootCA-G3**) and place them in `backend/certs/apple/`
 - [ ] Deploy them with the app on Railway
 
@@ -1216,7 +1254,8 @@ Once sandbox is live, on a real device with a sandbox tester signed in:
 
 No longer blocked — your existing Individual account can create this record (see §1).
 
-- [ ] ⚠️ **The app record probably ALREADY EXISTS — check before creating one.** The Xcode
+- [x] ⚠️ **The app record probably ALREADY EXISTS — check before creating one.** The Xcode
+      ✅ **CONFIRMED** — adamId **6759525689**, matches `IAP_APP_APPLE_ID` on Railway. Do not create a second record. Build number already bumped to **2**.
       archive at `~/Library/Developer/Xcode/Archives/2026-06-06/` records
       `uploadEvent { state = success, adamId = 6759525689, uploadDestination = App Store }`,
       and an App Store upload requires an existing record. Two consequences if so:
@@ -1274,7 +1313,8 @@ No longer blocked — your existing Individual account can create this record (s
 
 ### 🔴 Added 2026-08-14 evening — four required items that were in NO section
 
-- [ ] 🔴 **A demo account, actually created and seeded.** The App Review notes you are told to
+- [x] 🔴 **A demo account, actually created and seeded.** The App Review notes you are told to
+      ✅ **DONE 2026-08-21** — `appreview@caydexinvest.com`, Auto-Confirmed, tier `free` (deliberately, so the reviewer can exercise the purchase), 500 credits granted, one report generated end-to-end successfully.
       paste promise *"Credentials are in the App Review sign-in fields; the account is pre-loaded
       with credits."* Live DB: **4 users, none of them a review account.** And anonymous
       `GET /stocks/AAPL/report` returns **401 `AUTH_REQUIRED`** — so a reviewer signed out

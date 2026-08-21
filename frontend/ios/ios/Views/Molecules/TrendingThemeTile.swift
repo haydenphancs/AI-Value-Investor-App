@@ -39,33 +39,50 @@ struct TrendingThemeTile: View {
     // MARK: - Image band (full-bleed hero across the top of the card)
 
     private var imageBand: some View {
-        ZStack(alignment: .topTrailing) {
-            themeImage
+        // The hero is a `.background` and the chip an `.overlay` — deliberately NOT two
+        // children of a ZStack.
+        //
+        // `themeImage` is `contentMode: .fill`, so it reports an OVERSIZED intrinsic size
+        // (a 5:4 hero in a ~192pt-wide tile wants ~152pt of height for a 116pt band), and a
+        // ZStack sizes itself to its largest child. The stack therefore took the PHOTO's
+        // height, `.topTrailing` anchored the chip to the photo's top rather than the band's,
+        // and `.frame(height:)` then centre-cropped the stack — shearing the top off the
+        // percentage capsule. How much was lost was half the overflow, so it varied per tile
+        // with each photo's aspect ratio, which is what made it look like a text-clipping bug.
+        //
+        // A background and an overlay are both sized by their host and never drive layout, so
+        // the photo still cover-crops while the chip anchors to the 116pt band.
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .frame(height: imageHeight)
+            .background(themeImage)
+            // Crops the fill overflow. Before the chip is added, so its drop shadow is not
+            // shaved off against the band edge.
+            .clipped()
+            .overlay(alignment: .topTrailing) { changeChip }
+    }
 
-            // Overlaid on the image, top-right. A SOLID sign-coloured capsule with
-            // white text (not a low-opacity tint) so it stays legible on any photo.
-            // Hidden when the backend had no resolvable quotes (empty text).
-            if !theme.changeText.isEmpty {
-                Text(theme.changeText)
-                    .font(AppTypography.captionEmphasis)
-                    .foregroundColor(AppColors.textOnFill)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(
-                        // FILL tokens, opaque. `bullish`/`bearish` are text-safe tokens —
-                        // white on `bullish` #22C55E is 2.28:1 opaque and 2.60:1 at the old
-                        // 0.92, and this capsule sits on a PHOTO, so there is no surface
-                        // whose luminance can be assumed. Opaque `gainFill`/`lossFill`
-                        // measure 5.42 / 5.55 under this ink regardless of the image.
-                        Capsule().fill(theme.isPositive ? AppColors.gainFill : AppColors.lossFill)
-                    )
-                    .shadow(color: AppColors.shadowKey, radius: 3, y: 1)
-                    .padding(10)
-            }
+    /// The sign-coloured change capsule. A SOLID fill with white text (not a low-opacity
+    /// tint) so it stays legible on any photo. Hidden when the backend had no resolvable
+    /// quotes (empty text).
+    @ViewBuilder private var changeChip: some View {
+        if !theme.changeText.isEmpty {
+            Text(theme.changeText)
+                .font(AppTypography.captionEmphasis)
+                .foregroundColor(AppColors.textOnFill)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(
+                    // FILL tokens, opaque. `bullish`/`bearish` are text-safe tokens —
+                    // white on `bullish` #22C55E is 2.28:1 opaque and 2.60:1 at the old
+                    // 0.92, and this capsule sits on a PHOTO, so there is no surface
+                    // whose luminance can be assumed. Opaque `gainFill`/`lossFill`
+                    // measure 5.42 / 5.55 under this ink regardless of the image.
+                    Capsule().fill(theme.isPositive ? AppColors.gainFill : AppColors.lossFill)
+                )
+                .shadow(color: AppColors.shadowKey, radius: 3, y: 1)
+                .padding(10)
         }
-        .frame(height: imageHeight)
-        .frame(maxWidth: .infinity)
-        .clipped()
     }
 
     // MARK: - Text band (title + stock count on the card surface, below the image)

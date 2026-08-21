@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict sWsOJ8aRR8rs0rP5TLa00e0YKAsELu9Vx6qZXYj0uhi49FjjXQPJddSoHEHwAdg
+\restrict aKx1yuycMsyqLa8cvYskKT9J7RuYRFKJdJrdwhnE5Ybco8mlsPOZkOBXrncZt7S
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -5949,7 +5949,7 @@ CREATE TABLE public.etf_detail_cache (
 -- Name: TABLE etf_detail_cache; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.etf_detail_cache IS 'Cached ETFDetailResponse payloads (24h TTL), keyed by cache_key = symbol_range_interval. The key must include the chart shape because chart_data is built from it; a symbol-only key made every chart range pill after the first a silent no-op. Written by app/services/etf_service.py.';
+COMMENT ON TABLE public.etf_detail_cache IS 'RETIRED. Held the whole ETF detail response under a symbol_range_interval key. No longer read or written: etf_service now caches per section in etf_snapshot_cache, because a 24-hour row of the FULL payload froze current_price and the quote-derived key statistics along with it — the only reason _refresh_volatile ever existed. Kept unread for one release so a rollback is a code revert; drop it after that.';
 
 
 --
@@ -5963,6 +5963,13 @@ CREATE TABLE public.etf_snapshot_cache (
     response_json jsonb NOT NULL,
     cached_at timestamp with time zone DEFAULT now()
 );
+
+
+--
+-- Name: TABLE etf_snapshot_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.etf_snapshot_cache IS 'Per-section ETF detail cache. Categories: fundamentals (profile projection + etf-info + holders + sector weights + dividends), derived (performance periods + benchmark CAGR), chart:{range}:{interval} (non-intraday bars only), plus the three older finished-response categories profile / holdings_risk / dividend_history. 12h TTL for the section categories and 24h for the response ones, both enforced in application code via cached_at. Holds only sections that CANNOT contain a live price: the quote and the related-ETF quotes are in-process only, and the raw daily history is excluded because reading ~1 MB back is slower than re-fetching it from FMP. That exclusion is what let etf_service._refresh_volatile be deleted rather than fixed. Written by app/services/etf_service.py.';
 
 
 --
@@ -12760,13 +12767,6 @@ CREATE POLICY earnings_cache_service_role_all ON public.earnings_cache TO servic
 ALTER TABLE public.etf_detail_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: etf_detail_cache etf_detail_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY etf_detail_cache_public_read ON public.etf_detail_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: etf_detail_cache etf_detail_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -12778,13 +12778,6 @@ CREATE POLICY etf_detail_cache_service_write ON public.etf_detail_cache TO servi
 --
 
 ALTER TABLE public.etf_snapshot_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: etf_snapshot_cache etf_snapshot_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY etf_snapshot_cache_public_read ON public.etf_snapshot_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: etf_snapshot_cache etf_snapshot_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -14313,5 +14306,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict sWsOJ8aRR8rs0rP5TLa00e0YKAsELu9Vx6qZXYj0uhi49FjjXQPJddSoHEHwAdg
+\unrestrict aKx1yuycMsyqLa8cvYskKT9J7RuYRFKJdJrdwhnE5Ybco8mlsPOZkOBXrncZt7S
 

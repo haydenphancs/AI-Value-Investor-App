@@ -251,7 +251,28 @@ struct HomeDashboardView: View {
     @ViewBuilder
     private var content: some View {
         ScrollView(showsIndicators: false) {
-            LazyVStack(spacing: AppSpacing.xl) {
+            // A plain VStack, NOT LazyVStack — this is a fix, not a style choice.
+            //
+            // A lazy stack caches each subview's measured size and derives every offset
+            // by walking its predecessors. A child that RESIZES IN PLACE invalidates
+            // that cache in the middle of the placement pass, which restarts the walk.
+            // Daily Scanners has exactly such a child: a ScannerCard expands inline,
+            // animating the horizontal carousel's height.
+            //
+            // Measured, not theorised: expand a scanner card and then scroll Home, and
+            // the main thread pins at 100% inside ONE non-terminating
+            // GraphHost.runTransaction — LazySubviewPlacements.placeSubviews →
+            // LazyHVStack.lengthAndSpacing(subviews:predecessors:) →
+            // _ViewList_Node.applyNodes, recursing deeper on every sample (196 → 590
+            // frames). It never recovers; the app has to be force-quit. Users reached it
+            // through the App-Exclusive Signals lock, because `onLockedTap` collapses the
+            // expanded scanner card with `withAnimation` — the same in-place resize.
+            //
+            // Same family as the `.scrollPosition(id:)` deadlock documented at the top of
+            // DailyScannersSection.swift: layout state rewritten while layout is running.
+            // Laziness buys nothing here — at most eight fixed sections, all built from
+            // data already in memory, with no AsyncImage among them.
+            VStack(spacing: AppSpacing.xl) {
                 if let errorMessage = viewModel.errorMessage {
                     errorBanner(errorMessage)
                 }

@@ -29,6 +29,7 @@ from app.schemas.commodity import (
     PerformancePeriodResponse,
     RelatedCommodityResponse,
 )
+from app.services.chart_helper import _finite_or_none
 from app.utils.market_hours import to_utc_instant
 
 logger = logging.getLogger(__name__)
@@ -428,6 +429,123 @@ class CommodityService:
         finally:
             _inflight.pop(cache_key, None)
 
+    async def get_commodity_quote(
+        self,
+        symbol: str,
+        chart_range: Optional[str] = None,
+        interval: Optional[str] = None,
+    ) -> "CommodityQuoteResponse":
+        """The light slice behind `GET /commodities/{symbol}/quote`.
+
+        PROJECTED from the full build rather than assembled from a second, parallel set
+        of section-builders. That is deliberate: every section is already cached, so the
+        full assembly costs ZERO extra FMP calls here, and a second assembly path for the
+        same fields is exactly how two code paths drift into disagreeing about the same
+        number — the failure mode this whole pass has been unpicking.
+
+        What the client actually gains is the WIRE payload: ~2 KB instead of ~10 KB, and
+        no need to replace its entire view model on a 30-second tick. The sections dropped
+        here (`performance_periods`, `benchmark_summary`, `commodity_profile`,
+        `news_articles`) are all range-independent and cannot change between refreshes.
+        """
+        from app.schemas.commodity import CommodityQuoteResponse
+
+        full = await self.get_commodity_detail(
+            symbol,
+            chart_range=chart_range or "3M",
+            interval=interval,
+        )
+        return CommodityQuoteResponse(
+            symbol=full.symbol,
+            current_price=full.current_price,
+            price_change=full.price_change,
+            price_change_percent=full.price_change_percent,
+            market_status=full.market_status,
+            # Bars only when the caller asked for a range — the 30s loop skips them on a
+            # daily chart, where nothing below the last candle can have moved.
+            chart_data=full.chart_data if chart_range else [],
+            key_statistics_groups=full.key_statistics_groups,
+            related_commodities=full.related_commodities,
+        )
+
+    # ── Tier 2 (Supabase `commodity_cache`) ───────────────────────
+    #
+    # The header comment above used to argue that a Supabase tier was wrong here because
+    # "24-hour rows are what made the ETF/Index screens serve a day-old price". That was
+    # true of the MONOLITH — one row froze `current_price` along with everything else.
+    #
+    # After the decomposition the objection dissolves structurally rather than being
+    # patched: only sections that CANNOT contain a live price are persisted. The quote and
+    # the related quotes are Tier-1-only, so a Tier-2 hit still renders a price fetched
+    # seconds ago. That is why this service needs no `_refresh_volatile` — its ETF/Index
+    # siblings need one precisely because they persist the whole payload.
+    #
+    # `get_supabase()` is called here rather than cached on `self`: the tests construct
+    # this service with `__new__`, so `__init__` never runs and `self.supabase` would not
+    # exist on the hot path.
+
+    _TIER2_TTL_HOURS = 12
+
+    @staticmethod
+    def _tier2_get(cache_key: str) -> Optional[Dict[str, Any]]:
+        """Read one cached section, or None. Never raises.
+
+        Best-effort by design: until migration 149 is applied this logs a warning about
+        the missing relation and returns a MISS, so Tier 2 is simply inactive and Tier 1
+        carries the load — slower on a cold process, never wrong.
+        """
+        try:
+            from app.database import get_supabase
+
+            row = (
+                get_supabase()
+                .table("commodity_cache")
+                .select("response_json, cached_at")
+                .eq("cache_key", cache_key)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return None
+            entry = row.data[0]
+            cached_at = datetime.fromisoformat(
+                (entry.get("cached_at") or "").replace("Z", "+00:00")
+            )
+            age = datetime.now(timezone.utc) - cached_at
+            if age > timedelta(hours=CommodityService._TIER2_TTL_HOURS):
+                return None
+            return entry.get("response_json")
+        except Exception as e:
+            logger.warning(
+                "Commodity tier-2 read failed for %s: %s: %s",
+                cache_key, type(e).__name__, e,
+            )
+            return None
+
+    @staticmethod
+    def _tier2_put(
+        cache_key: str, symbol: str, category: str, payload: Dict[str, Any]
+    ) -> None:
+        """Persist one section. Best-effort; a failure only costs a rebuild."""
+        try:
+            from app.database import get_supabase
+
+            get_supabase().table("commodity_cache").upsert(
+                {
+                    "cache_key": cache_key,
+                    "symbol": symbol,
+                    "category": category,
+                    "response_json": payload,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="cache_key",
+            ).execute()
+        except Exception as e:
+            logger.warning(
+                "Commodity tier-2 write failed for %s: %s: %s",
+                cache_key, type(e).__name__, e,
+            )
+
     # ── Per-section fetchers ──────────────────────────────────────
     #
     # Each is cached under its OWN key with its OWN TTL, and the three below are keyed
@@ -488,6 +606,86 @@ class CommodityService:
         _cache_set(key, historical, _HISTORY_TTL)
         return historical
 
+    async def _get_derived(self, fmp_symbol: str) -> Dict[str, Any]:
+        """Everything computed FROM the daily history, cached in both tiers.
+
+        This is the section that makes Tier 2 worth having. `performance_periods` and the
+        daily key-stat rows are functions of the 4,333-row history alone, so persisting
+        them lets a cold process serve a full screen WITHOUT ever fetching the 972 KB —
+        the single most expensive thing this service does.
+
+        Deliberately stores `bench_base` (the inception close + date) rather than a
+        finished `benchmark_summary`: the benchmark's total-return figure is a function of
+        the LIVE price, and persisting it would put a stale price in Tier 2 — the one
+        thing this design refuses to do.
+        """
+        key = f"com:derived:{fmp_symbol}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+
+        tier2_key = f"{fmp_symbol}:derived"
+        db = await asyncio.to_thread(self._tier2_get, tier2_key)
+        if db is not None:
+            logger.info("Commodity derived tier-2 HIT for %s", fmp_symbol)
+            _cache_set(key, db, _DERIVED_TTL)
+            return db
+
+        historical = await self._get_history(fmp_symbol)
+        derived = self._derive_from_history(historical)
+
+        # Degradation gate: a history that failed or came back empty yields a bundle of
+        # nulls. Persisting it would pin an empty Performance card and a blank 200-day
+        # average for 12 hours. Mirrors profit_power_service's `if degraded: skip upsert`.
+        if not historical or derived.get("last_close") is None:
+            logger.warning(
+                "Commodity derived NOT persisted for %s (empty/failed history) — "
+                "will rebuild on the next request",
+                fmp_symbol,
+            )
+            return derived
+
+        _cache_set(key, derived, _DERIVED_TTL)
+        await asyncio.to_thread(
+            self._tier2_put, tier2_key, fmp_symbol, "derived", derived
+        )
+        return derived
+
+    def _derive_from_history(self, historical: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Pure: daily history -> the JSON-serialisable scalars every section needs."""
+        closes = [p.get("close", 0) for p in historical if p.get("close")]
+        ma_200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
+
+        avg_volume_30d = None
+        volumes_30d = [
+            p.get("volume") or 0 for p in historical[-30:] if p.get("volume")
+        ]
+        if volumes_30d:
+            avg_volume_30d = sum(volumes_30d) / len(volumes_30d)
+
+        # `_build_performance` baselines off `historical[-1].close`, never the live quote,
+        # so its output is a pure function of the history and is safe to persist verbatim.
+        performance = [p.model_dump() for p in self._build_performance(historical)]
+
+        bench_base = None
+        if historical and len(historical) >= 252:
+            earliest = historical[0]
+            earliest_close = _finite_or_none(earliest.get("close"))
+            if earliest_close and earliest_close > 0:
+                bench_base = {
+                    "close": earliest_close,
+                    "date": earliest.get("date") or "",
+                }
+
+        return {
+            "ma_200": _finite_or_none(ma_200),
+            "avg_volume_30d": _finite_or_none(avg_volume_30d),
+            "last_close": _finite_or_none(closes[-1]) if closes else None,
+            "prev_close": _finite_or_none(closes[-2]) if len(closes) >= 2 else None,
+            "performance_periods": performance,
+            "bench_base": bench_base,
+        }
+
     async def _get_related(
         self, root_symbol: str, related_symbols: List[str]
     ) -> List[tuple]:
@@ -525,7 +723,6 @@ class CommodityService:
     async def _get_chart(
         self,
         fmp_symbol: str,
-        historical: List[Dict[str, Any]],
         chart_range: str,
         interval: Optional[str],
     ) -> List[Dict[str, Any]]:
@@ -540,6 +737,7 @@ class CommodityService:
         """
         from app.services.chart_helper import (
             AGGREGATED_INTERVALS,
+            INTRADAY_INTERVALS,
             _aggregate_prices,
             fetch_chart_data,
             resolve_interval,
@@ -547,15 +745,40 @@ class CommodityService:
 
         resolved = resolve_interval(chart_range, interval)
 
+        # Non-intraday bars are close-cadence, so they persist. An intraday series must
+        # NOT: a 12h-old 5-minute chart would paint yesterday's session under a live
+        # header, which is precisely the staleness this design refuses to ship.
+        tier2_key = f"{fmp_symbol}:chart:{chart_range}:{resolved}"
+        persistable = resolved not in INTRADAY_INTERVALS
+
+        if persistable:
+            db = await asyncio.to_thread(self._tier2_get, tier2_key)
+            if db:
+                logger.info("Commodity chart tier-2 HIT for %s", tier2_key)
+                return db
+
+        historical = (
+            [] if resolved in INTRADAY_INTERVALS else await self._get_history(fmp_symbol)
+        )
+
         if resolved in AGGREGATED_INTERVALS and historical:
             bars = _aggregate_prices(historical, resolved)
             if chart_range != "ALL":
                 # ALL means the whole series; every other aggregated range is windowed.
                 bars = self._window_by_range(bars, chart_range)
+            if bars:
+                await asyncio.to_thread(
+                    self._tier2_put, tier2_key, fmp_symbol, "chart", bars
+                )
             return bars
 
         if resolved == "daily":
-            return self._extract_chart_data(historical, chart_range)
+            bars = self._extract_chart_data(historical, chart_range)
+            if bars:
+                await asyncio.to_thread(
+                    self._tier2_put, tier2_key, fmp_symbol, "chart", bars
+                )
+            return bars
 
         # Genuinely intraday (1D/1W): its own short-lived key.
         key = f"com:chart:{fmp_symbol}:{chart_range}:{resolved}"
@@ -620,12 +843,20 @@ class CommodityService:
         # response as its schema default `[]` because the iOS DTO is non-optional.
         related_symbols = meta.get("related", [])
 
-        quote, historical, related_quotes = await asyncio.gather(
+        # `_get_derived` and `_get_chart` may both want the daily history; `_get_history`
+        # is itself cached, so the second caller gets the first one's list rather than a
+        # second 972 KB fetch. On a Tier-2 derived HIT with a non-daily range, the history
+        # is never fetched at all.
+        quote, derived, chart_points, related_quotes = await asyncio.gather(
             self._get_quote(fmp_symbol),
-            self._get_history(fmp_symbol),
+            self._get_derived(fmp_symbol),
+            self._get_chart(fmp_symbol, chart_range, interval),
             self._get_related(symbol, related_symbols),
         )
         news_raw: List[Dict[str, Any]] = []
+        # Only the paths that genuinely need raw bars still touch the history; everything
+        # else now reads the small `derived` bundle.
+        historical = _cache_get(f"com:hist:{fmp_symbol}") or []
 
         # ── Step 2: Extract quote data ────────────────────────────
         # FMP quote numerics can be bare NaN/Inf JSON tokens; those are truthy so
@@ -692,11 +923,7 @@ class CommodityService:
                 change_pct = 0
 
         # ── Step 3: Build chart data ──────────────────────────────
-        # Derived from the shared history wherever the bars are daily-or-coarser; only
-        # 1D/1W issue their own (short-lived, separately keyed) intraday fetch.
-        chart_points = await self._get_chart(
-            fmp_symbol, historical, chart_range, interval
-        )
+
 
         chart_data = [
             CommodityChartPointResponse(
@@ -728,11 +955,9 @@ class CommodityService:
                 return f"{v / 1_000:.1f}K"
             return str(int(v))
 
-        # Only `ma_200` is rendered. `ma_50` and a 52-week-change block used to be
-        # computed here and referenced nowhere — dropped rather than carried through the
-        # decomposition, since every survivor now has to justify its place in a section.
-        closes = [p.get("close", 0) for p in historical if p.get("close")]
-        ma_200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
+        # From the cached `derived` bundle, NOT a re-scan of the raw history: on a Tier-2
+        # hit the history was never fetched at all.
+        ma_200 = derived.get("ma_200")
 
         # Price per unit (top-left, like Constituents in Index)
         _UNIT_ABBREV = {
@@ -749,10 +974,11 @@ class CommodityService:
         price_per_unit = _fmt(price) + unit_abbrev if price else "—"
 
         # Avg volume: compute from historical if FMP quote returns 0
-        if not avg_volume and len(closes) >= 30:
-            volumes_30d = [p.get("volume", 0) for p in historical[-30:] if p.get("volume")]
-            if volumes_30d:
-                avg_volume = sum(volumes_30d) / len(volumes_30d)
+        # FMP often omits avgVolume on futures; fall back to the 30-day mean carried in
+        # the cached `derived` bundle rather than re-scanning the raw history, which on a
+        # Tier-2 hit was never fetched.
+        if not avg_volume:
+            avg_volume = derived.get("avg_volume_30d") or 0
 
         key_statistics_groups = [
             # Left column (matches Index layout)
@@ -774,7 +1000,13 @@ class CommodityService:
         ]
 
         # ── Step 5: Build performance periods ─────────────────────
-        performance_periods = self._build_performance(historical)
+        # Rebuilt from the persisted bundle. `_build_performance` baselines off the last
+        # historical close (never the live quote), so its output is a pure function of the
+        # history and round-trips through Tier 2 unchanged.
+        performance_periods = [
+            PerformancePeriodResponse(**row)
+            for row in (derived.get("performance_periods") or [])
+        ]
 
         # ── Step 6: Build news ────────────────────────────────────
         news_articles = []
@@ -833,11 +1065,14 @@ class CommodityService:
 
         # ── Step 9: Build benchmark summary ───────────────────────
         # Use the earliest available data point for longest history
+        # Recomputed from the persisted inception close + the LIVE price. The total-return
+        # figure is a function of the current price, so persisting the finished summary
+        # would put a stale price in Tier 2 — the one thing this design refuses to do.
         benchmark = None
-        if historical and len(historical) >= 252 and price:
-            earliest = historical[0]
-            earliest_close = earliest.get("close") or 0
-            earliest_date = earliest.get("date") or ""
+        _bench_base = derived.get("bench_base") or {}
+        if _bench_base and price:
+            earliest_close = _bench_base.get("close") or 0
+            earliest_date = _bench_base.get("date") or ""
             if earliest_close and earliest_close > 0:
                 total_return = ((price - earliest_close) / earliest_close) * 100
                 # Compute years from earliest date

@@ -22,7 +22,10 @@ from app.api.error_response import (
     upstream_error_response,
 )
 from app.services.commodity_service import get_commodity_service
-from app.schemas.commodity import CommodityDetailResponse
+from app.schemas.commodity import (
+    CommodityDetailResponse,
+    CommodityQuoteResponse,
+)
 from app.schemas.news import (
     MAX_ENRICH_ARTICLE_IDS,
     EnrichNewsResponse,
@@ -174,6 +177,50 @@ async def enrich_commodity_news(
 
 
 # ── Main detail endpoint (catch-all /{symbol} MUST be last) ──
+
+
+@router.get("/{symbol}/quote", response_model=CommodityQuoteResponse)
+async def get_commodity_quote(
+    symbol: str,
+    chart_range: Optional[str] = Query(
+        None,
+        alias="range",
+        pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$",
+    ),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
+):
+    """Light refresh slice — price, market status, key stats, related, optional chart.
+
+    Exists because the iOS 30-second loop and every range-pill tap were re-requesting the
+    ~10 KB monolith to move a price and a chart. Same fast-core pattern as
+    `GET /stocks/{ticker}/overview/core`.
+
+    Declared ABOVE the catch-all `/{symbol}` — FastAPI matches in declaration order, so
+    below it this would be swallowed as `symbol="{sym}/quote"`. Same reason the two news
+    routes sit above it.
+
+    Omit `range` to skip chart work entirely: on a daily chart a 30s refresh cannot move
+    a bar, so the loop asks for bars only when the chart is intraday.
+    """
+    symbol = symbol.upper().strip()
+    if len(symbol) > 3 and symbol.endswith("USD"):
+        symbol = symbol[:-3]
+
+    try:
+        service = get_commodity_service()
+        return await service.get_commodity_quote(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except Exception as e:
+        logger.error(
+            "Commodity quote failed for %s: %s: %s", symbol, type(e).__name__, e,
+            exc_info=True,
+        )
+        raise error_response_from_exception(e, resource=f"commodity {symbol}")
 
 
 @router.get("/{symbol}", response_model=CommodityDetailResponse)

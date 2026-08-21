@@ -112,12 +112,15 @@ struct CommodityDetailData: Identifiable {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
-    let marketStatus: CommodityMarketStatus
-    let chartPricePoints: [StockPricePoint]
-    let keyStatisticsGroups: [KeyStatisticsGroup]
+    // `var`, like the three price fields above: the light-refresh path merges into this
+    // struct IN PLACE. It used to replace the whole value every 30s, which erased every
+    // WebSocket tick that had landed since — a 30-second sawtooth on a live price.
+    var marketStatus: CommodityMarketStatus
+    var chartPricePoints: [StockPricePoint]
+    var keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let commodityProfile: CommodityProfile
-    let relatedCommodities: [RelatedTicker]
+    var relatedCommodities: [RelatedTicker]
     let benchmarkSummary: PerformanceBenchmarkSummary?
 
     var chartData: [Double] {

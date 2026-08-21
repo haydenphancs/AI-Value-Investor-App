@@ -78,6 +78,29 @@ class BenchmarkSummaryResponse(BaseModel):
     alltime_since_date: Optional[str] = None
 
 
+class CommodityQuoteResponse(BaseModel):
+    """Light refresh slice for the iOS 30s loop and the range picker.
+
+    Every field name and type is identical to the same-named field on
+    `CommodityDetailResponse`, so the client decodes them with DTOs it already has.
+
+    Deliberately EXCLUDES the close-cadence sections a 30-second refresh cannot change —
+    `performance_periods`, `benchmark_summary`, `commodity_profile` — and `news_articles`,
+    which comes from `GET /commodities/{symbol}/news`. The 30s loop and every range tap
+    used to re-request the whole monolith to move a price and a chart.
+    """
+
+    symbol: str
+    current_price: float
+    price_change: float
+    price_change_percent: float
+    market_status: str
+    # Empty unless `range` was supplied — the loop only needs bars on an intraday chart.
+    chart_data: List[CommodityChartPointResponse] = []
+    key_statistics_groups: List[KeyStatisticsGroupResponse] = []
+    related_commodities: List[RelatedCommodityResponse] = []
+
+
 class CommodityDetailResponse(BaseModel):
     symbol: str
     name: str

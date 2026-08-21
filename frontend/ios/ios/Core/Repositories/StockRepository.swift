@@ -45,6 +45,8 @@ protocol StockRepositoryProtocol {
     func getSignalOfConfidence(ticker: String) async throws -> SignalOfConfidenceResponseDTO
     func getHolders(ticker: String) async throws -> HoldersResponseDTO
     func getETFDetail(symbol: String, range: String, interval: String?) async throws -> ETFDetailResponseDTO
+    func getCommodityDetail(symbol: String, range: String, interval: String?) async throws -> CommodityDetailResponseDTO
+    func getCommodityQuote(symbol: String, range: String?, interval: String?) async throws -> CommodityQuoteResponseDTO
 }
 
 // MARK: - Stock Repository
@@ -189,6 +191,49 @@ final class StockRepository: StockRepositoryProtocol {
 
         setCache(cacheKey, value: response)
         print("✅ StockRepository: Got ETF detail for \(symbol), range=\(range), interval=\(interval ?? "default")")
+        return response
+    }
+
+    // MARK: - Commodity Detail
+    //
+    // The commodity screen used to call `APIClient` directly, bypassing this repository
+    // entirely — so `invalidate(symbol:)` on pull-to-refresh matched nothing and logged
+    // "invalidated 0 cached entries". Routing it here is what makes that gesture real,
+    // and gives the screen the same client-side TTLs the ETF screen already had.
+
+    func getCommodityDetail(symbol: String, range: String = "3M", interval: String? = nil) async throws -> CommodityDetailResponseDTO {
+        let cacheKey = "commodity_detail_\(symbol)_\(range)_\(interval ?? "default")"
+
+        if let cached: CommodityDetailResponseDTO = getCached(cacheKey, maxAge: CacheTTL.volatile) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getCommodityDetail(symbol: symbol, range: range, interval: interval),
+            responseType: CommodityDetailResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        print("✅ StockRepository: Got commodity detail for \(symbol), range=\(range)")
+        return response
+    }
+
+    /// The light refresh slice. `CacheTTL.chart` (25s) deliberately sits UNDER the 30s
+    /// poll interval, so a poll is never answered from cache — the same reasoning already
+    /// applied to `getStockQuote`, where a 120s TTL made most "live" polls a cache hit.
+    func getCommodityQuote(symbol: String, range: String?, interval: String?) async throws -> CommodityQuoteResponseDTO {
+        let cacheKey = "commodity_quote_\(symbol)_\(range ?? "none")_\(interval ?? "default")"
+
+        if let cached: CommodityQuoteResponseDTO = getCached(cacheKey, maxAge: CacheTTL.chart) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getCommodityQuote(symbol: symbol, range: range, interval: interval),
+            responseType: CommodityQuoteResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
         return response
     }
 
@@ -2673,6 +2718,14 @@ struct CongressActivityDTO: Codable {
 @MainActor
 final class MockStockRepository: StockRepositoryProtocol {
     func getETFDetail(symbol: String, range: String, interval: String?) async throws -> ETFDetailResponseDTO {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getCommodityDetail(symbol: String, range: String, interval: String?) async throws -> CommodityDetailResponseDTO {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getCommodityQuote(symbol: String, range: String?, interval: String?) async throws -> CommodityQuoteResponseDTO {
         throw APIError.networkError(NSError(domain: "Mock", code: 0))
     }
     

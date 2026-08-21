@@ -10,6 +10,52 @@ import Foundation
 
 // MARK: - Top-Level Response
 
+extension CommodityMarketStatus {
+    /// The backend's `market_status` string -> the view model's enum.
+    ///
+    /// Extracted so the full and light refresh paths cannot disagree about what
+    /// "Market Closed" means — two copies of a mapping is how the same string ends up
+    /// rendering two different states on one screen.
+    init(backend: String) {
+        switch backend.lowercased() {
+        case "open", "market open":
+            self = .open
+        case "pre-market", "premarket":
+            self = .preMarket
+        case "after-hours", "afterhours":
+            self = .afterHours
+        default:
+            self = .closed(date: Date(), time: "", timezone: "ET")
+        }
+    }
+}
+
+/// Light refresh slice from `GET /commodities/{symbol}/quote`.
+///
+/// Field names and types deliberately mirror `CommodityDetailResponseDTO`, so the same
+/// nested DTOs decode it. `chartData` is empty unless the caller asked for a range.
+struct CommodityQuoteResponseDTO: Decodable {
+    let symbol: String
+    let currentPrice: Double
+    let priceChange: Double
+    let priceChangePercent: Double
+    let marketStatus: String
+    let chartData: [CommodityChartPointDTO]
+    let keyStatisticsGroups: [KeyStatisticsGroupDTO]
+    let relatedCommodities: [RelatedCommodityDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case currentPrice = "current_price"
+        case priceChange = "price_change"
+        case priceChangePercent = "price_change_percent"
+        case marketStatus = "market_status"
+        case chartData = "chart_data"
+        case keyStatisticsGroups = "key_statistics_groups"
+        case relatedCommodities = "related_commodities"
+    }
+}
+
 struct CommodityDetailResponseDTO: Decodable {
     let symbol: String
     let name: String
@@ -229,17 +275,7 @@ struct CommodityNewsArticleDTO: Decodable {
 
 extension CommodityDetailResponseDTO {
     func toDisplayModel() -> CommodityDetailData {
-        let resolvedMarketStatus: CommodityMarketStatus
-        switch marketStatus.lowercased() {
-        case "open", "market open":
-            resolvedMarketStatus = .open
-        case "pre-market", "premarket":
-            resolvedMarketStatus = .preMarket
-        case "after-hours", "afterhours":
-            resolvedMarketStatus = .afterHours
-        default:
-            resolvedMarketStatus = .closed(date: Date(), time: "", timezone: "ET")
-        }
+        let resolvedMarketStatus = CommodityMarketStatus(backend: marketStatus)
 
         let profile = commodityProfile?.toModel() ?? CommodityProfile(
             description: "",

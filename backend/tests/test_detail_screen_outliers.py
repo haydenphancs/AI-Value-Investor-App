@@ -1382,6 +1382,26 @@ def test_the_schema_default_is_what_makes_the_stale_row_dangerous():
 # 7 ranges of one commodity.
 
 
+def _isolate_tier2(monkeypatch, store=None):
+    """Replace the Supabase tier with an in-process dict.
+
+    Without this these tests do REAL Supabase I/O: `_tier2_get` would hit the live
+    `commodity_cache` table, and a row written there by the deployed backend makes the
+    history fetch disappear — so the test silently measures production's cache state
+    instead of the code under test. (That is exactly how the TTL assertion below started
+    failing for a reason that had nothing to do with the code.)
+    """
+    from app.services import commodity_service as M
+
+    store = {} if store is None else store
+    monkeypatch.setattr(M.CommodityService, "_tier2_get", staticmethod(store.get))
+    monkeypatch.setattr(
+        M.CommodityService, "_tier2_put",
+        staticmethod(lambda k, sym, cat, payload: store.__setitem__(k, payload)),
+    )
+    return store
+
+
 def _fake_fmp_counter():
     """A stand-in FMP client that counts calls by kind and serves plausible data."""
     import datetime as _dt
@@ -1425,7 +1445,7 @@ def _fake_fmp_counter():
 
 
 @pytest.mark.asyncio
-async def test_browsing_every_range_shares_one_history_fetch():
+async def test_browsing_every_range_shares_one_history_fetch(monkeypatch):
     """The headline saving, measured rather than asserted.
 
     The 972 KB history, the quote and the related quotes are all range-INDEPENDENT, so
@@ -1435,6 +1455,7 @@ async def test_browsing_every_range_shares_one_history_fetch():
 
     M._cache.clear()
     M._inflight.clear()
+    _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, calls = _fake_fmp_counter()
 
@@ -1449,7 +1470,7 @@ async def test_browsing_every_range_shares_one_history_fetch():
 
 
 @pytest.mark.asyncio
-async def test_daily_and_aggregated_ranges_need_no_extra_fetch():
+async def test_daily_and_aggregated_ranges_need_no_extra_fetch(monkeypatch):
     """3M/6M/1Y slice the shared history; 5Y/ALL aggregate it.
 
     `chart_helper._aggregate_prices` already existed — `fetch_chart_data` was calling it
@@ -1459,6 +1480,7 @@ async def test_daily_and_aggregated_ranges_need_no_extra_fetch():
 
     M._cache.clear()
     M._inflight.clear()
+    _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, calls = _fake_fmp_counter()
 
@@ -1473,12 +1495,13 @@ async def test_daily_and_aggregated_ranges_need_no_extra_fetch():
 
 
 @pytest.mark.asyncio
-async def test_sections_have_distinct_ttls_not_one_flat_300():
+async def test_sections_have_distinct_ttls_not_one_flat_300(monkeypatch):
     """A nine-section payload under one 5-minute TTL is the defect being fixed."""
     from app.services import commodity_service as M
 
     M._cache.clear()
     M._inflight.clear()
+    _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, _ = _fake_fmp_counter()
     await svc.get_commodity_detail("GCUSD", chart_range="3M")
@@ -1498,7 +1521,7 @@ async def test_sections_have_distinct_ttls_not_one_flat_300():
 
 
 @pytest.mark.asyncio
-async def test_a_priceless_build_is_not_cached():
+async def test_a_priceless_build_is_not_cached(monkeypatch):
     """Degradation gate: never pin a response with no usable price.
 
     Previously the build was cached unconditionally, so a failed quote pinned a blank
@@ -1508,6 +1531,7 @@ async def test_a_priceless_build_is_not_cached():
 
     M._cache.clear()
     M._inflight.clear()
+    _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
 
     class _Degraded:
@@ -1579,4 +1603,84 @@ def test_technical_analysis_uses_the_shared_classifier():
     assert "detect_asset_class(ticker) == \"crypto\"" in src
     assert 'ticker.endswith("USD") and not ticker.startswith("$")' not in src, (
         "the bare suffix heuristic is still deciding the asset class"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tier2_survives_a_restart_without_refetching_the_history(monkeypatch):
+    """The point of the Supabase tier: a redeploy must not re-pull the 972 KB.
+
+    Commodity was the only one of the five detail services with no tier 2 at all, so its
+    cache died with every Railway deploy and the first viewer afterwards paid the full
+    fan-out again.
+    """
+    from app.services import commodity_service as M
+
+    store: dict = {}
+
+    M._cache.clear()
+    M._inflight.clear()
+    _isolate_tier2(monkeypatch, store)
+    svc = M.CommodityService.__new__(M.CommodityService)
+    svc.fmp, calls = _fake_fmp_counter()
+    cold = await svc.get_commodity_detail("GCUSD", chart_range="3M")
+    assert calls["hist"] == 1
+    assert store, "nothing was persisted to tier 2"
+
+    # A deploy: the in-process tier is gone, Supabase survives.
+    M._cache.clear()
+    M._inflight.clear()
+    svc2 = M.CommodityService.__new__(M.CommodityService)
+    svc2.fmp, calls2 = _fake_fmp_counter()
+    warm = await svc2.get_commodity_detail("GCUSD", chart_range="3M")
+
+    assert calls2["hist"] == 0, "the history was re-fetched after a restart"
+    assert [p.model_dump() for p in warm.performance_periods] == \
+        [p.model_dump() for p in cold.performance_periods]
+    # ...and the price is still LIVE, because no persisted section carries one. This is
+    # why the service needs no `_refresh_volatile` (its ETF/Index siblings do, precisely
+    # because they persist the whole payload).
+    assert calls2["quote"] >= 1
+    assert warm.current_price > 0
+
+
+@pytest.mark.asyncio
+async def test_an_intraday_chart_is_never_persisted(monkeypatch):
+    """A 12h-old 5-minute series would paint yesterday's session under a live header."""
+    from app.services import commodity_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    store = _isolate_tier2(monkeypatch)
+    svc = M.CommodityService.__new__(M.CommodityService)
+    svc.fmp, _ = _fake_fmp_counter()
+
+    await svc.get_commodity_detail("GCUSD", chart_range="1D")
+    intraday = [k for k in store if ":chart:1D:" in k]
+    assert not intraday, f"an intraday chart was persisted: {intraday}"
+
+    # Control: a daily range MUST persist, or the guard above proves nothing.
+    await svc.get_commodity_detail("GCUSD", chart_range="3M")
+    assert [k for k in store if ":chart:3M:" in k], "no daily chart was persisted"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_history_is_not_persisted(monkeypatch):
+    """Degradation gate: a bundle of nulls would pin an empty Performance card for 12h."""
+    from app.services import commodity_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    store = _isolate_tier2(monkeypatch)
+    svc = M.CommodityService.__new__(M.CommodityService)
+    svc.fmp, _ = _fake_fmp_counter()
+
+    async def no_history(_sym):
+        return []
+
+    svc._get_history = no_history
+    derived = await svc._get_derived("GCUSD")
+    assert derived["last_close"] is None
+    assert not [k for k in store if k.endswith(":derived")], (
+        "a derived bundle built from an empty history was persisted"
     )

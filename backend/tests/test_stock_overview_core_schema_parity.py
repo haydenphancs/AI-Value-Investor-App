@@ -182,11 +182,19 @@ async def test_get_overview_core_no_slow_historical_on_all_or_5y(rng):
 
 
 @pytest.mark.asyncio
-async def test_get_overview_core_non_finite_price_becomes_finite_default():
-    """Regression (adversarial review): a NaN/Inf quote price must NOT reach the
-    required Double — it would serialize as a JSON `NaN`/`Infinity` token and crash
-    the iOS JSONDecoder on the whole response. _safe_float rejects non-finite."""
-    import math as _m
+async def test_get_overview_core_refuses_to_invent_a_price_when_there_is_none():
+    """A NaN/Inf quote price must not reach the required Double — it would serialize as
+    a JSON `NaN` token and crash the iOS decoder on the whole response.
+
+    UPDATED: this used to assert the degraded value was `0.0`. That kept the response
+    finite, but $0.00 is a PRICE, and this endpoint paints the first thing the user sees
+    on a stock — so an FMP outage opened the screen showing the company trading at zero,
+    HTTP 200, cached for 120 seconds. "No price" is now an upstream FAILURE: the service
+    raises, the endpoint maps it to a typed retryable error, and the iOS shimmer stays up
+    instead of being replaced by a fabricated number. The non-finite guarantee is
+    unchanged and is asserted separately below.
+    """
+    from app.integrations.fmp import FMPUnavailableException
     _cache.clear()
 
     class _NaNFMP(_FakeFMP):
@@ -201,12 +209,33 @@ async def test_get_overview_core_non_finite_price_becomes_finite_default():
 
     svc = StockOverviewService()
     svc.fmp = _NaNFMP()  # type: ignore[assignment]
-    resp = await svc.get_overview_core("NVDA", chart_range="3M")
-    assert _m.isfinite(resp.current_price) and resp.current_price == 0.0
-    assert _m.isfinite(resp.price_change) and resp.price_change == 0.0
-    assert _m.isfinite(resp.price_change_percent)
-    # Serializes cleanly (no NaN/Infinity tokens) — the whole point.
+    with pytest.raises(FMPUnavailableException):
+        await svc.get_overview_core("NVDA", chart_range="3M")
+
+
+@pytest.mark.asyncio
+async def test_get_overview_core_still_strips_non_finite_from_a_usable_response():
+    """The original guarantee, on the path that still returns: with a REAL price, a
+    non-finite change/percent must not reach the wire."""
     import json
+    import math as _m
+    _cache.clear()
+
+    class _PartialNaNFMP(_FakeFMP):
+        async def get_stock_price_quote(self, ticker: str):
+            self.calls.append("get_stock_price_quote")
+            return {"price": 182.5, "change": float("inf"),
+                    "changePercentage": float("nan"), "name": "NVIDIA"}
+
+        async def get_company_profile(self, ticker: str):
+            self.calls.append("get_company_profile")
+            return {"companyName": "NVIDIA Corporation"}
+
+    svc = StockOverviewService()
+    svc.fmp = _PartialNaNFMP()  # type: ignore[assignment]
+    resp = await svc.get_overview_core("NVDA", chart_range="3M")
+    assert resp.current_price == 182.5
+    assert _m.isfinite(resp.price_change) and _m.isfinite(resp.price_change_percent)
     json.dumps(resp.model_dump(), allow_nan=False)
 
 

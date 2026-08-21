@@ -84,12 +84,29 @@ class SmartMoneyFlowDataPointSchema(BaseModel):
 
 
 class SmartMoneyFlowSummarySchema(BaseModel):
-    """Summary of smart money activity."""
+    """Summary of smart money activity.
+
+    `total_*` are in the BARS' unit — millions of SHARES for the Insider and Institutions
+    tabs, dollars for Congress (the STOCK Act discloses ranges, never share counts).
+
+    `*_usd_millions` are populated for the INSIDER tab only and are the VERDICT: the
+    badge's value, sign and colour, and `is_positive`, all derive from the dollar net so
+    this card cannot contradict `TickerReportView`, whose `_build_insider_sections` has
+    always judged insider sentiment on net dollar value. The bars stay share-denominated
+    because Form 4 reports exact share counts and a row with no price would silently
+    vanish from a dollar chart.
+
+    Optional with a `None` default so an older client simply ignores them and keeps the
+    previous share-denominated badge — no forced app update.
+    """
     total_net_flow: float = Field(0.0)
     total_buy: float = Field(0.0)
     total_sell: float = Field(0.0)
     is_positive: bool = True
     period_description: str = "12-Month"
+    net_flow_usd_millions: Optional[float] = None
+    total_buy_usd_millions: Optional[float] = None
+    total_sell_usd_millions: Optional[float] = None
 
 
 class SmartMoneyDataSchema(BaseModel):

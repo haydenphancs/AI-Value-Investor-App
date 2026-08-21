@@ -330,3 +330,432 @@ def test_sentiment_persist_dedups_urls_and_drops_unusable_dates():
     assert ids == ["u1", "u2"], ids
     assert len(set(ids)) == len(ids), "duplicate conflict keys abort the whole upsert"
     assert rows[1]["published_at"] is None, "an empty date must be NULL, not ''"
+
+
+# ── 8. Insider sentiment: one verdict unit across three screens ──────────────
+#
+# The Holders badge judged on SHARES while TickerReportView's `_build_insider_sections`
+# judged on DOLLARS, so the two screens could state opposite conclusions for one ticker.
+# Product decision: the VERDICT (badge value, sign, colour, `is_positive`, and the
+# Overview ownership rating) is dollar-denominated; the chart BARS stay share-denominated
+# because Form 4 reports exact share counts and a price-less row would vanish from a
+# dollar chart.
+
+def _flow(buy_m: float, sell_m: float):
+    from app.schemas.holders import SmartMoneyFlowDataPointSchema
+
+    return [SmartMoneyFlowDataPointSchema(
+        month="01/2026", buy_volume=buy_m, sell_volume=sell_m, has_activity=True
+    )]
+
+
+def test_insider_verdict_follows_dollars_while_bars_stay_shares():
+    """The canonical contradiction: buy 1M shares at $1, sell 100K at $50. Shares say
+    net BUY (+0.9M); dollars say net SELL (-$4M). The bars must keep the share figure
+    and the verdict must be bearish."""
+    from app.services.holders_service import HoldersService
+
+    summary = HoldersService._build_summary(
+        _flow(1.0, 0.1), usd_buy_millions=1.0, usd_sell_millions=5.0
+    )
+    assert summary.total_net_flow == 0.9, "bars stay share-denominated"
+    assert summary.net_flow_usd_millions == -4.0
+    assert summary.is_positive is False, "the verdict follows the dollars"
+
+
+def test_share_and_dollar_verdicts_agree_when_they_should():
+    from app.services.holders_service import HoldersService
+
+    s = HoldersService._build_summary(
+        _flow(2.0, 0.5), usd_buy_millions=30.0, usd_sell_millions=4.0
+    )
+    assert s.total_net_flow == 1.5 and s.net_flow_usd_millions == 26.0
+    assert s.is_positive is True
+
+
+def test_summary_without_dollar_totals_keeps_the_share_verdict():
+    """Institutions and Congress send no dollar totals; they must be unaffected."""
+    from app.services.holders_service import HoldersService
+
+    s = HoldersService._build_summary(_flow(0.2, 1.2))
+    assert s.net_flow_usd_millions is None
+    assert s.total_net_flow == -1.0 and s.is_positive is False
+
+
+def test_a_flat_series_is_neutral_not_bullish():
+    """`is_positive` is `>= 0`, so an exactly-flat series used to paint bullish green."""
+    from app.services.holders_service import HoldersService
+
+    s = HoldersService._build_summary(
+        _flow(1.0, 1.0), usd_buy_millions=3.0, usd_sell_millions=3.0
+    )
+    assert s.net_flow_usd_millions == 0.0
+    assert s.is_positive is True  # >= 0 by contract; iOS renders 0 as its own state
+
+
+def test_overview_insider_rating_scores_on_the_same_unit_as_its_direction():
+    """The 40%-weight factor took its DIRECTION from `is_positive` (now dollar-derived)
+    and its MAGNITUDE from a share count. Mixing units scores a company by one unit's
+    direction and another's size."""
+    from app.services.ownership_snapshot_service import OwnershipSnapshotService
+
+    svc = OwnershipSnapshotService.__new__(OwnershipSnapshotService)
+    heavy_sell = svc._compute_rating(
+        5.0, 60.0, 0.9, False, 1.0, True, insider_usd_millions=-40.0
+    )
+    modest_buy = svc._compute_rating(
+        5.0, 60.0, 0.9, True, 1.0, True, insider_usd_millions=5.0
+    )
+    assert heavy_sell < modest_buy, (heavy_sell, modest_buy)
+
+
+def test_overview_insider_row_prints_the_unit_it_judged_on():
+    from app.services.ownership_snapshot_service import _fmt_usd_flow, _fmt_share_flow
+
+    assert _fmt_usd_flow(-4.0, False) == "Net Sell $4.00M"
+    assert _fmt_usd_flow(0.0, True) == "Neutral"
+    assert _fmt_usd_flow(float("nan"), True) == "—"
+    assert _fmt_usd_flow(0.008, True) == "Net Buy $8K"
+    # the share formatter is untouched — it still serves the Institutions row
+    assert "shares" in _fmt_share_flow(2.5, True)
+
+
+# ── 9. A cache hit must not serve a 24-hour-old price ────────────────────────
+#
+# `etf_detail_cache` / `index_detail_cache` rows carry the REQUIRED price fields and live
+# for 24h, and both cache-hit paths returned them verbatim. The index screen has no
+# live-price WebSocket at all, so nothing corrected it afterwards. The fix re-quotes only
+# the volatile fields on a hit — and must degrade to the cached values, never to zero.
+
+class _StubFMP:
+    def __init__(self, quote):
+        self._quote = quote
+
+    async def get_stock_price_quote(self, _symbol):
+        if isinstance(self._quote, Exception):
+            raise self._quote
+        return self._quote
+
+
+def _stale_response():
+    import types
+
+    return types.SimpleNamespace(
+        current_price=100.0, price_change=1.0,
+        price_change_percent=1.0, market_status=None,
+    )
+
+
+def test_etf_cache_hit_is_requoted_in_place():
+    from app.services.etf_service import ETFService
+
+    svc = ETFService.__new__(ETFService)
+    svc.fmp = _StubFMP({"price": 212.5, "change": -3.5, "changePercentage": -1.62})
+    r = _stale_response()
+    asyncio.run(svc._refresh_volatile(r, "SPY"))
+    assert (r.current_price, r.price_change, r.price_change_percent) == (212.5, -3.5, -1.62)
+    assert r.market_status is not None, "the badge must be recomputed for NOW, not the row's age"
+
+
+@pytest.mark.parametrize("bad_quote", [
+    RuntimeError("FMP down"),
+    {},
+    {"price": float("nan")},
+    {"price": 0},
+    {"price": -1},
+])
+def test_a_failed_requote_keeps_the_cached_price_rather_than_zeroing_it(bad_quote):
+    """Degrading to 0 would be worse than the staleness it replaces."""
+    from app.services.etf_service import ETFService
+
+    svc = ETFService.__new__(ETFService)
+    svc.fmp = _StubFMP(bad_quote)
+    r = _stale_response()
+    asyncio.run(svc._refresh_volatile(r, "SPY"))
+    assert r.current_price == 100.0
+
+
+def test_index_requote_computes_the_percent_when_fmp_omits_it():
+    """FMP /stable sometimes sends neither spelling; commodity already falls back to
+    change/previousClose and the index path now does too."""
+    from app.services.index_service import IndexService
+
+    svc = IndexService.__new__(IndexService)
+    svc.fmp = _StubFMP({"price": 5000.0, "change": 25.0, "previousClose": 4975.0})
+    r = _stale_response()
+    asyncio.run(svc._refresh_volatile(r, "^GSPC"))
+    assert r.current_price == 5000.0
+    assert r.price_change_percent == pytest.approx(0.5025, abs=1e-3)
+
+
+def test_etf_market_status_follows_the_real_new_york_clock():
+    """A hardcoded UTC-5 put every session boundary an hour late from March to November
+    — about eight months a year — and stamped "EST" in August."""
+    from app.services.etf_service import _get_market_status
+
+    st = _get_market_status()
+    if st.status == "closed":
+        assert st.timezone in ("EST", "EDT")
+        assert st.date and ("-04:00" in st.date or "-05:00" in st.date)
+        # the label and the offset must agree with each other
+        assert (st.timezone == "EDT") == ("-04:00" in st.date)
+
+
+# ── 10. A stock split is not a purchase ──────────────────────────────────────
+#
+# FMP's 13F deltas (`changeInSharesNumber`, `numberOf13FsharesChange`) are a raw
+# `current - last`, and `last` is the PRE-split count. `_compute_quarter_flow` (the
+# quarterly chart) already restated across a split and suppressed an implausible
+# magnitude; Recent Activities did neither, so on the same tab the chart drew no bar
+# while the card announced tens of billions of buying.
+
+_KLAC_BLACKROCK = {
+    "investorName": "BLACKROCK INC",
+    "sharesNumber": 126_198_653,          # post 10:1
+    "lastSharesNumber": 12_596_207,       # pre-split
+    "changeInSharesNumber": 113_602_446,  # raw, i.e. mostly the multiplication
+    "changeInSharesNumberPercentage": 901.8782,
+    "marketValue": 38_075_395_547,
+    "filingDate": "2026-08-14",
+}
+
+
+def test_a_split_quarter_is_not_reported_as_a_34_billion_dollar_purchase():
+    """KLAC did 10:1 on 2026-06-12, inside the quarter `latest_filed_13f_quarter()`
+    selects. Live analytics for that quarter made BlackRock's row read
+    `+$34,275.0M / +901.88%`; the true move was +236,583 shares (~+$71M)."""
+    from app.services.holders_service import HoldersService
+
+    svc = HoldersService.__new__(HoldersService)
+    unrestated = svc._build_institutional_activities([_KLAC_BLACKROCK], split_ratio=1.0)[0]
+    restated = svc._build_institutional_activities([_KLAC_BLACKROCK], split_ratio=10.0)[0]
+
+    # the shape of the old bug, kept as the contrast
+    assert unrestated.change_in_millions > 30_000
+    assert unrestated.change_percent > 900
+
+    # restated: a rounding-level move, and the percent recomputed from the new basis
+    assert restated.change_in_millions == pytest.approx(71.4, abs=1.0)
+    assert restated.change_percent == pytest.approx(0.19, abs=0.05)
+
+
+def test_no_split_leaves_the_reported_numbers_untouched():
+    """The restatement must be inert in the ordinary case, or it becomes its own bug."""
+    from app.services.holders_service import HoldersService
+
+    svc = HoldersService.__new__(HoldersService)
+    ordinary = {
+        "investorName": "VANGUARD GROUP INC",
+        "sharesNumber": 10_500_000,
+        "lastSharesNumber": 10_000_000,
+        "changeInSharesNumber": 500_000,
+        "changeInSharesNumberPercentage": 5.0,
+        "marketValue": 1_050_000_000,
+        "filingDate": "2026-08-14",
+    }
+    row = svc._build_institutional_activities([ordinary], split_ratio=1.0)[0]
+    assert row.change_percent == pytest.approx(5.0, abs=0.01)
+    assert row.change_in_millions == pytest.approx(50.0, abs=0.5)
+
+
+def test_an_implausible_aggregate_delta_is_suppressed_not_rendered():
+    """`|change| >= half the total position` is a restatement artefact, not a quarter's
+    trading. The chart already suppressed it; the flow summary rendered it as
+    '+$343.1B in'."""
+    from app.services.holders_service import HoldersService
+    from app.schemas.holders import DailyPricePointSchema
+
+    svc = HoldersService.__new__(HoldersService)
+    agg = {
+        "numberOf13Fshares": 1_201_868_820,
+        "lastNumberOf13Fshares": 115_612_040,
+        "numberOf13FsharesChange": 1_086_256_780,
+        "newPositions": 50, "increasedPositions": 500,
+        "closedPositions": 20, "reducedPositions": 300,
+    }
+    prices = [DailyPricePointSchema(date="2026-06-30", price=301.71)]
+    out = svc._build_institutional_flow_summary(
+        [], aggregate_data=agg, daily_prices=prices, split_ratio=1.0
+    )
+    # with no per-holder activities to fall back on, the honest answer is zero flow —
+    # never the $343B the raw delta implies
+    assert out.in_flow_in_billions < 1.0 and out.out_flow_in_billions < 1.0
+
+
+# ── 11. Round-2 confirmations ────────────────────────────────────────────────
+
+
+def test_sentiment_is_crypto_is_a_parameter_not_singleton_state():
+    """`get_sentiment_service()` returns a PROCESS-WIDE singleton, and the per-request
+    crypto flag was stored on it. There are real awaits between the write and the read
+    (`_get_articles` does `await asyncio.to_thread(self._load_from_db, …)`), so a
+    concurrent request flipped it: an AAPL request that read the flipped True called
+    `/news/crypto?symbols=AAPL`, which returns ZERO articles — and the news-less
+    sentiment was then pinned in the 15-minute cache for every viewer of that ticker."""
+    import inspect
+
+    from app.services.sentiment_service import SentimentService
+
+    for fn in (SentimentService._get_articles, SentimentService._fetch_news):
+        assert "is_crypto" in inspect.signature(fn).parameters, fn.__name__
+
+    src = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "app/services/sentiment_service.py"
+    ).read_text()
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    assert "_is_crypto" not in code, "request state is back on the singleton"
+
+
+def test_a_partial_ttm_is_omitted_rather_than_published_as_twelve_months():
+    from app.services.health_check_service import _sum_ttm_income, _compute_z_score
+
+    two = [
+        {"date": "2026-06-30", "operatingIncome": 56_689_000, "revenue": 1_490_286_000,
+         "interestExpense": 0, "netIncome": 1, "ebitda": 1},
+        {"date": "2026-03-31", "operatingIncome": 222_510_000, "revenue": 1_457_576_000,
+         "interestExpense": 0, "netIncome": 1, "ebitda": 1},
+    ]
+    assert _sum_ttm_income(two) == {}
+    four = two + [dict(two[0], date="2025-12-31"), dict(two[1], date="2025-09-30")]
+    assert _sum_ttm_income(four)  # a full year does produce totals
+
+    bs = {"totalAssets": 7_429_258_000, "totalLiabilities": 6_639_995_000,
+          "totalCurrentAssets": 1, "totalCurrentLiabilities": 1, "retainedEarnings": 1}
+    assert _compute_z_score(bs, _sum_ttm_income(two), 1e9) is None
+
+
+def test_zero_shares_is_unknown_not_a_measurement():
+    """FMP returns `weightedAverageShsOut: 0` on real rows (verified live on CD). Treated
+    as a measurement it produced a flat -100% share-count change — a spectacular fake
+    buyback — and plunged the shares line to the axis."""
+    from app.schemas.signal_of_confidence import SignalOfConfidenceDataPointSchema
+
+    import inspect
+    from app.services import signal_of_confidence_service as M
+
+    src = inspect.getsource(M)
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    assert "shares_raw is not None and shares_raw > 0" in code
+    field = SignalOfConfidenceDataPointSchema.model_fields["shares_outstanding"]
+    assert field.default is None, "0.0 is not a share count any listed company has"
+
+
+def test_sub_cent_prices_survive_the_technical_detail_rounding():
+    """SHIB trades near $0.00000495. Every level was `round(x, 2)`, so the pivots,
+    fibonacci levels, support/resistance bands and current price all serialised as 0.0 —
+    a full sheet of actionable price levels, all zero."""
+    from app.services.technical_analysis_service import _round_price
+
+    assert _round_price(0.00000495) == pytest.approx(0.00000495, rel=1e-6)
+    assert _round_price(0.0001234) == pytest.approx(0.000123, rel=1e-3)
+    assert _round_price(212.5) == 212.5          # equities keep 2dp
+    assert _round_price(1.239) == 1.24
+    for bad in (None, float("nan"), float("inf"), "x"):
+        assert _round_price(bad) == 0.0
+
+
+def test_a_chat_launched_from_the_etf_screen_is_not_treated_as_a_stock():
+    """`detect_asset_class` has no ETF branch, so every ETF chat classified as STOCK and
+    attached equity-fundamental snapshot ratings — profit margins and a moat verdict —
+    computed as though the fund were an operating company."""
+    from app.services.chat_service import ChatService
+
+    assert ChatService._detect_asset_type("SPY") == "STOCK"          # symbol alone
+    assert ChatService._detect_asset_type("SPY", "ETF") == "ETF"     # screen wins
+    assert ChatService._detect_asset_type("AAPL", "STOCK") == "STOCK"
+    assert ChatService._detect_asset_type("BTCUSD") == "CRYPTO"
+    # an unknown declaration must not override the heuristic
+    assert ChatService._detect_asset_type("AAPL", "NORMAL") == "STOCK"
+
+
+def test_no_analyst_coverage_is_stated_not_rendered_as_a_hold():
+    """FMP returns `[]` for both /grades and /price-target-consensus on real listings
+    (AACT). The zero-defaults rendered as a confident HOLD at a $0.00 target."""
+    from app.schemas.analyst import AnalystAnalysisResponse
+
+    assert AnalystAnalysisResponse.model_fields["has_coverage"].default is True
+    src = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "app/services/analyst_service.py"
+    ).read_text()
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    assert "has_coverage = bool(total_analysts > 0 or target_consensus_price > 0)" in code
+    # and the distribution is windowed rather than counting a decade of dead coverage
+    assert "dist_cutoff" in code and "timedelta(days=730)" in code
+
+
+def test_a_degraded_fundamentals_bundle_is_not_pinned_for_24h():
+    """The poison gate checked ONLY the profile, while the heaviest slice —
+    `get_historical_prices(…, "1900-01-01", …)` — is the one FMP 429s first. A good
+    profile plus no history was cached for a day, silently emptying the Overview tab's
+    performance periods and benchmark comparison."""
+    import inspect
+    from app.services import stock_overview_service as M
+
+    code = "\n".join(
+        l for l in inspect.getsource(M).splitlines() if not l.strip().startswith("#")
+    )
+    assert '"stock_historical": bool(data.get("stock_historical"))' in code
+    assert '"key_metrics": bool(data.get("key_metrics"))' in code
+
+
+def test_the_stream_meta_frame_carries_the_normalized_user_message():
+    """iOS reconciles a failed stream by matching its RAW typed string against history,
+    but the server persists `normalize_text(raw)` (NFKC + invisible/bidi/control
+    stripping). Anything normalisation touched — a smart quote from the iOS keyboard, an
+    emoji variation selector, a full-width character — never matched, so the reconcile
+    concluded the turn had not persisted and RE-SENT it: a duplicated Q+A in history and
+    a second credit charged for one message."""
+    from app.services.chat_security import normalize_text
+
+    src = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "app/api/v1/endpoints/chat.py"
+    ).read_text()
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    assert '"user_message": user_message,' in code, (
+        "the meta frame must carry the server's own normalized copy"
+    )
+
+    # and normalisation really does change text an iOS keyboard produces
+    smart = "What’s the outlook？"          # curly apostrophe + full-width ?
+    assert normalize_text(smart) != smart, (
+        "if this ever stops being true the reconcile mismatch cannot occur"
+    )
+
+
+def test_sub_penny_closes_survive_the_crypto_chart_rounding():
+    """The DEFAULT crypto chart path (`range=3M` → daily → `_extract_chart_data`) emitted
+    `round(close, 2)`, so SHIB/PEPE/BONK drew a flat line on the axis."""
+    from app.services.crypto_service import _round_close
+
+    assert _round_close(0.00000495) == pytest.approx(0.00000495, rel=1e-6)
+    assert _round_close(0.0001234) == pytest.approx(0.000123, rel=1e-3)
+    assert _round_close(212.567) == 212.57
+
+
+def test_a_zero_price_is_omitted_from_the_chat_grounding_not_asserted():
+    """`_price(0.0)` returned the TRUTHY string "0.00", and the caller's `if px and …`
+    then wrote "Price $0.00" into the grounding lead — telling Cay AI the asset is
+    worthless. The degraded gates elsewhere all treat `price <= 0` as absent."""
+    from app.services.chat_context_resolver import _price
+
+    assert _price(0.0) is None
+    assert _price(-5.0) is None
+    assert _price(float("nan")) is None
+    assert _price(212.5) == "212.50"
+    assert _price(0.00000495) == "0.00000495"   # meme coins keep significant figures
+
+
+def test_a_price_free_holders_build_is_treated_as_degraded():
+    """Every dollar figure on the Holders tab derives from these closes, but the fetch
+    was not marked `critical`, so a build with NO price data at all was pinned in the 24h
+    cache. Its five neighbours were already critical."""
+    import inspect
+    from app.services import holders_service as M
+
+    code = "\n".join(
+        l for l in inspect.getsource(M).splitlines() if not l.strip().startswith("#")
+    )
+    assert 'historical_prices, "Historical prices", [], critical=True' in code

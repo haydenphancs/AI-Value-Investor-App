@@ -32,6 +32,12 @@ struct TickerAnalysisContent: View {
                 CryptoFearGreedSection(data: fgData, selectedTimeframe: fgTimeframe)
             } else if !isFearGreedLoaded && analystRatingsData == nil {
                 analysisSectionPlaceholder(height: 280)
+            } else if let ratingsData = analystRatingsData, !ratingsData.hasCoverage {
+                // No analyst covers this ticker. Rendering the section anyway printed a
+                // confident "HOLD" consensus over a $0.00 low / $0.00 average / $0.00
+                // high target — a fabricated verdict for a company nobody has an opinion
+                // on. Say that instead.
+                noAnalystCoverageCard
             } else if let ratingsData = analystRatingsData {
                 AnalystRatingsSection(
                     ratingsData: ratingsData,
@@ -78,6 +84,25 @@ struct TickerAnalysisContent: View {
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.lg)
+    }
+
+    /// Honest empty state for a ticker with no analyst coverage.
+    private var noAnalystCoverageCard: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Image(systemName: "person.2.slash")
+                .font(AppTypography.iconLarge)
+                .foregroundColor(AppColors.textMuted)
+            Text("No Analyst Coverage")
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+            Text("No Wall Street analyst currently publishes a rating or price target for this stock.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(AppSpacing.lg)
+        .cardSurface()
     }
 
     private func analysisSectionPlaceholder(height: CGFloat) -> some View {

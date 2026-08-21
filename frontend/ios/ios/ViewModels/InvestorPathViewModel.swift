@@ -173,7 +173,7 @@ class InvestorJourneyViewModel: ObservableObject {
         // Generate content based on lesson title
         // This provides meaningful sample content for each lesson type
         switch lesson.title {
-        case "The Buffett Way":
+        case "The Quality Compounder":
             return [
                 .contentCard(
                     content: [

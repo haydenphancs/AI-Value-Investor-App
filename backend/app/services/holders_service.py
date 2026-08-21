@@ -425,6 +425,7 @@ class HoldersService:
             house_latest,
             senate_disclosure,
             house_disclosure,
+            stock_splits,
         ) = await asyncio.gather(
             self.fmp.get_shares_float(ticker),
             self.fmp.get_stock_price_quote(ticker),
@@ -438,6 +439,12 @@ class HoldersService:
             self.fmp.get_house_latest(limit=1000),
             self.fmp.get_senate_disclosure(ticker),
             self.fmp.get_house_disclosure(ticker),
+            # Needed to RESTATE the 13F share deltas below onto a post-split basis.
+            # `_compute_quarter_flow` (the chart) already does this; Recent Activities
+            # did not, so across a split it reported the mechanical share multiplication
+            # as a real trade — e.g. KLAC's 10:1 on 2026-06-12 made BlackRock's row read
+            # "+$34.3B / +901.9%" when the true move was +236,583 shares (~+$71M).
+            self.fmp.get_stock_splits(ticker),
             return_exceptions=True,
         )
 
@@ -467,7 +474,14 @@ class HoldersService:
         inst_quarter_aggregate = _unwrap(inst_quarter_aggregate, "Inst quarter aggregate", None)
         insider_trading = _unwrap(insider_trading, "Insider trading", [], critical=True)
         insider_roster = _unwrap(insider_roster, "Insider roster", [])
-        historical_prices = _unwrap(historical_prices, "Historical prices", [])
+        # `critical=True`: without it a build that got NO price data at all was pinned in
+        # the 24h holders_cache. Every dollar figure on the tab is derived from these
+        # closes, so an FMP blip on this one call persisted a price-free Holders tab for
+        # a day. Its five neighbours were already marked critical; this one was missed.
+        historical_prices = _unwrap(
+            historical_prices, "Historical prices", [], critical=True
+        )
+        stock_splits = _unwrap(stock_splits, "Stock splits", [])
         senate_latest = _unwrap(senate_latest, "Senate latest", [])
         house_latest = _unwrap(house_latest, "House latest", [])
         senate_disclosure = _unwrap(senate_disclosure, "Senate disclosure", [])
@@ -491,6 +505,14 @@ class HoldersService:
             company_profile, institutional_holders, insider_roster, current_price,
             inst_ownership_summary,
         )
+        # Split ratio for the 13F data quarter. A split multiplies the share count
+        # mechanically, so `changeInSharesNumber` / `numberOf13FsharesChange` report the
+        # multiplication as if institutions had bought. `_quarter_split_ratios` is the
+        # same helper the quarterly chart uses — this is the missing half.
+        inst_split_ratio = self._quarter_split_ratios(
+            stock_splits, [(data_year, data_quarter)]
+        ).get((data_year, data_quarter), 1.0)
+
         recent = self._build_recent_activities(
             institutional_holders, insider_trading, insider_roster, current_price,
             inst_quarter_aggregate=inst_quarter_aggregate,
@@ -752,14 +774,18 @@ class HoldersService:
         daily_prices: Optional[List[DailyPricePointSchema]] = None,
         senate_trades: Optional[List[Dict[str, Any]]] = None,
         house_trades: Optional[List[Dict[str, Any]]] = None,
+        split_ratio: float = 1.0,
     ) -> RecentActivitiesSchema:
         # Build institutional activities (all, before truncation)
-        all_inst_activities = self._build_institutional_activities(inst_holders)
+        all_inst_activities = self._build_institutional_activities(
+            inst_holders, split_ratio=split_ratio
+        )
         # Flow summary: prefer aggregate data from ALL institutions (not just top 15)
         flow_summary = self._build_institutional_flow_summary(
             all_inst_activities,
             aggregate_data=inst_quarter_aggregate,
             daily_prices=daily_prices,
+            split_ratio=split_ratio,
         )
         # Sort by absolute value for the display list (return ALL for frontend pagination)
         inst_activities = sorted(
@@ -807,9 +833,17 @@ class HoldersService:
         )
 
     def _build_institutional_activities(
-        self, holders: List[Dict[str, Any]]
+        self, holders: List[Dict[str, Any]], split_ratio: float = 1.0
     ) -> List[InstitutionalActivitySchema]:
-        """Convert institutional holder analytics into recent activity entries."""
+        """Convert institutional holder analytics into recent activity entries.
+
+        ``split_ratio`` restates the PRIOR quarter's share count onto the post-split
+        basis. Without it a split is reported as a purchase: FMP's
+        ``changeInSharesNumber`` is a raw ``current - last``, and after KLAC's 10:1 on
+        2026-06-12 BlackRock's row read ``+$34,275.0M / +901.88%`` — the true move was
+        +236,583 shares (~$71M). ``changeInSharesNumberPercentage`` is likewise raw and
+        is now recomputed from the restated basis rather than forwarded.
+        """
         result = []
         for h in holders[:15]:
             # Skip unattributed FMP 13F rows — a blank investorName + null holder
@@ -826,8 +860,15 @@ class HoldersService:
             total_value = _safe_float(
                 h, "marketValue", _safe_float(h, "value", 0.0)
             )
-            # Reconstruct prev from current + delta so we can reuse the helper.
+            # Reconstruct prev from current + delta so we can reuse the helper, then
+            # RESTATE it onto the post-split basis when a split landed in this quarter.
+            # `lastSharesNumber` is the pre-split count, so the raw delta is dominated by
+            # the multiplication rather than by any trade.
             prev_shares = max(total_shares - shares_change, 0.0)
+            if split_ratio and split_ratio > 0 and split_ratio != 1.0:
+                last_reported = _safe_float(h, "lastSharesNumber", prev_shares)
+                prev_shares = max(last_reported * split_ratio, 0.0)
+                shares_change = total_shares - prev_shares
             implied_price = (
                 total_value / total_shares if total_shares > 0 else 0.0
             )
@@ -841,8 +882,15 @@ class HoldersService:
                 min_amount=0.0,  # institutional section shows tiny deltas too
             )
 
-            change_pct = _safe_float(h, "changeInSharesNumberPercentage",
-                            _safe_float(h, "changeInSharesPercentage", 0.0))
+            # FMP's percentage is computed off the RAW (pre-split) prior count, so
+            # across a split it reports the multiplication — KLAC 10:1 gave +901.88% for
+            # a holder who barely moved. Recompute from the restated basis whenever we
+            # restated it; otherwise keep FMP's value.
+            if split_ratio and split_ratio > 0 and split_ratio != 1.0 and prev_shares > 0:
+                change_pct = (total_shares - prev_shares) / prev_shares * 100
+            else:
+                change_pct = _safe_float(h, "changeInSharesNumberPercentage",
+                                _safe_float(h, "changeInSharesPercentage", 0.0))
 
             if action is None or amount == 0.0:
                 continue
@@ -885,6 +933,7 @@ class HoldersService:
         activities: List[InstitutionalActivitySchema],
         aggregate_data: Optional[Dict[str, Any]] = None,
         daily_prices: Optional[List[DailyPricePointSchema]] = None,
+        split_ratio: float = 1.0,
     ) -> RecentActivitiesFlowSummarySchema:
         """Aggregate institutional activities into a flow summary.
 
@@ -926,6 +975,25 @@ class HoldersService:
             )
             shares_change = _safe_float(aggregate_data, "numberOf13FsharesChange", 0.0)
 
+            # RESTATE across a split, and suppress an implausible magnitude — the two
+            # guards `_compute_quarter_flow` already applies to this exact FMP field, and
+            # which this summary was missing. Live KLAC (10:1 on 2026-06-12) produced
+            # "+$343.1B in / $15.3B out" here while the chart drew NO bar for the same
+            # quarter, on the same tab. A raw delta that is more than half the total
+            # position is a restatement artefact, not a quarter's trading.
+            cur_total = _safe_float(aggregate_data, "numberOf13Fshares", 0.0)
+            last_total = _safe_float(aggregate_data, "lastNumberOf13Fshares", 0.0)
+            if split_ratio and split_ratio > 0 and split_ratio != 1.0 and last_total > 0:
+                shares_change = cur_total - (last_total * split_ratio)
+            if cur_total > 0 and abs(shares_change) >= 0.5 * cur_total:
+                logger.warning(
+                    "Institutional flow summary: |change| %.0f is >= half the total "
+                    "position %.0f for %sQ%s — suppressing as a restatement artefact "
+                    "and falling back to the per-holder sum",
+                    abs(shares_change), cur_total, data_year, data_quarter,
+                )
+                shares_change = 0.0
+
             # Quarter-end price (same approach as _build_hedge_fund_smart_money).
             #
             # There is deliberately NO totalInvested/numberOf13Fshares fallback
@@ -946,6 +1014,10 @@ class HoldersService:
                     "(top-15 bounded, understates) instead of an implied price",
                     data_year, data_quarter,
                 )
+                inflow, outflow = _sum_activities()
+            elif shares_change == 0.0:
+                # Suppressed above (or genuinely flat): the top-15 per-holder sum is the
+                # honest answer rather than a $0 headline.
                 inflow, outflow = _sum_activities()
             else:
                 net_millions = (shares_change * price) / 1_000_000
@@ -1360,17 +1432,42 @@ class HoldersService:
     @staticmethod
     def _build_summary(
         flow_data: List[SmartMoneyFlowDataPointSchema],
+        usd_buy_millions: Optional[float] = None,
+        usd_sell_millions: Optional[float] = None,
     ) -> SmartMoneyFlowSummarySchema:
-        """Compute summary from flow data points."""
+        """Compute summary from flow data points.
+
+        `total_*` stay in the BARS' unit (millions of shares for Insider/Institutions,
+        dollars for Congress). When dollar totals are supplied — Insider only — they are
+        carried alongside and become the verdict: `is_positive` is derived from the
+        dollar net so this badge cannot contradict TickerReportView, which has always
+        judged insider sentiment on net dollar value.
+        """
         total_buy = sum(f.buy_volume for f in flow_data)
         total_sell = sum(f.sell_volume for f in flow_data)
         net = total_buy - total_sell
+
+        usd_net = None
+        if usd_buy_millions is not None and usd_sell_millions is not None:
+            usd_net = round(usd_buy_millions - usd_sell_millions, 4)
+
+        # Judge on dollars when we have them, else on the bars' own unit. Compare the
+        # ROUNDED value — the one that is actually printed — so the arrow, the colour and
+        # the number can never disagree (`round(-0.002, 2)` is `-0.0`, and `-0.0 >= 0`).
+        verdict_value = usd_net if usd_net is not None else round(net, 2)
         return SmartMoneyFlowSummarySchema(
             total_net_flow=round(net, 2),
             total_buy=round(total_buy, 2),
             total_sell=round(total_sell, 2),
-            is_positive=net >= 0,
+            is_positive=verdict_value >= 0,
             period_description="12-Month",
+            net_flow_usd_millions=usd_net,
+            total_buy_usd_millions=(
+                round(usd_buy_millions, 4) if usd_buy_millions is not None else None
+            ),
+            total_sell_usd_millions=(
+                round(usd_sell_millions, 4) if usd_sell_millions is not None else None
+            ),
         )
 
     # ── Insider Smart Money Tab ───────────────────────────────────
@@ -1399,6 +1496,9 @@ class HoldersService:
 
         informative_count = 0
         skipped_count = 0
+        # Dollar totals for the VERDICT (see the note at the accumulation below).
+        usd_buy_millions = 0.0
+        usd_sell_millions = 0.0
 
         for tx in insider_trades:
             # Only count informative trades (open-market buys/sells).
@@ -1447,15 +1547,31 @@ class HoldersService:
                 continue
             shares_millions = shares / 1_000_000
 
+            # DOLLAR value of the same trade, accumulated in parallel. The BARS stay
+            # share-denominated (Form 4 reports exact shares, and a row whose price is
+            # missing would silently vanish from a dollar chart), but the SUMMARY VERDICT
+            # — the badge, its colour, and `is_positive` — is dollar-denominated so it
+            # agrees with TickerReportView's `_build_insider_sections`, which has always
+            # derived sentiment from net dollar value.
+            #
+            # Without this the two screens could state OPPOSITE conclusions for the same
+            # ticker: buy 1M shares at $1 and sell 100K at $50 is "Net Buy 900K shares"
+            # (green) here and "Net Selling / critical" (red) there. Both were defensible
+            # in isolation; disagreeing on screen was not.
+            price_at_tx = _safe_float(tx, "price", 0.0)
+            value_millions = (shares * price_at_tx) / 1_000_000 if price_at_tx > 0 else 0.0
+
             # Buy vs sell from the transactionType classification (P=Buy /
             # S=Sell) — the SAME rule the report table and the recent-trade list
             # use. (Was acquisitionOrDisposition A/D, which could disagree with
             # the table and silently dropped any row whose A/D field was blank.)
             if "Buy" in classified:
                 monthly_flows[m_key]["buy"] += shares_millions
+                usd_buy_millions += value_millions
                 informative_count += 1
             else:  # "Informative Sell"
                 monthly_flows[m_key]["sell"] += shares_millions
+                usd_sell_millions += value_millions
                 informative_count += 1
 
         logger.info(
@@ -1494,7 +1610,11 @@ class HoldersService:
             price_data=self._build_price_data(monthly_prices, month_keys),
             daily_prices=windowed_daily,
             flow_data=flow_data,
-            summary=self._build_summary(flow_data),
+            summary=self._build_summary(
+                flow_data,
+                usd_buy_millions=usd_buy_millions,
+                usd_sell_millions=usd_sell_millions,
+            ),
         )
 
     # ── Hedge Fund Smart Money Tab (quarterly, incremental DB) ────

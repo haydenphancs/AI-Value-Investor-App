@@ -492,6 +492,21 @@ _AI_CACHE_TTL_SECONDS = 1800  # 30 minutes for AI-generated stories
 _CACHE_MAX_ENTRIES = 1024
 
 
+def _round_close(v: float) -> float:
+    """Round a close price with precision proportional to its magnitude.
+
+    2 dp at/above $1, 6 dp down to $0.0001, 10 dp below that — the same ladder
+    `technical_analysis_service._round_price` uses, so a coin's chart and its technical
+    levels agree on how much precision a price has.
+    """
+    mag = abs(v)
+    if mag >= 1:
+        return round(v, 2)
+    if mag >= 0.0001:
+        return round(v, 6)
+    return round(v, 10)
+
+
 def _cache_get(key: str, ttl: Optional[float] = None) -> Optional[Any]:
     entry = _cache.get(key)
     if entry is None:
@@ -1165,7 +1180,12 @@ class CryptoService:
                         "open": _finite_or_none(p.get("open")),
                         "high": _finite_or_none(p.get("high")),
                         "low": _finite_or_none(p.get("low")),
-                        "close": round(close, 2),
+                        # Magnitude-aware, NOT `round(close, 2)`: SHIB trades near
+                        # $0.00000495, so two decimals collapsed every close to 0.0 and
+                        # the default 3M crypto chart drew a flat line on the axis for
+                        # every sub-penny coin (SHIB / PEPE / BONK). OHLC is left
+                        # unrounded — it is already finite-guarded above.
+                        "close": _round_close(close),
                         "volume": _finite_or_none(p.get("volume")),
                     })
         return result

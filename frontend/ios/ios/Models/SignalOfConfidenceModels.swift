@@ -60,7 +60,13 @@ struct SignalOfConfidenceDataPoint: Identifiable {
     let buybackYield: Double              // Percentage
     let dividendAmount: Double            // Dollar amount in millions
     let buybackAmount: Double             // Dollar amount in millions
-    let sharesOutstanding: Double         // In millions (e.g., 150 for 150M)
+    /// In millions (e.g. 150 for 150M). NIL when the filing did not report it.
+    ///
+    /// Not `0.0`: no listed company has zero weighted-average shares, so a zero was
+    /// indistinguishable from a measurement — it plunged the shares line to the axis and
+    /// made the summary read a flat -100% share-count change (a spectacular fake
+    /// buyback). Same reasoning, and the same fix, as ProfitPower's `Double?` margins.
+    let sharesOutstanding: Double?
 
     /// Total shareholder yield (dividend + buyback)
     var totalYield: Double {
@@ -227,7 +233,7 @@ struct SignalOfConfidenceSectionData {
 
     /// Get shares outstanding range for normalization
     var sharesRange: (min: Double, max: Double) {
-        let shares = dataPoints.map { $0.sharesOutstanding }
+        let shares = dataPoints.compactMap { $0.sharesOutstanding }
         let minShares = (shares.min() ?? 0) * 0.95
         let maxShares = (shares.max() ?? 1) * 1.05
         return (minShares, maxShares)

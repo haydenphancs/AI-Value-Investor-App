@@ -181,7 +181,9 @@ class ChatService:
 
         # Step 3: Build prompt (includes RAG context + history)
         # Detect asset type from stock_id
-        asset_type = self._detect_asset_type(stock_id) if stock_id else "NORMAL"
+        asset_type = (
+            self._detect_asset_type(stock_id, context_type) if stock_id else "NORMAL"
+        )
 
         # Enrich with live data — only for stocks (other types use client_context)
         profit_summary = None
@@ -347,7 +349,9 @@ class ChatService:
             self._condense_history(history, session_id=session_id),
         )
 
-        asset_type = self._detect_asset_type(stock_id) if stock_id else "NORMAL"
+        asset_type = (
+            self._detect_asset_type(stock_id, context_type) if stock_id else "NORMAL"
+        )
 
         # Stock enrichment (only for STOCK — other types are grounded by the resolver).
         profit_summary = snapshot_summary = company_profile_summary = None
@@ -1167,7 +1171,17 @@ class ChatService:
     # ── Asset type detection ─────────────────────────────────────────
 
     @staticmethod
-    def _detect_asset_type(stock_id: str) -> str:
+    def _detect_asset_type(stock_id: str, context_type: Optional[str] = None) -> str:
+        """Classify the chat's subject.
+
+        `context_type` — the SCREEN the user launched from — is authoritative when it is
+        one the symbol heuristic cannot express. `detect_asset_class` can only answer
+        index / commodity / crypto / stock: there is no ETF branch, so every ETF chat
+        classified as STOCK. That is not cosmetic — it gated the equity-fundamental
+        enrichment below, so asking Cay AI about SPY attached profit-margin, valuation
+        and moat "snapshot ratings" computed as though the fund were an operating
+        company, and skipped the ETF grounding the resolver had already prepared.
+        """
         """Detect asset type from the symbol format.
 
         Delegates to the shared `asset_class.detect_asset_class` so the chat
@@ -1184,6 +1198,9 @@ class ChatService:
         # friendly names ("GOLD", "OIL", …) — chat only VOICES the asset, so a
         # name collision with a listed equity costs a wording nuance, not a wrong
         # chart. The chart/refresh callers deliberately leave it off.
+        declared = (context_type or "").strip().upper()
+        if declared in ("ETF", "CRYPTO", "INDEX", "COMMODITY", "STOCK"):
+            return declared
         return detect_asset_class(stock_id, include_aliases=True).upper()
 
     # ── Deep dive cache ───────────────────────────────────────────

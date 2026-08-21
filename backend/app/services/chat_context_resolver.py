@@ -121,6 +121,13 @@ def _price(v: Any) -> Optional[str]:
         return None
     if isinstance(v, float) and not math.isfinite(v):
         return None
+    # A zero price is not a price. `0 < abs(v) < 0.01` is False for 0.0, so it fell
+    # through and returned the TRUTHY string "0.00" — and the caller's
+    # `if px and ...` then happily stated "Price $0.00" in the grounding lead, telling
+    # Cay AI the asset is worthless. The degraded gates in etf/index/commodity all treat
+    # `price <= 0` as absent; this now matches them.
+    if v <= 0:
+        return None
     if 0 < abs(v) < 0.01:
         return f"{v:.8f}".rstrip("0").rstrip(".")
     return f"{v:,.2f}"

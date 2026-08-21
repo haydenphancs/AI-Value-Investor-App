@@ -14,7 +14,11 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import (
+    FMPClient,
+    FMPUnavailableException,
+    get_fmp_client,
+)
 from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
@@ -535,15 +539,30 @@ class StockOverviewService:
         # (company_name=ticker, no sector/industry, all key stats "—") for the
         # full TTL even after FMP recovers seconds later. Gate on a non-empty
         # profile so a blip can't poison the cache.
+        # The gate checked ONLY the profile, while the bundle has ~15 independent slices.
+        # The heaviest of them — `get_historical_prices(ticker, "1900-01-01", today)` —
+        # is exactly the one FMP's burst limiter 429s first, and its failure degrades to
+        # `[]` just as quietly. Writing that combination pinned a bundle with a good
+        # profile and NO price history for 24 hours, which is what silently empties the
+        # performance periods and the benchmark comparison on the Overview tab. Require
+        # the slices the screen actually needs, not just the one that names the company.
         profile_ok = isinstance(data.get("profile"), dict) and bool(data["profile"])
-        if profile_ok:
+        essential = {
+            "profile": profile_ok,
+            "stock_historical": bool(data.get("stock_historical")),
+            "key_metrics": bool(data.get("key_metrics")),
+        }
+        missing = [k for k, ok in essential.items() if not ok]
+        if missing:
+            logger.warning(
+                "Fundamentals NOT cached for %s — degraded slices: %s. Serving this "
+                "response but not persisting it, so a transient FMP failure cannot pin "
+                "an empty bundle for the full 24h TTL.",
+                ticker, ", ".join(missing),
+            )
+        else:
             _cache_set(mem_key, data)
             self._upsert_fundamentals_db(ticker, data)
-        else:
-            logger.warning(
-                f"Skipping fundamentals cache write for {ticker}: empty profile "
-                f"(transient upstream failure) — will re-fetch on next request"
-            )
 
         return data
 
@@ -773,6 +792,21 @@ class StockOverviewService:
             (quote, "changePercentage"), (quote, "changesPercentage"),
             (profile, "changePercentage"), (profile, "changesPercentage"),
         )
+        # A missing price is an upstream FAILURE, not a price of zero.
+        #
+        # Both fetches above degrade to `{}` on any exception, and `_safe_float` then
+        # returns its 0.0 default — so an FMP outage produced a structurally valid
+        # `current_price: 0.0`, HTTP 200, cached for 120s. This endpoint paints the FIRST
+        # thing the user sees on a stock, so the screen opened showing "$0.00" as the
+        # company's price. Raise instead: the endpoint's `upstream_error_response` then
+        # returns a typed, retryable error and the iOS shimmer stays up rather than being
+        # replaced by a fabricated number.
+        if not price or price <= 0:
+            raise FMPUnavailableException(
+                f"No usable price for {ticker} in the fast-core fetch "
+                f"(quote={'ok' if quote else 'empty'}, profile={'ok' if profile else 'empty'})"
+            )
+
         company_name = profile.get("companyName") or quote.get("name") or ticker
         # NEVER slice from stock_historical here — that requires the slow bundle.
         chart_data = (vol.get("chart_data") if isinstance(vol, dict) else None) or []

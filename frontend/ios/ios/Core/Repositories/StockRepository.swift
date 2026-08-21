@@ -1030,6 +1030,9 @@ struct StockPricePoint: Codable {
 
 struct AnalystAnalysisDTO: Codable {
     let symbol: String
+    /// False when NO analyst covers this ticker. Optional + defaulted so an older
+    /// backend (which never sends it) keeps the previous behaviour.
+    let hasCoverage: Bool?
     let totalAnalysts: Int
     let updatedDate: String
     let consensus: String
@@ -1045,6 +1048,7 @@ struct AnalystAnalysisDTO: Codable {
 
     enum CodingKeys: String, CodingKey {
         case symbol
+        case hasCoverage = "has_coverage"
         case totalAnalysts = "total_analysts"
         case updatedDate = "updated_date"
         case consensus
@@ -1543,6 +1547,7 @@ extension AnalystAnalysisDTO {
         }
 
         return AnalystRatingsData(
+            hasCoverage: hasCoverage ?? true,
             totalAnalysts: totalAnalysts,
             updatedDate: parsedDate,
             consensus: consensusEnum,
@@ -2022,7 +2027,9 @@ struct SignalOfConfidenceDataPointDTO: Codable {
     let buybackYield: Double
     let dividendAmount: Double
     let buybackAmount: Double
-    let sharesOutstanding: Double
+    /// Optional: FMP genuinely returns `weightedAverageShsOut: 0` on some rows, and the
+    /// backend now sends null rather than passing a sentinel off as a measurement.
+    let sharesOutstanding: Double?
 
     enum CodingKeys: String, CodingKey {
         case period
@@ -2378,6 +2385,12 @@ struct SmartMoneyFlowSummaryDTO: Codable {
     let totalSell: Double?
     let isPositive: Bool
     let periodDescription: String
+    /// Dollar totals, sent for the INSIDER tab only. When present they are the VERDICT
+    /// (see `SmartMoneyFlowSummary`); the bars stay in `totalNetFlow`'s unit. Optional so
+    /// an older backend simply keeps the previous share-denominated badge.
+    let netFlowUsdMillions: Double?
+    let totalBuyUsdMillions: Double?
+    let totalSellUsdMillions: Double?
 
     enum CodingKeys: String, CodingKey {
         case totalNetFlow = "total_net_flow"
@@ -2385,6 +2398,9 @@ struct SmartMoneyFlowSummaryDTO: Codable {
         case totalSell = "total_sell"
         case isPositive = "is_positive"
         case periodDescription = "period_description"
+        case netFlowUsdMillions = "net_flow_usd_millions"
+        case totalBuyUsdMillions = "total_buy_usd_millions"
+        case totalSellUsdMillions = "total_sell_usd_millions"
     }
 
     func toDisplayModel(unit: SmartMoneyFlowUnit = .dollars) -> SmartMoneyFlowSummary {
@@ -2394,7 +2410,12 @@ struct SmartMoneyFlowSummaryDTO: Codable {
             totalSell: totalSell ?? 0,
             isPositive: isPositive,
             periodDescription: periodDescription,
-            unit: unit
+            unit: unit,
+            // Non-finite is dropped rather than propagated: a NaN here would make the
+            // badge read "nan" and poison every comparison it feeds.
+            netFlowUsdMillions: netFlowUsdMillions.finiteOrNil,
+            totalBuyUsdMillions: totalBuyUsdMillions.finiteOrNil,
+            totalSellUsdMillions: totalSellUsdMillions.finiteOrNil
         )
     }
 }

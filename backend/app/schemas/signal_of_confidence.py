@@ -21,7 +21,12 @@ class SignalOfConfidenceDataPointSchema(BaseModel):
     buyback_yield: float = Field(0.0, description="Annualised buyback yield as percentage")
     dividend_amount: float = Field(0.0, description="Dividends paid in the quarter (USD millions)")
     buyback_amount: float = Field(0.0, description="Share buybacks in the quarter (USD millions)")
-    shares_outstanding: float = Field(0.0, description="Weighted-average shares outstanding (millions)")
+    # Optional because 0.0 is not a share count any listed company can have — FMP
+    # genuinely returns `weightedAverageShsOut: 0` on some rows, and treating that as a
+    # measurement produced a fabricated -100% share-count change. None = "not reported".
+    shares_outstanding: Optional[float] = Field(
+        None, description="Weighted-average shares outstanding (millions); None if unreported"
+    )
 
 
 class SignalOfConfidenceSummarySchema(BaseModel):

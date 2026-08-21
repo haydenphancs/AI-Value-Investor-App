@@ -301,19 +301,19 @@ extension InvestorJourneyData {
 
         let strategiesLessons = [
             Lesson(
-                title: "The Buffett Way",
-                description: "Value investing principles from the Oracle of Omaha himself.",
+                title: "The Quality Compounder",
+                description: "Buy wonderful businesses at a fair price, then let time do the work.",
                 durationMinutes: 7,
                 status: .notStarted
             ),
             Lesson(
-                title: "The Lynch Way",
-                description: "Invest in what you know. Peter Lynch's common sense approach.",
+                title: "The Everyday Growth Hunter",
+                description: "Invest in what you know: spotting winners in everyday life.",
                 durationMinutes: 6,
                 status: .notStarted
             ),
             Lesson(
-                title: "The Cathie Wood Way",
+                title: "The Disruption Seeker",
                 description: "Disruptive innovation investing and exponential growth thinking.",
                 durationMinutes: 5,
                 status: .notStarted
@@ -371,7 +371,7 @@ extension InvestorJourneyData {
             ),
             Lesson(
                 title: "Inversion Thinking",
-                description: "Charlie Munger's secret weapon: solving problems backwards.",
+                description: "A thinking tool that solves problems backwards.",
                 durationMinutes: 5,
                 status: .notStarted
             ),

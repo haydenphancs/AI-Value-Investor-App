@@ -176,8 +176,18 @@ class TickerDetailViewModel: ObservableObject {
             .sink { [weak self] newPrice in
                 guard let self = self, var data = self.tickerData else { return }
                 data.currentPrice = newPrice
-                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
-                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
+                // `??` only guards nil, so a socket tick carrying 0.0 used to overwrite
+                // the correct REST day-change with a flat +0.00%. The backend now sends
+                // null when it has no previous close to compare against; this keeps the
+                // client honest even against an older backend that still sends 0.0
+                // alongside a moving price (a real 0.00 change with a price that is not
+                // the previous close is not a day-change we should trust).
+                if let liveChange = self.livePriceManager.livePriceChange, liveChange != 0 {
+                    data.priceChange = liveChange
+                }
+                if let livePct = self.livePriceManager.livePriceChangePercent, livePct != 0 {
+                    data.priceChangePercent = livePct
+                }
 
                 // Update last chart candle for intraday ranges
                 if self.chartSettings.selectedInterval.isIntraday,
@@ -1859,7 +1869,12 @@ class TickerDetailViewModel: ObservableObject {
         // A ZERO net flow is genuinely neutral — not "Bullish". `isPositive` is
         // `net >= 0`, so a flat/no-activity series was being asserted as bullish.
         func flowLine(_ label: String, _ s: SmartMoneyFlowSummary) -> String {
-            let tone = s.totalNetFlow == 0
+            // Tone from `verdictValue` — the number the badge actually PRINTS — not
+            // from `totalNetFlow`. For the Insider tab those differ by design: the bars
+            // are share-denominated while the verdict is dollar-denominated, so keying
+            // the tone off the share figure would tell Cay AI "Bullish" beside a printed
+            // net SELL in dollars.
+            let tone = s.verdictValue == 0
                 ? "Neutral"
                 : (s.isPositive ? "Bullish" : "Bearish")
             return "\(label) \(s.periodDescription) Net Flow: \(s.formattedNetFlow) (\(tone))"

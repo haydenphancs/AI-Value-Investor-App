@@ -33,10 +33,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.hydrate_whales import (
-    WhaleHydrator,
-    _congress_trade_identity,
-    _dedupe_congress_trades,
+from scripts.hydrate_whales import WhaleHydrator
+from app.services._whale_common import (
+    congress_trade_identity as _congress_trade_identity,
+    dedupe_congress_trades as _dedupe_congress_trades,
 )
 
 
@@ -178,7 +178,7 @@ def test_dedupe_tolerates_malformed_rows():
 def test_identity_is_shared_with_the_hash():
     """One definition of 'the same disclosure'. If these ever diverge, the aggregation
     and the idempotency hash disagree about what changed."""
-    from scripts.hydrate_whales import _CONGRESS_HASH_FIELDS
+    from app.services._whale_common import CONGRESS_TRADE_FIELDS as _CONGRESS_HASH_FIELDS
     t = _t("AAPL", "Purchase")
     assert _congress_trade_identity(t) == "|".join(
         str(t.get(k) or "") for k in _CONGRESS_HASH_FIELDS
@@ -193,3 +193,109 @@ def test_aggregation_actually_dedupes_not_just_the_helper():
     holdings, _ = h._aggregate_congressional(rows, "2026-08-21")
     single, _ = h._aggregate_congressional([_t("AAPL", "Purchase")], "2026-08-21")
     assert _by_ticker(holdings) == _by_ticker(single)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE GUARD: the same property, applied to BOTH implementations.
+#
+# The two aggregations are deliberately different — one is a flat accumulation, the
+# other a chronological walk reconstructing allocations — so their OUTPUTS cannot be
+# compared to each other. What can be compared is each one against itself:
+#
+#     f(rows_with_duplicates) == f(deduped_rows)
+#
+# That invariant survives their intended divergence, which is what makes it a durable
+# guard rather than a snapshot of today's behaviour. This is the fifth recurrence of
+# "two copies of whale logic disagreed in production"; the point of these tests is that
+# there is not a sixth.
+# ─────────────────────────────────────────────────────────────────────────────
+def _service():
+    """`_aggregate_congressional_trades` touches no instance state either."""
+    from app.services.whale_service import WhaleService
+    return object.__new__(WhaleService)
+
+
+def _dup_free_property(fn, rows, duplicated):
+    """fn(duplicated) must equal fn(rows) on holdings."""
+    a = fn(rows)
+    b = fn(duplicated)
+    ha = a[0] if isinstance(a, tuple) else a
+    hb = b[0] if isinstance(b, tuple) else b
+    return _by_ticker(ha), _by_ticker(hb)
+
+
+@pytest.mark.parametrize("which", ["hydrate", "service"])
+def test_both_paths_ignore_duplicate_disclosures(which):
+    rows = [
+        _t("AAPL", "Purchase", txn="2026-01-05"),
+        _t("MSFT", "Purchase", txn="2026-01-06", amount="$50,001 - $100,000"),
+        _t("NVDA", "Sale", txn="2026-02-02"),
+    ]
+    duplicated = rows + [dict(rows[0]), dict(rows[1]), dict(rows[1])]
+
+    if which == "hydrate":
+        fn = lambda r: _h()._aggregate_congressional(r, "2026-08-21")
+    else:
+        fn = lambda r: _service()._aggregate_congressional_trades(r, "2026-08-21")
+
+    clean, duped = _dup_free_property(fn, rows, duplicated)
+    assert clean == duped, (
+        f"{which} path changed its portfolio when the feed repeated a disclosure"
+    )
+
+
+@pytest.mark.parametrize("which", ["hydrate", "service"])
+def test_both_paths_survive_a_duplicated_sale_without_deleting_the_position(which):
+    """The Gottheimer/IFNNY shape, applied to whichever path is under test."""
+    rows = [
+        _t("IFNNY", "Purchase", txn="2026-03-01"),
+        _t("IFNNY", "Purchase", txn="2026-03-05"),
+        _t("IFNNY", "Sale", txn="2026-03-12"),
+    ]
+    duplicated = rows + [dict(rows[-1])]
+
+    if which == "hydrate":
+        fn = lambda r: _h()._aggregate_congressional(r, "2026-08-21")
+    else:
+        fn = lambda r: _service()._aggregate_congressional_trades(r, "2026-08-21")
+
+    clean, duped = _dup_free_property(fn, rows, duplicated)
+    assert "IFNNY" in clean, f"{which}: test setup no longer nets positive"
+    assert "IFNNY" in duped, f"{which}: the duplicated sale DELETED a real position"
+    assert clean == duped
+
+
+def test_both_writers_share_one_identity_function():
+    """If either re-implements 'the same disclosure' locally, they can disagree again."""
+    import app.services.whale_service as ws
+    import scripts.hydrate_whales as hw
+    from app.services import _whale_common as wc
+
+    assert hw.dedupe_congress_trades is wc.dedupe_congress_trades
+    assert ws.dedupe_congress_trades is wc.dedupe_congress_trades
+    assert hw.congressional_raw_hash is wc.congressional_raw_hash
+    assert ws.congressional_raw_hash is wc.congressional_raw_hash
+
+
+def test_both_writers_share_one_trade_summary():
+    """The same card rendered in two voices until this was collapsed."""
+    import app.services.whale_service as ws
+    import scripts.hydrate_whales as hw
+    from app.services import _whale_common as wc
+
+    assert hw._generate_trade_summary is wc.generate_trade_summary
+    assert ws.generate_trade_summary is wc.generate_trade_summary
+
+
+def test_hydration_path_can_emit_all_four_trade_types():
+    """`New`/`Closed` were unreachable here, which emptied the iOS filter tabs for the
+    entire congressional cohort and disabled the `new_positions >= 5` alert."""
+    rows = [
+        _t("AAPL", "Purchase", txn="2026-01-01"),
+        _t("AAPL", "Purchase", txn="2026-02-01"),
+        _t("MSFT", "Purchase", txn="2026-01-05"),
+        _t("MSFT", "Sale", txn="2026-03-01"),
+    ]
+    _, groups = _h()._aggregate_congressional(rows, "2026-08-21")
+    kinds = {tr["trade_type"] for g in groups for tr in g["trades"]}
+    assert {"New", "Increased", "Closed"} <= kinds, f"only got {kinds}"

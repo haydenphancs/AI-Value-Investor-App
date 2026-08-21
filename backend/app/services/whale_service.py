@@ -49,6 +49,11 @@ from app.services._whale_common import (
     RETURN_OK,
     RETURN_INSUFFICIENT,
     RETURN_UNAVAILABLE,
+    SPLIT_SUPPRESS,
+    generate_trade_summary,
+    restate_prev_shares_for_split,
+    dedupe_congress_trades,
+    congressional_raw_hash,
 )
 from app.services.entitlements import (
     FREE_TIER_WHALE_NAME,
@@ -253,31 +258,7 @@ RISK_PROFILE_LABELS: Dict[str, str] = {
     "very_aggressive": "High Risk",
 }
 
-# Congressional amount range → midpoint in dollars
-AMOUNT_RANGES: Dict[str, float] = {
-    "$1,001 - $15,000": 8_000,
-    "$15,001 - $50,000": 32_500,
-    "$50,001 - $100,000": 75_000,
-    "$100,001 - $250,000": 175_000,
-    "$250,001 - $500,000": 375_000,
-    "$500,001 - $1,000,000": 750_000,
-    "$1,000,001 - $5,000,000": 3_000_000,
-    "$5,000,001 - $25,000,000": 15_000_000,
-    "$25,000,001 - $50,000,000": 37_500_000,
-    "$50,000,001 - $100,000,000": 75_000_000,
-    "Over $50,000,000": 75_000_000,
-}
 
-# Congressional type → our action
-CONGRESSIONAL_TYPE_MAP: Dict[str, str] = {
-    "purchase": "BOUGHT",
-    "sale_full": "SOLD",
-    "sale_partial": "SOLD",
-    "sale (full)": "SOLD",
-    "sale (partial)": "SOLD",
-    "sale": "SOLD",
-    "exchange": "BOUGHT",
-}
 
 # Sentinel for "this stored number could not be coerced to a finite float".
 # Distinct from 0.0 so `_stat_disclosure` can tell "genuinely flat" from "unusable"
@@ -2022,9 +2003,12 @@ class WhaleService:
             holdings_data, primary_group, sector_data, is_congress=True
         )
 
-        raw_hash = hashlib.sha256(
-            json.dumps(raw_trades[:50], sort_keys=True, default=str).encode()
-        ).hexdigest()
+        # ONE hash, shared with the hydration path. This used to be the old
+        # `raw_trades[:50]` form while `hydrate_whales` had already moved to the
+        # sorted/deduped one — and both write the SAME `whale_filing_snapshots.raw_hash`
+        # column, so whenever this path wrote a snapshot the next sweep saw a mismatch
+        # and re-ran the full write path, silently re-arming the bug that was fixed.
+        raw_hash = congressional_raw_hash(raw_trades)
 
         snapshot = {
             "whale_id": whale_id,
@@ -2205,23 +2189,18 @@ class WhaleService:
             curr_shares = float(curr["shares"]) if curr else 0.0
             prev_shares = float(prev["shares"]) if prev else 0.0
 
-            # Split restatement (mirrors holders_service._compute_quarter_flow):
-            # a split inflates the RAW share-count delta. Restate the previous
-            # quarter onto the post-split basis so a held-through-split position
-            # doesn't fabricate a large BOUGHT/Increased trade.
-            ratio = split_ratios.get(ticker, 1.0)
-            if ratio and ratio != 1.0 and curr and prev and prev_shares > 0:
-                ratio_obs = curr_shares / prev_shares
-                if abs(ratio_obs - ratio) <= 0.15 * ratio:
-                    # Clean split signature → restate; residual is the real flow.
-                    prev_shares = prev_shares * ratio
-                elif ratio_obs >= (1.0 + ratio) / 2.0:
-                    # Split + large concurrent real flow, inseparable → suppress
-                    # rather than fabricate a wrong-sign trade ("no bar, not
-                    # garbage"). Keeps the position out of the trade list.
+            # Split restatement — ONE shared implementation (there were three, and
+            # they had drifted twice). `restate_prev_shares_for_split` carries the
+            # direction-aware midpoint this copy was missing: the old `>=` form was
+            # correct only for FORWARD splits, so on a reverse split an ordinary
+            # quarter was misclassified.
+            if curr and prev:
+                _restated = restate_prev_shares_for_split(
+                    prev_shares, curr_shares, split_ratios.get(ticker, 1.0)
+                )
+                if _restated is SPLIT_SUPPRESS:
                     continue
-                # else: count didn't jump toward the split (ratio_obs ≈ 1.0) →
-                # spinoff / ADR-ratio / already-adjusted; keep the raw diff.
+                prev_shares = _restated
 
             # Shared 13F formula — shares_change × implied_price. Keeps
             # Supabase whale_trades.amount aligned with what TickerDetailView's
@@ -2336,6 +2315,14 @@ class WhaleService:
         full_sale_types = {"sale_full", "sale (full)"}
 
         # ── Pass 1: normalize + sort by date ────────────────────────────
+        # Deduped FIRST. `house-latest` is paginated over a feed being written to and
+        # really does repeat disclosures (measured: Cisneros 1091 rows / 1032 distinct).
+        # Every row is summed into the running portfolio, so a repeat double-counts a
+        # purchase — Gottheimer's portfolio read $1,828,012 against a true $1,062,009,
+        # with MSFT counted exactly twice. Shares one identity with the hydration path
+        # so the two cannot disagree about what "the same disclosure" means.
+        raw_trades = dedupe_congress_trades(raw_trades)
+
         normalized: List[Dict] = []
         for t in raw_trades:
             symbol = (t.get("symbol") or "").upper().strip()
@@ -3003,16 +2990,14 @@ class WhaleService:
                 f"closed {closed_count} position{'s' if closed_count > 1 else ''}"
             )
 
-        if len(buys) > len(sells) * 2:
-            action_text = f"Heavy accumulation with {len(buys)} buys"
-        elif len(sells) > len(buys) * 2:
-            action_text = f"Significant reduction with {len(sells)} sells"
-        elif not sells and buys:
-            action_text = f"Pure buying activity with {len(buys)} positions"
-        elif not buys and sells:
-            action_text = f"Pure selling activity with {len(sells)} positions"
-        else:
-            action_text = "Portfolio rebalancing"
+        # Shared with the hydration path. The old order here tested the ratio branches
+        # FIRST, and with `sells == []` the test `len(buys) > 0` is satisfied by any
+        # single buy — so the "Pure buying/selling" arms below it were provably
+        # unreachable and a lone purchase was announced as "Heavy accumulation with 1
+        # buys": wrong in register AND ungrammatical. That was fixed on the hydration
+        # copy only, which is why the same card rendered in two different voices
+        # depending on which writer touched the row last.
+        action_text = generate_trade_summary(buys, sells, net_action)
 
         if parts:
             return f"{action_text} ({', '.join(parts)})"

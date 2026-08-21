@@ -42,9 +42,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.hydrate_whales import (
-    _CONGRESS_HASH_MAX,
-    _congressional_raw_hash,
+# The helpers now live in the SHARED module — asserting the import location is part
+# of the guard: a future local re-implementation in either writer fails here.
+from app.services._whale_common import (
+    CONGRESS_HASH_MAX as _CONGRESS_HASH_MAX,
+    congressional_raw_hash as _congressional_raw_hash,
 )
 
 
@@ -213,7 +215,7 @@ def _congress_processor_source() -> str:
 
 def test_processor_uses_the_stable_helper():
     body = _congress_processor_source()
-    assert "_congressional_raw_hash(raw_trades)" in body
+    assert "congressional_raw_hash(raw_trades)" in body
 
 
 def test_the_unsorted_first_fifty_formula_has_not_returned():

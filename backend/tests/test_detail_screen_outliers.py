@@ -1296,3 +1296,78 @@ def test_one_shared_compact_number_formatter():
     y = _func_body(earnings, "func formatYValue(_ value: Double) -> String")
     assert "CompactNumberFormat.percentString" in y
     assert "9_999" not in y, "the caption is still clamped while the plot domain is not"
+
+
+# ── 20. A schema DEFAULT must not launder a stale cached row ─────────
+#
+# Caught only by probing production after the deploy. `buyback_status` moved onto the
+# summary, but 335 of 339 rows in `signal_of_confidence_cache` were written before that
+# — and `SignalOfConfidenceSummarySchema.buyback_status` defaults to "Low", so every one
+# of them deserialized into a CONFIDENT "Low" that is indistinguishable from a real
+# measurement. That is the exact defect the move was meant to fix, re-served from cache
+# for a further 24h. A default is the wrong tool for a value that must be COMPUTED.
+
+
+def _soc_cache_payload(*, with_buyback_status: bool) -> dict:
+    summary = {
+        "total_yield": 2.99, "dividend_yield": 0.0,
+        "buyback_yield": 2.99, "share_count_change": -2.17,
+    }
+    if with_buyback_status:
+        summary["buyback_status"] = "High"
+    return {"symbol": "NFLX", "data_points": [], "summary": summary, "dividend_info": None}
+
+
+def test_a_cached_row_without_buyback_status_is_treated_as_stale():
+    """The guard: a pre-change row must be RECOMPUTED, not defaulted."""
+    from app.services.signal_of_confidence_service import SignalOfConfidenceService
+
+    svc = SignalOfConfidenceService.__new__(SignalOfConfidenceService)
+
+    class _Row:
+        def __init__(self, payload):
+            self.data = [{
+                "response_json": payload,
+                "cached_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+                "next_earnings_date": None,
+            }]
+
+    class _Tbl:
+        def __init__(self, payload): self._p = payload
+        def select(self, *a, **k): return self
+        def eq(self, *a, **k): return self
+        def limit(self, *a, **k): return self
+        def execute(self): return _Row(self._p)
+
+    class _SB:
+        def __init__(self, payload): self._p = payload
+        def table(self, *_a, **_k): return _Tbl(self._p)
+
+    svc.supabase = _SB(_soc_cache_payload(with_buyback_status=False))
+    assert svc._check_supabase_cache("NFLX") is None, (
+        "a pre-schema-change cached row was served, so its missing buyback_status "
+        "silently became the schema default 'Low'"
+    )
+
+    # Anti-vacuity control: a row that DOES carry the key must still be served, or the
+    # guard would simply disable the cache entirely and look like it works.
+    svc.supabase = _SB(_soc_cache_payload(with_buyback_status=True))
+    fresh = svc._check_supabase_cache("NFLX")
+    assert fresh is not None, "the guard rejected a valid, current cached row"
+    assert fresh.summary.buyback_status == "High"
+
+
+def test_the_schema_default_is_what_makes_the_stale_row_dangerous():
+    """Documents WHY the guard is needed: the default is silent and plausible."""
+    from app.schemas.signal_of_confidence import SignalOfConfidenceSummarySchema
+
+    # NFLX-shaped numbers with the key absent — exactly a pre-change cached row.
+    s = SignalOfConfidenceSummarySchema(
+        total_yield=2.99, dividend_yield=0.0,
+        buyback_yield=2.99, share_count_change=-2.17,
+    )
+    assert s.buyback_status == "Low"      # ...for a company buying back 2.99%/yr
+    # The computed answer for those same inputs:
+    from app.services.signal_of_confidence_service import SignalOfConfidenceService
+    svc = SignalOfConfidenceService.__new__(SignalOfConfidenceService)
+    assert svc._classify_buyback(2.99, -2.17) == "High"

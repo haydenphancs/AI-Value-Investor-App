@@ -280,6 +280,24 @@ class SignalOfConfidenceService:
                     return None
 
             json_data = entry["response_json"]
+
+            # SCHEMA DRIFT GUARD. `buyback_status` moved onto the summary so a
+            # non-dividend payer could carry a buyback verdict at all. A row cached
+            # BEFORE that change has no such key, and the Pydantic field's `"Low"`
+            # default then silently fills it in — reproducing the exact defect (a
+            # confident "Low" for the market's largest repurchasers) for a further 24h,
+            # with nothing to distinguish it from a real measurement.
+            #
+            # A default is the wrong tool for a value that must be COMPUTED, so detect
+            # the drift and recompute instead of serving a plausible-looking guess.
+            # Self-limiting: it stops mattering once every cached row is rewritten.
+            summary_json = (json_data or {}).get("summary") or {}
+            if "buyback_status" not in summary_json:
+                logger.info(
+                    "Supabase cache STALE (pre-buyback_status schema) for %s", ticker
+                )
+                return None
+
             return SignalOfConfidenceResponse(**json_data)
 
         except Exception as e:

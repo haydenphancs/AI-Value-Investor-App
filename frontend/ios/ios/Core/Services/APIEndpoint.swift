@@ -187,6 +187,10 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Indices
     case getIndexDetail(symbol: String, range: String, interval: String? = nil)
+    /// Light refresh slice. See `getETFQuote` — same reason, and here it also drops
+    /// `snapshots_data`, a deep required object graph of AI-written stories that a
+    /// 30-second refresh cannot change.
+    case getIndexQuote(symbol: String, range: String?, interval: String?)
     case getIndexNews(symbol: String, limit: Int)
     case enrichIndexNews(symbol: String, articleIds: [String])
 
@@ -206,6 +210,10 @@ enum APIEndpoint: Sendable {
     case getETFProfile(symbol: String)
     case getETFNews(symbol: String, limit: Int)
     case enrichETFNews(symbol: String, articleIds: [String])
+    /// Light refresh slice — price, market status, key stats, related, optional chart.
+    /// `range` is optional on purpose: the 30s loop asks for bars only on an intraday
+    /// chart, where omitting them cuts the payload to a fraction of the detail monolith.
+    case getETFQuote(symbol: String, range: String?, interval: String?)
 
     // MARK: - Commodities
     case getCommodityDetail(symbol: String, range: String, interval: String? = nil)
@@ -467,6 +475,8 @@ enum APIEndpoint: Sendable {
         // Indices
         case .getIndexDetail(let symbol, _, _):
             return "/api/v1/indices/\(symbol)"
+        case .getIndexQuote(let symbol, _, _):
+            return "/api/v1/indices/\(symbol)/quote"
         case .getIndexNews(let symbol, _):
             return "/api/v1/indices/\(symbol)/news"
         case .enrichIndexNews(let symbol, _):
@@ -475,6 +485,8 @@ enum APIEndpoint: Sendable {
         // ETFs
         case .getETFDetail(let symbol, _, _):
             return "/api/v1/etfs/\(symbol)"
+        case .getETFQuote(let symbol, _, _):
+            return "/api/v1/etfs/\(symbol)/quote"
         case .getETFDividends(let symbol):
             return "/api/v1/etfs/\(symbol)/dividends"
         case .getETFHoldingsRisk(let symbol):
@@ -759,7 +771,9 @@ enum APIEndpoint: Sendable {
             if let interval = interval { params["interval"] = interval }
             return params
 
-        case .getCommodityQuote(_, let range, let interval):
+        case .getCommodityQuote(_, let range, let interval),
+             .getETFQuote(_, let range, let interval),
+             .getIndexQuote(_, let range, let interval):
             var params: [String: String] = [:]
             if let range = range { params["range"] = range }
             if let interval = interval { params["interval"] = interval }
@@ -1001,7 +1015,7 @@ enum APIEndpoint: Sendable {
              .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed,
              .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail,
              .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getETFNews,
-             .enrichETFNews,
+             .enrichETFNews, .getETFQuote, .getIndexQuote,
              .getCommodityDetail, .getCommodityQuote, .getCommodityNews,
              .enrichCommodityNews:
             return .public

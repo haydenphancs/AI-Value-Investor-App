@@ -319,19 +319,26 @@ def _parse_historical(hist_raw) -> List[Dict]:
 def _extract_chart_data(prices: List[Dict], chart_range: str) -> List[Dict]:
     """Extract OHLCV data for the requested chart range.
 
-    Includes extra trading days before the display range so that
-    technical indicators (MACD ≈ 34, RSI ≈ 14) can warm up.
+    Includes extra TRADING DAYS before the display range so technical indicators can warm
+    up. This slices by bar count, not by date like the other four detail services, so it
+    uses `_WARMUP_DATA_POINTS` (bars) rather than `daily_range_days` (calendar days) --
+    the same window, counted in the unit this function actually works in.
+
+    The warm-up used to be 50 bars, sized for MACD (~34) and RSI (~14) only. MA(200) needs
+    200, so the overlay drew nothing until 200 bars into the visible window -- i.e. never,
+    on a 3M chart. 210 covers every indicator the client offers.
     """
-    _WARMUP_TRADING_DAYS = 50
+    from app.services.chart_helper import _WARMUP_DATA_POINTS
+
     range_days = {
         "1D": 2, "1W": 5,
-        "3M": 63 + _WARMUP_TRADING_DAYS,
-        "6M": 126 + _WARMUP_TRADING_DAYS,
-        "1Y": 252 + _WARMUP_TRADING_DAYS,
-        "5Y": 1260 + _WARMUP_TRADING_DAYS,
+        "3M": 63 + _WARMUP_DATA_POINTS,
+        "6M": 126 + _WARMUP_DATA_POINTS,
+        "1Y": 252 + _WARMUP_DATA_POINTS,
+        "5Y": 1260 + _WARMUP_DATA_POINTS,
         "ALL": 999999,
     }
-    days = range_days.get(chart_range, 63 + _WARMUP_TRADING_DAYS)
+    days = range_days.get(chart_range, 63 + _WARMUP_DATA_POINTS)
     relevant = prices[-days:] if len(prices) > days else prices
     result = []
     for p in relevant:

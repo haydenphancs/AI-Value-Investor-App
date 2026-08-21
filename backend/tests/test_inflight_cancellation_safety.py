@@ -49,6 +49,10 @@ _INFLIGHT_MODULES = [
     # Added 2026-08-21 with the commodity cache pass: N concurrent viewers of the same
     # cold ticker each ran their own 600-day fetch AND their own pandas indicator pass.
     "technical_analysis_service.py",
+    # Added with the ETF/index cache decomposition: neither had ANY dedup, so N concurrent
+    # viewers of a cold SPY each ran the whole ~10-call fan-out including the 1.1 MB history.
+    "etf_service.py",
+    "index_service.py",
     # The 2026-08-07 audit named only the six above. The anti-vacuity check at the bottom of
     # this file found sixteen more already using the same shared-future dedup, which is the
     # whole reason that check exists.

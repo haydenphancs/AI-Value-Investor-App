@@ -47,6 +47,8 @@ protocol StockRepositoryProtocol {
     func getETFDetail(symbol: String, range: String, interval: String?) async throws -> ETFDetailResponseDTO
     func getCommodityDetail(symbol: String, range: String, interval: String?) async throws -> CommodityDetailResponseDTO
     func getCommodityQuote(symbol: String, range: String?, interval: String?) async throws -> CommodityQuoteResponseDTO
+    func getETFQuote(symbol: String, range: String?, interval: String?) async throws -> ETFQuoteResponseDTO
+    func getIndexQuote(symbol: String, range: String?, interval: String?) async throws -> IndexQuoteResponse
 }
 
 // MARK: - Stock Repository
@@ -231,6 +233,48 @@ final class StockRepository: StockRepositoryProtocol {
         let response = try await apiClient.request(
             endpoint: .getCommodityQuote(symbol: symbol, range: range, interval: interval),
             responseType: CommodityQuoteResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    /// The light refresh slice for the ETF screen. `CacheTTL.chart` (25s) deliberately
+    /// sits UNDER the 30s poll interval, so a poll is never answered from cache. The ETF
+    /// detail's `CacheTTL.volatile` (120s) meant roughly three of every four "live" polls
+    /// were served from the client cache — the header only really moved every two minutes.
+    func getETFQuote(symbol: String, range: String?, interval: String?) async throws -> ETFQuoteResponseDTO {
+        let cacheKey = "etf_quote_\(symbol)_\(range ?? "none")_\(interval ?? "default")"
+
+        if let cached: ETFQuoteResponseDTO = getCached(cacheKey, maxAge: CacheTTL.chart) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getETFQuote(symbol: symbol, range: range, interval: interval),
+            responseType: ETFQuoteResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    // MARK: - Index Detail
+    //
+    // The index screen calls `APIClient` directly for its detail payload and so has no
+    // client-side cache at all — but the light slice routes through here, which is what
+    // lets `invalidate(symbol:)` reach it on pull-to-refresh.
+
+    func getIndexQuote(symbol: String, range: String?, interval: String?) async throws -> IndexQuoteResponse {
+        let cacheKey = "index_quote_\(symbol)_\(range ?? "none")_\(interval ?? "default")"
+
+        if let cached: IndexQuoteResponse = getCached(cacheKey, maxAge: CacheTTL.chart) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getIndexQuote(symbol: symbol, range: range, interval: interval),
+            responseType: IndexQuoteResponse.self
         )
 
         setCache(cacheKey, value: response)
@@ -2728,7 +2772,15 @@ final class MockStockRepository: StockRepositoryProtocol {
     func getCommodityQuote(symbol: String, range: String?, interval: String?) async throws -> CommodityQuoteResponseDTO {
         throw APIError.networkError(NSError(domain: "Mock", code: 0))
     }
-    
+
+    func getETFQuote(symbol: String, range: String?, interval: String?) async throws -> ETFQuoteResponseDTO {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getIndexQuote(symbol: String, range: String?, interval: String?) async throws -> IndexQuoteResponse {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
 
     func searchStocks(query: String, limit: Int) async throws -> [StockSearchResult] {
         [

@@ -84,6 +84,20 @@ class IndexDetailViewModel: ObservableObject {
     init(indexSymbol: String) {
         self.indexSymbol = indexSymbol
 
+        // Seed the interval from the range's own default BEFORE the sinks are wired.
+        //
+        // `selectedChartRange` defaults to 3M (daily) while `ChartSettings.selectedInterval`
+        // defaults to `.fiveMin`, and the range sink is `.dropFirst()`-ed so it never fires
+        // for the initial value. Every cold open therefore requested `?range=3M&interval=5min`
+        // — a pair the picker cannot produce (`ChartTimeRange.allowedIntervals` excludes it),
+        // so the backend silently fell back to `daily` and cached the response under a key no
+        // later request would ever reuse. It also made `selectedInterval.isIntraday` true on a
+        // daily chart, which un-gated the 30-second refresh timer.
+        //
+        // Assigning here fires nothing: both sinks are registered below and drop their first
+        // value at subscribe time.
+        chartSettings.selectedInterval = selectedChartRange.defaultInterval
+
         // Observe chart range changes and reload chart data
         $selectedChartRange
             .dropFirst()
@@ -336,10 +350,15 @@ class IndexDetailViewModel: ObservableObject {
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
 
-                guard self.chartSettings.selectedInterval.isIntraday,
-                      MarketHoursUtil.isMarketActive() else { continue }
+                guard MarketHoursUtil.isMarketActive() else { continue }
 
-                await self.loadChartData(range: self.selectedChartRange)
+                // The LIGHT slice, not the whole detail payload. Bars only when the chart
+                // is intraday: on a daily chart a 30-second refresh cannot move a candle.
+                // The level header refreshes either way — the old `isIntraday` guard froze
+                // it entirely on a daily chart.
+                await self.refreshLiveSlice(
+                    includeChart: self.chartSettings.selectedInterval.isIntraday
+                )
             }
         }
     }
@@ -512,6 +531,43 @@ class IndexDetailViewModel: ObservableObject {
                 loadFallbackData()
             }
             self.isLoading = false
+        }
+    }
+
+    /// Light refresh: merge the volatile slice into `indexData` IN PLACE.
+    ///
+    /// Replaces a `loadChartData` call that re-requested the entire detail payload —
+    /// including `snapshotsData`, a deep graph of AI-written valuation, sector and macro
+    /// stories — and then did `self.indexData = response.toDisplayModel()`, a wholesale
+    /// replacement that erased every WebSocket tick since the last refresh on a 30-second
+    /// sawtooth.
+    ///
+    /// The socket WINS over the REST snapshot: a tick is now, a snapshot is up to 45s old.
+    private func refreshLiveSlice(includeChart: Bool) async {
+        chartRequestToken += 1
+        let token = chartRequestToken
+        let range = selectedChartRange
+        do {
+            let light = try await StockRepository.shared.getIndexQuote(
+                symbol: indexSymbol,
+                range: includeChart ? range.rawValue : nil,
+                interval: includeChart ? chartSettings.selectedInterval.rawValue : nil
+            )
+            // Drop a stale response so rapid range switching can't clobber a newer range.
+            guard token == self.chartRequestToken, let current = self.indexData else { return }
+
+            self.indexData = light.merged(
+                into: current,
+                livePrice: self.livePriceManager.livePrice,
+                liveChange: self.livePriceManager.livePriceChange,
+                liveChangePercent: self.livePriceManager.livePriceChangePercent,
+                includeChart: includeChart
+            )
+            if includeChart, !light.chartData.isEmpty {
+                self.chartDataVersion += 1
+            }
+        } catch {
+            print("⚠️ [IndexDetailVM] Live slice refresh failed: \(error)")
         }
     }
 

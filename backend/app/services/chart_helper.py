@@ -179,18 +179,51 @@ ALL_INTERVALS = INTRADAY_INTERVALS | DAILY_INTERVALS | AGGREGATED_INTERVALS
 # 210 gives comfortable headroom for MA200 on the main chart overlay.
 _WARMUP_DATA_POINTS = 210
 
+# The same window expressed in calendar days, for the services that slice a daily history
+# by DATE rather than by bar count. ~210 trading days is ~320 calendar days once weekends
+# and holidays are counted. Keep the two in step: they describe one window.
+_WARMUP_CALENDAR_DAYS = 320
+
 
 def _warmup_calendar_days(interval: str) -> int:
     """Calendar days of extra history to fetch for indicator warm-up."""
     if interval in INTRADAY_INTERVALS:
         return 7   # a few extra trading days of intraday bars
     if interval in DAILY_INTERVALS:
-        return 320  # ~210 trading days for MA200
+        return _WARMUP_CALENDAR_DAYS
     if interval == "weekly":
         return 7 * _WARMUP_DATA_POINTS + 14  # ~210 weeks
     if interval in ("monthly", "quarterly"):
         return 30 * _WARMUP_DATA_POINTS + 30  # ~210 months
-    return 320
+    return _WARMUP_CALENDAR_DAYS
+
+
+def daily_range_days(range_code: str) -> int:
+    """Calendar days of history one daily-interval chart range needs: the visible window
+    PLUS the MA(200) warm-up.
+
+    `TickerChartView.warmupCount` finds the first bar at or after the visible start and
+    draws from there, feeding everything earlier to the indicator pass. So when the backend
+    sends no leading bars, `warmupCount` is 0 and MA(200) is blank across the whole chart.
+
+    ONE definition for all the detail services. It used to be four separate copies of a
+    literal map and only index_service's copy carried the warm-up, so the ETF, crypto and
+    commodity daily charts shipped with no MA(200) at all.
+
+    1D/1W get a small weekend/holiday pad rather than the full 320: they resolve to an
+    intraday interval on every service, so this branch is only reached when a caller has
+    explicitly asked for daily bars over a very short window.
+    """
+    return {
+        "1D": 2 + 7,
+        "1W": 7 + 14,
+        "3M": 90 + _WARMUP_CALENDAR_DAYS,
+        "6M": 180 + _WARMUP_CALENDAR_DAYS,
+        "1Y": 365 + _WARMUP_CALENDAR_DAYS,
+        "5Y": 365 * 5 + _WARMUP_CALENDAR_DAYS,
+        "ALL": 99999,
+    }.get(range_code, 90 + _WARMUP_CALENDAR_DAYS)
+
 
 # Default interval for each range when not explicitly specified
 DEFAULT_INTERVALS = {
@@ -245,6 +278,34 @@ def compute_date_range(range_code: str) -> Tuple[Optional[str], str]:
     delta = deltas.get(range_code, timedelta(days=90))
     from_date = (today - delta).isoformat()
     return from_date, to_date
+
+
+def window_by_range(
+    bars: List[Dict], range_code: str, resolved_interval: str
+) -> List[Dict]:
+    """Trim locally-aggregated bars to one range, KEEPING the indicator warm-up.
+
+    Aggregated ranges (5Y weekly, ALL monthly) used to come from `fetch_chart_data`,
+    which extends `from_date` by `_warmup_calendar_days(interval)` -- 1,484 days for
+    weekly. When commodity_service began deriving them from a shared daily history it
+    windowed with `compute_date_range` alone, which dropped ~210 leading weekly bars and
+    left MA(200) blank across the entire 5Y chart. That regression is the reason this
+    function exists instead of a bare list comprehension at each call site.
+
+    ALL is handled by the caller: it means the whole series, so there is nothing to trim.
+    """
+    from_date, _to = compute_date_range(range_code)
+    # `from_date` is Optional -- None means "no lower bound", and comparing a str against
+    # None raises. Serve the full series rather than trimming it to nothing.
+    if not from_date:
+        return bars
+    try:
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return bars
+    warmup = _warmup_calendar_days(resolved_interval)
+    cutoff = (from_dt - timedelta(days=warmup)).isoformat()
+    return [b for b in bars if (b.get("date") or "") >= cutoff]
 
 
 async def _fetch_all_daily(fmp: FMPClient, symbol: str) -> List[Dict]:

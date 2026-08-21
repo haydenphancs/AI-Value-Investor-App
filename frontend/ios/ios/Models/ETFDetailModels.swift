@@ -185,10 +185,13 @@ struct ETFDetailData: Identifiable {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
-    let marketStatus: MarketStatus
+    // `var` on everything the 30-second light slice merges in place. The loop used to
+    // replace this whole struct, which erased every WebSocket tick since the last
+    // refresh; it now writes only the fields the slice actually carries.
+    var marketStatus: MarketStatus
     var chartPricePoints: [StockPricePoint]
-    let keyStatistics: [KeyStatistic]
-    let keyStatisticsGroups: [KeyStatisticsGroup]
+    var keyStatistics: [KeyStatistic]
+    var keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let identityRating: ETFIdentityRating
 
@@ -199,7 +202,7 @@ struct ETFDetailData: Identifiable {
     let netYield: ETFNetYield
     let holdingsRisk: ETFHoldingsRisk
     let etfProfile: ETFProfile
-    let relatedETFs: [RelatedTicker]
+    var relatedETFs: [RelatedTicker]
     let benchmarkSummary: PerformanceBenchmarkSummary?
 
     var isPositive: Bool {

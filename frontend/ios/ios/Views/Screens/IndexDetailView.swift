@@ -113,6 +113,19 @@ struct IndexDetailView: View {
                                 previousClose: indexData.previousClose
                             )
                             .padding(.top, AppSpacing.lg)
+                        } else if let errorMessage = viewModel.errorMessage {
+                            // The ViewModel has been writing this message all along and
+                            // nothing rendered it: on failure the screen fell through to
+                            // a skeleton that never resolved, so the user sat on a
+                            // permanent shimmer with no error and no retry. The ETF screen
+                            // got this fix; this one did not — which matters more here,
+                            // because `snapshots_data` is a deep REQUIRED object graph and
+                            // any drift in it fails the whole decode.
+                            DetailLoadFailureCard(
+                                message: errorMessage,
+                                isRetrying: viewModel.isLoading,
+                                onRetry: { viewModel.loadIndexData() }
+                            )
                         } else {
                             DetailHeaderChartSkeleton()
                                 .padding(.top, AppSpacing.sm)

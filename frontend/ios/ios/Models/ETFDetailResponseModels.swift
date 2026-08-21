@@ -39,6 +39,41 @@ private enum ETFResponseFormatters {
     }
 }
 
+// MARK: - Light Refresh Slice
+
+/// `GET /api/v1/etfs/{symbol}/quote` — the payload the 30-second loop and the range picker
+/// actually need.
+///
+/// Every field name and type matches `ETFDetailResponseDTO`, so this reuses the same nested
+/// DTOs. What it drops is everything a 30-second refresh cannot change: performance
+/// periods, benchmark, profile, identity rating, strategy, net yield, holdings and news.
+///
+/// The loop used to call `getETFDetail` and then assign the WHOLE view model, which erased
+/// every WebSocket tick that had landed since the last refresh — a 30-second price sawtooth.
+struct ETFQuoteResponseDTO: Decodable {
+    let symbol: String
+    let currentPrice: Double
+    let priceChange: Double
+    let priceChangePercent: Double
+    let marketStatus: MarketStatusDTO
+    let chartData: [StockOverviewPricePointDTO]
+    let keyStatistics: [KeyStatisticItemDTO]
+    let keyStatisticsGroups: [KeyStatisticsGroupDTO]
+    let relatedEtfs: [RelatedTickerDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case currentPrice = "current_price"
+        case priceChange = "price_change"
+        case priceChangePercent = "price_change_percent"
+        case marketStatus = "market_status"
+        case chartData = "chart_data"
+        case keyStatistics = "key_statistics"
+        case keyStatisticsGroups = "key_statistics_groups"
+        case relatedEtfs = "related_etfs"
+    }
+}
+
 // MARK: - Top-Level Response
 
 struct ETFDetailResponseDTO: Decodable {
@@ -367,9 +402,60 @@ extension ETFProfileDTO {
 // MARK:   DTO → Display Model Mapping
 // MARK: - ──────────────────────────────────────────────
 
-extension ETFDetailResponseDTO {
+// MARK: - Light Slice → Display Merge
 
-    /// Convert the API response DTO to the display model used by the view.
+extension ETFQuoteResponseDTO {
+    /// Merge the volatile slice into an existing `ETFDetailData` IN PLACE.
+    ///
+    /// Only the fields this slice actually carries are written. The close-cadence sections
+    /// — performance periods, benchmark, profile, identity rating, strategy, net yield,
+    /// holdings — are left exactly as they were, because they are range-independent and
+    /// cannot change between two 30-second refreshes.
+    ///
+    /// `livePrice` WINS over the REST snapshot when the socket has ticked: a tick is now, a
+    /// snapshot is up to 45 seconds old. Falling back to REST keeps the header alive for
+    /// symbols whose feed never ticks, which is the reason the poll exists at all.
+    func merged(
+        into data: ETFDetailData,
+        livePrice: Double?,
+        liveChange: Double?,
+        liveChangePercent: Double?,
+        includeChart: Bool
+    ) -> ETFDetailData {
+        var out = data
+        out.currentPrice = livePrice ?? currentPrice
+        out.priceChange = liveChange ?? priceChange
+        out.priceChangePercent = liveChangePercent ?? priceChangePercent
+        out.marketStatus = marketStatus.resolvedMarketStatus
+        out.keyStatistics = keyStatistics.map {
+            KeyStatistic(label: $0.label, value: $0.value,
+                         isHighlighted: $0.isHighlighted, colorState: $0.colorState)
+        }
+        out.keyStatisticsGroups = keyStatisticsGroups.map { group in
+            KeyStatisticsGroup(statistics: group.statistics.map {
+                KeyStatistic(label: $0.label, value: $0.value,
+                             isHighlighted: $0.isHighlighted, colorState: $0.colorState)
+            })
+        }
+        // Keep the previous list when the refresh returns none — a cache miss on the
+        // related quotes must not blank a populated "Related ETFs" row.
+        if !relatedEtfs.isEmpty {
+            out.relatedETFs = relatedEtfs.map {
+                RelatedTicker(symbol: $0.symbol, name: $0.name,
+                              price: $0.price, changePercent: $0.changePercent)
+            }
+        }
+        if includeChart, !chartData.isEmpty {
+            out.chartPricePoints = chartData.map {
+                StockPricePoint(date: $0.date ?? "", close: $0.close,
+                                open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
+            }
+        }
+        return out
+    }
+}
+
+extension ETFDetailResponseDTO {
     func toDisplayModel() -> ETFDetailData {
         // Map market status
         let mktStatus: MarketStatus

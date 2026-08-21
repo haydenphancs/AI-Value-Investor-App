@@ -26,6 +26,35 @@ private enum IndexResponseFormatters {
     }
 }
 
+// MARK: - Light Refresh Slice
+
+/// `GET /api/v1/indices/{symbol}/quote` — the payload the 30-second loop and the range
+/// picker actually need.
+///
+/// Every field name and type matches `IndexDetailResponse`, so this reuses the same nested
+/// DTOs. What it drops is everything a 30-second refresh cannot change — and on this screen
+/// that includes `snapshots_data`, a deep required graph of AI-written valuation, sector
+/// and macro stories that made up most of the payload.
+struct IndexQuoteResponse: Decodable {
+    let symbol: String
+    let currentPrice: Double
+    let priceChange: Double
+    let priceChangePercent: Double
+    let marketStatus: MarketStatusDTO
+    let chartData: [StockOverviewPricePointDTO]
+    let keyStatisticsGroups: [IndexKeyStatisticsGroupDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case currentPrice = "current_price"
+        case priceChange = "price_change"
+        case priceChangePercent = "price_change_percent"
+        case marketStatus = "market_status"
+        case chartData = "chart_data"
+        case keyStatisticsGroups = "key_statistics_groups"
+    }
+}
+
 // MARK: - Top-Level Response
 
 struct IndexDetailResponse: Decodable {
@@ -258,6 +287,45 @@ struct IndexNewsArticleDTO: Decodable {
 // MARK: - ──────────────────────────────────────────────
 // MARK:   DTO → Display Model Mapping
 // MARK: - ──────────────────────────────────────────────
+
+// MARK: - Light Slice → Display Merge
+
+extension IndexQuoteResponse {
+    /// Merge the volatile slice into an existing `IndexDetailData` IN PLACE.
+    ///
+    /// Only the fields this slice carries are written; `snapshotsData`, `indexProfile`,
+    /// `performancePeriods` and `benchmarkSummary` are left untouched because a 30-second
+    /// refresh cannot change them.
+    ///
+    /// `livePrice` WINS over the REST snapshot when the socket has ticked — a tick is now,
+    /// a snapshot is up to 45 seconds old. See `ETFQuoteResponseDTO.merged`.
+    func merged(
+        into data: IndexDetailData,
+        livePrice: Double?,
+        liveChange: Double?,
+        liveChangePercent: Double?,
+        includeChart: Bool
+    ) -> IndexDetailData {
+        var out = data
+        out.currentPrice = livePrice ?? currentPrice
+        out.priceChange = liveChange ?? priceChange
+        out.priceChangePercent = liveChangePercent ?? priceChangePercent
+        out.marketStatus = marketStatus.resolvedMarketStatus
+        out.keyStatisticsGroups = keyStatisticsGroups.map { group in
+            KeyStatisticsGroup(statistics: group.statistics.map {
+                KeyStatistic(label: $0.label, value: $0.value,
+                             isHighlighted: $0.isHighlighted, colorState: $0.colorState)
+            })
+        }
+        if includeChart, !chartData.isEmpty {
+            out.chartPricePoints = chartData.map {
+                StockPricePoint(date: $0.date ?? "", close: $0.close,
+                                open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
+            }
+        }
+        return out
+    }
+}
 
 extension IndexDetailResponse {
 

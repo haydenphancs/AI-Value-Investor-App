@@ -303,9 +303,10 @@ struct IndexDetailData: Identifiable {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
-    let marketStatus: MarketStatus
+    // `var` on everything the 30-second light slice merges in place — see ETFDetailData.
+    var marketStatus: MarketStatus
     var chartPricePoints: [StockPricePoint]
-    let keyStatisticsGroups: [KeyStatisticsGroup]
+    var keyStatisticsGroups: [KeyStatisticsGroup]
     let performancePeriods: [PerformancePeriod]
     let snapshotsData: IndexSnapshotsData
     let indexProfile: IndexProfile

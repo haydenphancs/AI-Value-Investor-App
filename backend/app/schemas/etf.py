@@ -156,6 +156,31 @@ class ETFNewsArticleResponse(BaseModel):
 # ── Top-level response ───────────────────────────────────────────
 
 
+class ETFQuoteResponse(BaseModel):
+    """Light refresh slice for the iOS 30-second loop and the range picker.
+
+    Every field name and type is identical to the same-named field on `ETFDetailResponse`,
+    so the client decodes them with DTOs it already has.
+
+    Deliberately EXCLUDES the close-cadence sections a 30-second refresh cannot change —
+    `performance_periods`, `benchmark_summary`, `etf_profile`, `identity_rating`,
+    `strategy`, `net_yield`, `holdings_risk` — and `news_articles`, which the client reads
+    from `GET /etfs/{symbol}/news` and never took from this payload anyway. The 30s loop
+    and every range tap used to re-request the whole ~10 KB monolith to move a price.
+    """
+
+    symbol: str
+    current_price: float
+    price_change: float
+    price_change_percent: float
+    market_status: MarketStatusResponse
+    # Empty unless `range` was supplied — the loop only needs bars on an intraday chart.
+    chart_data: List[Dict[str, Any]] = []
+    key_statistics: List[KeyStatisticItem] = []
+    key_statistics_groups: List[KeyStatisticsGroupResponse] = []
+    related_etfs: List[RelatedTickerResponse] = []
+
+
 class ETFDetailResponse(BaseModel):
     symbol: str
     name: str

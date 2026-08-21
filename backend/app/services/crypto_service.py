@@ -1158,15 +1158,15 @@ class CryptoService:
         if not historical:
             return []
 
-        today = datetime.now(tz=timezone.utc).date()
-        range_days = {
-            "1D": 2, "1W": 7, "3M": 90, "6M": 180,
-            "1Y": 365, "5Y": 365 * 5, "ALL": 99999,
-        }
-        days = range_days.get(chart_range, 90)
-        cutoff = (today - timedelta(days=days)).isoformat()
+        from app.services.chart_helper import _finite_or_none, daily_range_days
 
-        from app.services.chart_helper import _finite_or_none
+        # The visible window PLUS the MA(200) warm-up, from the one shared definition.
+        # This service used to carry its own copy of the range map with NO warm-up in it,
+        # so the client's `TickerChartView.warmupCount` resolved to 0 and the moving
+        # average never drew on a daily chart. index_service and stock_overview_service
+        # always had the warm-up; these three never did.
+        today = datetime.now(tz=timezone.utc).date()
+        cutoff = (today - timedelta(days=daily_range_days(chart_range))).isoformat()
 
         result = []
         for p in historical:

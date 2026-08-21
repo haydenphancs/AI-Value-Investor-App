@@ -37,6 +37,8 @@ from app.schemas.tracking import (
 from app.services._insider_common import classify_for_alerts
 from app.services._analyst_common import classify_for_alerts as classify_analyst_for_alerts
 from app.services._whale_common import (
+    # Was a character-for-character clone below; the roll-up rule lives in ONE place.
+    format_amount_short as _format_amount,
     parse_congress_amount_bounds,
     sum_amount_bounds,
     format_amount_range,
@@ -1194,20 +1196,6 @@ class TrackingService:
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
-def _format_amount(value: float) -> str:
-    """Format a dollar amount as $X.XB / $X.XM / $XK.
-
-    Rolls a value up to the next unit when rounding would otherwise render a
-    four-digit mantissa in the lower unit — e.g. 999_600 → "$1.0M" (not
-    "$1000K"), 999_960_000 → "$1.00B" (not "$1000.0M")."""
-    amt = abs(value)
-    if amt >= 1_000_000_000 or round(amt / 1_000_000, 1) >= 1000:
-        return f"${amt / 1_000_000_000:.2f}B"
-    if amt >= 1_000_000 or round(amt / 1_000, 0) >= 1000:
-        return f"${amt / 1_000_000:.1f}M"
-    if amt >= 1_000:
-        return f"${amt / 1_000:.0f}K"
-    return f"${amt:.0f}"
 
 
 def _format_amount_or_range(

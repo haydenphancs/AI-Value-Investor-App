@@ -17,6 +17,8 @@ different captions ("13F Portfolio CAGR" vs "13F Portfolio Avg.") for the same
 number, with the hydration copy being the one that actually runs in production.
 """
 
+import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -97,6 +99,93 @@ def resolve_congress_action(raw_type) -> Optional[str]:
     if "sale" in key or key.startswith("sell"):
         return "SOLD"
     return None
+
+
+# ── Congressional duplicate handling ────────────────────────────────
+#
+# `house-latest` / `senate-latest` return a GLOBAL feed of every member (the by-name
+# path pulls 7500 rows) which the client then filters by name. It is paginated 30 pages
+# at a time from a feed that is being WRITTEN TO, and it genuinely returns the same
+# disclosure more than once. Measured 2026-08-21: Gilbert Cisneros 1091 rows / 1032
+# distinct, Josh Gottheimer 138 / 136, Nancy Pelosi 21 / 21.
+#
+# ONE definition of "the same disclosure", shared by the idempotency hash and by BOTH
+# aggregations, so they can never disagree about whether a row is a repeat.
+
+# Content fields only. `link` is excluded deliberately: it is a PDF URL the Clerk can
+# re-issue, and it says nothing about what was traded.
+CONGRESS_TRADE_FIELDS: Tuple[str, ...] = (
+    "transactionDate", "disclosureDate", "symbol", "type",
+    "amount", "owner", "assetDescription",
+)
+
+# The hash covers the N most RECENT disclosures, chosen deterministically by date —
+# never the first N as the upstream feed happened to order them.
+CONGRESS_HASH_MAX = 50
+
+
+def congress_trade_identity(trade: Dict[str, Any]) -> str:
+    """What makes two congressional disclosures THE SAME filing."""
+    return "|".join(str(trade.get(k) or "") for k in CONGRESS_TRADE_FIELDS)
+
+
+def dedupe_congress_trades(raw_trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop byte-identical repeats, preserving first-seen order.
+
+    ⚠️ NOT cosmetic. Counting a repeat twice corrupts the portfolio, and not only by
+    inflating it. Both aggregations sum every row into a per-symbol running value and
+    then drop non-positive positions, so a SALE disclosed twice can drive a real
+    position to zero and DELETE it. Measured on Josh Gottheimer: one duplicated IFNNY
+    sale cancelled a genuine $8,000 holding and the ticker vanished — 25 positions
+    served where 26 were real. On the serve path the same repeats inflated his whole
+    portfolio to $1,828,012 against a true $1,062,009, with MSFT counted exactly twice.
+    """
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for t in raw_trades:
+        if not isinstance(t, dict):
+            continue
+        key = congress_trade_identity(t)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
+def congressional_raw_hash(raw_trades: List[Dict[str, Any]]) -> str:
+    """Stable idempotency hash for one member's disclosures.
+
+    ⚠️ Why this is not `sha256(json.dumps(raw_trades[:50], sort_keys=True))`, which is
+    what both callers used to do:
+
+    1. `sort_keys=True` sorts keys *inside* each dict — it does NOT order the LIST. The
+       name is a trap. Any reshuffle of the feed changed the hash.
+    2. `[:50]` took the first 50 *as the feed ordered them*, so a new disclosure by ANY
+       OTHER member shifted the window and changed this member's hash.
+
+    Measured 2026-08-21: the five House members re-ran the full `_persist` write path on
+    every sweep (01:46, 02:00 and 02:15 the same night, 7.6-14.8s each) while every
+    Senate member correctly skipped — the House feed simply churns faster. Ted Cruz's
+    stored hash was byte-identical across two months; no House member's ever matched a
+    fresh fetch.
+
+    The fix is fourfold: identities from content fields only, DEDUPED (a shifting
+    duplicate count is the same class of false change), SORTED so order cannot matter,
+    and the newest `CONGRESS_HASH_MAX` taken *after* sorting so an old trade ageing out
+    of the shared fetch window is not a change either. Sorting is lexical on a string
+    that starts with `transactionDate` (ISO `YYYY-MM-DD`), so it is chronological and
+    `[-N:]` is the newest N.
+
+    Members with fewer than `CONGRESS_HASH_MAX` filings are fully covered, so for them
+    an ageing-out IS a change — a documented trade-off, not an oversight.
+    """
+    ids = sorted({
+        congress_trade_identity(t) for t in raw_trades if isinstance(t, dict)
+    })
+    return hashlib.sha256(
+        json.dumps(ids[-CONGRESS_HASH_MAX:]).encode()
+    ).hexdigest()
 
 
 def parse_congress_amount_dollars(amount_str: str) -> float:
@@ -233,6 +322,79 @@ def format_amount_range(low: float, high: Optional[float]) -> str:
 # ── 13F Institutional (shares × implied price) ─────────────────────
 
 
+# Sentinel: the split and the real flow cannot be separated, so emit NOTHING.
+# Distinct from "no restatement needed" (which returns prev_shares unchanged).
+SPLIT_SUPPRESS = object()
+
+
+def restate_prev_shares_for_split(
+    prev_shares: float, curr_shares: float, split_ratio: float
+):
+    """Put the previous quarter's share count on the current basis, or suppress.
+
+    Returns the restated ``prev_shares``, ``prev_shares`` unchanged when the ratio does
+    not apply, or :data:`SPLIT_SUPPRESS` when split and real flow are inseparable.
+
+    ONE implementation, because there were THREE and they had already drifted twice.
+    ``holders_service._compute_quarter_flow`` is the most-evolved of them and is the
+    behaviour encoded here.
+
+    ``ratio_obs = curr_shares / prev_shares`` mixes the split with real trading. The
+    classifier compares it against two hypotheses — H0 "the feed is already split
+    adjusted" (predicts ``ratio_obs ~ 1.0``) and H1 "the feed is raw" (predicts
+    ``ratio_obs ~ ratio``) — and asks which is nearer.
+
+    ⚠️ **The midpoint test is direction-dependent.** For a forward split the count
+    INFLATES so H1 sits above H0 and the test is ``>=``. For a REVERSE split (1:10 →
+    ratio 0.1) the count SHRINKS, H1 sits BELOW H0, and the test must flip to ``<=``.
+    Both whale paths carried the ``>=`` form unconditionally, so on any reverse-split
+    quarter an ordinary ``ratio_obs ~ 1.0`` fell into the ambiguous branch — which in
+    `hydrate_whales` restated and **fabricated a large BOUGHT out of nothing**, the exact
+    failure this codebase has already shipped once.
+
+    ⚠️ **Ambiguity means SUPPRESS, never restate.** `calc_13f_trade_dollars` turns a bad
+    `prev_shares` into a WRONG-SIGN trade, not merely a wrong magnitude — a holder who
+    bought reads as a seller. A missing bar is recoverable; a fabricated multi-million
+    dollar BOUGHT that feeds an alert is not. "No bar, not garbage."
+    """
+    if not split_ratio or split_ratio == 1.0:
+        return prev_shares
+    if prev_shares <= 0 or curr_shares <= 0:
+        return prev_shares
+
+    ratio_obs = curr_shares / prev_shares
+
+    # Clean split signature — the residual is the real flow.
+    if abs(ratio_obs - split_ratio) <= 0.15 * split_ratio:
+        return prev_shares * split_ratio
+
+    midpoint = (1.0 + split_ratio) / 2.0
+    jumped_toward_split = (
+        ratio_obs >= midpoint if split_ratio > 1.0 else ratio_obs <= midpoint
+    )
+    if jumped_toward_split:
+        return SPLIT_SUPPRESS
+
+    # The count did NOT move toward the split: spinoff / ADR-ratio change / a count
+    # FMP's /splits mislabels. Keep the raw diff.
+    return prev_shares
+
+
+def is_implausible_share_flow(shares_change: float, curr_shares: float) -> bool:
+    """Magnitude backstop, ported from ``holders_service._compute_quarter_flow``.
+
+    A quarterly net change cannot plausibly exceed ~half the shares HELD. Anything at or
+    above that is a corporate action or a data artifact, not flow. This catches a bad
+    restatement regardless of which branch produced it — a backstop that does not depend
+    on classifying the split correctly in the first place.
+    """
+    if curr_shares <= 0:
+        return False
+    if not math.isfinite(shares_change) or not math.isfinite(curr_shares):
+        return True
+    return abs(shares_change) >= 0.5 * curr_shares
+
+
 def calc_13f_trade_dollars(
     curr_shares: float,
     curr_value: float,
@@ -274,6 +436,35 @@ def calc_13f_trade_dollars(
     action = "BOUGHT" if shares_change > 0 else "SOLD"
     return (action, amount)
 
+
+def generate_trade_summary(
+    buys: List[Dict], sells: List[Dict], net_action: str
+) -> str:
+    """One-line trade group summary. Rendered verbatim under the trade-group card.
+
+    ⚠️ Order matters, and the old order made two branches unreachable: with
+    ``sells == []`` the first test is ``len(buys) > 0``, which any single buy satisfies,
+    so "Pure buying activity" could never be reached and a lone purchase was announced
+    as "Heavy accumulation with 1 buys" — wrong in register AND ungrammatical. The
+    one-sided cases are therefore checked FIRST, and the ratio tests now require enough
+    trades for "heavy" to mean something.
+    """
+    n_buys, n_sells = len(buys), len(sells)
+
+    if n_buys and not n_sells:
+        return f"Pure buying activity with {n_buys} {positions_word(n_buys)}"
+    if n_sells and not n_buys:
+        return f"Pure selling activity with {n_sells} {positions_word(n_sells)}"
+    if n_buys >= 3 and n_buys > n_sells * 2:
+        return f"Heavy accumulation with {n_buys} buys"
+    if n_sells >= 3 and n_sells > n_buys * 2:
+        return f"Significant reduction with {n_sells} sells"
+    return "Portfolio rebalancing"
+
+
+def positions_word(n: int) -> str:
+    """"position" / "positions" — a count of 1 must not read "1 positions"."""
+    return "position" if n == 1 else "positions"
 
 # ── 13F annual return (CAGR) ─────────────────────────────────────────
 #

@@ -54,6 +54,22 @@ from app.services.whale_service import (  # noqa: E402
     # Split detection is IMPORTED, never re-implemented. A second copy of this logic
     # is what let the two 13F diff paths drift apart in the first place.
     _quarter_end_date, _split_ratio_in_window,
+    # Byte-identical clones lived here; `_find_previous_quarter` sits on the
+    # quarter-selection path for BOTH 13F writers, and they upsert the same
+    # `whale_trade_groups` row — so a one-sided fix would have made them pick
+    # DIFFERENT quarters for one whale and flip-flop the profile.
+    _find_previous_quarter, _noop_list,
+    # The SIGNED formatter, imported not re-implemented. The local copy here had no
+    # unit roll-up (so $999,999,999 rendered "+$1000.0M" while the very same figure
+    # rendered "+$1.00B" one screen away, via the service) and derived its sign from
+    # `action == "BOUGHT"`, which stamps a MINUS on any value that is not exactly that
+    # string. Both defects were already fixed on the service copy.
+    _format_amount,
+    # `_finite_float`, NOT bare `float()`: `float("NaN")` SUCCEEDS, NaN is truthy so
+    # `or 0` does not catch it, and `int(float("nan"))` raises ValueError — which
+    # aborts the whole whale's hydration and, because `raw_hash` never advances,
+    # repeats on every run until FMP fixes the row.
+    _finite_float,
 )
 from app.services.whale_service import WhaleService as _WhaleService  # noqa: E402
 
@@ -61,6 +77,14 @@ from app.services.whale_service import WhaleService as _WhaleService  # noqa: E4
 # name so the call sites below read the same as the service's.
 _suspicious_split_tickers = _WhaleService._suspicious_split_tickers
 from app.services._whale_common import (  # noqa: E402
+    SPLIT_SUPPRESS,
+    restate_prev_shares_for_split,
+    is_implausible_share_flow,
+    congress_trade_identity,
+    generate_trade_summary as _generate_trade_summary,
+    positions_word as _positions,
+    dedupe_congress_trades,
+    congressional_raw_hash,
     parse_congress_amount_dollars,
     parse_congress_amount_bounds,
     sum_amount_bounds,
@@ -93,114 +117,11 @@ _QUARTER_PERIOD_RE = re.compile(r"^\d{4}-Q[1-4]$")
 # otherwise fan out one unthrottled call per suspect ticker.
 _MAX_SPLIT_LOOKUPS = 25
 
-# Fields that define a congressional disclosure. Deliberately CONTENT ONLY — no
-# feed-position metadata, no `link` (a PDF URL that can be re-issued).
-_CONGRESS_HASH_FIELDS = (
-    "transactionDate", "disclosureDate", "symbol", "type",
-    "amount", "owner", "assetDescription",
-)
-# Hash the N most RECENT disclosures, chosen deterministically by date — not the first
-# N as the upstream feed happened to order them.
-_CONGRESS_HASH_MAX = 50
-
-
-def _congress_trade_identity(t: Dict[str, Any]) -> str:
-    """What makes two congressional disclosures THE SAME filing.
-
-    One definition, shared by the idempotency hash and the aggregation, so the two can
-    never disagree about whether a row is a duplicate.
-    """
-    return "|".join(str(t.get(k) or "") for k in _CONGRESS_HASH_FIELDS)
-
-
-def _dedupe_congress_trades(raw_trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Drop byte-identical repeats, preserving first-seen order.
-
-    ⚠️ NOT cosmetic. `house-latest` is pulled 30 pages at a time from a feed that is being
-    written to, and it really does return the same disclosure twice — measured 2026-08-21:
-    Gilbert Cisneros 1091 rows / 1032 distinct, Josh Gottheimer 138 / 136.
-
-    Counting a repeat twice corrupts the portfolio, and not only by inflating it. Every
-    row is summed into `holdings_accum[symbol]["value"]`, and holdings are then filtered by
-    `if h["value"] > 0` — so a SALE disclosed twice can drive a real position to zero and
-    DELETE it from what the user sees. Measured on Gottheimer: one duplicated IFNNY sale
-    cancelled a genuine $8,000 position, and the ticker vanished from his portfolio
-    entirely (25 positions served where 26 were real).
-    """
-    seen: set = set()
-    out: List[Dict[str, Any]] = []
-    for t in raw_trades:
-        if not isinstance(t, dict):
-            continue
-        key = _congress_trade_identity(t)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(t)
-    return out
-
-
-def _congressional_raw_hash(raw_trades: List[Dict[str, Any]]) -> str:
-    """Stable idempotency hash for one member's disclosures.
-
-    ⚠️ Why this is not `sha256(json.dumps(raw_trades[:50], sort_keys=True))`.
-
-    `house-latest` / `senate-latest` return a GLOBAL, continuously-updating feed of every
-    member (the by-name path pulls 7500 rows), which the client then filters by name.
-    Two consequences
-    broke the old hash:
-
-    1. `sort_keys=True` sorts keys *inside* each dict — it does NOT order the LIST. Any
-       reshuffle of the feed changed the hash.
-    2. `[:50]` took the first 50 *as the feed ordered them*, so a new disclosure by ANY
-       OTHER member shifted the window and changed this member's hash.
-
-    Measured 2026-08-21: the five House members re-ran the full `_persist` write path on
-    every sweep (01:46, 02:00 and 02:15 the same night, 7.6-14.8s each) while every Senate
-    member correctly skipped — the House feed simply churns faster. Ted Cruz's stored hash
-    was byte-identical across two months; no House member's ever matched a fresh fetch.
-
-    The fix is threefold: hash a per-trade identity built from content fields only, SORT
-    those identities so order cannot matter, and take the most recent
-    `_CONGRESS_HASH_MAX` *after* sorting — so an old trade ageing out of the shared
-    fetch window does not read as a change either.
-
-    Sorting is lexical on a string that starts with `transactionDate` (ISO `YYYY-MM-DD`),
-    so it is chronological, and `[-N:]` is the newest N.
-    """
-    # DEDUPED. `house-latest` is paginated 30 pages at a time over a feed that is being
-    # written to, and it really does return the same disclosure more than once: measured
-    # 2026-08-21, Gilbert Cisneros came back as 1082 rows but only 1020 DISTINCT ones.
-    # Counting duplicates would make the hash move whenever the pagination boundary
-    # shifted, which is the same class of false change this function exists to remove.
-    # Two byte-identical disclosures carry no extra information about what was filed.
-    ids = sorted({
-        _congress_trade_identity(t) for t in raw_trades if isinstance(t, dict)
-    })
-    return hashlib.sha256(
-        json.dumps(ids[-_CONGRESS_HASH_MAX:]).encode()
-    ).hexdigest()
-GEMINI_SEMAPHORE = asyncio.Semaphore(3)
-FMP_BATCH_SIZE = 30
-
 # SECTOR_COLORS, DEFAULT_SECTOR_COLOR, SIC_TO_SECTOR, _map_sic_to_sector
 # are imported from app.services.whale_service (single source of truth).
 
 
-# Congressional amount parsing (midpoint for internal math, bounds for the
-# honest display range) lives in app.services._whale_common — single source of
-# truth shared with whale_service, so both agree on the same numbers.
-
-CONGRESSIONAL_TYPE_MAP: Dict[str, str] = {
-    "purchase": "BOUGHT",
-    "sale_full": "SOLD",
-    "sale_partial": "SOLD",
-    "sale (full)": "SOLD",
-    "sale (partial)": "SOLD",
-    "sale": "SOLD",
-    "exchange": "BOUGHT",
-}
-
+#
 
 # ── Hydration Engine ─────────────────────────────────────────────────
 
@@ -647,7 +568,7 @@ class WhaleHydrator:
             # SKIP THIS WHALE FOR THIS SWEEP. `e.partial` holds the rows that did
             # arrive, and using them would be actively destructive: the truncated
             # set is aggregated and `_persist`-ed OVER the good stored snapshot,
-            # and because `_congressional_raw_hash` covers this member's own
+            # and because `congressional_raw_hash` covers this member's own
             # disclosures, the missing page ALSO changes the hash and forces the
             # full write path again on the next sweep. One skipped sweep is cheap;
             # a snapshot overwritten with a gap is not.
@@ -682,7 +603,7 @@ class WhaleHydrator:
             prev_snap.data[0]["holdings_data"] if prev_snap.data else []
         )
 
-        raw_hash = _congressional_raw_hash(raw_trades)
+        raw_hash = congressional_raw_hash(raw_trades)
 
         return {
             "holdings": holdings,
@@ -762,8 +683,8 @@ class WhaleHydrator:
 
         # Deduped HERE rather than at the call site: tests and any future caller hand
         # this method a raw list straight from the feed, and a duplicate silently
-        # deletes a position (see `_dedupe_congress_trades`).
-        raw_trades = _dedupe_congress_trades(raw_trades)
+        # deletes a position (see `_whale_common.dedupe_congress_trades`).
+        raw_trades = dedupe_congress_trades(raw_trades)
 
         for t in raw_trades:
             symbol = (t.get("symbol") or "").upper().strip()
@@ -811,6 +732,9 @@ class WhaleHydrator:
                 or symbol
             )
 
+            # Provisional. The real New/Closed classification needs chronological
+            # order and a running position, which is applied in one pass below —
+            # this loop walks the feed, not time.
             trade_type = "Increased" if action == "BOUGHT" else "Decreased"
 
             trades.append({
@@ -841,6 +765,31 @@ class WhaleHydrator:
                 holdings_accum[symbol]["value"] += amount
             else:
                 holdings_accum[symbol]["value"] -= amount
+
+        # ── Classify New / Closed ────────────────────────────────────────
+        # Previously this method only ever emitted "Increased"/"Decreased", so for the
+        # entire congressional cohort `New` and `Closed` were unreachable — and because
+        # politicians re-hydrate every 6 hours, THIS path is almost always the last
+        # writer. The consequences were user-visible: the New and Closed filter tabs on
+        # Trade Group Detail counted zero forever, the "New positions:" insight never
+        # rendered, and `_maybe_generate_alert`'s `new_positions >= 5` branch could
+        # never fire for any politician.
+        #
+        # Walk oldest → newest with a running position per ticker, matching the
+        # semantics `whale_service._aggregate_congressional_trades` already uses:
+        # first buy into a flat position is New; a sale that takes it to zero is Closed.
+        running: Dict[str, float] = {}
+        for t in sorted(trades, key=lambda x: (x.get("date") or "", x.get("ticker") or "")):
+            held = running.get(t["ticker"], 0.0)
+            if t["action"] == "BOUGHT":
+                t["trade_type"] = "New" if held <= 0 else "Increased"
+                running[t["ticker"]] = held + t["amount"]
+            else:
+                after = held - t["amount"]
+                # Clamp at zero: STOCK Act gives no pre-disclosure baseline, so a sale
+                # can legitimately exceed everything we have seen bought.
+                running[t["ticker"]] = max(after, 0.0)
+                t["trade_type"] = "Closed" if after <= 0 else "Decreased"
 
         # Positive positions only
         holdings = [h for h in holdings_accum.values() if h["value"] > 0]
@@ -948,9 +897,9 @@ class WhaleHydrator:
             current_map[sym] = {
                 "symbol": sym,
                 "name": h.get("securityName") or h.get("companyName") or sym,
-                "value": float(h.get("value") or 0),
+                "value": _finite_float(h.get("value")),
                 "shares": int(
-                    float(h.get("sharesNumber") or h.get("shares") or 0)
+                    _finite_float(h.get("sharesNumber") or h.get("shares"))
                 ),
             }
 
@@ -960,13 +909,13 @@ class WhaleHydrator:
             sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
             if not sym or sym == "--":
                 continue
-            val = float(h.get("value") or 0)
+            val = _finite_float(h.get("value"))
             prev_map[sym] = {
                 "symbol": sym,
                 "name": h.get("securityName") or h.get("companyName") or sym,
                 "value": val,
                 "shares": int(
-                    float(h.get("sharesNumber") or h.get("shares") or 0)
+                    _finite_float(h.get("sharesNumber") or h.get("shares"))
                 ),
             }
             prev_total += val
@@ -986,18 +935,21 @@ class WhaleHydrator:
             curr_shares = curr["shares"] if curr else 0
             prev_shares = prev["shares"] if prev else 0
 
-            # Restate the PRIOR share count into post-split terms before diffing, but
-            # only when the observed jump actually matches the split — a count that did
-            # not move toward the ratio is a spinoff / ADR-ratio change / an
-            # already-adjusted feed, and restating it there would invent a trade of its
-            # own. Same three-way test as whale_service.
-            ratio = split_ratios.get(ticker, 1.0)
-            if ratio and ratio != 1.0 and curr and prev and prev_shares > 0:
-                ratio_obs = curr_shares / prev_shares
-                if abs(ratio_obs - ratio) <= 0.15 * ratio:
-                    prev_shares = prev_shares * ratio
-                elif ratio_obs >= (1.0 + ratio) / 2.0:
-                    prev_shares = prev_shares * ratio
+            # Restate the PRIOR share count into post-split terms — via the ONE shared
+            # implementation. This copy previously had IDENTICAL bodies on its `if` and
+            # `elif`, so its "three-way test" was really a two-way one wearing a comment
+            # that claimed parity with whale_service. The effect was that an ambiguous
+            # split+flow quarter got restated on an unverified premise, which
+            # `calc_13f_trade_dollars` then amplified into a WRONG-SIGN trade — a holder
+            # who bought reported as a seller, and on a reverse split a large BOUGHT
+            # fabricated from nothing.
+            if curr and prev:
+                _restated = restate_prev_shares_for_split(
+                    prev_shares, curr_shares, split_ratios.get(ticker, 1.0)
+                )
+                if _restated is SPLIT_SUPPRESS:
+                    continue
+                prev_shares = _restated
 
             # ⚠️ SHARES at an implied price — NOT `curr_val - prev_val`.
             #
@@ -2150,67 +2102,6 @@ def _activity_signals(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(period, str) and _QUARTER_PERIOD_RE.match(period.strip()):
         out["last_filing_period"] = period.strip()
     return out
-
-
-def _find_previous_quarter(
-    filing_dates: List[Dict], year: int, quarter: int
-) -> Optional[Dict]:
-    """Find the entry for the quarter before (year, quarter)."""
-    for fd in filing_dates:
-        fd_year = int(fd.get("year") or fd.get("date", "0000")[:4])
-        fd_quarter = int(fd.get("quarter", 0))
-        if fd_year == year and fd_quarter == quarter:
-            continue
-        if (fd_year < year) or (fd_year == year and fd_quarter < quarter):
-            return fd
-    return None
-
-
-async def _noop_list() -> List:
-    return []
-
-
-def _format_amount(value: float, action: str) -> str:
-    """Format dollar amount: +$4.34B, -$2.1M, etc."""
-    prefix = "+" if action == "BOUGHT" else "-"
-    abs_val = abs(value)
-    if abs_val >= 1_000_000_000:
-        return f"{prefix}${abs_val / 1_000_000_000:.2f}B"
-    elif abs_val >= 1_000_000:
-        return f"{prefix}${abs_val / 1_000_000:.1f}M"
-    elif abs_val >= 1_000:
-        return f"{prefix}${abs_val / 1_000:.0f}K"
-    return f"{prefix}${abs_val:,.0f}"
-
-
-def _generate_trade_summary(
-    buys: List[Dict], sells: List[Dict], net_action: str
-) -> str:
-    """One-line trade group summary. Rendered verbatim under the trade-group card.
-
-    ⚠️ Order matters, and the old order made two branches unreachable: with
-    ``sells == []`` the first test is ``len(buys) > 0``, which any single buy satisfies,
-    so "Pure buying activity" could never be reached and a lone purchase was announced
-    as "Heavy accumulation with 1 buys" — wrong in register AND ungrammatical. The
-    one-sided cases are therefore checked FIRST, and the ratio tests now require enough
-    trades for "heavy" to mean something.
-    """
-    n_buys, n_sells = len(buys), len(sells)
-
-    if n_buys and not n_sells:
-        return f"Pure buying activity with {n_buys} {_positions(n_buys)}"
-    if n_sells and not n_buys:
-        return f"Pure selling activity with {n_sells} {_positions(n_sells)}"
-    if n_buys >= 3 and n_buys > n_sells * 2:
-        return f"Heavy accumulation with {n_buys} buys"
-    if n_sells >= 3 and n_sells > n_buys * 2:
-        return f"Significant reduction with {n_sells} sells"
-    return "Portfolio rebalancing"
-
-
-def _positions(n: int) -> str:
-    """"position" / "positions" — a count of 1 must not read "1 positions"."""
-    return "position" if n == 1 else "positions"
 
 
 def _generate_trade_insights(

@@ -2491,7 +2491,11 @@ class WhaleService:
         total_value = sum(h["value"] for h in holdings) or 1
         for h in holdings:
             h["allocation"] = round(h["value"] / total_value * 100, 2)
-        holdings.sort(key=lambda x: x["value"], reverse=True)
+        # Ticker breaks the tie DETERMINISTICALLY. STOCK Act buckets collapse to a
+        # handful of midpoints — 21 of Gottheimer's positions share $8,000.50 — so with
+        # value alone the `[:30]` cap kept an arbitrary subset and the two writers
+        # picked DIFFERENT positions for the same member.
+        holdings.sort(key=lambda x: (-x["value"], x["ticker"]))
 
         # ── Group trades by disclosure filing → one group per disclosure ─
         by_disclosure: Dict[str, List[Dict]] = {}

@@ -761,10 +761,9 @@ class WhaleHydrator:
                     "change_percent": 0.0,
                     "logo_url": None,
                 }
-            if action == "BOUGHT":
-                holdings_accum[symbol]["value"] += amount
-            else:
-                holdings_accum[symbol]["value"] -= amount
+            # Value is NOT accumulated here — feed order is not chronological, and a
+            # signed running total lets a pre-baseline sale go negative. It is computed
+            # in the clamped chronological walk below.
 
         # ── Classify New / Closed ────────────────────────────────────────
         # Previously this method only ever emitted "Increased"/"Decreased", so for the
@@ -786,17 +785,37 @@ class WhaleHydrator:
                 running[t["ticker"]] = held + t["amount"]
             else:
                 after = held - t["amount"]
-                # Clamp at zero: STOCK Act gives no pre-disclosure baseline, so a sale
-                # can legitimately exceed everything we have seen bought.
+                # ⚠️ CLAMP AT ZERO — this is not a rounding nicety, it is the whole
+                # model. The STOCK Act gives no pre-disclosure baseline, so a member
+                # routinely sells a position they held before anything we can see. A
+                # signed running total goes deeply negative there and NEVER recovers,
+                # so every later re-purchase is netted away and `value > 0` then DELETES
+                # the position outright.
+                #
+                # Measured on Nancy Pelosi 2026-08-21: she sold $3,000,000 of GOOGL
+                # (pre-baseline) then bought back $1,125,001. Flat accumulation left her
+                # at -$1,875,000, so GOOGL — plus AMZN, NVDA and AAPL — were dropped
+                # from her stored profile entirely: $2,975,003 of a $9,983,006 portfolio,
+                # and the allocations of the survivors were inflated by the missing
+                # denominator. `whale_service` has always clamped (its docstring:
+                # "Sales exceeding known holdings clamp to zero"); this path did not.
                 running[t["ticker"]] = max(after, 0.0)
                 t["trade_type"] = "Closed" if after <= 0 else "Decreased"
+
+        for _sym, _val in running.items():
+            if _sym in holdings_accum:
+                holdings_accum[_sym]["value"] = _val
 
         # Positive positions only
         holdings = [h for h in holdings_accum.values() if h["value"] > 0]
         total = sum(h["value"] for h in holdings) or 1
         for h in holdings:
             h["allocation"] = round(h["value"] / total * 100, 2)
-        holdings.sort(key=lambda x: x["value"], reverse=True)
+        # Ticker breaks the tie DETERMINISTICALLY. STOCK Act buckets collapse to a
+        # handful of midpoints — 21 of Gottheimer's positions share $8,000.50 — so with
+        # value alone the `[:30]` cap kept an arbitrary subset and the two writers
+        # picked DIFFERENT positions for the same member.
+        holdings.sort(key=lambda x: (-x["value"], x["ticker"]))
 
         # Group trades by disclosure filing → one group per disclosure date
         by_disclosure: Dict[str, List[Dict]] = {}

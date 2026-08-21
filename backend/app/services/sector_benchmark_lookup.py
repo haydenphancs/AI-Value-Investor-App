@@ -175,7 +175,19 @@ class SectorBenchmarkLookup:
         if cached is not None:
             return cached
 
-        result = self._query(sector, metrics, period_type)
+        try:
+            result = self._query(sector, metrics, period_type)
+        except Exception as e:
+            # Do NOT cache a failure. Mirrors get_sector_benchmarks_with_n and
+            # get_benchmarks, which both scope their `_cache_set` to the success path.
+            # Returning the empty shape keeps every caller's contract (comparisons just
+            # degrade to "no benchmark"), but the next request retries instead of being
+            # served a cached blank for the rest of the hour.
+            _log = logger.warning if _is_transient(e) else logger.error
+            _log("Sector benchmark lookup failed for %s/%s: %s: %s",
+                 sector, period_type, type(e).__name__, e)
+            return {m: {} for m in metrics}
+
         _cache_set(cache_key, result)
         return result
 
@@ -239,23 +251,29 @@ class SectorBenchmarkLookup:
         metrics: List[str],
         period_type: str,
     ) -> Dict[str, Dict[str, float]]:
-        """Query Supabase for benchmark values (paginated → never truncated)."""
-        try:
-            rows = self._fetch_rows(
-                "metric_name,period_label,median_value", sector, metrics, period_type,
-            )
-            result: Dict[str, Dict[str, float]] = {m: {} for m in metrics}
-            for row in rows:
-                metric = row["metric_name"]
-                label = row["period_label"]
-                result.setdefault(metric, {})[label] = row["median_value"]
+        """Query Supabase for benchmark values (paginated → never truncated).
 
-            return result
-        except Exception as e:
-            _log = logger.warning if _is_transient(e) else logger.error
-            _log("Sector benchmark lookup failed for %s/%s: %s: %s",
-                 sector, period_type, type(e).__name__, e)
-            return {m: {} for m in metrics}
+        RAISES on failure — deliberately. This used to swallow every exception and
+        return the same empty dict a successful zero-row query returns, which made the
+        two indistinguishable to the caller. `get_sector_benchmarks` then cached that
+        empty sentinel for the full hour, so ONE transient Supabase blip (a Cloudflare
+        520 is the common one) erased every "vs sector avg" comparison on the screen
+        until the TTL expired. The two sibling lookups already scope their caching to
+        the success path; this one could not, because it never learned that it failed.
+
+        A genuinely-empty result still returns `{m: {} ...}` and is still worth caching
+        — a peer group with no rows is a real answer, not an error.
+        """
+        rows = self._fetch_rows(
+            "metric_name,period_label,median_value", sector, metrics, period_type,
+        )
+        result: Dict[str, Dict[str, float]] = {m: {} for m in metrics}
+        for row in rows:
+            metric = row["metric_name"]
+            label = row["period_label"]
+            result.setdefault(metric, {})[label] = row["median_value"]
+
+        return result
 
     # ── Phase 3A: sample-size-aware lookup ──────────────────────────────
 

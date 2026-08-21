@@ -43,6 +43,11 @@ def _soc(
             dividend_yield=dividend_yield,
             buyback_yield=buyback_yield,
             share_count_change=share_count_change,
+            # The buyback verdict now lives on the SUMMARY, which is always present.
+            # It used to be read off `dividend_info`, which is None for every
+            # non-dividend payer — so the report asserted a flat "Low" for the
+            # market's largest repurchasers.
+            buyback_status=buyback_status,
         ),
         dividend_info=DividendInfoSchema(
             status=dividend_status, buyback_status=buyback_status,

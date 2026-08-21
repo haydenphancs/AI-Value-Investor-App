@@ -33,8 +33,48 @@ _RATING_RANK = {
     "in-line": 2, "in line": 2, "peer perform": 2, "sector weight": 2,
     "buy": 3, "overweight": 3, "outperform": 3, "accumulate": 3,
     "sector outperform": 3, "market outperform": 3, "positive": 3, "add": 3,
-    "strong buy": 4, "conviction buy": 4,
+    "strong buy": 4, "conviction buy": 4, "long term buy": 4,
 }
+
+
+# ── Grade → distribution bucket ───────────────────────────────────────
+#
+# There used to be a SECOND, narrower table (`analyst_service._GRADE_TO_CATEGORY`)
+# doing this job, and the two disagreed in BOTH directions:
+#
+#   * known to _RATING_RANK only  -> fell to the category table's `"Hold"` default,
+#     so `add` (a Buy) and `sector underperform` / `market underperform` (Sells)
+#     were all counted as HOLDs, biasing the distribution toward the middle;
+#   * known to the category table only -> `long term buy` had no rank, so
+#     `_infer_rating_direction` reported a genuine upgrade as "maintain".
+#
+# One table, one meaning. The rank IS the bucket: 0..4 maps onto the five columns.
+RANK_TO_CATEGORY: dict[int, str] = {
+    0: "Strong Sell",
+    1: "Sell",
+    2: "Hold",
+    3: "Buy",
+    4: "Strong Buy",
+}
+
+# A label neither table recognises ("mixed", "top pick", "average", "mkt perform"
+# have all been seen on the wire). It is DELIBERATELY not one of the five: folding an
+# uninterpretable rating into Hold lets it vote, and a firm whose opinion we cannot
+# read should not cast a ballot. `_compute_distribution` builds a fixed five-key dict,
+# so this value is counted nowhere and never reaches iOS.
+RATING_CATEGORY_UNKNOWN = "Unknown"
+
+
+def classify_grade(grade: str) -> str:
+    """Map an FMP grade label to one of the five distribution buckets.
+
+    Returns :data:`RATING_CATEGORY_UNKNOWN` when the label is in neither table, so
+    the caller can log it rather than silently miscount it.
+    """
+    rank = _RATING_RANK.get((grade or "").strip().lower())
+    if rank is None:
+        return RATING_CATEGORY_UNKNOWN
+    return RANK_TO_CATEGORY[rank]
 
 
 def _infer_rating_direction(previous: str, new: str) -> str:

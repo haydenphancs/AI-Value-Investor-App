@@ -33,17 +33,10 @@ struct RevenueSource: Identifiable {
     }
 
     private func formatLargeNumber(_ number: Double) -> String {
-        let absNumber = abs(number)
-        if absNumber >= 1_000_000_000_000 {
-            return String(format: "%.1fT", number / 1_000_000_000_000)
-        } else if absNumber >= 1_000_000_000 {
-            return String(format: "%.2fB", number / 1_000_000_000)
-        } else if absNumber >= 1_000_000 {
-            return String(format: "%.1fM", number / 1_000_000)
-        } else if absNumber >= 1_000 {
-            return String(format: "%.1fK", number / 1_000)
-        }
-        return String(format: "%.0f", number)
+        // Shared formatter. This copy was itself inconsistent — `%.1fT`, `%.0fB`,
+        // `%.1fM`, `%.1fK`: a decimal everywhere EXCEPT billions, which is the tier most
+        // large caps land in. It and the chart axis are on the same screen and disagreed.
+        CompactNumberFormat.string(number)
     }
 }
 

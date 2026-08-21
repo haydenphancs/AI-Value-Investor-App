@@ -37,7 +37,7 @@ from app.schemas.etf import (
     PerformancePeriodResponse,
     RelatedTickerResponse,
 )
-from app.utils.market_hours import market_status_fields
+from app.utils.market_hours import market_status_fields, to_utc_instant
 
 logger = logging.getLogger(__name__)
 
@@ -1540,7 +1540,15 @@ class ETFService:
     ) -> List[ETFNewsArticleResponse]:
         articles = []
         for item in raw_articles[:10]:
-            published = item.get("publishedDate") or item.get("published_date") or ""
+            # FMP's publishedDate is a naive America/New_York wall clock, but this field is
+            # a timestamp the client renders, and the News tab now serves a true UTC instant
+            # (news_cache_service._sanitize_published_at). Emitting the raw string here made
+            # the same article read 4h apart on two screens. These detail builders bypass
+            # news_cache_service entirely, so the ingest-level fix does NOT reach them.
+            # Keep the `or ""` fallback: the field is REQUIRED and a None 500s the response.
+            _raw_pub = item.get("publishedDate") or item.get("published_date") or ""
+            _pub_dt = to_utc_instant(_raw_pub)
+            published = _pub_dt.isoformat() if _pub_dt is not None else _raw_pub
             articles.append(ETFNewsArticleResponse(
                 headline=item.get("title") or item.get("headline") or "",
                 source_name=item.get("site") or item.get("source") or "Unknown",

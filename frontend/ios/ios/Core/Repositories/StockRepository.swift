@@ -2046,12 +2046,18 @@ struct SignalOfConfidenceSummaryDTO: Codable {
     let dividendYield: Double
     let buybackYield: Double
     let shareCountChange: Double
+    /// Optional so an older backend (which only carried this on `dividend_info`)
+    /// still decodes. The buyback verdict lives here because it depends solely on
+    /// `buybackYield` + `shareCountChange`, and `dividendInfo` is nil for every
+    /// non-dividend payer — which silently discarded it for the biggest repurchasers.
+    let buybackStatus: String?
 
     enum CodingKeys: String, CodingKey {
         case totalYield = "total_yield"
         case dividendYield = "dividend_yield"
         case buybackYield = "buyback_yield"
         case shareCountChange = "share_count_change"
+        case buybackStatus = "buyback_status"
     }
 }
 
@@ -2100,7 +2106,11 @@ struct SignalOfConfidenceResponseDTO: Codable {
             totalYield: summary.totalYield,
             dividendYield: summary.dividendYield,
             buybackYield: summary.buybackYield,
-            shareCountChange: summary.shareCountChange
+            shareCountChange: summary.shareCountChange,
+            // Fall back to the dividend block for an older backend, then to .low.
+            buybackStatus: summary.buybackStatus.flatMap(BuybackStatus.init(rawValue:))
+                ?? dividendInfo.flatMap { BuybackStatus(rawValue: $0.buybackStatus) }
+                ?? .low
         )
 
         var divInfo: DividendInfo? = nil

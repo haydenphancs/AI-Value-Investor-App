@@ -270,9 +270,15 @@ def _compute_growth_points(
         # check only governs whether a YoY is MEANINGFUL — it must NOT drop the
         # bar (a gap year still has a real, chartable value). Mirror the
         # negative-value path: emit the bar, null the YoY, break the line.
-        for i in range(1, len(sorted_recs)):
+        # Start at 0, not 1. Skipping index 0 dropped the OLDEST year's bar entirely
+        # — and for a company with a single annual filing (a recent listing) that is
+        # every bar, so the chart came back completely empty. The oldest year has no
+        # predecessor and therefore no YoY, which is exactly the "emit the bar, null
+        # the YoY" contract the quarterly branch above already follows and the gap
+        # case below already relies on. A missing PRIOR year is not a missing VALUE.
+        for i in range(len(sorted_recs)):
             rec = sorted_recs[i]
-            prev_rec = sorted_recs[i - 1]
+            prev_rec = sorted_recs[i - 1] if i > 0 else None
 
             current_val = _safe_float(rec, metric_key)
             if current_val is None:
@@ -281,20 +287,23 @@ def _compute_growth_points(
             # YoY only when prev is exactly the prior calendar year; otherwise
             # emit the bar with a null YoY (a multi-year gap is a discontinuity,
             # not zero growth) so the value still charts.
-            try:
-                cur_year = int(_extract_year(rec))
-                prev_year = int(_extract_year(prev_rec))
-                if cur_year - prev_year == 1:
-                    yoy = _compute_yoy(current_val, _safe_float(prev_rec, metric_key))
-                else:
-                    logger.warning(
-                        "growth annual year gap %s->%s for metric=%s; "
-                        "emitting bar with null YoY",
-                        prev_year, cur_year, metric_key,
-                    )
+            if prev_rec is None:
+                yoy = None  # oldest point: nothing to compare against
+            else:
+                try:
+                    cur_year = int(_extract_year(rec))
+                    prev_year = int(_extract_year(prev_rec))
+                    if cur_year - prev_year == 1:
+                        yoy = _compute_yoy(current_val, _safe_float(prev_rec, metric_key))
+                    else:
+                        logger.warning(
+                            "growth annual year gap %s->%s for metric=%s; "
+                            "emitting bar with null YoY",
+                            prev_year, cur_year, metric_key,
+                        )
+                        yoy = None
+                except (ValueError, TypeError):
                     yoy = None
-            except (ValueError, TypeError):
-                yoy = None
 
             results.append({
                 "period": _annual_period_label(rec),

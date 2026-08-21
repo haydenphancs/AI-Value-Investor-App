@@ -482,10 +482,20 @@ class HoldersService:
             historical_prices, "Historical prices", [], critical=True
         )
         stock_splits = _unwrap(stock_splits, "Stock splits", [])
-        senate_latest = _unwrap(senate_latest, "Senate latest", [])
-        house_latest = _unwrap(house_latest, "House latest", [])
-        senate_disclosure = _unwrap(senate_disclosure, "Senate disclosure", [])
-        house_disclosure = _unwrap(house_disclosure, "House disclosure", [])
+        # critical=True on all four: these now raise FMPPartialPageException when
+        # the paginated feed loses a page, and a truncated congressional set must
+        # NOT be pinned into the 24h Supabase cache — that would freeze a
+        # missing-rows view of a member's trades for a day. Degraded means the
+        # build is still served best-effort, just never persisted, so the 5-min
+        # rebuild picks up the complete feed.
+        senate_latest = _unwrap(senate_latest, "Senate latest", [], critical=True)
+        house_latest = _unwrap(house_latest, "House latest", [], critical=True)
+        senate_disclosure = _unwrap(
+            senate_disclosure, "Senate disclosure", [], critical=True
+        )
+        house_disclosure = _unwrap(
+            house_disclosure, "House disclosure", [], critical=True
+        )
 
         current_price = _safe_float(quote_data, "price", 0.0)
         company_profile = shares_float

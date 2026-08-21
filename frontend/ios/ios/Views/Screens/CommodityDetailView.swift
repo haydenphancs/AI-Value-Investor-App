@@ -179,6 +179,19 @@ struct CommodityDetailView: View {
         .task {
             viewModel.loadCommodityData()
         }
+        // Socket lifecycle, mirroring IndexDetailView. Without these the connection
+        // outlives the screen and keeps ticking in the background.
+        .onDisappear {
+            viewModel.disconnectLivePrice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            viewModel.disconnectLivePrice()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            // Commodities are continuously-quoted futures, so unlike the equity screens
+            // there is no market-status gate here — reconnect whenever we come forward.
+            viewModel.connectLivePrice()
+        }
         .gesture(
             DragGesture()
                 .onEnded { value in
@@ -308,6 +321,20 @@ struct CommodityDetailView: View {
                         .cardFill()
                         .frame(height: 180)
                         .shimmer()
+                } else if let message = viewModel.technicalUnavailableMessage {
+                    // Loaded, but there is nothing to show. This branch did not exist:
+                    // the tab rendered an entirely BLANK screen, which reads as a broken
+                    // app rather than as absent data, and offered no way to recover.
+                    if viewModel.technicalIsRetryable {
+                        InlineRetryNotice(message: message) {
+                            Task { await viewModel.retryTechnicalAnalysis() }
+                        }
+                    } else {
+                        // Permanent for this asset — a Try Again button would promise
+                        // something that can never succeed.
+                        ChartUnavailableView(message: message)
+                            .frame(height: 180)
+                    }
                 }
 
                 Spacer()

@@ -49,6 +49,14 @@ class CommodityDetailViewModel: ObservableObject {
 
     // Analysis tab state
     @Published var isTechnicalLoaded: Bool = false
+    /// Why the Analysis tab has no data, when it has none. Nil while loading or on
+    /// success. The tab used to render literally NOTHING on failure — an empty tab is
+    /// indistinguishable from a broken app, and `isTechnicalLoaded` was set to true on
+    /// the failure path, making the state terminal for the life of the screen.
+    @Published var technicalUnavailableMessage: String?
+    /// False when the asset genuinely has no price history (the backend 404s), so a
+    /// "Try Again" button would promise something that can never succeed.
+    @Published var technicalIsRetryable: Bool = false
 
     // News state
     @Published var isNewsLoading: Bool = false
@@ -67,6 +75,11 @@ class CommodityDetailViewModel: ObservableObject {
     let commoditySymbol: String
     private let apiClient = APIClient.shared
     private var cancellables = Set<AnyCancellable>()
+    /// Mirrors IndexDetailViewModel. The commodity screen previously had NO live price
+    /// path at all — `chartRefreshTask` below was declared and never assigned, so the
+    /// quote was frozen for the entire life of the screen while the field implied a
+    /// refresh that never ran.
+    let livePriceManager = LivePriceWebSocketManager()
     private var chartRefreshTask: Task<Void, Never>?
     /// Monotonic token for detail/chart fetches. Each captures the value before
     /// awaiting and only applies its result if still current — so a slow
@@ -105,6 +118,8 @@ class CommodityDetailViewModel: ObservableObject {
                 Task { await self.fetchChartForRange() }
             }
             .store(in: &cancellables)
+
+        observeLivePrice()
     }
 
     // MARK: - Data Loading
@@ -115,6 +130,12 @@ class CommodityDetailViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self = self else { return }
+            // One-time setup, deliberately NOT gated on the detail request token: a
+            // range change during the initial fetch supersedes it, and a stale response
+            // would then skip the connect and leave the screen with no live updates and
+            // no 30s refresh. Both the socket and the timer self-gate, so this is cheap
+            // when the market for this symbol is shut.
+            self.connectLivePrice()
             async let detailTask: () = self.fetchCommodityDetail()
             async let newsTask: () = self.fetchCommodityNews()
             async let technicalTask: () = self.fetchTechnicalAnalysis()
@@ -133,6 +154,9 @@ class CommodityDetailViewModel: ObservableObject {
         StockRepository.shared.invalidate(symbol: commoditySymbol)
         await fetchCommodityDetail()
         await fetchCommodityNews()
+        // See IndexDetailViewModel.refresh — the technical failure path is terminal, so
+        // refresh is the only thing that can un-stick a blank Analysis tab.
+        await retryTechnicalAnalysis()
     }
 
     // MARK: - Detail Fetch
@@ -198,6 +222,69 @@ class CommodityDetailViewModel: ObservableObject {
             // skeleton/empty state. errorMessage drives any banner; the header
             // shows the real symbol and pull-to-refresh retries.
         }
+    }
+
+    // MARK: - Live Price
+
+    /// Merge socket ticks into `commodityData`. Every field falls back to what the REST
+    /// load produced, so if the upstream feed never ticks for this symbol the screen
+    /// still shows the 30s-refreshed values rather than blanking.
+    private func observeLivePrice() {
+        livePriceManager.$livePrice
+            .compactMap { $0 }
+            .sink { [weak self] newPrice in
+                guard let self = self, var data = self.commodityData else { return }
+                data.currentPrice = newPrice
+                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
+                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
+                self.commodityData = data
+            }
+            .store(in: &cancellables)
+    }
+
+    func connectLivePrice() {
+        // Reads APIClient rather than the Keychain — the two deliberately diverge during
+        // session restore, and the stream is public for these symbols, so connect even
+        // when the token is nil rather than leaving a guest with no live price.
+        Task { [weak self] in
+            guard let self else { return }
+            let token = await APIClient.shared.currentAuthToken()
+            self.livePriceManager.connect(ticker: self.commoditySymbol, authToken: token)
+        }
+        startChartRefreshTimer()
+    }
+
+    func disconnectLivePrice() {
+        livePriceManager.disconnect()
+        stopChartRefreshTimer()
+    }
+
+    // MARK: - Chart Refresh Timer
+
+    private func startChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds
+                guard !Task.isCancelled else { break }
+                guard let self = self else { break }
+
+                // NOT `MarketHoursUtil.isMarketActive()`, which the index copy uses:
+                // that is the US EQUITY session, and these are continuously-quoted
+                // futures (~23h/day). Gating on equity hours would leave the commodity
+                // screen frozen for most of the day — the very bug being fixed.
+                guard self.chartSettings.selectedInterval.isIntraday else { continue }
+                guard MarketHoursUtil.symbolTradesAroundTheClock(self.commoditySymbol)
+                        || MarketHoursUtil.isMarketActive() else { continue }
+
+                await self.fetchChartForRange()
+            }
+        }
+    }
+
+    private func stopChartRefreshTimer() {
+        chartRefreshTask?.cancel()
+        chartRefreshTask = nil
     }
 
     // MARK: - Chart Range Change
@@ -349,6 +436,13 @@ class CommodityDetailViewModel: ObservableObject {
 
     // MARK: - Technical Analysis
 
+    /// Re-run the technical fetch after a failure. Safe to call repeatedly.
+    func retryTechnicalAnalysis() async {
+        isTechnicalLoaded = false
+        technicalUnavailableMessage = nil
+        await fetchTechnicalAnalysis()
+    }
+
     private func fetchTechnicalAnalysis() async {
         do {
             let dto = try await apiClient.request(
@@ -357,6 +451,7 @@ class CommodityDetailViewModel: ObservableObject {
             )
             self.technicalAnalysisData = dto.toDisplayModel()
             self.isTechnicalLoaded = true
+            self.technicalUnavailableMessage = nil
             print("✅ [CommodityDetailVM] Got technical analysis — gauge: \(dto.gaugeValue)")
         } catch {
             print("⚠️ [CommodityDetailVM] Technical analysis failed: \(error)")
@@ -365,6 +460,18 @@ class CommodityDetailViewModel: ObservableObject {
             // context (contextForCurrentTab). Leave nil; the section stays empty.
             self.technicalAnalysisData = nil
             self.isTechnicalLoaded = true
+            // Distinguish "this asset has no history" (permanent — the service raises a
+            // 404 for a ticker with no OHLCV) from "the fetch failed" (retryable). The
+            // tab previously rendered nothing at all for BOTH, so a transient blip
+            // looked identical to an unsupported asset and neither offered a way back.
+            if case APIError.notFound = error {
+                self.technicalUnavailableMessage =
+                    "Technical analysis isn\u{2019}t available for this asset."
+                self.technicalIsRetryable = false
+            } else {
+                self.technicalUnavailableMessage = "Couldn\u{2019}t load technical analysis."
+                self.technicalIsRetryable = true
+            }
         }
     }
 
@@ -392,7 +499,20 @@ class CommodityDetailViewModel: ObservableObject {
 
     // MARK: - Watchlist
 
+    /// Bumped on every star tap. `checkWatchlistStatus()` captures it before its GET and
+    /// re-checks it after, so a snapshot that was already in flight when the user tapped
+    /// is discarded instead of reverting them. TickerDetailViewModel had this guard; all
+    /// four sibling screens shipped without it, so a slow watchlist GET landing after the
+    /// tap silently un-starred the asset with no error and no trace.
+    ///
+    /// A generation counter, NOT a sticky Bool: `checkWatchlistStatus()` re-runs from each
+    /// screen's error-state Retry, and a sticky flag would pin the local value forever and
+    /// ignore a genuine change made on another device.
+    private var favoriteToggleGeneration: Int = 0
+
     func toggleFavorite() {
+        // The user's intent now outranks any watchlist snapshot already in flight.
+        favoriteToggleGeneration &+= 1
         let wasInWatchlist = isFavorite
         isFavorite.toggle()
 
@@ -426,11 +546,18 @@ class CommodityDetailViewModel: ObservableObject {
     }
 
     private func checkWatchlistStatus() async {
+        let generation = favoriteToggleGeneration
         do {
             let watchlist: [WatchlistItemDTO] = try await apiClient.request(
                 endpoint: .getWatchlist,
                 responseType: [WatchlistItemDTO].self
             )
+            // Discard a snapshot that raced with a tap: it may predate the user's write
+            // and would revert their star with no error shown.
+            guard generation == self.favoriteToggleGeneration else {
+                print("⏭️ [CommodityDetailVM] Watchlist snapshot discarded — user toggled during the fetch")
+                return
+            }
             self.isFavorite = watchlist.contains { $0.ticker.uppercased() == commoditySymbol.uppercased() }
         } catch {
             print("⚠️ [CommodityDetailVM] Watchlist check failed: \(error)")

@@ -440,19 +440,10 @@ struct GrowthChartView: View {
     }
 
     private func formatLargeNumber(_ number: Double) -> String {
-        let absNumber = abs(number)
-        if absNumber >= 1_000_000_000_000 {
-            return String(format: "%.0fT", number / 1_000_000_000_000)
-        } else if absNumber >= 1_000_000_000 {
-            return String(format: "%.0fB", number / 1_000_000_000)
-        } else if absNumber >= 1_000_000 {
-            return String(format: "%.0fM", number / 1_000_000)
-        } else if absNumber >= 1_000 {
-            return String(format: "%.0fK", number / 1_000)
-        } else if absNumber >= 1 {
-            return String(format: "%.1f", number)
-        }
-        return String(format: "%.2f", number)
+        // Shared formatter. This copy printed whole B/M/K directly above a YoY row that
+        // keeps one decimal, so the two rows of the SAME chart contradicted each other:
+        // a bar labelled "2B" sat over "+12.3%" computed from 2.4B.
+        CompactNumberFormat.string(number)
     }
 }
 

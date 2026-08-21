@@ -1179,6 +1179,25 @@ async def stream_chat_message(
                 session_id, enforced, advice_flags, content[:200],
             )
 
+        # REASONING IS A SECOND OUTPUT CHANNEL and was never enforced. It is rendered in
+        # the thinking card and carried in the `done` frame + the persisted turn, so an
+        # identity/secret leak there is durable — it survives a reload and is re-served
+        # on history load. Model reasoning is in fact the MORE likely place to name the
+        # underlying provider (invariant #7), because the identity rule shapes the answer
+        # far more strongly than the scratchpad.
+        #
+        # Enforced HERE, next to the answer, rather than per-chunk at the `reasoning`
+        # yield above. Per-chunk is actively wrong: a pattern spanning a chunk boundary
+        # is never matched, and rewriting a chunk can split a token mid-redaction. This
+        # site sees the whole finalized string.
+        if reasoning_text:
+            reasoning_text, reasoning_enforced = enforce_answer(reasoning_text)
+            if reasoning_enforced:
+                sec_logger.warning(
+                    "Chat guardrail (stream reasoning) session=%s enforced=%r: %r",
+                    session_id, reasoning_enforced, reasoning_text[:200],
+                )
+
         # GUARANTEE the advice disclaimer in code. Append to the durable content so the
         # `done` frame + persisted row carry it; also stream it live on the pure-streamed
         # path (a fallback answer arrives whole via `done`, so no live token there).

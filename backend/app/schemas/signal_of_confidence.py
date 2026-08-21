@@ -36,6 +36,14 @@ class SignalOfConfidenceSummarySchema(BaseModel):
     dividend_yield: float = Field(0.0, description="T12M dividend yield %")
     buyback_yield: float = Field(0.0, description="T12M buyback yield %")
     share_count_change: float = Field(0.0, description="Share count change % (negative = shrinking)")
+    # Lives here, NOT only on DividendInfoSchema. That schema is Optional and is None
+    # for every non-dividend payer, so the buyback verdict — which depends solely on
+    # the two fields above — was computed and discarded for AMZN, BRK-B and NFLX. The
+    # summary is always present, so this always reaches the client.
+    buyback_status: str = Field(
+        "Low",
+        description="Buyback status: Diluting / Diluting (Mild) / Low / Moderate / High / Very High",
+    )
 
 
 class DividendInfoSchema(BaseModel):

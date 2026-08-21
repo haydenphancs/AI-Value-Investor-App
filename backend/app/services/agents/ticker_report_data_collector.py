@@ -2983,7 +2983,11 @@ def _build_capital_allocation_block(
     s = soc.summary
     div = soc.dividend_info
     return {
-        "buyback_status": (div.buyback_status if div else "Low"),
+        # Read from the SUMMARY, which is always present. This used to fall back to a
+        # hardcoded "Low" whenever `dividend_info` was None — i.e. for every company
+        # that pays no dividend — so the report asserted weak buybacks for AMZN, BRK-B
+        # and NFLX, three of the largest repurchasers on the market.
+        "buyback_status": s.buyback_status,
         "dividend_status": (div.status if div else "Fair"),
         "dividend_yield": round(s.dividend_yield, 2),
         "buyback_yield": round(s.buyback_yield, 2),

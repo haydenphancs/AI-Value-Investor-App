@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import math
 
 from app.database import get_supabase
+from app.utils.market_hours import to_utc_instant
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.schemas.sentiment import (
     MarketMoodLevel,
@@ -475,7 +476,15 @@ class SentimentService:
             # sent "" and Postgres rejected the whole batch with 22007 (invalid input
             # syntax). Drop the value, keep the row — the column is nullable and the
             # article is still worth caching.
-            published = published if _looks_like_timestamp(published) else None
+            # Normalised to a true UTC instant, not just validated. FMP's
+            # publishedDate is a NAIVE America/New_York wall clock, and this column
+            # is `timestamptz`: writing the raw string made Postgres apply the
+            # session zone (UTC) and backdate every row by the ET offset. This
+            # writer shares `(ticker, external_id)` with NewsCacheService, so the
+            # two must interpret the wall clock identically or the same article's
+            # timestamp depends on who wrote it last.
+            _published_dt = to_utc_instant(published)
+            published = _published_dt.isoformat() if _published_dt is not None else None
 
             # Score sentiment using keyword classifier
             combined = f"{title} {text[:300]}"
@@ -658,23 +667,38 @@ class SentimentService:
         Classifies articles: score > 60 = bullish, < 40 = bearish, else neutral.
         """
         now = datetime.now(timezone.utc)
-        # FMP publishedDate is space-separated ("2024-01-15 09:30:00"); the ISO cutoff
-        # carries a 'T' + tz offset. A raw string compare mis-buckets articles — ' '
-        # (0x20) < 'T' (0x54), so a same-day article ALWAYS sorts before the cutoff —
-        # corrupting the current/previous window counts and the news change%.
-        # Canonicalize both sides to "yyyy-mm-ddThh:mm:ss" before comparing.
-        current_cutoff = (now - timedelta(hours=hours)).isoformat()[:19]
-        previous_cutoff = (now - timedelta(hours=hours * 2)).isoformat()[:19]
+        # Compare INSTANTS, not strings. Two independent defects lived here:
+        #
+        #  1. FMP's publishedDate is a naive America/New_York wall clock while both
+        #     cutoffs are UTC, so every article was effectively shifted by the ET
+        #     offset (4h in EDT, 5h in EST). The densest hours of the prior session
+        #     fell into "previous", so `news_articles` under-counted and
+        #     `news_articles_change` was biased negative — a "24h" window that was
+        #     really ~20h. An earlier fix addressed only ' ' vs 'T' and could not
+        #     have caught this.
+        #  2. `articles` is MIXED provenance — raw FMP rows carry `publishedDate`
+        #     (naive ET) while rows read back from Supabase carry `published_at`
+        #     (offset-aware UTC). No single string canonicalisation can order both;
+        #     parsing each to a UTC instant is the only correct comparison.
+        #
+        # `to_utc_instant` is idempotent on already-aware values, so it is safe
+        # across both shapes. An unparseable date sorts out of every window rather
+        # than silently landing in "current".
+        current_cutoff = now - timedelta(hours=hours)
+        previous_cutoff = now - timedelta(hours=hours * 2)
 
-        def _pub_date(a: Dict) -> str:
-            raw = a.get("publishedDate") or a.get("published_at") or ""
-            return raw.replace(" ", "T")[:19]
+        def _pub_instant(a: Dict) -> Optional[datetime]:
+            return to_utc_instant(a.get("publishedDate") or a.get("published_at") or "")
 
-        current = [a for a in articles if _pub_date(a) >= current_cutoff]
-        previous = [
-            a for a in articles
-            if previous_cutoff <= _pub_date(a) < current_cutoff
-        ]
+        current, previous = [], []
+        for a in articles:
+            dt = _pub_instant(a)
+            if dt is None:
+                continue
+            if dt >= current_cutoff:
+                current.append(a)
+            elif dt >= previous_cutoff:
+                previous.append(a)
 
         logger.info(
             f"News scoring (hours={hours}): "

@@ -346,7 +346,20 @@ class CryptoDetailViewModel: ObservableObject {
 
     // MARK: - User Actions
 
+    /// Bumped on every star tap. `checkWatchlistStatus()` captures it before its GET and
+    /// re-checks it after, so a snapshot that was already in flight when the user tapped
+    /// is discarded instead of reverting them. TickerDetailViewModel had this guard; all
+    /// four sibling screens shipped without it, so a slow watchlist GET landing after the
+    /// tap silently un-starred the asset with no error and no trace.
+    ///
+    /// A generation counter, NOT a sticky Bool: `checkWatchlistStatus()` re-runs from each
+    /// screen's error-state Retry, and a sticky flag would pin the local value forever and
+    /// ignore a genuine change made on another device.
+    private var favoriteToggleGeneration: Int = 0
+
     func toggleFavorite() {
+        // The user's intent now outranks any watchlist snapshot already in flight.
+        favoriteToggleGeneration &+= 1
         let wasInWatchlist = isFavorite
         isFavorite.toggle()
 
@@ -380,11 +393,18 @@ class CryptoDetailViewModel: ObservableObject {
     }
 
     private func checkWatchlistStatus() async {
+        let generation = favoriteToggleGeneration
         do {
             let watchlist: [WatchlistItemDTO] = try await apiClient.request(
                 endpoint: .getWatchlist,
                 responseType: [WatchlistItemDTO].self
             )
+            // Discard a snapshot that raced with a tap: it may predate the user's write
+            // and would revert their star with no error shown.
+            guard generation == self.favoriteToggleGeneration else {
+                print("⏭️ [CryptoDetailVM] Watchlist snapshot discarded — user toggled during the fetch")
+                return
+            }
             self.isFavorite = watchlist.contains { $0.ticker.uppercased() == cryptoSymbol.uppercased() }
         } catch {
             print("⚠️ [CryptoDetailVM] Watchlist check failed: \(error)")

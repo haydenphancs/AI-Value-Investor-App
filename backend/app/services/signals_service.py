@@ -619,8 +619,23 @@ class SignalsService:
         senate, house = await asyncio.gather(
             self.fmp.get_senate_latest(1000),
             self.fmp.get_house_latest(1000),
+            return_exceptions=True,
         )
-        # Both integration methods self-swallow FMP errors → []. Empty is the
+        # `return_exceptions` so ONE chamber failing cannot leave the other's
+        # task un-retrieved, and so the incomplete case is handled here rather
+        # than by the outer gather's generic warning.
+        for label, res in (("senate", senate), ("house", house)):
+            if isinstance(res, BaseException):
+                # The card's headline is a COUNT ("N members buying"). A
+                # truncated feed would under-count it while looking complete, so
+                # omit the card rather than publish a number we know is short.
+                logger.warning(
+                    "Congressional Buys: %s feed incomplete (%s: %s) — omitting "
+                    "card rather than publishing an under-count",
+                    label, type(res).__name__, res,
+                )
+                return None
+        # Both methods self-swallow non-partial FMP errors → []. Empty is the
         # honest-empty case (no disclosures), not a failure.
         if not senate and not house:
             logger.info("Congressional Buys: no disclosures returned — omitting card")
@@ -1006,7 +1021,19 @@ class SignalsService:
         senate, house = await asyncio.gather(
             self.fmp.get_senate_latest(1000),
             self.fmp.get_house_latest(1000),
+            return_exceptions=True,
         )
+        # This list must match the card's distinct-member count. A truncated feed
+        # would silently drop members from the drill-down while the card claims a
+        # higher number, so an incomplete fetch yields NO rows, not short ones.
+        for label, res in (("senate", senate), ("house", house)):
+            if isinstance(res, BaseException):
+                logger.warning(
+                    "Congress detail for %s: %s feed incomplete (%s: %s) — "
+                    "returning no rows rather than a short list",
+                    sym, label, type(res).__name__, res,
+                )
+                return [], None
         reg = await asyncio.to_thread(self._congress_registry_map)
         now = datetime.now(timezone.utc)
 

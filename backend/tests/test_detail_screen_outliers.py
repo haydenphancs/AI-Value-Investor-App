@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.encoders import jsonable_encoder
@@ -759,3 +761,538 @@ def test_a_price_free_holders_build_is_treated_as_degraded():
         l for l in inspect.getsource(M).splitlines() if not l.strip().startswith("#")
     )
     assert 'historical_prices, "Historical prices", [], critical=True' in code
+
+
+# ── 15. An index is not its own benchmark ────────────────────────────
+#
+# `avg_annual_return` and `sp_benchmark` both read the SAME per-index constant, so
+# the Nasdaq screen rendered "S&P 500 Benchmark 12.2%" — the Nasdaq's own long-run
+# return wearing the S&P's label (the real S&P constant is 10.5). It also disabled
+# the Outperforming/Underperforming badge on EVERY index, because the UI's
+# `abs(avg - benchmark) > threshold` test can never be true when both sides are the
+# same number. `_build_performance_periods` had already made the opposite (correct)
+# call for `vs_market_percent` on the same screen.
+
+def test_index_does_not_benchmark_itself():
+    import inspect
+    from app.services import index_service
+
+    src = inspect.getsource(index_service.IndexService._build_response) \
+        if hasattr(index_service.IndexService, "_build_response") else \
+        inspect.getsource(index_service)
+    # The two-fields-one-constant construction must be gone.
+    assert 'sp_benchmark=profile_meta.get("avg_annual_return"' not in src, (
+        "index benchmark_summary is echoing the index's own return as the S&P's"
+    )
+
+
+def test_index_profiles_do_not_all_share_the_sp_return():
+    """Anti-vacuity control for the test above.
+
+    If every index carried the same `avg_annual_return`, echoing it would be
+    harmless and the fix meaningless. Prove the constants genuinely differ.
+    """
+    from app.services.index_service import _INDEX_PROFILES
+
+    returns = {
+        sym: p.get("avg_annual_return")
+        for sym, p in _INDEX_PROFILES.items()
+        if p.get("avg_annual_return") is not None
+    }
+    assert len(set(returns.values())) > 1, (
+        f"expected differing per-index returns, got {returns}"
+    )
+    # The S&P's own constant is the only correct value for an S&P benchmark row.
+    assert returns.get("^GSPC") != returns.get("^IXIC")
+
+
+# ── 16. Market status knows the market calendar ──────────────────────
+#
+# Three services derived the session from weekday + hour only, so all three reported
+# "open" at 11:00 ET on Thanksgiving and kept reporting "open" until 16:00 on the
+# half-days that shut at 13:00. `app/utils/market_hours` already knew both facts and
+# `home_dashboard_service` already delegated to it.
+
+_ET = ZoneInfo("America/New_York")
+
+
+@pytest.mark.parametrize("service_name", ["stock_overview_service", "etf_service", "index_service"])
+def test_all_three_detail_services_share_one_market_calendar(service_name):
+    """Every copy must delegate — a surviving local copy is the whole defect."""
+    import importlib, inspect
+
+    mod = importlib.import_module(f"app.services.{service_name}")
+    src = inspect.getsource(mod._get_market_status)
+    assert "market_status_fields" in src, f"{service_name} still hand-rolls the session"
+    # The hand-rolled boundary arithmetic must be gone, not merely supplemented.
+    assert "weekday()" not in src, f"{service_name} still branches on weekday"
+
+
+@pytest.mark.parametrize(
+    "when,expected",
+    [
+        # Thanksgiving 2026 — a weekday, mid-session by the clock, tape SHUT.
+        (datetime(2026, 11, 26, 11, 0, tzinfo=_ET), "closed"),
+        # Day after Thanksgiving 2026 closes at 13:00 ET.
+        (datetime(2026, 11, 27, 14, 0, tzinfo=_ET), "closed"),
+        # ...but the morning of a half-day is a genuine regular session.
+        (datetime(2026, 11, 27, 11, 0, tzinfo=_ET), "open"),
+        # Ordinary trading Tuesday.
+        (datetime(2026, 8, 25, 11, 0, tzinfo=_ET), "open"),
+        (datetime(2026, 8, 25, 8, 0, tzinfo=_ET), "pre_market"),
+        (datetime(2026, 8, 25, 17, 0, tzinfo=_ET), "after_hours"),
+        (datetime(2026, 8, 22, 12, 0, tzinfo=_ET), "closed"),  # Saturday
+    ],
+)
+def test_market_status_respects_holidays_and_half_days(when, expected):
+    from app.utils.market_hours import market_status_fields
+
+    assert market_status_fields(when)["status"] == expected
+
+
+def test_market_status_wire_values_match_the_ios_contract():
+    """The wire strings are a CONTRACT with three iOS switches.
+
+    `session_phase` speaks `premarket`/`regular`/`afterhours`; the client decodes
+    `pre_market`/`open`/`after_hours`. A silent mismatch degrades to an unrecognised
+    status on the client, which is exactly what the mapping layer exists to prevent.
+    """
+    from app.utils.market_hours import (
+        _PHASE_TO_WIRE_STATUS,
+        SESSION_AFTERHOURS,
+        SESSION_CLOSED,
+        SESSION_PREMARKET,
+        SESSION_REGULAR,
+    )
+
+    # Total over every phase the module can emit — no phase may fall through.
+    assert set(_PHASE_TO_WIRE_STATUS) == {
+        SESSION_PREMARKET, SESSION_REGULAR, SESSION_AFTERHOURS, SESSION_CLOSED,
+    }
+    assert set(_PHASE_TO_WIRE_STATUS.values()) == {
+        "pre_market", "open", "after_hours", "closed",
+    }
+
+
+def test_closed_status_names_the_last_real_close():
+    """A weekend must name FRIDAY's close, and a half-day its 13:00 close.
+
+    The old copies stamped `now.date()` at a hardcoded 16:00, so on a Saturday they
+    announced a Saturday close that never happened.
+    """
+    from app.utils.market_hours import market_status_fields
+
+    sat = market_status_fields(datetime(2026, 8, 22, 12, 0, tzinfo=_ET))
+    assert sat["date"].startswith("2026-08-21")  # Friday, not Saturday
+    assert sat["time"] == "4:00 PM"
+    assert sat["timezone"] == "EDT"  # August
+
+    half = market_status_fields(datetime(2026, 11, 27, 14, 0, tzinfo=_ET))
+    assert half["date"].startswith("2026-11-27T13:00")
+    assert half["time"] == "1:00 PM"
+    assert half["timezone"] == "EST"  # November
+
+
+# ── 17. A non-dividend payer still gets its buyback verdict ──────────
+#
+# `_build_dividend_info` returns None the moment dividend history is empty — which is
+# every non-payer, including AMZN, BRK-B and NFLX, three of the largest repurchasers
+# on the market. The buyback verdict depends ONLY on buyback yield + share-count
+# change, so it was computed and thrown away, and the report's fallback then asserted
+# a flat "Low".
+
+def test_buyback_verdict_survives_an_empty_dividend_history():
+    from app.services.signal_of_confidence_service import SignalOfConfidenceService
+
+    svc = SignalOfConfidenceService.__new__(SignalOfConfidenceService)
+    # An AMZN-shaped non-payer: no dividend, real buybacks, shrinking share count.
+    assert svc._classify_buyback(3.0, -4.0) == "High"
+    # Dilution is detected before yield, so issuing shares outranks a token buyback.
+    assert svc._classify_buyback(5.0, 3.0) == "Diluting"
+    assert svc._classify_buyback(0.0, 0.5) == "Diluting (Mild)"
+    assert svc._classify_buyback(0.5, -0.1) == "Low"
+
+
+def test_summary_always_carries_a_buyback_status():
+    """It lives on the SUMMARY precisely because that is never None."""
+    from app.schemas.signal_of_confidence import SignalOfConfidenceSummarySchema
+
+    s = SignalOfConfidenceSummarySchema()
+    assert s.buyback_status  # defaulted, never absent
+
+
+def test_report_reads_buyback_from_the_summary_not_the_dividend_block():
+    """The report used to hardcode "Low" whenever `dividend_info` was None."""
+    from app.schemas.signal_of_confidence import (
+        SignalOfConfidenceResponse,
+        SignalOfConfidenceSummarySchema,
+    )
+    from app.services.agents.ticker_report_data_collector import (
+        _build_capital_allocation_block,
+    )
+
+    soc = SignalOfConfidenceResponse(
+        symbol="AMZN",
+        data_points=[],
+        summary=SignalOfConfidenceSummarySchema(
+            total_yield=3.0, dividend_yield=0.0, buyback_yield=3.0,
+            share_count_change=-4.0, buyback_status="High",
+        ),
+        dividend_info=None,  # a non-payer — the whole point
+    )
+    block = _build_capital_allocation_block(soc)
+    assert block is not None
+    assert block["buyback_status"] == "High", "report fell back to the hardcoded 'Low'"
+
+
+# ── 18. Shared-layer: dedup, ingest, cache poisoning, cache keys ─────
+
+
+def test_ticker_and_index_news_share_the_market_path_dedup():
+    """`_inflight` was consulted ONLY by get_market_news.
+
+    N users opening a cold ticker fired N identical FMP fetches. Source-scan because the
+    real paths need Supabase; the behavioural proof is the two tests below.
+    """
+    import inspect
+    from app.services import news_cache_service
+
+    for fn in ("get_ticker_news", "get_index_news"):
+        src = inspect.getsource(getattr(news_cache_service.NewsCacheService, fn))
+        assert "_deduped(" in src, f"{fn} still fetches without herd protection"
+
+
+@pytest.mark.asyncio
+async def test_deduped_collapses_a_herd_to_one_fetch():
+    from app.services.news_cache_service import NewsCacheService
+
+    svc = NewsCacheService.__new__(NewsCacheService)
+    svc._inflight = {}
+    calls = {"n": 0}
+
+    async def build():
+        calls["n"] += 1
+        await asyncio.sleep(0.02)
+        return ["article"]
+
+    results = await asyncio.gather(*[svc._deduped("AAPL", build) for _ in range(5)])
+    assert calls["n"] == 1, "five concurrent viewers produced more than one FMP fetch"
+    assert all(r == ["article"] for r in results)
+    assert svc._inflight == {}, "the in-flight entry was not released"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_joiner_does_not_kill_the_leader():
+    """The shielded join is the load-bearing part.
+
+    Awaiting the shared future UNSHIELDED means a cancelled joiner cancels the future the
+    leader is about to publish into — killing the fetch for everyone still waiting.
+    """
+    from app.services.news_cache_service import NewsCacheService
+
+    svc = NewsCacheService.__new__(NewsCacheService)
+    svc._inflight = {}
+
+    async def build():
+        await asyncio.sleep(0.05)
+        return ["article"]
+
+    leader = asyncio.create_task(svc._deduped("MSFT", build))
+    await asyncio.sleep(0.01)
+    joiner = asyncio.create_task(svc._deduped("MSFT", build))
+    await asyncio.sleep(0.01)
+    joiner.cancel()
+
+    assert await leader == ["article"]
+    assert svc._inflight == {}
+
+
+def test_ingest_path_inserts_related_tickers_on_a_new_row():
+    """`ingest_only=True` skips the first-write columns so a refresh cannot clobber
+    enrichment — correct for an EXISTING row, wrong for a new one, where the upsert is an
+    INSERT and `related_tickers` takes its `[]` default forever."""
+    import inspect
+    from app.services import news_cache_service
+
+    src = inspect.getsource(news_cache_service.NewsCacheService._build_and_cache_rows)
+    assert "insert_only_rows" in src
+    # Create-only: it must never overwrite an existing (possibly enriched) row.
+    assert "ignore_duplicates=True" in src, (
+        "the create-only pre-pass must be ON CONFLICT DO NOTHING, or it re-clobbers "
+        "the Gemini-extracted related tickers on every refresh"
+    )
+
+
+def test_a_transient_supabase_failure_is_not_cached():
+    """`_query` swallowed every exception and returned the same empty dict a successful
+    zero-row query returns, so ONE blip erased every sector comparison for a full hour."""
+    from app.services import sector_benchmark_lookup as sbl
+
+    svc = sbl.SectorBenchmarkLookup.__new__(sbl.SectorBenchmarkLookup)
+    calls = {"n": 0}
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("supabase 520")
+
+    svc._fetch_rows = boom
+    first = svc.get_sector_benchmarks("TestSector", ["eps_yoy"], "annual")
+    second = svc.get_sector_benchmarks("TestSector", ["eps_yoy"], "annual")
+
+    assert first == {"eps_yoy": {}} == second, "caller contract changed"
+    assert calls["n"] == 2, "a failure was cached and the retry never happened"
+
+
+def test_a_genuinely_empty_benchmark_result_is_still_cached():
+    """Anti-vacuity control for the test above: a peer group with no rows is a real
+    answer and must still be negatively cached, or every miss re-queries forever."""
+    from app.services import sector_benchmark_lookup as sbl
+
+    svc = sbl.SectorBenchmarkLookup.__new__(sbl.SectorBenchmarkLookup)
+    calls = {"n": 0}
+
+    def empty(*a, **k):
+        calls["n"] += 1
+        return []
+
+    svc._fetch_rows = empty
+    svc.get_sector_benchmarks("EmptySector", ["eps_yoy"], "annual")
+    svc.get_sector_benchmarks("EmptySector", ["eps_yoy"], "annual")
+    assert calls["n"] == 1, "a valid empty result should be cached"
+
+
+def test_deep_dive_cache_separates_two_different_questions():
+    """The key was md5(context) alone and ignored the message, while the gate is a bare
+    substring test — so a second, different "deep dive ..." question on the same screen
+    was answered with the first one's cached report."""
+    from app.services.chat_service import ChatService
+
+    ctx = "S&P 500 snapshot: level 6100, +0.4%"
+    a = ChatService._deep_dive_cache_key(ctx, "Give me a comprehensive Market Deep Dive")
+    b = ChatService._deep_dive_cache_key(ctx, "deep dive on the risks of a rate cut")
+    assert a != b, "two different questions still collide on one cache entry"
+
+    # ...but trivial formatting differences must still share an entry, or the cache
+    # never hits for the canned prompt it exists to serve.
+    assert ChatService._deep_dive_cache_key(ctx, "Deep Dive On Gold") == \
+        ChatService._deep_dive_cache_key(ctx, "  deep   dive on gold ")
+    # And the context still participates.
+    assert ChatService._deep_dive_cache_key(ctx, "deep dive") != \
+        ChatService._deep_dive_cache_key(ctx + "!", "deep dive")
+
+
+def test_streamed_reasoning_passes_output_enforcement():
+    """Reasoning is a SECOND rendered+persisted channel that bypassed enforcement.
+
+    It is the likelier place to name the underlying provider, because the identity rule
+    shapes the answer far more strongly than the scratchpad.
+    """
+    import inspect
+    from app.api.v1.endpoints import chat as chat_ep
+
+    src = inspect.getsource(chat_ep)
+    assert "reasoning_text, reasoning_enforced = enforce_answer(reasoning_text)" in src, (
+        "streamed reasoning is not passed through enforce_answer"
+    )
+
+
+def test_enforce_answer_actually_redacts_what_reasoning_would_leak():
+    """Anti-vacuity control: proves the guardrail the test above wires up does something.
+
+    The identity patterns are deliberately FIRST-PERSON anchored so an AI-investing
+    product can still discuss the AI sector ("NVIDIA, as an AI chip maker"). These two
+    classes are exactly what a model scratchpad plausibly emits.
+    """
+    from app.services.agents.chat_guardrails import enforce_answer
+
+    identity, id_tags = enforce_answer("I was created by Google.")
+    assert "Google" not in identity, f"identity leak survived: {identity!r}"
+    assert "identity_redacted" in id_tags
+
+    schema, sc_tags = enforce_answer("My service_role key is in chat_messages.")
+    assert "service_role" not in schema and "chat_messages" not in schema
+    assert "schema_redacted" in sc_tags
+
+
+# ── 19. iOS source-scan guards for the detail-screen defects ─────────
+#
+# There is no XCTest target, so these iOS invariants are pinned from Python by reading
+# the Swift source. They go vacuous VERY easily, so all three rules from
+# `.claude/rules/testing.md` apply: strip comments first (the explanatory comment beside
+# each fix contains every token the scan looks for, so an un-stripped scan passes on
+# prose after the code is reverted), brace-bound the declaration, and mutation-test once.
+
+import re as _re
+from pathlib import Path as _Path
+
+_IOS = _Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios"
+
+
+def _swift_code(path: _Path) -> str:
+    """Swift source with `//` comments and block comments removed.
+
+    Load-bearing: every fix below is documented by a comment that names the exact symbol
+    the assertion greps for, so scanning the raw file would pass even after the code was
+    reverted. `_control_comment_stripping_actually_works` proves this still bites.
+    """
+    src = path.read_text()
+    src = _re.sub(r"/\*.*?\*/", "", src, flags=_re.S)
+    return "\n".join(_re.sub(r"//.*$", "", line) for line in src.splitlines())
+
+
+def _func_body(code: str, signature: str) -> str:
+    """The brace-bounded body of one declaration.
+
+    Asserting against a whole file passes when the token lives in a DIFFERENT type —
+    exactly how a fix to a preview-only duplicate once looked like a fix to the live one.
+    """
+    start = code.index(signature)
+    depth, i = 0, code.index("{", start)
+    body_start = i
+    while i < len(code):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[body_start:i + 1]
+        i += 1
+    raise AssertionError(f"unbalanced braces after {signature!r}")
+
+
+def test_control_comment_stripping_actually_works():
+    """Anti-vacuity control for `_swift_code` itself.
+
+    If the stripper silently stopped stripping, every scan below would start passing on
+    its own explanatory prose and prove nothing at all.
+    """
+    code = _swift_code(_IOS / "ViewModels" / "CommodityDetailViewModel.swift")
+    assert "//" not in code
+    # A phrase that exists ONLY inside a comment in that file must be gone.
+    assert "frozen for the entire life of the screen" not in code
+
+
+@pytest.mark.parametrize("vm", [
+    "CryptoDetailViewModel", "ETFDetailViewModel",
+    "IndexDetailViewModel", "CommodityDetailViewModel", "TickerDetailViewModel",
+])
+def test_every_detail_screen_guards_its_favorite_against_a_slow_watchlist_get(vm):
+    """A watchlist snapshot already in flight when the user taps the star must not
+    overwrite their intent. TickerDetailViewModel had this; the four siblings shipped
+    without it, so the star silently reverted with no error and no trace."""
+    code = _swift_code(_IOS / "ViewModels" / f"{vm}.swift")
+
+    toggle = _func_body(code, "func toggleFavorite()")
+    assert "favoriteToggleGeneration &+= 1" in toggle, f"{vm} does not bump the guard on tap"
+
+    check = _func_body(code, "func checkWatchlistStatus()")
+    assert "let generation = favoriteToggleGeneration" in check, \
+        f"{vm} does not capture the generation before its GET"
+    assert "guard generation == self.favoriteToggleGeneration else" in check, \
+        f"{vm} applies a possibly-stale watchlist snapshot over the user's tap"
+
+
+@pytest.mark.parametrize("vm", ["IndexDetailViewModel", "CommodityDetailViewModel"])
+def test_a_failed_technical_fetch_is_recoverable(vm):
+    """`isTechnicalLoaded = true` with nil data is TERMINAL, and neither refresh()
+    retried it — so one failed fetch blanked the Analysis tab for the life of the
+    screen, with no gesture anywhere in the app able to recover it."""
+    code = _swift_code(_IOS / "ViewModels" / f"{vm}.swift")
+
+    retry = _func_body(code, "func retryTechnicalAnalysis()")
+    assert "isTechnicalLoaded = false" in retry, f"{vm} retry does not clear the terminal flag"
+    assert "fetchTechnicalAnalysis()" in retry
+
+    refresh = _func_body(code, "func refresh()")
+    assert "retryTechnicalAnalysis()" in refresh, \
+        f"{vm}.refresh() still cannot un-stick a blank Analysis tab"
+
+    # And the failure must be CLASSIFIED, so the tab can tell "no data for this asset"
+    # (the backend 404s) from "the fetch failed" — a retry button on the former lies.
+    fetch = _func_body(code, "func fetchTechnicalAnalysis()")
+    assert "technicalUnavailableMessage" in fetch
+    assert "technicalIsRetryable" in fetch
+
+
+@pytest.mark.parametrize("screen", ["IndexDetailView", "CommodityDetailView"])
+def test_the_analysis_tab_renders_something_when_it_has_nothing(screen):
+    """Both else-branches rendered literally nothing, which reads as a broken app."""
+    code = _swift_code(_IOS / "Views" / "Screens" / f"{screen}.swift")
+    assert "technicalUnavailableMessage" in code, f"{screen} still renders a blank Analysis tab"
+    assert "InlineRetryNotice" in code and "ChartUnavailableView" in code, \
+        f"{screen} does not distinguish retryable from unsupported"
+
+
+def test_chat_clears_grounding_when_switching_conversations():
+    """`currentSessionId` moved to the new session before the fetch while the six
+    grounding fields were rewritten only on SUCCESS — so a failed history load left
+    session B selected while still carrying session A's ticker."""
+    code = _swift_code(_IOS / "ViewModels" / "ChatViewModel.swift")
+    body = _func_body(code, "func loadConversation(sessionId: String)")
+
+    assign = body.index("currentSessionId = sessionId")
+    fetch = body.index("getChatHistory")
+    for field in ("currentStockId = nil", "currentContext = nil",
+                  "currentContextType = nil", "currentReferenceId = nil"):
+        assert field in body, f"loadConversation never clears {field}"
+        assert assign < body.index(field) < fetch, \
+            f"{field} is cleared outside the pre-fetch window (a failed load keeps it)"
+
+
+def test_a_failed_session_create_retry_keeps_its_grounding():
+    """The nil-session retry called `startNewConversation(firstMessage:)`, whose nil
+    DEFAULTS then overwrote the grounding still held in instance state — turning a
+    retried "Ask Cay AI about NVDA" into a generic chat about nothing."""
+    code = _swift_code(_IOS / "ViewModels" / "ChatViewModel.swift")
+    body = _func_body(code, "func sendMessage(_ text: String)")
+
+    guard_idx = body.index("guard let sessionId = currentSessionId else")
+    tail = body[guard_idx:guard_idx + 900]
+    for arg in ("stockId: currentStockId", "context: currentContext",
+                "contextType: currentContextType", "referenceId: currentReferenceId"):
+        assert arg in tail, f"the retry path drops grounding: missing {arg}"
+
+
+def test_a_failed_history_load_is_not_an_empty_account():
+    """The catch set no state at all, so a network failure rendered "No conversations
+    yet" — indistinguishable from a new user, and offering no retry."""
+    vm = _swift_code(_IOS / "ViewModels" / "ChatViewModel.swift")
+    assert "historyLoadFailed = true" in _func_body(vm, "func loadHistory()")
+
+    view = _swift_code(_IOS / "Views" / "Screens" / "ChatHistoryView.swift")
+    assert "loadFailed" in view and "failedState" in view, \
+        "ChatHistoryView cannot distinguish a failure from an empty account"
+
+
+def test_commodity_screen_actually_refreshes():
+    """`chartRefreshTask` was declared and NEVER assigned — the field implied a refresh
+    that never ran, and the quote was frozen for the life of the screen."""
+    code = _swift_code(_IOS / "ViewModels" / "CommodityDetailViewModel.swift")
+    assert "chartRefreshTask = Task" in code, "chartRefreshTask is still a dead stub"
+    assert "LivePriceWebSocketManager()" in code
+
+    timer = _func_body(code, "func startChartRefreshTimer()")
+    # NOT gated on the US EQUITY session: these are continuously-quoted futures, and
+    # `isMarketActive()` alone would freeze the screen for most of the day.
+    assert "symbolTradesAroundTheClock" in timer, \
+        "the commodity refresh is gated on US equity hours"
+
+    view = _swift_code(_IOS / "Views" / "Screens" / "CommodityDetailView.swift")
+    assert "disconnectLivePrice()" in view, "the socket outlives the screen"
+
+
+def test_one_shared_compact_number_formatter():
+    """Eight private `formatLargeNumber` copies had grown with different tier rules, and
+    two of them sat on the same screen disagreeing with each other."""
+    for rel in ("Views/Molecules/RevenueBreakdownChartView.swift",
+                "Views/Molecules/GrowthChartView.swift",
+                "Models/RevenueBreakdownModels.swift"):
+        code = _swift_code(_IOS / rel)
+        body = _func_body(code, "func formatLargeNumber(_ number: Double) -> String")
+        assert "CompactNumberFormat.string" in body, f"{rel} still hand-rolls its formatter"
+        assert "%.0f" not in body, f"{rel} still rounds every tier to whole units"
+
+    earnings = _swift_code(_IOS / "Views" / "Organisms" / "EarningsSurpriseBarChart.swift")
+    y = _func_body(earnings, "func formatYValue(_ value: Double) -> String")
+    assert "CompactNumberFormat.percentString" in y
+    assert "9_999" not in y, "the caption is still clamped while the plot domain is not"

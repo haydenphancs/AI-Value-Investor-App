@@ -505,6 +505,19 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 // endpoint, the client refreshed and REPLAYED the request — spending two of the
                 // five per-user attempts on one typo.
                 return .validationFailed(message: message)
+            case "AUTH_PASSWORD_REJECTED":
+                // The NEW password the user chose was refused by the identity provider —
+                // too weak for the project's rules, or found in a breach corpus once leaked-
+                // password protection is enabled. Same treatment as AUTH_CREDENTIALS_INVALID:
+                // `.validationFailed` carries the server's own wording, is excluded from
+                // `isAuthError` (so nothing clears the Keychain), and points at the field.
+                //
+                // ⚠️ It must NOT become `.unauthorized` or any session case. The credential
+                // situation is fine — the user is either mid-registration or already signed in
+                // — and treating this as a session failure would sign out someone whose only
+                // mistake was picking a bad password. It must also never suggest "retry": the
+                // identical password is refused forever.
+                return .validationFailed(message: message)
             case "AUTH_PROVIDER_FAILED":
                 // Apple/Google identity verification failed. Retryable and non-destructive; the
                 // copy must never mention a password, because that flow has none — the old

@@ -136,6 +136,35 @@ def _is_offender(acl) -> str | None:
     return None
 
 
+_SCHEMA_QUERY = """
+SELECT r.rolname,
+       has_schema_privilege(r.rolname, 'public', 'CREATE') AS can_create
+FROM pg_roles r
+WHERE r.rolname IN ('anon', 'authenticated')
+ORDER BY r.rolname;
+"""
+
+
+def _check_schema_create(cur) -> list[str]:
+    """anon/authenticated must NOT hold CREATE on schema public.
+
+    This is the load-bearing half of how this project answers the Security Advisor's
+    `extension_in_public` warning for pgvector. Moving the extension was rejected as too risky
+    (it would mean rewriting four function signatures that name `public.vector`, re-pinning
+    search_path on 14 functions, and trusting three HNSW opclasses to re-resolve). Migration 153
+    removed the ATTACK instead: shadowing an extension's function requires the ability to CREATE
+    in the schema it lives in.
+
+    So the advisor will keep reporting `extension_in_public` forever, and the thing that makes
+    that acceptable is invisible to it. If a future migration or a support action re-grants
+    CREATE — `GRANT ALL ON SCHEMA public TO authenticated` is a single plausible line — the risk
+    comes back silently and the dashboard says exactly what it says today. This is the check
+    that would notice.
+    """
+    cur.execute(_SCHEMA_QUERY)
+    return [role for role, can_create in cur.fetchall() if can_create]
+
+
 def main() -> int:
     strict = "--strict" in sys.argv
     _assert_parser_is_sane()
@@ -150,6 +179,7 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(_QUERY)
             rows = cur.fetchall()
+            schema_offenders = _check_schema_create(cur)
     finally:
         conn.close()
 
@@ -184,7 +214,18 @@ def main() -> int:
         if not strict:
             print("   (cannot escalate — they run as the caller. Re-run with --strict to gate.)")
 
-    if secdef or (strict and invoker):
+    if schema_offenders:
+        print(
+            f"\n❌ {', '.join(schema_offenders)} hold CREATE on schema public.\n"
+            "   Migration 153 revoked this. It is what makes leaving pgvector in `public`\n"
+            "   acceptable — without it, a role can plant a function that SHADOWS the\n"
+            "   extension's. Re-revoke:\n"
+            "     REVOKE CREATE ON SCHEMA public FROM anon, authenticated;"
+        )
+    else:
+        print("\n✅ anon/authenticated hold no CREATE on schema public")
+
+    if secdef or schema_offenders or (strict and invoker):
         return 1
     return 0
 

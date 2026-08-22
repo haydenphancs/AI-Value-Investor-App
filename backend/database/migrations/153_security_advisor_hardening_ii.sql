@@ -158,21 +158,35 @@ REVOKE ALL ON FUNCTION public.update_whale_followers_count()  FROM PUBLIC;
 
 
 -- =============================================================================
--- E. Revoke TRUNCATE on storage.objects from the client-reachable roles
+-- E. TRUNCATE on storage.objects — NOT FIXABLE BY US. Documented, not attempted.
 --
--- NOT an advisor warning. RLS does NOT apply to TRUNCATE — it is an all-or-nothing
--- table-level privilege — so the careful per-bucket policies above would not stop it.
+-- The finding is real: `anon` and `authenticated` hold TRUNCATE on storage.objects, and
+-- RLS does NOT apply to TRUNCATE (it is all-or-nothing at the table level), so none of
+-- the careful per-bucket policies above would stop it.
 --
--- Not reachable today: the Storage API never issues TRUNCATE, and an anon/authenticated
--- key reaches Postgres only through PostgREST and Storage, neither of which offers a DDL
--- surface. This closes it anyway, because "unreachable" is a property of today's
--- middleware rather than of the grant.
+-- ⚠️ THIS FILE ORIGINALLY TRIED TO REVOKE IT, AND THAT WAS A SILENT NO-OP.
+-- Measured after applying:  anon still had  DELETE,INSERT,...,TRUNCATE,UPDATE.
 --
--- Every other privilege is left exactly as Supabase set it: the Storage service does
--- issue SELECT/INSERT/UPDATE/DELETE as these roles, and RLS is what gates those.
+-- Why. The grants were issued BY `supabase_storage_admin`, which owns storage.objects:
+--     anon=arwdDxtm/supabase_storage_admin
+-- A REVOKE only removes grants made by the role executing it. Migrations run as
+-- `postgres`, which is NOT a superuser here (rolsuper = false) and is NOT a member of
+-- `supabase_storage_admin` — so the statement matched nothing. Postgres does not raise
+-- on a REVOKE that has nothing to revoke, so it "succeeded" and changed nothing.
+-- The only role that could do it is `supabase_admin` (the sole superuser), which Supabase
+-- reserves and does not expose. The Studio SQL editor also runs as `postgres`.
+--
+-- Accepted, with the reasoning written down rather than left implicit:
+--   * NOT REACHABLE. anon/authenticated reach Postgres only via PostgREST and the Storage
+--     API. Neither exposes a DDL surface, and the Storage service never issues TRUNCATE.
+--     Exploiting it needs direct SQL, which needs the database password — and anyone
+--     holding that does not need this privilege.
+--   * NOT DURABLE EVEN IF DONE. Supabase manages this schema and re-applies its grants on
+--     platform upgrades, so a revoke would silently come back.
+--
+-- If Supabase ever exposes a supported way to manage storage-schema grants, revisit.
+-- Do NOT re-add a bare REVOKE here: it will pass review, apply cleanly, do nothing, and
+-- leave the next reader believing this is closed.
 -- =============================================================================
-
-REVOKE TRUNCATE ON storage.objects FROM anon;
-REVOKE TRUNCATE ON storage.objects FROM authenticated;
 
 COMMIT;
